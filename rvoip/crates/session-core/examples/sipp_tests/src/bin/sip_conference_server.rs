@@ -1,19 +1,24 @@
 //! SIP Conference Server - Multi-party conferencing with REAL AUDIO MIXING
 //! 
-//! Uses session-core + media-core + rtp-core for actual audio conference functionality.
+//! Uses session-core's MediaManager for proper media abstraction layer.
 //! This is a REAL working conference server, not just SIP signaling.
 
 use anyhow::Result;
 use clap::Parser;
 use rvoip_session_core::api::*;
-use rvoip_media_core::relay::{
-    MediaSessionController, MediaConfig, DialogId, MediaSessionStatus, MediaSessionInfo
-};
+// Use session-core's proper media abstractions
+use rvoip_session_core::media::{MediaManager};
+use rvoip_session_core::media::types::*;
 use sipp_tests::CallStats;
+
+// SDP imports for proper SDP generation
+use rvoip_sip_core::sdp::SdpBuilder;
+use rvoip_sip_core::sdp::attributes::MediaDirection;
 use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
+    net::SocketAddr,
 };
 use tokio::{
     signal,
@@ -25,7 +30,7 @@ use tracing::{info, warn, error, debug};
 /// 🎪 SIP Conference Server with REAL AUDIO MIXING
 #[derive(Parser, Debug)]
 #[command(name = "sip_conference_server")]
-#[command(about = "Real SIP Conference Server with audio mixing via media-core")]
+#[command(about = "Real SIP Conference Server with audio mixing via session-core")]
 struct Args {
     /// Port to listen on
     #[arg(short, long, default_value = "5064")]
@@ -58,21 +63,21 @@ struct ConferenceParticipant {
     id: String,
     call_id: String,
     contact: String,
-    dialog_id: DialogId,
-    media_session_id: Option<String>,
+    session_id: SessionId, // Use SessionId from session-core API  
+    participant_name: String, // Human-readable participant identifier
+    media_session_id: Option<MediaSessionId>,
     rtp_port: Option<u16>,
     joined_at: Instant,
     active: bool,
     audio_active: bool,
 }
 
-/// Conference room with real audio mixing
-#[derive(Debug)]
+/// Conference room with real audio mixing via session-core MediaManager
 struct ConferenceRoom {
     id: String,
     participants: HashMap<String, ConferenceParticipant>,
-    media_controller: Arc<MediaSessionController>,
-    mixer_session_id: Option<String>,
+    media_manager: Arc<MediaManager>, // Use session-core MediaManager
+    mixer_session_id: Option<SessionId>,
     created_at: Instant,
     max_participants: usize,
     audio_mixing_enabled: bool,
@@ -82,15 +87,16 @@ impl ConferenceRoom {
     async fn new(
         id: String, 
         max_participants: usize, 
-        media_controller: Arc<MediaSessionController>,
+        media_manager: Arc<MediaManager>,
         audio_mixing_enabled: bool
     ) -> Result<Self> {
-        info!("🎪 Creating conference room '{}' with real audio mixing: {}", id, audio_mixing_enabled);
+        info!("🎪 Creating conference room '{}' with session-core MediaManager (audio mixing: {})", 
+              id, audio_mixing_enabled);
         
         let mut room = Self {
             id: id.clone(),
             participants: HashMap::new(),
-            media_controller,
+            media_manager,
             mixer_session_id: None,
             created_at: Instant::now(),
             max_participants,
@@ -105,48 +111,47 @@ impl ConferenceRoom {
         Ok(room)
     }
     
-    /// Initialize the conference audio mixer
+    /// Initialize the conference audio mixer using session-core MediaManager
     async fn initialize_audio_mixer(&mut self) -> Result<()> {
         if !self.audio_mixing_enabled {
             return Ok(());
         }
         
-        info!("🎵 Initializing conference audio mixer for room '{}'", self.id);
+        info!("🎵 Initializing conference audio mixer for room '{}' via session-core", self.id);
         
-        // Create a special dialog ID for the conference mixer
-        let mixer_dialog_id = format!("conference_mixer_{}", self.id);
+        // Create a special session ID for the conference mixer
+        let mixer_session_id = SessionId::new();
         
-        // Configure media for the conference mixer
-        let mixer_config = MediaConfig {
-            local_addr: "127.0.0.1:0".parse()?, // Let system assign port
-            remote_addr: None, // Will be set when participants join
-            preferred_codec: Some("PCMU".to_string()),
-            parameters: HashMap::new(),
-        };
-        
-        // Start media session for the mixer
-        self.media_controller.start_media(mixer_dialog_id.clone(), mixer_config).await
-            .map_err(|e| anyhow::anyhow!("Failed to start mixer media session: {}", e))?;
-        
-        self.mixer_session_id = Some(mixer_dialog_id);
-        info!("✅ Conference audio mixer initialized for room '{}'", self.id);
+        // Create media session for the mixer using session-core MediaManager
+        match self.media_manager.create_media_session(&mixer_session_id).await {
+            Ok(media_info) => {
+                self.mixer_session_id = Some(mixer_session_id.clone());
+                info!("✅ Conference audio mixer initialized for room '{}' on port {:?}", 
+                      self.id, media_info.local_rtp_port);
+            }
+            Err(e) => {
+                warn!("⚠️ Failed to initialize conference mixer: {}", e);
+                // Continue without mixer - participants can still do signaling
+            }
+        }
         
         Ok(())
     }
     
-    /// Add participant with real media session
+    /// Add participant with real media session via session-core
     async fn add_participant(&mut self, mut participant: ConferenceParticipant) -> Result<(), String> {
         if self.participants.len() >= self.max_participants {
             return Err(format!("Conference room full (max: {})", self.max_participants));
         }
         
-        info!("🎪 Adding participant {} to conference {} with real media", participant.id, self.id);
+        info!("🎪 Adding participant {} to conference {} with session-core MediaManager", 
+              participant.id, self.id);
         
         // Set up real media session for the participant if audio mixing is enabled
         if self.audio_mixing_enabled {
             match self.setup_participant_media(&mut participant).await {
                 Ok(()) => {
-                    info!("🎵 Participant {} media session established", participant.id);
+                    info!("🎵 Participant {} media session established via session-core", participant.id);
                 }
                 Err(e) => {
                     warn!("⚠️ Failed to setup media for participant {}: {}", participant.id, e);
@@ -165,33 +170,28 @@ impl ConferenceRoom {
         Ok(())
     }
     
-    /// Set up real media session for a participant
+    /// Set up real media session for a participant using session-core MediaManager
     async fn setup_participant_media(&self, participant: &mut ConferenceParticipant) -> Result<()> {
-        info!("🎵 Setting up real media session for participant {}", participant.id);
+        info!("🎵 Setting up real media session for participant {} via session-core", participant.id);
         
-        // Create media configuration for the participant
-        let media_config = MediaConfig {
-            local_addr: "127.0.0.1:0".parse()?, // Let system assign port
-            remote_addr: None, // Will be negotiated via SDP
-            preferred_codec: Some("PCMU".to_string()),
-            parameters: HashMap::new(),
-        };
-        
-        // Start media session for this participant
-        self.media_controller.start_media(participant.dialog_id.clone(), media_config).await
-            .map_err(|e| anyhow::anyhow!("Failed to start participant media: {}", e))?;
-        
-        // Get the allocated RTP port
-        if let Ok(session_info) = self.media_controller.get_session_info(&participant.dialog_id).await {
-            participant.rtp_port = session_info.rtp_port;
-            participant.media_session_id = Some(participant.dialog_id.clone());
-            participant.audio_active = true;
-            
-            info!("✅ Participant {} media session active on RTP port {:?}", 
-                  participant.id, participant.rtp_port);
+        // Create media session for this participant using session-core MediaManager
+        match self.media_manager.create_media_session(&participant.session_id).await {
+            Ok(media_info) => {
+                participant.media_session_id = Some(media_info.session_id.clone());
+                participant.rtp_port = media_info.local_rtp_port;
+                participant.audio_active = true;
+                
+                info!("✅ Participant {} media session active on RTP port {:?} via session-core", 
+                      participant.id, participant.rtp_port);
+                
+                Ok(())
+            },
+            Err(e) => {
+                error!("❌ Failed to start media session for participant {} via session-core: {}", 
+                       participant.id, e);
+                Err(anyhow::anyhow!("Media session setup failed: {}", e))
+            }
         }
-        
-        Ok(())
     }
     
     /// Update conference audio mixing when participants change
@@ -204,29 +204,31 @@ impl ConferenceRoom {
             .filter(|p| p.audio_active && p.media_session_id.is_some())
             .collect();
         
-        info!("🎵 Updating conference mixing: {} active audio participants", active_participants.len());
+        info!("🎵 Updating conference mixing via session-core: {} active audio participants", 
+              active_participants.len());
         
         // In a full implementation, this would:
-        // 1. Set up audio routing between all participants
-        // 2. Configure the mixer to combine audio from all sources
-        // 3. Distribute mixed audio to all participants
+        // 1. Use session-core MediaManager to coordinate conference mixing
+        // 2. Set up audio routing between all participants via the underlying media-core
+        // 3. Configure the mixer through session-core's abstractions
         // 
         // For now, we log the configuration
         for participant in &active_participants {
-            debug!("🎵 Active audio participant: {} (RTP port: {:?})", 
+            debug!("🎵 Active audio participant: {} (RTP port: {:?}) [session-core managed]", 
                    participant.id, participant.rtp_port);
         }
     }
     
-    /// Remove participant and clean up media
+    /// Remove participant and clean up media via session-core
     async fn remove_participant(&mut self, participant_id: &str) -> Option<ConferenceParticipant> {
-        info!("🚪 Removing participant {} from conference {}", participant_id, self.id);
+        info!("🚪 Removing participant {} from conference {} via session-core", participant_id, self.id);
         
         if let Some(participant) = self.participants.remove(participant_id) {
-            // Clean up media session
+            // Clean up media session via session-core MediaManager
             if self.audio_mixing_enabled && participant.media_session_id.is_some() {
-                if let Err(e) = self.media_controller.stop_media(participant.dialog_id.clone()).await {
-                    warn!("⚠️ Failed to stop media for participant {}: {}", participant_id, e);
+                if let Err(e) = self.media_manager.terminate_media_session(&participant.session_id).await {
+                    warn!("⚠️ Failed to terminate media session for participant {} via session-core: {}", 
+                          participant_id, e);
                 }
             }
             
@@ -274,64 +276,87 @@ struct ConferenceStats {
 }
 
 /// Conference call handler with real media integration
-#[derive(Debug)]
 pub struct SipConferenceHandler {
     conferences: Arc<RwLock<HashMap<String, ConferenceRoom>>>,
-    media_controller: Arc<MediaSessionController>,
+    media_manager: Arc<MediaManager>,
     stats: Arc<Mutex<CallStats>>,
     max_participants: usize,
     audio_mixing_enabled: bool,
     name: String,
 }
 
+impl std::fmt::Debug for SipConferenceHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SipConferenceHandler")
+            .field("max_participants", &self.max_participants)
+            .field("audio_mixing_enabled", &self.audio_mixing_enabled)
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
 impl SipConferenceHandler {
-    pub fn new(
+    pub async fn new(
         max_participants: usize, 
         stats: Arc<Mutex<CallStats>>,
         audio_mixing_enabled: bool
-    ) -> Self {
-        info!("🎪 Creating SIP Conference Handler with real audio mixing: {}", audio_mixing_enabled);
+    ) -> Result<Self> {
+        info!("🎪 Creating SIP Conference Handler with session-core MediaManager (audio mixing: {})", audio_mixing_enabled);
         
-        // Create media controller for real audio processing
-        let media_controller = Arc::new(MediaSessionController::new());
+        // Create media manager using session-core MediaManager
+        let local_bind_addr: SocketAddr = "127.0.0.1:0".parse()?;
+        let media_manager = if audio_mixing_enabled {
+            // Create MediaManager with port range for conference scenarios
+            Arc::new(MediaManager::with_port_range(local_bind_addr, 10000, 20000))
+        } else {
+            // Create basic MediaManager
+            Arc::new(MediaManager::new(local_bind_addr))
+        };
         
-        Self {
+        // Start the MediaManager
+        media_manager.start().await
+            .map_err(|e| anyhow::anyhow!("Failed to start MediaManager: {}", e))?;
+        
+        Ok(Self {
             conferences: Arc::new(RwLock::new(HashMap::new())),
-            media_controller,
+            media_manager,
             stats,
             max_participants,
             audio_mixing_enabled,
-            name: "SIPp-Conference-Server-RealAudio".to_string(),
-        }
+            name: "SIPp-Conference-Server-SessionCore".to_string(),
+        })
     }
     
-    /// Generate conference SDP with real media ports
-    async fn generate_conference_sdp(&self, conference_id: &str, participant_count: usize, dialog_id: &str) -> String {
-        // Get real RTP port from media controller if available
+    /// Generate conference SDP with real media ports using proper SDP builder
+    async fn generate_conference_sdp(&self, conference_id: &str, participant_count: usize, session_id: &SessionId) -> String {
+        // Get real RTP port from media manager if available
         let rtp_port = if self.audio_mixing_enabled {
-            match self.media_controller.get_session_info(dialog_id).await {
-                Ok(info) => info.rtp_port.unwrap_or(10000),
-                Err(_) => 10000, // Fallback port
+            match self.media_manager.get_media_info(session_id).await {
+                Ok(Some(info)) => info.local_rtp_port.unwrap_or(10000),
+                _ => 10000, // Fallback port
             }
         } else {
             10000 // Default port for signaling-only
         };
         
-        format!(
-            "v=0\r\n\
-             o=conference 123456 654321 IN IP4 127.0.0.1\r\n\
-             s=Conference Room {} - REAL AUDIO MIXING\r\n\
-             c=IN IP4 127.0.0.1\r\n\
-             t=0 0\r\n\
-             a=tool:rvoip-conference-server-real-audio\r\n\
-             a=participants:{}\r\n\
-             a=audio-mixing:{}\r\n\
-             m=audio {} RTP/AVP 0 8\r\n\
-             a=rtpmap:0 PCMU/8000\r\n\
-             a=rtpmap:8 PCMA/8000\r\n\
-             a=sendrecv\r\n",
-            conference_id, participant_count, self.audio_mixing_enabled, rtp_port
-        )
+        // Use proper SDP builder to create well-formed SDP
+        let session_name = format!("Conference Room {}", conference_id);
+        let session_version = "654321"; // Increment for each SDP update
+        
+        // Generate RFC 4566 compliant SDP with correct CRLF line endings for SIPp compatibility
+        // Standard SDP format without custom attributes that might confuse SIPp's regex parser
+        let sdp_content = format!(
+            "v=0\r\no=conference 123456 {} IN IP4 127.0.0.1\r\ns={}\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0 8\r\na=sendrecv\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\n",
+            session_version,
+            session_name,
+            rtp_port
+        );
+        
+        // Debug log the exact SDP to understand the issue
+        info!("🔍 Generated SDP for SIPp: {:?}", sdp_content);
+        info!("🔍 SDP length: {} bytes", sdp_content.len());
+        
+        sdp_content
     }
     
     async fn print_conference_stats(&self) {
@@ -381,13 +406,15 @@ impl CallHandler for SipConferenceHandler {
         info!("🎪 Participant {} wants to join conference {} (audio mixing: {})", 
               participant_id, conference_id, self.audio_mixing_enabled);
         
-        // Create participant with dialog ID for media
-        let dialog_id = format!("{}_{}", conference_id, participant_id);
+        // Create participant with session ID for media
+        let session_id = SessionId::new(); // Generate unique UUID-based session ID
+        let participant_name = format!("{}_{}", conference_id, participant_id);
         let participant = ConferenceParticipant {
             id: participant_id.clone(),
             call_id: call.id.to_string(),
             contact: call.from.clone(),
-            dialog_id: dialog_id.clone(),
+            session_id: session_id.clone(),
+            participant_name,
             media_session_id: None,
             rtp_port: None,
             joined_at: Instant::now(),
@@ -404,7 +431,7 @@ impl CallHandler for SipConferenceHandler {
                 let new_conference = match ConferenceRoom::new(
                     conference_id.clone(), 
                     self.max_participants, 
-                    Arc::clone(&self.media_controller),
+                    Arc::clone(&self.media_manager),
                     self.audio_mixing_enabled
                 ).await {
                     Ok(conf) => conf,
@@ -427,7 +454,7 @@ impl CallHandler for SipConferenceHandler {
                       participant_id, conference_id, participant_count, self.max_participants, stats.audio_participants);
                 
                 // Generate conference SDP answer with real media info
-                let conference_sdp = self.generate_conference_sdp(&conference_id, participant_count, &dialog_id).await;
+                let conference_sdp = self.generate_conference_sdp(&conference_id, participant_count, &session_id).await;
                 
                 CallDecision::Accept(Some(conference_sdp))
             }
@@ -643,5 +670,4 @@ async fn main() -> Result<()> {
     
     info!("🛑 SIP Conference Server shutdown complete");
     Ok(())
-} 
-} 
+}

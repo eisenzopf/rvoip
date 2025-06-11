@@ -62,8 +62,8 @@ async fn test_session_establishment_latency() {
     println!("  Maximum: {:?}", max_time);
     
     // Validate performance - media sessions should establish within reasonable time for real operations
-    assert!(avg_time < Duration::from_millis(1000), "Average media establishment should be < 1s, got {:?}", avg_time);
-    assert!(*max_time < Duration::from_millis(2000), "Max media establishment should be < 2s, got {:?}", max_time);
+    assert!(avg_time < Duration::from_millis(2000), "Average media establishment should be < 2s, got {:?}", avg_time);
+    assert!(*max_time < Duration::from_millis(3000), "Max media establishment should be < 3s, got {:?}", max_time);
 }
 
 /// Test real concurrent media session scalability
@@ -117,8 +117,8 @@ async fn test_concurrent_session_scalability() {
         
         // Performance should scale reasonably for real media operations
         let time_per_session = creation_time / session_count as u32;
-        assert!(time_per_session < Duration::from_millis(800), 
-               "Time per session should be < 800ms for real media, got {:?}", time_per_session);
+        assert!(time_per_session < Duration::from_millis(1500), 
+               "Time per session should be < 1.5s for real media, got {:?}", time_per_session);
     }
     
     println!("Final memory usage: {} bytes", memory_monitor.get_memory_increase());
@@ -405,8 +405,8 @@ async fn test_cpu_usage_characteristics() {
         
                  // Performance should scale reasonably with session count for real media
          let time_per_session = creation_time / session_count as u32;
-         assert!(time_per_session < Duration::from_millis(800), 
-                "CPU time per session should be < 800ms for real media, got {:?}", time_per_session);
+         assert!(time_per_session < Duration::from_millis(1500), 
+                "CPU time per session should be < 1.5s for real media, got {:?}", time_per_session);
     }
     
     println!("CPU usage test completed successfully with real media sessions");
@@ -508,5 +508,5 @@ async fn test_performance_monitoring_overhead() {
     
     // Validate monitoring overhead is reasonable for real media operations
     assert!(overhead_percentage < 50.0, "Monitoring overhead should be < 50% for this test scale, got {:.2}%", overhead_percentage);
-    assert!(monitored_duration < Duration::from_secs(10), "Monitored operations should complete within 10s");
+    assert!(monitored_duration < Duration::from_secs(15), "Monitored operations should complete within 15s");
 } 

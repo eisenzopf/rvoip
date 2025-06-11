@@ -25,6 +25,9 @@ path = "src/bin/sip_conference_server.rs"
 # Core session library
 rvoip-session-core = { path = "../../" }
 
+# SIP core for SDP building
+rvoip-sip-core = { path = "../../../sip-core" }
+
 # Media and RTP for real audio mixing
 rvoip-media-core = { path = "../../../media-core" }
 rvoip-rtp-core = { path = "../../../rtp-core" }

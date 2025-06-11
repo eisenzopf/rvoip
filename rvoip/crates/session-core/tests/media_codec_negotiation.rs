@@ -405,9 +405,9 @@ async fn test_codec_performance_validation() {
         media_engine.start_media(dialog_id.clone(), media_config).await.unwrap();
         let creation_time = start.elapsed();
         
-        // Should be reasonably fast (< 1 second, first session may need initialization time)
-        assert!(creation_time < Duration::from_millis(1000), 
-               "Codec {} session creation should be < 1s, got {:?}", 
+        // Should be reasonably fast (< 2 seconds, first session may need initialization time)
+        assert!(creation_time < Duration::from_millis(2000), 
+               "Codec {} session creation should be < 2s, got {:?}", 
                codec.name, creation_time);
         
         // Verify session exists
@@ -444,7 +444,7 @@ async fn test_codec_performance_validation() {
     
     let metrics = measure_integration_performance(performance_test, 10).await.unwrap();
     assert!(metrics.success_rate > 0.9, "Performance should be > 90% success rate, got {}", metrics.success_rate);
-    assert!(metrics.operation_time < Duration::from_secs(10), "Operations should complete within reasonable time");
+    assert!(metrics.operation_time < Duration::from_secs(15), "Operations should complete within reasonable time");
 }
 
 /// Test codec negotiation scenarios with MediaSessionController

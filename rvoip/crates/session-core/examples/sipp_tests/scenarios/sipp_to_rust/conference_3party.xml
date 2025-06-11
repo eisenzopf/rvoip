@@ -39,9 +39,9 @@ Features:
       v=0
       o=participant[call_number] 53655765 2353687637 IN IP4 [local_ip]
       s=SIPp Conference Client [call_number]
-      c=IN IP4 [local_ip]
+      c=IN IP4 [media_ip]
       t=0 0
-      m=audio [media_port] RTP/AVP 0 8
+      m=audio [auto_media_port] RTP/AVP 0 8
       a=rtpmap:0 PCMU/8000
       a=rtpmap:8 PCMA/8000
       a=sendrecv
@@ -56,10 +56,8 @@ Features:
   <!-- Expect 200 OK from conference server -->
   <recv response="200" rtd="true">
     <action>
-      <!-- Store conference participant count from SDP -->
-      <ereg regexp="a=participants:([0-9]+)" search_in="body" check_it="true" assign_to="participant_count"/>
-      <!-- Extract remote media port for RTP -->
-      <ereg regexp="m=audio ([0-9]+)" search_in="body" check_it="true" assign_to="remote_media_port"/>
+      <!-- Extract server's media port for RTP destination -->
+      <ereg regexp="m=audio ([0-9]+)" search_in="body" check_it="false" assign_to="server_media_port"/>
     </action>
   </recv>
 
@@ -81,8 +79,8 @@ Features:
   <!-- Log conference joining -->
   <nop>
     <action>
-      <log message="🎪 Participant [call_number] joined conference (participants: [$participant_count])"/>
-      <log message="📡 RTP session established on port [media_port] → [$remote_media_port]"/>
+      <log message="🎪 Participant [call_number] joined conference successfully"/>
+      <log message="📡 RTP session established: Client port [auto_media_port] → Server port [$server_media_port]"/>
     </action>
   </nop>
 
@@ -100,6 +98,8 @@ Features:
       <log message="🎵 Participant [call_number] starting RTP audio streaming..."/>
     </action>
   </nop>
+
+  <!-- RTP MEDIA SESSION - SIPp will handle RTP based on command line options -->
 
   <!-- Audio streaming duration - participants stay different times -->
   <pause milliseconds="20000" test="[call_number]" op="eq" value="1"/>

@@ -3784,6 +3784,7 @@ dependencies = [
  "rvoip-media-core",
  "rvoip-rtp-core",
  "rvoip-session-core",
+ "rvoip-sip-core",
  "serde",
  "serde_json",
  "serde_yaml",

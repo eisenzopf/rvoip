@@ -523,27 +523,41 @@ run_sipp_test() {
         "-message_file" "$TEST_SESSION_DIR/${test_name}_messages.log"
         "-trace_screen"
         "-screen_file" "$sipp_log"
+        "-trace_err"
         "-stf" "$sipp_csv"
         "-nostdin"
     )
     
-    # Enable REAL RTP audio streaming for conference tests
+    # Configure RTP for conference testing (real audio streaming)
     if [[ "$scenario" == "conference_3party" ]]; then
-        log_info "🎵 Enabling REAL RTP audio streaming for conference test"
-        log_info "🎯 Conference participants will send/receive actual RTP packets"
-        
-        # Enable RTP echo to simulate real audio streams
-        sipp_args+=("-rtp_echo")
+        log_info "🎵 Testing REAL session-core/media-core conference integration"
+        log_info "🎯 Conference participants will send RTP to conference server"
+        log_info "📡 Testing actual audio mixing and distribution via media-core"
         
         # Use dynamic media ports (different for each participant)
         local base_media_port=$((6000 + (RANDOM % 1000)))
-        sipp_args+=("-media_port" "$base_media_port")
+        sipp_args+=("-min_rtp_port" "$base_media_port")
+        sipp_args+=("-max_rtp_port" "$((base_media_port + 100))")
         
-        # Enable RTP statistics for audio analysis
-        sipp_args+=("-trace_rtp")
+        # Enable RTP echo and media interface for RTP packet handling
+        sipp_args+=("-rtp_echo")  # Enable RTP echo capability
+        sipp_args+=("-mi" "127.0.0.1")  # Media interface IP
+        sipp_args+=("-mp" "$base_media_port")  # Media port base
         
-        log_info "📡 RTP media port range: ${base_media_port}-$((base_media_port + max_calls))"
-        log_info "🔊 Each participant will echo RTP packets (simulating real audio)"
+        # Start packet capture to verify RTP flow
+        log_info "📡 Starting packet capture on RTP ports to verify media flow..."
+        local capture_file="$TEST_SESSION_DIR/${test_name}_rtp_capture.pcap"
+        local capture_filter="host 127.0.0.1 and udp and portrange ${base_media_port}-$((base_media_port + 100))"
+        
+        # Start tcpdump in background to capture RTP packets
+        sudo tcpdump -i lo0 -w "$capture_file" "$capture_filter" &
+        local tcpdump_pid=$!
+        sleep 1  # Let tcpdump start
+        
+        log_info "📡 RTP media port range: ${base_media_port}-$((base_media_port + 100))"
+        log_info "🎪 Testing conference server's real media handling with RTP echo"
+        log_info "🎵 SIPp will echo any RTP packets received from conference server"
+        log_info "📊 RTP packet capture: $capture_file (PID: $tcpdump_pid)"
         
     else
         # For non-conference tests, basic RTP echo
@@ -560,6 +574,30 @@ run_sipp_test() {
     # Wait for SIPp to complete
     wait "$sipp_pid"
     local sipp_result=$?
+    
+    # Stop packet capture if it was started
+    if [[ "$scenario" == "conference_3party" && -n "$tcpdump_pid" ]]; then
+        log_info "🛑 Stopping packet capture (PID: $tcpdump_pid)..."
+        sudo kill "$tcpdump_pid" 2>/dev/null || true
+        sleep 1
+        
+        # Analyze captured RTP packets
+        if [[ -f "$capture_file" ]]; then
+            local rtp_count=$(tshark -r "$capture_file" -Y "rtp" -T fields -e rtp.ssrc 2>/dev/null | wc -l | tr -d ' ')
+            local udp_count=$(tshark -r "$capture_file" -Y "udp" -T fields -e udp.srcport 2>/dev/null | wc -l | tr -d ' ')
+            
+            log_info "📊 Packet Analysis Results:"
+            log_info "  📦 Total UDP packets captured: $udp_count"
+            log_info "  🎵 Total RTP packets captured: $rtp_count"
+            
+            if [[ "$rtp_count" -gt 0 ]]; then
+                log_success "🎉 SUCCESS: RTP packets detected! Conference media is working!"
+                log_info "🎵 Conference server and SIPp exchanged real audio packets"
+            else
+                log_warning "⚠️ No RTP packets detected (only SIP signaling working)"
+            fi
+        fi
+    fi
     
     if [[ $sipp_result -eq 0 ]]; then
         log_success "✅ SIPp test completed successfully"

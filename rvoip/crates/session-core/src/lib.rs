@@ -11,6 +11,7 @@ pub mod media;         // EXISTING - media-core integration
 pub mod manager;       // SIMPLIFIED - orchestration only
 pub mod coordination;
 pub mod bridge;
+pub mod conference;    // NEW - Conference functionality
 
 // Core error types
 mod errors;
@@ -29,6 +30,7 @@ pub mod prelude {
     pub use crate::manager::events::{SessionEvent, SessionEventProcessor};
     pub use crate::manager::SessionManager;
     pub use crate::dialog::DialogManager;  // NEW
+    pub use crate::conference::prelude::*; // NEW - Conference functionality
 }
 
 #[cfg(test)]
