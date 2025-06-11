@@ -487,8 +487,15 @@ async fn test_event_system_failure_recovery() {
         }
         
         // Receive some events
-        for _ in 0..3 {
-            let _ = wait_for_session_event(&mut subscriber, Duration::from_millis(100)).await;
+        let mut events_received = 0;
+        loop {
+            // Try to receive events (should not receive any new ones)
+            match tokio::time::timeout(Duration::from_millis(100), subscriber.receive()).await {
+                Ok(Ok(_)) => {
+                    events_received += 1;
+                },
+                _ => break, // Timeout, no more events
+            }
         }
         
         // Stop and restart processor (simulating failure/recovery)
@@ -506,8 +513,10 @@ async fn test_event_system_failure_recovery() {
         };
         
         processor.publish_event(recovery_event).await.unwrap();
-        let received = wait_for_session_event(&mut new_subscriber, Duration::from_secs(1)).await;
-        assert!(received.is_some());
+        match tokio::time::timeout(Duration::from_secs(1), new_subscriber.receive()).await {
+            Ok(Ok(_)) => {}, // Event received
+            _ => panic!("Failed to receive recovery event"),
+        }
         
         processor.stop().await.unwrap();
         

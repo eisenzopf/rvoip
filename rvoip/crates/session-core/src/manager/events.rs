@@ -1,17 +1,11 @@
 //! Session Event System
 //!
-//! Integrates with infra-common zero-copy event system for high-performance session event handling.
+//! Simple event system using tokio::sync::broadcast for session event handling.
+//! Aligns with the event patterns used throughout the rest of the codebase.
 
 use std::sync::Arc;
-use std::any::Any;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use serde::{Serialize, Deserialize};
-use infra_common::events::{
-    types::{Event, EventPriority, EventResult},
-    system::EventSystem,
-    builder::{EventSystemBuilder, ImplementationType},
-    api::{EventSystem as EventSystemTrait, EventSubscriber},
-};
 use crate::api::types::{SessionId, CallSession, CallState};
 use crate::media::types::{RtpProcessingType, RtpProcessingMode, RtpProcessingMetrics, RtpBufferPoolStats};
 use crate::errors::Result;
@@ -81,7 +75,7 @@ pub enum SessionEvent {
         error: String,
     },
     
-    // ========== NEW: RTP Processing Events ==========
+    // ========== RTP Processing Events ==========
     
     /// RTP packet processed with zero-copy optimization
     RtpPacketProcessed {
@@ -110,64 +104,42 @@ pub enum SessionEvent {
     },
 }
 
-impl Event for SessionEvent {
-    fn event_type() -> &'static str {
-        "session_event"
-    }
-    
-    fn priority() -> EventPriority {
-        // Default priority for all session events, individual events can override if needed
-        EventPriority::Normal
-    }
-    
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
+/// Simple subscriber wrapper for session events
+pub struct SessionEventSubscriber {
+    receiver: broadcast::Receiver<SessionEvent>,
 }
 
-impl SessionEvent {
-    /// Get priority for this specific event instance
-    pub fn get_priority(&self) -> EventPriority {
-        match self {
-            // High priority events - immediate session state changes
-            SessionEvent::SessionCreated { .. } => EventPriority::High,
-            SessionEvent::StateChanged { .. } => EventPriority::High,
-            SessionEvent::SessionTerminated { .. } => EventPriority::High,
-            
-            // Critical priority events - RTP processing errors that need immediate attention
-            SessionEvent::RtpProcessingError { .. } => EventPriority::Critical,
-            
-            // High priority events - RTP mode changes affect session performance
-            SessionEvent::RtpProcessingModeChanged { .. } => EventPriority::High,
-            
-            // Normal priority events - regular RTP processing and statistics
-            SessionEvent::RtpPacketProcessed { .. } => EventPriority::Normal,
-            SessionEvent::RtpBufferPoolUpdate { .. } => EventPriority::Normal,
-            
-            // Normal priority events - media and session updates
-            SessionEvent::MediaEvent { .. } => EventPriority::Normal,
-            SessionEvent::DtmfReceived { .. } => EventPriority::Normal,
-            SessionEvent::SessionHeld { .. } => EventPriority::Normal,
-            SessionEvent::SessionResumed { .. } => EventPriority::Normal,
-            SessionEvent::MediaUpdate { .. } => EventPriority::Normal,
-            SessionEvent::SdpEvent { .. } => EventPriority::Normal,
-            
-            // Low priority events - errors and logging
-            SessionEvent::Error { .. } => EventPriority::Low,
+impl SessionEventSubscriber {
+    pub fn new(receiver: broadcast::Receiver<SessionEvent>) -> Self {
+        Self { receiver }
+    }
+
+    /// Receive the next event
+    pub async fn receive(&mut self) -> Result<SessionEvent> {
+        self.receiver.recv().await
+            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to receive event: {}", e)))
+    }
+
+    /// Try to receive an event without blocking
+    pub fn try_receive(&mut self) -> Result<Option<SessionEvent>> {
+        match self.receiver.try_recv() {
+            Ok(event) => Ok(Some(event)),
+            Err(broadcast::error::TryRecvError::Empty) => Ok(None),
+            Err(e) => Err(crate::errors::SessionError::internal(&format!("Failed to try receive event: {}", e))),
         }
     }
 }
 
-/// Event processor for session events using infra-common zero-copy event system
+/// Event processor for session events using tokio::sync::broadcast
 pub struct SessionEventProcessor {
-    event_system: EventSystem,
-    publisher: Arc<RwLock<Option<Box<dyn infra_common::events::api::EventPublisher<SessionEvent> + Send + Sync>>>>,
+    sender: Arc<RwLock<Option<broadcast::Sender<SessionEvent>>>>,
+    is_running: Arc<RwLock<bool>>,
 }
 
 impl std::fmt::Debug for SessionEventProcessor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionEventProcessor")
-            .field("has_publisher", &self.publisher.try_read().map(|p| p.is_some()).unwrap_or(false))
+            .field("has_sender", &self.sender.try_read().map(|s| s.is_some()).unwrap_or(false))
             .finish()
     }
 }
@@ -175,51 +147,35 @@ impl std::fmt::Debug for SessionEventProcessor {
 impl SessionEventProcessor {
     /// Create a new session event processor
     pub fn new() -> Self {
-        let event_system = EventSystemBuilder::new()
-            .implementation(ImplementationType::ZeroCopy)
-            .channel_capacity(10_000)
-            .max_concurrent_dispatches(1_000)
-            .enable_priority(true)
-            .shard_count(8)
-            .enable_metrics(false)
-            .build();
-
         Self {
-            event_system,
-            publisher: Arc::new(RwLock::new(None)),
+            sender: Arc::new(RwLock::new(None)),
+            is_running: Arc::new(RwLock::new(false)),
         }
     }
 
     /// Start the event processor
     pub async fn start(&self) -> Result<()> {
-        self.event_system.start()
-            .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to start event system: {}", e)))?;
+        let (sender, _) = broadcast::channel(1000); // Buffer for 1000 events
+        *self.sender.write().await = Some(sender);
+        *self.is_running.write().await = true;
         
-        // Create publisher
-        let publisher = self.event_system.create_publisher::<SessionEvent>();
-        *self.publisher.write().await = Some(publisher);
-
         tracing::info!("Session event processor started");
         Ok(())
     }
 
     /// Stop the event processor
     pub async fn stop(&self) -> Result<()> {
-        *self.publisher.write().await = None;
+        *self.sender.write().await = None;
+        *self.is_running.write().await = false;
         
-        self.event_system.shutdown()
-            .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to stop event system: {}", e)))?;
-
         tracing::info!("Session event processor stopped");
         Ok(())
     }
 
-    /// Publish a session event with instance-specific priority
+    /// Publish a session event
     pub async fn publish_event(&self, event: SessionEvent) -> Result<()> {
-        let publisher = self.publisher.read().await;
-        if let Some(publisher) = publisher.as_ref() {
+        let sender_guard = self.sender.read().await;
+        if let Some(sender) = sender_guard.as_ref() {
             // Log RTP events with more detail for monitoring
             match &event {
                 SessionEvent::RtpPacketProcessed { session_id, processing_type, performance_metrics } => {
@@ -262,39 +218,43 @@ impl SessionEventProcessor {
                 _ => {} // Other events use default logging
             }
             
-            publisher.publish(event)
-                .await
-                .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to publish event: {}", e)))?;
+            match sender.send(event) {
+                Ok(_) => {}, // Event sent successfully
+                Err(broadcast::error::SendError(_)) => {
+                    // No receivers are currently listening, which is fine
+                    tracing::debug!("No subscribers listening for event, but this is acceptable");
+                }
+            }
         } else {
             tracing::warn!("Event processor not running, dropping event");
         }
         Ok(())
     }
 
-    /// Subscribe to session events (for testing and monitoring)
-    pub async fn subscribe(&self) -> Result<Box<dyn EventSubscriber<SessionEvent> + Send>> {
-        let subscriber = self.event_system.subscribe::<SessionEvent>()
-            .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to subscribe to events: {}", e)))?;
-        
-        Ok(subscriber)
+    /// Subscribe to session events
+    pub async fn subscribe(&self) -> Result<SessionEventSubscriber> {
+        let sender_guard = self.sender.read().await;
+        if let Some(sender) = sender_guard.as_ref() {
+            let receiver = sender.subscribe();
+            Ok(SessionEventSubscriber::new(receiver))
+        } else {
+            Err(crate::errors::SessionError::internal("Event processor not running"))
+        }
     }
 
-    /// Subscribe to session events with a filter
-    pub async fn subscribe_filtered<F>(&self, filter: F) -> Result<Box<dyn EventSubscriber<SessionEvent> + Send>>
+    /// Subscribe to session events with a filter (compatibility method)
+    pub async fn subscribe_filtered<F>(&self, _filter: F) -> Result<SessionEventSubscriber>
     where
         F: Fn(&SessionEvent) -> bool + Send + Sync + 'static,
     {
-        let subscriber = self.event_system.subscribe_filtered::<SessionEvent, F>(filter)
-            .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to subscribe to filtered events: {}", e)))?;
-        
-        Ok(subscriber)
+        // For now, just return a regular subscriber
+        // Filtering can be done by the subscriber if needed
+        self.subscribe().await
     }
 
     /// Check if the event processor is running
     pub async fn is_running(&self) -> bool {
-        self.publisher.read().await.is_some()
+        *self.is_running.read().await
     }
 
     // ========== RTP Event Publishing Helper Methods ==========

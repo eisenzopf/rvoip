@@ -105,7 +105,7 @@ pub fn generate_sdp_offer(local_ip: &str, local_port: u16) -> Result<String> {
 ///     if let Some(ref offer) = call.sdp {
 ///         match generate_sdp_answer(offer, "127.0.0.1", 10001) {
 ///             Ok(answer) => CallDecision::Accept(Some(answer)),
-///             Err(_) => CallDecision::Reject("Incompatible media"),
+///             Err(_) => CallDecision::Reject("Incompatible media".to_string()),
 ///         }
 ///     } else {
 ///         CallDecision::Accept(None)

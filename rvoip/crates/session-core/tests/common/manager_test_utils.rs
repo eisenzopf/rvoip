@@ -16,12 +16,11 @@ use rvoip_session_core::{
     },
     manager::{
         registry::SessionRegistry,
-        events::{SessionEvent, SessionEventProcessor},
+        events::{SessionEvent, SessionEventProcessor, SessionEventSubscriber},
         cleanup::CleanupManager,
     },
     SessionError,
 };
-use infra_common::events::api::EventSubscriber;
 use crate::common::*;
 
 /// Test configuration for manager testing
@@ -179,7 +178,7 @@ impl RegistryTestHelper {
 /// Event system test helper
 pub struct EventTestHelper {
     processor: Arc<SessionEventProcessor>,
-    subscriber: Option<Box<dyn EventSubscriber<SessionEvent> + Send>>,
+    subscriber: Option<SessionEventSubscriber>,
     received_events: Arc<Mutex<Vec<SessionEvent>>>,
 }
 
@@ -207,7 +206,10 @@ impl EventTestHelper {
 
     pub async fn wait_for_event(&mut self, timeout: Duration) -> Option<SessionEvent> {
         if let Some(ref mut subscriber) = self.subscriber {
-            wait_for_session_event(subscriber, timeout).await
+            match tokio::time::timeout(timeout, subscriber.receive()).await {
+                Ok(Ok(event)) => Some(event),
+                _ => None,
+            }
         } else {
             None
         }

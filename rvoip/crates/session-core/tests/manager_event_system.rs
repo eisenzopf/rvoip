@@ -238,13 +238,18 @@ async fn test_event_processor_multiple_subscribers() {
     processor.publish_event(event).await.unwrap();
     
     // All subscribers should receive the event
-    let event1 = wait_for_session_event(&mut subscriber1, Duration::from_secs(1)).await;
-    let event2 = wait_for_session_event(&mut subscriber2, Duration::from_secs(1)).await;
-    let event3 = wait_for_session_event(&mut subscriber3, Duration::from_secs(1)).await;
-    
-    assert!(event1.is_some());
-    assert!(event2.is_some());
-    assert!(event3.is_some());
+    match tokio::time::timeout(Duration::from_secs(1), subscriber1.receive()).await {
+        Ok(Ok(_)) => {}, // Event received
+        _ => panic!("Subscriber 1 failed to receive event"),
+    }
+    match tokio::time::timeout(Duration::from_secs(1), subscriber2.receive()).await {
+        Ok(Ok(_)) => {}, // Event received
+        _ => panic!("Subscriber 2 failed to receive event"),
+    }
+    match tokio::time::timeout(Duration::from_secs(1), subscriber3.receive()).await {
+        Ok(Ok(_)) => {}, // Event received
+        _ => panic!("Subscriber 3 failed to receive event"),
+    }
     
     processor.stop().await.unwrap();
 }
@@ -413,10 +418,9 @@ async fn test_concurrent_event_publishing() {
     let mut received_count = 0;
     
     while received_count < total_events {
-        if wait_for_session_event(&mut subscriber, Duration::from_millis(100)).await.is_some() {
-            received_count += 1;
-        } else {
-            break;
+        match tokio::time::timeout(Duration::from_millis(100), subscriber.receive()).await {
+            Ok(Ok(_)) => received_count += 1,
+            _ => break,
         }
     }
     
@@ -441,8 +445,10 @@ async fn test_event_processor_restart() {
     };
     
     processor.publish_event(event1).await.unwrap();
-    let received1 = wait_for_session_event(&mut subscriber1, Duration::from_secs(1)).await;
-    assert!(received1.is_some());
+    match tokio::time::timeout(Duration::from_secs(1), subscriber1.receive()).await {
+        Ok(Ok(_)) => {}, // Event received
+        _ => panic!("Failed to receive first event"),
+    }
     
     processor.stop().await.unwrap();
     
@@ -458,8 +464,10 @@ async fn test_event_processor_restart() {
     };
     
     processor.publish_event(event2).await.unwrap();
-    let received2 = wait_for_session_event(&mut subscriber2, Duration::from_secs(1)).await;
-    assert!(received2.is_some());
+    match tokio::time::timeout(Duration::from_secs(1), subscriber2.receive()).await {
+        Ok(Ok(_)) => {}, // Event received
+        _ => panic!("Failed to receive second event"),
+    }
     
     processor.stop().await.unwrap();
 }

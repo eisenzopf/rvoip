@@ -42,7 +42,7 @@ use rvoip_session_core::{
         handlers::CallHandler,
         builder::SessionManagerBuilder,
     },
-    manager::events::SessionEvent,
+    manager::events::{SessionEvent, SessionEventSubscriber},
 };
 use infra_common::events::api::EventSubscriber;
 
@@ -151,32 +151,24 @@ impl CallHandler for DeferHandler {
     }
 }
 
-/// Wait for a specific session event
-pub async fn wait_for_session_event(
-    subscriber: &mut Box<dyn EventSubscriber<SessionEvent> + Send>,
-    timeout: Duration,
-) -> Option<SessionEvent> {
-    match tokio::time::timeout(timeout, subscriber.receive()).await {
-        Ok(Ok(event)) => Some((*event).clone()),
-        _ => None,
-    }
-}
-
 /// Wait for a session state change event
 pub async fn wait_for_state_change(
-    subscriber: &mut Box<dyn EventSubscriber<SessionEvent> + Send>,
+    subscriber: &mut SessionEventSubscriber,
     session_id: &SessionId,
     timeout: Duration,
 ) -> Option<(CallState, CallState)> {
     let start = std::time::Instant::now();
     
     while start.elapsed() < timeout {
-        if let Some(event) = wait_for_session_event(subscriber, Duration::from_millis(100)).await {
-            if let SessionEvent::StateChanged { session_id: event_session_id, old_state, new_state } = event {
-                if &event_session_id == session_id {
-                    return Some((old_state, new_state));
+        match tokio::time::timeout(Duration::from_millis(100), subscriber.receive()).await {
+            Ok(Ok(event)) => {
+                if let SessionEvent::StateChanged { session_id: event_session_id, old_state, new_state } = event {
+                    if &event_session_id == session_id {
+                        return Some((old_state, new_state));
+                    }
                 }
-            }
+            },
+            _ => {}
         }
     }
     
@@ -185,32 +177,38 @@ pub async fn wait_for_state_change(
 
 /// Wait for a session created event
 pub async fn wait_for_session_created(
-    subscriber: &mut Box<dyn EventSubscriber<SessionEvent> + Send>,
+    subscriber: &mut SessionEventSubscriber,
     timeout: Duration,
 ) -> Option<SessionId> {
-    if let Some(event) = wait_for_session_event(subscriber, timeout).await {
-        if let SessionEvent::SessionCreated { session_id, .. } = event {
-            return Some(session_id);
-        }
+    match tokio::time::timeout(timeout, subscriber.receive()).await {
+        Ok(Ok(event)) => {
+            if let SessionEvent::SessionCreated { session_id, .. } = event {
+                return Some(session_id);
+            }
+        },
+        _ => {}
     }
     None
 }
 
 /// Wait for a session terminated event
 pub async fn wait_for_session_terminated(
-    subscriber: &mut Box<dyn EventSubscriber<SessionEvent> + Send>,
-    session_id: &SessionId,
+    subscriber: &mut SessionEventSubscriber,
+    session_id: &SessionId,  
     timeout: Duration,
 ) -> Option<String> {
     let start = std::time::Instant::now();
     
     while start.elapsed() < timeout {
-        if let Some(event) = wait_for_session_event(subscriber, Duration::from_millis(100)).await {
-            if let SessionEvent::SessionTerminated { session_id: event_session_id, reason } = event {
-                if &event_session_id == session_id {
-                    return Some(reason);
+        match tokio::time::timeout(Duration::from_millis(100), subscriber.receive()).await {
+            Ok(Ok(event)) => {
+                if let SessionEvent::SessionTerminated { session_id: event_session_id, reason } = event {
+                    if &event_session_id == session_id {
+                        return Some(reason);
+                    }
                 }
-            }
+            },
+            _ => {}
         }
     }
     
