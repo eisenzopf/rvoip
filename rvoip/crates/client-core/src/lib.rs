@@ -34,15 +34,13 @@ pub use events::{
 pub use error::{ClientError, ClientResult};
 
 // Re-export commonly used types from session-core (for convenience)
-pub use rvoip_session_core::{SessionId, SessionState};
+pub use rvoip_session_core::api::types::SessionId;
 
 /// Client-core version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[tokio::test]
     async fn test_client_core_compiles() {
         // Basic compilation test

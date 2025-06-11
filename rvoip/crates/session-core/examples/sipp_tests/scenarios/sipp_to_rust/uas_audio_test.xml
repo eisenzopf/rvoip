@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!-- 
+🎵 UAS Audio Streaming Test Scenario
+=====================================
+
+This scenario answers SIP calls and streams PCMA audio to test rtp_stream functionality.
+
+Usage: 
+  sipp -sf uas_audio_test.xml -mi 127.0.0.1 -mp 8000 -p 5080
+-->
+
+<scenario name="UAS Audio Streaming Test">
+  
+  <!-- Wait for INVITE -->
+  <recv request="INVITE" crlf="true">
+  </recv>
+
+  <!-- Send 180 Ringing -->
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]SIPpTag[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:testuser@[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- Wait a moment -->
+  <pause milliseconds="500"/>
+
+  <!-- Send 200 OK with SDP audio answer -->
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=[pid]SIPpTag[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:testuser@[local_ip]:[local_port];transport=[transport]>
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=server 53655765 2353687637 IN IP4 [local_ip]
+      s=SIPp Audio Test Server
+      c=IN IP4 [media_ip]
+      t=0 0
+      m=audio [auto_media_port] RTP/AVP 0 8
+      a=rtpmap:0 PCMU/8000
+      a=rtpmap:8 PCMA/8000
+      a=sendrecv
+    ]]>
+  </send>
+
+  <!-- Wait for ACK -->
+  <recv request="ACK">
+  </recv>
+
+  <!-- Log call establishment -->
+  <nop>
+    <action>
+      <log message="🎵 UAS: Call established, starting audio streaming..."/>
+    </action>
+  </nop>
+
+  <!-- Wait a moment for media session to establish -->
+  <pause milliseconds="500"/>
+
+  <!-- START STREAMING AUDIO VIA PCAP -->
+  <nop>
+    <action>
+      <exec play_pcap_audio="../../pcap/g711a.pcap"/>
+      <log message="🎵 UAS: Started playing G.711A RTP stream from PCAP"/>
+    </action>
+  </nop>
+
+  <!-- Let PCAP play for its duration (1 second) + extra time -->
+  <pause milliseconds="2500"/>
+
+  <!-- Log completion -->
+  <nop>
+    <action>
+      <log message="🎵 UAS: PCAP audio playback completed"/>
+    </action>
+  </nop>
+
+  <!-- Wait for BYE -->
+  <recv request="BYE">
+  </recv>
+
+  <!-- Send 200 OK for BYE -->
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:testuser@[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+    ]]>
+  </send>
+
+  <!-- Log completion -->
+  <nop>
+    <action>
+      <log message="✅ UAS: Audio streaming test completed"/>
+    </action>
+  </nop>
+  
+</scenario> 

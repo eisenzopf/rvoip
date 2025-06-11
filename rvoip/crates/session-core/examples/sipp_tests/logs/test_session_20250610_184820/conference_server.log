@@ -1,0 +1,245 @@
+[2m2025-06-11T01:48:23.337219Z[0m [32m INFO[0m 🎪 Starting SIP Conference Server with session-core Conference Module
+[2m2025-06-11T01:48:23.337309Z[0m [32m INFO[0m 📡 Listening on port: 5064
+[2m2025-06-11T01:48:23.337322Z[0m [32m INFO[0m 👥 Max participants per conference: 5
+[2m2025-06-11T01:48:23.337331Z[0m [32m INFO[0m 🎵 Audio mixing enabled: true
+[2m2025-06-11T01:48:23.337339Z[0m [32m INFO[0m 📡 RTP port base: 10000
+[2m2025-06-11T01:48:23.337346Z[0m [32m INFO[0m ⏰ No conference timeout (manual control)
+[2m2025-06-11T01:48:23.337355Z[0m [32m INFO[0m 🎪 Starting SIP Conference Server with session-core Conference Module
+[2m2025-06-11T01:48:23.337362Z[0m [32m INFO[0m 📡 Port: 5064, Max participants: 5, Audio mixing: true
+[2m2025-06-11T01:48:23.337374Z[0m [32m INFO[0m 🎪 Creating SIP Conference Handler with session-core Conference API (audio mixing: true)
+[2m2025-06-11T01:48:23.337437Z[0m [32m INFO[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-06-11T01:48:23.337532Z[0m [32m INFO[0m SIP UDP transport bound to 127.0.0.1:5064
+[2m2025-06-11T01:48:23.337619Z[0m [32m INFO[0m Added UDP transport bound to 127.0.0.1:5064
+[2m2025-06-11T01:48:23.337674Z[0m [32m INFO[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-06-11T01:48:23.337686Z[0m [32m INFO[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 127.0.0.1:5064
+[2m2025-06-11T01:48:23.337695Z[0m [32m INFO[0m Creating new DialogManager with global transaction events and local address 127.0.0.1:5064
+[2m2025-06-11T01:48:23.337756Z[0m [32m INFO[0m 🔄 Starting global transaction event processor for dialog-core
+🔗 SETUP: Initializing dialog coordination via DialogCoordinator
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+🎬 SPAWN: Starting dialog coordination event loop
+🎬 SPAWN: Starting session coordination event loop
+🌉 BRIDGE: Setting up session event bridge with media auto-creation and SDP handling
+📡 EVENT LOOP: Session coordination event loop started
+[2m2025-06-11T01:48:23.337913Z[0m [32m INFO[0m SessionManager initialized on port 5064
+[2m2025-06-11T01:48:23.337948Z[0m [32m INFO[0m 🔄 Running indefinitely (script-controlled)
+[2m2025-06-11T01:48:23.337961Z[0m [32m INFO[0m 🎪 Starting SIP Conference Server session manager...
+[2m2025-06-11T01:48:23.337971Z[0m [32m INFO[0m Starting UnifiedDialogApi
+[2m2025-06-11T01:48:23.337979Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-11T01:48:23.337987Z[0m [32m INFO[0m DialogManager starting
+[2m2025-06-11T01:48:23.337994Z[0m [32m INFO[0m DialogManager started successfully
+[2m2025-06-11T01:48:23.338007Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:conference@127.0.0.1:5064"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-11T01:48:23.338016Z[0m [32m INFO[0m UnifiedDialogManager started successfully
+[2m2025-06-11T01:48:23.338116Z[0m [32m INFO[0m Session event processor started
+[2m2025-06-11T01:48:23.338138Z[0m [32m INFO[0m Cleanup manager started
+[2m2025-06-11T01:48:23.338146Z[0m [32m INFO[0m SessionManager started
+[2m2025-06-11T01:48:23.338153Z[0m [32m INFO[0m ✅ SIP Conference Server ready and listening on port 5064
+[2m2025-06-11T01:48:23.338159Z[0m [32m INFO[0m 👥 Max participants per conference: 5
+[2m2025-06-11T01:48:23.338165Z[0m [32m INFO[0m 🎵 Audio mixing enabled: true
+[2m2025-06-11T01:48:23.338171Z[0m [32m INFO[0m 🎯 Ready to handle multi-party conference calls with session-core Conference API
+[2m2025-06-11T01:48:23.338179Z[0m [32m INFO[0m 📡 Real SIP conference server now active - SIPp can connect!
+=== PARSING SIP MESSAGE ===
+Input length: 662 bytes
+Input as string: "INVITE sip:testroom@127.0.0.1:5064 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-98816-1\r\nFrom: Participant 1 <sip:participant1@127.0.0.1:5061>;tag=98816SIPpTag1\r\nTo: Conference Room <sip:testroom@127.0.0.1:5064>\r\nCall-ID: 1-98816@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: <sip:participant1@127.0.0.1:5061>\r\nMax-Forwards: 70\r\nSubject: 3-Party Conference Test - Participant 1\r\nContent-Type: application/sdp\r\nContent-Length:   226\r\n\r\nv=0\r\no=participant1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Conference Client 1\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6242 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\na=participant-id:participant1\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 72, 6f, 6f, 6d, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 34, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 39, 38, 38, 31, 36, 2d, 31, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 50, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 20, 31, 20, 3c, 73, 69, 70, 3a, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 39, 38, 38, 31, 36, 53, 49, 50, 70, 54, 61, 67, 31, 0d, 0a, 54, 6f, 3a, 20, 43, 6f, 6e, 66, 65, 72, 65, 6e, 63, 65, 20, 52, 6f, 6f, 6d, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 72, 6f, 6f, 6d, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 34, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 39, 38, 38, 31, 36, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 33, 2d, 50, 61, 72, 74, 79, 20, 43, 6f, 6e, 66, 65, 72, 65, 6e, 63, 65, 20, 54, 65, 73, 74, 20, 2d, 20, 50, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 20, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 32, 32, 36, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 43, 6f, 6e, 66, 65, 72, 65, 6e, 63, 65, 20, 43, 6c, 69, 65, 6e, 74, 20, 31, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 32, 34, 32, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a, 61, 3d, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 2d, 69, 64, 3a, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-11T01:48:26.444193Z[0m [32m INFO[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-98816-1:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+Transaction loop starting for Key(z9hG4bK-98816-1:INVITE:server)
+Initial state: Proceeding
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-98816-1:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+Already in requested state, no transition needed: Proceeding
+[2m2025-06-11T01:48:26.444328Z[0m [32m INFO[0m Created early dialog f24b4175-d873-4af8-b37b-1e372ff08beb from INVITE request
+🔍 INVITE HANDLER: Created early dialog f24b4175-d873-4af8-b37b-1e372ff08beb
+🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-98816-1:INVITE:server) with dialog f24b4175-d873-4af8-b37b-1e372ff08beb
+🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog f24b4175-d873-4af8-b37b-1e372ff08beb
+🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog f24b4175-d873-4af8-b37b-1e372ff08beb
+[2m2025-06-11T01:48:26.444389Z[0m [32m INFO[0m Initial INVITE processed, created dialog f24b4175-d873-4af8-b37b-1e372ff08beb
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(f24b4175-d873-4af8-b37b-1e372ff08beb), transaction_id: z9hG4bK-98816-1:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("testroom"), password: None, host: Address(127.0.0.1), port: Some(5064), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-98816-1")] }])), From(From(Address { display_name: Some("Participant 1"), uri: Uri { scheme: Sip, user: Some("participant1"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("98816SIPpTag1")] })), To(To(Address { display_name: Some("Conference Room"), uri: Uri { scheme: Sip, user: Some("testroom"), password: None, host: Address(127.0.0.1), port: Some(5064), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-98816@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("participant1"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("3-Party Conference Test - Participant 1")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(226))], body: b"v=0\r\no=participant1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Conference Client 1\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6242 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\na=participant-id:participant1\r\n" }, source: 127.0.0.1:5061 }
+[2m2025-06-11T01:48:26.444473Z[0m [32m INFO[0m Incoming call from dialog f24b4175-d873-4af8-b37b-1e372ff08beb: sip:from@127.0.0.1 -> sip:to@local
+[2m2025-06-11T01:48:26.444519Z[0m [32m INFO[0m 🎪 [SIPp-Conference-SessionCore] Conference INVITE from sip:from@127.0.0.1 to sip:to@local (session-core Conference API)
+[2m2025-06-11T01:48:26.444530Z[0m [32m INFO[0m 🎪 [SIPp-Conference-SessionCore] Call ID: sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9
+[2m2025-06-11T01:48:26.444545Z[0m [32m INFO[0m 🎪 Participant from wants to join conference to (session-core)
+[2m2025-06-11T01:48:26.444556Z[0m [32m INFO[0m 🎪 Creating new conference to with session-core
+[2m2025-06-11T01:48:26.444579Z[0m [32m INFO[0m ✅ Conference to created with session-core
+[2m2025-06-11T01:48:26.444635Z[0m [32m INFO[0m ✅ Participant from joined conference to via session-core (1/5) - Audio participants: 0
+[2m2025-06-11T01:48:26.444667Z[0m [32m INFO[0m 🔍 Generated conference SDP via session-core for participant from
+[2m2025-06-11T01:48:26.444698Z[0m [32m INFO[0m Answering call f24b4175-d873-4af8-b37b-1e372ff08beb
+[2m2025-06-11T01:48:26.444811Z[0m [32m INFO[0m Sending response message to 127.0.0.1:5061
+[2m2025-06-11T01:48:26.444882Z[0m [32m INFO[0m Dialog f24b4175-d873-4af8-b37b-1e372ff08beb local tag set to match response: tag-040459496267447d89507ebac9dc11bd
+[2m2025-06-11T01:48:26.444890Z[0m [32m INFO[0m Dialog f24b4175-d873-4af8-b37b-1e372ff08beb transitioned to Confirmed state
+[2m2025-06-11T01:48:26.444905Z[0m [32m INFO[0m Updated dialog lookup for confirmed dialog f24b4175-d873-4af8-b37b-1e372ff08beb
+[2m2025-06-11T01:48:26.444927Z[0m [32m INFO[0m Successfully answered call f24b4175-d873-4af8-b37b-1e372ff08beb
+[2m2025-06-11T01:48:26.444938Z[0m [32m INFO[0m Successfully answered incoming call for session sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallAnswered { dialog_id: DialogId(f24b4175-d873-4af8-b37b-1e372ff08beb), session_answer: "v=0\r\no=conference_sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9 1749606506 1749606506 IN IP4 127.0.0.1\r\ns=Conference Room to (1 participants)\r\ni=Multi-party conference call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10697 RTP/AVP 0 8 18 101\r\na=sendrecv\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:18 G729/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=maxptime:40\r\na=conf:audio-mixing\r\na=conf:multi-party\r\n" }
+[2m2025-06-11T01:48:26.444968Z[0m [32m INFO[0m Call answered for session sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9: f24b4175-d873-4af8-b37b-1e372ff08beb (awaiting ACK per RFC 3261)
+[2m2025-06-11T01:48:26.444989Z[0m [32m INFO[0m 📞 Call answered for session sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9 - keeping in Initiating state until media ready
+[2m2025-06-11T01:48:26.444999Z[0m [32m INFO[0m 🚫 RFC 3261: NOT creating media session yet - waiting for ACK
+Received command: CancelTimer100 for transaction Key(z9hG4bK-98816-1:INVITE:server)
+[2m2025-06-11T01:48:26.445018Z[0m [32m INFO[0m 📄 Stored remote SDP answer for session sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-98816-1:INVITE:server)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-98816-1:INVITE:server). Final state: Terminated
+=== PARSING SIP MESSAGE ===
+Input length: 390 bytes
+Input as string: "ACK sip:testroom@127.0.0.1:5064 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-98816-1-ack\r\nFrom: Participant 1 <sip:participant1@127.0.0.1:5061>;tag=98816SIPpTag1\r\nTo: Conference Room <sip:testroom@127.0.0.1:5064>;tag=tag-040459496267447d89507ebac9dc11bd\r\nCall-ID: 1-98816@127.0.0.1\r\nCSeq: 1 ACK\r\nContact: <sip:participant1@127.0.0.1:5061>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [41, 43, 4b, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 72, 6f, 6f, 6d, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 34, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 39, 38, 38, 31, 36, 2d, 31, 2d, 61, 63, 6b, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 50, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 20, 31, 20, 3c, 73, 69, 70, 3a, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 39, 38, 38, 31, 36, 53, 49, 50, 70, 54, 61, 67, 31, 0d, 0a, 54, 6f, 3a, 20, 43, 6f, 6e, 66, 65, 72, 65, 6e, 63, 65, 20, 52, 6f, 6f, 6d, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 72, 6f, 6f, 6d, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 34, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 30, 34, 30, 34, 35, 39, 34, 39, 36, 32, 36, 37, 34, 34, 37, 64, 38, 39, 35, 30, 37, 65, 62, 61, 63, 39, 64, 63, 31, 31, 62, 64, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 39, 38, 38, 31, 36, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 41, 43, 4b, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 48, 52, 48, 52, 53, 57, 52, 57, 54, 50, 54, 55, 52, 52, 55, 100, 56, 57, 53, 48, 55, 101, 98, 97, 99, 57, 100, 99, 49, 49, 98, 100]
+Successfully parsed tag: tag-040459496267447d89507ebac9dc11bd
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"parameters": Array([]), "scheme": String("Sip"), "host": Object({"Address": String("127.0.0.1")}), "port": Number(5061.0), "headers": Object({}), "raw_uri": Null, "user": String("participant1"), "password": Null}), "params": Array([Object({"Tag": String("98816SIPpTag1")})]), "display_name": String("Participant 1")})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("98816SIPpTag1")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("98816SIPpTag1")})
+Final value for path 'headers.From.params[0].Tag': String("98816SIPpTag1")
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"user": String("participant1"), "scheme": String("Sip"), "parameters": Array([]), "password": Null, "headers": Object({}), "host": Object({"Address": String("127.0.0.1")}), "port": Number(5061.0), "raw_uri": Null}), "params": Array([Object({"Tag": String("98816SIPpTag1")})]), "display_name": String("Participant 1")})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("98816SIPpTag1")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("98816SIPpTag1")})
+Final value for path 'headers.From.params[0].Tag': String("98816SIPpTag1")
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([]), "uri": Object({"headers": Object({}), "host": Object({"Address": String("127.0.0.1")}), "user": String("testroom"), "scheme": String("Sip"), "port": Number(5064.0), "parameters": Array([]), "raw_uri": Null, "password": Null}), "display_name": String("Conference Room")})
+Processing segment Index(0) at index 3, current value: Array([])
+Index 0 out of bounds for array of length 0
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("Conference Room"), "params": Array([Object({"Tag": String("tag-040459496267447d89507ebac9dc11bd")})]), "uri": Object({"parameters": Array([]), "port": Number(5064.0), "raw_uri": Null, "scheme": String("Sip"), "headers": Object({}), "host": Object({"Address": String("127.0.0.1")}), "password": Null, "user": String("testroom")})})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("tag-040459496267447d89507ebac9dc11bd")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("tag-040459496267447d89507ebac9dc11bd")})
+Final value for path 'headers.To.params[0].Tag': String("tag-040459496267447d89507ebac9dc11bd")
+[2m2025-06-11T01:48:26.448153Z[0m [32m INFO[0m ✅ RFC 3261: ACK received for transaction Key(z9hG4bK-98816-1:INVITE:server) in dialog f24b4175-d873-4af8-b37b-1e372ff08beb - time to start media (UAS side)
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: AckReceived { dialog_id: DialogId(f24b4175-d873-4af8-b37b-1e372ff08beb), transaction_id: z9hG4bK-98816-1:INVITE:server, negotiated_sdp: None }
+[2m2025-06-11T01:48:26.448197Z[0m [32m INFO[0m ✅ RFC 3261: ACK RECEIVED for session sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9 - creating media session (UAS side)
+[2m2025-06-11T01:48:26.448218Z[0m [32m INFO[0m 🚀 RFC 3261: Creating media session after ACK for sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9: rfc_compliant_media_creation_uas
+[2m2025-06-11T01:48:26.448232Z[0m [32m INFO[0m Starting media session for dialog: media-sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9
+[2m2025-06-11T01:48:26.448259Z[0m [32m INFO[0m Created global port allocator with range 16384-32767
+[2m2025-06-11T01:48:27.453276Z[0m [32m INFO[0m Started UDP transport receiver tasks
+[2m2025-06-11T01:48:27.453403Z[0m [32m INFO[0m Started RTP session with SSRC=5580d93a
+[2m2025-06-11T01:48:27.453442Z[0m [32m INFO[0m ✅ Created media session with REAL RTP session: media-sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9 (port: 26781)
+[2m2025-06-11T01:48:27.453475Z[0m [32m INFO[0m ✅ Created media session: media-sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9 for SIP session: sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9 with real MediaSessionController + zero-copy enabled
+[2m2025-06-11T01:48:27.453489Z[0m [32m INFO[0m ✅ Successfully created RFC-compliant media session for sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9
+[2m2025-06-11T01:48:27.453532Z[0m [32m INFO[0m ✅ Updated media session for SIP session: sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9 with remote: 127.0.0.1:10697 and codecs: ["PCMU"]
+[2m2025-06-11T01:48:27.453543Z[0m [32m INFO[0m ✅ Applied stored remote SDP to new media session for sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9
+[2m2025-06-11T01:48:27.453558Z[0m [32m INFO[0m 🎉 Session sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9 transitioned to Active in registry - media ready and session fully established!
+=== PARSING SIP MESSAGE ===
+Input length: 662 bytes
+Input as string: "INVITE sip:testroom@127.0.0.1:5064 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-98924-1\r\nFrom: Participant 1 <sip:participant1@127.0.0.1:5061>;tag=98924SIPpTag1\r\nTo: Conference Room <sip:testroom@127.0.0.1:5064>\r\nCall-ID: 1-98924@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: <sip:participant1@127.0.0.1:5061>\r\nMax-Forwards: 70\r\nSubject: 3-Party Conference Test - Participant 1\r\nContent-Type: application/sdp\r\nContent-Length:   226\r\n\r\nv=0\r\no=participant1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Conference Client 1\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6353 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\na=participant-id:participant1\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 72, 6f, 6f, 6d, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 34, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 39, 38, 39, 32, 34, 2d, 31, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 50, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 20, 31, 20, 3c, 73, 69, 70, 3a, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 39, 38, 39, 32, 34, 53, 49, 50, 70, 54, 61, 67, 31, 0d, 0a, 54, 6f, 3a, 20, 43, 6f, 6e, 66, 65, 72, 65, 6e, 63, 65, 20, 52, 6f, 6f, 6d, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 72, 6f, 6f, 6d, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 34, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 39, 38, 39, 32, 34, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 33, 2d, 50, 61, 72, 74, 79, 20, 43, 6f, 6e, 66, 65, 72, 65, 6e, 63, 65, 20, 54, 65, 73, 74, 20, 2d, 20, 50, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 20, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 32, 32, 36, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 43, 6f, 6e, 66, 65, 72, 65, 6e, 63, 65, 20, 43, 6c, 69, 65, 6e, 74, 20, 31, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 33, 35, 33, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a, 61, 3d, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 2d, 69, 64, 3a, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-11T01:48:29.773675Z[0m [32m INFO[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-98924-1:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+Transaction loop starting for Key(z9hG4bK-98924-1:INVITE:server)
+Initial state: Proceeding
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-98924-1:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+Already in requested state, no transition needed: Proceeding
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+[2m2025-06-11T01:48:29.773880Z[0m [32m INFO[0m Created early dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690 from INVITE request
+🔍 INVITE HANDLER: Created early dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690
+🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-98924-1:INVITE:server) with dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690
+🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690
+🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690
+[2m2025-06-11T01:48:29.773949Z[0m [32m INFO[0m Initial INVITE processed, created dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(2dc0bb35-227f-4d85-bf11-0ecbdca1b690), transaction_id: z9hG4bK-98924-1:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("testroom"), password: None, host: Address(127.0.0.1), port: Some(5064), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-98924-1")] }])), From(From(Address { display_name: Some("Participant 1"), uri: Uri { scheme: Sip, user: Some("participant1"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("98924SIPpTag1")] })), To(To(Address { display_name: Some("Conference Room"), uri: Uri { scheme: Sip, user: Some("testroom"), password: None, host: Address(127.0.0.1), port: Some(5064), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-98924@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("participant1"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("3-Party Conference Test - Participant 1")), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(226))], body: b"v=0\r\no=participant1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Conference Client 1\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6353 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\na=participant-id:participant1\r\n" }, source: 127.0.0.1:5061 }
+[2m2025-06-11T01:48:29.774044Z[0m [32m INFO[0m Incoming call from dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690: sip:from@127.0.0.1 -> sip:to@local
+[2m2025-06-11T01:48:29.774092Z[0m [32m INFO[0m 🎪 [SIPp-Conference-SessionCore] Conference INVITE from sip:from@127.0.0.1 to sip:to@local (session-core Conference API)
+[2m2025-06-11T01:48:29.774103Z[0m [32m INFO[0m 🎪 [SIPp-Conference-SessionCore] Call ID: sess_839d0fc9-99fb-4533-bae3-7de6afd3b342
+[2m2025-06-11T01:48:29.774118Z[0m [32m INFO[0m 🎪 Participant from wants to join conference to (session-core)
+[2m2025-06-11T01:48:29.774201Z[0m [32m INFO[0m ✅ Participant from joined conference to via session-core (2/5) - Audio participants: 0
+[2m2025-06-11T01:48:29.774235Z[0m [32m INFO[0m 🔍 Generated conference SDP via session-core for participant from
+[2m2025-06-11T01:48:29.774256Z[0m [32m INFO[0m Answering call 2dc0bb35-227f-4d85-bf11-0ecbdca1b690
+[2m2025-06-11T01:48:29.774379Z[0m [32m INFO[0m Sending response message to 127.0.0.1:5061
+[2m2025-06-11T01:48:29.774445Z[0m [32m INFO[0m Dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690 local tag set to match response: tag-2e20bd9059c64cde911594acaea676d6
+[2m2025-06-11T01:48:29.774454Z[0m [32m INFO[0m Dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690 transitioned to Confirmed state
+[2m2025-06-11T01:48:29.774469Z[0m [32m INFO[0m Updated dialog lookup for confirmed dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690
+[2m2025-06-11T01:48:29.774483Z[0m [32m INFO[0m Successfully answered call 2dc0bb35-227f-4d85-bf11-0ecbdca1b690
+[2m2025-06-11T01:48:29.774493Z[0m [32m INFO[0m Successfully answered incoming call for session sess_839d0fc9-99fb-4533-bae3-7de6afd3b342
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallAnswered { dialog_id: DialogId(2dc0bb35-227f-4d85-bf11-0ecbdca1b690), session_answer: "v=0\r\no=conference_sess_839d0fc9-99fb-4533-bae3-7de6afd3b342 1749606509 1749606509 IN IP4 127.0.0.1\r\ns=Conference Room to (2 participants)\r\ni=Multi-party conference call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10697 RTP/AVP 0 8 18 101\r\na=sendrecv\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:18 G729/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=ptime:20\r\na=maxptime:40\r\na=conf:audio-mixing\r\na=conf:multi-party\r\n" }
+[2m2025-06-11T01:48:29.774522Z[0m [32m INFO[0m Call answered for session sess_839d0fc9-99fb-4533-bae3-7de6afd3b342: 2dc0bb35-227f-4d85-bf11-0ecbdca1b690 (awaiting ACK per RFC 3261)
+[2m2025-06-11T01:48:29.774543Z[0m [32m INFO[0m 📞 Call answered for session sess_839d0fc9-99fb-4533-bae3-7de6afd3b342 - keeping in Initiating state until media ready
+[2m2025-06-11T01:48:29.774552Z[0m [32m INFO[0m 🚫 RFC 3261: NOT creating media session yet - waiting for ACK
+Received command: CancelTimer100 for transaction Key(z9hG4bK-98924-1:INVITE:server)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-98924-1:INVITE:server)
+[2m2025-06-11T01:48:29.774572Z[0m [32m INFO[0m 📄 Stored remote SDP answer for session sess_839d0fc9-99fb-4533-bae3-7de6afd3b342
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-98924-1:INVITE:server). Final state: Terminated
+=== PARSING SIP MESSAGE ===
+Input length: 390 bytes
+Input as string: "ACK sip:testroom@127.0.0.1:5064 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-98924-1-ack\r\nFrom: Participant 1 <sip:participant1@127.0.0.1:5061>;tag=98924SIPpTag1\r\nTo: Conference Room <sip:testroom@127.0.0.1:5064>;tag=tag-2e20bd9059c64cde911594acaea676d6\r\nCall-ID: 1-98924@127.0.0.1\r\nCSeq: 1 ACK\r\nContact: <sip:participant1@127.0.0.1:5061>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [41, 43, 4b, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 72, 6f, 6f, 6d, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 34, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 39, 38, 39, 32, 34, 2d, 31, 2d, 61, 63, 6b, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 50, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 20, 31, 20, 3c, 73, 69, 70, 3a, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 39, 38, 39, 32, 34, 53, 49, 50, 70, 54, 61, 67, 31, 0d, 0a, 54, 6f, 3a, 20, 43, 6f, 6e, 66, 65, 72, 65, 6e, 63, 65, 20, 52, 6f, 6f, 6d, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 72, 6f, 6f, 6d, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 34, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 32, 65, 32, 30, 62, 64, 39, 30, 35, 39, 63, 36, 34, 63, 64, 65, 39, 31, 31, 35, 39, 34, 61, 63, 61, 65, 61, 36, 37, 36, 64, 36, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 39, 38, 39, 32, 34, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 41, 43, 4b, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 70, 61, 72, 74, 69, 63, 69, 70, 61, 6e, 74, 31, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 50, 101, 50, 48, 98, 100, 57, 48, 53, 57, 99, 54, 52, 99, 100, 101, 57, 49, 49, 53, 57, 52, 97, 99, 97, 101, 97, 54, 55, 54, 100, 54]
+Successfully parsed tag: tag-2e20bd9059c64cde911594acaea676d6
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([Object({"Tag": String("98924SIPpTag1")})]), "uri": Object({"raw_uri": Null, "host": Object({"Address": String("127.0.0.1")}), "scheme": String("Sip"), "user": String("participant1"), "headers": Object({}), "parameters": Array([]), "password": Null, "port": Number(5061.0)}), "display_name": String("Participant 1")})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("98924SIPpTag1")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("98924SIPpTag1")})
+Final value for path 'headers.From.params[0].Tag': String("98924SIPpTag1")
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([Object({"Tag": String("98924SIPpTag1")})]), "uri": Object({"user": String("participant1"), "headers": Object({}), "password": Null, "raw_uri": Null, "host": Object({"Address": String("127.0.0.1")}), "parameters": Array([]), "port": Number(5061.0), "scheme": String("Sip")}), "display_name": String("Participant 1")})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("98924SIPpTag1")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("98924SIPpTag1")})
+Final value for path 'headers.From.params[0].Tag': String("98924SIPpTag1")
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"password": Null, "headers": Object({}), "host": Object({"Address": String("127.0.0.1")}), "parameters": Array([]), "raw_uri": Null, "user": String("testroom"), "port": Number(5064.0), "scheme": String("Sip")}), "display_name": String("Conference Room"), "params": Array([])})
+Processing segment Index(0) at index 3, current value: Array([])
+Index 0 out of bounds for array of length 0
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("Conference Room"), "uri": Object({"scheme": String("Sip"), "user": String("testroom"), "port": Number(5064.0), "host": Object({"Address": String("127.0.0.1")}), "raw_uri": Null, "headers": Object({}), "parameters": Array([]), "password": Null}), "params": Array([Object({"Tag": String("tag-2e20bd9059c64cde911594acaea676d6")})])})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("tag-2e20bd9059c64cde911594acaea676d6")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("tag-2e20bd9059c64cde911594acaea676d6")})
+Final value for path 'headers.To.params[0].Tag': String("tag-2e20bd9059c64cde911594acaea676d6")
+[2m2025-06-11T01:48:29.778240Z[0m [32m INFO[0m ✅ RFC 3261: ACK received for transaction Key(z9hG4bK-98924-1:INVITE:server) in dialog 2dc0bb35-227f-4d85-bf11-0ecbdca1b690 - time to start media (UAS side)
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: AckReceived { dialog_id: DialogId(2dc0bb35-227f-4d85-bf11-0ecbdca1b690), transaction_id: z9hG4bK-98924-1:INVITE:server, negotiated_sdp: None }
+[2m2025-06-11T01:48:29.778288Z[0m [32m INFO[0m ✅ RFC 3261: ACK RECEIVED for session sess_839d0fc9-99fb-4533-bae3-7de6afd3b342 - creating media session (UAS side)
+[2m2025-06-11T01:48:29.778305Z[0m [32m INFO[0m 🚀 RFC 3261: Creating media session after ACK for sess_839d0fc9-99fb-4533-bae3-7de6afd3b342: rfc_compliant_media_creation_uas
+[2m2025-06-11T01:48:29.778320Z[0m [32m INFO[0m Starting media session for dialog: media-sess_839d0fc9-99fb-4533-bae3-7de6afd3b342
+[2m2025-06-11T01:48:30.781708Z[0m [32m INFO[0m Started UDP transport receiver tasks
+[2m2025-06-11T01:48:30.781902Z[0m [32m INFO[0m Started RTP session with SSRC=9c0e79aa
+[2m2025-06-11T01:48:30.782001Z[0m [32m INFO[0m ✅ Created media session with REAL RTP session: media-sess_839d0fc9-99fb-4533-bae3-7de6afd3b342 (port: 29191)
+[2m2025-06-11T01:48:30.782086Z[0m [32m INFO[0m ✅ Created media session: media-sess_839d0fc9-99fb-4533-bae3-7de6afd3b342 for SIP session: sess_839d0fc9-99fb-4533-bae3-7de6afd3b342 with real MediaSessionController + zero-copy enabled
+[2m2025-06-11T01:48:30.782133Z[0m [32m INFO[0m ✅ Successfully created RFC-compliant media session for sess_839d0fc9-99fb-4533-bae3-7de6afd3b342
+[2m2025-06-11T01:48:30.782273Z[0m [32m INFO[0m ✅ Updated media session for SIP session: sess_839d0fc9-99fb-4533-bae3-7de6afd3b342 with remote: 127.0.0.1:10697 and codecs: ["PCMU"]
+[2m2025-06-11T01:48:30.782325Z[0m [32m INFO[0m ✅ Applied stored remote SDP to new media session for sess_839d0fc9-99fb-4533-bae3-7de6afd3b342
+[2m2025-06-11T01:48:30.782381Z[0m [32m INFO[0m 🎉 Session sess_839d0fc9-99fb-4533-bae3-7de6afd3b342 transitioned to Active in registry - media ready and session fully established!
+[2m2025-06-11T01:48:31.028500Z[0m [32m INFO[0m 📡 Received SIGTERM signal
+[2m2025-06-11T01:48:31.028524Z[0m [32m INFO[0m 🛑 SIP Conference Server shutting down
+[2m2025-06-11T01:48:31.028533Z[0m [32m INFO[0m 📊 Final Conference Statistics (session-core Conference API):
+[2m2025-06-11T01:48:31.028538Z[0m [32m INFO[0m   ⏱️  Uptime: 7.69 seconds
+[2m2025-06-11T01:48:31.028545Z[0m [32m INFO[0m   🎪 Total conference participants: 2
+[2m2025-06-11T01:48:31.028549Z[0m [32m INFO[0m   ✅ Successful participants: 0
+[2m2025-06-11T01:48:31.028553Z[0m [32m INFO[0m   ❌ Failed participants: 0
+[2m2025-06-11T01:48:31.028557Z[0m [32m INFO[0m   🔄 Active participants: 2
+[2m2025-06-11T01:48:31.028561Z[0m [32m INFO[0m   🎵 Audio mixing enabled: true
+[2m2025-06-11T01:48:31.028572Z[0m [32m INFO[0m   📈 Success rate: 0.0%
+[2m2025-06-11T01:48:31.028577Z[0m [32m INFO[0m   🚀 Average participant rate: 0.26 participants/second
+[2m2025-06-11T01:48:31.028601Z[0m [32m INFO[0m 📊 Conference Statistics (session-core Conference API):
+[2m2025-06-11T01:48:31.028632Z[0m [32m INFO[0m   🎪 Conference to: 2 participants (0 active, mixing: true)
+[2m2025-06-11T01:48:31.028652Z[0m [32m INFO[0m     👤 sess_839d0fc9-99fb-4533-bae3-7de6afd3b342: 1s 🔇 (status: Joining)
+[2m2025-06-11T01:48:31.028658Z[0m [32m INFO[0m     👤 sess_2eaa86c4-9fbc-42df-b5e6-9f630937e8e9: 4s 🔇 (status: Joining)
+[2m2025-06-11T01:48:31.028665Z[0m [32m INFO[0m 🛑 SIP Conference Server shutdown complete

@@ -10,11 +10,12 @@ categories = ["network-programming", "multimedia"]
 
 [dependencies]
 # Core rvoip infrastructure (PROPER LAYER SEPARATION!)
+# session-core handles ALL lower-level integration
 rvoip-session-core = { path = "../session-core" }
-# Remove direct access to lower layers - session-core handles these
-# rvoip-media-core = { path = "../media-core" }
-# rvoip-rtp-core = { path = "../rtp-core" }
-# rvoip-sip-core = { path = "../sip-core" }
+
+# No direct access to lower layers - session-core handles ALL of these:
+# rvoip-transaction-core, rvoip-sip-core, rvoip-sip-transport, 
+# rvoip-media-core, rvoip-rtp-core, rvoip-dialog-core
 infra-common = { path = "../infra-common" }
 
 # Async runtime and utilities

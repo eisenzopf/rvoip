@@ -1,0 +1,82 @@
+# Session-Core SIPp Test Suite Execution Log
+# Started: Tue Jun 10 20:37:52 PDT 2025
+# Mode: conference
+# Session: 20250610_203752
+
+2025-06-10 20:37:52 INFO: 📁 Test session directory: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250610_203752
+2025-06-10 20:37:52 INFO: 📋 Test mode: conference
+2025-06-10 20:37:52 INFO: ⏰ Test session: 20250610_203752
+2025-06-10 20:37:52 INFO: 🔨 Building test applications...
+2025-06-10 20:37:52 SUCCESS: ✅ Built sip_test_server
+2025-06-10 20:37:52 INFO: 📝 sip_bridge_server not yet implemented (will use sip_test_server for bridge tests)
+2025-06-10 20:37:52 SUCCESS: ✅ Test environment ready
+2025-06-10 20:37:52 HEADER: Generating Audio Test Files
+2025-06-10 20:37:52 INFO: 🎵 Generating test audio files with different frequencies...
+2025-06-10 20:37:52 INFO: Using sox for audio generation
+2025-06-10 20:37:52 SUCCESS: ✅ Generated Client A audio (440Hz)
+2025-06-10 20:37:52 SUCCESS: ✅ Generated Client B audio (880Hz)
+2025-06-10 20:37:52 SUCCESS: ✅ Generated Client C audio (1320Hz)
+2025-06-10 20:37:52 INFO: 📁 Generated audio files:
+2025-06-10 20:37:52 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun 10 20:37 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_a_440hz.wav
+2025-06-10 20:37:52 INFO:   📄 -rw-r--r--@ 1 root  staff  240058 Jun 10 20:31 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_a_440hz_pcma.wav
+2025-06-10 20:37:52 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun 10 20:37 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_b_880hz.wav
+2025-06-10 20:37:52 INFO:   📄 -rw-r--r--@ 1 root  staff  240058 Jun 10 20:31 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_b_880hz_pcma.wav
+2025-06-10 20:37:52 INFO:   📄 -rw-r--r--@ 1 root  staff  480044 Jun 10 20:37 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_c_1320hz.wav
+2025-06-10 20:37:52 INFO:   📄 -rw-r--r--@ 1 root  staff  240058 Jun 10 20:31 /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/audio/generated/client_c_1320hz_pcma.wav
+2025-06-10 20:37:52 HEADER: Conference Tests (3+ Party)
+2025-06-10 20:37:52 INFO: 🎪 Testing multi-party conference functionality...
+2025-06-10 20:37:52 INFO: ⏱️ Duration: 10s
+2025-06-10 20:37:52 INFO: 🎯 Phase 3: Advanced Conference Testing Implementation
+2025-06-10 20:37:52 INFO: 📡 Starting packet capture for conference_tests...
+2025-06-10 20:37:52 SUCCESS: ✅ Packet capture started (PID: 57088)
+2025-06-10 20:37:52 INFO: 📄 Capture file: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/captures/conference_tests_20250610_203752.pcap
+2025-06-10 20:37:52 INFO: 📄 Capture log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250610_203752/conference_tests_capture.log
+2025-06-10 20:37:54 TEST_START: Conference Server Startup
+2025-06-10 20:37:54 INFO: 🎪 Starting conference server on port 5064...
+2025-06-10 20:37:55 TEST_RESULT: Conference Server Startup = PASS
+2025-06-10 20:37:55 SUCCESS: ✅ Conference server ready (PID: 57131)
+2025-06-10 20:37:55 TEST_START: 3-Party Conference Test
+2025-06-10 20:37:55 INFO: 🎪 Simulating 3 participants joining conference 'testroom'...
+2025-06-10 20:37:55 INFO: 🧪 Running SIPp test: conference_3party
+2025-06-10 20:37:55 INFO: 📄 Scenario: conference_3party
+2025-06-10 20:37:55 INFO: 🎯 Target: 127.0.0.1:5064
+2025-06-10 20:37:55 INFO: 📊 Rate: 1 calls/sec, Max: 3 calls
+2025-06-10 20:37:55 INFO: 🎵 Testing REAL session-core/media-core conference integration
+2025-06-10 20:37:55 INFO: 🎯 Conference participants will send RTP to conference server
+2025-06-10 20:37:55 INFO: 📡 Testing actual audio mixing and distribution via media-core
+2025-06-10 20:37:55 INFO: 🎵 Using RTP streaming to SEND audio files TO conference server
+2025-06-10 20:37:55 INFO: 📡 RTP streaming mode (not echo) - sending packets to conference server
+2025-06-10 20:37:55 INFO: 📡 Starting packet capture on RTP ports to verify media flow...
+2025-06-10 20:37:56 INFO: 📡 RTP media port range: 6371-6471
+2025-06-10 20:37:56 INFO: 🎪 Testing conference server's real media handling with RTP echo
+2025-06-10 20:37:56 INFO: 🎵 SIPp will echo any RTP packets received from conference server
+2025-06-10 20:37:56 INFO: 📊 RTP packet capture: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250610_203752/conference_3party_rtp_capture.pcap (PID: 57200)
+2025-06-10 20:38:10 INFO: 🛑 Stopping packet capture (PID: 57200)...
+2025-06-10 20:38:11 INFO: 📊 Packet Analysis Results:
+2025-06-10 20:38:11 INFO:   📦 Total UDP packets captured: 3
+2025-06-10 20:38:11 INFO:   🎵 Total RTP packets captured: 0
+2025-06-10 20:38:11 WARNING: ⚠️ No RTP packets detected (only SIP signaling working)
+2025-06-10 20:38:11 SUCCESS: ✅ SIPp test completed successfully
+2025-06-10 20:38:11 INFO: 📄 SIPp log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/logs/test_session_20250610_203752/conference_3party_sipp.log
+2025-06-10 20:38:11 INFO: 📊 SIPp stats: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/reports/conference_3party_20250610_203752.csv
+2025-06-10 20:38:11 TEST_RESULT: 3-Party Conference Test = PASS
+2025-06-10 20:38:11 SUCCESS: ✅ 3-party conference test completed successfully
+2025-06-10 20:38:11 INFO: ⚠️ Skipping capacity test (known issue with ACK handling in multi-round tests)
+2025-06-10 20:38:11 INFO: 🛑 Stopping conference server (PID: 57131)...
+2025-06-10 20:38:11 SUCCESS: ✅ conference server stopped
+2025-06-10 20:38:11 INFO: 📊 Conference Tests: 2/2 passed
+2025-06-10 20:38:11 SUCCESS: 🎉 All conference tests passed!
+2025-06-10 20:38:11 HEADER: Analyzing Test Results
+2025-06-10 20:38:11 INFO: 📊 Analyzing logs, packet captures, and statistics...
+2025-06-10 20:38:11 INFO: 📄 Log files analyzed:        5
+2025-06-10 20:38:11 INFO: 📡 Packet captures analyzed:        1
+2025-06-10 20:38:11 INFO: 🔍 Running packet analysis with tshark...
+2025-06-10 20:38:11 INFO:   📄 Analyzing conference_tests_20250610_203752.pcap...
+2025-06-10 20:38:12 INFO:   ✅ Analysis saved: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/reports/conference_tests_20250610_203752_analysis.txt
+2025-06-10 20:38:12 SUCCESS: ✅ Result analysis completed
+2025-06-10 20:38:12 HEADER: Generating Final Report
+2025-06-10 20:38:12 INFO: 📄 Generating comprehensive HTML report...
+2025-06-10 20:38:12 SUCCESS: ✅ Report generated: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/reports/test_summary_20250610_203752.html
+2025-06-10 20:38:12 INFO: 🌐 Open report: open /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/sipp_tests/reports/test_summary_20250610_203752.html
+2025-06-10 20:38:12 INFO: 🧹 Cleaning up active processes...
+2025-06-10 20:38:12 SUCCESS: ✅ Process cleanup completed

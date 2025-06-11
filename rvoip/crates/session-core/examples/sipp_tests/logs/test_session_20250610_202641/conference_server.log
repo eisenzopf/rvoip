@@ -1,0 +1,51 @@
+[2m2025-06-11T03:26:44.428135Z[0m [32m INFO[0m 🎪 Starting SIP Conference Server with session-core Conference Module
+[2m2025-06-11T03:26:44.428220Z[0m [32m INFO[0m 📡 Listening on port: 5064
+[2m2025-06-11T03:26:44.428234Z[0m [32m INFO[0m 👥 Max participants per conference: 5
+[2m2025-06-11T03:26:44.428243Z[0m [32m INFO[0m 🎵 Audio mixing enabled: true
+[2m2025-06-11T03:26:44.428252Z[0m [32m INFO[0m 📡 RTP port base: 10000
+[2m2025-06-11T03:26:44.428259Z[0m [32m INFO[0m ⏰ No conference timeout (manual control)
+[2m2025-06-11T03:26:44.428268Z[0m [32m INFO[0m 🎪 Starting SIP Conference Server with session-core Conference Module
+[2m2025-06-11T03:26:44.428276Z[0m [32m INFO[0m 📡 Port: 5064, Max participants: 5, Audio mixing: true
+[2m2025-06-11T03:26:44.428286Z[0m [32m INFO[0m 🎪 Creating SIP Conference Handler with session-core Conference API (audio mixing: true)
+[2m2025-06-11T03:26:44.428349Z[0m [32m INFO[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-06-11T03:26:44.428442Z[0m [32m INFO[0m SIP UDP transport bound to 127.0.0.1:5064
+[2m2025-06-11T03:26:44.428528Z[0m [32m INFO[0m Added UDP transport bound to 127.0.0.1:5064
+[2m2025-06-11T03:26:44.428583Z[0m [32m INFO[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-06-11T03:26:44.428596Z[0m [32m INFO[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 127.0.0.1:5064
+[2m2025-06-11T03:26:44.428606Z[0m [32m INFO[0m Creating new DialogManager with global transaction events and local address 127.0.0.1:5064
+[2m2025-06-11T03:26:44.428665Z[0m [32m INFO[0m 🔄 Starting global transaction event processor for dialog-core
+🔗 SETUP: Initializing dialog coordination via DialogCoordinator
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+🎬 SPAWN: Starting dialog coordination event loop
+🎬 SPAWN: Starting session coordination event loop
+🌉 BRIDGE: Setting up session event bridge with media auto-creation and SDP handling
+📡 EVENT LOOP: Session coordination event loop started
+[2m2025-06-11T03:26:44.428835Z[0m [32m INFO[0m SessionManager initialized on port 5064
+[2m2025-06-11T03:26:44.428867Z[0m [32m INFO[0m 🔄 Running indefinitely (script-controlled)
+[2m2025-06-11T03:26:44.428880Z[0m [32m INFO[0m 🎪 Starting SIP Conference Server session manager...
+[2m2025-06-11T03:26:44.428888Z[0m [32m INFO[0m Starting UnifiedDialogApi
+[2m2025-06-11T03:26:44.428896Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-11T03:26:44.428903Z[0m [32m INFO[0m DialogManager starting
+[2m2025-06-11T03:26:44.428910Z[0m [32m INFO[0m DialogManager started successfully
+[2m2025-06-11T03:26:44.428921Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:conference@127.0.0.1:5064"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-11T03:26:44.428929Z[0m [32m INFO[0m UnifiedDialogManager started successfully
+[2m2025-06-11T03:26:44.429025Z[0m [32m INFO[0m Session event processor started
+[2m2025-06-11T03:26:44.429043Z[0m [32m INFO[0m Cleanup manager started
+[2m2025-06-11T03:26:44.429051Z[0m [32m INFO[0m SessionManager started
+[2m2025-06-11T03:26:44.429058Z[0m [32m INFO[0m ✅ SIP Conference Server ready and listening on port 5064
+[2m2025-06-11T03:26:44.429064Z[0m [32m INFO[0m 👥 Max participants per conference: 5
+[2m2025-06-11T03:26:44.429070Z[0m [32m INFO[0m 🎵 Audio mixing enabled: true
+[2m2025-06-11T03:26:44.429076Z[0m [32m INFO[0m 🎯 Ready to handle multi-party conference calls with session-core Conference API
+[2m2025-06-11T03:26:44.429083Z[0m [32m INFO[0m 📡 Real SIP conference server now active - SIPp can connect!
+[2m2025-06-11T03:26:47.824779Z[0m [32m INFO[0m 📡 Received SIGTERM signal
+[2m2025-06-11T03:26:47.824807Z[0m [32m INFO[0m 🛑 SIP Conference Server shutting down
+[2m2025-06-11T03:26:47.824818Z[0m [32m INFO[0m 📊 Final Conference Statistics (session-core Conference API):
+[2m2025-06-11T03:26:47.824833Z[0m [32m INFO[0m   ⏱️  Uptime: 3.40 seconds
+[2m2025-06-11T03:26:47.824840Z[0m [32m INFO[0m   🎪 Total conference participants: 0
+[2m2025-06-11T03:26:47.824844Z[0m [32m INFO[0m   ✅ Successful participants: 0
+[2m2025-06-11T03:26:47.824849Z[0m [32m INFO[0m   ❌ Failed participants: 0
+[2m2025-06-11T03:26:47.824853Z[0m [32m INFO[0m   🔄 Active participants: 0
+[2m2025-06-11T03:26:47.824856Z[0m [32m INFO[0m   🎵 Audio mixing enabled: true
+[2m2025-06-11T03:26:47.824860Z[0m [32m INFO[0m   📈 Success rate: 0.0%
+[2m2025-06-11T03:26:47.824888Z[0m [32m INFO[0m 🛑 SIP Conference Server shutdown complete

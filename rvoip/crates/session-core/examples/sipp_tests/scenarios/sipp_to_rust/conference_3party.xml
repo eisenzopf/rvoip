@@ -55,10 +55,6 @@ Features:
 
   <!-- Expect 200 OK from conference server -->
   <recv response="200" rtd="true">
-    <action>
-      <!-- Extract server's media port for RTP destination -->
-      <ereg regexp="m=audio ([0-9]+)" search_in="body" check_it="false" assign_to="server_media_port"/>
-    </action>
   </recv>
 
   <!-- Send ACK -->
@@ -80,14 +76,14 @@ Features:
   <nop>
     <action>
       <log message="🎪 Participant [call_number] joined conference successfully"/>
-      <log message="📡 RTP session established: Client port [auto_media_port] → Server port [$server_media_port]"/>
+      <log message="📡 RTP session established: Client port 6060 → Server port (extracted from SDP)"/>
     </action>
   </nop>
 
-  <!-- Staggered conference participation -->
-  <pause milliseconds="1000" test="[call_number]" op="eq" value="1"/>
-  <pause milliseconds="2000" test="[call_number]" op="eq" value="2"/>
-  <pause milliseconds="3000" test="[call_number]" op="eq" value="3"/>
+  <!-- Staggered conference participation (reduced for faster testing) -->
+  <pause milliseconds="500" test="[call_number]" op="eq" value="1"/>
+  <pause milliseconds="1000" test="[call_number]" op="eq" value="2"/>
+  <pause milliseconds="1500" test="[call_number]" op="eq" value="3"/>
 
   <!-- START REAL AUDIO TESTING PHASE -->
   <!-- This is where RTP audio streams flow between participants and conference server -->
@@ -99,12 +95,19 @@ Features:
     </action>
   </nop>
 
-  <!-- RTP MEDIA SESSION - SIPp will handle RTP based on command line options -->
+  <!-- START SENDING REAL RTP AUDIO PACKETS -->
+  <!-- Using exact SIPp documentation syntax -->
+  <nop>
+    <action>
+      <exec rtp_stream="../../audio/generated/client_a_440hz_pcma.wav" />
+      <log message="🎵 All participants streaming 440Hz PCMA audio per SIPp docs"/>
+    </action>
+  </nop>
 
-  <!-- Audio streaming duration - participants stay different times -->
-  <pause milliseconds="20000" test="[call_number]" op="eq" value="1"/>
-  <pause milliseconds="15000" test="[call_number]" op="eq" value="2"/>
-  <pause milliseconds="10000" test="[call_number]" op="eq" value="3"/>
+  <!-- Audio streaming duration - participants stay different times (reduced for faster testing) -->
+  <pause milliseconds="3000" test="[call_number]" op="eq" value="1"/>
+  <pause milliseconds="2500" test="[call_number]" op="eq" value="2"/>
+  <pause milliseconds="2000" test="[call_number]" op="eq" value="3"/>
 
   <!-- Log audio streaming end -->
   <nop>

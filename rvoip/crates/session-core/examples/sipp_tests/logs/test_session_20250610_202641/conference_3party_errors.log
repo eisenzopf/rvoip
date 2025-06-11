@@ -1,0 +1,3 @@
+The following events occurred:
+2025-06-10	20:26:46.565598	1749612406.565598: SIPp now prefers looking for pcap/rtpstream files next to the scenario. pcap/g711a.pcap couldn't be found next to the scenario, falling back to using the current working directory
+2025-06-10	20:26:46.565761	1749612406.565761: Can't open PCAP file 'pcap/g711a.pcap': pcap/g711a.pcap: No such file or directory

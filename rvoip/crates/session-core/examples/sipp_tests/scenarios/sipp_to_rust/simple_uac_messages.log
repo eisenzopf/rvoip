@@ -1,0 +1,98 @@
+----------------------------------------------- 2025-06-10 21:05:01.506324
+UDP message sent (491 bytes):
+
+INVITE sip:service@127.0.0.1:5080 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-71681-1-0
+From: <sip:caller@127.0.0.1>;tag=71681SIPpTag001
+To: <sip:service@127.0.0.1:5080>
+Call-ID: 1-71681@127.0.0.1
+CSeq: 1 INVITE
+Contact: <sip:caller@127.0.0.1:5060>
+Max-Forwards: 70
+Subject: Test Call
+Content-Type: application/sdp
+Content-Length:   130
+
+v=0
+o=- 3442013121 3442013121 IN IP4 127.0.0.1
+s=SIPp
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6000 RTP/AVP 8
+a=rtpmap:8 PCMA/8000
+
+----------------------------------------------- 2025-06-10 21:05:01.506629
+UDP message received [293] bytes :
+
+SIP/2.0 180 Ringing
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-71681-1-0
+From: <sip:caller@127.0.0.1>;tag=71681SIPpTag001
+To: <sip:service@127.0.0.1:5080>;tag=71662SIPpTag011
+Call-ID: 1-71681@127.0.0.1
+CSeq: 1 INVITE
+Contact: <sip:127.0.0.1:5080;transport=UDP>
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-10 21:05:01.506676
+UDP message received [453] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-71681-1-0
+From: <sip:caller@127.0.0.1>;tag=71681SIPpTag001
+To: <sip:service@127.0.0.1:5080>;tag=71662SIPpTag011
+Call-ID: 1-71681@127.0.0.1
+CSeq: 1 INVITE
+Contact: <sip:127.0.0.1:5080;transport=UDP>
+Content-Type: application/sdp
+Content-Length:   130
+
+v=0
+o=- 3442013122 3442013122 IN IP4 127.0.0.1
+s=SIPp
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6000 RTP/AVP 8
+a=rtpmap:8 PCMA/8000
+
+----------------------------------------------- 2025-06-10 21:05:01.506723
+UDP message sent (320 bytes):
+
+ACK sip:service@127.0.0.1:5080 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-71681-1-4
+From: <sip:caller@127.0.0.1>;tag=71681SIPpTag001
+To: <sip:service@127.0.0.1:5080>;tag=71662SIPpTag011
+Call-ID: 1-71681@127.0.0.1
+CSeq: 1 ACK
+Contact: <sip:caller@127.0.0.1:5060>
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-10 21:05:06.509284
+UDP message sent (320 bytes):
+
+BYE sip:service@127.0.0.1:5080 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-71681-1-7
+From: <sip:caller@127.0.0.1>;tag=71681SIPpTag001
+To: <sip:service@127.0.0.1:5080>;tag=71662SIPpTag011
+Call-ID: 1-71681@127.0.0.1
+CSeq: 2 BYE
+Contact: <sip:caller@127.0.0.1:5060>
+Max-Forwards: 70
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-10 21:05:06.509470
+UDP message received [285] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-71681-1-7
+From: <sip:caller@127.0.0.1>;tag=71681SIPpTag001
+To: <sip:service@127.0.0.1:5080>;tag=71662SIPpTag011
+Call-ID: 1-71681@127.0.0.1
+CSeq: 2 BYE
+Contact: <sip:127.0.0.1:5080;transport=UDP>
+Content-Length: 0
+
+
