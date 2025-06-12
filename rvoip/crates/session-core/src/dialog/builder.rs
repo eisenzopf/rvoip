@@ -68,9 +68,8 @@ impl DialogBuilder {
         // Get the session configuration details
         let session_config = &self.config_converter;
         
-        // Extract bind address and port
-        let bind_addr = format!("{}:{}", 
-            session_config.session_config().sip_bind_address,
+        // Use 0.0.0.0 as default bind address
+        let bind_addr = format!("0.0.0.0:{}", 
             session_config.session_config().sip_port
         );
         
@@ -79,13 +78,11 @@ impl DialogBuilder {
                 message: format!("Invalid bind address: {}", e),
             })?;
         
-        // Determine From URI
+        // Determine From URI - use local_address from config or custom from_uri
         let from_uri = if let Some(ref uri) = self.from_uri {
             uri.clone()
-        } else if let Some(ref uri) = session_config.session_config().from_uri {
-            uri.clone()
         } else {
-            format!("sip:user@{}", session_config.session_config().sip_bind_address)
+            session_config.session_config().local_address.clone()
         };
         
         // Create dialog configuration using hybrid mode to support both incoming and outgoing calls
@@ -132,9 +129,8 @@ impl DialogBuilder {
         // Validate configuration compatibility
         self.config_converter.validate_compatibility()?;
         
-        // Extract bind address and port
-        let bind_addr = format!("{}:{}", 
-            self.config_converter.session_config().sip_bind_address,
+        // Use 0.0.0.0 as default bind address
+        let bind_addr = format!("0.0.0.0:{}", 
             self.config_converter.session_config().sip_port
         );
         
@@ -164,10 +160,8 @@ impl DialogBuilder {
         // Determine From URI
         let from_uri = if let Some(ref uri) = self.from_uri {
             uri.clone()
-        } else if let Some(ref uri) = self.config_converter.session_config().from_uri {
-            uri.clone()
         } else {
-            format!("sip:user@{}", self.config_converter.session_config().sip_bind_address)
+            self.config_converter.session_config().local_address.clone()
         };
         
         // Parse a local address for client mode (can use any available port)

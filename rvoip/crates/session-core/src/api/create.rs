@@ -1,56 +1,31 @@
-//! Session Creation Functions
+//! Session Creation API
 //!
-//! Simple functions for creating outgoing calls and handling incoming calls.
+//! High-level API for creating new sessions.
 
 use std::sync::Arc;
-use crate::api::types::{CallSession, SessionId, IncomingCall, CallState};
-use crate::manager::SessionManager;
-use crate::Result;
+use crate::api::types::{CallSession, SessionId, CallState, IncomingCall, CallDecision};
+use crate::coordinator::SessionCoordinator;
+use crate::errors::{Result, SessionError};
 
-/// Make an outgoing call to the specified destination
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `from` - The caller URI (e.g., "sip:alice@example.com")
-/// * `to` - The destination URI (e.g., "sip:bob@example.com")
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// use rvoip_session_core::Result;
-/// 
-/// # async fn example() -> Result<()> {
-/// let session_mgr = SessionManagerBuilder::new().build().await?;
-/// let call = make_call_with_manager(
-///     &session_mgr,
-///     "sip:alice@192.168.1.100", 
-///     "sip:bob@192.168.1.200"
-/// ).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn make_call_with_manager(
-    session_manager: &Arc<SessionManager>,
-    from: &str,
+/// Create an outgoing call
+pub async fn create_call(
+    manager: &Arc<SessionCoordinator>,
     to: &str,
+    from: Option<&str>,
 ) -> Result<CallSession> {
-    session_manager.create_outgoing_call(from, to, None).await
+    let from_uri = from.unwrap_or("sip:user@localhost");
+    manager.create_outgoing_call(from_uri, to, None).await
 }
 
-/// Make an outgoing call with custom SDP
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `from` - The caller URI
-/// * `to` - The destination URI
-/// * `sdp` - Custom SDP offer
-pub async fn make_call_with_sdp(
-    session_manager: &Arc<SessionManager>,
-    from: &str,
+/// Create an outgoing call with custom SDP
+pub async fn create_call_with_sdp(
+    manager: &Arc<SessionCoordinator>,
     to: &str,
-    sdp: &str,
+    from: Option<&str>,
+    sdp: String,
 ) -> Result<CallSession> {
-    session_manager.create_outgoing_call(from, to, Some(sdp.to_string())).await
+    let from_uri = from.unwrap_or("sip:user@localhost");
+    manager.create_outgoing_call(from_uri, to, Some(sdp)).await
 }
 
 /// Generate an SDP offer for making calls
@@ -72,7 +47,7 @@ pub async fn make_call_with_sdp(
 /// # async fn example() -> rvoip_session_core::Result<()> {
 /// let sdp_offer = generate_sdp_offer("127.0.0.1", 10000)?;
 /// let session_mgr = SessionManagerBuilder::new().build().await?;
-/// let call = make_call_with_sdp(&session_mgr, "sip:alice@example.com", "sip:bob@example.com", &sdp_offer).await?;
+/// let call = create_call_with_sdp(&session_mgr, "sip:bob@example.com", None, sdp_offer).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -80,7 +55,7 @@ pub fn generate_sdp_offer(local_ip: &str, local_port: u16) -> Result<String> {
     use crate::media::config::MediaConfigConverter;
     let converter = MediaConfigConverter::new();
     converter.generate_sdp_offer(local_ip, local_port)
-        .map_err(|e| crate::SessionError::MediaError(e.to_string()))
+        .map_err(|e| SessionError::MediaError(e.to_string()))
 }
 
 /// Generate an SDP answer in response to an offer
@@ -116,7 +91,7 @@ pub fn generate_sdp_answer(offer_sdp: &str, local_ip: &str, local_port: u16) -> 
     use crate::media::config::MediaConfigConverter;
     let converter = MediaConfigConverter::new();
     converter.generate_sdp_answer(offer_sdp, local_ip, local_port)
-        .map_err(|e| crate::SessionError::MediaError(e.to_string()))
+        .map_err(|e| SessionError::MediaError(e.to_string()))
 }
 
 /// Parse an SDP answer to extract negotiated media parameters
@@ -145,58 +120,7 @@ pub fn parse_sdp_answer(answer_sdp: &str) -> Result<crate::media::config::Negoti
     use crate::media::config::MediaConfigConverter;
     let converter = MediaConfigConverter::new();
     converter.parse_sdp_answer(answer_sdp)
-        .map_err(|e| crate::SessionError::MediaError(e.to_string()))
-}
-
-/// Accept an incoming call
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session_id` - The ID of the incoming call session
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// 
-/// #[derive(Debug)]
-/// struct MyHandler;
-/// 
-/// #[async_trait::async_trait]
-/// impl CallHandler for MyHandler {
-///     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-///         CallDecision::Accept(None)
-///     }
-///     
-///     async fn on_call_ended(&self, _call: CallSession, _reason: &str) {}
-/// }
-/// ```
-pub async fn accept_call(session_manager: &Arc<SessionManager>, session_id: &SessionId) -> Result<CallSession> {
-    session_manager.accept_incoming_call(session_id).await
-}
-
-/// Reject an incoming call with a specific reason
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session_id` - The ID of the incoming call session
-/// * `reason` - The reason for rejecting the call
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// use std::sync::Arc;
-/// use rvoip_session_core::{SessionManager, Result};
-/// 
-/// # async fn example(session_manager: &Arc<SessionManager>, call: IncomingCall) -> Result<()> {
-/// reject_call(session_manager, &call.id, "Busy").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn reject_call(session_manager: &Arc<SessionManager>, session_id: &SessionId, reason: &str) -> Result<()> {
-    // Terminate the session to reject the call
-    session_manager.terminate_session(session_id).await?;
-    tracing::info!("Rejected call {} with reason: {}", session_id, reason);
-    Ok(())
+        .map_err(|e| SessionError::MediaError(e.to_string()))
 }
 
 /// Create an incoming call object from SIP INVITE request
@@ -221,7 +145,7 @@ pub fn create_incoming_call(
 /// Helper function to create a CallSession from an accepted IncomingCall
 pub fn create_call_session(
     incoming: &IncomingCall,
-    _manager: Arc<SessionManager>,
+    _manager: Arc<SessionCoordinator>,
 ) -> CallSession {
     CallSession {
         id: incoming.id.clone(),
@@ -233,16 +157,16 @@ pub fn create_call_session(
 }
 
 /// Get statistics about active sessions
-pub async fn get_session_stats(session_manager: &Arc<SessionManager>) -> Result<crate::api::types::SessionStats> {
+pub async fn get_session_stats(session_manager: &Arc<SessionCoordinator>) -> Result<crate::api::types::SessionStats> {
     session_manager.get_stats().await
 }
 
 /// List all active sessions
-pub async fn list_active_sessions(session_manager: &Arc<SessionManager>) -> Result<Vec<SessionId>> {
+pub async fn list_active_sessions(session_manager: &Arc<SessionCoordinator>) -> Result<Vec<SessionId>> {
     session_manager.list_active_sessions().await
 }
 
 /// Find a session by ID
-pub async fn find_session(session_manager: &Arc<SessionManager>, session_id: &SessionId) -> Result<Option<CallSession>> {
+pub async fn find_session(session_manager: &Arc<SessionCoordinator>, session_id: &SessionId) -> Result<Option<CallSession>> {
     session_manager.find_session(session_id).await
 } 

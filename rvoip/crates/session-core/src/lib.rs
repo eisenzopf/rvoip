@@ -12,6 +12,7 @@ pub mod manager;       // SIMPLIFIED - orchestration only
 pub mod coordination;
 pub mod bridge;
 pub mod conference;    // NEW - Conference functionality
+pub mod coordinator;
 
 // Core error types
 mod errors;
@@ -42,4 +43,26 @@ mod tests {
         // Basic smoke test to ensure the library structure compiles
         assert!(true);
     }
+}
+
+// Feature flags
+#[cfg(feature = "testing")]
+pub mod testing {
+    //! Testing utilities and mocks
+    pub use crate::manager::testing::*;
+}
+
+// Version information
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Initialize the session core library
+/// 
+/// This should be called once at application startup to initialize
+/// any global state or resources.
+pub fn init() {
+    // Initialize logging if not already done
+    let _ = tracing_subscriber::fmt::try_init();
+    
+    // Any other global initialization
+    tracing::info!("RVoIP Session Core v{} initialized", VERSION);
 } 

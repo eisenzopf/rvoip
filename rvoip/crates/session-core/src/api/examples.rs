@@ -1,368 +1,317 @@
-//! Example Code for Common Use Cases
+//! API Usage Examples
 //!
-//! This module contains complete examples showing how to use the session-core API
-//! for different types of applications.
+//! This module provides practical examples of using the session-core API.
 
-#![allow(unused_imports)]
-#![allow(dead_code)]
-
-use std::sync::Arc;
-use tokio::sync::mpsc;
 use crate::api::*;
-use crate::manager::SessionManager;
+use crate::api::handlers::CallHandler;
+use crate::api::types::{IncomingCall, CallSession, SessionId, CallDecision};
+use crate::api::control::SessionControl;
+use std::sync::Arc;
 
-/// Example: Simple SIP Server that auto-answers all calls
+/// Example: Basic outgoing call
 /// 
-/// This shows the minimal code needed to create a SIP server that accepts
-/// all incoming calls.
-pub mod simple_sip_server {
-    use super::*;
-
-    pub async fn run() -> crate::errors::Result<()> {
-        // Create a session manager with auto-answer handler
-        let session_mgr = SessionManagerBuilder::new()
-            .with_sip_port(5060)
-            .with_handler(Arc::new(AutoAnswerHandler))
-            .build()
-            .await?;
-        
-        // Start the server
-        session_mgr.start().await?;
-        println!("SIP server running on port 5060");
-        
-        // Wait for shutdown signal
-        tokio::signal::ctrl_c().await?;
-        println!("Server shutting down...");
-        
-        Ok(())
-    }
-}
-
-/// Example: WebSocket API Bridge
-/// 
-/// This shows how to create a WebSocket API that bridges to SIP sessions,
-/// allowing web applications to make and receive calls.
-pub mod websocket_bridge {
-    use super::*;
-    use serde_json::json;
-
-    // Mock WebSocket types - replace with your WebSocket library
-    pub struct WebSocket;
-    pub struct WebSocketMessage { pub command: String, pub from: String, pub to: String, pub call_id: String }
+/// Shows how to make a simple outgoing call and handle the result.
+#[allow(dead_code)]
+pub async fn example_basic_call() -> Result<()> {
+    // Create session manager
+    let session_mgr = SessionManagerBuilder::new()
+        .with_sip_port(5060)
+        .with_local_address("sip:alice@example.com")
+        .build()
+        .await?;
     
-    impl WebSocket {
-        pub async fn recv(&mut self) -> Option<WebSocketMessage> { None }
-        pub async fn send(&mut self, _value: serde_json::Value) -> crate::errors::Result<()> { Ok(()) }
-    }
-
-    pub async fn handle_websocket(mut ws: WebSocket, session_mgr: Arc<SessionManager>) -> crate::errors::Result<()> {
-        while let Some(msg) = ws.recv().await {
-            match msg.command.as_str() {
-                "make_call" => {
-                    let call = make_call_with_manager(&session_mgr, &msg.from, &msg.to).await?;
-                    ws.send(json!({ 
-                        "type": "call_created",
-                        "call_id": call.id().as_str() 
-                    })).await?;
-                }
-                "hangup" => {
-                    if let Some(call) = find_session(&session_mgr, &SessionId(msg.call_id)).await? {
-                        terminate_call(&session_mgr, &call).await?;
-                        ws.send(json!({ 
-                            "type": "call_ended",
-                            "call_id": call.id().as_str() 
-                        })).await?;
-                    }
-                }
-                "hold" => {
-                    if let Some(call) = find_session(&session_mgr, &SessionId(msg.call_id)).await? {
-                        hold_call(&session_mgr, &call).await?;
-                        ws.send(json!({ 
-                            "type": "call_held",
-                            "call_id": call.id().as_str() 
-                        })).await?;
-                    }
-                }
-                "resume" => {
-                    if let Some(call) = find_session(&session_mgr, &SessionId(msg.call_id)).await? {
-                        resume_call(&session_mgr, &call).await?;
-                        ws.send(json!({ 
-                            "type": "call_resumed",
-                            "call_id": call.id().as_str() 
-                        })).await?;
-                    }
-                }
-                _ => {
-                    ws.send(json!({ 
-                        "type": "error",
-                        "message": "Unknown command" 
-                    })).await?;
-                }
-            }
-        }
-        Ok(())
-    }
+    // Make a call
+    let call = session_mgr.create_outgoing_call(
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+        None
+    ).await?;
+    
+    println!("Call initiated: {}", call.id);
+    
+    // Wait for some time...
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    
+    // End the call
+    session_mgr.terminate_session(&call.id).await?;
+    
+    Ok(())
 }
 
-/// Example: P2P Client
+/// Example: Call with custom handler
 /// 
-/// This shows how to create a peer-to-peer SIP client that can make direct
-/// calls without requiring a server.
-pub mod p2p_client {
-    use super::*;
-
-    pub async fn run() -> crate::errors::Result<()> {
-        // Create session manager in P2P mode
-        let session_mgr = SessionManagerBuilder::new()
-            .p2p_mode()
-            .build()
-            .await?;
-        
-        // Make a direct call
-        let call = make_call_with_manager(
-            &session_mgr,
-            "sip:alice@192.168.1.100",
-            "sip:bob@192.168.1.200"
-        ).await?;
-        
-        println!("Call initiated: {}", call.id());
-        
-        // Wait for the call to be answered
-        call.wait_for_answer().await?;
-        println!("Call connected!");
-        
-        // Keep the call active for 30 seconds
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-        
-        // Terminate the call
-        call.terminate().await?;
-        println!("Call ended");
-        
-        Ok(())
-    }
-}
-
-/// Example: Call Center Queue
-/// 
-/// This shows how to implement a call center with queuing, where incoming
-/// calls are queued when all agents are busy.
-pub mod call_center {
-    use super::*;
-
+/// Shows how to implement a custom call handler for incoming calls.
+#[allow(dead_code)]
+pub async fn example_with_handler() -> Result<()> {
     #[derive(Debug)]
-    pub struct CallCenterHandler {
-        queue: Arc<QueueHandler>,
-        agents_available: Arc<tokio::sync::Mutex<bool>>,
-    }
-
-    impl CallCenterHandler {
-        pub fn new(max_queue_size: usize) -> Self {
-            Self {
-                queue: Arc::new(QueueHandler::new(max_queue_size)),
-                agents_available: Arc::new(tokio::sync::Mutex::new(true)),
-            }
-        }
-
-        pub async fn process_queue(&self) -> crate::errors::Result<()> {
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            self.queue.set_notify_channel(tx);
-
-            while let Some(call) = rx.recv().await {
-                // Wait for an agent to become available
-                let mut available = self.agents_available.lock().await;
-                if *available {
-                    *available = false;
-                    drop(available);
-
-                    println!("Connecting call {} to agent", call.id);
-                    
-                    // Accept the call
-                    let session = call.accept().await?;
-                    
-                    // Simulate call handling
-                    tokio::spawn({
-                        let agents = Arc::clone(&self.agents_available);
-                        async move {
-                            // Simulate call duration
-                            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                            
-                            // Agent becomes available again
-                            *agents.lock().await = true;
-                            
-                            // End the call
-                            let _ = session.terminate().await;
-                        }
-                    });
-                }
-            }
-            Ok(())
-        }
-    }
-
+    struct MyHandler;
+    
     #[async_trait::async_trait]
-    impl CallHandler for CallCenterHandler {
+    impl CallHandler for MyHandler {
         async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-            let available = *self.agents_available.lock().await;
+            println!("Incoming call from: {}", call.from);
             
-            if available {
-                // Agent is available, accept immediately
-                CallDecision::Accept(None)
-            } else {
-                // No agent available, add to queue
-                if self.queue.queue_size() < 10 {
-                    self.queue.enqueue(call).await;
-                    CallDecision::Defer
-                } else {
-                    CallDecision::Reject("Queue full".to_string())
-                }
-            }
-        }
-
-        async fn on_call_ended(&self, call: CallSession, reason: &str) {
-            println!("Call center call {} ended: {}", call.id(), reason);
-        }
-    }
-
-    pub async fn run() -> crate::errors::Result<()> {
-        let handler = Arc::new(CallCenterHandler::new(10));
-        
-        let session_mgr = SessionManagerBuilder::new()
-            .with_sip_port(5060)
-            .with_handler(handler.clone())
-            .build()
-            .await?;
-
-        // Start processing the queue
-        let queue_processor = tokio::spawn({
-            let handler = Arc::clone(&handler);
-            async move {
-                handler.process_queue().await
-            }
-        });
-
-        // Start the session manager
-        session_mgr.start().await?;
-        println!("Call center running on port 5060");
-
-        // Wait for shutdown
-        tokio::signal::ctrl_c().await?;
-        
-        // Cleanup
-        queue_processor.abort();
-        
-        Ok(())
-    }
-}
-
-/// Example: SIP Gateway
-/// 
-/// This shows how to create a SIP gateway that routes calls between
-/// different SIP networks or protocols.
-pub mod sip_gateway {
-    use super::*;
-
-    #[derive(Debug)]
-    pub struct GatewayHandler {
-        routing: Arc<RoutingHandler>,
-    }
-
-    impl GatewayHandler {
-        pub fn new() -> Self {
-            let mut routing = RoutingHandler::new();
-            
-            // Add routing rules
-            routing.add_route("1", "sip:gateway1.example.com"); // Route 1xxx to gateway1
-            routing.add_route("2", "sip:gateway2.example.com"); // Route 2xxx to gateway2
-            routing.set_default_action(CallDecision::Reject("No route".to_string()));
-            
-            Self {
-                routing: Arc::new(routing),
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl CallHandler for GatewayHandler {
-        async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-            self.routing.on_incoming_call(call).await
-        }
-
-        async fn on_call_ended(&self, call: CallSession, reason: &str) {
-            println!("Gateway call {} ended: {}", call.id(), reason);
-        }
-    }
-
-    pub async fn run() -> crate::errors::Result<()> {
-        let session_mgr = SessionManagerBuilder::new()
-            .with_sip_port(5060)
-            .with_handler(Arc::new(GatewayHandler::new()))
-            .build()
-            .await?;
-        
-        session_mgr.start().await?;
-        println!("SIP gateway running on port 5060");
-        
-        tokio::signal::ctrl_c().await?;
-        Ok(())
-    }
-}
-
-/// Example: Conference Bridge
-/// 
-/// This shows how to create a conference bridge where multiple calls
-/// can be connected together.
-pub mod conference_bridge {
-    use super::*;
-
-    #[derive(Debug)]
-    pub struct ConferenceHandler {
-        bridge_sessions: Arc<tokio::sync::Mutex<Vec<SessionId>>>,
-    }
-
-    impl ConferenceHandler {
-        pub fn new() -> Self {
-            Self {
-                bridge_sessions: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            }
-        }
-
-        async fn add_to_conference(&self, session_id: SessionId) {
-            let mut sessions = self.bridge_sessions.lock().await;
-            sessions.push(session_id);
-            println!("Added session to conference. Total participants: {}", sessions.len());
-        }
-
-        async fn remove_from_conference(&self, session_id: &SessionId) {
-            let mut sessions = self.bridge_sessions.lock().await;
-            sessions.retain(|id| id != session_id);
-            println!("Removed session from conference. Remaining participants: {}", sessions.len());
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl CallHandler for ConferenceHandler {
-        async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-            self.add_to_conference(call.id.clone()).await;
+            // Auto-accept all calls
             CallDecision::Accept(None)
         }
-
+        
         async fn on_call_ended(&self, call: CallSession, reason: &str) {
-            self.remove_from_conference(&call.id).await;
-            println!("Conference call {} ended: {}", call.id(), reason);
+            println!("Call {} ended: {}", call.id, reason);
         }
     }
+    
+    // Create session manager with handler
+    let session_mgr = SessionManagerBuilder::new()
+        .with_sip_port(5060)
+        .with_local_address("sip:alice@example.com")
+        .with_handler(Arc::new(MyHandler))
+        .build()
+        .await?;
+    
+    // Wait for incoming calls...
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    
+    Ok(())
+}
 
-    pub async fn run() -> crate::errors::Result<()> {
-        let session_mgr = SessionManagerBuilder::new()
-            .with_sip_port(5060)
-            .with_handler(Arc::new(ConferenceHandler::new()))
-            .build()
-            .await?;
-        
-        session_mgr.start().await?;
-        println!("Conference bridge running on port 5060");
-        
-        tokio::signal::ctrl_c().await?;
-        Ok(())
+/// Example: Conference call
+/// 
+/// Shows how to create a conference with multiple participants.
+#[allow(dead_code)]
+pub async fn example_conference() -> Result<()> {
+    // Create session manager
+    let session_mgr = SessionManagerBuilder::new()
+        .with_sip_port(5060)
+        .with_local_address("sip:conference@example.com")
+        .build()
+        .await?;
+    
+    // Create calls to participants
+    let participants = vec![
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+        "sip:charlie@example.com",
+    ];
+    
+    let mut calls = Vec::new();
+    for participant in participants {
+        match session_mgr.create_outgoing_call(
+            "sip:conference@example.com",
+            participant,
+            None
+        ).await {
+            Ok(call) => {
+                println!("Added participant: {}", participant);
+                calls.push(call);
+            }
+            Err(e) => {
+                eprintln!("Failed to add participant {}: {}", participant, e);
+            }
+        }
     }
+    
+    // Conference is active...
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    
+    // End all calls
+    for call in calls {
+        let _ = session_mgr.terminate_session(&call.id).await;
+    }
+    
+    Ok(())
+}
+
+/// Example: Call with media control
+/// 
+/// Shows how to control media during a call.
+#[allow(dead_code)]
+pub async fn example_media_control() -> Result<()> {
+    // Create session manager
+    let session_mgr = SessionManagerBuilder::new()
+        .with_sip_port(5060)
+        .with_local_address("sip:alice@example.com")
+        .build()
+        .await?;
+    
+    // Make a call
+    let call = session_mgr.create_outgoing_call(
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+        None
+    ).await?;
+    
+    // Wait for call to be established
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    
+    // Mute audio
+    session_mgr.set_audio_muted(&call.id, true).await?;
+    println!("Audio muted");
+    
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    
+    // Unmute audio
+    session_mgr.set_audio_muted(&call.id, false).await?;
+    println!("Audio unmuted");
+    
+    // Put call on hold
+    session_mgr.hold_session(&call.id).await?;
+    println!("Call on hold");
+    
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    
+    // Resume call
+    session_mgr.resume_session(&call.id).await?;
+    println!("Call resumed");
+    
+    // End the call
+    session_mgr.terminate_session(&call.id).await?;
+    
+    Ok(())
+}
+
+/// Example: SDP negotiation
+/// 
+/// Shows how to handle custom SDP offers and answers.
+#[allow(dead_code)]
+pub async fn example_sdp_negotiation() -> Result<()> {
+    #[derive(Debug)]
+    struct SdpHandler;
+    
+    #[async_trait::async_trait]
+    impl CallHandler for SdpHandler {
+        async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+            if let Some(offer_sdp) = call.sdp {
+                // Generate answer based on offer
+                match generate_sdp_answer(&offer_sdp, "192.168.1.100", 20000) {
+                    Ok(answer) => CallDecision::Accept(Some(answer)),
+                    Err(_) => CallDecision::Reject("Incompatible media".to_string()),
+                }
+            } else {
+                CallDecision::Accept(None)
+            }
+        }
+        
+        async fn on_call_ended(&self, _call: CallSession, _reason: &str) {}
+    }
+    
+    // Create session manager with SDP handler
+    let session_mgr = SessionManagerBuilder::new()
+        .with_sip_port(5060)
+        .with_local_address("sip:alice@example.com")
+        .with_handler(Arc::new(SdpHandler))
+        .build()
+        .await?;
+    
+    // Make a call with custom SDP
+    let sdp_offer = generate_sdp_offer("192.168.1.100", 20000)?;
+    let call = session_mgr.create_outgoing_call(
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+        Some(sdp_offer)
+    ).await?;
+    
+    println!("Call with custom SDP: {}", call.id);
+    
+    Ok(())
+}
+
+/// Example: Simple auto-answer handler
+#[derive(Debug)]
+pub struct AutoAnswerHandler;
+
+#[async_trait::async_trait]
+impl CallHandler for AutoAnswerHandler {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+        println!("Auto-answering call from: {}", call.from);
+        CallDecision::Accept(None)
+    }
+    
+    async fn on_call_ended(&self, call: CallSession, reason: &str) {
+        println!("Call {} ended: {}", call.id, reason);
+    }
+}
+
+/// Example: Queue handler for call centers
+#[derive(Debug)]
+pub struct QueueHandler {
+    max_queue_size: usize,
+    queue: tokio::sync::Mutex<Vec<IncomingCall>>,
+    notify: tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<IncomingCall>>>,
+}
+
+impl QueueHandler {
+    pub fn new(max_queue_size: usize) -> Self {
+        Self {
+            max_queue_size,
+            queue: tokio::sync::Mutex::new(Vec::new()),
+            notify: tokio::sync::Mutex::new(None),
+        }
+    }
+    
+    pub async fn enqueue(&self, call: IncomingCall) {
+        let mut queue = self.queue.lock().await;
+        if queue.len() < self.max_queue_size {
+            queue.push(call.clone());
+            
+            // Notify if channel is set
+            if let Some(tx) = self.notify.lock().await.as_ref() {
+                let _ = tx.send(call);
+            }
+        }
+    }
+    
+    pub fn queue_size(&self) -> usize {
+        // This is approximate since we're not locking
+        0
+    }
+    
+    pub fn set_notify_channel(&self, tx: tokio::sync::mpsc::UnboundedSender<IncomingCall>) {
+        let mut notify = self.notify.blocking_lock();
+        *notify = Some(tx);
+    }
+}
+
+/// Example: Routing handler for gateways
+#[derive(Debug)]
+pub struct RoutingHandler {
+    routes: std::collections::HashMap<String, String>,
+    default_action: CallDecision,
+}
+
+impl RoutingHandler {
+    pub fn new() -> Self {
+        Self {
+            routes: std::collections::HashMap::new(),
+            default_action: CallDecision::Reject("No route".to_string()),
+        }
+    }
+    
+    pub fn add_route(&mut self, prefix: &str, destination: &str) {
+        self.routes.insert(prefix.to_string(), destination.to_string());
+    }
+    
+    pub fn set_default_action(&mut self, action: CallDecision) {
+        self.default_action = action;
+    }
+}
+
+#[async_trait::async_trait]
+impl CallHandler for RoutingHandler {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+        // Extract number from To header
+        let to_number = call.to.split('@').next().unwrap_or("")
+            .split(':').last().unwrap_or("");
+        
+        // Find matching route
+        for (prefix, _destination) in &self.routes {
+            if to_number.starts_with(prefix) {
+                // In a real implementation, you would forward the call to destination
+                return CallDecision::Accept(None);
+            }
+        }
+        
+        self.default_action.clone()
+    }
+    
+    async fn on_call_ended(&self, _call: CallSession, _reason: &str) {}
 } 

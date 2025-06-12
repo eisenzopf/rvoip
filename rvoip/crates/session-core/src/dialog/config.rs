@@ -26,8 +26,8 @@ impl DialogConfigConverter {
     
     /// Convert session config to dialog-core configuration
     pub fn to_dialog_config(&self) -> DialogResult<rvoip_dialog_core::config::DialogManagerConfig> {
-        // Parse bind address from string
-        let bind_addr = format!("{}:{}", self.session_config.sip_bind_address, self.session_config.sip_port);
+        // Use 0.0.0.0 as default bind address for the SIP port
+        let bind_addr = format!("0.0.0.0:{}", self.session_config.sip_port);
         let local_address: SocketAddr = bind_addr.parse()
             .map_err(|e| DialogError::Configuration {
                 message: format!("Invalid bind address: {}", e),
@@ -67,18 +67,14 @@ impl DialogConfigConverter {
             });
         }
         
-        // Ensure bind address is valid
-        let bind_addr: std::net::SocketAddr = format!("{}:{}", self.session_config.sip_bind_address, self.session_config.sip_port)
+        // Ensure bind address is valid (using default 0.0.0.0)
+        let bind_addr: std::net::SocketAddr = format!("0.0.0.0:{}", self.session_config.sip_port)
             .parse()
             .map_err(|e| DialogError::Configuration {
                 message: format!("Invalid bind address format: {}", e),
             })?;
             
-        if bind_addr.ip().is_unspecified() {
-            return Err(DialogError::Configuration {
-                message: "Bind address cannot be unspecified".to_string(),
-            });
-        }
+        // Note: 0.0.0.0 is valid for binding to all interfaces
         
         Ok(())
     }
@@ -88,7 +84,7 @@ impl std::fmt::Debug for DialogConfigConverter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DialogConfigConverter")
             .field("sip_port", &self.session_config.sip_port)
-            .field("bind_address", &self.session_config.sip_bind_address)
+            .field("local_address", &self.session_config.local_address)
             .finish()
     }
 } 

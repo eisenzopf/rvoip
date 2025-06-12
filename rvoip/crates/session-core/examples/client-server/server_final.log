@@ -1,0 +1,295 @@
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+🎬 SPAWN: Starting session coordination event loop
+📡 EVENT LOOP: Session coordination event loop started
+=== PARSING SIP MESSAGE ===
+Input length: 305 bytes
+Input as string: "INVITE sip:uas@127.0.0.1:5062 SIP/2.0\r\nFrom: User <sip:uac@127.0.0.1>;tag=c74fd590\r\nTo: User <sip:uas@127.0.0.1:5062>\r\nCall-ID: call-9df9bd08-3813-459d-b069-1f28c3617f39\r\nCSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\nVia: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK-2b5f169900cb465692c8c7e985448255\r\n\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 63, 37, 34, 66, 64, 35, 39, 30, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 39, 64, 66, 39, 62, 64, 30, 38, 2d, 33, 38, 31, 33, 2d, 34, 35, 39, 64, 2d, 62, 30, 36, 39, 2d, 31, 66, 32, 38, 63, 33, 36, 31, 37, 66, 33, 39, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 62, 35, 66, 31, 36, 39, 39, 30, 30, 63, 62, 34, 36, 35, 36, 39, 32, 63, 38, 63, 37, 65, 39, 38, 35, 34, 34, 38, 32, 35, 35, 0d, 0a, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+Transaction loop starting for Key(z9hG4bK-2b5f169900cb465692c8c7e985448255:INVITE:server)
+Initial state: Proceeding
+🔍 INVITE HANDLER: Created early dialog 8184df5a-efbf-42a8-affe-ab8292b2081c
+🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-2b5f169900cb465692c8c7e985448255:INVITE:server) with dialog 8184df5a-efbf-42a8-affe-ab8292b2081c
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-2b5f169900cb465692c8c7e985448255:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog 8184df5a-efbf-42a8-affe-ab8292b2081c
+Already in requested state, no transition needed: Proceeding
+🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog 8184df5a-efbf-42a8-affe-ab8292b2081c
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(8184df5a-efbf-42a8-affe-ab8292b2081c), transaction_id: z9hG4bK-2b5f169900cb465692c8c7e985448255:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("c74fd590")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("call-9df9bd08-3813-459d-b069-1f28c3617f39")), CSeq(CSeq { seq: 1, method: Invite }), MaxForwards(MaxForwards(70)), ContentLength(ContentLength(0)), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-2b5f169900cb465692c8c7e985448255")] }]))], body: b"" }, source: 127.0.0.1:5061 }
+🎯 COORDINATOR: Handling event: SessionCreated { session_id: SessionId("sess_85c1f28a-091f-4515-93ea-670673333e93"), from: "sip:from@127.0.0.1", to: "sip:to@local", call_state: Ringing }
+Received command: CancelTimer100 for transaction Key(z9hG4bK-2b5f169900cb465692c8c7e985448255:INVITE:server)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-2b5f169900cb465692c8c7e985448255:INVITE:server)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-2b5f169900cb465692c8c7e985448255:INVITE:server). Final state: Terminated
+=== PARSING SIP MESSAGE ===
+Input length: 340 bytes
+Input as string: "ACK sip:server@0.0.0.0:5062 SIP/2.0\r\nFrom: User <sip:uac@127.0.0.1>;tag=c74fd590\r\nTo: User <sip:uas@127.0.0.1:5062>;tag=tag-96b3449315d644e68dd957da2024be75\r\nCall-ID: call-9df9bd08-3813-459d-b069-1f28c3617f39\r\nCSeq: 1 ACK\r\nVia: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK752db0820f8d480997c17e77cc8eaa0c\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [41, 43, 4b, 20, 73, 69, 70, 3a, 73, 65, 72, 76, 65, 72, 40, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 63, 37, 34, 66, 64, 35, 39, 30, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 39, 36, 62, 33, 34, 34, 39, 33, 31, 35, 64, 36, 34, 34, 65, 36, 38, 64, 64, 39, 35, 37, 64, 61, 32, 30, 32, 34, 62, 65, 37, 35, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 39, 64, 66, 39, 62, 64, 30, 38, 2d, 33, 38, 31, 33, 2d, 34, 35, 39, 64, 2d, 62, 30, 36, 39, 2d, 31, 66, 32, 38, 63, 33, 36, 31, 37, 66, 33, 39, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 41, 43, 4b, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 37, 35, 32, 64, 62, 30, 38, 32, 30, 66, 38, 64, 34, 38, 30, 39, 39, 37, 63, 31, 37, 65, 37, 37, 63, 63, 38, 65, 61, 61, 30, 63, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 57, 54, 98, 51, 52, 52, 57, 51, 49, 53, 100, 54, 52, 52, 101, 54, 56, 100, 100, 57, 53, 55, 100, 97, 50, 48, 50, 52, 98, 101, 55, 53]
+Successfully parsed tag: tag-96b3449315d644e68dd957da2024be75
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([Object({"Tag": String("c74fd590")})]), "uri": Object({"raw_uri": Null, "scheme": String("Sip"), "port": Null, "host": Object({"Address": String("127.0.0.1")}), "parameters": Array([]), "headers": Object({}), "user": String("uac"), "password": Null}), "display_name": String("User")})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("c74fd590")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("c74fd590")})
+Final value for path 'headers.From.params[0].Tag': String("c74fd590")
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([Object({"Tag": String("c74fd590")})]), "display_name": String("User"), "uri": Object({"headers": Object({}), "scheme": String("Sip"), "user": String("uac"), "host": Object({"Address": String("127.0.0.1")}), "parameters": Array([]), "raw_uri": Null, "password": Null, "port": Null})})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("c74fd590")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("c74fd590")})
+Final value for path 'headers.From.params[0].Tag': String("c74fd590")
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"parameters": Array([]), "password": Null, "scheme": String("Sip"), "user": String("uas"), "raw_uri": Null, "port": Number(5062.0), "headers": Object({}), "host": Object({"Address": String("127.0.0.1")})}), "display_name": String("User"), "params": Array([])})
+Processing segment Index(0) at index 3, current value: Array([])
+Index 0 out of bounds for array of length 0
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("User"), "params": Array([Object({"Tag": String("tag-96b3449315d644e68dd957da2024be75")})]), "uri": Object({"host": Object({"Address": String("127.0.0.1")}), "scheme": String("Sip"), "port": Number(5062.0), "parameters": Array([]), "headers": Object({}), "raw_uri": Null, "password": Null, "user": String("uas")})})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("tag-96b3449315d644e68dd957da2024be75")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("tag-96b3449315d644e68dd957da2024be75")})
+Final value for path 'headers.To.params[0].Tag': String("tag-96b3449315d644e68dd957da2024be75")
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: AckReceived { dialog_id: DialogId(8184df5a-efbf-42a8-affe-ab8292b2081c), transaction_id: z9hG4bK-2b5f169900cb465692c8c7e985448255:INVITE:server, negotiated_sdp: None }
+🎯 COORDINATOR: Handling event: MediaEvent { session_id: SessionId("sess_85c1f28a-091f-4515-93ea-670673333e93"), event: "rfc_compliant_media_creation_uas" }
+🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_85c1f28a-091f-4515-93ea-670673333e93"), old_state: Ringing, new_state: Active }
+=== PARSING SIP MESSAGE ===
+Input length: 340 bytes
+Input as string: "BYE sip:uas@127.0.0.1:5062 SIP/2.0\r\nFrom: User <sip:uac@127.0.0.1>;tag=c74fd590\r\nTo: User <sip:uas@127.0.0.1:5062>;tag=tag-96b3449315d644e68dd957da2024be75\r\nCall-ID: call-9df9bd08-3813-459d-b069-1f28c3617f39\r\nCSeq: 2 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\nVia: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK-8eee0b09eb304fe0bd85f347441b4ab4\r\n\r\n"
+Input as hex: [42, 59, 45, 20, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 63, 37, 34, 66, 64, 35, 39, 30, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 39, 36, 62, 33, 34, 34, 39, 33, 31, 35, 64, 36, 34, 34, 65, 36, 38, 64, 64, 39, 35, 37, 64, 61, 32, 30, 32, 34, 62, 65, 37, 35, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 39, 64, 66, 39, 62, 64, 30, 38, 2d, 33, 38, 31, 33, 2d, 34, 35, 39, 64, 2d, 62, 30, 36, 39, 2d, 31, 66, 32, 38, 63, 33, 36, 31, 37, 66, 33, 39, 0d, 0a, 43, 53, 65, 71, 3a, 20, 32, 20, 42, 59, 45, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 38, 65, 65, 65, 30, 62, 30, 39, 65, 62, 33, 30, 34, 66, 65, 30, 62, 64, 38, 35, 66, 33, 34, 37, 34, 34, 31, 62, 34, 61, 62, 34, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 57, 54, 98, 51, 52, 52, 57, 51, 49, 53, 100, 54, 52, 52, 101, 54, 56, 100, 100, 57, 53, 55, 100, 97, 50, 48, 50, 52, 98, 101, 55, 53]
+Successfully parsed tag: tag-96b3449315d644e68dd957da2024be75
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Transaction loop starting for Key(z9hG4bK-8eee0b09eb304fe0bd85f347441b4ab4:BYE:server)
+Initial state: Trying
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK-8eee0b09eb304fe0bd85f347441b4ab4:BYE:server)
+Processing TransitionTo(Trying) current state: Trying
+Already in requested state, no transition needed: Trying
+Received command: ProcessMessage(Request(Request { method: Bye, uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("c74fd590")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-96b3449315d644e68dd957da2024be75")] })), CallId(CallId("call-9df9bd08-3813-459d-b069-1f28c3617f39")), CSeq(CSeq { seq: 2, method: Bye }), MaxForwards(MaxForwards(70)), ContentLength(ContentLength(0)), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-8eee0b09eb304fe0bd85f347441b4ab4")] }]))], body: b"" })) for transaction Key(z9hG4bK-8eee0b09eb304fe0bd85f347441b4ab4:BYE:server)
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK-8eee0b09eb304fe0bd85f347441b4ab4:BYE:server)
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+📨 EVENT LOOP: Received session coordination event in background task
+Sent StateChanged event result: Success
+🎪 SESSION COORDINATION: Received event: CallTerminated { dialog_id: DialogId(8184df5a-efbf-42a8-affe-ab8292b2081c), reason: "BYE received" }
+🎯 COORDINATOR: Handling event: SessionTerminated { session_id: SessionId("sess_85c1f28a-091f-4515-93ea-670673333e93"), reason: "BYE received" }
+🎯 COORDINATOR: Matched SessionTerminated event for sess_85c1f28a-091f-4515-93ea-670673333e93 - BYE received
+🔴 COORDINATOR: handle_session_terminated called for session sess_85c1f28a-091f-4515-93ea-670673333e93 with reason: BYE received
+🔔 COORDINATOR: Handler exists, checking for session sess_85c1f28a-091f-4515-93ea-670673333e93
+✅ COORDINATOR: Found session sess_85c1f28a-091f-4515-93ea-670673333e93, calling handler.on_call_ended
+=== PARSING SIP MESSAGE ===
+Input length: 305 bytes
+Input as string: "INVITE sip:uas@127.0.0.1:5062 SIP/2.0\r\nFrom: User <sip:uac@127.0.0.1>;tag=b239ffa6\r\nTo: User <sip:uas@127.0.0.1:5062>\r\nCall-ID: call-b96ece2d-7cf2-45c2-b8d1-fcd92f71bc4d\r\nCSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\nVia: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK-4a116197e1634367a25dd6d21ba2f387\r\n\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 62, 32, 33, 39, 66, 66, 61, 36, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 62, 39, 36, 65, 63, 65, 32, 64, 2d, 37, 63, 66, 32, 2d, 34, 35, 63, 32, 2d, 62, 38, 64, 31, 2d, 66, 63, 64, 39, 32, 66, 37, 31, 62, 63, 34, 64, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 34, 61, 31, 31, 36, 31, 39, 37, 65, 31, 36, 33, 34, 33, 36, 37, 61, 32, 35, 64, 64, 36, 64, 32, 31, 62, 61, 32, 66, 33, 38, 37, 0d, 0a, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+🔍 INVITE HANDLER: Created early dialog b3bb9f6d-104f-4d2c-a44b-46e81e4c3244
+Transaction loop starting for Key(z9hG4bK-4a116197e1634367a25dd6d21ba2f387:INVITE:server)
+Initial state: Proceeding
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-4a116197e1634367a25dd6d21ba2f387:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+Already in requested state, no transition needed: Proceeding
+🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-4a116197e1634367a25dd6d21ba2f387:INVITE:server) with dialog b3bb9f6d-104f-4d2c-a44b-46e81e4c3244
+🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog b3bb9f6d-104f-4d2c-a44b-46e81e4c3244
+🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog b3bb9f6d-104f-4d2c-a44b-46e81e4c3244
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(b3bb9f6d-104f-4d2c-a44b-46e81e4c3244), transaction_id: z9hG4bK-4a116197e1634367a25dd6d21ba2f387:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("b239ffa6")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("call-b96ece2d-7cf2-45c2-b8d1-fcd92f71bc4d")), CSeq(CSeq { seq: 1, method: Invite }), MaxForwards(MaxForwards(70)), ContentLength(ContentLength(0)), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-4a116197e1634367a25dd6d21ba2f387")] }]))], body: b"" }, source: 127.0.0.1:5061 }
+🎯 COORDINATOR: Handling event: SessionCreated { session_id: SessionId("sess_6a3dea73-4963-4021-920b-f761c91f5484"), from: "sip:from@127.0.0.1", to: "sip:to@local", call_state: Ringing }
+Received command: CancelTimer100 for transaction Key(z9hG4bK-4a116197e1634367a25dd6d21ba2f387:INVITE:server)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-4a116197e1634367a25dd6d21ba2f387:INVITE:server)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-4a116197e1634367a25dd6d21ba2f387:INVITE:server). Final state: Terminated
+=== PARSING SIP MESSAGE ===
+Input length: 340 bytes
+Input as string: "ACK sip:server@0.0.0.0:5062 SIP/2.0\r\nFrom: User <sip:uac@127.0.0.1>;tag=b239ffa6\r\nTo: User <sip:uas@127.0.0.1:5062>;tag=tag-afddc99e1e5b453a952cfecc0becfdd4\r\nCall-ID: call-b96ece2d-7cf2-45c2-b8d1-fcd92f71bc4d\r\nCSeq: 1 ACK\r\nVia: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK073654ef3afa49a596a1ac2b329d5678\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [41, 43, 4b, 20, 73, 69, 70, 3a, 73, 65, 72, 76, 65, 72, 40, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 62, 32, 33, 39, 66, 66, 61, 36, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 61, 66, 64, 64, 63, 39, 39, 65, 31, 65, 35, 62, 34, 35, 33, 61, 39, 35, 32, 63, 66, 65, 63, 63, 30, 62, 65, 63, 66, 64, 64, 34, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 62, 39, 36, 65, 63, 65, 32, 64, 2d, 37, 63, 66, 32, 2d, 34, 35, 63, 32, 2d, 62, 38, 64, 31, 2d, 66, 63, 64, 39, 32, 66, 37, 31, 62, 63, 34, 64, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 41, 43, 4b, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 30, 37, 33, 36, 35, 34, 65, 66, 33, 61, 66, 61, 34, 39, 61, 35, 39, 36, 61, 31, 61, 63, 32, 62, 33, 32, 39, 64, 35, 36, 37, 38, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 97, 102, 100, 100, 99, 57, 57, 101, 49, 101, 53, 98, 52, 53, 51, 97, 57, 53, 50, 99, 102, 101, 99, 99, 48, 98, 101, 99, 102, 100, 100, 52]
+Successfully parsed tag: tag-afddc99e1e5b453a952cfecc0becfdd4
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([Object({"Tag": String("b239ffa6")})]), "display_name": String("User"), "uri": Object({"port": Null, "user": String("uac"), "headers": Object({}), "host": Object({"Address": String("127.0.0.1")}), "scheme": String("Sip"), "password": Null, "parameters": Array([]), "raw_uri": Null})})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("b239ffa6")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("b239ffa6")})
+Final value for path 'headers.From.params[0].Tag': String("b239ffa6")
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("User"), "uri": Object({"parameters": Array([]), "port": Null, "headers": Object({}), "scheme": String("Sip"), "user": String("uac"), "host": Object({"Address": String("127.0.0.1")}), "password": Null, "raw_uri": Null}), "params": Array([Object({"Tag": String("b239ffa6")})])})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("b239ffa6")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("b239ffa6")})
+Final value for path 'headers.From.params[0].Tag': String("b239ffa6")
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("User"), "params": Array([]), "uri": Object({"port": Number(5062.0), "host": Object({"Address": String("127.0.0.1")}), "password": Null, "scheme": String("Sip"), "headers": Object({}), "parameters": Array([]), "raw_uri": Null, "user": String("uas")})})
+Processing segment Index(0) at index 3, current value: Array([])
+Index 0 out of bounds for array of length 0
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"parameters": Array([]), "password": Null, "raw_uri": Null, "user": String("uas"), "port": Number(5062.0), "scheme": String("Sip"), "headers": Object({}), "host": Object({"Address": String("127.0.0.1")})}), "display_name": String("User"), "params": Array([Object({"Tag": String("tag-afddc99e1e5b453a952cfecc0becfdd4")})])})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("tag-afddc99e1e5b453a952cfecc0becfdd4")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("tag-afddc99e1e5b453a952cfecc0becfdd4")})
+Final value for path 'headers.To.params[0].Tag': String("tag-afddc99e1e5b453a952cfecc0becfdd4")
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: AckReceived { dialog_id: DialogId(b3bb9f6d-104f-4d2c-a44b-46e81e4c3244), transaction_id: z9hG4bK-4a116197e1634367a25dd6d21ba2f387:INVITE:server, negotiated_sdp: None }
+🎯 COORDINATOR: Handling event: MediaEvent { session_id: SessionId("sess_6a3dea73-4963-4021-920b-f761c91f5484"), event: "rfc_compliant_media_creation_uas" }
+🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_6a3dea73-4963-4021-920b-f761c91f5484"), old_state: Ringing, new_state: Active }
+=== PARSING SIP MESSAGE ===
+Input length: 340 bytes
+Input as string: "BYE sip:uas@127.0.0.1:5062 SIP/2.0\r\nFrom: User <sip:uac@127.0.0.1>;tag=b239ffa6\r\nTo: User <sip:uas@127.0.0.1:5062>;tag=tag-afddc99e1e5b453a952cfecc0becfdd4\r\nCall-ID: call-b96ece2d-7cf2-45c2-b8d1-fcd92f71bc4d\r\nCSeq: 2 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\nVia: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK-ac61f20dfc094a19b36d8bfd77740d86\r\n\r\n"
+Input as hex: [42, 59, 45, 20, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 62, 32, 33, 39, 66, 66, 61, 36, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 61, 66, 64, 64, 63, 39, 39, 65, 31, 65, 35, 62, 34, 35, 33, 61, 39, 35, 32, 63, 66, 65, 63, 63, 30, 62, 65, 63, 66, 64, 64, 34, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 62, 39, 36, 65, 63, 65, 32, 64, 2d, 37, 63, 66, 32, 2d, 34, 35, 63, 32, 2d, 62, 38, 64, 31, 2d, 66, 63, 64, 39, 32, 66, 37, 31, 62, 63, 34, 64, 0d, 0a, 43, 53, 65, 71, 3a, 20, 32, 20, 42, 59, 45, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 61, 63, 36, 31, 66, 32, 30, 64, 66, 63, 30, 39, 34, 61, 31, 39, 62, 33, 36, 64, 38, 62, 66, 64, 37, 37, 37, 34, 30, 64, 38, 36, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 97, 102, 100, 100, 99, 57, 57, 101, 49, 101, 53, 98, 52, 53, 51, 97, 57, 53, 50, 99, 102, 101, 99, 99, 48, 98, 101, 99, 102, 100, 100, 52]
+Successfully parsed tag: tag-afddc99e1e5b453a952cfecc0becfdd4
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Transaction loop starting for Key(z9hG4bK-ac61f20dfc094a19b36d8bfd77740d86:BYE:server)
+Initial state: Trying
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK-ac61f20dfc094a19b36d8bfd77740d86:BYE:server)
+Processing TransitionTo(Trying) current state: Trying
+Already in requested state, no transition needed: Trying
+Received command: ProcessMessage(Request(Request { method: Bye, uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("b239ffa6")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-afddc99e1e5b453a952cfecc0becfdd4")] })), CallId(CallId("call-b96ece2d-7cf2-45c2-b8d1-fcd92f71bc4d")), CSeq(CSeq { seq: 2, method: Bye }), MaxForwards(MaxForwards(70)), ContentLength(ContentLength(0)), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-ac61f20dfc094a19b36d8bfd77740d86")] }]))], body: b"" })) for transaction Key(z9hG4bK-ac61f20dfc094a19b36d8bfd77740d86:BYE:server)
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK-ac61f20dfc094a19b36d8bfd77740d86:BYE:server)
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+📨 EVENT LOOP: Received session coordination event in background task
+Sent StateChanged event result: Success
+🎪 SESSION COORDINATION: Received event: CallTerminated { dialog_id: DialogId(b3bb9f6d-104f-4d2c-a44b-46e81e4c3244), reason: "BYE received" }
+🎯 COORDINATOR: Handling event: SessionTerminated { session_id: SessionId("sess_6a3dea73-4963-4021-920b-f761c91f5484"), reason: "BYE received" }
+🎯 COORDINATOR: Matched SessionTerminated event for sess_6a3dea73-4963-4021-920b-f761c91f5484 - BYE received
+🔴 COORDINATOR: handle_session_terminated called for session sess_6a3dea73-4963-4021-920b-f761c91f5484 with reason: BYE received
+🔔 COORDINATOR: Handler exists, checking for session sess_6a3dea73-4963-4021-920b-f761c91f5484
+✅ COORDINATOR: Found session sess_6a3dea73-4963-4021-920b-f761c91f5484, calling handler.on_call_ended
+=== PARSING SIP MESSAGE ===
+Input length: 305 bytes
+Input as string: "INVITE sip:uas@127.0.0.1:5062 SIP/2.0\r\nFrom: User <sip:uac@127.0.0.1>;tag=dd02e491\r\nTo: User <sip:uas@127.0.0.1:5062>\r\nCall-ID: call-59d41b0c-7997-474b-9630-d81469102374\r\nCSeq: 1 INVITE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\nVia: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK-56f0430975854272bcbbecb32caa9fc9\r\n\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 64, 64, 30, 32, 65, 34, 39, 31, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 35, 39, 64, 34, 31, 62, 30, 63, 2d, 37, 39, 39, 37, 2d, 34, 37, 34, 62, 2d, 39, 36, 33, 30, 2d, 64, 38, 31, 34, 36, 39, 31, 30, 32, 33, 37, 34, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 35, 36, 66, 30, 34, 33, 30, 39, 37, 35, 38, 35, 34, 32, 37, 32, 62, 63, 62, 62, 65, 63, 62, 33, 32, 63, 61, 61, 39, 66, 63, 39, 0d, 0a, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+🔍 INVITE HANDLER: Created early dialog b68d396a-62da-42e8-9af0-1bf6c37ad017
+🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-56f0430975854272bcbbecb32caa9fc9:INVITE:server) with dialog b68d396a-62da-42e8-9af0-1bf6c37ad017
+🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog b68d396a-62da-42e8-9af0-1bf6c37ad017
+🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog b68d396a-62da-42e8-9af0-1bf6c37ad017
+Transaction loop starting for Key(z9hG4bK-56f0430975854272bcbbecb32caa9fc9:INVITE:server)
+Initial state: Proceeding
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-56f0430975854272bcbbecb32caa9fc9:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(b68d396a-62da-42e8-9af0-1bf6c37ad017), transaction_id: z9hG4bK-56f0430975854272bcbbecb32caa9fc9:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("dd02e491")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("call-59d41b0c-7997-474b-9630-d81469102374")), CSeq(CSeq { seq: 1, method: Invite }), MaxForwards(MaxForwards(70)), ContentLength(ContentLength(0)), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-56f0430975854272bcbbecb32caa9fc9")] }]))], body: b"" }, source: 127.0.0.1:5061 }
+Already in requested state, no transition needed: Proceeding
+🎯 COORDINATOR: Handling event: SessionCreated { session_id: SessionId("sess_bb7498c0-56aa-4464-ae4e-ae957cf06a97"), from: "sip:from@127.0.0.1", to: "sip:to@local", call_state: Ringing }
+Received command: CancelTimer100 for transaction Key(z9hG4bK-56f0430975854272bcbbecb32caa9fc9:INVITE:server)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-56f0430975854272bcbbecb32caa9fc9:INVITE:server)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-56f0430975854272bcbbecb32caa9fc9:INVITE:server). Final state: Terminated
+=== PARSING SIP MESSAGE ===
+Input length: 340 bytes
+Input as string: "ACK sip:server@0.0.0.0:5062 SIP/2.0\r\nFrom: User <sip:uac@127.0.0.1>;tag=dd02e491\r\nTo: User <sip:uas@127.0.0.1:5062>;tag=tag-4f53d0515ff94e5d8c982ade2f1f856f\r\nCall-ID: call-59d41b0c-7997-474b-9630-d81469102374\r\nCSeq: 1 ACK\r\nVia: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bKf0b020392d9d4bb8ac6f56dbf34c60c1\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [41, 43, 4b, 20, 73, 69, 70, 3a, 73, 65, 72, 76, 65, 72, 40, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 64, 64, 30, 32, 65, 34, 39, 31, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 34, 66, 35, 33, 64, 30, 35, 31, 35, 66, 66, 39, 34, 65, 35, 64, 38, 63, 39, 38, 32, 61, 64, 65, 32, 66, 31, 66, 38, 35, 36, 66, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 35, 39, 64, 34, 31, 62, 30, 63, 2d, 37, 39, 39, 37, 2d, 34, 37, 34, 62, 2d, 39, 36, 33, 30, 2d, 64, 38, 31, 34, 36, 39, 31, 30, 32, 33, 37, 34, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 41, 43, 4b, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 66, 30, 62, 30, 32, 30, 33, 39, 32, 64, 39, 64, 34, 62, 62, 38, 61, 63, 36, 66, 35, 36, 64, 62, 66, 33, 34, 63, 36, 30, 63, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 52, 102, 53, 51, 100, 48, 53, 49, 53, 102, 102, 57, 52, 101, 53, 100, 56, 99, 57, 56, 50, 97, 100, 101, 50, 102, 49, 102, 56, 53, 54, 102]
+Successfully parsed tag: tag-4f53d0515ff94e5d8c982ade2f1f856f
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("User"), "params": Array([Object({"Tag": String("dd02e491")})]), "uri": Object({"raw_uri": Null, "headers": Object({}), "port": Null, "parameters": Array([]), "password": Null, "scheme": String("Sip"), "host": Object({"Address": String("127.0.0.1")}), "user": String("uac")})})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("dd02e491")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("dd02e491")})
+Final value for path 'headers.From.params[0].Tag': String("dd02e491")
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("User"), "uri": Object({"headers": Object({}), "host": Object({"Address": String("127.0.0.1")}), "password": Null, "user": String("uac"), "scheme": String("Sip"), "raw_uri": Null, "port": Null, "parameters": Array([])}), "params": Array([Object({"Tag": String("dd02e491")})])})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("dd02e491")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("dd02e491")})
+Final value for path 'headers.From.params[0].Tag': String("dd02e491")
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"raw_uri": Null, "headers": Object({}), "parameters": Array([]), "scheme": String("Sip"), "password": Null, "host": Object({"Address": String("127.0.0.1")}), "port": Number(5062.0), "user": String("uas")}), "params": Array([]), "display_name": String("User")})
+Processing segment Index(0) at index 3, current value: Array([])
+Index 0 out of bounds for array of length 0
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("User"), "uri": Object({"user": String("uas"), "host": Object({"Address": String("127.0.0.1")}), "raw_uri": Null, "parameters": Array([]), "password": Null, "scheme": String("Sip"), "port": Number(5062.0), "headers": Object({})}), "params": Array([Object({"Tag": String("tag-4f53d0515ff94e5d8c982ade2f1f856f")})])})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("tag-4f53d0515ff94e5d8c982ade2f1f856f")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("tag-4f53d0515ff94e5d8c982ade2f1f856f")})
+Final value for path 'headers.To.params[0].Tag': String("tag-4f53d0515ff94e5d8c982ade2f1f856f")
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: AckReceived { dialog_id: DialogId(b68d396a-62da-42e8-9af0-1bf6c37ad017), transaction_id: z9hG4bK-56f0430975854272bcbbecb32caa9fc9:INVITE:server, negotiated_sdp: None }
+🎯 COORDINATOR: Handling event: MediaEvent { session_id: SessionId("sess_bb7498c0-56aa-4464-ae4e-ae957cf06a97"), event: "rfc_compliant_media_creation_uas" }
+🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_bb7498c0-56aa-4464-ae4e-ae957cf06a97"), old_state: Ringing, new_state: Active }
+=== PARSING SIP MESSAGE ===
+Input length: 340 bytes
+Input as string: "BYE sip:uas@127.0.0.1:5062 SIP/2.0\r\nFrom: User <sip:uac@127.0.0.1>;tag=dd02e491\r\nTo: User <sip:uas@127.0.0.1:5062>;tag=tag-4f53d0515ff94e5d8c982ade2f1f856f\r\nCall-ID: call-59d41b0c-7997-474b-9630-d81469102374\r\nCSeq: 2 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\nVia: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK-8643caaaf84d46ba80cb51419bae1163\r\n\r\n"
+Input as hex: [42, 59, 45, 20, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3e, 3b, 74, 61, 67, 3d, 64, 64, 30, 32, 65, 34, 39, 31, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 34, 66, 35, 33, 64, 30, 35, 31, 35, 66, 66, 39, 34, 65, 35, 64, 38, 63, 39, 38, 32, 61, 64, 65, 32, 66, 31, 66, 38, 35, 36, 66, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 35, 39, 64, 34, 31, 62, 30, 63, 2d, 37, 39, 39, 37, 2d, 34, 37, 34, 62, 2d, 39, 36, 33, 30, 2d, 64, 38, 31, 34, 36, 39, 31, 30, 32, 33, 37, 34, 0d, 0a, 43, 53, 65, 71, 3a, 20, 32, 20, 42, 59, 45, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 38, 36, 34, 33, 63, 61, 61, 61, 66, 38, 34, 64, 34, 36, 62, 61, 38, 30, 63, 62, 35, 31, 34, 31, 39, 62, 61, 65, 31, 31, 36, 33, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 52, 102, 53, 51, 100, 48, 53, 49, 53, 102, 102, 57, 52, 101, 53, 100, 56, 99, 57, 56, 50, 97, 100, 101, 50, 102, 49, 102, 56, 53, 54, 102]
+Successfully parsed tag: tag-4f53d0515ff94e5d8c982ade2f1f856f
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Transaction loop starting for Key(z9hG4bK-8643caaaf84d46ba80cb51419bae1163:BYE:server)
+Initial state: Trying
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK-8643caaaf84d46ba80cb51419bae1163:BYE:server)
+Processing TransitionTo(Trying) current state: Trying
+Already in requested state, no transition needed: Trying
+Received command: ProcessMessage(Request(Request { method: Bye, uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("dd02e491")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-4f53d0515ff94e5d8c982ade2f1f856f")] })), CallId(CallId("call-59d41b0c-7997-474b-9630-d81469102374")), CSeq(CSeq { seq: 2, method: Bye }), MaxForwards(MaxForwards(70)), ContentLength(ContentLength(0)), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-8643caaaf84d46ba80cb51419bae1163")] }]))], body: b"" })) for transaction Key(z9hG4bK-8643caaaf84d46ba80cb51419bae1163:BYE:server)
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK-8643caaaf84d46ba80cb51419bae1163:BYE:server)
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+📨 EVENT LOOP: Received session coordination event in background task
+Sent StateChanged event result: Success
+🎪 SESSION COORDINATION: Received event: CallTerminated { dialog_id: DialogId(b68d396a-62da-42e8-9af0-1bf6c37ad017), reason: "BYE received" }
+🎯 COORDINATOR: Handling event: SessionTerminated { session_id: SessionId("sess_bb7498c0-56aa-4464-ae4e-ae957cf06a97"), reason: "BYE received" }
+🎯 COORDINATOR: Matched SessionTerminated event for sess_bb7498c0-56aa-4464-ae4e-ae957cf06a97 - BYE received
+🔴 COORDINATOR: handle_session_terminated called for session sess_bb7498c0-56aa-4464-ae4e-ae957cf06a97 with reason: BYE received
+🔔 COORDINATOR: Handler exists, checking for session sess_bb7498c0-56aa-4464-ae4e-ae957cf06a97
+✅ COORDINATOR: Found session sess_bb7498c0-56aa-4464-ae4e-ae957cf06a97, calling handler.on_call_ended
+Received command: Timer("J") for transaction Key(z9hG4bK-8eee0b09eb304fe0bd85f347441b4ab4:BYE:server)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-8eee0b09eb304fe0bd85f347441b4ab4:BYE:server)
+Processing TransitionTo(Terminated) current state: Completed
+Valid state transition: Completed -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-8eee0b09eb304fe0bd85f347441b4ab4:BYE:server). Final state: Terminated
+Received command: Timer("J") for transaction Key(z9hG4bK-ac61f20dfc094a19b36d8bfd77740d86:BYE:server)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-ac61f20dfc094a19b36d8bfd77740d86:BYE:server)
+Processing TransitionTo(Terminated) current state: Completed
+Valid state transition: Completed -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-ac61f20dfc094a19b36d8bfd77740d86:BYE:server). Final state: Terminated
+Received command: Timer("J") for transaction Key(z9hG4bK-8643caaaf84d46ba80cb51419bae1163:BYE:server)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-8643caaaf84d46ba80cb51419bae1163:BYE:server)
+Processing TransitionTo(Terminated) current state: Completed
+Valid state transition: Completed -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-8643caaaf84d46ba80cb51419bae1163:BYE:server). Final state: Terminated

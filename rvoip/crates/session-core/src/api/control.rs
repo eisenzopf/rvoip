@@ -1,299 +1,76 @@
-//! Call Control Functions
+//! Session Control API
 //!
-//! Simple functions for controlling active calls (hold, transfer, terminate, etc.).
+//! High-level API for controlling active sessions.
 
 use std::sync::Arc;
-use crate::api::types::{CallSession, CallState};
-use crate::manager::SessionManager;
-use crate::Result;
+use crate::api::types::{SessionId, MediaInfo};
+use crate::coordinator::SessionCoordinator;
+use crate::errors::Result;
 
-/// Put a call on hold
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session` - The active call session to hold
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// use std::sync::Arc;
-/// use rvoip_session_core::{SessionManager, Result};
-/// 
-/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
-/// hold_call(&manager, &call).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn hold_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
-    // Get the current session state from the manager to avoid stale state issues
-    let current_session = session_manager.find_session(&session.id).await?
-        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+/// Extension trait for session control operations
+pub trait SessionControl {
+    /// Put a session on hold
+    async fn hold_session(&self, session_id: &SessionId) -> Result<()>;
     
-    if !current_session.is_active() {
-        return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot hold call in state: {:?}", current_session.state)
-        ));
-    }
-
-    session_manager.hold_session(&session.id).await
-}
-
-/// Resume a call from hold
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session` - The held call session to resume
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// use std::sync::Arc;
-/// use rvoip_session_core::{SessionManager, Result};
-/// 
-/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
-/// // First hold the call
-/// hold_call(&manager, &call).await?;
-/// 
-/// // Then resume it
-/// resume_call(&manager, &call).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn resume_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
-    // Get the current session state from the manager to avoid stale state issues
-    let current_session = session_manager.find_session(&session.id).await?
-        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    /// Resume a held session
+    async fn resume_session(&self, session_id: &SessionId) -> Result<()>;
     
-    match current_session.state {
-        CallState::OnHold => {
-            // Normal case: resume from hold
-            session_manager.resume_session(&session.id).await
-        }
-        CallState::Active => {
-            // UX improvement: Allow no-op resume for active calls
-            // This is user-friendly since the desired outcome (active call) is already achieved
-            tracing::debug!("Resume called on already active call {}, treating as no-op", session.id);
-            Ok(())
-        }
-        _ => {
-            // Provide clear, helpful error message with context
-            let state_name = match current_session.state {
-                CallState::Initiating => "initiating (call setup in progress)",
-                CallState::Ringing => "ringing (waiting for answer)",
-                CallState::Transferring => "being transferred",
-                CallState::Terminating => "being terminated", 
-                CallState::Terminated => "terminated (call ended)",
-                CallState::Cancelled => "cancelled",
-                CallState::Failed(_) => "failed",
-                _ => "unknown state" // This shouldn't happen
-            };
-            
-            Err(crate::errors::SessionError::InvalidState(
-                format!(
-                    "Cannot resume call that is currently {}. Resume is only available for calls on hold. \
-                    Tip: Use hold_call() first to put an active call on hold, then resume_call() to resume it.",
-                    state_name
-                )
-            ))
-        }
-    }
-}
-
-/// Transfer a call to another destination
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session` - The active call session to transfer
-/// * `target` - The destination URI to transfer to (e.g., "sip:bob@example.com")
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// use std::sync::Arc;
-/// use rvoip_session_core::{SessionManager, Result};
-/// 
-/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
-/// transfer_call(&manager, &call, "sip:transferee@example.com").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn transfer_call(session_manager: &Arc<SessionManager>, session: &CallSession, target: &str) -> Result<()> {
-    // Get the current session state from the manager to avoid stale state issues
-    let current_session = session_manager.find_session(&session.id).await?
-        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    /// Transfer a session to another party
+    async fn transfer_session(&self, session_id: &SessionId, target: &str) -> Result<()>;
     
-    if !current_session.state.is_in_progress() {
-        return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot transfer call in state: {:?}", current_session.state)
-        ));
-    }
-
-    session_manager.transfer_session(&session.id, target).await
-}
-
-/// Terminate a call
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session` - The call session to terminate
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// use std::sync::Arc;
-/// use rvoip_session_core::{SessionManager, Result};
-/// 
-/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
-/// terminate_call(&manager, &call).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn terminate_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
-    if session.state.is_final() {
-        return Ok(()); // Already terminated
-    }
-
-    session_manager.terminate_session(&session.id).await
-}
-
-/// Send DTMF tones to the call
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session` - The active call session
-/// * `digits` - The DTMF digits to send (e.g., "123*#")
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// use std::sync::Arc;
-/// use rvoip_session_core::{SessionManager, Result};
-/// 
-/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
-/// send_dtmf(&manager, &call, "123").await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn send_dtmf(session_manager: &Arc<SessionManager>, session: &CallSession, digits: &str) -> Result<()> {
-    // Get the current session state from the manager to avoid stale state issues
-    let current_session = session_manager.find_session(&session.id).await?
-        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    /// Update session media (e.g., for codec changes)
+    async fn update_media(&self, session_id: &SessionId, sdp: &str) -> Result<()>;
     
-    if !current_session.is_active() {
-        return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot send DTMF on inactive call: {:?}", current_session.state)
-        ));
-    }
-
-    session_manager.send_dtmf(&session.id, digits).await
-}
-
-/// Mute the call (stop sending audio)
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session` - The active call session to mute
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// use std::sync::Arc;
-/// use rvoip_session_core::{SessionManager, Result};
-/// 
-/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
-/// mute_call(&manager, &call).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn mute_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
-    // Get the current session state from the manager to avoid stale state issues
-    let current_session = session_manager.find_session(&session.id).await?
-        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    /// Get media information for a session
+    async fn get_media_info(&self, session_id: &SessionId) -> Result<Option<MediaInfo>>;
     
-    if !current_session.is_active() {
-        return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot mute inactive call: {:?}", current_session.state)
-        ));
-    }
-
-    session_manager.mute_session(&session.id, true).await
-}
-
-/// Unmute the call (resume sending audio)
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session` - The muted call session to unmute
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// use std::sync::Arc;
-/// use rvoip_session_core::{SessionManager, Result};
-/// 
-/// # async fn example(manager: Arc<SessionManager>, call: CallSession) -> Result<()> {
-/// // First mute
-/// mute_call(&manager, &call).await?;
-/// 
-/// // Then unmute
-/// unmute_call(&manager, &call).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn unmute_call(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<()> {
-    // Get the current session state from the manager to avoid stale state issues
-    let current_session = session_manager.find_session(&session.id).await?
-        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
+    /// Mute/unmute audio
+    async fn set_audio_muted(&self, session_id: &SessionId, muted: bool) -> Result<()>;
     
-    if !current_session.is_active() {
-        return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot unmute inactive call: {:?}", current_session.state)
-        ));
+    /// Enable/disable video
+    async fn set_video_enabled(&self, session_id: &SessionId, enabled: bool) -> Result<()>;
+}
+
+impl SessionControl for Arc<SessionCoordinator> {
+    async fn hold_session(&self, session_id: &SessionId) -> Result<()> {
+        // TODO: Implement hold functionality
+        tracing::warn!("Hold session not yet implemented for {}", session_id);
+        Ok(())
     }
-
-    session_manager.mute_session(&session.id, false).await
-}
-
-/// Get media information for the call
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session` - The call session to get media info for
-/// 
-/// # Returns
-/// Media information including SDP, ports, and codec details
-pub async fn get_media_info(session_manager: &Arc<SessionManager>, session: &CallSession) -> Result<crate::api::types::MediaInfo> {
-    session_manager.get_media_info(&session.id).await
-}
-
-/// Update the media session (e.g., add/remove streams)
-/// 
-/// # Arguments
-/// * `session_manager` - The SessionManager instance
-/// * `session` - The call session to update
-/// * `new_sdp` - The new SDP offer/answer
-/// 
-/// # Example
-/// ```rust
-/// use rvoip_session_core::api::*;
-/// use std::sync::Arc;
-/// use rvoip_session_core::{SessionManager, Result};
-/// 
-/// # async fn example(manager: Arc<SessionManager>, call: CallSession, sdp: String) -> Result<()> {
-/// update_media(&manager, &call, &sdp).await?;
-/// # Ok(())
-/// # }
-/// ```
-pub async fn update_media(session_manager: &Arc<SessionManager>, session: &CallSession, new_sdp: &str) -> Result<()> {
-    // Get the current session state from the manager to avoid stale state issues
-    let current_session = session_manager.find_session(&session.id).await?
-        .ok_or_else(|| crate::errors::SessionError::session_not_found(&session.id.0))?;
     
-    if !current_session.state.is_in_progress() {
-        return Err(crate::errors::SessionError::InvalidState(
-            format!("Cannot update media for call in state: {:?}", current_session.state)
-        ));
+    async fn resume_session(&self, session_id: &SessionId) -> Result<()> {
+        // TODO: Implement resume functionality
+        tracing::warn!("Resume session not yet implemented for {}", session_id);
+        Ok(())
     }
-
-    session_manager.update_media(&session.id, new_sdp).await
+    
+    async fn transfer_session(&self, session_id: &SessionId, target: &str) -> Result<()> {
+        // TODO: Implement transfer functionality
+        tracing::warn!("Transfer session not yet implemented for {} to {}", session_id, target);
+        Ok(())
+    }
+    
+    async fn update_media(&self, session_id: &SessionId, sdp: &str) -> Result<()> {
+        // TODO: Implement media update
+        tracing::warn!("Update media not yet implemented for {}", session_id);
+        Ok(())
+    }
+    
+    async fn get_media_info(&self, session_id: &SessionId) -> Result<Option<MediaInfo>> {
+        // TODO: Implement get media info
+        tracing::warn!("Get media info not yet implemented for {}", session_id);
+        Ok(None)
+    }
+    
+    async fn set_audio_muted(&self, session_id: &SessionId, muted: bool) -> Result<()> {
+        // TODO: Implement audio mute
+        tracing::warn!("Set audio muted not yet implemented for {}: {}", session_id, muted);
+        Ok(())
+    }
+    
+    async fn set_video_enabled(&self, session_id: &SessionId, enabled: bool) -> Result<()> {
+        // TODO: Implement video enable/disable
+        tracing::warn!("Set video enabled not yet implemented for {}: {}", session_id, enabled);
+        Ok(())
+    }
 } 

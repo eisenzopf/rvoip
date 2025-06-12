@@ -136,6 +136,8 @@ impl SessionDialogCoordinator {
         request: rvoip_sip_core::Request,
         source: std::net::SocketAddr,
     ) -> DialogResult<()> {
+        tracing::info!("handle_incoming_call called for dialog {}", dialog_id);
+        
         // Extract From and To headers - simplified for now
         let from_uri = format!("sip:from@{}", source.ip());
         let to_uri = "sip:to@local".to_string();
@@ -147,6 +149,8 @@ impl SessionDialogCoordinator {
         // Create a new session for the incoming call
         let session_id = SessionId::new();
         self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
+        
+        tracing::info!("Created session {} for incoming call dialog {}", session_id, dialog_id);
         
         let call_session = CallSession {
             id: session_id.clone(),
@@ -171,6 +175,8 @@ impl SessionDialogCoordinator {
         
         // Handle the call with the configured handler
         if let Some(handler) = &self.handler {
+            tracing::info!("Calling handler.on_incoming_call for session {}", session_id);
+            
             let incoming_call = IncomingCall {
                 id: session_id.clone(),
                 from: from_uri,
@@ -181,7 +187,10 @@ impl SessionDialogCoordinator {
             };
             
             let decision = handler.on_incoming_call(incoming_call).await;
+            tracing::info!("Handler decision for session {}: {:?}", session_id, decision);
             self.process_call_decision(session_id, dialog_id, decision).await?;
+        } else {
+            tracing::warn!("No handler configured for incoming call");
         }
         
         Ok(())
@@ -589,6 +598,8 @@ impl SessionDialogCoordinator {
         dialog_id: DialogId,
         reason: String,
     ) -> DialogResult<()> {
+        tracing::info!("handle_call_terminated called for dialog {}: {}", dialog_id, reason);
+        
         if let Some((_, session_id)) = self.dialog_to_session.remove(&dialog_id) {
             tracing::info!("Call terminated for session {}: {} - {}", session_id, dialog_id, reason);
             
@@ -598,10 +609,13 @@ impl SessionDialogCoordinator {
                 reason: reason.clone(),
             }).await?;
             
-            self.registry.unregister_session(&session_id).await
-                .map_err(|e| DialogError::Coordination {
-                    message: format!("Failed to unregister session: {}", e),
-                })?;
+            // Don't unregister here - let the main coordinator do it after handler notification
+            // self.registry.unregister_session(&session_id).await
+            //     .map_err(|e| DialogError::Coordination {
+            //         message: format!("Failed to unregister session: {}", e),
+            //     })?;
+        } else {
+            tracing::warn!("No session found for terminated dialog {}", dialog_id);
         }
         
         Ok(())
