@@ -7,7 +7,7 @@ use uuid::Uuid;
 pub type ClientResult<T> = Result<T, ClientError>;
 
 /// Comprehensive error types for SIP client operations
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum ClientError {
     /// Registration related errors
     #[error("Registration failed: {reason}")]
@@ -68,38 +68,59 @@ pub enum ClientError {
     #[error("SIP protocol error: {reason}")]
     ProtocolError { reason: String },
 
-    #[error("Invalid SIP URI: {uri}")]
-    InvalidUri { uri: String },
+    #[error("Invalid SIP message: {reason}")]
+    InvalidSipMessage { reason: String },
 
-    #[error("Unsupported SIP method: {method}")]
-    UnsupportedMethod { method: String },
+    #[error("Protocol version mismatch: expected {expected}, got {actual}")]
+    ProtocolVersionMismatch { expected: String, actual: String },
 
     /// Configuration errors
-    #[error("Invalid configuration: {reason}")]
-    InvalidConfiguration { reason: String },
+    #[error("Invalid configuration: {field} - {reason}")]
+    InvalidConfiguration { field: String, reason: String },
 
     #[error("Missing required configuration: {field}")]
     MissingConfiguration { field: String },
 
-    /// Infrastructure errors (wrapping lower-layer errors)
-    #[error("Transaction error: {0}")]
-    TransactionError(#[from] anyhow::Error),
+    /// Transport errors
+    #[error("Transport failed: {reason}")]
+    TransportFailed { reason: String },
 
-    #[error("Media error: {0}")]
-    MediaError(String),
+    #[error("Transport not available: {transport_type}")]
+    TransportNotAvailable { transport_type: String },
 
-    #[error("Transport error: {0}")]
-    TransportError(String),
+    /// Session management errors
+    #[error("Session manager error: {reason}")]
+    SessionManagerError { reason: String },
 
-    /// General errors
-    #[error("Internal error: {reason}")]
-    InternalError { reason: String },
+    #[error("Too many sessions: limit is {limit}")]
+    TooManySessions { limit: usize },
 
-    #[error("Operation timeout")]
-    Timeout,
+    /// Generic errors
+    #[error("Internal error: {message}")]
+    InternalError { message: String },
 
-    #[error("Operation cancelled")]
-    Cancelled,
+    #[error("Operation timeout after {duration_ms}ms")]
+    OperationTimeout { duration_ms: u64 },
+
+    #[error("Not implemented: {feature} - {reason}")]
+    NotImplemented { feature: String, reason: String },
+
+    #[error("Permission denied: {operation}")]
+    PermissionDenied { operation: String },
+
+    #[error("Resource unavailable: {resource}")]
+    ResourceUnavailable { resource: String },
+
+    /// Codec and media format errors
+    #[error("Unsupported codec: {codec}")]
+    UnsupportedCodec { codec: String },
+
+    #[error("Codec error: {reason}")]
+    CodecError { reason: String },
+
+    /// External service errors
+    #[error("External service error: {service} - {reason}")]
+    ExternalServiceError { service: String, reason: String },
 }
 
 impl ClientError {
@@ -135,19 +156,30 @@ impl ClientError {
 
     /// Create an internal error
     pub fn internal_error(reason: impl Into<String>) -> Self {
-        Self::InternalError { reason: reason.into() }
+        Self::InternalError { message: reason.into() }
     }
 
-    /// Check if error is recoverable (can retry operation)
+    /// Check if this error is recoverable
     pub fn is_recoverable(&self) -> bool {
-        matches!(
-            self,
-            ClientError::ConnectionTimeout
-                | ClientError::NetworkError { .. }
-                | ClientError::ServerUnreachable { .. }
-                | ClientError::Timeout
-                | ClientError::TransportError(..)
-        )
+        match self {
+            // Recoverable errors
+            ClientError::NetworkError { .. } |
+            ClientError::ConnectionTimeout |
+            ClientError::TransportFailed { .. } |
+            ClientError::OperationTimeout { .. } |
+            ClientError::ExternalServiceError { .. } => true,
+            
+            // Non-recoverable errors
+            ClientError::InvalidConfiguration { .. } |
+            ClientError::MissingConfiguration { .. } |
+            ClientError::ProtocolVersionMismatch { .. } |
+            ClientError::PermissionDenied { .. } |
+            ClientError::NotImplemented { .. } |
+            ClientError::UnsupportedCodec { .. } => false,
+            
+            // Context-dependent errors
+            _ => false,
+        }
     }
 
     /// Check if error indicates authentication issue
@@ -170,5 +202,51 @@ impl ClientError {
                 | ClientError::CallSetupFailed { .. }
                 | ClientError::CallTerminated { .. }
         )
+    }
+
+    /// Get error category for metrics/logging
+    pub fn category(&self) -> &'static str {
+        match self {
+            ClientError::RegistrationFailed { .. } |
+            ClientError::NotRegistered |
+            ClientError::RegistrationExpired |
+            ClientError::AuthenticationFailed { .. } => "registration",
+            
+            ClientError::CallNotFound { .. } |
+            ClientError::CallAlreadyExists { .. } |
+            ClientError::InvalidCallState { .. } |
+            ClientError::InvalidCallStateGeneric { .. } |
+            ClientError::CallSetupFailed { .. } |
+            ClientError::CallTerminated { .. } => "call",
+            
+            ClientError::MediaNegotiationFailed { .. } |
+            ClientError::NoCompatibleCodecs |
+            ClientError::AudioDeviceError { .. } |
+            ClientError::UnsupportedCodec { .. } |
+            ClientError::CodecError { .. } => "media",
+            
+            ClientError::NetworkError { .. } |
+            ClientError::ConnectionTimeout |
+            ClientError::ServerUnreachable { .. } |
+            ClientError::TransportFailed { .. } |
+            ClientError::TransportNotAvailable { .. } => "network",
+            
+            ClientError::ProtocolError { .. } |
+            ClientError::InvalidSipMessage { .. } |
+            ClientError::ProtocolVersionMismatch { .. } => "protocol",
+            
+            ClientError::InvalidConfiguration { .. } |
+            ClientError::MissingConfiguration { .. } => "configuration",
+            
+            ClientError::SessionManagerError { .. } |
+            ClientError::TooManySessions { .. } => "session",
+            
+            ClientError::InternalError { .. } |
+            ClientError::OperationTimeout { .. } |
+            ClientError::NotImplemented { .. } |
+            ClientError::PermissionDenied { .. } |
+            ClientError::ResourceUnavailable { .. } |
+            ClientError::ExternalServiceError { .. } => "system",
+        }
     }
 } 

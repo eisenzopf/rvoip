@@ -3,113 +3,132 @@
 //! This example demonstrates the basic capabilities of the rvoip-client-core library.
 //! It shows how to create a SIP client, register with a server, and manage calls.
 
-use std::time::Duration;
-use tokio::time::sleep;
-use tracing::{info, error, warn};
+use tokio::time::{sleep, Duration};
+use tracing::{info, warn, error};
 
 use rvoip_client_core::{
-    ClientManager, ClientConfig, RegistrationConfig,
-    ClientEventHandler, IncomingCallInfo, CallStatusInfo, 
-    RegistrationStatusInfo, CallAction, MediaEventType,
-    CallId, CallState,
-    events::Credentials,
+    ClientManager, ClientConfig, ClientEventHandler, RegistrationConfig,
+    call::{CallId, CallState},
+    events::{
+        CallAction, IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo,
+        MediaEventInfo, MediaEventType
+    },
+    error::ClientError,
 };
 
-/// A simple event handler that logs all events
-struct LoggingEventHandler;
+/// Example event handler that demonstrates all the client events
+struct ExampleEventHandler {
+    name: String,
+}
+
+impl ExampleEventHandler {
+    fn new(name: String) -> Self {
+        Self { name }
+    }
+}
 
 #[async_trait::async_trait]
-impl ClientEventHandler for LoggingEventHandler {
+impl ClientEventHandler for ExampleEventHandler {
     async fn on_incoming_call(&self, call_info: IncomingCallInfo) -> CallAction {
-        info!("📞 Incoming call from: {} -> {}", 
-              call_info.caller_uri, call_info.callee_uri);
+        info!(
+            "📞 [{}] Incoming call from: {} ({})", 
+            self.name,
+            call_info.caller_uri,
+            call_info.caller_display_name.as_deref().unwrap_or("Unknown")
+        );
         
-        if let Some(display_name) = &call_info.caller_display_name {
-            info!("👤 Caller display name: {}", display_name);
+        if let Some(subject) = &call_info.subject {
+            info!("📝 Call subject: {}", subject);
         }
         
-        // For demo purposes, auto-accept all calls
-        info!("✅ Auto-accepting call");
+        // For this example, we'll automatically accept incoming calls
+        info!("✅ Auto-accepting incoming call");
         CallAction::Accept
     }
-    
+
     async fn on_call_state_changed(&self, status_info: CallStatusInfo) {
         let state_emoji = match status_info.new_state {
-            CallState::Initiating => "🔄",
+            CallState::Initiating => "🚀",
             CallState::Proceeding => "⏳", 
-            CallState::Ringing => "📳",
-            CallState::Connected => "🟢",
-            CallState::Terminating => "🔴",
-            CallState::Terminated => "❌",
-            CallState::Failed => "💥",
+            CallState::Ringing => "🔔",
+            CallState::Connected => "📞",
+            CallState::Terminating => "👋",
+            CallState::Terminated => "🔚",
+            CallState::Failed => "❌",
             CallState::Cancelled => "🚫",
-            CallState::IncomingPending => "📞",
+            CallState::IncomingPending => "📨",
         };
         
-        info!("{} Call {} state: {:?}", 
-              state_emoji, status_info.call_id, status_info.new_state);
+        info!(
+            "{} [{}] Call {} state: {:?} -> {:?}", 
+            state_emoji,
+            self.name,
+            status_info.call_id,
+            status_info.previous_state.as_ref().map(|s| format!("{:?}", s)).unwrap_or_else(|| "None".to_string()),
+            status_info.new_state
+        );
         
         if let Some(reason) = &status_info.reason {
-            info!("   Reason: {}", reason);
+            info!("💬 Reason: {}", reason);
         }
     }
-    
+
     async fn on_registration_status_changed(&self, status_info: RegistrationStatusInfo) {
         let status_emoji = match status_info.status {
-            rvoip_client_core::RegistrationStatus::Unregistered => "❌",
-            rvoip_client_core::RegistrationStatus::Registering => "🔄",
-            rvoip_client_core::RegistrationStatus::Registered => "✅",
-            rvoip_client_core::RegistrationStatus::Failed => "💥",
-            rvoip_client_core::RegistrationStatus::Unregistering => "🔄",
+            rvoip_client_core::registration::RegistrationStatus::Unregistered => "❌",
+            rvoip_client_core::registration::RegistrationStatus::Registering => "⏳",
+            rvoip_client_core::registration::RegistrationStatus::Registered => "✅",
+            rvoip_client_core::registration::RegistrationStatus::Failed => "💥",
+            rvoip_client_core::registration::RegistrationStatus::Unregistering => "🔄",
         };
         
-        info!("{} Registration status for {}: {:?}", 
-              status_emoji, status_info.server_uri, status_info.status);
-    }
-    
-    async fn on_network_status_changed(&self, connected: bool, server: String, message: Option<String>) {
-        let status = if connected { "🌐 Connected" } else { "🔌 Disconnected" };
-        info!("{} to server: {}", status, server);
+        info!(
+            "{} [{}] Registration {} for {}: {:?}",
+            status_emoji, self.name, status_info.user_uri, status_info.server_uri, status_info.status
+        );
         
-        if let Some(msg) = message {
-            info!("   Message: {}", msg);
+        if let Some(reason) = &status_info.reason {
+            info!("💬 Reason: {}", reason);
         }
     }
-    
-    async fn on_media_event(&self, call_id: Option<CallId>, event_type: MediaEventType, description: String) {
-        let emoji = match event_type {
-            MediaEventType::AudioStarted => "🔊",
-            MediaEventType::AudioStopped => "🔇",
-            MediaEventType::AudioQualityChanged => "📈",
-            MediaEventType::MicrophoneStateChanged { muted } => if muted { "🎙️❌" } else { "🎙️✅" },
-            MediaEventType::SpeakerStateChanged { muted } => if muted { "🔊❌" } else { "🔊✅" },
-            MediaEventType::CodecChanged { .. } => "🎵",
+
+    async fn on_media_event(&self, event: MediaEventInfo) {
+        let emoji = match &event.event_type {
+            MediaEventType::MicrophoneStateChanged { muted } => if *muted { "🔇" } else { "🎤" },
+            MediaEventType::SpeakerStateChanged { muted } => if *muted { "🔇" } else { "🔊" },
+            MediaEventType::AudioStarted => "▶️",
+            MediaEventType::AudioStopped => "⏹️",
+            MediaEventType::HoldStateChanged { on_hold } => if *on_hold { "⏸️" } else { "▶️" },
+            MediaEventType::DtmfSent { .. } => "📞",
+            MediaEventType::TransferInitiated { .. } => "🔄",
+            MediaEventType::SdpOfferGenerated { .. } => "📄",
+            MediaEventType::SdpAnswerProcessed { .. } => "📥",
+            MediaEventType::MediaSessionStarted { .. } => "🎵",
+            MediaEventType::MediaSessionStopped => "⏹️",
+            MediaEventType::MediaSessionUpdated { .. } => "🔄",
+            MediaEventType::QualityChanged { .. } => "📊",
+            MediaEventType::PacketLoss { .. } => "📉",
+            MediaEventType::JitterChanged { .. } => "📈",
         };
         
+        println!("    {} Media Event: {:?}", emoji, event.event_type);
+    }
+
+    async fn on_client_error(&self, error: ClientError, call_id: Option<CallId>) {
         if let Some(call_id) = call_id {
-            info!("{} Media event for call {}: {}", emoji, call_id, description);
+            error!("💥 [{}] Error for call {}: {}", self.name, call_id, error);
         } else {
-            info!("{} Global media event: {}", emoji, description);
+            error!("💥 [{}] General error: {}", self.name, error);
         }
     }
-    
-    async fn on_error(&self, error: String, recoverable: bool, context: Option<String>) {
-        let severity = if recoverable { "⚠️  WARNING" } else { "💥 ERROR" };
-        error!("{}: {}", severity, error);
+
+    async fn on_network_event(&self, connected: bool, reason: Option<String>) {
+        let status = if connected { "🌐 Connected" } else { "🔌 Disconnected" };
+        info!("{} [{}] Network status changed", status, self.name);
         
-        if let Some(ctx) = context {
-            error!("   Context: {}", ctx);
+        if let Some(reason) = reason {
+            info!("💬 Reason: {}", reason);
         }
-    }
-    
-    async fn get_credentials(&self, realm: String, server: String) -> Option<Credentials> {
-        warn!("🔐 Authentication required for realm '{}' on server '{}'", realm, server);
-        
-        // For demo purposes, return dummy credentials
-        Some(Credentials {
-            username: "demo_user".to_string(),
-            password: "demo_pass".to_string(),
-        })
     }
 }
 
@@ -147,7 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = ClientManager::new(config).await?;
     
     // Set up event handler
-    let event_handler = std::sync::Arc::new(LoggingEventHandler);
+    let event_handler = std::sync::Arc::new(ExampleEventHandler::new("Main".to_string()));
     client.set_event_handler(event_handler).await;
     info!("📋 Event handler registered");
 

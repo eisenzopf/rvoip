@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 pub type CallId = Uuid;
 
 /// Current state of a call
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CallState {
     /// Call is being initiated (sending INVITE)
     Initiating,

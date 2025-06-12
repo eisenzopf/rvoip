@@ -1,0 +1,544 @@
+warning: method `handle_auto_options` is never used
+   --> crates/dialog-core/src/manager/unified.rs:563:14
+    |
+197 | impl UnifiedDialogManager {
+    | ------------------------- method in this implementation
+...
+563 |     async fn handle_auto_options(&self, request: Request, source: SocketAddr) -> ApiResult<()> {
+    |              ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: method `extract_body_string` is never used
+   --> crates/dialog-core/src/protocol/invite_handler.rs:177:8
+    |
+71  | impl DialogManager {
+    | ------------------ method in this implementation
+...
+177 |     fn extract_body_string(&self, request: &Request) -> String {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: `rvoip-dialog-core` (lib) generated 2 warnings
+warning: unused import: `StaticEvent`
+  --> crates/infra-common/src/events/static_path.rs:14:60
+   |
+14 | use crate::events::types::{Event, EventResult, EventError, StaticEvent, EventFilter};
+   |                                                            ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `EventError` and `StaticEvent`
+  --> crates/infra-common/src/events/system.rs:16:48
+   |
+16 | use crate::events::types::{Event, EventResult, EventError, EventFilter, StaticEvent};
+   |                                                ^^^^^^^^^^               ^^^^^^^^^^^
+
+warning: unused imports: `EventSystemBuilder` and `ImplementationType`
+  --> crates/infra-common/src/events/system.rs:21:30
+   |
+21 | use crate::events::builder::{ImplementationType, EventSystemBuilder};
+   |                              ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/infra-common/src/lifecycle/manager.rs:87:13
+   |
+87 |         let mut components = self.components.write().unwrap();
+   |             ----^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:107:13
+    |
+107 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:127:13
+    |
+127 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:148:13
+    |
+148 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:63:20
+   |
+63 |             config.merge(File::from(base_path.clone()))
+   |                    ^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:69:20
+   |
+69 |             config.merge(File::from(env_path))
+   |                    ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:75:16
+   |
+75 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:97:16
+   |
+97 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+   --> crates/infra-common/src/config/loader.rs:115:20
+    |
+115 |             config.merge(File::from(p.clone()))
+    |                    ^^^^^
+
+warning: methods `type_name` and `clone_sender` are never used
+  --> crates/infra-common/src/events/registry.rs:37:8
+   |
+35 | trait AnyBroadcastSender: Send + Sync + 'static {
+   |       ------------------ methods in this trait
+36 |     fn as_any(&self) -> &dyn Any;
+37 |     fn type_name(&self) -> &str;
+   |        ^^^^^^^^^
+38 |     fn clone_sender(&self) -> Box<dyn AnyBroadcastSender>;
+   |        ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: fields `id`, `event_type`, and `priority` are never read
+  --> crates/infra-common/src/events/subscriber.rs:11:16
+   |
+10 | pub struct SubscriberHandle {
+   |            ---------------- fields in this struct
+11 |     pub(crate) id: u64,
+   |                ^^
+12 |     pub(crate) event_type: EventType,
+   |                ^^^^^^^^^^
+13 |     pub(crate) priority: EventPriority,
+   |                ^^^^^^^^
+   |
+   = note: `SubscriberHandle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `infra-common` (lib) generated 14 warnings (run `cargo fix --lib -p infra-common` to apply 7 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/debug/sip_test_server --port 5062 --mode auto-answer --log-level info`
+[2m2025-06-12T05:06:54.056818Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m278:[0m 🧪 SIP Test Server starting...
+[2m2025-06-12T05:06:54.056966Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m279:[0m 🔧 Configuration:
+[2m2025-06-12T05:06:54.057002Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m280:[0m   📡 Port: 5062
+[2m2025-06-12T05:06:54.057015Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m281:[0m   🎯 Mode: AutoAnswer
+[2m2025-06-12T05:06:54.057027Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m282:[0m   📊 Metrics: true
+[2m2025-06-12T05:06:54.057039Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m168:[0m 🚀 Starting SIP Test Server on port 5062
+[2m2025-06-12T05:06:54.057537Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/api/unified.rs[0m[2m:[0m[2m805:[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-06-12T05:06:54.058100Z[0m [32m INFO[0m ThreadId(01) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m48:[0m SIP UDP transport bound to 127.0.0.1:5062
+[2m2025-06-12T05:06:54.059142Z[0m [32m INFO[0m ThreadId(01) [2mcrates/transaction-core/src/transport/mod.rs[0m[2m:[0m[2m247:[0m Added UDP transport bound to 127.0.0.1:5062
+[2m2025-06-12T05:06:54.059680Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/api/unified.rs[0m[2m:[0m[2m294:[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-06-12T05:06:54.059734Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m252:[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 127.0.0.1:5062
+[2m2025-06-12T05:06:54.059779Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m100:[0m Creating new DialogManager with global transaction events and local address 127.0.0.1:5062
+[2m2025-06-12T05:06:54.060112Z[0m [32m INFO[0m ThreadId(17) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m128:[0m 🔄 Starting global transaction event processor for dialog-core
+🔗 SETUP: Initializing dialog coordination via DialogCoordinator
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+🎬 SPAWN: Starting dialog coordination event loop
+🎬 SPAWN: Starting session coordination event loop
+🌉 BRIDGE: Setting up session event bridge with media auto-creation and SDP handling
+📡 EVENT LOOP: Session coordination event loop started
+[2m2025-06-12T05:06:54.060470Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m289:[0m SessionManager initialized on port 5062
+[2m2025-06-12T05:06:54.060486Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m197:[0m 🚀 Starting SIP Test Server session manager...
+[2m2025-06-12T05:06:54.060496Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/api/unified.rs[0m[2m:[0m[2m336:[0m Starting UnifiedDialogApi
+[2m2025-06-12T05:06:54.060506Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m294:[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-12T05:06:54.060515Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m399:[0m DialogManager starting
+[2m2025-06-12T05:06:54.060523Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/core.rs[0m[2m:[0m[2m407:[0m DialogManager started successfully
+[2m2025-06-12T05:06:54.060549Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m310:[0m Hybrid mode active - from_uri: Some("sip:test@127.0.0.1:5062"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-12T05:06:54.060559Z[0m [32m INFO[0m ThreadId(01) [2mcrates/dialog-core/src/manager/unified.rs[0m[2m:[0m[2m315:[0m UnifiedDialogManager started successfully
+[2m2025-06-12T05:06:54.060815Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/events.rs[0m[2m:[0m[2m162:[0m Session event processor started
+[2m2025-06-12T05:06:54.060836Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/cleanup.rs[0m[2m:[0m[2m54:[0m Cleanup manager started
+[2m2025-06-12T05:06:54.060848Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m302:[0m SessionManager started
+[2m2025-06-12T05:06:54.060859Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m202:[0m ✅ SIP Test Server ready and listening on port 5062
+[2m2025-06-12T05:06:54.060867Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m203:[0m 📋 Response mode: AutoAnswer
+[2m2025-06-12T05:06:54.060892Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m204:[0m 🔄 Waiting for incoming calls from SIPp...
+[2m2025-06-12T05:06:54.060901Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m205:[0m 📡 Real SIP server now active - SIPp can connect!
+=== PARSING SIP MESSAGE ===
+Input length: 590 bytes
+Input as string: "INVITE sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-23547-1-0\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=23547SIPpTag001\r\nTo: Test User <sip:test@127.0.0.1:5062>\r\nCall-ID: 1-23547@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Type: application/sdp\r\nContent-Length:   181\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 33, 35, 34, 37, 2d, 31, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 33, 35, 34, 37, 53, 49, 50, 70, 54, 61, 67, 30, 30, 31, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 32, 33, 35, 34, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 38, 31, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 53, 65, 73, 73, 69, 6f, 6e, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-12T05:06:58.821687Z[0m [32m INFO[0m ThreadId(05) [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m1958:[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-23547-1-0:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+Transaction loop starting for Key(z9hG4bK-23547-1-0:INVITE:server)
+Initial state: Proceeding
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-23547-1-0:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+[2m2025-06-12T05:06:58.821980Z[0m [32m INFO[0m ThreadId(05) [2mcrates/dialog-core/src/manager/dialog_operations.rs[0m[2m:[0m[2m435:[0m Created early dialog 198212c7-aa37-4923-99fd-1ad77204c538 from INVITE request
+🔍 INVITE HANDLER: Created early dialog 198212c7-aa37-4923-99fd-1ad77204c538
+Already in requested state, no transition needed: Proceeding
+🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-23547-1-0:INVITE:server) with dialog 198212c7-aa37-4923-99fd-1ad77204c538
+🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog 198212c7-aa37-4923-99fd-1ad77204c538
+🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog 198212c7-aa37-4923-99fd-1ad77204c538
+📨 EVENT LOOP: Received session coordination event in background task
+[2m2025-06-12T05:06:58.822174Z[0m [32m INFO[0m ThreadId(05) [2mcrates/dialog-core/src/protocol/invite_handler.rs[0m[2m:[0m[2m101:[0m Initial INVITE processed, created dialog 198212c7-aa37-4923-99fd-1ad77204c538
+🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(198212c7-aa37-4923-99fd-1ad77204c538), transaction_id: z9hG4bK-23547-1-0:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-23547-1-0")] }])), From(From(Address { display_name: Some("SIPp Test"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("23547SIPpTag001")] })), To(To(Address { display_name: Some("Test User"), uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-23547@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("SIPp Basic Call Test")), UserAgent(["SIPp/3.6.1"]), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(181))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n" }, source: 127.0.0.1:5061 }
+[2m2025-06-12T05:06:58.822396Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m143:[0m Incoming call from dialog 198212c7-aa37-4923-99fd-1ad77204c538: sip:from@127.0.0.1 -> sip:to@local
+[2m2025-06-12T05:06:58.822507Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m77:[0m 📞 [SIPp-Test-Server] Incoming call from sip:from@127.0.0.1 to sip:to@local
+[2m2025-06-12T05:06:58.822538Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m78:[0m 📞 [SIPp-Test-Server] Call ID: sess_265cd56c-efbb-46c2-a828-6de6cbab408f
+[2m2025-06-12T05:06:58.822560Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m89:[0m ✅ [SIPp-Test-Server] Auto-answering call
+[2m2025-06-12T05:06:58.822579Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m93:[0m 📞 [SIPp-Test-Server] Received SDP offer, generating answer
+[2m2025-06-12T05:06:58.822634Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m96:[0m 📞 [SIPp-Test-Server] Generated SDP answer
+[2m2025-06-12T05:06:58.822708Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m537:[0m Answering call 198212c7-aa37-4923-99fd-1ad77204c538
+[2m2025-06-12T05:06:58.822932Z[0m [32m INFO[0m ThreadId(10) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m162:[0m Sending response message to 127.0.0.1:5061
+[2m2025-06-12T05:06:58.823053Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m628:[0m Dialog 198212c7-aa37-4923-99fd-1ad77204c538 local tag set to match response: tag-5f126537b9744cc79c0c978f1df82a03
+[2m2025-06-12T05:06:58.823086Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m640:[0m Dialog 198212c7-aa37-4923-99fd-1ad77204c538 transitioned to Confirmed state
+[2m2025-06-12T05:06:58.823124Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m647:[0m Updated dialog lookup for confirmed dialog 198212c7-aa37-4923-99fd-1ad77204c538
+[2m2025-06-12T05:06:58.823159Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m661:[0m Successfully answered call 198212c7-aa37-4923-99fd-1ad77204c538
+[2m2025-06-12T05:06:58.823220Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m205:[0m Successfully answered incoming call for session sess_265cd56c-efbb-46c2-a828-6de6cbab408f
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallAnswered { dialog_id: DialogId(198212c7-aa37-4923-99fd-1ad77204c538), session_answer: "v=0\r\no=rvoip 1749704818 1749704818 IN IP4 127.0.0.1\r\ns=RVOIP Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10001 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n" }
+[2m2025-06-12T05:06:58.823287Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m409:[0m Call answered for session sess_265cd56c-efbb-46c2-a828-6de6cbab408f: 198212c7-aa37-4923-99fd-1ad77204c538 (awaiting ACK per RFC 3261)
+[2m2025-06-12T05:06:58.823333Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m423:[0m 📞 Call answered for session sess_265cd56c-efbb-46c2-a828-6de6cbab408f - keeping in Initiating state until media ready
+Received command: CancelTimer100 for transaction Key(z9hG4bK-23547-1-0:INVITE:server)
+[2m2025-06-12T05:06:58.823360Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m426:[0m 🚫 RFC 3261: NOT creating media session yet - waiting for ACK
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-23547-1-0:INVITE:server)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+=== PARSING SIP MESSAGE ===
+Input length: Sent StateChanged event result: Success
+409 bytes
+Input as string: "ACK sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-23547-1-4\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=23547SIPpTag001\r\nTo: Test User <sip:test@127.0.0.1:5062>;tag=tag-5f126537b9744cc79c0c978f1df82a03\r\nCall-ID: 1-23547@127.0.0.1\r\nCSeq: 1 ACK\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [41, 43, 4b, 20, 73, 69, 70, 3a, 74, 65, 73, Transaction loop ending for Key(z9hG4bK-23547-1-0:INVITE:server). Final state: Terminated
+74, 40, 31, 32, 37, 2e[2m2025-06-12T05:06:58.823461Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m159:[0m 📄 Stored remote SDP answer for session sess_265cd56c-efbb-46c2-a828-6de6cbab408f
+, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 33, 35, 34, 37, 2d, 31, 2d, 34, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 33, 35, 34, 37, 53, 49, 50, 70, 54, 61, 67, 30, 30, 31, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 35, 66, 31, 32, 36, 35, 33, 37, 62, 39, 37, 34, 34, 63, 63, 37, 39, 63, 30, 63, 39, 37, 38, 66, 31, 64, 66, 38, 32, 61, 30, 33, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 32, 33, 35, 34, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 41, 43, 4b, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 53, 102, 49, 50, 54, 53, 51, 55, 98, 57, 55, 52, 52, 99, 99, 55, 57, 99, 48, 99, 57, 55, 56, 102, 49, 100, 102, 56, 50, 97, 48, 51]
+Successfully parsed tag: tag-5f126537b9744cc79c0c978f1df82a03
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("SIPp Test"), "params": Array([Object({"Tag": String("23547SIPpTag001")})]), "uri": Object({"raw_uri": Null, "host": Object({"Address": String("127.0.0.1")}), "headers": Object({}), "scheme": String("Sip"), "port": Number(5061.0), "user": String("sipp"), "parameters": Array([]), "password": Null})})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("23547SIPpTag001")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("23547SIPpTag001")})
+Final value for path 'headers.From.params[0].Tag': String("23547SIPpTag001")
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([Object({"Tag": String("23547SIPpTag001")})]), "uri": Object({"headers": Object({}), "host": Object({"Address": String("127.0.0.1")}), "scheme": String("Sip"), "port": Number(5061.0), "user": String("sipp"), "password": Null, "parameters": Array([]), "raw_uri": Null}), "display_name": String("SIPp Test")})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("23547SIPpTag001")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("23547SIPpTag001")})
+Final value for path 'headers.From.params[0].Tag': String("23547SIPpTag001")
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"host": Object({"Address": String("127.0.0.1")}), "parameters": Array([]), "scheme": String("Sip"), "headers": Object({}), "user": String("test"), "password": Null, "port": Number(5062.0), "raw_uri": Null}), "display_name": String("Test User"), "params": Array([])})
+Processing segment Index(0) at index 3, current value: Array([])
+Index 0 out of bounds for array of length 0
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([Object({"Tag": String("tag-5f126537b9744cc79c0c978f1df82a03")})]), "display_name": String("Test User"), "uri": Object({"port": Number(5062.0), "raw_uri": Null, "scheme": String("Sip"), "user": String("test"), "parameters": Array([]), "host": Object({"Address": String("127.0.0.1")}), "password": Null, "headers": Object({})})})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("tag-5f126537b9744cc79c0c978f1df82a03")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("tag-5f126537b9744cc79c0c978f1df82a03")})
+Final value for path 'headers.To.params[0].Tag': String("tag-5f126537b9744cc79c0c978f1df82a03")
+[2m2025-06-12T05:06:58.829209Z[0m [32m INFO[0m ThreadId(17) [2mcrates/dialog-core/src/manager/transaction_integration.rs[0m[2m:[0m[2m758:[0m ✅ RFC 3261: ACK received for transaction Key(z9hG4bK-23547-1-0:INVITE:server) in dialog 198212c7-aa37-4923-99fd-1ad77204c538 - time to start media (UAS side)
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: AckReceived { dialog_id: DialogId(198212c7-aa37-4923-99fd-1ad77204c538), transaction_id: z9hG4bK-23547-1-0:INVITE:server, negotiated_sdp: None }
+[2m2025-06-12T05:06:58.829354Z[0m [32m INFO[0m ThreadId(17) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m518:[0m ✅ RFC 3261: ACK RECEIVED for session sess_265cd56c-efbb-46c2-a828-6de6cbab408f - creating media session (UAS side)
+[2m2025-06-12T05:06:58.829388Z[0m [32m INFO[0m ThreadId(17) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m206:[0m 🚀 RFC 3261: Creating media session after ACK for sess_265cd56c-efbb-46c2-a828-6de6cbab408f: rfc_compliant_media_creation_uas
+[2m2025-06-12T05:06:58.829433Z[0m [32m INFO[0m ThreadId(17) [2mcrates/media-core/src/relay/controller.rs[0m[2m:[0m[2m691:[0m Starting media session for dialog: media-sess_265cd56c-efbb-46c2-a828-6de6cbab408f
+[2m2025-06-12T05:06:58.829627Z[0m [32m INFO[0m ThreadId(17) [2mcrates/rtp-core/src/transport/allocator.rs[0m[2m:[0m[2m564:[0m Created global port allocator with range 16384-32767
+=== PARSING SIP MESSAGE ===
+Input length: 590 bytes
+Input as string: "INVITE sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-23547-2-0\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=23547SIPpTag002\r\nTo: Test User <sip:test@127.0.0.1:5062>\r\nCall-ID: 2-23547@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Type: application/sdp\r\nContent-Length:   181\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6004 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 33, 35, 34, 37, 2d, 32, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 33, 35, 34, 37, 53, 49, 50, 70, 54, 61, 67, 30, 30, 32, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 32, 2d, 32, 33, 35, 34, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 38, 31, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 53, 65, 73, 73, 69, 6f, 6e, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 34, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-12T05:06:59.819703Z[0m [32m INFO[0m ThreadId(08) [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m1958:[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-23547-2-0:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+Transaction loop starting for Key(z9hG4bK-23547-2-0:INVITE:server)
+Initial state: Proceeding
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-23547-2-0:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+Already in requested state, no transition needed: Proceeding
+[2m2025-06-12T05:06:59.819864Z[0m [32m INFO[0m ThreadId(08) [2mcrates/dialog-core/src/manager/dialog_operations.rs[0m[2m:[0m[2m435:[0m Created early dialog 7593521d-42cf-4487-9487-7aaefac47166 from INVITE request
+🔍 INVITE HANDLER: Created early dialog 7593521d-42cf-4487-9487-7aaefac47166
+🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-23547-2-0:INVITE:server) with dialog 7593521d-42cf-4487-9487-7aaefac47166
+🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog 7593521d-42cf-4487-9487-7aaefac47166
+🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog 7593521d-42cf-4487-9487-7aaefac47166
+[2m2025-06-12T05:06:59.819929Z[0m [32m INFO[0m ThreadId(08) [2mcrates/dialog-core/src/protocol/invite_handler.rs[0m[2m:[0m[2m101:[0m Initial INVITE processed, created dialog 7593521d-42cf-4487-9487-7aaefac47166
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(7593521d-42cf-4487-9487-7aaefac47166), transaction_id: z9hG4bK-23547-2-0:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-23547-2-0")] }])), From(From(Address { display_name: Some("SIPp Test"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("23547SIPpTag002")] })), To(To(Address { display_name: Some("Test User"), uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("2-23547@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("SIPp Basic Call Test")), UserAgent(["SIPp/3.6.1"]), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(181))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6004 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n" }, source: 127.0.0.1:5061 }
+[2m2025-06-12T05:06:59.820024Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m143:[0m Incoming call from dialog 7593521d-42cf-4487-9487-7aaefac47166: sip:from@127.0.0.1 -> sip:to@local
+[2m2025-06-12T05:06:59.820068Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m77:[0m 📞 [SIPp-Test-Server] Incoming call from sip:from@127.0.0.1 to sip:to@local
+[2m2025-06-12T05:06:59.820083Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m78:[0m 📞 [SIPp-Test-Server] Call ID: sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9
+[2m2025-06-12T05:06:59.820116Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m89:[0m ✅ [SIPp-Test-Server] Auto-answering call
+[2m2025-06-12T05:06:59.820129Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m93:[0m 📞 [SIPp-Test-Server] Received SDP offer, generating answer
+[2m2025-06-12T05:06:59.820192Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m96:[0m 📞 [SIPp-Test-Server] Generated SDP answer
+[2m2025-06-12T05:06:59.820220Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m537:[0m Answering call 7593521d-42cf-4487-9487-7aaefac47166
+[2m2025-06-12T05:06:59.820354Z[0m [32m INFO[0m ThreadId(10) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m162:[0m Sending response message to 127.0.0.1:5061
+[2m2025-06-12T05:06:59.820441Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m628:[0m Dialog 7593521d-42cf-4487-9487-7aaefac47166 local tag set to match response: tag-f215b1892ce64fffa0bc221d9af86a99
+[2m2025-06-12T05:06:59.820460Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m640:[0m Dialog 7593521d-42cf-4487-9487-7aaefac47166 transitioned to Confirmed state
+[2m2025-06-12T05:06:59.820483Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m647:[0m Updated dialog lookup for confirmed dialog 7593521d-42cf-4487-9487-7aaefac47166
+[2m2025-06-12T05:06:59.820504Z[0m [32m INFO[0m ThreadId(10) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m661:[0m Successfully answered call 7593521d-42cf-4487-9487-7aaefac47166
+[2m2025-06-12T05:06:59.820521Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m205:[0m Successfully answered incoming call for session sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallAnswered { dialog_id: DialogId(7593521d-42cf-4487-9487-7aaefac47166), session_answer: "v=0\r\no=rvoip 1749704819 1749704819 IN IP4 127.0.0.1\r\ns=RVOIP Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10001 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n" }
+[2m2025-06-12T05:06:59.820559Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m409:[0m Call answered for session sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9: 7593521d-42cf-4487-9487-7aaefac47166 (awaiting ACK per RFC 3261)
+[2m2025-06-12T05:06:59.820579Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m423:[0m 📞 Call answered for session sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9 - keeping in Initiating state until media ready
+[2m2025-06-12T05:06:59.820592Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m426:[0m 🚫 RFC 3261: NOT creating media session yet - waiting for ACK
+Received command: CancelTimer100 for transaction Key(z9hG4bK-23547-2-0:INVITE:server)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-23547-2-0:INVITE:server)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-23547-2-0:INVITE:server). Final state: Terminated
+=== PARSING SIP MESSAGE ===
+Input length: 409 bytes
+Input as string: "ACK sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-23547-2-4\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=23547SIPpTag002\r\nTo: Test User <sip:test@127.0.0.1:5062>;tag=tag-f215b1892ce64fffa0bc221d9af86a99\r\nCall-ID: 2-23547@127.0.0.1\r\nCSeq: 1 ACK\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [41, 43, 4b, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 33, 35, 34, 37, 2d, 32, 2d, 34, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 33, 35, 34, 37, 53, 49, 50, 70, 54, 61, 67, 30, 30, 32, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 66, 32, 31, 35, 62, 31, 38, 39, 32, 63, 65, 36, 34, 66, 66, 66, 61, 30, 62, 63, 32, 32, 31, 64, 39, 61, 66, 38, 36, 61, 39, 39, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 32, 2d, 32, 33, 35, 34, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 41, 43, 4b, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 102, 50, 49, 53, 98, 49, 56, 57, 50, 99, 101, 54, 52, 102, 102, 102, 97, 48, 98, 99, 50, 50, 49, 100, 57, 97, 102, 56, 54, 97, 57, 57]
+Successfully parsed tag: tag-f215b1892ce64fffa0bc221d9af86a99
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("SIPp Test"), "uri": Object({"parameters": Array([]), "scheme": String("Sip"), "port": Number(5061.0), "headers": Object({}), "host": Object({"Address": String("127.0.0.1")}), "password": Null, "raw_uri": Null, "user": String("sipp")}), "params": Array([Object({"Tag": String("23547SIPpTag002")})])})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("23547SIPpTag002")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("23547SIPpTag002")})
+Final value for path 'headers.From.params[0].Tag': String("23547SIPpTag002")
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("SIPp Test"), "uri": Object({"user": String("sipp"), "host": Object({"Address": String("127.0.0.1")}), "raw_uri": Null, "password": Null, "scheme": String("Sip"), "headers": Object({}), "parameters": Array([]), "port": Number(5061.0)}), "params": Array([Object({"Tag": String("23547SIPpTag002")})])})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("23547SIPpTag002")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("23547SIPpTag002")})
+Final value for path 'headers.From.params[0].Tag': String("23547SIPpTag002")
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"host": Object({"Address": String("127.0.0.1")}), "password": Null, "user": String("test"), "scheme": String("Sip"), "headers": Object({}), "port": Number(5062.0), "raw_uri": Null, "parameters": Array([])}), "params": Array([]), "display_name": String("Test User")})
+Processing segment Index(0) at index 3, current value: Array([])
+Index 0 out of bounds for array of length 0
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("Test User"), "uri": Object({"scheme": String("Sip"), "password": Null, "port": Number(5062.0), "headers": Object({}), "host": Object({"Address": String("127.0.0.1")}), "parameters": Array([]), "user": String("test"), "raw_uri": Null}), "params": Array([Object({"Tag": String("tag-f215b1892ce64fffa0bc221d9af86a99")})])})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("tag-f215b1892ce64fffa0bc221d9af86a99")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("tag-f215b1892ce64fffa0bc221d9af86a99")})
+Final value for path 'headers.To.params[0].Tag': String("tag-f215b1892ce64fffa0bc221d9af86a99")
+[2m2025-06-12T05:06:59.824709Z[0m [32m INFO[0m ThreadId(05) [2mcrates/dialog-core/src/manager/transaction_integration.rs[0m[2m:[0m[2m758:[0m ✅ RFC 3261: ACK received for transaction Key(z9hG4bK-23547-2-0:INVITE:server) in dialog 7593521d-42cf-4487-9487-7aaefac47166 - time to start media (UAS side)
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: AckReceived { dialog_id: DialogId(7593521d-42cf-4487-9487-7aaefac47166), transaction_id: z9hG4bK-23547-2-0:INVITE:server, negotiated_sdp: None }
+[2m2025-06-12T05:06:59.824786Z[0m [32m INFO[0m ThreadId(05) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m518:[0m ✅ RFC 3261: ACK RECEIVED for session sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9 - creating media session (UAS side)
+[2m2025-06-12T05:06:59.833998Z[0m [32m INFO[0m ThreadId(10) [2mcrates/rtp-core/src/transport/udp.rs[0m[2m:[0m[2m394:[0m Started UDP transport receiver tasks
+[2m2025-06-12T05:06:59.834179Z[0m [32m INFO[0m ThreadId(10) [2mcrates/rtp-core/src/session/mod.rs[0m[2m:[0m[2m751:[0m Started RTP session with SSRC=1b65cf9a
+[2m2025-06-12T05:06:59.834251Z[0m [32m INFO[0m ThreadId(10) [2mcrates/media-core/src/relay/controller.rs[0m[2m:[0m[2m767:[0m ✅ Created media session with REAL RTP session: media-sess_265cd56c-efbb-46c2-a828-6de6cbab408f (port: 30886)
+[2m2025-06-12T05:06:59.834323Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/media/manager.rs[0m[2m:[0m[2m385:[0m ✅ Created media session: media-sess_265cd56c-efbb-46c2-a828-6de6cbab408f for SIP session: sess_265cd56c-efbb-46c2-a828-6de6cbab408f with real MediaSessionController + zero-copy enabled
+[2m2025-06-12T05:06:59.834351Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m215:[0m ✅ Successfully created RFC-compliant media session for sess_265cd56c-efbb-46c2-a828-6de6cbab408f
+[2m2025-06-12T05:06:59.834405Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/media/manager.rs[0m[2m:[0m[2m422:[0m ✅ Updated media session for SIP session: sess_265cd56c-efbb-46c2-a828-6de6cbab408f with remote: 127.0.0.1:10001 and codecs: ["PCMU"]
+[2m2025-06-12T05:06:59.834435Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m224:[0m ✅ Applied stored remote SDP to new media session for sess_265cd56c-efbb-46c2-a828-6de6cbab408f
+[2m2025-06-12T05:06:59.834463Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m239:[0m 🎉 Session sess_265cd56c-efbb-46c2-a828-6de6cbab408f transitioned to Active in registry - media ready and session fully established!
+[2m2025-06-12T05:06:59.834501Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m159:[0m 📄 Stored remote SDP answer for session sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9
+[2m2025-06-12T05:06:59.834544Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m206:[0m 🚀 RFC 3261: Creating media session after ACK for sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9: rfc_compliant_media_creation_uas
+[2m2025-06-12T05:06:59.834569Z[0m [32m INFO[0m ThreadId(10) [2mcrates/media-core/src/relay/controller.rs[0m[2m:[0m[2m691:[0m Starting media session for dialog: media-sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9
+=== PARSING SIP MESSAGE ===
+Input length: 590 bytes
+Input as string: "INVITE sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-23547-3-0\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=23547SIPpTag003\r\nTo: Test User <sip:test@127.0.0.1:5062>\r\nCall-ID: 3-23547@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Type: application/sdp\r\nContent-Length:   181\r\n\r\nv=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6008 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 33, 35, 34, 37, 2d, 33, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 33, 35, 34, 37, 53, 49, 50, 70, 54, 61, 67, 30, 30, 33, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 33, 2d, 32, 33, 35, 34, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 31, 38, 31, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 73, 65, 72, 31, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 53, 65, 73, 73, 69, 6f, 6e, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 38, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-12T05:07:00.821126Z[0m [32m INFO[0m ThreadId(05) [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m1958:[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-23547-3-0:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5061
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5061
+Transaction loop starting for Key(z9hG4bK-23547-3-0:INVITE:server)
+Initial state: Proceeding
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-23547-3-0:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+Already in requested state, no transition needed: Proceeding
+[2m2025-06-12T05:07:00.821339Z[0m [32m INFO[0m ThreadId(05) [2mcrates/dialog-core/src/manager/dialog_operations.rs[0m[2m:[0m[2m435:[0m Created early dialog db3120df-77cb-40bd-875e-c3f64b41fb58 from INVITE request
+🔍 INVITE HANDLER: Created early dialog db3120df-77cb-40bd-875e-c3f64b41fb58
+🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-23547-3-0:INVITE:server) with dialog db3120df-77cb-40bd-875e-c3f64b41fb58
+🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog db3120df-77cb-40bd-875e-c3f64b41fb58
+🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog db3120df-77cb-40bd-875e-c3f64b41fb58
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(db3120df-77cb-40bd-875e-c3f64b41fb58), transaction_id: z9hG4bK-23547-3-0:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-23547-3-0")] }])), From(From(Address { display_name: Some("SIPp Test"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("23547SIPpTag003")] })), To(To(Address { display_name: Some("Test User"), uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("3-23547@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("SIPp Basic Call Test")), UserAgent(["SIPp/3.6.1"]), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(181))], body: b"v=0\r\no=user1 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6008 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n" }, source: 127.0.0.1:5061 }
+[2m2025-06-12T05:07:00.821505Z[0m [32m INFO[0m ThreadId(05) [2mcrates/dialog-core/src/protocol/invite_handler.rs[0m[2m:[0m[2m101:[0m Initial INVITE processed, created dialog db3120df-77cb-40bd-875e-c3f64b41fb58
+[2m2025-06-12T05:07:00.821642Z[0m [32m INFO[0m ThreadId(15) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m143:[0m Incoming call from dialog db3120df-77cb-40bd-875e-c3f64b41fb58: sip:from@127.0.0.1 -> sip:to@local
+[2m2025-06-12T05:07:00.821754Z[0m [32m INFO[0m ThreadId(15) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m77:[0m 📞 [SIPp-Test-Server] Incoming call from sip:from@127.0.0.1 to sip:to@local
+[2m2025-06-12T05:07:00.821789Z[0m [32m INFO[0m ThreadId(15) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m78:[0m 📞 [SIPp-Test-Server] Call ID: sess_b288f5da-964a-44b3-a527-6b16e8f0c034
+[2m2025-06-12T05:07:00.821813Z[0m [32m INFO[0m ThreadId(15) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m89:[0m ✅ [SIPp-Test-Server] Auto-answering call
+[2m2025-06-12T05:07:00.821849Z[0m [32m INFO[0m ThreadId(15) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m93:[0m 📞 [SIPp-Test-Server] Received SDP offer, generating answer
+[2m2025-06-12T05:07:00.821896Z[0m [32m INFO[0m ThreadId(15) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m96:[0m 📞 [SIPp-Test-Server] Generated SDP answer
+[2m2025-06-12T05:07:00.821946Z[0m [32m INFO[0m ThreadId(15) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m537:[0m Answering call db3120df-77cb-40bd-875e-c3f64b41fb58
+[2m2025-06-12T05:07:00.822128Z[0m [32m INFO[0m ThreadId(15) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m162:[0m Sending response message to 127.0.0.1:5061
+[2m2025-06-12T05:07:00.822236Z[0m [32m INFO[0m ThreadId(15) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m628:[0m Dialog db3120df-77cb-40bd-875e-c3f64b41fb58 local tag set to match response: tag-040967ce6bed48fc927a0c6157231573
+[2m2025-06-12T05:07:00.822271Z[0m [32m INFO[0m ThreadId(15) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m640:[0m Dialog db3120df-77cb-40bd-875e-c3f64b41fb58 transitioned to Confirmed state
+[2m2025-06-12T05:07:00.822307Z[0m [32m INFO[0m ThreadId(15) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m647:[0m Updated dialog lookup for confirmed dialog db3120df-77cb-40bd-875e-c3f64b41fb58
+[2m2025-06-12T05:07:00.822338Z[0m [32m INFO[0m ThreadId(15) [2mcrates/dialog-core/src/api/common.rs[0m[2m:[0m[2m661:[0m Successfully answered call db3120df-77cb-40bd-875e-c3f64b41fb58
+[2m2025-06-12T05:07:00.822367Z[0m [32m INFO[0m ThreadId(15) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m205:[0m Successfully answered incoming call for session sess_b288f5da-964a-44b3-a527-6b16e8f0c034
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallAnswered { dialog_id: DialogId(db3120df-77cb-40bd-875e-c3f64b41fb58), session_answer: "v=0\r\no=rvoip 1749704820 1749704820 IN IP4 127.0.0.1\r\ns=RVOIP Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10001 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n" }
+[2m2025-06-12T05:07:00.822431Z[0m [32m INFO[0m ThreadId(15) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m409:[0m Call answered for session sess_b288f5da-964a-44b3-a527-6b16e8f0c034: db3120df-77cb-40bd-875e-c3f64b41fb58 (awaiting ACK per RFC 3261)
+[2m2025-06-12T05:07:00.822464Z[0m [32m INFO[0m ThreadId(15) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m423:[0m 📞 Call answered for session sess_b288f5da-964a-44b3-a527-6b16e8f0c034 - keeping in Initiating state until media ready
+[2m2025-06-12T05:07:00.822488Z[0m [32m INFO[0m ThreadId(15) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m426:[0m 🚫 RFC 3261: NOT creating media session yet - waiting for ACK
+Received command: CancelTimer100 for transaction Key(z9hG4bK-23547-3-0:INVITE:server)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-23547-3-0:INVITE:server)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+=== PARSING SIP MESSAGE ===
+Input length: 409 bytes
+Input as string: "ACK sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-23547-3-4\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=23547SIPpTag003\r\nTo: Test User <sip:test@127.0.0.1:5062>;tag=tag-040967ce6bed48fc927a0c6157231573\r\nCall-ID: 3-23547@127.0.0.1\r\nCSeq: 1 ACK\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [41, 43Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-23547-3-0:INVITE:server). Final state: Terminated
+, 4b, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 33, 35, 34, 37, 2d, 33, 2d, 34, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 33, 35, 34, 37, 53, 49, 50, 70, 54, 61, 67, 30, 30, 33, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 30, 34, 30, 39, 36, 37, 63, 65, 36, 62, 65, 64, 34, 38, 66, 63, 39, 32, 37, 61, 30, 63, 36, 31, 35, 37, 32, 33, 31, 35, 37, 33, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 33, 2d, 32, 33, 35, 34, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 41, 43, 4b, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 48, 52, 48, 57, 54, 55, 99, 101, 54, 98, 101, 100, 52, 56, 102, 99, 57, 50, 55, 97, 48, 99, 54, 49, 53, 55, 50, 51, 49, 53, 55, 51]
+Successfully parsed tag: tag-040967ce6bed48fc927a0c6157231573
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"display_name": String("SIPp Test"), "uri": Object({"raw_uri": Null, "scheme": String("Sip"), "password": Null, "port": Number(5061.0), "parameters": Array([]), "user": String("sipp"), "host": Object({"Address": String("127.0.0.1")}), "headers": Object({})}), "params": Array([Object({"Tag": String("23547SIPpTag003")})])})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("23547SIPpTag003")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("23547SIPpTag003")})
+Final value for path 'headers.From.params[0].Tag': String("23547SIPpTag003")
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([Object({"Tag": String("23547SIPpTag003")})]), "uri": Object({"host": Object({"Address": String("127.0.0.1")}), "parameters": Array([]), "password": Null, "raw_uri": Null, "user": String("sipp"), "port": Number(5061.0), "scheme": String("Sip"), "headers": Object({})}), "display_name": String("SIPp Test")})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("23547SIPpTag003")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("23547SIPpTag003")})
+Final value for path 'headers.From.params[0].Tag': String("23547SIPpTag003")
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"host": Object({"Address": String("127.0.0.1")}), "password": Null, "port": Number(5062.0), "raw_uri": Null, "parameters": Array([]), "headers": Object({}), "user": String("test"), "scheme": String("Sip")}), "display_name": String("Test User"), "params": Array([])})
+Processing segment Index(0) at index 3, current value: Array([])
+Index 0 out of bounds for array of length 0
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([Object({"Tag": String("tag-040967ce6bed48fc927a0c6157231573")})]), "display_name": String("Test User"), "uri": Object({"scheme": String("Sip"), "port": Number(5062.0), "password": Null, "headers": Object({}), "user": String("test"), "host": Object({"Address": String("127.0.0.1")}), "raw_uri": Null, "parameters": Array([])})})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("tag-040967ce6bed48fc927a0c6157231573")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("tag-040967ce6bed48fc927a0c6157231573")})
+Final value for path 'headers.To.params[0].Tag': String("tag-040967ce6bed48fc927a0c6157231573")
+[2m2025-06-12T05:07:00.828374Z[0m [32m INFO[0m ThreadId(17) [2mcrates/dialog-core/src/manager/transaction_integration.rs[0m[2m:[0m[2m758:[0m ✅ RFC 3261: ACK received for transaction Key(z9hG4bK-23547-3-0:INVITE:server) in dialog db3120df-77cb-40bd-875e-c3f64b41fb58 - time to start media (UAS side)
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: AckReceived { dialog_id: DialogId(db3120df-77cb-40bd-875e-c3f64b41fb58), transaction_id: z9hG4bK-23547-3-0:INVITE:server, negotiated_sdp: None }
+[2m2025-06-12T05:07:00.828465Z[0m [32m INFO[0m ThreadId(17) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m518:[0m ✅ RFC 3261: ACK RECEIVED for session sess_b288f5da-964a-44b3-a527-6b16e8f0c034 - creating media session (UAS side)
+[2m2025-06-12T05:07:00.837030Z[0m [32m INFO[0m ThreadId(05) [2mcrates/rtp-core/src/transport/udp.rs[0m[2m:[0m[2m394:[0m Started UDP transport receiver tasks
+[2m2025-06-12T05:07:00.837214Z[0m [32m INFO[0m ThreadId(05) [2mcrates/rtp-core/src/session/mod.rs[0m[2m:[0m[2m751:[0m Started RTP session with SSRC=ff63f1c9
+[2m2025-06-12T05:07:00.837259Z[0m [32m INFO[0m ThreadId(05) [2mcrates/media-core/src/relay/controller.rs[0m[2m:[0m[2m767:[0m ✅ Created media session with REAL RTP session: media-sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9 (port: 19636)
+[2m2025-06-12T05:07:00.837292Z[0m [32m INFO[0m ThreadId(05) [2mcrates/session-core/src/media/manager.rs[0m[2m:[0m[2m385:[0m ✅ Created media session: media-sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9 for SIP session: sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9 with real MediaSessionController + zero-copy enabled
+[2m2025-06-12T05:07:00.837311Z[0m [32m INFO[0m ThreadId(05) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m215:[0m ✅ Successfully created RFC-compliant media session for sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9
+[2m2025-06-12T05:07:00.837372Z[0m [32m INFO[0m ThreadId(05) [2mcrates/session-core/src/media/manager.rs[0m[2m:[0m[2m422:[0m ✅ Updated media session for SIP session: sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9 with remote: 127.0.0.1:10001 and codecs: ["PCMU"]
+[2m2025-06-12T05:07:00.837388Z[0m [32m INFO[0m ThreadId(05) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m224:[0m ✅ Applied stored remote SDP to new media session for sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9
+[2m2025-06-12T05:07:00.837423Z[0m [32m INFO[0m ThreadId(05) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m239:[0m 🎉 Session sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9 transitioned to Active in registry - media ready and session fully established!
+[2m2025-06-12T05:07:00.837465Z[0m [32m INFO[0m ThreadId(05) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m159:[0m 📄 Stored remote SDP answer for session sess_b288f5da-964a-44b3-a527-6b16e8f0c034
+[2m2025-06-12T05:07:00.837484Z[0m [32m INFO[0m ThreadId(05) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m206:[0m 🚀 RFC 3261: Creating media session after ACK for sess_b288f5da-964a-44b3-a527-6b16e8f0c034: rfc_compliant_media_creation_uas
+[2m2025-06-12T05:07:00.837525Z[0m [32m INFO[0m ThreadId(05) [2mcrates/media-core/src/relay/controller.rs[0m[2m:[0m[2m691:[0m Starting media session for dialog: media-sess_b288f5da-964a-44b3-a527-6b16e8f0c034
+[2m2025-06-12T05:07:01.841245Z[0m [32m INFO[0m ThreadId(17) [2mcrates/rtp-core/src/transport/udp.rs[0m[2m:[0m[2m394:[0m Started UDP transport receiver tasks
+[2m2025-06-12T05:07:01.841470Z[0m [32m INFO[0m ThreadId(17) [2mcrates/rtp-core/src/session/mod.rs[0m[2m:[0m[2m751:[0m Started RTP session with SSRC=b7771587
+[2m2025-06-12T05:07:01.841567Z[0m [32m INFO[0m ThreadId(17) [2mcrates/media-core/src/relay/controller.rs[0m[2m:[0m[2m767:[0m ✅ Created media session with REAL RTP session: media-sess_b288f5da-964a-44b3-a527-6b16e8f0c034 (port: 17770)
+[2m2025-06-12T05:07:01.841656Z[0m [32m INFO[0m ThreadId(17) [2mcrates/session-core/src/media/manager.rs[0m[2m:[0m[2m385:[0m ✅ Created media session: media-sess_b288f5da-964a-44b3-a527-6b16e8f0c034 for SIP session: sess_b288f5da-964a-44b3-a527-6b16e8f0c034 with real MediaSessionController + zero-copy enabled
+[2m2025-06-12T05:07:01.841706Z[0m [32m INFO[0m ThreadId(17) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m215:[0m ✅ Successfully created RFC-compliant media session for sess_b288f5da-964a-44b3-a527-6b16e8f0c034
+[2m2025-06-12T05:07:01.841824Z[0m [32m INFO[0m ThreadId(17) [2mcrates/session-core/src/media/manager.rs[0m[2m:[0m[2m422:[0m ✅ Updated media session for SIP session: sess_b288f5da-964a-44b3-a527-6b16e8f0c034 with remote: 127.0.0.1:10001 and codecs: ["PCMU"]
+[2m2025-06-12T05:07:01.841878Z[0m [32m INFO[0m ThreadId(17) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m224:[0m ✅ Applied stored remote SDP to new media session for sess_b288f5da-964a-44b3-a527-6b16e8f0c034
+[2m2025-06-12T05:07:01.841936Z[0m [32m INFO[0m ThreadId(17) [2mcrates/session-core/src/manager/core.rs[0m[2m:[0m[2m239:[0m 🎉 Session sess_b288f5da-964a-44b3-a527-6b16e8f0c034 transitioned to Active in registry - media ready and session fully established!
+=== PARSING SIP MESSAGE ===
+Input length: 409 bytes
+Input as string: "BYE sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-23547-1-7\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=23547SIPpTag001\r\nTo: Test User <sip:test@127.0.0.1:5062>;tag=tag-5f126537b9744cc79c0c978f1df82a03\r\nCall-ID: 1-23547@127.0.0.1\r\nCSeq: 2 BYE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [42, 59, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 33, 35, 34, 37, 2d, 31, 2d, 37, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 33, 35, 34, 37, 53, 49, 50, 70, 54, 61, 67, 30, 30, 31, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 35, 66, 31, 32, 36, 35, 33, 37, 62, 39, 37, 34, 34, 63, 63, 37, 39, 63, 30, 63, 39, 37, 38, 66, 31, 64, 66, 38, 32, 61, 30, 33, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 32, 33, 35, 34, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 32, 20, 42, 59, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 53, 102, 49, 50, 54, 53, 51, 55, 98, 57, 55, 52, 52, 99, 99, 55, 57, 99, 48, 99, 57, 55, 56, 102, 49, 100, 102, 56, 50, 97, 48, 51]
+Successfully parsed tag: tag-5f126537b9744cc79c0c978f1df82a03
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-12T05:07:03.833476Z[0m [32m INFO[0m ThreadId(08) [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m2038:[0m Created new ServerNonInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-23547-1-7:BYE:server) [3mmethod[0m[2m=[0mBYE
+Transaction loop starting for Key(z9hG4bK-23547-1-7:BYE:server)
+Initial state: Trying
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK-23547-1-7:BYE:server)
+Processing TransitionTo(Trying) current state: Trying
+Already in requested state, no transition needed: Trying
+Received command: ProcessMessage(Request(Request { method: Bye, uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-23547-1-7")] }])), From(From(Address { display_name: Some("SIPp Test"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("23547SIPpTag001")] })), To(To(Address { display_name: Some("Test User"), uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-5f126537b9744cc79c0c978f1df82a03")] })), CallId(CallId("1-23547@127.0.0.1")), CSeq(CSeq { seq: 2, method: Bye }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("SIPp Basic Call Test")), UserAgent(["SIPp/3.6.1"]), ContentLength(ContentLength(0))], body: b"" })) for transaction Key(z9hG4bK-23547-1-7:BYE:server)
+[2m2025-06-12T05:07:03.833799Z[0m [32m INFO[0m ThreadId(08) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m162:[0m Sending response message to 127.0.0.1:5061
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK-23547-1-7:BYE:server)
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallTerminated { dialog_id: DialogId(198212c7-aa37-4923-99fd-1ad77204c538), reason: "BYE received" }
+Sent StateChanged event result: Success
+[2m2025-06-12T05:07:03.833994Z[0m [32m INFO[0m ThreadId(08) [2mcrates/dialog-core/src/protocol/bye_handler.rs[0m[2m:[0m[2m106:[0m BYE processed for dialog 198212c7-aa37-4923-99fd-1ad77204c538
+[2m2025-06-12T05:07:03.834168Z[0m [32m INFO[0m ThreadId(05) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m593:[0m Call terminated for session sess_265cd56c-efbb-46c2-a828-6de6cbab408f: 198212c7-aa37-4923-99fd-1ad77204c538 - BYE received
+=== PARSING SIP MESSAGE ===
+Input length: 409 bytes
+Input as string: "BYE sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-23547-2-7\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=23547SIPpTag002\r\nTo: Test User <sip:test@127.0.0.1:5062>;tag=tag-f215b1892ce64fffa0bc221d9af86a99\r\nCall-ID: 2-23547@127.0.0.1\r\nCSeq: 2 BYE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [42, 59, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 33, 35, 34, 37, 2d, 32, 2d, 37, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 33, 35, 34, 37, 53, 49, 50, 70, 54, 61, 67, 30, 30, 32, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 66, 32, 31, 35, 62, 31, 38, 39, 32, 63, 65, 36, 34, 66, 66, 66, 61, 30, 62, 63, 32, 32, 31, 64, 39, 61, 66, 38, 36, 61, 39, 39, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 32, 2d, 32, 33, 35, 34, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 32, 20, 42, 59, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 102, 50, 49, 53, 98, 49, 56, 57, 50, 99, 101, 54, 52, 102, 102, 102, 97, 48, 98, 99, 50, 50, 49, 100, 57, 97, 102, 56, 54, 97, 57, 57]
+Successfully parsed tag: tag-f215b1892ce64fffa0bc221d9af86a99
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-12T05:07:04.830016Z[0m [32m INFO[0m ThreadId(17) [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m2038:[0m Created new ServerNonInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-23547-2-7:BYE:server) [3mmethod[0m[2m=[0mBYE
+Transaction loop starting for Key(z9hG4bK-23547-2-7:BYE:server)
+Initial state: Trying
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK-23547-2-7:BYE:server)
+Processing TransitionTo(Trying) current state: Trying
+Already in requested state, no transition needed: Trying
+Received command: ProcessMessage(Request(Request { method: Bye, uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-23547-2-7")] }])), From(From(Address { display_name: Some("SIPp Test"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("23547SIPpTag002")] })), To(To(Address { display_name: Some("Test User"), uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-f215b1892ce64fffa0bc221d9af86a99")] })), CallId(CallId("2-23547@127.0.0.1")), CSeq(CSeq { seq: 2, method: Bye }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("SIPp Basic Call Test")), UserAgent(["SIPp/3.6.1"]), ContentLength(ContentLength(0))], body: b"" })) for transaction Key(z9hG4bK-23547-2-7:BYE:server)
+[2m2025-06-12T05:07:04.830298Z[0m [32m INFO[0m ThreadId(17) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m162:[0m Sending response message to 127.0.0.1:5061
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK-23547-2-7:BYE:server)
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+Sent StateChanged event result: Success
+[2m2025-06-12T05:07:04.830465Z[0m [32m INFO[0m ThreadId(17) [2mcrates/dialog-core/src/protocol/bye_handler.rs[0m[2m:[0m[2m106:[0m BYE processed for dialog 7593521d-42cf-4487-9487-7aaefac47166
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallTerminated { dialog_id: DialogId(7593521d-42cf-4487-9487-7aaefac47166), reason: "BYE received" }
+[2m2025-06-12T05:07:04.830704Z[0m [32m INFO[0m ThreadId(10) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m593:[0m Call terminated for session sess_d3bebb8e-e597-4ba8-9d87-9ee8fc64aed9: 7593521d-42cf-4487-9487-7aaefac47166 - BYE received
+=== PARSING SIP MESSAGE ===
+Input length: 409 bytes
+Input as string: "BYE sip:test@127.0.0.1:5062 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-23547-3-7\r\nFrom: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=23547SIPpTag003\r\nTo: Test User <sip:test@127.0.0.1:5062>;tag=tag-040967ce6bed48fc927a0c6157231573\r\nCall-ID: 3-23547@127.0.0.1\r\nCSeq: 2 BYE\r\nContact: sip:sipp@127.0.0.1:5061\r\nMax-Forwards: 70\r\nSubject: SIPp Basic Call Test\r\nUser-Agent: SIPp/3.6.1\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [42, 59, 45, 20, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 32, 33, 35, 34, 37, 2d, 33, 2d, 37, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 3c, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 33, 35, 34, 37, 53, 49, 50, 70, 54, 61, 67, 30, 30, 33, 0d, 0a, 54, 6f, 3a, 20, 54, 65, 73, 74, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 74, 65, 73, 74, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 30, 34, 30, 39, 36, 37, 63, 65, 36, 62, 65, 64, 34, 38, 66, 63, 39, 32, 37, 61, 30, 63, 36, 31, 35, 37, 32, 33, 31, 35, 37, 33, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 33, 2d, 32, 33, 35, 34, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 32, 20, 42, 59, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 73, 69, 70, 3a, 73, 69, 70, 70, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 53, 49, 50, 70, 20, 42, 61, 73, 69, 63, 20, 43, 61, 6c, 6c, 20, 54, 65, 73, 74, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 2f, 33, 2e, 36, 2e, 31, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 48, 52, 48, 57, 54, 55, 99, 101, 54, 98, 101, 100, 52, 56, 102, 99, 57, 50, 55, 97, 48, 99, 54, 49, 53, 55, 50, 51, 49, 53, 55, 51]
+Successfully parsed tag: tag-040967ce6bed48fc927a0c6157231573
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+[2m2025-06-12T05:07:05.832800Z[0m [32m INFO[0m ThreadId(17) [2mcrates/transaction-core/src/manager/mod.rs[0m[2m:[0m[2m2038:[0m Created new ServerNonInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-23547-3-7:BYE:server) [3mmethod[0m[2m=[0mBYE
+Transaction loop starting for Key(z9hG4bK-23547-3-7:BYE:server)
+Initial state: Trying
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK-23547-3-7:BYE:server)
+Processing TransitionTo(Trying) current state: Trying
+Already in requested state, no transition needed: Trying
+Received command: ProcessMessage(Request(Request { method: Bye, uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-23547-3-7")] }])), From(From(Address { display_name: Some("SIPp Test"), uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("23547SIPpTag003")] })), To(To(Address { display_name: Some("Test User"), uri: Uri { scheme: Sip, user: Some("test"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-040967ce6bed48fc927a0c6157231573")] })), CallId(CallId("3-23547@127.0.0.1")), CSeq(CSeq { seq: 2, method: Bye }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("sipp"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("SIPp Basic Call Test")), UserAgent(["SIPp/3.6.1"]), ContentLength(ContentLength(0))], body: b"" })) for transaction Key(z9hG4bK-23547-3-7:BYE:server)
+[2m2025-06-12T05:07:05.833031Z[0m [32m INFO[0m ThreadId(17) [2mcrates/sip-transport/src/transport/udp/mod.rs[0m[2m:[0m[2m162:[0m Sending response message to 127.0.0.1:5061
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK-23547-3-7:BYE:server)
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallTerminated { dialog_id: DialogId(db3120df-77cb-40bd-875e-c3f64b41fb58), reason: "BYE received" }
+[2m2025-06-12T05:07:05.833211Z[0m [32m INFO[0m ThreadId(17) [2mcrates/dialog-core/src/protocol/bye_handler.rs[0m[2m:[0m[2m106:[0m BYE processed for dialog db3120df-77cb-40bd-875e-c3f64b41fb58
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+Sent StateChanged event result: Success
+[2m2025-06-12T05:07:05.833340Z[0m [32m INFO[0m ThreadId(08) [2mcrates/session-core/src/dialog/coordinator.rs[0m[2m:[0m[2m593:[0m Call terminated for session sess_b288f5da-964a-44b3-a527-6b16e8f0c034: db3120df-77cb-40bd-875e-c3f64b41fb58 - BYE received
+[2m2025-06-12T05:07:05.874451Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m231:[0m 📡 Received SIGTERM signal
+[2m2025-06-12T05:07:05.874481Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m210:[0m 🛑 SIP Test Server shutting down
+[2m2025-06-12T05:07:05.874494Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m250:[0m 📊 Final Statistics:
+[2m2025-06-12T05:07:05.874505Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m251:[0m   ⏱️  Uptime: 11.81 seconds
+[2m2025-06-12T05:07:05.874515Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m252:[0m   📞 Total calls: 3
+[2m2025-06-12T05:07:05.874523Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m253:[0m   ✅ Successful calls: 0
+[2m2025-06-12T05:07:05.874530Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m254:[0m   ❌ Failed calls: 0
+[2m2025-06-12T05:07:05.874538Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m255:[0m   🔄 Active calls: 3
+[2m2025-06-12T05:07:05.874545Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m256:[0m   📈 Success rate: 0.0%
+[2m2025-06-12T05:07:05.874552Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m260:[0m   🚀 Average call rate: 0.25 calls/second
+[2m2025-06-12T05:07:05.874562Z[0m [32m INFO[0m ThreadId(01) [2mcrates/session-core/examples/sipp_tests/src/bin/sip_test_server.rs[0m[2m:[0m[2m298:[0m 👋 SIP Test Server shutdown complete

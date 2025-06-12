@@ -1,0 +1,38 @@
+# Packet Capture Analysis: basic_tests_20250611_220650.pcap
+# Generated: Wed Jun 11 22:07:05 PDT 2025
+
+## Basic Statistics
+
+=============================
+| IO Statistics             |
+|                           |
+| Duration: 2.   970 secs   |
+| Interval: 1 secs          |
+|                           |
+| Col 1: Frames and bytes   |
+|---------------------------|
+|          |1               |
+| Interval | Frames | Bytes |
+|---------------------------|
+|  0 <> 1  |      4 |  2232 |
+|  1 <> 2  |      2 |   988 |
+|  2 <> Dur|      1 |   622 |
+=============================
+Basic stats not available
+
+## UDP Flow Summary
+   5 127.0.0.1	127.0.0.1	5061	5062
+   2 127.0.0.1	127.0.0.1	5062	5061
+UDP flow analysis not available
+
+## RTP Audio Stream Analysis
+### RTP Packet Counts
+Total RTP packets: 0
+RTP analysis not available
+
+### RTP Stream Summary
+RTP stream details not available
+
+### Conference Audio Verification
+❌ NO AUDIO DETECTED: No RTP packets found
+⚠️ Conference test may have been signaling-only
