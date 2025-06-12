@@ -510,3 +510,10 @@ Transaction loop ending for Key(z9hG4bK-301f6165526e44a8aa5024911eb5e8f4:BYE:ser
 [2m2025-06-12T22:35:26.731548Z[0m [32m INFO[0m [2muas_server[0m[2m:[0m Calls completed: 3
 [2m2025-06-12T22:35:26.731551Z[0m [32m INFO[0m [2muas_server[0m[2m:[0m Active calls: 0
 [2m2025-06-12T22:35:26.731554Z[0m [32m INFO[0m [2muas_server[0m[2m:[0m Total call duration: 15.34673475s
+[2m2025-06-12T22:35:36.730724Z[0m [32m INFO[0m [2muas_server[0m[2m:[0m === Server Statistics ===
+[2m2025-06-12T22:35:36.730753Z[0m [32m INFO[0m [2muas_server[0m[2m:[0m Calls received: 3
+[2m2025-06-12T22:35:36.730756Z[0m [32m INFO[0m [2muas_server[0m[2m:[0m Calls accepted: 3
+[2m2025-06-12T22:35:36.730759Z[0m [32m INFO[0m [2muas_server[0m[2m:[0m Calls rejected: 0
+[2m2025-06-12T22:35:36.730763Z[0m [32m INFO[0m [2muas_server[0m[2m:[0m Calls completed: 3
+[2m2025-06-12T22:35:36.730766Z[0m [32m INFO[0m [2muas_server[0m[2m:[0m Active calls: 0
+[2m2025-06-12T22:35:36.730769Z[0m [32m INFO[0m [2muas_server[0m[2m:[0m Total call duration: 15.34673475s
