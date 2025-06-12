@@ -23,26 +23,26 @@ use rvoip_dialog_core::events::SessionCoordinationEvent;
 /// The main coordinator for the entire session system
 pub struct SessionCoordinator {
     // Core services
-    registry: Arc<SessionRegistry>,
-    event_processor: Arc<SessionEventProcessor>,
-    cleanup_manager: Arc<CleanupManager>,
+    pub registry: Arc<SessionRegistry>,
+    pub event_processor: Arc<SessionEventProcessor>,
+    pub cleanup_manager: Arc<CleanupManager>,
     
     // Subsystem managers
-    dialog_manager: Arc<DialogManager>,
-    media_manager: Arc<MediaManager>,
+    pub dialog_manager: Arc<DialogManager>,
+    pub media_manager: Arc<MediaManager>,
     
     // Subsystem coordinators
-    dialog_coordinator: Arc<SessionDialogCoordinator>,
-    media_coordinator: Arc<SessionMediaCoordinator>,
+    pub dialog_coordinator: Arc<SessionDialogCoordinator>,
+    pub media_coordinator: Arc<SessionMediaCoordinator>,
     
     // User handler
-    handler: Option<Arc<dyn CallHandler>>,
+    pub handler: Option<Arc<dyn CallHandler>>,
     
     // Configuration
-    config: SessionManagerConfig,
+    pub config: SessionManagerConfig,
     
     // Event channels
-    event_tx: mpsc::Sender<SessionEvent>,
+    pub event_tx: mpsc::Sender<SessionEvent>,
 }
 
 impl SessionCoordinator {
@@ -233,6 +233,19 @@ impl SessionCoordinator {
             (CallState::Ringing, CallState::Active) |
             (CallState::Initiating, CallState::Active) => {
                 self.start_media_session(&session_id).await?;
+                
+                // Notify handler that call is established
+                if let Some(handler) = &self.handler {
+                    if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                        // Get SDP information if available
+                        let media_info = self.media_manager.get_media_info(&session_id).await.ok().flatten();
+                        let local_sdp = media_info.as_ref().and_then(|m| m.local_sdp.clone());
+                        let remote_sdp = media_info.as_ref().and_then(|m| m.remote_sdp.clone());
+                        
+                        tracing::info!("Notifying handler about call {} establishment", session_id);
+                        handler.on_call_established(session, local_sdp, remote_sdp).await;
+                    }
+                }
             }
             
             // Call goes on hold
@@ -479,6 +492,14 @@ impl SessionCoordinator {
     /// Get the bound address
     pub fn get_bound_address(&self) -> std::net::SocketAddr {
         self.dialog_manager.get_bound_address()
+    }
+
+    /// Generate SDP offer for a session
+    pub async fn generate_sdp_offer(&self, session_id: &SessionId) -> Result<String> {
+        self.media_manager.generate_sdp_offer(session_id).await
+            .map_err(|e| SessionError::MediaIntegration { 
+                message: format!("Failed to generate SDP offer: {}", e) 
+            })
     }
 
     // Additional API methods would be implemented here...

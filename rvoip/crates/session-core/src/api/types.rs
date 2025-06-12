@@ -7,15 +7,20 @@ use std::time::Instant;
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use crate::errors::Result;
+use std::fmt;
 
 /// Unique identifier for a session
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
 
 impl SessionId {
+    /// Create a new random session ID
     pub fn new() -> Self {
-        // Generate a truly unique session ID using UUID
-        let id = format!("sess_{}", Uuid::new_v4());
+        Self(format!("sess_{}", Uuid::new_v4()))
+    }
+    
+    /// Create a session ID from a string
+    pub fn from_string(id: String) -> Self {
         Self(id)
     }
 
@@ -24,10 +29,32 @@ impl SessionId {
     }
 }
 
-impl std::fmt::Display for SessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
+}
+
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Represents a prepared outgoing call with allocated resources
+/// This is created before initiating the actual SIP INVITE
+#[derive(Debug, Clone)]
+pub struct PreparedCall {
+    /// The session ID for this call
+    pub session_id: SessionId,
+    /// Local SIP URI
+    pub from: String,
+    /// Remote SIP URI
+    pub to: String,
+    /// Generated SDP offer with allocated media ports
+    pub sdp_offer: String,
+    /// Local RTP port that was allocated
+    pub local_rtp_port: u16,
 }
 
 /// Represents an active call session
@@ -203,6 +230,61 @@ pub struct MediaInfo {
     pub local_rtp_port: Option<u16>,
     pub remote_rtp_port: Option<u16>,
     pub codec: Option<String>,
+}
+
+/// Call direction
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallDirection {
+    /// Outgoing call (UAC)
+    Outgoing,
+    /// Incoming call (UAS)
+    Incoming,
+}
+
+/// Call termination reason
+#[derive(Debug, Clone)]
+pub enum TerminationReason {
+    /// Normal hangup by local party
+    LocalHangup,
+    /// Normal hangup by remote party
+    RemoteHangup,
+    /// Call rejected
+    Rejected(String),
+    /// Call failed due to error
+    Error(String),
+    /// Call timed out
+    Timeout,
+}
+
+impl fmt::Display for TerminationReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TerminationReason::LocalHangup => write!(f, "Local hangup"),
+            TerminationReason::RemoteHangup => write!(f, "Remote hangup"),
+            TerminationReason::Rejected(reason) => write!(f, "Rejected: {}", reason),
+            TerminationReason::Error(error) => write!(f, "Error: {}", error),
+            TerminationReason::Timeout => write!(f, "Timeout"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_session_id_creation() {
+        let id1 = SessionId::new();
+        let id2 = SessionId::new();
+        assert_ne!(id1, id2);
+        assert!(id1.0.starts_with("sess_"));
+    }
+    
+    #[test]
+    fn test_call_state_display() {
+        assert_eq!(CallState::Active.to_string(), "Active");
+        assert_eq!(CallState::Failed("timeout".to_string()).to_string(), "Failed: timeout");
+    }
 }
 
  

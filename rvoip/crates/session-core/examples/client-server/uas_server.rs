@@ -6,7 +6,6 @@
 use anyhow::Result;
 use clap::Parser;
 use rvoip_session_core::api::*;
-use rvoip_session_core::coordinator::SessionCoordinator;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::signal;
@@ -31,27 +30,38 @@ pub struct Args {
     pub max_calls: usize,
 }
 
-/// Statistics tracking for the UAS
+/// Statistics for the UAS server
 #[derive(Debug, Default)]
 struct UasStats {
     calls_received: usize,
     calls_accepted: usize,
     calls_rejected: usize,
-    calls_completed: usize,
+    calls_active: usize,
     total_duration: Duration,
 }
 
-/// UAS Call Handler
+/// UAS server handler
 #[derive(Debug)]
 struct UasHandler {
     stats: Arc<Mutex<UasStats>>,
     auto_accept: bool,
     max_calls: usize,
+    session_coordinator: Arc<tokio::sync::RwLock<Option<Arc<SessionCoordinator>>>>,
 }
 
 impl UasHandler {
     fn new(stats: Arc<Mutex<UasStats>>, auto_accept: bool, max_calls: usize) -> Self {
-        Self { stats, auto_accept, max_calls }
+        Self { 
+            stats, 
+            auto_accept,
+            max_calls,
+            session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
+        }
+    }
+    
+    async fn set_coordinator(&self, coordinator: Arc<SessionCoordinator>) {
+        let mut coord = self.session_coordinator.write().await;
+        *coord = Some(coordinator);
     }
 }
 
@@ -65,113 +75,164 @@ impl CallHandler for UasHandler {
         
         // Check if we should accept the call
         if !self.auto_accept {
-            warn!("Auto-accept disabled, rejecting call");
             stats.calls_rejected += 1;
-            return CallDecision::Reject("Auto-accept disabled".to_string());
+            return CallDecision::Reject("Manual mode - rejecting call".to_string());
         }
         
-        // Check max concurrent calls
-        let active_calls = stats.calls_accepted - stats.calls_completed;
-        if active_calls >= self.max_calls {
-            warn!("Max concurrent calls reached ({}), rejecting call", self.max_calls);
+        if stats.calls_active >= self.max_calls {
             stats.calls_rejected += 1;
-            return CallDecision::Reject("Server busy".to_string());
+            return CallDecision::Reject("Maximum concurrent calls reached".to_string());
         }
         
-        // Accept the call
-        info!("Accepting call from {}", call.from);
         stats.calls_accepted += 1;
+        stats.calls_active += 1;
+        drop(stats);
         
-        // Generate SDP answer if needed
-        if let Some(offer_sdp) = call.sdp {
-            match generate_sdp_answer(&offer_sdp, "127.0.0.1", 30000) {
-                Ok(answer) => {
-                    info!("Generated SDP answer for call");
-                    CallDecision::Accept(Some(answer))
+        // If we have a coordinator and the incoming call has SDP, prepare our answer
+        let coordinator_guard = self.session_coordinator.read().await;
+        if let (Some(coordinator), Some(remote_sdp)) = (coordinator_guard.as_ref(), &call.sdp) {
+            info!("Incoming call has SDP offer, preparing answer...");
+            
+            // Create media session for this call
+            match coordinator.media_manager.create_media_session(&call.id).await {
+                Ok(_) => {
+                    // Generate SDP answer with our allocated port
+                    match coordinator.generate_sdp_offer(&call.id).await {
+                        Ok(sdp_answer) => {
+                            info!("Generated SDP answer with dynamic port allocation");
+                            
+                            // Update media session with remote SDP
+                            if let Err(e) = coordinator.media_manager.update_media_session(&call.id, remote_sdp).await {
+                                error!("Failed to update media session with remote SDP: {}", e);
+                            }
+                            
+                            return CallDecision::Accept(Some(sdp_answer));
+                        }
+                        Err(e) => {
+                            error!("Failed to generate SDP answer: {}", e);
+                        }
+                    }
                 }
                 Err(e) => {
-                    error!("Failed to generate SDP answer: {}", e);
-                    stats.calls_rejected += 1;
-                    CallDecision::Reject("Failed to generate media answer".to_string())
+                    error!("Failed to create media session: {}", e);
                 }
             }
-        } else {
-            CallDecision::Accept(None)
+        }
+        
+        // Accept without SDP if we couldn't generate it
+        CallDecision::Accept(None)
+    }
+    
+    async fn on_call_established(&self, session: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
+        info!("Call {} established", session.id);
+        
+        // Extract remote RTP address from SDP if available
+        let coordinator_guard = self.session_coordinator.read().await;
+        if let (Some(coordinator), Some(remote_sdp)) = (coordinator_guard.as_ref(), remote_sdp) {
+            // Simple SDP parsing to get IP and port
+            let mut remote_ip = None;
+            let mut remote_port = None;
+            
+            for line in remote_sdp.lines() {
+                if line.starts_with("c=IN IP4 ") {
+                    remote_ip = line.strip_prefix("c=IN IP4 ").map(|s| s.to_string());
+                } else if line.starts_with("m=audio ") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() > 1 {
+                        remote_port = parts[1].parse::<u16>().ok();
+                    }
+                }
+            }
+            
+            if let (Some(ip), Some(port)) = (remote_ip, remote_port) {
+                let remote_addr = format!("{}:{}", ip, port);
+                info!("Establishing media flow to {}", remote_addr);
+                
+                // Start audio transmission
+                if let Err(e) = coordinator.establish_media_flow(&session.id, &remote_addr).await {
+                    error!("Failed to establish media flow: {}", e);
+                }
+            }
         }
     }
     
-    async fn on_call_ended(&self, call: CallSession, reason: &str) {
-        info!("Call {} ended: {}", call.id, reason);
+    async fn on_call_ended(&self, session: CallSession, reason: &str) {
+        info!("Call {} ended: {}", session.id, reason);
         
         let mut stats = self.stats.lock().await;
-        stats.calls_completed += 1;
+        if stats.calls_active > 0 {
+            stats.calls_active -= 1;
+        }
         
-        if let Some(started_at) = call.started_at {
+        if let Some(started_at) = session.started_at {
             stats.total_duration += started_at.elapsed();
         }
-    }
-}
-
-async fn run_server(
-    session_manager: Arc<SessionCoordinator>,
-    stats: Arc<Mutex<UasStats>>,
-) -> Result<()> {
-    info!("UAS server ready and waiting for calls...");
-    
-    // Print stats periodically
-    let stats_clone = stats.clone();
-    let stats_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-            let s = stats_clone.lock().await;
-            info!("=== Server Statistics ===");
-            info!("Calls received: {}", s.calls_received);
-            info!("Calls accepted: {}", s.calls_accepted);
-            info!("Calls rejected: {}", s.calls_rejected);
-            info!("Calls completed: {}", s.calls_completed);
-            info!("Active calls: {}", s.calls_accepted - s.calls_completed);
-            info!("Total call duration: {:?}", s.total_duration);
+        
+        // Check if audio was transmitted
+        let coordinator_guard = self.session_coordinator.read().await;
+        if let Some(coordinator) = coordinator_guard.as_ref() {
+            match coordinator.media_manager.get_media_info(&session.id).await {
+                Ok(Some(info)) => {
+                    if info.local_rtp_port.is_some() && info.remote_rtp_port.is_some() {
+                        info!("✅ Audio transmission was active during the call");
+                    }
+                }
+                _ => {}
+            }
         }
-    });
-    
-    // Wait for shutdown signal
-    signal::ctrl_c().await?;
-    info!("Received shutdown signal");
-    
-    stats_task.abort();
-    Ok(())
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_target(false)
+        .init();
     
+    // Parse command line arguments
     let args = Args::parse();
-    let port = args.port;
     
-    info!("Starting UAS server on port {}", port);
+    info!("Starting UAS server on port {}", args.port);
+    info!("Auto-accept: {}", args.auto_accept);
+    info!("Max concurrent calls: {}", args.max_calls);
     
     // Create stats tracker
     let stats = Arc::new(Mutex::new(UasStats::default()));
     
-    // Create session manager
-    let session_manager = SessionManagerBuilder::new()
-        .with_sip_port(port)
-        .with_local_address(format!("sip:uas@127.0.0.1:{}", port))
-        .with_handler(Arc::new(UasHandler::new(
-            stats.clone(),
-            args.auto_accept,
-            args.max_calls,
-        )))
+    // Create handler
+    let handler = Arc::new(UasHandler::new(
+        stats.clone(),
+        args.auto_accept,
+        args.max_calls,
+    ));
+    
+    // Create session manager with dynamic port allocation
+    let session_coordinator = SessionManagerBuilder::new()
+        .with_sip_port(args.port)
+        .with_local_address(format!("sip:uas@127.0.0.1:{}", args.port))
+        .with_media_ports(15000, 20000)  // UAS uses ports 15000-20000
+        .with_handler(handler.clone())
         .build()
         .await?;
     
-    info!("UAS server initialized on {}", session_manager.get_bound_address());
+    // Set the coordinator in the handler
+    handler.set_coordinator(session_coordinator.clone()).await;
     
-    // Run the server
-    run_server(session_manager.clone(), stats.clone()).await?;
+    // Start the session manager
+    session_coordinator.start().await?;
+    
+    info!("UAS server listening on {}", session_coordinator.get_bound_address());
+    info!("Media ports: 15000-20000 (dynamically allocated)");
+    info!("Ready to accept calls...");
+    
+    // Wait for Ctrl+C
+    signal::ctrl_c().await?;
+    info!("Shutting down UAS server...");
+    
+    // Stop the session manager
+    session_coordinator.stop().await?;
     
     // Print final statistics
     let final_stats = stats.lock().await;
@@ -179,31 +240,7 @@ async fn main() -> Result<()> {
     info!("Calls received: {}", final_stats.calls_received);
     info!("Calls accepted: {}", final_stats.calls_accepted);
     info!("Calls rejected: {}", final_stats.calls_rejected);
-    info!("Calls completed: {}", final_stats.calls_completed);
     info!("Total call duration: {:?}", final_stats.total_duration);
     
-    // Shutdown
-    session_manager.stop().await?;
-    info!("UAS server shutdown complete");
-    
     Ok(())
-}
-
-/// Generate SDP answer from offer
-fn generate_sdp_answer(offer: &str, local_ip: &str, port: u16) -> Result<String> {
-    // Simple SDP answer generation - in a real app, you'd parse the offer and respond accordingly
-    let answer = format!(
-        "v=0\r\n\
-         o=uas 123456 654321 IN IP4 {}\r\n\
-         s=UAS Test Call\r\n\
-         c=IN IP4 {}\r\n\
-         t=0 0\r\n\
-         m=audio {} RTP/AVP 0 8\r\n\
-         a=rtpmap:0 PCMU/8000\r\n\
-         a=rtpmap:8 PCMA/8000\r\n\
-         a=sendrecv\r\n",
-        local_ip, local_ip, port
-    );
-    
-    Ok(answer)
 } 

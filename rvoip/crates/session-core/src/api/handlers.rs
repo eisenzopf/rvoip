@@ -18,6 +18,21 @@ pub trait CallHandler: Send + Sync + std::fmt::Debug {
 
     /// Handle when a call ends
     async fn on_call_ended(&self, call: CallSession, reason: &str);
+    
+    /// Handle when a call is established (200 OK received/sent)
+    /// This is called when the call is fully established and media can flow
+    /// 
+    /// # Arguments
+    /// * `call` - The established call session
+    /// * `local_sdp` - The local SDP (offer or answer)
+    /// * `remote_sdp` - The remote SDP (answer or offer)
+    async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
+        // Default implementation does nothing
+        tracing::info!("Call {} established", call.id());
+        if let Some(remote) = remote_sdp {
+            tracing::debug!("Remote SDP: {}", remote);
+        }
+    }
 }
 
 /// Automatically accepts all incoming calls
@@ -212,6 +227,13 @@ impl CallHandler for CompositeHandler {
         // Notify all handlers
         for handler in &self.handlers {
             handler.on_call_ended(call.clone(), reason).await;
+        }
+    }
+    
+    async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
+        // Notify all handlers
+        for handler in &self.handlers {
+            handler.on_call_established(call.clone(), local_sdp.clone(), remote_sdp.clone()).await;
         }
     }
 } 
