@@ -61,7 +61,16 @@ sipp_tests/
    ./scripts/test_inbound.sh basic_call
    ```
 
-2. **Manual testing**:
+2. **RTP Media Exchange Test** (NEW!):
+   ```bash
+   # Terminal 1: Start RTP test server with media processing
+   cargo run --bin sip_rtp_test_server -- --port 5062 --media-mode echo --rtp-logging
+   
+   # Terminal 2: Run SIPp with RTP media
+   sipp -sf scenarios/sipp_to_rust/rtp_media_test.xml -mi 127.0.0.1 -mp 6000 -rtp_echo 127.0.0.1:5062
+   ```
+
+3. **Manual testing**:
    ```bash
    # Terminal 1: Start our SIP test server
    cargo run --bin sip_test_server -- --port 5062 --mode auto-answer
@@ -110,6 +119,25 @@ cargo run --bin sip_test_client -- --target 127.0.0.1:5060 --rate 2.0
 - Concurrent call generation
 - Performance metrics
 
+### SIP RTP Test Server (`sip_rtp_test_server`)
+
+**NEW!** Enhanced test server specifically designed for RTP media verification.
+
+```bash
+cargo run --bin sip_rtp_test_server -- --help
+
+# Examples:
+cargo run --bin sip_rtp_test_server -- --port 5062 --media-mode echo
+cargo run --bin sip_rtp_test_server -- --port 5062 --media-mode analyze --rtp-logging
+```
+
+**Features**:
+- ✅ Real RTP packet processing and analysis
+- ✅ Multiple media modes: echo, silent, tone, analyze
+- ✅ Detailed RTP packet logging and metrics
+- ✅ Enhanced SDP negotiation with media capabilities
+- ✅ Media session tracking and monitoring
+
 ### SIP Echo Server (`sip_echo_server`)
 
 Advanced test server for audio verification.
@@ -134,6 +162,7 @@ cargo run --bin sip_echo_server -- --port 5063 --delay 100
 | Scenario | Description | SIPp Role | Our App Role |
 |----------|-------------|-----------|--------------|
 | `basic_call` | Simple INVITE/200/ACK/BYE | UAC | UAS (server) |
+| `rtp_media_test` | **RTP packet exchange verification** | UAC | UAS (server) |
 | `call_with_dtmf` | Call + INFO (DTMF) | UAC | UAS |
 | `call_with_hold` | Call + UPDATE (hold/resume) | UAC | UAS |
 | `call_rejection` | INVITE → 486 Busy Here | UAC | UAS |
@@ -212,10 +241,12 @@ Test results are automatically generated in multiple formats:
 
 - ✅ **Infrastructure**: Directory structure, build system, configuration
 - ✅ **Basic Server**: SIP test server with response mode support
+- ✅ **RTP Test Server**: Enhanced server with real media processing
 - ✅ **Test Scripts**: Automated test execution with packet capture
-- ✅ **SIPp Scenarios**: Basic call flow scenario
-- 🔄 **In Progress**: Session-core integration, additional scenarios
-- 📋 **Planned**: Client implementation, echo server, audio testing
+- ✅ **SIPp Scenarios**: Basic call flow and RTP media exchange scenarios
+- ✅ **Media Testing**: RTP packet exchange verification
+- 🔄 **In Progress**: Advanced media analysis, performance metrics
+- 📋 **Planned**: Client implementation, conference bridge testing
 
 ### Adding Features
 
@@ -246,13 +277,14 @@ Test results are automatically generated in multiple formats:
 | Test Type | Priority | Status | Description |
 |-----------|----------|--------|-------------|
 | Basic Call Flow | P0 | ✅ | INVITE/200/ACK/BYE sequence |
+| **RTP Media Exchange** | **P0** | **✅** | **Real RTP packet verification** |
 | DTMF Handling | P0 | 📋 | INFO method DTMF reception |
 | Hold/Resume | P1 | 📋 | UPDATE method SDP modification |
 | Call Rejection | P1 | 📋 | Error response handling |
 | Early Media | P2 | 📋 | 180/183 responses, early RTP |
 | Concurrent Calls | P1 | 📋 | Performance, resource management |
 | Stress Testing | P2 | 📋 | High-volume call processing |
-| Audio Quality | P2 | 📋 | RTP streams, codec negotiation |
+| Audio Quality | P1 | 🔄 | RTP streams, codec negotiation |
 
 ## 🚨 Troubleshooting
 

@@ -1,0 +1,12 @@
+
+-e [0;36m============================================================[0m
+-e [0;36mSIP Client-Server Test[0m
+-e [0;36m============================================================[0m
+-e [0;34m[INFO][0m Test started at Thu Jun 12 14:04:34 PDT 2025
+-e [0;34m[INFO][0m Log directory: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/client-server/logs
+
+-e [0;36m============================================================[0m
+-e [0;36mBuilding UAS Server and UAC Client[0m
+-e [0;36m============================================================[0m
+-e [0;34m[INFO][0m Building UAS server...
+-e [0;31m[ERROR][0m Failed to build UAS server

@@ -1,0 +1,1446 @@
+warning: method `handle_auto_options` is never used
+   --> crates/dialog-core/src/manager/unified.rs:563:14
+    |
+197 | impl UnifiedDialogManager {
+    | ------------------------- method in this implementation
+...
+563 |     async fn handle_auto_options(&self, request: Request, source: SocketAddr) -> ApiResult<()> {
+    |              ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: method `extract_body_string` is never used
+   --> crates/dialog-core/src/protocol/invite_handler.rs:177:8
+    |
+71  | impl DialogManager {
+    | ------------------ method in this implementation
+...
+177 |     fn extract_body_string(&self, request: &Request) -> String {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: `rvoip-dialog-core` (lib) generated 2 warnings
+warning: unused import: `StaticEvent`
+  --> crates/infra-common/src/events/static_path.rs:14:60
+   |
+14 | use crate::events::types::{Event, EventResult, EventError, StaticEvent, EventFilter};
+   |                                                            ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `EventError` and `StaticEvent`
+  --> crates/infra-common/src/events/system.rs:16:48
+   |
+16 | use crate::events::types::{Event, EventResult, EventError, EventFilter, StaticEvent};
+   |                                                ^^^^^^^^^^               ^^^^^^^^^^^
+
+warning: unused imports: `EventSystemBuilder` and `ImplementationType`
+  --> crates/infra-common/src/events/system.rs:21:30
+   |
+21 | use crate::events::builder::{ImplementationType, EventSystemBuilder};
+   |                              ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/infra-common/src/lifecycle/manager.rs:87:13
+   |
+87 |         let mut components = self.components.write().unwrap();
+   |             ----^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:107:13
+    |
+107 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:127:13
+    |
+127 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:148:13
+    |
+148 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:63:20
+   |
+63 |             config.merge(File::from(base_path.clone()))
+   |                    ^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:69:20
+   |
+69 |             config.merge(File::from(env_path))
+   |                    ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:75:16
+   |
+75 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:97:16
+   |
+97 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+   --> crates/infra-common/src/config/loader.rs:115:20
+    |
+115 |             config.merge(File::from(p.clone()))
+    |                    ^^^^^
+
+warning: methods `type_name` and `clone_sender` are never used
+  --> crates/infra-common/src/events/registry.rs:37:8
+   |
+35 | trait AnyBroadcastSender: Send + Sync + 'static {
+   |       ------------------ methods in this trait
+36 |     fn as_any(&self) -> &dyn Any;
+37 |     fn type_name(&self) -> &str;
+   |        ^^^^^^^^^
+38 |     fn clone_sender(&self) -> Box<dyn AnyBroadcastSender>;
+   |        ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: fields `id`, `event_type`, and `priority` are never read
+  --> crates/infra-common/src/events/subscriber.rs:11:16
+   |
+10 | pub struct SubscriberHandle {
+   |            ---------------- fields in this struct
+11 |     pub(crate) id: u64,
+   |                ^^
+12 |     pub(crate) event_type: EventType,
+   |                ^^^^^^^^^^
+13 |     pub(crate) priority: EventPriority,
+   |                ^^^^^^^^
+   |
+   = note: `SubscriberHandle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `infra-common` (lib) generated 14 warnings (run `cargo fix --lib -p infra-common` to apply 7 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/debug/uac_client --port 5061 --target '127.0.0.1:5062' --calls 1 --duration 10 --log-level info`
+[2m2025-06-12T20:54:16.644977Z[0m [32m INFO[0m 🧪 UAC Client starting...
+[2m2025-06-12T20:54:16.645054Z[0m [32m INFO[0m 🔧 Configuration:
+[2m2025-06-12T20:54:16.645081Z[0m [32m INFO[0m   📡 Port: 5061
+[2m2025-06-12T20:54:16.645121Z[0m [32m INFO[0m   🎯 Target: 127.0.0.1:5062
+[2m2025-06-12T20:54:16.645130Z[0m [32m INFO[0m   📞 Calls: 1
+[2m2025-06-12T20:54:16.645137Z[0m [32m INFO[0m   ⏱️  Duration: 10s
+[2m2025-06-12T20:54:16.645145Z[0m [32m INFO[0m 🚀 Starting UAC Client on port 5061
+[2m2025-06-12T20:54:16.645510Z[0m [32m INFO[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-06-12T20:54:16.646072Z[0m [32m INFO[0m SIP UDP transport bound to 127.0.0.1:5061
+[2m2025-06-12T20:54:16.646992Z[0m [32m INFO[0m Added UDP transport bound to 127.0.0.1:5061
+[2m2025-06-12T20:54:16.647695Z[0m [32m INFO[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-06-12T20:54:16.647818Z[0m [32m INFO[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 127.0.0.1:5061
+[2m2025-06-12T20:54:16.647879Z[0m [32m INFO[0m Creating new DialogManager with global transaction events and local address 127.0.0.1:5061
+[2m2025-06-12T20:54:16.648259Z[0m [32m INFO[0m 🔄 Starting global transaction event processor for dialog-core
+🔗 SETUP: Initializing dialog coordination via DialogCoordinator
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+🎬 SPAWN: Starting dialog coordination event loop
+🎬 SPAWN: Starting session coordination event loop
+🌉 BRIDGE: Setting up session event bridge with media auto-creation and SDP handling
+📡 EVENT LOOP: Session coordination event loop started
+[2m2025-06-12T20:54:16.648586Z[0m [32m INFO[0m SessionManager initialized on port 5061
+[2m2025-06-12T20:54:16.648598Z[0m [32m INFO[0m 🚀 Starting UAC Client session manager...
+[2m2025-06-12T20:54:16.648606Z[0m [32m INFO[0m Starting UnifiedDialogApi
+[2m2025-06-12T20:54:16.648636Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-12T20:54:16.648644Z[0m [32m INFO[0m DialogManager starting
+[2m2025-06-12T20:54:16.648651Z[0m [32m INFO[0m DialogManager started successfully
+[2m2025-06-12T20:54:16.648658Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:uac@127.0.0.1:5061"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-12T20:54:16.648683Z[0m [32m INFO[0m UnifiedDialogManager started successfully
+[2m2025-06-12T20:54:16.648858Z[0m [32m INFO[0m Session event processor started
+[2m2025-06-12T20:54:16.648876Z[0m [32m INFO[0m Cleanup manager started
+[2m2025-06-12T20:54:16.648904Z[0m [32m INFO[0m SessionManager started
+[2m2025-06-12T20:54:16.648935Z[0m [32m INFO[0m ✅ UAC Client ready on port 5061
+[2m2025-06-12T20:54:16.648942Z[0m [32m INFO[0m 🎯 Target: 127.0.0.1:5062
+[2m2025-06-12T20:54:16.648949Z[0m [32m INFO[0m 📞 Making 1 calls with duration 10s each
+[2m2025-06-12T20:54:16.648956Z[0m [32m INFO[0m 📞 Making call 1/1
+[2m2025-06-12T20:54:16.649013Z[0m [32m INFO[0m Making outgoing call from sip:uac@127.0.0.1:5061 to sip:uas@127.0.0.1:5062
+Request Via headers before transaction creation:
+  Via[0]: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee
+Request Via headers after potential modification:
+  Via[0]: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee
+Creating ClientInviteTransaction: Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Creating new ClientInviteTransaction: Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Created ClientInviteTransaction: Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Created ClientInviteTransaction: Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+ClientInviteTransaction::initiate called for Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Current state is Initial
+Sending TransitionTo(Calling) command for Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Starting event loop for INVITE Client transaction: Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Successfully sent TransitionTo command for Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Transaction loop starting for Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Initial state: Initial
+Received command: TransitionTo(Calling) for transaction Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Processing TransitionTo(Calling) current state: Initial
+Valid state transition: Initial -> Calling
+State successfully changed to: Calling
+Sent StateChanged event result: Success
+[2m2025-06-12T20:54:16.650817Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5062
+=== PARSING SIP MESSAGE ===
+Input length: 553 bytes
+Input as string: "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee\r\nFrom: User <sip:uac@127.0.0.1:5061>;tag=2697981f\r\nCall-ID: call-412c2153-7759-4e81-a572-344bec88c4ed\r\nCSeq: 1 INVITE\r\nTo: User <sip:uas@127.0.0.1:5062>;tag=tag-b4f8041fd6e34dda8d9429fa5327967f\r\nContact: <sip:server@127.0.0.1:5062>\r\nContent-Length: 170\r\nContent-Type: application/sdp\r\n\r\nv=0\r\no=uas 123456 654321 IN IP4 127.0.0.1\r\ns=UAS Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10001 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n"
+Input as hex: [53, 49, 50, 2f, 32, 2e, 30, 20, 32, 30, 30, 20, 4f, 4b, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 62, 35, 31, 64, 31, 65, 32, 63, 62, 31, 34, 37, 34, 31, 61, 30, 62, 36, 39, 36, 35, 62, 36, 66, 38, 61, 62, 66, 63, 34, 65, 65, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 36, 39, 37, 39, 38, 31, 66, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 34, 31, 32, 63, 32, 31, 35, 33, 2d, 37, 37, 35, 39, 2d, 34, 65, 38, 31, 2d, 61, 35, 37, 32, 2d, 33, 34, 34, 62, 65, 63, 38, 38, 63, 34, 65, 64, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 62, 34, 66, 38, 30, 34, 31, 66, 64, 36, 65, 33, 34, 64, 64, 61, 38, 64, 39, 34, 32, 39, 66, 61, 35, 33, 32, 37, 39, 36, 37, 66, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 73, 65, 72, 76, 65, 72, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 31, 37, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 75, 61, 73, 20, 31, 32, 33, 34, 35, 36, 20, 36, 35, 34, 33, 32, 31, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 55, 41, 53, 20, 54, 65, 73, 74, 20, 43, 61, 6c, 6c, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 31, 30, 30, 30, 31, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 98, 52, 102, 56, 48, 52, 49, 102, 100, 54, 101, 51, 52, 100, 100, 97, 56, 100, 57, 52, 50, 57, 102, 97, 53, 51, 50, 55, 57, 54, 55, 102]
+Successfully parsed tag: tag-b4f8041fd6e34dda8d9429fa5327967f
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+State after sending command: Calling
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("2697981f")] })), CallId(CallId("call-412c2153-7759-4e81-a572-344bec88c4ed")), CSeq(CSeq { seq: 1, method: Invite }), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-b4f8041fd6e34dda8d9429fa5327967f")] })), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("server"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), ContentLength(ContentLength(170)), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} }))], body: b"v=0\r\no=uas 123456 654321 IN IP4 127.0.0.1\r\ns=UAS Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10001 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n" })) for transaction Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+Processing TransitionTo(Terminated) current state: Calling
+Valid state transition: Calling -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client). Final state: Terminated
+Event loop for INVITE Client transaction ended: Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+[2m2025-06-12T20:54:16.662744Z[0m [32m INFO[0m Transaction Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client) received success response 200 OK for dialog e5c59c8d-241d-4bb7-9147-9ef619c56ad1
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: ResponseReceived { dialog_id: DialogId(e5c59c8d-241d-4bb7-9147-9ef619c56ad1), response: Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("2697981f")] })), CallId(CallId("call-412c2153-7759-4e81-a572-344bec88c4ed")), CSeq(CSeq { seq: 1, method: Invite }), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-b4f8041fd6e34dda8d9429fa5327967f")] })), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("server"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), ContentLength(ContentLength(170)), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} }))], body: b"v=0\r\no=uas 123456 654321 IN IP4 127.0.0.1\r\ns=UAS Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10001 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n" }, transaction_id: z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client }
+🎯 SESSION COORDINATION: Received response 200 for dialog e5c59c8d-241d-4bb7-9147-9ef619c56ad1
+🚀 SESSION COORDINATION: This is a 200 OK to INVITE - sending automatic ACK
+[2m2025-06-12T20:54:16.662897Z[0m [32m INFO[0m 📄 SESSION COORDINATION: 200 OK contains SDP body (170 bytes)
+[2m2025-06-12T20:54:16.662990Z[0m [32m INFO[0m Sending ACK message to 127.0.0.1:5062
+✅ SESSION COORDINATION: Successfully sent ACK for 200 OK response
+[2m2025-06-12T20:54:16.663026Z[0m [32m INFO[0m ACK sent successfully for dialog e5c59c8d-241d-4bb7-9147-9ef619c56ad1 transaction Key(z9hG4bK-b51d1e2cb14741a0b6965b6f8abfc4ee:INVITE:client)
+[2m2025-06-12T20:54:16.663063Z[0m [32m INFO[0m 🔧 ACK SENT: Alternative media creation for session sess_19aff811-42de-4658-bcf5-e031dd872913 after ACK (state: Initiating)
+[2m2025-06-12T20:54:16.663081Z[0m [32m INFO[0m 🚀 RFC 3261: Handled ACK sent for UAC side media creation
+📞 SESSION COORDINATION: Updating session sess_19aff811-42de-4658-bcf5-e031dd872913 state to Active for successful outgoing call
+[2m2025-06-12T20:54:16.663094Z[0m [32m INFO[0m 📞 200 OK received for session sess_19aff811-42de-4658-bcf5-e031dd872913 - keeping in Initiating state until media ready
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallAnswered { dialog_id: DialogId(e5c59c8d-241d-4bb7-9147-9ef619c56ad1), session_answer: "v=0\r\no=uas 123456 654321 IN IP4 127.0.0.1\r\ns=UAS Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 10001 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=sendrecv\r\n" }
+[2m2025-06-12T20:54:16.663154Z[0m [32m INFO[0m Call answered for session sess_19aff811-42de-4658-bcf5-e031dd872913: e5c59c8d-241d-4bb7-9147-9ef619c56ad1 (awaiting ACK per RFC 3261)
+[2m2025-06-12T20:54:16.663165Z[0m [32m INFO[0m 📞 Call answered for session sess_19aff811-42de-4658-bcf5-e031dd872913 - keeping in Initiating state until media ready
+[2m2025-06-12T20:54:16.663172Z[0m [32m INFO[0m 🚫 RFC 3261: NOT creating media session yet - waiting for ACK
+[2m2025-06-12T20:54:16.663184Z[0m [32m INFO[0m 📄 ✅ RFC 3261: Processing final negotiated SDP for session sess_19aff811-42de-4658-bcf5-e031dd872913 after ACK exchange
+[2m2025-06-12T20:54:16.663240Z[0m [32m INFO[0m 🚀 RFC 3261: Creating media session after ACK for sess_19aff811-42de-4658-bcf5-e031dd872913: rfc_compliant_media_creation_uac
+[2m2025-06-12T20:54:16.663252Z[0m [32m INFO[0m Starting media session for dialog: media-sess_19aff811-42de-4658-bcf5-e031dd872913
+[2m2025-06-12T20:54:16.663327Z[0m [32m INFO[0m Created global port allocator with range 16384-32767
+[2m2025-06-12T20:54:16.764373Z[0m [32m INFO[0m Created outgoing call with dialog ID: e5c59c8d-241d-4bb7-9147-9ef619c56ad1 (transaction completed per RFC 3261)
+[2m2025-06-12T20:54:16.764498Z[0m [32m INFO[0m Created outgoing call: sip:uac@127.0.0.1:5061 -> sip:uas@127.0.0.1:5062 (dialog: e5c59c8d-241d-4bb7-9147-9ef619c56ad1)
+[2m2025-06-12T20:54:16.764540Z[0m [32m INFO[0m Created outgoing call: sip:uac@127.0.0.1:5061 -> sip:uas@127.0.0.1:5062
+[2m2025-06-12T20:54:16.764575Z[0m [32m INFO[0m 📞 Call initiated with ID: sess_19aff811-42de-4658-bcf5-e031dd872913
+[2m2025-06-12T20:54:16.764596Z[0m [32m INFO[0m ⏱️ Keeping call active for 10s
+[2m2025-06-12T20:54:17.667360Z[0m [32m INFO[0m Started UDP transport receiver tasks
+[2m2025-06-12T20:54:17.667514Z[0m [32m INFO[0m Started RTP session with SSRC=1691960e
+[2m2025-06-12T20:54:17.667592Z[0m [32m INFO[0m ✅ Created media session with REAL RTP session: media-sess_19aff811-42de-4658-bcf5-e031dd872913 (port: 21013)
+[2m2025-06-12T20:54:17.667670Z[0m [32m INFO[0m ✅ Created media session: media-sess_19aff811-42de-4658-bcf5-e031dd872913 for SIP session: sess_19aff811-42de-4658-bcf5-e031dd872913 with real MediaSessionController + zero-copy enabled
+[2m2025-06-12T20:54:17.667712Z[0m [32m INFO[0m ✅ Successfully created RFC-compliant media session for sess_19aff811-42de-4658-bcf5-e031dd872913
+[2m2025-06-12T20:54:17.667794Z[0m [32m INFO[0m ✅ Updated media session for SIP session: sess_19aff811-42de-4658-bcf5-e031dd872913 with remote: 127.0.0.1:10001 and codecs: ["PCMU"]
+[2m2025-06-12T20:54:17.667833Z[0m [32m INFO[0m ✅ Applied stored remote SDP to new media session for sess_19aff811-42de-4658-bcf5-e031dd872913
+[2m2025-06-12T20:54:17.667871Z[0m [32m INFO[0m 🎉 Session sess_19aff811-42de-4658-bcf5-e031dd872913 transitioned to Active in registry - media ready and session fully established!
+[2m2025-06-12T20:54:17.667920Z[0m [32m INFO[0m 📄 Stored remote SDP answer for session sess_19aff811-42de-4658-bcf5-e031dd872913
+[2m2025-06-12T20:54:17.667979Z[0m [32m INFO[0m ✅ Updated media session for SIP session: sess_19aff811-42de-4658-bcf5-e031dd872913 with remote: 127.0.0.1:10001 and codecs: ["PCMU"]
+[2m2025-06-12T20:54:17.668011Z[0m [32m INFO[0m ✅ Updated media session with remote SDP for sess_19aff811-42de-4658-bcf5-e031dd872913
+[2m2025-06-12T20:54:26.766406Z[0m [32m INFO[0m 📴 Ending call sess_19aff811-42de-4658-bcf5-e031dd872913
+Request Via headers before transaction creation:
+  Via[0]: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-18787c66dbae433598fd25be2a23b403
+Request Via headers after potential modification:
+  Via[0]: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-18787c66dbae433598fd25be2a23b403
+ClientNonInviteTransaction::initiate called for Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client)
+Current state is Initial
+Sending TransitionTo(Trying) command for Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client)
+Successfully sent TransitionTo command for Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client)
+Transaction loop starting for Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client)
+Initial state: Initial
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client)
+Processing TransitionTo(Trying) current state: Initial
+Valid state transition: Initial -> Trying
+State successfully changed to: Trying
+Sent StateChanged event result: Success
+[2m2025-06-12T20:54:26.767414Z[0m [32m INFO[0m Sending BYE message to 127.0.0.1:5062
+=== PARSING SIP MESSAGE ===
+Input length: 309 bytes
+Input as string: "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-18787c66dbae433598fd25be2a23b403\r\nFrom: User <sip:uac@127.0.0.1:5061>;tag=2697981f\r\nTo: User <sip:uas@127.0.0.1:5062>;tag=tag-b4f8041fd6e34dda8d9429fa5327967f\r\nCall-ID: call-412c2153-7759-4e81-a572-344bec88c4ed\r\nCSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [53, 49, 50, 2f, 32, 2e, 30, 20, 32, 30, 30, 20, 4f, 4b, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 31, 38, 37, 38, 37, 63, 36, 36, 64, 62, 61, 65, 34, 33, 33, 35, 39, 38, 66, 64, 32, 35, 62, 65, 32, 61, 32, 33, 62, 34, 30, 33, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 63, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 31, 3e, 3b, 74, 61, 67, 3d, 32, 36, 39, 37, 39, 38, 31, 66, 0d, 0a, 54, 6f, 3a, 20, 55, 73, 65, 72, 20, 3c, 73, 69, 70, 3a, 75, 61, 73, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 32, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 62, 34, 66, 38, 30, 34, 31, 66, 64, 36, 65, 33, 34, 64, 64, 61, 38, 64, 39, 34, 32, 39, 66, 61, 35, 33, 32, 37, 39, 36, 37, 66, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 63, 61, 6c, 6c, 2d, 34, 31, 32, 63, 32, 31, 35, 33, 2d, 37, 37, 35, 39, 2d, 34, 65, 38, 31, 2d, 61, 35, 37, 32, 2d, 33, 34, 34, 62, 65, 63, 38, 38, 63, 34, 65, 64, 0d, 0a, 43, 53, 65, 71, 3a, 20, 32, 20, 42, 59, 45, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
+===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 98, 52, 102, 56, 48, 52, 49, 102, 100, 54, 101, 51, 52, 100, 100, 97, 56, 100, 57, 52, 50, 57, 102, 97, 53, 51, 50, 55, 57, 54, 55, 102]
+Successfully parsed tag: tag-b4f8041fd6e34dda8d9429fa5327967f
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+State after sending command: Trying
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-18787c66dbae433598fd25be2a23b403")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("2697981f")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-b4f8041fd6e34dda8d9429fa5327967f")] })), CallId(CallId("call-412c2153-7759-4e81-a572-344bec88c4ed")), CSeq(CSeq { seq: 2, method: Bye }), ContentLength(ContentLength(0))], body: b"" })) for transaction Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client)
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client)
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+Sent StateChanged event result: Success
+[2m2025-06-12T20:54:26.780397Z[0m [32m INFO[0m Transaction Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client) received success response 200 OK for dialog e5c59c8d-241d-4bb7-9147-9ef619c56ad1
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: ResponseReceived { dialog_id: DialogId(e5c59c8d-241d-4bb7-9147-9ef619c56ad1), response: Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5061), params: [Branch("z9hG4bK-18787c66dbae433598fd25be2a23b403")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: Some(5061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("2697981f")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-b4f8041fd6e34dda8d9429fa5327967f")] })), CallId(CallId("call-412c2153-7759-4e81-a572-344bec88c4ed")), CSeq(CSeq { seq: 2, method: Bye }), ContentLength(ContentLength(0))], body: b"" }, transaction_id: z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client }
+🎯 SESSION COORDINATION: Received response 200 for dialog e5c59c8d-241d-4bb7-9147-9ef619c56ad1
+[2m2025-06-12T20:54:26.880552Z[0m [32m INFO[0m Terminated session: sess_19aff811-42de-4658-bcf5-e031dd872913
+[2m2025-06-12T20:54:26.880627Z[0m [32m INFO[0m Terminated session: sess_19aff811-42de-4658-bcf5-e031dd872913
+[2m2025-06-12T20:54:26.880669Z[0m [32m INFO[0m ⏳ Waiting for all calls to complete...
+[2m2025-06-12T20:54:26.880683Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:27.382531Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:27.884303Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:28.385508Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:28.886955Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:29.387990Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:29.888862Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:30.389887Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:30.890645Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:31.392303Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+Received command: Timer("K") for transaction Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client)
+Processing TransitionTo(Terminated) current state: Completed
+Valid state transition: Completed -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-18787c66dbae433598fd25be2a23b403:BYE:client). Final state: Terminated
+[2m2025-06-12T20:54:31.893428Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:32.395452Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:32.897364Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:33.399086Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:33.899641Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:34.401432Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:34.903143Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:35.404417Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:35.905485Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:36.407230Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:36.908583Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:37.410400Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:37.912379Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:38.414433Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:38.916301Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:39.417855Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:39.919226Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:40.420863Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:40.921871Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:41.422809Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:41.923494Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:42.424588Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:42.925492Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:43.426724Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:43.927368Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:44.429034Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:44.929410Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:45.430880Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:45.931967Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:46.433335Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:46.934828Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:47.435295Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:47.936732Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:48.437289Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:48.938688Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:49.439498Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:49.940479Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:50.441578Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:50.943007Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:51.444305Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:51.945210Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:52.446403Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:52.947528Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:53.448627Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:53.949403Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:54.450662Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:54.952112Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:55.453701Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:55.954865Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:56.456086Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:56.957744Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:57.458168Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:57.959180Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:58.460337Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:58.962023Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:59.463576Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:54:59.964318Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:00.466014Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:00.968061Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:01.470163Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:01.971711Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:02.472259Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:02.973651Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:03.474560Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:03.975616Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:04.476853Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:04.977810Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:05.478781Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:05.979587Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:06.481140Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:06.982384Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:07.483066Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:07.985163Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:08.486267Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:08.987575Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:09.489080Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:09.991050Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:10.492290Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:10.993826Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:11.495157Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:11.996218Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:12.497779Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:12.998497Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:13.499224Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:14.000158Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:14.501763Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:15.002458Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:15.503977Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:16.005505Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:16.506248Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:17.007904Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:17.509795Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:18.012053Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:18.513444Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:19.014294Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:19.515173Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:20.016443Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:20.517966Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:21.019194Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:21.520205Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:22.021978Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:22.523984Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:23.025093Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:23.526399Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:24.027743Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:24.529938Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:25.031185Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:25.532671Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:26.033439Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:26.534580Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:27.035744Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:27.537328Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:28.037885Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:28.539767Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:29.041389Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:29.542601Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:30.043695Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:30.544895Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:31.046351Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:31.547422Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:32.048322Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:32.549007Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:33.049954Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:33.551019Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:34.051967Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:34.553499Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:35.054663Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:35.556437Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:36.057284Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:36.557996Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:37.059379Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:37.560246Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:38.061265Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:38.561803Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:39.063638Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:39.564952Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:40.065655Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:40.567214Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:41.067760Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:41.569368Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:42.070764Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:42.571871Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:43.072898Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:43.574201Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:44.075651Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:44.577718Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:45.079723Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:45.581118Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:46.082198Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:46.582647Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:47.083814Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:47.585199Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:48.085622Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:48.587713Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:49.089702Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:49.590620Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:50.092385Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:50.593098Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:51.093791Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:51.595637Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:52.096680Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:52.597568Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:53.098766Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:53.600225Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:54.101560Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:54.603492Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:55.104915Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:55.606137Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:56.106584Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:56.607630Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:57.108521Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:57.609552Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:58.110772Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:58.612165Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:59.113035Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:55:59.613647Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:00.115528Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:00.617477Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:01.119321Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:01.620551Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:02.121454Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:02.623097Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:03.123855Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:03.625570Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:04.126722Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:04.628131Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:05.129246Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:05.630669Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:06.131841Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:06.632820Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:07.133997Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:07.634731Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:08.135629Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:08.637260Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:09.138579Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:09.639592Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:10.141220Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:10.642439Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:11.143675Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:11.645184Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:12.147207Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:12.649360Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:13.153543Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:13.656557Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:14.158043Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:14.659265Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:15.160549Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:15.662369Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:16.163405Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:16.664492Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:17.165413Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:17.667000Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:18.167575Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:18.668621Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:19.169863Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:19.671261Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:20.172816Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:20.674101Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:21.176397Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:21.677395Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:22.179213Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:22.681024Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:23.182828Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:23.683569Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:24.185105Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:24.686360Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:25.188262Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:25.689230Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:26.190726Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:26.692000Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:27.193924Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:27.695029Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:28.196724Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:28.697482Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:29.198253Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:29.700083Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:30.202289Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:30.703376Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:31.205058Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:31.706908Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:32.207415Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:32.708690Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:33.210065Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:33.712217Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:34.213793Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:34.714102Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:35.215140Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:35.716346Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:36.218235Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:36.719392Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:37.221140Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:37.722155Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:38.223954Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:38.725882Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:39.227913Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:39.729893Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:40.231935Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:40.733345Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:41.234706Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:41.736128Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:42.237921Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:42.739545Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:43.240282Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:43.741907Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:44.244052Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:44.745231Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:45.246101Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:45.747913Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:46.250008Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:46.750999Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:47.252258Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:47.753768Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:48.254481Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:48.755509Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:49.256793Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:49.758095Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:50.259983Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:50.761217Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:51.262077Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:51.763345Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:52.264169Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:52.765171Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:53.266412Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:53.767096Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:54.268996Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:54.769972Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:55.271405Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:55.772652Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:56.274064Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:56.775779Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:57.277748Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:57.778948Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:58.280787Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:58.782573Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:59.283184Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:56:59.784133Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:00.285608Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:00.786760Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:01.288655Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:01.790960Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:02.292731Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:02.794210Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:03.295768Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:03.797746Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:04.298961Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:04.800004Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:05.301356Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:05.802214Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:06.303561Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:06.804082Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:07.304907Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:07.806024Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:08.306987Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:08.808389Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:09.308763Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:09.810287Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:10.311745Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:10.813011Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:11.314170Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:11.815203Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:12.316025Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:12.817795Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:13.319264Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:13.820539Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:14.321406Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:14.821991Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:15.323753Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:15.825638Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:16.327718Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:16.828713Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:17.330190Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:17.830921Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:18.332526Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:18.834756Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:19.335657Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:19.837613Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:20.339485Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:20.840966Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:21.342790Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:21.843738Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:22.345326Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:22.846497Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:23.348701Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:23.849897Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:24.351193Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:24.852199Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:25.353104Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:25.854519Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:26.355706Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:26.856776Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:27.358084Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:27.858662Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:28.359819Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:28.861123Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:29.361586Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:29.863341Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:30.364067Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:30.864628Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:31.365904Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:31.866696Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:32.368025Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:32.869004Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:33.370653Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:33.872551Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:34.373524Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:34.874994Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:35.376150Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:35.877383Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:36.379043Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:36.879511Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:37.380515Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:37.881981Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:38.382964Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:38.883721Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:39.384436Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:39.886476Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:40.387713Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:40.888501Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:41.390559Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:41.892319Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:42.394314Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:42.896432Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:43.397381Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:43.899026Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:44.400044Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:44.901359Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:45.403056Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:45.903870Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:46.404731Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:46.905929Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:47.406600Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:47.908439Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:48.410484Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:48.912541Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:49.413916Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:49.915457Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:50.417224Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:50.918941Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:51.420293Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:51.921500Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:52.422852Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:52.924014Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:53.424373Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:53.925769Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:54.426989Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:54.927605Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:55.428396Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:55.930527Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:56.432404Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:56.934153Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:57.435867Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:57.936599Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:58.437314Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:58.939426Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:59.441119Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:57:59.942276Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:00.443346Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:00.944976Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:01.446833Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:01.948314Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:02.449931Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:02.950449Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:03.452171Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:03.953314Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:04.454589Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:04.955836Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:05.456912Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:05.958366Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:06.459235Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:06.961303Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:07.462369Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:07.964246Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:08.465772Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:08.966728Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:09.467650Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:09.968991Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:10.470975Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:10.972985Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:11.474650Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:11.977075Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:12.479317Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:12.981699Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:13.483997Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:13.987018Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:14.489980Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:14.992624Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:15.494486Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:15.997017Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:16.498772Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:17.000654Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:17.502975Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:18.004893Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:18.507343Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:19.009473Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:19.511832Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:20.013102Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:20.514987Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:21.016729Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:21.518672Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:22.020402Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:22.522158Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:23.024425Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:23.525931Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:24.027526Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:24.529790Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:25.032308Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:25.534563Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:26.035674Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:26.537226Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:27.038864Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:27.540373Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:28.041693Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:28.542816Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:29.044853Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:29.546507Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:30.048638Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:30.550662Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:31.052345Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:31.554956Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:32.056894Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:32.559054Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:33.060753Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:33.562574Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:34.064942Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:34.567493Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:35.069599Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:35.570929Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:36.073081Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:36.574404Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:37.076431Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:37.578666Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:38.081034Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:38.582888Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:39.084131Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:39.585929Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:40.087115Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:40.588587Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:41.090076Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:41.592121Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:42.094081Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:42.594683Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:43.096097Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:43.597520Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:44.098731Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:44.599678Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:45.100856Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:45.601473Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:46.103015Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:46.603811Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:47.104937Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:47.606615Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:48.107543Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:48.608924Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:49.110641Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:49.612099Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:50.113872Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:50.614595Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:51.116782Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:51.617893Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:52.119945Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:52.621785Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:53.123728Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:53.625683Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:54.127276Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:54.628368Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:55.129382Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:55.631522Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:56.133246Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:56.635084Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:57.136392Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:57.638207Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:58.138730Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:58.640688Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:59.142116Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:58:59.643125Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:00.144442Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:00.645966Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:01.147635Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:01.649204Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:02.151208Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:02.652391Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:03.153276Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:03.654816Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:04.155781Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:04.657322Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:05.159114Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:05.660648Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:06.162067Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:06.662515Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:07.163504Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:07.665421Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:08.167260Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:08.667613Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:09.168876Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:09.669706Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:10.170959Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:10.672523Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:11.174716Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:11.675819Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:12.177228Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:12.678018Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:13.179386Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:13.680689Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:14.181927Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:14.683658Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:15.185895Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:15.688009Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:16.189158Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:16.691003Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:17.192564Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:17.693908Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:18.195286Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:18.696238Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:19.197505Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:19.698250Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:20.199566Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:20.700875Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:21.202724Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:21.703982Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:22.206156Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:22.707656Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:23.208302Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:23.709399Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:24.210613Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:24.712312Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:25.214154Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:25.716088Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:26.218084Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:26.719800Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:27.220260Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:27.721495Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:28.222775Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:28.723394Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:29.224779Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:29.726383Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:30.227308Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:30.728542Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:31.229321Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:31.731218Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:32.232524Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:32.733557Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:33.235379Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:33.736529Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:34.237732Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:34.738856Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:35.239395Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:35.740797Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:36.241932Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:36.742923Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:37.244069Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:37.745542Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:38.246873Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:38.747749Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:39.248876Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:39.749852Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:40.251252Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:40.753282Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:41.255153Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:41.756992Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:42.257392Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:42.759409Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:43.260882Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:43.761731Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:44.262419Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:44.763593Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:45.264714Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:45.765674Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:46.267175Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:46.768506Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:47.270508Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:47.771641Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:48.272921Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:48.774444Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:49.276212Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:49.777916Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:50.279066Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:50.780004Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:51.280944Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:51.782523Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:52.283953Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:52.784442Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:53.286201Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:53.788317Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:54.289504Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:54.791001Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:55.292019Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:55.793187Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:56.295495Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:56.796785Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:57.297717Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:57.799399Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:58.301257Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:58.803095Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:59.304216Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T20:59:59.805770Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:00.306898Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:00.808387Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:01.309701Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:01.811013Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:02.312373Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:02.813973Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:03.314657Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:03.815731Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:04.317050Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:04.817654Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:05.318970Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:05.819929Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:06.320698Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:06.821459Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:07.323045Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:07.823816Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:08.324672Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:08.825458Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:09.326953Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:09.828105Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:10.329401Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:10.831037Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:11.332025Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:11.833095Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:12.333726Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:12.834855Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:13.341963Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:13.842829Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:14.344074Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:14.845123Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:15.345935Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:15.846767Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:16.348029Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:16.849092Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:17.350011Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:17.850436Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:18.351446Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:18.852700Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:19.353982Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:19.855163Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:20.356027Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:20.857578Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:21.358862Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:21.859736Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:22.361187Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:22.863574Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:23.365150Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:23.866341Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:24.368321Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:24.869972Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:25.370771Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:25.872149Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:26.372915Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:26.874424Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:27.376051Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:27.876800Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:28.377974Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:28.878693Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:29.380181Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:29.880641Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:30.381984Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:30.883556Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:31.384704Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:31.885770Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:32.387512Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:32.889078Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:33.390404Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:33.891866Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:34.392945Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:34.894260Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:35.396474Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:35.898389Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:36.400321Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:36.902337Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:37.404142Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:37.904737Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:38.406492Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:38.908270Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:39.410057Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:39.910784Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:40.411891Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:40.913361Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:41.415219Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:41.917610Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:42.419590Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:42.921034Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:43.421476Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:43.922757Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:44.423512Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:44.925237Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:45.427140Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:45.927514Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:46.429326Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:46.931360Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:47.432566Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:47.934182Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:48.434549Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:48.936547Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:49.437967Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:49.938969Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:50.440409Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:50.941512Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:51.442705Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:51.943559Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:52.445285Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:52.946851Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:53.448545Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:53.949527Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:54.451507Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:54.952812Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:55.453479Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:55.955286Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:56.457047Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:56.957739Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:57.459001Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:57.960068Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:58.460439Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:58.962012Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:59.463297Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:00:59.964653Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:00.466600Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:00.967575Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:01.469356Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:01.970689Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:02.471465Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:02.972605Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:03.473688Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:03.974791Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:04.476533Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:04.978615Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:05.479775Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:05.980482Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:06.482413Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:06.984485Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:07.485884Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:07.986835Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:08.487641Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:08.988937Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:09.490264Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:09.991712Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:10.492482Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:10.993875Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:11.495225Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:11.996568Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:12.498537Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:12.999551Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:13.501046Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:14.001538Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:14.503488Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:15.004692Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:15.506315Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:16.008260Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:16.509673Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:17.011564Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:17.512511Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:18.013996Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:18.515150Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:19.016368Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:19.518055Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:20.019177Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:20.519996Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:21.020751Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:21.521753Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:22.022513Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:22.524233Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:23.025716Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:23.527048Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:24.027703Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:24.528752Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:25.029603Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:25.531265Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:26.033427Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:26.534763Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:27.035525Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:27.537312Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:28.039562Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:28.540477Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:29.041767Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:29.543588Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:30.044699Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:30.545626Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:31.046573Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:31.548355Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:32.050064Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:32.550473Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:33.051784Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:33.553364Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:34.054748Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:34.556569Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:35.058272Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:35.559789Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:36.060854Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:36.562086Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:37.062728Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:37.564534Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:38.065494Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:38.566594Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:39.068030Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:39.568950Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:40.069729Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:40.571543Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:41.072469Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:41.573680Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:42.074497Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:42.575800Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:43.077029Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:43.578387Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:44.080418Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:44.581490Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:45.083370Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:45.584860Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:46.086466Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:46.588020Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:47.089515Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:47.591043Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:48.092036Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:48.593252Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:49.094538Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:49.596149Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:50.097364Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:50.598601Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:51.099528Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:51.601056Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:52.101770Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:52.603522Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:53.105494Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:53.606776Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:54.108539Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:54.609487Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:55.111137Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:55.612570Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:56.114570Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:56.615936Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:57.117431Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:57.619108Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:58.120462Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:58.621888Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:59.122827Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:01:59.624170Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:00.135403Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:00.637300Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:01.138951Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:01.640615Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:02.141884Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:02.642880Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:03.143821Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:03.644936Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:04.146419Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:04.647578Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:05.148576Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:05.649598Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:06.151386Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:06.652453Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:07.153531Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:07.654695Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:08.156405Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:08.658309Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:09.159528Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:09.660875Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:10.162123Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:10.662657Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:11.163509Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:11.664524Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:12.165957Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:12.667140Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:13.168084Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:13.668589Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:14.170276Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:14.672316Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:15.173806Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:15.675570Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:16.177303Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:16.679380Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:17.181130Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:17.682239Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:18.184276Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:18.685726Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:19.186781Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:19.688374Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:20.190399Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:20.691764Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:21.192710Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:21.694254Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:22.196325Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:22.698084Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:23.198517Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:23.699738Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:24.201512Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:24.703466Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:25.205286Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:25.707384Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:26.209016Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:26.709782Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:27.211105Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:27.712263Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:28.213554Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:28.715020Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:29.216394Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:29.717859Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:30.218705Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:30.720235Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:31.222526Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:31.724019Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:32.224723Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:32.726234Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:33.227728Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:33.729365Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:34.231002Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:34.732412Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:35.234358Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:35.735796Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:36.237615Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:36.739526Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:37.241243Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:37.742751Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:38.244503Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:38.745416Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:39.246524Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:39.747741Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:40.248989Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:40.750083Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:41.251385Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:41.752531Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:42.253697Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:42.755336Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:43.257485Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:43.759125Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:44.260281Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:44.761526Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:45.262501Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:45.764286Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:46.265748Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:46.767041Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:47.268296Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:47.769825Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:48.270536Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:48.772520Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:49.273842Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:49.775034Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:50.275508Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:50.777244Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:51.278845Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:51.779698Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:52.280804Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:52.782561Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:53.284364Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:53.785966Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:54.286786Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:54.788010Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:55.288673Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:55.789847Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:56.291575Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:56.793355Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:57.295060Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:57.796279Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:58.298133Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:58.799335Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:59.301006Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:02:59.801714Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:00.302701Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:00.804062Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:01.305067Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:01.806052Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:02.306557Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:02.808324Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:03.309799Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:03.811010Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:04.312556Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:04.813575Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:05.315265Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:05.816735Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:06.318312Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:06.820465Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:07.322296Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:07.823568Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:08.325013Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:08.826290Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:09.328034Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:09.829047Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:10.330277Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:10.831784Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:11.332496Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:11.833753Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:12.334964Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:12.836014Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:13.336997Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:13.837590Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:14.338667Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:14.839572Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:15.341380Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:15.842720Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:16.344170Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:16.845536Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:17.346765Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:17.847722Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:18.349460Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:18.851396Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:19.353242Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:19.855043Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:20.356101Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:20.856737Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:21.357601Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:21.858474Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:22.359566Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:22.860609Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:23.362631Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:23.863628Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:24.365441Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:24.867441Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:25.368551Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:25.870355Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:26.383736Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:26.885131Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:27.386302Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:27.887703Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:28.389455Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:28.891412Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:29.393269Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:29.894866Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:30.396538Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:30.898336Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:31.399645Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:31.900700Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:32.401903Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:32.903620Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:33.405138Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:33.906564Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:34.408158Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:34.908994Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:35.409555Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:35.911133Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:36.412077Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:36.913401Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:37.415539Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:37.917081Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:38.417816Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:38.919144Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:39.419832Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:39.921134Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:40.421745Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:40.923553Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:41.425004Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:41.926556Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:42.428382Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:42.930320Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:43.432170Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:43.933423Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:44.434999Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:44.935768Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:45.436877Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:45.937632Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:46.439359Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:46.940629Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:47.441573Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:47.942579Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:48.444617Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:48.945931Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:49.447461Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:49.949197Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:50.450617Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:50.951948Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:51.452757Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:51.954237Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:52.456424Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:52.958633Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:53.459583Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:53.961044Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:54.461538Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:54.962983Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:55.463783Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:55.965528Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:56.466758Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:56.968177Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:57.468602Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:57.969909Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:58.471162Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:58.971875Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:59.472661Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:03:59.973888Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:04:00.474905Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete
+[2m2025-06-12T21:04:00.976018Z[0m [32m INFO[0m ⏳ Still waiting for 1 active calls to complete

@@ -11,11 +11,11 @@ use crate::api::{
     builder::SessionManagerConfig,
 };
 use crate::errors::Result;
-use super::{registry::SessionRegistry, events::SessionEventProcessor, cleanup::CleanupManager};
+use super::{registry::SessionRegistry, events::SessionEventProcessor, cleanup::CleanupManager, coordinator::SessionCoordinator};
 
 // High-level integration with dialog and media modules (parallel abstraction levels)
 use crate::dialog::{DialogManager, SessionDialogCoordinator, DialogBuilder};
-use crate::media::MediaManager; // TODO: Add MediaManager when implemented
+use crate::media::{MediaManager, SessionMediaCoordinator}; // TODO: Add MediaManager when implemented
 use rvoip_dialog_core::events::SessionCoordinationEvent;
 
 /// Main SessionManager that coordinates all session operations
@@ -81,7 +81,7 @@ impl SessionManager {
             dialog_api,
             registry.clone(),
             handler.clone(),
-            session_events_tx,
+            session_events_tx.clone(),
             dialog_to_session,
         ));
 
@@ -105,18 +105,22 @@ impl SessionManager {
         });
 
         // Initialize subsystems and coordination
-        manager.initialize(dialog_coordination_tx, dialog_coordination_rx, session_events_rx).await?;
+        manager.initialize(dialog_coordination_tx, dialog_coordination_rx, session_events_rx, session_events_tx).await?;
 
         Ok(manager)
     }
 
     /// Initialize the session manager and all subsystems
     async fn initialize(
-        &self, 
+        self: &Arc<Self>, 
         dialog_coordination_tx: mpsc::Sender<SessionCoordinationEvent>,
         dialog_coordination_rx: mpsc::Receiver<SessionCoordinationEvent>,
-        mut session_events_rx: mpsc::Receiver<super::events::SessionEvent>
+        session_events_rx: mpsc::Receiver<super::events::SessionEvent>,
+        session_events_tx: mpsc::Sender<super::events::SessionEvent>,
     ) -> Result<()> {
+        // Start the event processor first so events can be published
+        self.event_processor.start().await?;
+        
         // Initialize dialog coordination (high-level delegation)
         println!("🔗 SETUP: Initializing dialog coordination via DialogCoordinator");
         self.dialog_coordinator
@@ -126,165 +130,38 @@ impl SessionManager {
         
         // Start dialog event loop (delegated to coordinator)
         println!("🎬 SPAWN: Starting dialog coordination event loop");
-        self.dialog_coordinator
-            .start_event_loop(dialog_coordination_rx)
-            .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to start dialog event loop: {}", e)))?;
-
-        // Bridge session events from coordinator to event processor
-        println!("🌉 BRIDGE: Setting up session event bridge with media auto-creation and SDP handling");
-        let event_processor = self.event_processor.clone();
-        let media_manager = self.media_manager.clone();
-        let registry = self.registry.clone();
-        
-        // SDP storage for sessions (session_id -> (local_sdp, remote_sdp))
-        let sdp_storage = Arc::new(dashmap::DashMap::<SessionId, (Option<String>, Option<String>)>::new());
-        let sdp_storage_clone = sdp_storage.clone();
-        
+        let dialog_coordinator_clone = self.dialog_coordinator.clone();
         tokio::spawn(async move {
-            while let Some(session_event) = session_events_rx.recv().await {
-                // Handle SDP events - store SDP for sessions
-                if let super::events::SessionEvent::SdpEvent { session_id, event_type, sdp } = &session_event {
-                    match event_type.as_str() {
-                        "local_sdp_offer" => {
-                            sdp_storage_clone.entry(session_id.clone())
-                                .or_insert((None, None))
-                                .0 = Some(sdp.clone());
-                            tracing::info!("📄 Stored local SDP offer for session {}", session_id);
-                        }
-                        "remote_sdp_answer" => {
-                            sdp_storage_clone.entry(session_id.clone())
-                                .or_insert((None, None))
-                                .1 = Some(sdp.clone());
-                            tracing::info!("📄 Stored remote SDP answer for session {}", session_id);
-                            
-                            // When we have remote SDP, update media session if it exists
-                            if let Ok(Some(_)) = media_manager.get_media_info(session_id).await {
-                                if let Err(e) = media_manager.update_media_session(session_id, sdp).await {
-                                    tracing::error!("Failed to update media session with remote SDP: {}", e);
-                                } else {
-                                    tracing::info!("✅ Updated media session with remote SDP for {}", session_id);
-                                }
-                            }
-                        }
-                        "sdp_update" => {
-                            tracing::info!("📄 Processing SDP update for session {}", session_id);
-                            if let Ok(Some(_)) = media_manager.get_media_info(session_id).await {
-                                if let Err(e) = media_manager.update_media_session(session_id, sdp).await {
-                                    tracing::error!("Failed to update media session with new SDP: {}", e);
-                                }
-                            }
-                        }
-                        "final_negotiated_sdp" => {
-                            tracing::info!("📄 ✅ RFC 3261: Processing final negotiated SDP for session {} after ACK exchange", session_id);
-                            // Store final negotiated SDP (this represents the complete SDP after ACK)
-                            sdp_storage_clone.entry(session_id.clone())
-                                .or_insert((None, None))
-                                .1 = Some(sdp.clone());
-                            
-                            // Update media session if it exists with the final negotiated SDP
-                            if let Ok(Some(_)) = media_manager.get_media_info(session_id).await {
-                                if let Err(e) = media_manager.update_media_session(session_id, sdp).await {
-                                    tracing::error!("Failed to update media session with final negotiated SDP: {}", e);
-                                } else {
-                                    tracing::info!("✅ Applied final negotiated SDP to media session for {}", session_id);
-                                }
-                            } else {
-                                tracing::debug!("Media session not yet created for {}, final SDP stored for later application", session_id);
-                            }
-                        }
-                        _ => {
-                            tracing::debug!("Unknown SDP event type: {}", event_type);
-                        }
-                    }
-                }
-                
-                // Handle RFC-compliant media creation events
-                if let super::events::SessionEvent::MediaEvent { session_id, event } = &session_event {
-                    match event.as_str() {
-                        "rfc_compliant_media_creation_uac" | "rfc_compliant_media_creation_uas" => {
-                            tracing::info!("🚀 RFC 3261: Creating media session after ACK for {}: {}", session_id, event);
-                            
-                            // Check if media session already exists to avoid duplicates
-                            if let Ok(Some(_)) = media_manager.get_media_info(session_id).await {
-                                tracing::warn!("Media session already exists for {}, skipping creation", session_id);
-                            } else {
-                                if let Err(e) = media_manager.create_media_session(session_id).await {
-                                    tracing::error!("Failed to create RFC-compliant media session for {}: {}", session_id, e);
-                                } else {
-                                                                    tracing::info!("✅ Successfully created RFC-compliant media session for {}", session_id);
-                                
-                                // Apply any stored SDP to the newly created media session
-                                if let Some(sdp_entry) = sdp_storage_clone.get(session_id) {
-                                    let (local_sdp, remote_sdp) = sdp_entry.value();
-                                    if let Some(remote_sdp) = remote_sdp {
-                                        if let Err(e) = media_manager.update_media_session(session_id, remote_sdp).await {
-                                            tracing::error!("Failed to apply stored remote SDP to new media session: {}", e);
-                                        } else {
-                                            tracing::info!("✅ Applied stored remote SDP to new media session for {}", session_id);
-                                        }
-                                    }
-                                }
-                                
-                                // NOW transition session to Active - media is ready!
-                                // First, get the current session from registry
-                                if let Ok(Some(mut session)) = registry.get_session(session_id).await {
-                                    let old_state = session.state.clone();
-                                    session.state = crate::api::types::CallState::Active;
-                                    
-                                    // Update the session in the registry
-                                    if let Err(e) = registry.register_session(session_id.clone(), session).await {
-                                        tracing::error!("Failed to update session {} state to Active in registry: {}", session_id, e);
-                                    } else {
-                                        tracing::info!("🎉 Session {} transitioned to Active in registry - media ready and session fully established!", session_id);
-                                        
-                                        // Now publish the state change event
-                                        if let Err(e) = event_processor.publish_event(super::events::SessionEvent::StateChanged {
-                                            session_id: session_id.clone(),
-                                            old_state,
-                                            new_state: crate::api::types::CallState::Active,
-                                        }).await {
-                                            tracing::error!("Failed to publish state change event: {}", e);
-                                        }
-                                    }
-                                } else {
-                                    tracing::error!("Failed to find session {} to update state to Active", session_id);
-                                }
-                                }
-                            }
-                        }
-                        
-                        // Keep old event for backward compatibility but warn
-                        "auto_create_media_session" | "auto_create_media_session_with_sdp" => {
-                            tracing::warn!("⚠️ Using deprecated media creation event '{}' - should use RFC-compliant ACK-based creation", event);
-                            // Don't create media for deprecated events - let RFC-compliant flow handle it
-                        }
-                        
-                        _ => {
-                            tracing::debug!("Unknown media event: {}", event);
-                        }
-                    }
-                }
-                
-                // Also handle StateChanged events for media coordination
-                if let super::events::SessionEvent::StateChanged { session_id, new_state, .. } = &session_event {
-                    if matches!(new_state, crate::api::types::CallState::Terminated) {
-                        tracing::info!("Session {} terminated, cleaning up media session and SDP", session_id);
-                        if let Err(e) = media_manager.terminate_media_session(session_id).await {
-                            tracing::warn!("Failed to terminate media session for {}: {}", session_id, e);
-                        }
-                        
-                        // Clean up stored SDP
-                        sdp_storage_clone.remove(session_id);
-                    }
-                }
-                
-                // Forward to event processor for other handlers
-                if let Err(e) = event_processor.publish_event(session_event).await {
-                    tracing::error!("Failed to publish session event: {}", e);
-                }
+            if let Err(e) = dialog_coordinator_clone.start_event_loop(dialog_coordination_rx).await {
+                tracing::error!("Dialog event loop error: {}", e);
             }
         });
+
+        // Create media coordinator
+        let media_coordinator = Arc::new(SessionMediaCoordinator::new(self.media_manager.clone()));
+
+        // Create the main session coordinator
+        let session_coordinator = Arc::new(SessionCoordinator::new(
+            media_coordinator,
+            self.dialog_coordinator.clone(),
+            session_events_rx,
+            session_events_tx,
+            self.handler.clone(),
+            self.registry.clone(),
+        ));
+
+        // Start the session coordinator event loop
+        println!("🌉 BRIDGE: Starting session coordinator event loop");
+        let coordinator_clone = session_coordinator.clone();
+        tokio::spawn(async move {
+            if let Err(e) = coordinator_clone.start_coordination_loop().await {
+                tracing::error!("Session coordination loop error: {}", e);
+            }
+        });
+
+        // Note: We can't store the coordinator in self because we have &Arc<Self>
+        // The coordinator is running in the background and will handle events
+        // This is a limitation of the current architecture
 
         tracing::info!("SessionManager initialized on port {}", self.config.sip_port);
         Ok(())

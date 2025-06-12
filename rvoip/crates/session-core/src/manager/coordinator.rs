@@ -1,8 +1,7 @@
-//! Session Coordinator
+//! Session Coordination Module
 //!
-//! Orchestrates coordination between DialogCoordinator (SIP signaling) and 
-//! MediaCoordinator (media sessions). This is where the complex logic lives
-//! for managing the relationship between SIP dialogs and media sessions.
+//! Coordinates between dialog and media subsystems for session management.
+//! Handles session lifecycle events and ensures proper synchronization.
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -13,8 +12,10 @@ use crate::manager::events::SessionEvent;
 use crate::media::coordinator::SessionMediaCoordinator;
 use crate::dialog::coordinator::SessionDialogCoordinator;
 use crate::errors::SessionError;
+use crate::api::handlers::CallHandler;
+use super::registry::SessionRegistry;
 
-/// Coordinates between dialog and media subsystems
+/// Session coordinator that bridges dialog and media subsystems
 pub struct SessionCoordinator {
     /// Media coordinator for handling media sessions
     media_coordinator: Arc<SessionMediaCoordinator>,
@@ -27,6 +28,12 @@ pub struct SessionCoordinator {
     
     /// Channel for sending session events (for internal coordination)
     session_events_tx: mpsc::Sender<SessionEvent>,
+    
+    /// Handler for call events
+    handler: Option<Arc<dyn CallHandler>>,
+    
+    /// Session registry for looking up sessions
+    registry: Arc<SessionRegistry>,
 }
 
 impl SessionCoordinator {
@@ -36,24 +43,39 @@ impl SessionCoordinator {
         dialog_coordinator: Arc<SessionDialogCoordinator>,
         session_events_rx: mpsc::Receiver<SessionEvent>,
         session_events_tx: mpsc::Sender<SessionEvent>,
+        handler: Option<Arc<dyn CallHandler>>,
+        registry: Arc<SessionRegistry>,
     ) -> Self {
         Self {
             media_coordinator,
             dialog_coordinator,
             session_events_rx: Some(session_events_rx),
             session_events_tx,
+            handler,
+            registry,
         }
     }
     
     /// Start the coordination event loop
-    pub async fn start_coordination_loop(&mut self) -> Result<(), SessionError> {
-        let mut session_events_rx = self.session_events_rx.take()
-            .ok_or_else(|| SessionError::internal("Session events receiver already taken"))?;
+    pub async fn start_coordination_loop(self: Arc<Self>) -> Result<(), SessionError> {
+        // Clone the Arc for the async block
+        let coordinator = self.clone();
+        
+        // Take the receiver - this is why we need ownership
+        let mut session_events_rx = {
+            // We need to get mutable access to take the receiver
+            // This is safe because this method is only called once during initialization
+            let self_ptr = Arc::as_ptr(&self) as *mut Self;
+            unsafe {
+                (*self_ptr).session_events_rx.take()
+                    .ok_or_else(|| SessionError::internal("Session events receiver already taken"))?
+            }
+        };
         
         tracing::info!("Starting session coordination loop");
         
         while let Some(event) = session_events_rx.recv().await {
-            if let Err(e) = self.handle_session_event(event).await {
+            if let Err(e) = coordinator.handle_session_event(event).await {
                 tracing::error!("Error handling session event: {}", e);
             }
         }
@@ -219,6 +241,17 @@ impl SessionCoordinator {
         
         // Ensure media session is stopped
         self.stop_media_session(&session_id).await?;
+        
+        // Notify the handler about call termination
+        if let Some(handler) = &self.handler {
+            // Get the session from registry to pass to handler
+            if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                tracing::info!("Notifying handler about call termination for session {}", session_id);
+                handler.on_call_ended(session, &reason).await;
+            } else {
+                tracing::warn!("Session {} not found in registry when notifying handler about termination", session_id);
+            }
+        }
         
         Ok(())
     }
