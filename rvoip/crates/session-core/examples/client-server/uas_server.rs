@@ -5,29 +5,35 @@
 
 use anyhow::Result;
 use clap::Parser;
-use rvoip_session_core::api::*;
+use rvoip_session_core::{
+    SessionCoordinator,
+    MediaControl,
+    api::{
+        CallHandler, CallSession, CallState, IncomingCall, CallDecision,
+        SessionManagerConfig,
+    },
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::signal;
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tracing::{info, error, warn};
 use tracing_subscriber;
 
 #[derive(Parser, Debug)]
-#[command(name = "uas_server")]
-#[command(about = "SIP UAS Server Example")]
-pub struct Args {
-    /// SIP listening port for the server
+#[command(author, version, about = "SIP UAS Server - Auto-answers incoming calls", long_about = None)]
+struct Args {
+    /// Port to listen on
     #[arg(short, long, default_value = "5062")]
-    pub port: u16,
+    port: u16,
     
-    /// Auto-accept incoming calls
-    #[arg(short, long, default_value = "true")]
-    pub auto_accept: bool,
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(short, long, default_value = "info")]
+    log_level: String,
     
-    /// Maximum concurrent calls
-    #[arg(short, long, default_value = "10")]
-    pub max_calls: usize,
+    /// Auto-shutdown after N seconds (0 = disabled)
+    #[arg(short, long, default_value = "0")]
+    auto_shutdown: u64,
 }
 
 /// Statistics for the UAS server
@@ -125,10 +131,14 @@ impl CallHandler for UasHandler {
     
     async fn on_call_established(&self, session: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
         info!("Call {} established", session.id);
+        info!("Local SDP: {:?}", local_sdp.as_ref().map(|s| s.len()));
+        info!("Remote SDP: {:?}", remote_sdp.as_ref().map(|s| s.len()));
         
         // Extract remote RTP address from SDP if available
         let coordinator_guard = self.session_coordinator.read().await;
         if let (Some(coordinator), Some(remote_sdp)) = (coordinator_guard.as_ref(), remote_sdp) {
+            info!("Have coordinator and remote SDP, parsing...");
+            
             // Simple SDP parsing to get IP and port
             let mut remote_ip = None;
             let mut remote_port = None;
@@ -136,10 +146,12 @@ impl CallHandler for UasHandler {
             for line in remote_sdp.lines() {
                 if line.starts_with("c=IN IP4 ") {
                     remote_ip = line.strip_prefix("c=IN IP4 ").map(|s| s.to_string());
+                    info!("Found IP in SDP: {:?}", remote_ip);
                 } else if line.starts_with("m=audio ") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() > 1 {
                         remote_port = parts[1].parse::<u16>().ok();
+                        info!("Found port in SDP: {:?}", remote_port);
                     }
                 }
             }
@@ -148,11 +160,19 @@ impl CallHandler for UasHandler {
                 let remote_addr = format!("{}:{}", ip, port);
                 info!("Establishing media flow to {}", remote_addr);
                 
-                // Start audio transmission
-                if let Err(e) = coordinator.establish_media_flow(&session.id, &remote_addr).await {
-                    error!("Failed to establish media flow: {}", e);
+                // Establish media flow (this also starts audio transmission)
+                match coordinator.establish_media_flow(&session.id, &remote_addr).await {
+                    Ok(_) => {
+                        info!("✅ Successfully established media flow for session {}", session.id);
+                        info!("✅ Audio transmission (440Hz sine wave) started automatically");
+                    }
+                    Err(e) => error!("Failed to establish media flow: {}", e),
                 }
+            } else {
+                warn!("Could not extract IP/port from remote SDP");
             }
+        } else {
+            warn!("No coordinator or remote SDP available");
         }
     }
     
@@ -171,76 +191,86 @@ impl CallHandler for UasHandler {
         // Check if audio was transmitted
         let coordinator_guard = self.session_coordinator.read().await;
         if let Some(coordinator) = coordinator_guard.as_ref() {
-            match coordinator.media_manager.get_media_info(&session.id).await {
-                Ok(Some(info)) => {
-                    if info.local_rtp_port.is_some() && info.remote_rtp_port.is_some() {
-                        info!("✅ Audio transmission was active during the call");
-                    }
+            match coordinator.is_audio_transmission_active(&session.id).await {
+                Ok(true) => {
+                    info!("✅ Audio transmission was active during the call");
                 }
-                _ => {}
+                Ok(false) => {
+                    warn!("⚠️ Audio transmission was NOT active during the call");
+                }
+                Err(e) => {
+                    error!("Failed to check audio transmission status: {}", e);
+                }
             }
         }
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_target(false)
-        .init();
-    
-    // Parse command line arguments
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     
-    info!("Starting UAS server on port {}", args.port);
-    info!("Auto-accept: {}", args.auto_accept);
-    info!("Max concurrent calls: {}", args.max_calls);
+    // Initialize logging with the specified level
+    let log_level = match args.log_level.to_lowercase().as_str() {
+        "trace" => tracing::Level::TRACE,
+        "debug" => tracing::Level::DEBUG,
+        "info" => tracing::Level::INFO,
+        "warn" => tracing::Level::WARN,
+        "error" => tracing::Level::ERROR,
+        _ => tracing::Level::INFO,
+    };
     
-    // Create stats tracker
-    let stats = Arc::new(Mutex::new(UasStats::default()));
+    tracing_subscriber::fmt()
+        .with_max_level(log_level)
+        .init();
     
-    // Create handler
+    info!("Starting UAS Server on port {}", args.port);
+    
+    // Create the call handler
     let handler = Arc::new(UasHandler::new(
-        stats.clone(),
-        args.auto_accept,
-        args.max_calls,
+        Arc::new(Mutex::new(UasStats::default())),
+        true,
+        10,
     ));
     
-    // Create session manager with dynamic port allocation
-    let session_coordinator = SessionManagerBuilder::new()
-        .with_sip_port(args.port)
-        .with_local_address(format!("sip:uas@127.0.0.1:{}", args.port))
-        .with_media_ports(15000, 20000)  // UAS uses ports 15000-20000
-        .with_handler(handler.clone())
-        .build()
-        .await?;
+    // Create session configuration
+    let config = SessionManagerConfig {
+        sip_port: args.port,
+        local_address: format!("sip:uas@127.0.0.1:{}", args.port),
+        media_port_start: 15000,
+        media_port_end: 20000,
+        ..Default::default()
+    };
+    
+    // Create the session coordinator
+    let coordinator = SessionCoordinator::new(config, Some(handler.clone())).await?;
     
     // Set the coordinator in the handler
-    handler.set_coordinator(session_coordinator.clone()).await;
+    handler.set_coordinator(coordinator.clone()).await;
     
-    // Start the session manager
-    session_coordinator.start().await?;
+    info!("UAS Server ready and listening on port {}", args.port);
     
-    info!("UAS server listening on {}", session_coordinator.get_bound_address());
-    info!("Media ports: 15000-20000 (dynamically allocated)");
-    info!("Ready to accept calls...");
+    // If auto-shutdown is enabled, set up a timer
+    if args.auto_shutdown > 0 {
+        let shutdown_duration = Duration::from_secs(args.auto_shutdown);
+        tokio::spawn(async move {
+            sleep(shutdown_duration).await;
+            info!("Auto-shutdown timer expired, shutting down...");
+            std::process::exit(0);
+        });
+    }
     
-    // Wait for Ctrl+C
-    signal::ctrl_c().await?;
-    info!("Shutting down UAS server...");
-    
-    // Stop the session manager
-    session_coordinator.stop().await?;
-    
-    // Print final statistics
-    let final_stats = stats.lock().await;
-    info!("=== Final Statistics ===");
-    info!("Calls received: {}", final_stats.calls_received);
-    info!("Calls accepted: {}", final_stats.calls_accepted);
-    info!("Calls rejected: {}", final_stats.calls_rejected);
-    info!("Total call duration: {:?}", final_stats.total_duration);
-    
-    Ok(())
+    // Keep the server running
+    loop {
+        sleep(Duration::from_secs(1)).await;
+        
+        // Log server statistics periodically
+        let stats = handler.stats.lock().await;
+        if stats.calls_received > 0 || stats.calls_active > 0 {
+            info!(
+                "Server stats - Calls received: {}, Active: {}, Accepted: {}, Rejected: {}",
+                stats.calls_received, stats.calls_active, stats.calls_accepted, stats.calls_rejected
+            );
+        }
+    }
 } 

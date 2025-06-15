@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # SIP Client-Server Test Script
-# This script builds and runs both UAS server and UAC client,
+# This script runs both UAS server and UAC client automatically,
 # capturing logs and demonstrating a complete SIP call flow.
 
-set -euo pipefail
+set -uo pipefail  # Remove -e to prevent early exit on grep failures
 
 # Script directory and configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -70,37 +70,57 @@ echo "# Calls: $NUM_CALLS" >> "$COMBINED_LOG"
 echo "# Call duration: ${CALL_DURATION}s" >> "$COMBINED_LOG"
 echo "" >> "$COMBINED_LOG"
 
-# Function to build the binaries
-build_binaries() {
-    print_header "Building UAS Server and UAC Client"
+# Function to analyze the test results
+analyze_results() {
+    print_header "Analyzing Test Results"
     
-    log_info "Building UAS server..."
-    cd "$PROJECT_DIR"
-    if cargo build --bin uas_server; then
-        log_success "UAS server built successfully"
+    log_info "Checking server log for successful calls..."
+    # Strip ANSI color codes before grepping
+    SERVER_CALLS=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "uas_server.*Incoming call from" | wc -l | tr -d ' ')
+    SERVER_ACCEPTED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "calls_accepted += 1" | wc -l | tr -d ' ')
+    SERVER_ENDED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "uas_server.*Call.*ended:" | wc -l | tr -d ' ')
+    
+    log_info "Checking client log for successful calls..."
+    CLIENT_INITIATED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Making call.*of" | wc -l | tr -d ' ')
+    CLIENT_CONNECTED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "uac_client.*Call.*established" | wc -l | tr -d ' ')
+    CLIENT_ENDED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Terminated session:" | wc -l | tr -d ' ')
+    CLIENT_SUCCESS=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "All calls completed successfully" | wc -l | tr -d ' ')
+    
+    log_info "Server received $SERVER_CALLS calls"
+    log_info "Server accepted $SERVER_ACCEPTED calls"
+    log_info "Server ended $SERVER_ENDED calls"
+    log_info "Client initiated $CLIENT_INITIATED calls"
+    log_info "Client connected $CLIENT_CONNECTED calls"
+    log_info "Client ended $CLIENT_ENDED calls"
+    
+    # Determine test success
+    if [ "$SERVER_CALLS" -eq "$NUM_CALLS" ] && [ "$CLIENT_ENDED" -eq "$NUM_CALLS" ] && [ "$CLIENT_SUCCESS" -eq "1" ]; then
+        log_success "Test PASSED: All $NUM_CALLS calls were successful"
+        TEST_SUCCESS=0
     else
-        log_error "Failed to build UAS server"
-        exit 1
+        log_error "Test FAILED: Not all calls were successful"
+        TEST_SUCCESS=1
     fi
     
-    log_info "Building UAC client..."
-    if cargo build --bin uac_client; then
-        log_success "UAC client built successfully"
-    else
-        log_error "Failed to build UAC client"
-        exit 1
-    fi
+    return $TEST_SUCCESS
 }
 
-# Function to run the UAS server
-run_server() {
-    print_header "Starting UAS Server"
+# Main execution
+main() {
+    print_header "SIP Client-Server Test"
     
+    log_info "Test started at $(date)"
+    log_info "Log directory: $LOG_DIR"
+    
+    # Change to project directory
+    cd "$PROJECT_DIR"
+    
+    # Start the server
+    print_header "Starting UAS Server"
     log_info "Starting UAS server on port $SERVER_PORT..."
     log_info "Server log: $SERVER_LOG"
     
     # Run server in background with auto-shutdown after 60 seconds
-    cd "$PROJECT_DIR"
     cargo run --bin uas_server -- --port "$SERVER_PORT" --log-level "$LOG_LEVEL" --auto-shutdown 60 > "$SERVER_LOG" 2>&1 &
     SERVER_PID=$!
     
@@ -121,22 +141,19 @@ run_server() {
         fi
     done
     
-    # Return the server PID
-    echo $SERVER_PID
-}
-
-# Function to run the UAC client
-run_client() {
-    print_header "Starting UAC Client"
+    # Wait 2 seconds before starting client
+    log_info "Waiting 2 seconds before starting client..."
+    sleep 2
     
+    # Start the client
+    print_header "Starting UAC Client"
     log_info "Starting UAC client on port $CLIENT_PORT..."
     log_info "Client log: $CLIENT_LOG"
     log_info "Target: $TARGET"
     log_info "Number of calls: $NUM_CALLS"
     log_info "Call duration: ${CALL_DURATION}s"
     
-    # Run client
-    cd "$PROJECT_DIR"
+    # Run client (not in background, so we wait for it to complete)
     cargo run --bin uac_client -- \
         --port "$CLIENT_PORT" \
         --target "$TARGET" \
@@ -152,117 +169,19 @@ run_client() {
         log_error "UAC client failed with exit code $CLIENT_EXIT"
     fi
     
-    return $CLIENT_EXIT
-}
-
-# Function to analyze the test results
-analyze_results() {
-    print_header "Analyzing Test Results"
-    
-    log_info "Checking server log for successful calls..."
-    SERVER_CALLS=$(grep -c "Incoming call from" "$SERVER_LOG" || echo "0")
-    SERVER_ACCEPTED=$(grep -c "Auto-answering call" "$SERVER_LOG" || echo "0")
-    SERVER_ENDED=$(grep -c "Call .* ended" "$SERVER_LOG" || echo "0")
-    
-    log_info "Checking client log for successful calls..."
-    CLIENT_INITIATED=$(grep -c "Call initiated with ID" "$CLIENT_LOG" || echo "0")
-    CLIENT_ENDED=$(grep -c "Call .* ended" "$CLIENT_LOG" || echo "0")
-    CLIENT_SUCCESS=$(grep -c "All calls completed" "$CLIENT_LOG" || echo "0")
-    
-    log_info "Server received $SERVER_CALLS calls"
-    log_info "Server accepted $SERVER_ACCEPTED calls"
-    log_info "Server ended $SERVER_ENDED calls"
-    log_info "Client initiated $CLIENT_INITIATED calls"
-    log_info "Client ended $CLIENT_ENDED calls"
-    
-    # Determine test success
-    if [ "$SERVER_CALLS" -eq "$NUM_CALLS" ] && [ "$CLIENT_INITIATED" -eq "$NUM_CALLS" ] && [ "$CLIENT_SUCCESS" -eq "1" ]; then
-        log_success "Test PASSED: All $NUM_CALLS calls were successful"
-        TEST_SUCCESS=0
-    else
-        log_error "Test FAILED: Not all calls were successful"
-        TEST_SUCCESS=1
+    # Stop the server
+    if ps -p $SERVER_PID > /dev/null 2>&1; then
+        log_info "Stopping UAS server (PID: $SERVER_PID)..."
+        kill $SERVER_PID 2>/dev/null || true
+        wait $SERVER_PID 2>/dev/null || true
     fi
-    
-    return $TEST_SUCCESS
-}
-
-# Function to generate a combined report
-generate_report() {
-    print_header "Generating Test Report"
-    
-    REPORT_FILE="$LOG_DIR/test_report_${TEST_START_TIME}.txt"
-    
-    {
-        echo "SIP Client-Server Test Report"
-        echo "============================"
-        echo "Date: $(date)"
-        echo "Server port: $SERVER_PORT"
-        echo "Client port: $CLIENT_PORT"
-        echo "Target: $TARGET"
-        echo "Number of calls: $NUM_CALLS"
-        echo "Call duration: ${CALL_DURATION}s"
-        echo ""
-        echo "Results:"
-        echo "-------"
-        
-        if [ "$TEST_SUCCESS" -eq 0 ]; then
-            echo "Overall: PASS"
-        else
-            echo "Overall: FAIL"
-        fi
-        
-        echo "Server calls received: $SERVER_CALLS"
-        echo "Server calls accepted: $SERVER_ACCEPTED"
-        echo "Server calls ended: $SERVER_ENDED"
-        echo "Client calls initiated: $CLIENT_INITIATED"
-        echo "Client calls ended: $CLIENT_ENDED"
-        echo ""
-        echo "Log Files:"
-        echo "---------"
-        echo "Combined log: $COMBINED_LOG"
-        echo "Server log: $SERVER_LOG"
-        echo "Client log: $CLIENT_LOG"
-    } > "$REPORT_FILE"
-    
-    log_info "Report generated: $REPORT_FILE"
-    
-    # Also append to combined log
-    cat "$REPORT_FILE" >> "$COMBINED_LOG"
-}
-
-# Main execution
-main() {
-    print_header "SIP Client-Server Test"
-    
-    log_info "Test started at $(date)"
-    log_info "Log directory: $LOG_DIR"
-    
-    # Build the binaries
-    build_binaries
-    
-    # Run the server
-    SERVER_PID=$(run_server)
-    
-    # Give the server a moment to initialize fully
-    sleep 2
-    
-    # Run the client
-    run_client
-    CLIENT_EXIT=$?
     
     # Analyze results
     analyze_results
     TEST_SUCCESS=$?
     
-    # Generate report
-    generate_report
-    
-    # Stop the server if it's still running
-    if ps -p $SERVER_PID > /dev/null 2>&1; then
-        log_info "Stopping UAS server (PID: $SERVER_PID)..."
-        kill $SERVER_PID 2>/dev/null || true
-    fi
+    # Generate summary
+    print_header "Test Summary"
     
     if [ $TEST_SUCCESS -eq 0 ]; then
         log_success "Test completed successfully"
@@ -271,6 +190,11 @@ main() {
     fi
     
     log_info "Test ended at $(date)"
+    log_info ""
+    log_info "Log files:"
+    log_info "  Combined: $COMBINED_LOG"
+    log_info "  Server:   $SERVER_LOG"
+    log_info "  Client:   $CLIENT_LOG"
     
     # Return the test result
     return $TEST_SUCCESS

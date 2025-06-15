@@ -19,19 +19,22 @@ use crate::manager::events::SessionEventProcessor;
 /// Main media manager for session-core using real media-core components
 pub struct MediaManager {
     /// Real MediaSessionController from media-core
-    controller: Arc<MediaSessionController>,
+    pub controller: Arc<MediaSessionController>,
     
     /// Session ID mapping (SIP SessionId -> Media DialogId)
-    session_mapping: Arc<tokio::sync::RwLock<HashMap<SessionId, DialogId>>>,
+    pub session_mapping: Arc<tokio::sync::RwLock<HashMap<SessionId, DialogId>>>,
     
     /// Default local bind address for media sessions
-    local_bind_addr: SocketAddr,
+    pub local_bind_addr: SocketAddr,
     
     /// Zero-copy processing configuration per session
-    zero_copy_config: Arc<tokio::sync::RwLock<HashMap<SessionId, ZeroCopyConfig>>>,
+    pub zero_copy_config: Arc<tokio::sync::RwLock<HashMap<SessionId, ZeroCopyConfig>>>,
     
     /// Event processor for RTP processing events
-    event_processor: Arc<SessionEventProcessor>,
+    pub event_processor: Arc<SessionEventProcessor>,
+    
+    /// SDP storage per session
+    pub sdp_storage: Arc<tokio::sync::RwLock<HashMap<SessionId, (Option<String>, Option<String>)>>>,
 }
 
 /// Configuration for zero-copy RTP processing per session
@@ -69,6 +72,7 @@ impl MediaManager {
             local_bind_addr,
             zero_copy_config: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             event_processor,
+            sdp_storage: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
     
@@ -82,6 +86,7 @@ impl MediaManager {
             local_bind_addr,
             zero_copy_config: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             event_processor,
+            sdp_storage: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
     
@@ -399,6 +404,13 @@ impl MediaManager {
                 .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
         };
         
+        // Store the remote SDP
+        {
+            let mut sdp_storage = self.sdp_storage.write().await;
+            let entry = sdp_storage.entry(session_id.clone()).or_insert((None, None));
+            entry.1 = Some(sdp.to_string());
+        }
+        
         // Parse SDP to extract remote address and codec information
         let remote_addr = self.parse_remote_address_from_sdp(sdp);
         let codec = self.parse_codec_from_sdp(sdp);
@@ -442,6 +454,12 @@ impl MediaManager {
         // Cleanup zero-copy configuration
         self.cleanup_zero_copy_config(session_id).await;
         
+        // Cleanup SDP storage
+        {
+            let mut sdp_storage = self.sdp_storage.write().await;
+            sdp_storage.remove(session_id);
+        }
+        
         // Stop media session using real MediaSessionController
         self.controller.stop_media(&dialog_id).await
             .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
@@ -463,7 +481,15 @@ impl MediaManager {
         if let Some(dialog_id) = dialog_id {
             // Get session info from controller
             if let Some(media_session_info) = self.controller.get_session_info(&dialog_id).await {
-                let session_info = MediaSessionInfo::from(media_session_info);
+                let mut session_info = MediaSessionInfo::from(media_session_info);
+                
+                // Add stored SDP
+                let sdp_storage = self.sdp_storage.read().await;
+                if let Some((local_sdp, remote_sdp)) = sdp_storage.get(session_id) {
+                    session_info.local_sdp = local_sdp.clone();
+                    session_info.remote_sdp = remote_sdp.clone();
+                }
+                
                 Ok(Some(session_info))
             } else {
                 Ok(None)
@@ -503,6 +529,13 @@ impl MediaManager {
         
         let sdp = converter.generate_sdp_offer(&local_ip, local_port)
             .map_err(|e| MediaError::Configuration { message: e.to_string() })?;
+        
+        // Store the generated local SDP
+        {
+            let mut sdp_storage = self.sdp_storage.write().await;
+            let entry = sdp_storage.entry(session_id.clone()).or_insert((None, None));
+            entry.0 = Some(sdp.clone());
+        }
         
         tracing::info!("✅ Generated SDP offer for session: {} with port: {}", session_id, local_port);
         Ok(sdp)

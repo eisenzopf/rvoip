@@ -239,6 +239,13 @@ impl SessionCoordinator {
                     if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
                         // Get SDP information if available
                         let media_info = self.media_manager.get_media_info(&session_id).await.ok().flatten();
+                        
+                        tracing::info!("Media info available: {}", media_info.is_some());
+                        if let Some(ref info) = media_info {
+                            tracing::info!("Local SDP length: {:?}", info.local_sdp.as_ref().map(|s| s.len()));
+                            tracing::info!("Remote SDP length: {:?}", info.remote_sdp.as_ref().map(|s| s.len()));
+                        }
+                        
                         let local_sdp = media_info.as_ref().and_then(|m| m.local_sdp.clone());
                         let remote_sdp = media_info.as_ref().and_then(|m| m.remote_sdp.clone());
                         

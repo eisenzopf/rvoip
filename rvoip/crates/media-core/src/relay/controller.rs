@@ -949,7 +949,7 @@ impl MediaSessionController {
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
         
         let mut session = rtp_session.lock().await;
-        session.set_remote_addr(remote_addr);
+        session.set_remote_addr(remote_addr).await;
         
         // Update wrapper info
         {

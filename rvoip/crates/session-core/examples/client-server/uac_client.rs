@@ -36,6 +36,10 @@ pub struct Args {
     /// Delay between calls in seconds
     #[arg(short = 'w', long, default_value = "2")]
     pub delay: u64,
+    
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(short, long, default_value = "info")]
+    pub log_level: String,
 }
 
 /// Statistics for the UAC client
@@ -77,10 +81,14 @@ impl CallHandler for UacHandler {
     
     async fn on_call_established(&self, session: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
         info!("Call {} established", session.id);
+        info!("Local SDP: {:?}", local_sdp.as_ref().map(|s| s.len()));
+        info!("Remote SDP: {:?}", remote_sdp.as_ref().map(|s| s.len()));
         
         // Extract remote RTP address from SDP if available
         let coordinator_guard = self.session_coordinator.read().await;
         if let (Some(coordinator), Some(remote_sdp)) = (coordinator_guard.as_ref(), remote_sdp) {
+            info!("Have coordinator and remote SDP, parsing...");
+            
             // Simple SDP parsing to get IP and port
             let mut remote_ip = None;
             let mut remote_port = None;
@@ -88,10 +96,12 @@ impl CallHandler for UacHandler {
             for line in remote_sdp.lines() {
                 if line.starts_with("c=IN IP4 ") {
                     remote_ip = line.strip_prefix("c=IN IP4 ").map(|s| s.to_string());
+                    info!("Found IP in SDP: {:?}", remote_ip);
                 } else if line.starts_with("m=audio ") {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() > 1 {
                         remote_port = parts[1].parse::<u16>().ok();
+                        info!("Found port in SDP: {:?}", remote_port);
                     }
                 }
             }
@@ -100,11 +110,19 @@ impl CallHandler for UacHandler {
                 let remote_addr = format!("{}:{}", ip, port);
                 info!("Establishing media flow to {}", remote_addr);
                 
-                // Start audio transmission
-                if let Err(e) = coordinator.establish_media_flow(&session.id, &remote_addr).await {
-                    error!("Failed to establish media flow: {}", e);
+                // Establish media flow (this also starts audio transmission)
+                match coordinator.establish_media_flow(&session.id, &remote_addr).await {
+                    Ok(_) => {
+                        info!("✅ Successfully established media flow for session {}", session.id);
+                        info!("✅ Audio transmission (440Hz sine wave) started automatically");
+                    }
+                    Err(e) => error!("Failed to establish media flow: {}", e),
                 }
+            } else {
+                warn!("Could not extract IP/port from remote SDP");
             }
+        } else {
+            warn!("No coordinator or remote SDP available");
         }
         
         let mut stats = self.stats.lock().await;
@@ -122,13 +140,16 @@ impl CallHandler for UacHandler {
         // Check if audio was transmitted
         let coordinator_guard = self.session_coordinator.read().await;
         if let Some(coordinator) = coordinator_guard.as_ref() {
-            match coordinator.media_manager.get_media_info(&session.id).await {
-                Ok(Some(info)) => {
-                    if info.local_rtp_port.is_some() && info.remote_rtp_port.is_some() {
-                        info!("✅ Audio transmission was active during the call");
-                    }
+            match coordinator.is_audio_transmission_active(&session.id).await {
+                Ok(true) => {
+                    info!("✅ Audio transmission was active during the call");
                 }
-                _ => {}
+                Ok(false) => {
+                    warn!("⚠️ Audio transmission was NOT active during the call");
+                }
+                Err(e) => {
+                    error!("Failed to check audio transmission status: {}", e);
+                }
             }
         }
     }
@@ -203,14 +224,23 @@ async fn make_test_calls(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
+    // Parse command line arguments first
+    let args = Args::parse();
+    
+    // Initialize logging with the specified level
+    let log_level = match args.log_level.to_lowercase().as_str() {
+        "trace" => tracing::Level::TRACE,
+        "debug" => tracing::Level::DEBUG,
+        "info" => tracing::Level::INFO,
+        "warn" => tracing::Level::WARN,
+        "error" => tracing::Level::ERROR,
+        _ => tracing::Level::INFO,
+    };
+    
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(log_level)
         .with_target(false)
         .init();
-    
-    // Parse command line arguments
-    let args = Args::parse();
     
     info!("Starting UAC client on port {}", args.port);
     

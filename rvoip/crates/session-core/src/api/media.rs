@@ -74,24 +74,33 @@ impl MediaControl for Arc<SessionCoordinator> {
         // Get the media manager through the coordinator
         let media_manager = &self.media_manager;
         
-        // First update the media session with the remote address
-        // We need to construct a minimal SDP with the remote address
+        // Get the dialog ID for this session
+        let dialog_id = {
+            let mapping = media_manager.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| crate::errors::SessionError::MediaIntegration { 
+                    message: format!("No media session found for {}", session_id) 
+                })?
+        };
+        
+        // Call the controller's establish_media_flow which handles everything
+        media_manager.controller.establish_media_flow(&dialog_id, socket_addr).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to establish media flow: {}", e) 
+            })?;
+        
+        // Store the remote SDP info
         let minimal_sdp = format!(
             "v=0\r\nc=IN IP4 {}\r\nm=audio {} RTP/AVP 0\r\n",
             socket_addr.ip(),
             socket_addr.port()
         );
         
-        media_manager.update_media_session(session_id, &minimal_sdp).await
-            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
-                message: format!("Failed to update media session: {}", e) 
-            })?;
-        
-        // Then start audio transmission
-        media_manager.start_audio_transmission(session_id).await
-            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
-                message: format!("Failed to start audio transmission: {}", e) 
-            })?;
+        {
+            let mut sdp_storage = media_manager.sdp_storage.write().await;
+            let entry = sdp_storage.entry(session_id.clone()).or_insert((None, None));
+            entry.1 = Some(minimal_sdp);
+        }
         
         tracing::info!("Established media flow for session {} to {}", session_id, remote_addr);
         Ok(())
