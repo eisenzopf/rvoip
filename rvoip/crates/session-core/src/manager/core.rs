@@ -371,6 +371,8 @@ impl SessionManager {
                 local_rtp_port: media_session_info.local_rtp_port,
                 remote_rtp_port: media_session_info.remote_rtp_port,
                 codec: media_session_info.codec,
+                rtp_stats: None,  // TODO: Get from media session
+                quality_metrics: None,  // TODO: Get from media session
             })
         } else {
             // No media session exists yet (session might be in Ringing/Initiating state)
@@ -380,6 +382,8 @@ impl SessionManager {
                 local_rtp_port: None,
                 remote_rtp_port: None,
                 codec: None,
+                rtp_stats: None,
+                quality_metrics: None,
             })
         }
     }

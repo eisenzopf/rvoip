@@ -112,6 +112,12 @@ impl CallHandler for UasHandler {
                                 error!("Failed to update media session with remote SDP: {}", e);
                             }
                             
+                            // Update stats
+                            {
+                                let mut stats = self.stats.lock().await;
+                                stats.calls_accepted += 1;
+                            }
+                            
                             return CallDecision::Accept(Some(sdp_answer));
                         }
                         Err(e) => {
@@ -165,6 +171,72 @@ impl CallHandler for UasHandler {
                     Ok(_) => {
                         info!("✅ Successfully established media flow for session {}", session.id);
                         info!("✅ Audio transmission (440Hz sine wave) started automatically");
+                        
+                        // Start statistics monitoring for this specific session
+                        let stats_session_id = session.id.clone();
+                        let stats_coordinator = coordinator.clone();
+                        
+                        // Start statistics monitoring task
+                        match stats_coordinator.start_statistics_monitoring(&stats_session_id, Duration::from_secs(2)).await {
+                            Ok(_) => {
+                                info!("✅ Started statistics monitoring for session {}", stats_session_id);
+                                
+                                // Also spawn a task to periodically fetch and log statistics
+                                tokio::spawn(async move {
+                                    let mut interval = tokio::time::interval(Duration::from_secs(3));
+                                    let mut update_count = 0;
+                                    
+                                    loop {
+                                        interval.tick().await;
+                                        update_count += 1;
+                                        
+                                        match stats_coordinator.get_media_statistics(&stats_session_id).await {
+                                            Ok(Some(stats)) => {
+                                                info!("📊 Statistics Update #{} for session {}", update_count, stats_session_id);
+                                                
+                                                if let Some(rtp) = &stats.rtp_stats {
+                                                    info!("  RTP - Sent: {} pkts ({} bytes), Recv: {} pkts ({} bytes)",
+                                                          rtp.packets_sent, rtp.bytes_sent, 
+                                                          rtp.packets_received, rtp.bytes_received);
+                                                    info!("  RTP - Lost: {} pkts, Jitter: {:.1}ms",
+                                                          rtp.packets_lost, rtp.jitter_ms);
+                                                }
+                                                
+                                                if let Some(quality) = &stats.quality_metrics {
+                                                    info!("  Quality - Loss: {:.1}%, MOS: {:.1}, Network: {}%",
+                                                          quality.packet_loss_percent, 
+                                                          quality.mos_score.unwrap_or(0.0),
+                                                          quality.network_quality);
+                                                }
+                                                
+                                                // Alert on quality degradation
+                                                if let Some(quality) = &stats.quality_metrics {
+                                                    if quality.packet_loss_percent > 5.0 || quality.jitter_ms > 50.0 {
+                                                        warn!("⚠️ Quality degradation detected for call {}: Loss: {:.1}%, Jitter: {:.1}ms",
+                                                              stats_session_id, quality.packet_loss_percent, quality.jitter_ms);
+                                                    }
+                                                }
+                                            }
+                                            Ok(None) => {
+                                                info!("No statistics available yet for session {}", stats_session_id);
+                                                // Session might have ended, break the loop
+                                                break;
+                                            }
+                                            Err(e) => {
+                                                error!("Failed to get statistics for session {}: {}", stats_session_id, e);
+                                                // Session might have ended, break the loop
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    
+                                    info!("Statistics monitoring task ended for session {}", stats_session_id);
+                                });
+                            }
+                            Err(e) => {
+                                error!("Failed to start statistics monitoring: {}", e);
+                            }
+                        }
                     }
                     Err(e) => error!("Failed to establish media flow: {}", e),
                 }
@@ -188,15 +260,47 @@ impl CallHandler for UasHandler {
             stats.total_duration += started_at.elapsed();
         }
         
-        // Check if audio was transmitted
+        // Get final statistics for the call
         let coordinator_guard = self.session_coordinator.read().await;
         if let Some(coordinator) = coordinator_guard.as_ref() {
-            match coordinator.is_audio_transmission_active(&session.id).await {
-                Ok(true) => {
-                    info!("✅ Audio transmission was active during the call");
+            // Get final media statistics
+            match coordinator.get_media_statistics(&session.id).await {
+                Ok(Some(final_stats)) => {
+                    info!("📊 Final call statistics for session {}:", session.id);
+                    
+                    if let Some(rtp) = &final_stats.rtp_stats {
+                        info!("  Total packets sent: {}", rtp.packets_sent);
+                        info!("  Total packets received: {}", rtp.packets_received);
+                        info!("  Total bytes sent: {}", rtp.bytes_sent);
+                        info!("  Total bytes received: {}", rtp.bytes_received);
+                        info!("  Packets lost: {}", rtp.packets_lost);
+                        info!("  Final jitter: {:.1}ms", rtp.jitter_ms);
+                    }
+                    
+                    if let Some(quality) = &final_stats.quality_metrics {
+                        info!("  Final packet loss: {:.1}%", quality.packet_loss_percent);
+                        info!("  Final MOS score: {:.1}", quality.mos_score.unwrap_or(0.0));
+                        info!("  Final network quality: {}%", quality.network_quality);
+                    }
+                    
+                    info!("  Call duration: {:?}", final_stats.session_duration);
                 }
-                Ok(false) => {
-                    warn!("⚠️ Audio transmission was NOT active during the call");
+                Ok(None) => {
+                    info!("No final statistics available for session {}", session.id);
+                }
+                Err(e) => {
+                    error!("Failed to get final statistics: {}", e);
+                }
+            }
+            
+            // Check if audio was transmitted
+            match coordinator.is_audio_transmission_active(&session.id).await {
+                Ok(was_active) => {
+                    if was_active {
+                        info!("✅ Audio transmission was active during the call");
+                    } else {
+                        info!("ℹ️ Audio transmission status at call end: inactive");
+                    }
                 }
                 Err(e) => {
                     error!("Failed to check audio transmission status: {}", e);
@@ -249,6 +353,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     handler.set_coordinator(coordinator.clone()).await;
     
     info!("UAS Server ready and listening on port {}", args.port);
+    info!("📊 RTP/RTCP statistics monitoring is enabled (updates every 3 seconds during calls)");
     
     // If auto-shutdown is enabled, set up a timer
     if args.auto_shutdown > 0 {
@@ -262,7 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Keep the server running
     loop {
-        sleep(Duration::from_secs(1)).await;
+        sleep(Duration::from_secs(10)).await;
         
         // Log server statistics periodically
         let stats = handler.stats.lock().await;

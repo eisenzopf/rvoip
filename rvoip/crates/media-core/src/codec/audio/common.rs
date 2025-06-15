@@ -1,6 +1,7 @@
 //! Common audio codec types and utilities
 
-use crate::{AudioBuffer, AudioFormat, SampleRate};
+use crate::{AudioBuffer, AudioFormat};
+use crate::types::SampleRate;
 use crate::error::Result;
 use crate::types::AudioFrame;
 

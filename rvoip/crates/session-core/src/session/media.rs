@@ -23,6 +23,8 @@ impl MediaCoordinator {
             local_rtp_port: Some(8000),
             remote_rtp_port: None,
             codec: Some("PCMU".to_string()),
+            rtp_stats: None,
+            quality_metrics: None,
         })
     }
 

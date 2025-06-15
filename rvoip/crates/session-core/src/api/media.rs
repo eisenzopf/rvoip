@@ -33,6 +33,15 @@ pub trait MediaControl {
     /// Generate SDP offer for a session using dynamically allocated ports
     /// This creates a media session if needed and returns SDP with the allocated port
     async fn generate_sdp_offer(&self, session_id: &SessionId) -> Result<String>;
+    
+    /// Get RTP/RTCP statistics for a session
+    async fn get_rtp_statistics(&self, session_id: &SessionId) -> Result<Option<rvoip_rtp_core::session::RtpSessionStats>>;
+    
+    /// Get comprehensive media statistics including quality metrics
+    async fn get_media_statistics(&self, session_id: &SessionId) -> Result<Option<rvoip_media_core::types::MediaStatistics>>;
+    
+    /// Start periodic statistics monitoring with the specified interval
+    async fn start_statistics_monitoring(&self, session_id: &SessionId, interval: std::time::Duration) -> Result<()>;
 }
 
 impl MediaControl for Arc<SessionCoordinator> {
@@ -158,6 +167,15 @@ impl MediaControl for Arc<SessionCoordinator> {
                 message: format!("Failed to get media info: {}", e) 
             })? {
             
+            // Get RTP statistics
+            let rtp_stats = self.get_rtp_statistics(session_id).await.ok().flatten();
+            
+            // Get quality metrics from media statistics
+            let quality_metrics = self.get_media_statistics(session_id).await
+                .ok()
+                .flatten()
+                .and_then(|stats| stats.quality_metrics);
+            
             // Convert to API MediaInfo type
             Ok(Some(MediaInfo {
                 local_sdp: media_session_info.local_sdp,
@@ -165,6 +183,8 @@ impl MediaControl for Arc<SessionCoordinator> {
                 local_rtp_port: media_session_info.local_rtp_port,
                 remote_rtp_port: media_session_info.remote_rtp_port,
                 codec: media_session_info.codec,
+                rtp_stats,
+                quality_metrics,
             }))
         } else {
             Ok(None)
@@ -180,6 +200,39 @@ impl MediaControl for Arc<SessionCoordinator> {
         media_manager.generate_sdp_offer(session_id).await
             .map_err(|e| crate::errors::SessionError::MediaIntegration { 
                 message: format!("Failed to generate SDP offer: {}", e) 
+            })
+    }
+    
+    async fn get_rtp_statistics(&self, session_id: &SessionId) -> Result<Option<rvoip_rtp_core::session::RtpSessionStats>> {
+        // Get the media manager through the coordinator
+        let media_manager = &self.media_manager;
+        
+        // Get RTP statistics
+        media_manager.get_rtp_statistics(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to get RTP statistics: {}", e) 
+            })
+    }
+    
+    async fn get_media_statistics(&self, session_id: &SessionId) -> Result<Option<rvoip_media_core::types::MediaStatistics>> {
+        // Get the media manager through the coordinator
+        let media_manager = &self.media_manager;
+        
+        // Get media statistics
+        media_manager.get_media_statistics(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to get media statistics: {}", e) 
+            })
+    }
+    
+    async fn start_statistics_monitoring(&self, session_id: &SessionId, interval: std::time::Duration) -> Result<()> {
+        // Get the media manager through the coordinator
+        let media_manager = &self.media_manager;
+        
+        // Start statistics monitoring
+        media_manager.start_statistics_monitoring(session_id, interval).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to start statistics monitoring: {}", e) 
             })
     }
 }

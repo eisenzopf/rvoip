@@ -58,6 +58,9 @@ pub mod relay;
 pub use error::{Error, Result};
 pub use types::*;
 
+// Re-export RTP statistics types from rtp-core
+pub use rvoip_rtp_core::session::{RtpSessionStats, RtpStreamStats};
+
 // Re-export engine components
 pub use engine::{
     MediaEngine, 
@@ -125,7 +128,7 @@ pub struct AudioFormat {
     /// Bits per sample (typically 8, 16, or 32)
     pub bit_depth: u8,
     /// Sample rate in Hz
-    pub sample_rate: SampleRate,
+    pub sample_rate: crate::types::SampleRate,
 }
 
 impl Default for AudioFormat {
@@ -133,14 +136,14 @@ impl Default for AudioFormat {
         Self {
             channels: 1,         // Default to mono
             bit_depth: 16,       // Default to 16-bit
-            sample_rate: SampleRate::default(),
+            sample_rate: crate::types::SampleRate::default(),
         }
     }
 }
 
 impl AudioFormat {
     /// Create a new audio format
-    pub fn new(channels: u8, bit_depth: u8, sample_rate: SampleRate) -> Self {
+    pub fn new(channels: u8, bit_depth: u8, sample_rate: crate::types::SampleRate) -> Self {
         Self {
             channels,
             bit_depth,
@@ -149,18 +152,18 @@ impl AudioFormat {
     }
     
     /// Create a new mono 16-bit format with the given sample rate
-    pub fn mono_16bit(sample_rate: SampleRate) -> Self {
+    pub fn mono_16bit(sample_rate: crate::types::SampleRate) -> Self {
         Self::new(1, 16, sample_rate)
     }
     
     /// Create a new stereo 16-bit format with the given sample rate
-    pub fn stereo_16bit(sample_rate: SampleRate) -> Self {
+    pub fn stereo_16bit(sample_rate: crate::types::SampleRate) -> Self {
         Self::new(2, 16, sample_rate)
     }
     
     /// Standard narrowband telephony format (mono, 16-bit, 8kHz)
     pub fn telephony() -> Self {
-        Self::mono_16bit(SampleRate::Rate8000)
+        Self::mono_16bit(crate::types::SampleRate::Rate8000)
     }
 }
 
@@ -208,6 +211,9 @@ pub mod prelude {
         MediaDirection,
         SampleRate,
     };
+    
+    // RTP statistics types
+    pub use rvoip_rtp_core::session::{RtpSessionStats, RtpStreamStats};
     
     // Engine components
     pub use crate::engine::{

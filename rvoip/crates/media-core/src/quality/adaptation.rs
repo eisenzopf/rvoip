@@ -134,10 +134,14 @@ impl AdaptationEngine {
             _ => {} // No adjustments needed
         }
         
-        // Filter by confidence threshold
-        adjustments.into_iter()
+        // Sort by priority and filter by confidence
+        adjustments.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        let filtered: Vec<_> = adjustments
+            .into_iter()
             .filter(|adj| adj.confidence >= self.config.min_confidence)
-            .collect()
+            .collect();
+        
+        filtered
     }
     
     /// Handle high packet loss situations

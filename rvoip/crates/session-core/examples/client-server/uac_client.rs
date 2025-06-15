@@ -127,6 +127,34 @@ impl CallHandler for UacHandler {
         
         let mut stats = self.stats.lock().await;
         stats.calls_connected += 1;
+        
+        // Start statistics monitoring
+        let stats_session_id = session.id.clone();
+        let stats_coordinator = self.session_coordinator.read().await.as_ref().cloned().unwrap();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            
+            loop {
+                interval.tick().await;
+                
+                if let Ok(Some(stats)) = stats_coordinator.get_media_statistics(&stats_session_id).await {
+                    if let Some(rtp) = &stats.rtp_stats {
+                        info!("📊 RTP Statistics - Sent: {} pkts, Recv: {} pkts, Lost: {} pkts, Jitter: {:.1}ms",
+                              rtp.packets_sent, rtp.packets_received, rtp.packets_lost, rtp.jitter_ms);
+                    }
+                    
+                    if let Some(quality) = &stats.quality_metrics {
+                        info!("📈 Quality Metrics - Loss: {:.1}%, MOS: {:.1}, Quality: {}%",
+                              quality.packet_loss_percent, 
+                              quality.mos_score.unwrap_or(0.0),
+                              quality.network_quality);
+                    }
+                }
+            }
+        });
+        
+        // Keep the call active for the specified duration
+        info!("📞 Call {} established and active", session.id);
     }
     
     async fn on_call_ended(&self, session: CallSession, reason: &str) {

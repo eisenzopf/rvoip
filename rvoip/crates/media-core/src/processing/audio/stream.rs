@@ -362,8 +362,8 @@ impl AudioStreamManager {
         // Update drift compensation
         managed_stream.sync_state.drift_samples = drift as i32;
         
-        // Calculate synchronization quality
-        let drift_ratio = (drift.abs() as f32) / (self.config.sync_tolerance_samples as f32);
+        // Update sync quality based on drift
+        let drift_ratio: f32 = drift.abs() as f32 / 1000.0; // Convert to ratio
         managed_stream.sync_state.sync_quality = (1.0 - drift_ratio).max(0.0);
         
         // Update timestamp offset for next frame

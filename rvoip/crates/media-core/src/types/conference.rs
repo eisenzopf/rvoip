@@ -1,12 +1,13 @@
-//! Conference Audio Mixing Types
+//! Conference-related types for multi-party audio mixing
 //!
-//! Core types for multi-party conference audio mixing functionality.
-//! These types support the AudioMixer and conference coordination infrastructure.
+//! This module defines types specific to conference audio mixing,
+//! including participant management, mixing configuration, and
+//! conference-specific events.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use crate::types::{AudioFrame, MediaSessionId};
+use super::{AudioFrame, MediaSessionId};
 use crate::error::Result;
 
 /// Unique identifier for a conference participant

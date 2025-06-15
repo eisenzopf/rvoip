@@ -9,9 +9,13 @@ use bytes::Bytes;
 
 // Include specialized type modules
 pub mod conference;
+pub mod stats;
 
 // Re-export conference types
 pub use conference::*;
+
+// Re-export statistics types
+pub use stats::{MediaStatistics, MediaProcessingStats, QualityMetrics};
 
 /// Unique identifier for a SIP dialog (from session-core)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

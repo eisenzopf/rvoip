@@ -10,6 +10,9 @@ use super::MediaError;
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use tracing::warn;
+use tokio::sync::RwLock;
+use async_trait::async_trait;
 
 // Import RTP types from media-core for zero-copy processing
 use rvoip_rtp_core::RtpPacket;
@@ -255,16 +258,34 @@ impl MediaManager {
     }
     
     /// Publish RTP buffer pool statistics update event
-    pub async fn publish_rtp_buffer_pool_update(&self) -> super::MediaResult<()> {
+    pub async fn publish_rtp_buffer_pool_update(&self) {
         let pool_stats = self.get_rtp_buffer_pool_stats();
         let rtp_stats = RtpBufferPoolStats::from(pool_stats);
         
         if let Err(e) = self.event_processor.publish_rtp_buffer_pool_update(rtp_stats).await {
-            tracing::warn!("Failed to publish RTP buffer pool update event: {}", e);
-            return Err(MediaError::internal(&format!("Failed to publish buffer pool update: {}", e)));
+            warn!("Failed to publish RTP buffer pool update: {}", e);
         }
-        
-        Ok(())
+    }
+    
+    /// Get RTP/RTCP statistics for a session
+    pub async fn get_rtp_statistics(&self, session_id: &SessionId) -> super::MediaResult<Option<rvoip_rtp_core::session::RtpSessionStats>> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        Ok(self.controller.get_rtp_statistics(&dialog_id).await)
+    }
+    
+    /// Get comprehensive media statistics
+    pub async fn get_media_statistics(&self, session_id: &SessionId) -> super::MediaResult<Option<rvoip_media_core::types::MediaStatistics>> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        Ok(self.controller.get_media_statistics(&dialog_id).await)
+    }
+    
+    /// Start periodic statistics monitoring with the specified interval
+    pub async fn start_statistics_monitoring(&self, session_id: &SessionId, interval: std::time::Duration) -> super::MediaResult<()> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        self.controller.start_statistics_monitoring(dialog_id, interval).await
+            .map_err(|e| super::MediaError::MediaEngine {
+                source: Box::new(e),
+            })
     }
     
     /// Enable/disable zero-copy processing for a session
@@ -637,6 +658,9 @@ impl MediaManager {
     
     /// Stop audio transmission for a session
     pub async fn stop_audio_transmission(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        tracing::debug!("Stopping audio transmission for session: {}", session_id);
+        
+        // Find dialog ID for this session
         let dialog_id = {
             let mapping = self.session_mapping.read().await;
             mapping.get(session_id).cloned()
@@ -648,6 +672,13 @@ impl MediaManager {
         
         tracing::info!("✅ Stopped audio transmission for session: {}", session_id);
         Ok(())
+    }
+    
+    /// Helper method to get dialog ID from session ID
+    async fn get_dialog_id(&self, session_id: &SessionId) -> super::MediaResult<DialogId> {
+        let mapping = self.session_mapping.read().await;
+        mapping.get(session_id).cloned()
+            .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })
     }
 }
 
