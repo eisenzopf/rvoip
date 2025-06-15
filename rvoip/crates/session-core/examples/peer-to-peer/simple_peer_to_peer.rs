@@ -5,20 +5,23 @@
 //! sessions with SDP negotiation and real media sessions.
 //!
 //! Usage:
-//!   cargo run --example simple_peer_to_peer
-//!   cargo run --example simple_peer_to_peer -- --duration 10
+//!   cargo run --bin simple_peer_to_peer
+//!   cargo run --bin simple_peer_to_peer -- --duration 10
 //!
 //! This example shows:
-//! - Creating two SIP clients using SessionManagerBuilder
+//! - Creating two SIP clients using SessionCoordinator
 //! - Real SIP session establishment with proper SDP negotiation
 //! - Real media session setup using MediaSessionController
 //! - Complete call lifecycle management with proper cleanup
 //! - Error handling and state management
 
 use clap::{Arg, Command};
-use rvoip_session_core::api::*;
+use rvoip_session_core::{SessionCoordinator, SessionManagerBuilder, MediaControl, SessionControl};
+use rvoip_session_core::api::{
+    CallHandler, CallSession, CallState, IncomingCall, CallDecision, SessionId,
+};
 use std::sync::Arc;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{sleep, Duration};
 use tracing::{info, error, warn};
 use std::collections::HashMap;
 
@@ -27,6 +30,7 @@ use std::collections::HashMap;
 struct ExampleCallHandler {
     name: String,
     active_calls: Arc<tokio::sync::Mutex<HashMap<String, CallSession>>>,
+    session_coordinator: Arc<tokio::sync::RwLock<Option<Arc<SessionCoordinator>>>>,
 }
 
 impl ExampleCallHandler {
@@ -34,7 +38,13 @@ impl ExampleCallHandler {
         Self {
             name: name.to_string(),
             active_calls: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
         }
+    }
+
+    async fn set_coordinator(&self, coordinator: Arc<SessionCoordinator>) {
+        let mut coord = self.session_coordinator.write().await;
+        *coord = Some(coordinator);
     }
 
     async fn get_active_call_count(&self) -> usize {
@@ -48,28 +58,85 @@ impl CallHandler for ExampleCallHandler {
         info!("📞 [{}] Incoming call from {} to {}", self.name, call.from, call.to);
         info!("📞 [{}] Call ID: {}", self.name, call.id);
         
-        // Check if we have SDP in the incoming call and generate SDP answer
-        let sdp_answer = if let Some(ref sdp_offer) = call.sdp {
+        // Check if we have SDP in the incoming call
+        if let Some(ref sdp_offer) = call.sdp {
             info!("📞 [{}] Received SDP offer (length: {} bytes)", self.name, sdp_offer.len());
             
-            // Use proper SDP negotiation via public API only
-            match generate_sdp_answer(sdp_offer, "127.0.0.1", 10001) {
-                Ok(negotiated_answer) => {
-                    info!("📞 [{}] Generated negotiated SDP answer (length: {} bytes)", self.name, negotiated_answer.len());
-                    Some(negotiated_answer)
-                }
-                Err(e) => {
-                    error!("📞 [{}] SDP negotiation failed: {}", self.name, e);
-                    None
+            // Get coordinator to generate SDP answer
+            let coordinator_guard = self.session_coordinator.read().await;
+            if let Some(coordinator) = coordinator_guard.as_ref() {
+                // Create media session for this call
+                match coordinator.media_manager.create_media_session(&call.id).await {
+                    Ok(_) => {
+                        // Generate SDP answer with our allocated port
+                        match coordinator.generate_sdp_offer(&call.id).await {
+                            Ok(sdp_answer) => {
+                                info!("📞 [{}] Generated SDP answer (length: {} bytes)", self.name, sdp_answer.len());
+                                
+                                // Update media session with remote SDP
+                                if let Err(e) = coordinator.media_manager.update_media_session(&call.id, sdp_offer).await {
+                                    error!("Failed to update media session with remote SDP: {}", e);
+                                }
+                                
+                                return CallDecision::Accept(Some(sdp_answer));
+                            }
+                            Err(e) => {
+                                error!("📞 [{}] Failed to generate SDP answer: {}", self.name, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to create media session: {}", e);
+                    }
                 }
             }
         } else {
             info!("📞 [{}] No SDP offer received", self.name);
-            None
-        };
+        }
         
-        info!("✅ [{}] Auto-accepting incoming call with SDP answer", self.name);
-        CallDecision::Accept(sdp_answer)
+        info!("✅ [{}] Auto-accepting incoming call", self.name);
+        CallDecision::Accept(None)
+    }
+
+    async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
+        info!("📞 [{}] Call {} established", self.name, call.id());
+        info!("📞 [{}] Local SDP: {:?}", self.name, local_sdp.as_ref().map(|s| s.len()));
+        info!("📞 [{}] Remote SDP: {:?}", self.name, remote_sdp.as_ref().map(|s| s.len()));
+        
+        // Store the active call
+        let mut active_calls = self.active_calls.lock().await;
+        active_calls.insert(call.id().to_string(), call.clone());
+        
+        // Extract remote RTP address from SDP if available and establish media flow
+        let coordinator_guard = self.session_coordinator.read().await;
+        if let (Some(coordinator), Some(remote_sdp)) = (coordinator_guard.as_ref(), remote_sdp) {
+            // Simple SDP parsing to get IP and port
+            let mut remote_ip = None;
+            let mut remote_port = None;
+            
+            for line in remote_sdp.lines() {
+                if line.starts_with("c=IN IP4 ") {
+                    remote_ip = line.strip_prefix("c=IN IP4 ").map(|s| s.to_string());
+                } else if line.starts_with("m=audio ") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() > 1 {
+                        remote_port = parts[1].parse::<u16>().ok();
+                    }
+                }
+            }
+            
+            if let (Some(ip), Some(port)) = (remote_ip, remote_port) {
+                let remote_addr = format!("{}:{}", ip, port);
+                info!("📞 [{}] Establishing media flow to {}", self.name, remote_addr);
+                
+                match coordinator.establish_media_flow(&call.id(), &remote_addr).await {
+                    Ok(_) => {
+                        info!("✅ [{}] Successfully established media flow", self.name);
+                    }
+                    Err(e) => error!("Failed to establish media flow: {}", e),
+                }
+            }
+        }
     }
 
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
@@ -81,36 +148,35 @@ impl CallHandler for ExampleCallHandler {
     }
 }
 
-/// Create a session manager with the specified configuration
-async fn create_session_manager(
+/// Create a session coordinator with the specified configuration
+async fn create_session_coordinator(
     name: &str,
     port: u16,
     from_uri: &str,
     handler: Arc<ExampleCallHandler>,
-) -> Result<Arc<SessionManager>> {
-    info!("🚀 [{}] Creating session manager on port {}", name, port);
+) -> Result<Arc<SessionCoordinator>, Box<dyn std::error::Error>> {
+    info!("🚀 [{}] Creating session coordinator on port {}", name, port);
     
-    let session_manager = SessionManagerBuilder::new()
+    let coordinator = SessionManagerBuilder::new()
         .with_sip_port(port)
-        .with_from_uri(from_uri.to_string())
-        .with_sip_bind_address("127.0.0.1".to_string())
-        .with_media_ports(10000, 20000)  // Use proper RFC-compliant RTP port range
-        .p2p_mode()
-        .with_handler(handler)
+        .with_local_address(from_uri.to_string())
+        .with_media_ports(10000, 20000)
+        .with_handler(handler.clone())
         .build()
         .await?;
+    
+    // Set the coordinator in the handler
+    handler.set_coordinator(coordinator.clone()).await;
 
     // Start the session manager
-    session_manager.start().await?;
-    info!("✅ [{}] Session manager started and listening on port {}", name, port);
+    coordinator.start().await?;
+    info!("✅ [{}] Session coordinator started and listening on port {}", name, port);
     
-    Ok(session_manager)
+    Ok(coordinator)
 }
 
-
-
 /// Run the complete real SIP P2P call test
-async fn run_real_sip_call_test(duration_secs: u64) -> Result<()> {
+async fn run_real_sip_call_test(duration_secs: u64) -> Result<(), Box<dyn std::error::Error>> {
     info!("🌟 Starting Real SIP Peer-to-Peer Call Test");
     info!("📋 Test Configuration:");
     info!("   Duration: {} seconds", duration_secs);
@@ -122,15 +188,15 @@ async fn run_real_sip_call_test(duration_secs: u64) -> Result<()> {
     let alice_handler = Arc::new(ExampleCallHandler::new("Alice"));
     let bob_handler = Arc::new(ExampleCallHandler::new("Bob"));
 
-    // Create session managers for both parties
-    let alice_manager = create_session_manager(
+    // Create session coordinators for both parties
+    let alice_coordinator = create_session_coordinator(
         "Alice",
         5061,
         "sip:alice@127.0.0.1:5061",
         Arc::clone(&alice_handler),
     ).await?;
 
-    let bob_manager = create_session_manager(
+    let bob_coordinator = create_session_coordinator(
         "Bob", 
         5062,
         "sip:bob@127.0.0.1:5062",
@@ -141,18 +207,17 @@ async fn run_real_sip_call_test(duration_secs: u64) -> Result<()> {
     info!("⏳ Waiting for managers to be ready...");
     sleep(Duration::from_secs(2)).await;
 
-    // Alice initiates a call to Bob with real SDP offer
-    info!("📞 Alice initiating call to Bob...");
-    let alice_sdp = generate_sdp_offer("127.0.0.1", 10000)?;
-    info!("📞 Alice SDP offer with codec negotiation (length: {} bytes)", alice_sdp.len());
-
-    let call = make_call_with_sdp(
-        &alice_manager,
+    // Alice prepares and initiates a call to Bob
+    info!("📞 Alice preparing call to Bob...");
+    let prepared_call = alice_coordinator.prepare_outgoing_call(
         "sip:alice@127.0.0.1:5061",
-        "sip:bob@127.0.0.1:5062",
-        &alice_sdp,
+        "sip:bob@127.0.0.1:5062"
     ).await?;
+    
+    info!("📞 Alice prepared call with session {} and SDP offer (length: {} bytes)", 
+          prepared_call.session_id, prepared_call.sdp_offer.len());
 
+    let call = alice_coordinator.initiate_prepared_call(&prepared_call).await?;
     info!("🔄 Call initiated with ID: {}", call.id());
 
     // Wait for call to be established with proper state checking
@@ -162,7 +227,7 @@ async fn run_real_sip_call_test(duration_secs: u64) -> Result<()> {
     let mut call_established = false;
 
     while attempts < max_attempts {
-        if let Ok(Some(updated_call)) = find_session(&alice_manager, call.id()).await {
+        if let Ok(Some(updated_call)) = alice_coordinator.find_session(&call.id()).await {
             match updated_call.state() {
                 CallState::Active => {
                     info!("✅ Call established! Real media session active.");
@@ -199,62 +264,70 @@ async fn run_real_sip_call_test(duration_secs: u64) -> Result<()> {
     // With RFC compliance fixes, when state is Active, media is guaranteed ready!
     info!("✅ Call established with RFC-compliant timing - media ready when Active!");
 
-    // Get real media info to verify SDP negotiation (now should have data!)
-    if let Ok(media_info) = get_media_info(&alice_manager, &call).await {
-        info!("📊 Alice media info: local_port={:?}, remote_port={:?}, codec={:?}", 
-              media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);
-    }
-
-    // Get Bob's active sessions (fixed the compilation error)
-    if let Ok(bob_sessions) = bob_manager.list_active_sessions().await {
-        if let Some(bob_session_id) = bob_sessions.first() {
-            if let Ok(media_info) = bob_manager.get_media_info(bob_session_id).await {
-                info!("📊 Bob media info: local_port={:?}, remote_port={:?}, codec={:?}", 
-                      media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);
+    // Get real media info to verify SDP negotiation
+    if let Ok(media_info) = MediaControl::get_media_info(&alice_coordinator, &call.id()).await {
+        if let Some(info) = media_info {
+            info!("📊 Alice media info: local_port={:?}, remote_port={:?}, codec={:?}", 
+                  info.local_rtp_port, info.remote_rtp_port, info.codec);
+            
+            // Check RTP statistics
+            if let Some(rtp_stats) = &info.rtp_stats {
+                info!("📊 Alice RTP stats: sent={} pkts, recv={} pkts", 
+                      rtp_stats.packets_sent, rtp_stats.packets_received);
             }
         }
     }
 
-    // Demonstrate real call control operations
-    info!("🎛️ Testing call control operations...");
-    
-    // Test DTMF sending
-    info!("📱 Sending DTMF tones from Alice...");
-    if let Err(e) = send_dtmf(&alice_manager, &call, "123*#").await {
-        warn!("DTMF sending failed (expected in test): {}", e);
+    // Get Bob's active sessions
+    if let Ok(bob_sessions) = bob_coordinator.list_active_sessions().await {
+        if let Some(bob_session_id) = bob_sessions.first() {
+            if let Ok(media_info) = MediaControl::get_media_info(&bob_coordinator, bob_session_id).await {
+                if let Some(info) = media_info {
+                    info!("📊 Bob media info: local_port={:?}, remote_port={:?}, codec={:?}", 
+                          info.local_rtp_port, info.remote_rtp_port, info.codec);
+                }
+            }
+        }
     }
 
     // Let the call run for the specified duration
     info!("📞 Call active for {} seconds...", duration_secs);
-    sleep(Duration::from_secs(duration_secs)).await;
-
-    // Test hold/resume operations
-    info!("🔇 Testing hold operation...");
-    if let Err(e) = hold_call(&alice_manager, &call).await {
-        warn!("Hold operation failed (expected in test): {}", e);
-    }
-
-    sleep(Duration::from_secs(1)).await;
-
-    info!("🔊 Testing resume operation...");
-    if let Err(e) = resume_call(&alice_manager, &call).await {
-        warn!("Resume operation failed (expected in test): {}", e);
+    
+    // Monitor statistics during the call
+    for i in 0..duration_secs {
+        sleep(Duration::from_secs(1)).await;
+        
+        if i % 3 == 0 {
+            // Get statistics every 3 seconds
+            if let Ok(Some(stats)) = alice_coordinator.get_media_statistics(&call.id()).await {
+                if let Some(rtp) = &stats.rtp_stats {
+                    info!("📊 Alice RTP: Sent {} pkts, Recv {} pkts, Lost {} pkts, Jitter {:.1}ms",
+                          rtp.packets_sent, rtp.packets_received, rtp.packets_lost, rtp.jitter_ms);
+                }
+                if let Some(quality) = &stats.quality_metrics {
+                    info!("📈 Quality: Loss {:.1}%, MOS {:.1}, Network {}%",
+                          quality.packet_loss_percent, 
+                          quality.mos_score.unwrap_or(0.0),
+                          quality.network_quality);
+                }
+            }
+        }
     }
 
     // Get session statistics
-    if let Ok(stats) = get_session_stats(&alice_manager).await {
+    if let Ok(stats) = alice_coordinator.get_stats().await {
         info!("📈 Alice session stats: total={}, active={}, failed={}", 
               stats.total_sessions, stats.active_sessions, stats.failed_sessions);
     }
 
-    if let Ok(stats) = get_session_stats(&bob_manager).await {
+    if let Ok(stats) = bob_coordinator.get_stats().await {
         info!("📈 Bob session stats: total={}, active={}, failed={}", 
               stats.total_sessions, stats.active_sessions, stats.failed_sessions);
     }
 
     // Terminate the call properly
     info!("📴 Terminating call...");
-    terminate_call(&alice_manager, &call).await?;
+    alice_coordinator.terminate_session(&call.id()).await?;
     info!("✅ Call terminated successfully");
 
     // Wait for proper cleanup
@@ -272,11 +345,11 @@ async fn run_real_sip_call_test(duration_secs: u64) -> Result<()> {
     if alice_active == 0 && bob_active == 0 {
         info!("🎉 SUCCESS: Real SIP P2P Call Test COMPLETED!");
         info!("✅ All features tested:");
-        info!("   - Session manager creation and startup");
+        info!("   - Session coordinator creation and startup");
         info!("   - Real SIP call establishment with SDP");
         info!("   - Real media session integration");
+        info!("   - RTCP statistics monitoring");
         info!("   - Call state management");
-        info!("   - Call control operations (DTMF, hold/resume)");
         info!("   - Proper call termination and cleanup");
     } else {
         warn!("⚠️ Cleanup incomplete - some calls still active");
@@ -286,7 +359,7 @@ async fn run_real_sip_call_test(duration_secs: u64) -> Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging with appropriate levels
     tracing_subscriber::fmt()
         .with_env_filter("info,rvoip_session_core=debug,rvoip_media_core=info")
@@ -314,10 +387,11 @@ async fn main() -> Result<()> {
 
     info!("🚀 Starting Real SIP P2P Call Example");
     info!("📱 This example uses:");
-    info!("   - session-core SessionManager API");
+    info!("   - session-core SessionCoordinator API");
     info!("   - Real media-core MediaSessionController");
     info!("   - Proper SIP signaling and SDP negotiation");
     info!("   - RFC-compliant RTP port allocation");
+    info!("   - RTCP statistics monitoring");
 
     // Run the complete test
     run_real_sip_call_test(duration).await?;

@@ -59,3 +59,7 @@ path = "examples/client-server/uas_server.rs"
 [[bin]]
 name = "uac_client"
 path = "examples/client-server/uac_client.rs"
+
+[[bin]]
+name = "simple_peer_to_peer"
+path = "examples/peer-to-peer/simple_peer_to_peer.rs"

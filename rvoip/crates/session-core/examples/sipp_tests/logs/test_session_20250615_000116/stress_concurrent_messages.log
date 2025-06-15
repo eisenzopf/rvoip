@@ -1,0 +1,930 @@
+----------------------------------------------- 2025-06-15 00:02:27.037669
+UDP message sent (587 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-1-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag001
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 1-1464@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6000 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:27.043297
+UDP message received [514] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-1-0
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag001
+Call-ID: 1-1464@127.0.0.1
+CSeq: 1 INVITE
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-fc215528a1f542e0a7eb9fab50363f82
+Contact: <sip:server@0.0.0.0:5062>
+Content-Length: 160
+Content-Type: application/sdp
+
+v=0
+o=rust 0 0 IN IP4 127.0.0.1
+s=Rust Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:27.043375
+UDP message sent (406 bytes):
+
+ACK sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-1-4
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag001
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-fc215528a1f542e0a7eb9fab50363f82
+Call-ID: 1-1464@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:27.538096
+UDP message sent (587 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-2-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag002
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 2-1464@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6004 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:27.541897
+UDP message received [514] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-2-0
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag002
+Call-ID: 2-1464@127.0.0.1
+CSeq: 1 INVITE
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-35b0ea02226149beaa9af9c25f052f18
+Contact: <sip:server@0.0.0.0:5062>
+Content-Length: 160
+Content-Type: application/sdp
+
+v=0
+o=rust 0 0 IN IP4 127.0.0.1
+s=Rust Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:27.542027
+UDP message sent (406 bytes):
+
+ACK sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-2-4
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag002
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-35b0ea02226149beaa9af9c25f052f18
+Call-ID: 2-1464@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:28.037558
+UDP message sent (587 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-3-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag003
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 3-1464@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6008 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:28.041761
+UDP message received [514] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-3-0
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag003
+Call-ID: 3-1464@127.0.0.1
+CSeq: 1 INVITE
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-c011a1383460469d9e023bac64096e4b
+Contact: <sip:server@0.0.0.0:5062>
+Content-Length: 160
+Content-Type: application/sdp
+
+v=0
+o=rust 0 0 IN IP4 127.0.0.1
+s=Rust Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:28.041862
+UDP message sent (406 bytes):
+
+ACK sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-3-4
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag003
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-c011a1383460469d9e023bac64096e4b
+Call-ID: 3-1464@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:28.536837
+UDP message sent (587 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-4-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag004
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 4-1464@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6012 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:28.541199
+UDP message received [514] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-4-0
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag004
+Call-ID: 4-1464@127.0.0.1
+CSeq: 1 INVITE
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-fe19e2dea1e5420ba6a2ec50f7854ade
+Contact: <sip:server@0.0.0.0:5062>
+Content-Length: 160
+Content-Type: application/sdp
+
+v=0
+o=rust 0 0 IN IP4 127.0.0.1
+s=Rust Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:28.541273
+UDP message sent (406 bytes):
+
+ACK sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-4-4
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag004
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-fe19e2dea1e5420ba6a2ec50f7854ade
+Call-ID: 4-1464@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:29.037527
+UDP message sent (587 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-5-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag005
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 5-1464@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6016 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:29.041341
+UDP message received [514] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-5-0
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag005
+Call-ID: 5-1464@127.0.0.1
+CSeq: 1 INVITE
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-f74fff4d8ad944f1925c4d129b6aac14
+Contact: <sip:server@0.0.0.0:5062>
+Content-Length: 160
+Content-Type: application/sdp
+
+v=0
+o=rust 0 0 IN IP4 127.0.0.1
+s=Rust Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:29.041473
+UDP message sent (406 bytes):
+
+ACK sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-5-4
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag005
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-f74fff4d8ad944f1925c4d129b6aac14
+Call-ID: 5-1464@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:29.537921
+UDP message sent (587 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-6-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag006
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 6-1464@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6020 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:29.542372
+UDP message received [514] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-6-0
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag006
+Call-ID: 6-1464@127.0.0.1
+CSeq: 1 INVITE
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-12b77753a0f4454b83659fbefdb06cb8
+Contact: <sip:server@0.0.0.0:5062>
+Content-Length: 160
+Content-Type: application/sdp
+
+v=0
+o=rust 0 0 IN IP4 127.0.0.1
+s=Rust Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:29.542472
+UDP message sent (406 bytes):
+
+ACK sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-6-4
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag006
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-12b77753a0f4454b83659fbefdb06cb8
+Call-ID: 6-1464@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:30.037978
+UDP message sent (587 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-7-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag007
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 7-1464@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6024 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:30.041941
+UDP message received [514] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-7-0
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag007
+Call-ID: 7-1464@127.0.0.1
+CSeq: 1 INVITE
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-4ea49537e711448888aae1a7a67f676c
+Contact: <sip:server@0.0.0.0:5062>
+Content-Length: 160
+Content-Type: application/sdp
+
+v=0
+o=rust 0 0 IN IP4 127.0.0.1
+s=Rust Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:30.042072
+UDP message sent (406 bytes):
+
+ACK sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-7-4
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag007
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-4ea49537e711448888aae1a7a67f676c
+Call-ID: 7-1464@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:30.536982
+UDP message sent (587 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-8-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag008
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 8-1464@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6028 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:30.541242
+UDP message received [514] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-8-0
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag008
+Call-ID: 8-1464@127.0.0.1
+CSeq: 1 INVITE
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-6e65854c4b0443fda34cad7f7a7e7c75
+Contact: <sip:server@0.0.0.0:5062>
+Content-Length: 160
+Content-Type: application/sdp
+
+v=0
+o=rust 0 0 IN IP4 127.0.0.1
+s=Rust Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:30.541346
+UDP message sent (406 bytes):
+
+ACK sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-8-4
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag008
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-6e65854c4b0443fda34cad7f7a7e7c75
+Call-ID: 8-1464@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:31.036793
+UDP message sent (587 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-9-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag009
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 9-1464@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6032 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:31.041081
+UDP message received [514] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-9-0
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag009
+Call-ID: 9-1464@127.0.0.1
+CSeq: 1 INVITE
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-a3e2f8e4be444657a8123176b5fe018f
+Contact: <sip:server@0.0.0.0:5062>
+Content-Length: 160
+Content-Type: application/sdp
+
+v=0
+o=rust 0 0 IN IP4 127.0.0.1
+s=Rust Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:31.041167
+UDP message sent (406 bytes):
+
+ACK sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-9-4
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag009
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-a3e2f8e4be444657a8123176b5fe018f
+Call-ID: 9-1464@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:31.538431
+UDP message sent (590 bytes):
+
+INVITE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-10-0
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag0010
+To: Test User <sip:test@127.0.0.1:5062>
+Call-ID: 10-1464@127.0.0.1
+CSeq: 1 INVITE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Type: application/sdp
+Content-Length:   181
+
+v=0
+o=user1 53655765 2353687637 IN IP4 127.0.0.1
+s=SIPp Test Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 6036 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:31.541352
+UDP message received [517] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-10-0
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag0010
+Call-ID: 10-1464@127.0.0.1
+CSeq: 1 INVITE
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-6ec018882f8d48f5b010902cd2b8f16c
+Contact: <sip:server@0.0.0.0:5062>
+Content-Length: 160
+Content-Type: application/sdp
+
+v=0
+o=rust 0 0 IN IP4 127.0.0.1
+s=Rust Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 10001 RTP/AVP 0 8
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=sendrecv
+
+----------------------------------------------- 2025-06-15 00:02:31.541400
+UDP message sent (409 bytes):
+
+ACK sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-10-4
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag0010
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-6ec018882f8d48f5b010902cd2b8f16c
+Call-ID: 10-1464@127.0.0.1
+CSeq: 1 ACK
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:32.045167
+UDP message sent (406 bytes):
+
+BYE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-1-7
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag001
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-fc215528a1f542e0a7eb9fab50363f82
+Call-ID: 1-1464@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:32.048173
+UDP message received [282] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-1-7
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag001
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-fc215528a1f542e0a7eb9fab50363f82
+Call-ID: 1-1464@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:32.543483
+UDP message sent (406 bytes):
+
+BYE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-2-7
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag002
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-35b0ea02226149beaa9af9c25f052f18
+Call-ID: 2-1464@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:32.546386
+UDP message received [282] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-2-7
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag002
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-35b0ea02226149beaa9af9c25f052f18
+Call-ID: 2-1464@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:33.042528
+UDP message sent (406 bytes):
+
+BYE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-3-7
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag003
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-c011a1383460469d9e023bac64096e4b
+Call-ID: 3-1464@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:33.045360
+UDP message received [282] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-3-7
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag003
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-c011a1383460469d9e023bac64096e4b
+Call-ID: 3-1464@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:33.543354
+UDP message sent (406 bytes):
+
+BYE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-4-7
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag004
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-fe19e2dea1e5420ba6a2ec50f7854ade
+Call-ID: 4-1464@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:33.547720
+UDP message received [282] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-4-7
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag004
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-fe19e2dea1e5420ba6a2ec50f7854ade
+Call-ID: 4-1464@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:34.043225
+UDP message sent (406 bytes):
+
+BYE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-5-7
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag005
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-f74fff4d8ad944f1925c4d129b6aac14
+Call-ID: 5-1464@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:34.047278
+UDP message received [282] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-5-7
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag005
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-f74fff4d8ad944f1925c4d129b6aac14
+Call-ID: 5-1464@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:34.545320
+UDP message sent (406 bytes):
+
+BYE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-6-7
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag006
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-12b77753a0f4454b83659fbefdb06cb8
+Call-ID: 6-1464@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:34.554545
+UDP message received [282] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-6-7
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag006
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-12b77753a0f4454b83659fbefdb06cb8
+Call-ID: 6-1464@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:35.043920
+UDP message sent (406 bytes):
+
+BYE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-7-7
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag007
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-4ea49537e711448888aae1a7a67f676c
+Call-ID: 7-1464@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:35.050041
+UDP message received [282] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-7-7
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag007
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-4ea49537e711448888aae1a7a67f676c
+Call-ID: 7-1464@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:35.542709
+UDP message sent (406 bytes):
+
+BYE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-8-7
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag008
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-6e65854c4b0443fda34cad7f7a7e7c75
+Call-ID: 8-1464@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:35.549693
+UDP message received [282] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-8-7
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag008
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-6e65854c4b0443fda34cad7f7a7e7c75
+Call-ID: 8-1464@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:36.043416
+UDP message sent (406 bytes):
+
+BYE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-9-7
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag009
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-a3e2f8e4be444657a8123176b5fe018f
+Call-ID: 9-1464@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:36.059414
+UDP message received [282] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-9-7
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag009
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-a3e2f8e4be444657a8123176b5fe018f
+Call-ID: 9-1464@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:36.543583
+UDP message sent (409 bytes):
+
+BYE sip:test@127.0.0.1:5062 SIP/2.0
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-10-7
+From: SIPp Test <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag0010
+To: Test User <sip:test@127.0.0.1:5062>;tag=tag-6ec018882f8d48f5b010902cd2b8f16c
+Call-ID: 10-1464@127.0.0.1
+CSeq: 2 BYE
+Contact: sip:sipp@127.0.0.1:5061
+Max-Forwards: 70
+Subject: SIPp Basic Call Test
+User-Agent: SIPp/3.6.1
+Content-Length: 0
+
+
+----------------------------------------------- 2025-06-15 00:02:36.554598
+UDP message received [285] bytes :
+
+SIP/2.0 200 OK
+Via: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-1464-10-7
+From: "SIPp Test" <sip:sipp@127.0.0.1:5061>;tag=1464SIPpTag0010
+To: "Test User" <sip:test@127.0.0.1:5062>;tag=tag-6ec018882f8d48f5b010902cd2b8f16c
+Call-ID: 10-1464@127.0.0.1
+CSeq: 2 BYE
+Content-Length: 0
+
+

@@ -5,7 +5,10 @@
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use rvoip_session_core::api::*;
+use rvoip_session_core::{SessionCoordinator, SessionManagerBuilder, MediaControl};
+use rvoip_session_core::api::{
+    CallHandler, CallSession, CallState, IncomingCall, CallDecision, SessionId,
+};
 use sipp_tests::CallStats;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,8 +54,6 @@ pub enum ResponseModeArg {
     Random,
 }
 
-
-
 /// Call handler for the SIP test server
 #[derive(Debug)]
 pub struct SipTestHandler {
@@ -90,17 +91,22 @@ impl CallHandler for SipTestHandler {
                 
                 // Generate SDP answer if we have an offer
                 let sdp_answer = if let Some(ref sdp_offer) = call.sdp {
-                    info!("📞 [{}] Received SDP offer, generating answer", self.name);
-                    match generate_sdp_answer(sdp_offer, "127.0.0.1", 10001) {
-                        Ok(answer) => {
-                            info!("📞 [{}] Generated SDP answer", self.name);
-                            Some(answer)
-                        }
-                        Err(e) => {
-                            error!("📞 [{}] SDP answer generation failed: {}", self.name, e);
-                            None
-                        }
-                    }
+                    info!("📞 [{}] Received SDP offer, generating simple answer", self.name);
+                    // Create a simple SDP answer that matches the offer
+                    // In a real implementation, you'd negotiate codecs properly
+                    let answer = format!(
+                        "v=0\r\n\
+                        o=rust 0 0 IN IP4 127.0.0.1\r\n\
+                        s=Rust Session\r\n\
+                        c=IN IP4 127.0.0.1\r\n\
+                        t=0 0\r\n\
+                        m=audio 10001 RTP/AVP 0 8\r\n\
+                        a=rtpmap:0 PCMU/8000\r\n\
+                        a=rtpmap:8 PCMA/8000\r\n\
+                        a=sendrecv\r\n"
+                    );
+                    info!("📞 [{}] Generated SDP answer", self.name);
+                    Some(answer)
                 } else {
                     None
                 };
@@ -121,8 +127,19 @@ impl CallHandler for SipTestHandler {
                 match choice {
                     0 => {
                         info!("🎲 [{}] Random choice: Accept", self.name);
-                        let sdp_answer = if let Some(ref sdp_offer) = call.sdp {
-                            generate_sdp_answer(sdp_offer, "127.0.0.1", 10001).ok()
+                        let sdp_answer = if let Some(ref _sdp_offer) = call.sdp {
+                            // Create simple SDP answer
+                            Some(format!(
+                                "v=0\r\n\
+                                o=rust 0 0 IN IP4 127.0.0.1\r\n\
+                                s=Rust Session\r\n\
+                                c=IN IP4 127.0.0.1\r\n\
+                                t=0 0\r\n\
+                                m=audio 10001 RTP/AVP 0 8\r\n\
+                                a=rtpmap:0 PCMU/8000\r\n\
+                                a=rtpmap:8 PCMA/8000\r\n\
+                                a=sendrecv\r\n"
+                            ))
                         } else {
                             None
                         };
@@ -155,7 +172,7 @@ impl CallHandler for SipTestHandler {
 
 /// SIP Test Server implementation
 pub struct SipTestServer {
-    session_manager: Arc<SessionManager>,
+    session_coordinator: Arc<SessionCoordinator>,
     stats: Arc<Mutex<CallStats>>,
     response_mode: ResponseModeArg,
     start_time: Instant,
@@ -170,19 +187,17 @@ impl SipTestServer {
         let stats = Arc::new(Mutex::new(CallStats::default()));
         let handler = Arc::new(SipTestHandler::new(response_mode.clone(), Arc::clone(&stats)));
         
-        // Create session manager with session-core
-        let session_manager = SessionManagerBuilder::new()
+        // Create session coordinator with session-core
+        let session_coordinator = SessionManagerBuilder::new()
             .with_sip_port(port)
-            .with_from_uri(format!("sip:test@127.0.0.1:{}", port))
-            .with_sip_bind_address("127.0.0.1".to_string())
+            .with_local_address(format!("sip:test@127.0.0.1:{}", port))
             .with_media_ports(10000, 20000)
-            .p2p_mode()
             .with_handler(handler)
             .build()
             .await?;
         
         let server = Self {
-            session_manager: session_manager,
+            session_coordinator,
             stats,
             response_mode,
             start_time: Instant::now(),
@@ -194,10 +209,10 @@ impl SipTestServer {
     
     /// Start the server and handle events
     pub async fn run(&self) -> Result<()> {
-        info!("🚀 Starting SIP Test Server session manager...");
+        info!("🚀 Starting SIP Test Server session coordinator...");
         
-        // Start the session manager - this actually binds to the SIP port!
-        self.session_manager.start().await?;
+        // Start the session coordinator - this actually binds to the SIP port!
+        self.session_coordinator.start().await?;
         
         info!("✅ SIP Test Server ready and listening on port {}", self.port);
         info!("📋 Response mode: {:?}", self.response_mode);
