@@ -1,9 +1,9 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Session Integration Tests
-//!
-//! Comprehensive integration tests that combine all session components
-//! (SessionImpl, StateManager, LifecycleManager, MediaCoordinator) to test
-//! realistic end-to-end scenarios and component interactions.
+// Session Integration Tests
+//
+// Comprehensive integration tests that combine all session components
+// (SessionImpl, StateManager, LifecycleManager, MediaCoordinator) to test
+// realistic end-to-end scenarios and component interactions.
 
 mod common;
 

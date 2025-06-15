@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for Manager Performance and Stress Testing
-//!
-//! Tests manager performance under various load conditions including
-//! high-volume session creation, concurrent operations, and stress scenarios.
+// Tests for Manager Performance and Stress Testing
+//
+// Tests manager performance under various load conditions including
+// high-volume session creation, concurrent operations, and stress scenarios.
 
 mod common;
 

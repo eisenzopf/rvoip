@@ -201,20 +201,57 @@ pub async fn wait_for_session_terminated(
 ) -> Option<String> {
     let start = std::time::Instant::now();
     
+    // First yield to allow any pending events to propagate
+    tokio::task::yield_now().await;
+    
     while start.elapsed() < timeout {
         match tokio::time::timeout(Duration::from_millis(100), subscriber.receive()).await {
             Ok(Ok(event)) => {
+                println!("Received event while waiting for termination: {:?}", event);
                 if let SessionEvent::SessionTerminated { session_id: event_session_id, reason } = event {
                     if &event_session_id == session_id {
                         return Some(reason);
                     }
                 }
             },
-            _ => {}
+            Ok(Err(e)) => {
+                println!("Error receiving event: {:?}", e);
+            },
+            Err(_) => {
+                // Timeout, continue
+                tokio::task::yield_now().await;
+            }
         }
     }
     
+    println!("Timeout waiting for SessionTerminated event for session {}", session_id);
     None
+}
+
+/// Wait for a session to transition to Terminated state
+pub async fn wait_for_terminated_state(
+    subscriber: &mut SessionEventSubscriber,
+    session_id: &SessionId,
+    timeout: Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(Duration::from_millis(100), subscriber.receive()).await {
+            Ok(Ok(event)) => {
+                if let SessionEvent::StateChanged { session_id: event_session_id, new_state, .. } = event {
+                    if &event_session_id == session_id && matches!(new_state, CallState::Terminated) {
+                        return true;
+                    }
+                }
+            },
+            _ => {
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    
+    false
 }
 
 /// Create a single session manager for testing

@@ -275,10 +275,39 @@ impl SessionDialogCoordinator {
         response: rvoip_sip_core::Response,
         transaction_id: rvoip_dialog_core::TransactionKey,
     ) -> DialogResult<()> {
+        let tx_id_str = transaction_id.to_string();
+        tracing::info!("🔍 RESPONSE HANDLER: status={}, tx_id='{}', dialog={}", 
+                      response.status_code(), tx_id_str, dialog_id);
         println!("🎯 SESSION COORDINATION: Received response {} for dialog {}", response.status_code(), dialog_id);
         
-        // Check if this is a 200 OK response to an INVITE that needs an ACK
-        if response.status_code() == 200 && transaction_id.to_string().contains("INVITE") && transaction_id.to_string().contains("client") {
+        // Handle BYE responses first - check transaction type before status code
+        if tx_id_str.contains("BYE") && tx_id_str.contains("client") {
+            tracing::info!("📞 BYE RESPONSE: Processing response to BYE request");
+            
+            match response.status_code() {
+                200 => {
+                    // Successful BYE - generate SessionTerminated for UAC
+                    self.handle_bye_success(dialog_id).await?;
+                }
+                code if code >= 400 => {
+                    // BYE failed
+                    tracing::warn!("BYE request failed with {}: {}", code, response.reason().unwrap_or("Unknown"));
+                    // Still try to clean up the session
+                    if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+                        let session_id = session_id_ref.value().clone();
+                        self.update_session_state(session_id, CallState::Failed(format!("BYE failed: {}", code))).await?;
+                    }
+                }
+                _ => {
+                    tracing::debug!("Unexpected response {} to BYE", response.status_code());
+                }
+            }
+            
+            return Ok(());
+        }
+        
+        // Handle INVITE responses
+        if response.status_code() == 200 && tx_id_str.contains("INVITE") && tx_id_str.contains("client") {
             println!("🚀 SESSION COORDINATION: This is a 200 OK to INVITE - sending automatic ACK");
             
             // Extract SDP from 200 OK response body if present
@@ -361,12 +390,11 @@ impl SessionDialogCoordinator {
             }
         }
         
-        // Handle other response codes
+        // Handle other response codes for non-BYE, non-INVITE requests
         match response.status_code() {
             200 => {
-                // 200 OK for non-INVITE requests (INFO, UPDATE, BYE, etc.)
+                // 200 OK for non-INVITE, non-BYE requests (INFO, UPDATE, etc.)
                 // These responses are handled correctly by the protocol stack
-                // Just log success without the misleading "Unhandled" message
                 tracing::debug!("✅ RFC 3261: Successfully processed 200 OK response for dialog {}", dialog_id);
             }
             
@@ -616,6 +644,40 @@ impl SessionDialogCoordinator {
             //     })?;
         } else {
             tracing::warn!("No session found for terminated dialog {}", dialog_id);
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle successful BYE response (200 OK) for UAC
+    async fn handle_bye_success(&self, dialog_id: DialogId) -> DialogResult<()> {
+        tracing::info!("📞 BYE SUCCESS: Processing successful BYE for dialog {}", dialog_id);
+        println!("📞 BYE SUCCESS: Processing successful BYE for dialog {}", dialog_id);
+        
+        // Look up session - get it before removing the mapping!
+        let session_info = self.dialog_to_session.get(&dialog_id)
+            .map(|entry| entry.value().clone());
+            
+        if let Some(session_id) = session_info {
+            tracing::info!("✅ BYE SUCCESS: Found session {} for dialog {}", session_id, dialog_id);
+            
+            // Send SessionTerminated event for the UAC
+            self.send_session_event(SessionEvent::SessionTerminated {
+                session_id: session_id.clone(),
+                reason: "Call terminated by local BYE".to_string(),
+            }).await.unwrap_or_else(|e| {
+                tracing::error!("Failed to send SessionTerminated event: {}", e);
+            });
+            
+            tracing::info!("✅ BYE SUCCESS: Generated SessionTerminated event for UAC session {}", session_id);
+            println!("✅ BYE SUCCESS: Generated SessionTerminated event for UAC session {}", session_id);
+            
+            // NOW remove the dialog mapping after sending the event
+            self.dialog_to_session.remove(&dialog_id);
+            tracing::debug!("Removed dialog mapping for {}", dialog_id);
+        } else {
+            tracing::warn!("❌ BYE SUCCESS: No session found for dialog {} - mapping may have been removed prematurely", dialog_id);
+            println!("❌ BYE SUCCESS: No session found for dialog {}", dialog_id);
         }
         
         Ok(())

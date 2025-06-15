@@ -65,9 +65,8 @@ impl ClientManager {
         
         // Create session manager using session-core builder
         let session_manager = SessionManagerBuilder::new()
-            .with_sip_bind_address("127.0.0.1") // Use config addr without port
+            .with_local_address(&format!("sip:client@{}", config.local_sip_addr.ip()))
             .with_sip_port(config.local_sip_addr.port())
-            .with_from_uri(&format!("sip:client@{}", config.local_sip_addr.ip()))
             .with_media_ports(config.local_media_addr.port(), config.local_media_addr.port() + 100)
             .with_handler(call_handler.clone() as Arc<dyn CallHandler>)
             .build()

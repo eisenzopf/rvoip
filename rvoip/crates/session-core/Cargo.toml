@@ -51,6 +51,7 @@ clap = { version = "4.0", features = ["derive"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-appender = "0.2"
 fastrand = "2.0"
+serial_test = "3.1"
 
 [[bin]]
 name = "uas_server"

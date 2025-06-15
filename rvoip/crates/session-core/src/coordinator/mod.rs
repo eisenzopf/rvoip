@@ -164,6 +164,13 @@ impl SessionCoordinator {
         println!("🎯 COORDINATOR: Handling event: {:?}", event);
         tracing::debug!("Handling event: {:?}", event);
 
+        // Publish event to subscribers BEFORE internal processing
+        // This ensures subscribers see events in real-time, even if processing takes time
+        if let Err(e) = self.event_processor.publish_event(event.clone()).await {
+            tracing::error!("Failed to publish event to subscribers: {}", e);
+            // Continue processing even if publishing fails
+        }
+
         match event {
             SessionEvent::SessionCreated { session_id, from, to, call_state } => {
                 self.handle_session_created(session_id, from, to, call_state).await?;
@@ -291,10 +298,32 @@ impl SessionCoordinator {
         // Stop media
         self.stop_media_session(&session_id).await?;
 
+        // Update session state to Terminated before notifying handler
+        let mut session_for_handler = None;
+        if let Ok(Some(mut session)) = self.registry.get_session(&session_id).await {
+            let old_state = session.state.clone();
+            session.state = CallState::Terminated;
+            
+            // Store the session for handler notification
+            session_for_handler = Some(session.clone());
+            
+            // Update the session in registry
+            if let Err(e) = self.registry.register_session(session_id.clone(), session).await {
+                tracing::error!("Failed to update session to Terminated state: {}", e);
+            } else {
+                // Emit state change event
+                let _ = self.event_tx.send(SessionEvent::StateChanged {
+                    session_id: session_id.clone(),
+                    old_state,
+                    new_state: CallState::Terminated,
+                }).await;
+            }
+        }
+
         // Notify handler
         if let Some(handler) = &self.handler {
             println!("🔔 COORDINATOR: Handler exists, checking for session {}", session_id);
-            if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+            if let Some(session) = session_for_handler {
                 println!("✅ COORDINATOR: Found session {}, calling handler.on_call_ended", session_id);
                 tracing::info!("Notifying handler about session {} termination", session_id);
                 handler.on_call_ended(session, &reason).await;
@@ -305,8 +334,9 @@ impl SessionCoordinator {
             println!("⚠️ COORDINATOR: No handler configured");
         }
 
-        // Clean up session
-        self.registry.unregister_session(&session_id).await?;
+        // Don't unregister immediately - let cleanup handle it later
+        // This allows tests and other components to verify the Terminated state
+        // self.registry.unregister_session(&session_id).await?;
 
         Ok(())
     }

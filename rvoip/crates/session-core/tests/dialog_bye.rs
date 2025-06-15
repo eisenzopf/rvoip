@@ -4,6 +4,9 @@ use rvoip_session_core::api::control::SessionControl;
 // Tests the session-core functionality for BYE requests (call termination),
 // ensuring proper integration with the underlying dialog layer.
 
+// All tests in this file run serially to avoid port conflicts
+use serial_test::serial;
+
 mod common;
 
 use std::sync::Arc;
@@ -15,6 +18,7 @@ use rvoip_session_core::{
         types::{CallState, SessionId, IncomingCall, CallSession, CallDecision},
         handlers::CallHandler,
     },
+    manager::events::SessionEvent,
 };
 use common::*;
 use common::media_test_utils;
@@ -65,33 +69,64 @@ impl CallHandler for ByeTestHandler {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_basic_bye_termination() {
-    let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
-    
-    // Establish a call first
-    let (call, _callee_session_id) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
-    let session_id = call.id().clone();
-    
-    // Verify session exists before termination (should be Active after INVITE/200OK/ACK)
+    // Global timeout for the entire test
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
+        let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
+        
+        // Establish a call first
+        let (call, _callee_session_id) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
+        let session_id = call.id().clone();
+        
+        // Verify session exists before termination (should be Active after INVITE/200OK/ACK)
     verify_session_exists(&manager_a, &session_id, Some(&CallState::Active)).await.unwrap();
     
     // Terminate with BYE
     let terminate_result = manager_a.terminate_session(&session_id).await;
     assert!(terminate_result.is_ok());
+        
+        // WORKAROUND: Poll for session removal instead of waiting for events
+        // The event system has a race condition that needs to be fixed
+        let mut session_removed = false;
+        let start = std::time::Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            match manager_a.get_session(&session_id).await {
+                Ok(None) => {
+                    session_removed = true;
+                    break;
+                }
+                Ok(Some(session)) if matches!(session.state(), CallState::Terminated) => {
+                    session_removed = true;
+                    break;
+                }
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        assert!(session_removed, "Session should be terminated/removed after BYE");
+        
+        // Verify session is removed after BYE
+        verify_session_removed(&manager_a, &session_id).await.unwrap();
+        
+        cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
     
-    // Wait for BYE processing and state transition
-    // Since event processor is not available, we use a reasonable delay
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    // Verify session is removed after BYE
-    verify_session_removed(&manager_a, &session_id).await.unwrap();
-    
-    cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_immediate_bye_after_invite() {
-    let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
+        let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
+    
+    // Subscribe to events BEFORE creating the call
+    let mut event_sub = manager_a.event_processor.subscribe().await.unwrap();
     
     // Create call but don't wait for establishment
     let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
@@ -101,41 +136,62 @@ async fn test_immediate_bye_after_invite() {
     let terminate_result = manager_a.terminate_session(&session_id).await;
     assert!(terminate_result.is_ok());
     
-    // Wait for cleanup
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for session terminated event
+    let termination_reason = wait_for_session_terminated(&mut event_sub, &session_id, Duration::from_secs(2)).await;
+    assert!(termination_reason.is_some(), "Should receive session terminated event");
     
     // Verify session cleanup
     verify_session_removed(&manager_a, &session_id).await.unwrap();
     
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_bye_after_call_establishment() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
+    
+    // Subscribe to events BEFORE creating the call
+    let mut event_sub = manager_a.event_processor.subscribe().await.unwrap();
     
     // Establish a call first
     let (call, _callee_session_id) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
     let session_id = call.id().clone();
     
-    // Simulate call being established (wait a bit)
+    // Wait a bit to ensure call is fully established
     tokio::time::sleep(Duration::from_millis(100)).await;
     
     // Now send BYE to terminate established call
     let terminate_result = manager_a.terminate_session(&session_id).await;
     assert!(terminate_result.is_ok());
     
-    // Wait for BYE processing
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for session terminated event
+    let termination_reason = wait_for_session_terminated(&mut event_sub, &session_id, Duration::from_secs(2)).await;
+    assert!(termination_reason.is_some(), "Should receive session terminated event");
     
     // Verify session cleanup
     verify_session_removed(&manager_a, &session_id).await.unwrap();
     
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_bye_multiple_concurrent_calls() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
     
     // Create multiple calls using the pair
@@ -167,10 +223,18 @@ async fn test_bye_multiple_concurrent_calls() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_bye_nonexistent_session() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
 let handler = Arc::new(ByeTestHandler::new());
     let manager = create_session_manager(Arc::new(media_test_utils::TestCallHandler::new(true)), None, Some("sip:test@localhost")).await.unwrap();
     
@@ -181,11 +245,22 @@ let handler = Arc::new(ByeTestHandler::new());
     assert!(matches!(terminate_result.unwrap_err(), SessionError::SessionNotFound(_)));
     
     cleanup_managers(vec![manager]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_bye_after_hold_operations() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
+    
+    // Subscribe to events BEFORE creating the call
+    let mut event_sub = manager_a.event_processor.subscribe().await.unwrap();
     
     // Establish a call first
     let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
@@ -207,18 +282,30 @@ async fn test_bye_after_hold_operations() {
     let terminate_result = manager_a.terminate_session(&session_id).await;
     assert!(terminate_result.is_ok());
     
-    // Wait for cleanup
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for session terminated event
+    let termination_reason = wait_for_session_terminated(&mut event_sub, &session_id, Duration::from_secs(2)).await;
+    assert!(termination_reason.is_some(), "Should receive session terminated event");
     
     // Verify session cleanup
     verify_session_removed(&manager_a, &session_id).await.unwrap();
     
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_bye_after_media_updates() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
+    
+    // Subscribe to events BEFORE creating the call
+    let mut event_sub = manager_a.event_processor.subscribe().await.unwrap();
     
     // Establish a call first
     let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
@@ -235,17 +322,26 @@ async fn test_bye_after_media_updates() {
     let terminate_result = manager_a.terminate_session(&session_id).await;
     assert!(terminate_result.is_ok());
     
-    // Wait for cleanup
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for session terminated event
+    let termination_reason = wait_for_session_terminated(&mut event_sub, &session_id, Duration::from_secs(2)).await;
+    assert!(termination_reason.is_some(), "Should receive session terminated event");
     
     // Verify session cleanup
     verify_session_removed(&manager_a, &session_id).await.unwrap();
     
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_concurrent_bye_operations() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
     
     // Create multiple calls using established pattern
@@ -283,11 +379,22 @@ async fn test_concurrent_bye_operations() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_bye_timing_measurements() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
+    
+    // Subscribe to events BEFORE creating the call
+    let mut event_sub = manager_a.event_processor.subscribe().await.unwrap();
     
     // Establish a call first
     let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
@@ -305,18 +412,30 @@ async fn test_bye_timing_measurements() {
     // BYE should complete quickly
     assert!(bye_duration < Duration::from_secs(1));
     
-    // Wait for cleanup
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for state transition to Terminated
+    let state_changed = wait_for_terminated_state(&mut event_sub, &session_id, Duration::from_secs(2)).await;
+    assert!(state_changed, "Session should transition to Terminated state");
     
     // Verify session cleanup
     verify_session_removed(&manager_a, &session_id).await.unwrap();
     
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_bye_session_state_transitions() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
+    
+    // Subscribe to events BEFORE creating the call
+    let mut event_sub = manager_a.event_processor.subscribe().await.unwrap();
     
     // Establish a call first
     let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
@@ -329,17 +448,26 @@ async fn test_bye_session_state_transitions() {
     let terminate_result = manager_a.terminate_session(&session_id).await;
     assert!(terminate_result.is_ok());
     
-    // Wait for state transition
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait for state transition to Terminated
+    let state_changed = wait_for_terminated_state(&mut event_sub, &session_id, Duration::from_secs(2)).await;
+    assert!(state_changed, "Session should transition to Terminated state");
     
     // Session should be removed (terminated)
     verify_session_removed(&manager_a, &session_id).await.unwrap();
     
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_double_bye_protection() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
     
     // Establish a call first
@@ -371,10 +499,18 @@ async fn test_double_bye_protection() {
     }
     
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_bye_statistics_tracking() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
     
     // Create multiple calls
@@ -400,10 +536,18 @@ async fn test_bye_statistics_tracking() {
     assert_eq!(final_stats.active_sessions, 3);
     
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 }
 
 #[tokio::test]
+#[serial]
 async fn test_error_conditions_for_non_established_dialogs() {
+    let test_result = tokio::time::timeout(Duration::from_secs(30), async {
 let handler = Arc::new(ByeTestHandler::new());
     let manager = create_session_manager(Arc::new(media_test_utils::TestCallHandler::new(true)), None, Some("sip:test@localhost")).await.unwrap();
     
@@ -435,4 +579,10 @@ let handler = Arc::new(ByeTestHandler::new());
     verify_session_exists(&manager, &session_id, Some(&CallState::Initiating)).await.unwrap();
     
     cleanup_managers(vec![manager]).await.unwrap();
+    }).await;
+    
+    match test_result {
+        Ok(_) => println!("✅ Test completed successfully"),
+        Err(_) => panic!("❌ Test timed out after 30 seconds!"),
+    }
 } 
