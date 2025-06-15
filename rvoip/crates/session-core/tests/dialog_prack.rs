@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for PRACK Dialog Integration
-//!
-//! Tests the session-core functionality for PRACK requests (Provisional Response Acknowledgment),
-//! ensuring proper integration with the underlying dialog layer.
+// Tests for PRACK Dialog Integration
+//
+// Tests the session-core functionality for PRACK requests (Provisional Response Acknowledgment),
+// ensuring proper integration with the underlying dialog layer.
 
 mod common;
 

@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for Bridge Integration with Session Managers
-//!
-//! Tests how bridges integrate with SessionCoordinator and real call sessions,
-//! including bridging multiple active calls together.
+// Tests for Bridge Integration with Session Managers
+//
+// Tests how bridges integrate with SessionCoordinator and real call sessions,
+// including bridging multiple active calls together.
 
 mod common;
 

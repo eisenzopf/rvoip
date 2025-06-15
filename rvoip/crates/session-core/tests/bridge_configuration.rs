@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for Bridge Configuration and Advanced Scenarios
-//!
-//! Tests bridge configuration options, auto-start/stop behavior, and advanced
-//! bridge scenarios that would be driven by configuration settings.
+// Tests for Bridge Configuration and Advanced Scenarios
+//
+// Tests bridge configuration options, auto-start/stop behavior, and advanced
+// bridge scenarios that would be driven by configuration settings.
 
 mod common;
 

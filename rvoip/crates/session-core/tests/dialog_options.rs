@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for Session Manager Configuration and Capabilities
-//!
-//! Tests the session-core functionality for different configurations,
-//! ensuring proper behavior across various scenarios.
+// Tests for Session Manager Configuration and Capabilities
+//
+// Tests the session-core functionality for different configurations,
+// ensuring proper behavior across various scenarios.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,12 +45,12 @@ impl CallHandler for CapabilitiesTestHandler {
 
 /// Create a test session manager with specific capabilities
 async fn create_capabilities_test_manager(accept_calls: bool, port: u16) -> Result<Arc<SessionCoordinator>, SessionError> {
-//     let handler = Arc::new(CapabilitiesTestHandler::new(accept_calls));
+let handler = Arc::new(CapabilitiesTestHandler::new(accept_calls));
     
     SessionManagerBuilder::new()
         .with_local_address("127.0.0.1")
         .with_sip_port(port)
-        .with_handler(None)
+        .with_handler(Arc::new(media_test_utils::TestCallHandler::new(true)))
         .build()
         .await
 }
@@ -273,7 +273,7 @@ async fn test_concurrent_session_capabilities() {
             println!("Session {} resume succeeded", i);
         }
         
-        let dtmf_result = // manager.send_dtmf(session_id, "123").await;
+        // let dtmf_result = manager.send_dtmf(session_id, "123").await;
         if dtmf_result.is_err() {
             println!("Session {} DTMF failed as expected: {:?}", i, dtmf_result.unwrap_err());
         } else {
@@ -393,7 +393,7 @@ async fn test_error_handling_capabilities() {
     let transfer_result = manager.transfer_session(&fake_session_id, "sip:target@example.com").await;
     assert!(transfer_result.is_err(), "Transfer should return error for non-existent session");
     
-    let dtmf_result = // manager.send_dtmf(&fake_session_id, "123").await;
+    // let dtmf_result = manager.send_dtmf(&fake_session_id, "123").await;
     assert!(dtmf_result.is_err(), "DTMF should return error for non-existent session");
     
     let media_result = // manager.update_media(&fake_session_id, "fake SDP").await;

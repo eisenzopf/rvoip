@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for Call Transfer Functionality
-//!
-//! Tests the session-core functionality for call transfers,
-//! ensuring proper integration with the underlying dialog layer.
+// Tests for Call Transfer Functionality
+//
+// Tests the session-core functionality for call transfers,
+// ensuring proper integration with the underlying dialog layer.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,12 +33,12 @@ impl CallHandler for TransferTestHandler {
 
 /// Create a test session manager for transfer testing
 async fn create_transfer_test_manager(port: u16) -> Result<Arc<SessionCoordinator>, SessionError> {
-//     let handler = Arc::new(TransferTestHandler);
+let handler = Arc::new(TransferTestHandler);
     
     SessionManagerBuilder::new()
         .with_local_address("127.0.0.1")
         .with_sip_port(port)
-        .with_handler(None)
+        .with_handler(Arc::new(media_test_utils::TestCallHandler::new(true)))
         .build()
         .await
 }

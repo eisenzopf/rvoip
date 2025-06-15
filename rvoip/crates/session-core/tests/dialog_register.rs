@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for Registration Functionality
-//!
-//! Tests the session-core functionality for SIP registration,
-//! ensuring proper integration with the underlying dialog layer.
+// Tests for Registration Functionality
+//
+// Tests the session-core functionality for SIP registration,
+// ensuring proper integration with the underlying dialog layer.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -34,12 +34,12 @@ impl CallHandler for RegistrationTestHandler {
 
 /// Create a test session manager for registration testing
 async fn create_registration_test_manager(port: u16) -> Result<Arc<SessionCoordinator>, SessionError> {
-//     let handler = Arc::new(RegistrationTestHandler);
+let handler = Arc::new(RegistrationTestHandler);
     
     SessionManagerBuilder::new()
         .with_local_address("127.0.0.1")
         .with_sip_port(port)
-        .with_handler(None)
+        .with_handler(Arc::new(media_test_utils::TestCallHandler::new(true)))
         .build()
         .await
 }
