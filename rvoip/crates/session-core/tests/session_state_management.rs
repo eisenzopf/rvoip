@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Session State Management Tests
 //!
 //! Tests for StateManager functionality including state transition validation,

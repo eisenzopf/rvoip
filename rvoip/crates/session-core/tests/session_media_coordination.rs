@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Session Media Coordination Tests
 //!
 //! Tests for MediaCoordinator functionality including media setup, updates,

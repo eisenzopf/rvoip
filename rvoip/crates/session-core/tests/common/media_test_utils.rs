@@ -1,15 +1,16 @@
-//! Session-Core Media Integration Test Utilities
-//!
-//! This module provides comprehensive test utilities for testing session-core's
-//! media integration layer. These utilities test the coordination between SIP
-//! signaling and the session-core media abstraction layer.
-//!
-//! These utilities support testing:
-//! - Session-core media integration components
-//! - SIP-media coordination scenarios
-//! - Media session lifecycle management
-//! - Audio stream processing through session-core
-//! - Performance measurement of the integration layer
+use rvoip_session_core::api::control::SessionControl;
+// Session-Core Media Integration Test Utilities
+//
+// This module provides comprehensive test utilities for testing session-core's
+// media integration layer. These utilities test the coordination between SIP
+// signaling and the session-core media abstraction layer.
+//
+// These utilities support testing:
+// - Session-core media integration components
+// - SIP-media coordination scenarios
+// - Media session lifecycle management
+// - Audio stream processing through session-core
+// - Performance measurement of the integration layer
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +21,7 @@ use tokio::sync::{Mutex, RwLock};
 // Session-core imports for media integration testing
 use rvoip_media_core::MediaSessionController as MediaCoreController;
 use rvoip_session_core::{
-    SessionManager, SessionError, SessionId,
+    SessionCoordinator, SessionError, SessionId,
     api::{
         types::{IncomingCall, CallSession, CallDecision}, 
         handlers::CallHandler,
@@ -56,8 +57,8 @@ pub async fn create_media_manager_with_engine(media_controller: Arc<MediaCoreCon
     Ok(Arc::new(media_manager))
 }
 
-/// Creates SessionManager + real MediaSessionController integration for testing
-pub async fn create_test_session_manager_with_media() -> std::result::Result<(Arc<SessionManager>, Arc<MediaCoreController>), Box<dyn std::error::Error>> {
+/// Creates SessionCoordinator + real MediaSessionController integration for testing
+pub async fn create_test_session_manager_with_media() -> std::result::Result<(Arc<SessionCoordinator>, Arc<MediaCoreController>), Box<dyn std::error::Error>> {
     let media_controller = create_test_media_engine().await?;
     let media_manager = create_media_manager_with_engine(media_controller.clone()).await?;
     
@@ -65,15 +66,14 @@ pub async fn create_test_session_manager_with_media() -> std::result::Result<(Ar
     let test_sip_port = 5060;
     
     let session_manager = SessionManagerBuilder::new()
-        .with_sip_bind_address("127.0.0.1")
+        .with_local_address("127.0.0.1")
         .with_sip_port(test_sip_port)
-        .with_from_uri("sip:test@localhost")
         .with_handler(Arc::new(TestCallHandler::new(true)))
         .build()
         .await?;
     
     session_manager.start().await?;
-    println!("✅ Created SessionManager with real MediaSessionController integration");
+    println!("✅ Created SessionCoordinator with real MediaSessionController integration");
     Ok((session_manager, media_controller))
 }
 
@@ -243,7 +243,7 @@ pub fn create_multi_frequency_test_audio(frequencies: &[f32], duration_ms: u32) 
 
 /// Coordinates end-to-end SIP session setup with media integration
 pub async fn coordinate_sip_session_with_media(
-    session_manager: &SessionManager,
+    session_manager: &SessionCoordinator,
     media_controller: &MediaCoreController,
     from_uri: &str,
     to_uri: &str,

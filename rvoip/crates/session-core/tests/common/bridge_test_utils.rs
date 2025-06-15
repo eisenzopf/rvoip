@@ -1,14 +1,15 @@
-//! Bridge Test Utilities
-//!
-//! Common helper functions and test utilities for testing bridge functionality
-//! across different bridge scenarios and configurations.
+use rvoip_session_core::api::control::SessionControl;
+// Bridge Test Utilities
+//
+// Common helper functions and test utilities for testing bridge functionality
+// across different bridge scenarios and configurations.
 
 use std::sync::Arc;
 use std::time::Duration;
 use std::collections::HashSet;
 use tokio::sync::Mutex;
 use rvoip_session_core::{
-    SessionManager,
+    SessionCoordinator,
     api::{
         types::{SessionId, CallSession},
         handlers::CallHandler,
@@ -103,12 +104,12 @@ pub fn verify_bridge_state(
 }
 
 /// Test bridge session management operations
-pub struct BridgeSessionManager {
+pub struct BridgeSessionCoordinator {
     bridge: SessionBridge,
     sessions: HashSet<SessionId>,
 }
 
-impl BridgeSessionManager {
+impl BridgeSessionCoordinator {
     pub fn new(bridge_id: &str) -> Self {
         Self {
             bridge: create_test_bridge(bridge_id),
@@ -155,7 +156,7 @@ impl BridgeSessionManager {
 
 /// Bridge integration test helper
 pub struct BridgeIntegrationHelper {
-    pub managers: Vec<Arc<SessionManager>>,
+    pub managers: Vec<Arc<SessionCoordinator>>,
     pub bridges: Vec<Arc<Mutex<SessionBridge>>>,
 }
 
@@ -165,7 +166,7 @@ impl BridgeIntegrationHelper {
         
         // Create session managers
         for i in 0..manager_count {
-            let (handler, _) = EventTrackingHandler::new();
+            let handler = TestCallHandler::new(true);
             let manager = create_session_manager(
                 Arc::new(handler),
                 None,

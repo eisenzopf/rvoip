@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Session Core Operations Tests
 //!
 //! Tests for SessionImpl core functionality including session creation,

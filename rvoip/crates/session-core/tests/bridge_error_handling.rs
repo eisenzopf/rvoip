@@ -1,7 +1,8 @@
-//! Tests for Bridge Error Handling and Edge Cases
-//!
-//! Tests error conditions, edge cases, and boundary conditions for bridge functionality.
-//! Ensures bridges handle failures gracefully and maintain consistency.
+use rvoip_session_core::api::control::SessionControl;
+// Tests for Bridge Error Handling and Edge Cases
+//
+// Tests error conditions, edge cases, and boundary conditions for bridge functionality.
+// Ensures bridges handle failures gracefully and maintain consistency.
 
 mod common;
 
@@ -125,7 +126,7 @@ async fn test_bridge_boundary_conditions() {
 
 #[tokio::test]
 async fn test_bridge_session_manager_error_conditions() {
-    let mut manager = BridgeSessionManager::new("error-test");
+    let mut manager = BridgeSessionCoordinator::new("error-test");
     
     // Test removing session that was never added
     let fake_session = SessionId("never-added".to_string());

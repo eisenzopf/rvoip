@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Media Quality Monitoring Integration Tests
 //!
 //! Tests the integration between SIP session management and media-core quality
@@ -8,7 +9,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use rvoip_session_core::{SessionManager, SessionError};
+use rvoip_session_core::{SessionCoordinator, SessionError};
 use rvoip_session_core::media::DialogId;
 use uuid::Uuid;
 

@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Tests for SessionEventProcessor Operations
 //!
 //! Tests the session event system functionality including event publishing,

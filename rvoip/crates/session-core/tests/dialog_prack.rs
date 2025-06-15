@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Tests for PRACK Dialog Integration
 //!
 //! Tests the session-core functionality for PRACK requests (Provisional Response Acknowledgment),
@@ -7,7 +8,7 @@ mod common;
 
 use std::time::Duration;
 use rvoip_session_core::{
-    SessionManager,
+    SessionCoordinator,
     SessionError,
     api::{
         types::{SessionId},

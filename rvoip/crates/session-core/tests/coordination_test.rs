@@ -1,10 +1,11 @@
-//! Test to verify session coordination between dialog-core and session-core
+use rvoip_session_core::api::control::SessionControl;
+// Test to verify session coordination between dialog-core and session-core
 
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use rvoip_session_core::{
-    SessionManager,
+    SessionCoordinator,
     api::{
         handlers::CallHandler,
         builder::SessionManagerBuilder,
@@ -34,9 +35,8 @@ async fn test_session_coordination_setup() {
 
     // Create a session manager
     let manager = SessionManagerBuilder::new()
-        .with_sip_bind_address("127.0.0.1")
+        .with_local_address("sip:test@127.0.0.1")
         .with_sip_port(7000)
-        .with_from_uri("sip:test@localhost")
         .with_handler(Arc::new(TestHandler))
         .build()
         .await

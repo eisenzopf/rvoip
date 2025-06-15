@@ -1,7 +1,8 @@
-//! Tests for Basic Bridge Operations
-//!
-//! Tests the core functionality of SessionBridge including creation, session management,
-//! and bridge lifecycle operations (start/stop).
+use rvoip_session_core::api::control::SessionControl;
+// Tests for Basic Bridge Operations
+//
+// Tests the core functionality of SessionBridge including creation, session management,
+// and bridge lifecycle operations (start/stop).
 
 mod common;
 
@@ -198,7 +199,7 @@ async fn test_bridge_session_management_with_lifecycle() {
 
 #[tokio::test]
 async fn test_bridge_session_manager_wrapper() {
-    let mut manager = BridgeSessionManager::new("wrapper-test");
+    let mut manager = BridgeSessionCoordinator::new("wrapper-test");
     let session_ids = create_test_session_ids(3);
     
     // Test wrapper methods

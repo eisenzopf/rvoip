@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Tests for CleanupManager Operations
 //!
 //! Tests the cleanup manager functionality including resource cleanup,

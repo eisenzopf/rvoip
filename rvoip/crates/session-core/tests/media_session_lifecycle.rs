@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Media Session Lifecycle Integration Tests
 //!
 //! Tests the coordination between SIP session lifecycle events and media-core
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use uuid::Uuid;
-use rvoip_session_core::{SessionManager, SessionError, api::types::CallState, api::types::SessionId};
+use rvoip_session_core::{SessionCoordinator, SessionError, api::types::CallState, api::types::SessionId};
 use rvoip_session_core::media::DialogId;
 
 mod common;

@@ -1,6 +1,7 @@
-//! Conference API Tests
-//!
-//! Tests for the ConferenceApi trait and its default implementations.
+use rvoip_session_core::api::control::SessionControl;
+// Conference API Tests
+//
+// Tests for the ConferenceApi trait and its default implementations.
 
 use std::sync::Arc;
 use tokio::test;

@@ -1,6 +1,7 @@
-//! Coordination Test Utilities
-//!
-//! Shared utilities for testing coordination functionality (resources, priority, groups).
+use rvoip_session_core::api::control::SessionControl;
+// Coordination Test Utilities
+//
+// Shared utilities for testing coordination functionality (resources, priority, groups).
 
 use std::collections::HashMap;
 use std::sync::Arc;

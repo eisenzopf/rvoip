@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Tests for BYE Dialog Integration
 //!
 //! Tests the session-core functionality for BYE requests (call termination),
@@ -8,7 +9,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 use rvoip_session_core::{
-    SessionManager,
+    SessionCoordinator,
     SessionError,
     api::{
         types::{CallState, SessionId, IncomingCall, CallSession, CallDecision},
@@ -171,7 +172,7 @@ async fn test_bye_multiple_concurrent_calls() {
 
 #[tokio::test]
 async fn test_bye_nonexistent_session() {
-    let handler = Arc::new(ByeTestHandler::new());
+//     let handler = Arc::new(ByeTestHandler::new());
     let manager = create_session_manager(handler, None, Some("sip:test@localhost")).await.unwrap();
     
     // Try to send BYE to non-existent session
@@ -397,7 +398,7 @@ async fn test_bye_statistics_tracking() {
 
 #[tokio::test]
 async fn test_error_conditions_for_non_established_dialogs() {
-    let handler = Arc::new(ByeTestHandler::new());
+//     let handler = Arc::new(ByeTestHandler::new());
     let manager = create_session_manager(handler, None, Some("sip:test@localhost")).await.unwrap();
     
     // Create call to non-existent endpoint

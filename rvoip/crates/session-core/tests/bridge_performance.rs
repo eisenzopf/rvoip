@@ -1,7 +1,8 @@
-//! Tests for Bridge Performance and Concurrency
-//!
-//! Performance tests, benchmarks, and concurrency tests for bridge functionality.
-//! These tests ensure bridges can handle high loads and concurrent operations.
+use rvoip_session_core::api::control::SessionControl;
+// Tests for Bridge Performance and Concurrency
+//
+// Performance tests, benchmarks, and concurrency tests for bridge functionality.
+// These tests ensure bridges can handle high loads and concurrent operations.
 
 mod common;
 
@@ -274,7 +275,7 @@ async fn test_bridge_stress_test() {
     
     for bridge_idx in 0..bridge_count {
         let handle = tokio::spawn(async move {
-            let mut manager = BridgeSessionManager::new(&format!("stress-bridge-{}", bridge_idx));
+            let mut manager = BridgeSessionCoordinator::new(&format!("stress-bridge-{}", bridge_idx));
             let session_ids = create_test_session_ids(sessions_per_bridge);
             
             // Add sessions

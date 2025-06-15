@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Session Lifecycle Management Tests
 //!
 //! Tests for LifecycleManager functionality including session creation/termination events,

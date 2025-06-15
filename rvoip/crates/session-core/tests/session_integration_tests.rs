@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Session Integration Tests
 //!
 //! Comprehensive integration tests that combine all session components

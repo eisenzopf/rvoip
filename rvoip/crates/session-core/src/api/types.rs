@@ -200,6 +200,22 @@ impl CallState {
     }
 }
 
+impl fmt::Display for CallState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CallState::Initiating => write!(f, "Initiating"),
+            CallState::Ringing => write!(f, "Ringing"),
+            CallState::Active => write!(f, "Active"),
+            CallState::OnHold => write!(f, "OnHold"),
+            CallState::Transferring => write!(f, "Transferring"),
+            CallState::Terminating => write!(f, "Terminating"),
+            CallState::Terminated => write!(f, "Terminated"),
+            CallState::Cancelled => write!(f, "Cancelled"),
+            CallState::Failed(reason) => write!(f, "Failed: {}", reason),
+        }
+    }
+}
+
 /// Decision on how to handle an incoming call
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallDecision {

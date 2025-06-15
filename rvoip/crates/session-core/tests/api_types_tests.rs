@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 mod common;
 
 use std::collections::HashMap;
@@ -377,6 +378,8 @@ async fn test_media_info_creation() {
             local_rtp_port: None,
             remote_rtp_port: None,
             codec: None,
+            quality_metrics: None,
+        rtp_stats: None,
         };
         
         assert!(empty_media_info.local_sdp.is_none());

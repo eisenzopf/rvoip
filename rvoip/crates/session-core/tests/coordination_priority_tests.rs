@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Tests for Coordination Priority Management
 //!
 //! Tests for session priority assignment and management in session coordination.
@@ -461,7 +462,6 @@ async fn test_priority_enum_properties() {
     assert_eq!(priority, cloned, "Cloned priority should be equal");
     
     // Test debug formatting
-    let debug_str = format!("{:?}", Priority::Critical);
     assert!(debug_str.contains("Critical"), "Debug format should contain 'Critical'");
     
     println!("✅ Priority enum properties tests passed");

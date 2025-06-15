@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Tests for CANCEL Dialog Integration
 //!
 //! Tests the session-core functionality for CANCEL requests,
@@ -8,7 +9,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 use rvoip_session_core::{
-    SessionManager,
+    SessionCoordinator,
     SessionError,
     api::{
         types::{CallState, SessionId, IncomingCall, CallSession, CallDecision},
@@ -52,14 +53,13 @@ impl CallHandler for CancelTestHandler {
 }
 
 /// Create a test session manager for CANCEL testing
-async fn create_cancel_test_manager() -> Result<Arc<SessionManager>, SessionError> {
-    let handler = Arc::new(CancelTestHandler::new());
+async fn create_cancel_test_manager() -> Result<Arc<SessionCoordinator>, SessionError> {
+//     let handler = Arc::new(CancelTestHandler::new());
     
     SessionManagerBuilder::new()
-        .with_sip_bind_address("127.0.0.1")
+        .with_local_address("127.0.0.1")
         .with_sip_port(5061) // Use specific test port
-        .with_from_uri("sip:test@localhost")
-        .with_handler(handler)
+        .with_handler(None)
         .build()
         .await
 }

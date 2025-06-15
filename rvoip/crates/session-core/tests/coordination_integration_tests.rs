@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Tests for Coordination Integration
 //!
 //! Integration tests that combine resources, priority, and groups coordination components.

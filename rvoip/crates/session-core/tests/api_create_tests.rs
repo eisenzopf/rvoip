@@ -1,3 +1,5 @@
+use rvoip_session_core::api::control::SessionControl;
+use rvoip_session_core::api::create::create_incoming_call;
 mod common;
 
 use std::sync::Arc;
@@ -18,11 +20,11 @@ async fn test_make_call_with_manager() {
         let helper = ApiBuilderTestHelper::new();
         let builder = helper.create_test_builder();
         
-        // This test requires a running SessionManager, which may not be available in test environment
+        // This test requires a running SessionCoordinator, which may not be available in test environment
         // We'll test the function signature and basic validation
         
-        // Test invalid URIs would be caught by SessionManager
-        // For now, we'll test the structure and expect this to work when SessionManager is available
+        // Test invalid URIs would be caught by SessionCoordinator
+        // For now, we'll test the structure and expect this to work when SessionCoordinator is available
         
         println!("Completed test_make_call_with_manager (structure test)");
     }).await;
@@ -117,11 +119,11 @@ async fn test_create_call_session() {
             headers,
         );
         
-        // Try to create a SessionManager for the test
+        // Try to create a SessionCoordinator for the test
         let builder_helper = ApiBuilderTestHelper::new();
         let builder = builder_helper.create_test_builder();
         
-        // This would require building the SessionManager which may not work in test environment
+        // This would require building the SessionCoordinator which may not work in test environment
         // We'll test the function structure
         
         // Validate the incoming call we would convert
@@ -140,13 +142,13 @@ async fn test_accept_and_reject_call_structure() {
         
         let session_id = SessionId::new();
         
-        // These functions now require SessionManager context
+        // These functions now require SessionCoordinator context
         // We'll test that they have the right signature
         
         let helper = ApiBuilderTestHelper::new();
         let builder = helper.create_test_builder();
         
-        // Try to build SessionManager - this might fail in test environment
+        // Try to build SessionCoordinator - this might fail in test environment
         // but we can test the function signatures
         match builder.build().await {
             Ok(session_manager) => {
@@ -161,9 +163,9 @@ async fn test_accept_and_reject_call_structure() {
                 assert!(reject_result.is_err());
             }
             Err(_) => {
-                // If SessionManager can't be built in test environment, 
+                // If SessionCoordinator can't be built in test environment, 
                 // at least we know the functions compile with correct signatures
-                println!("SessionManager not available in test environment - function signatures verified");
+                println!("SessionCoordinator not available in test environment - function signatures verified");
             }
         }
         
@@ -191,21 +193,21 @@ async fn test_incoming_call_methods() {
         );
         
         // Test the accept and reject methods on IncomingCall
-        // These should now return errors directing users to use SessionManager functions
+        // These should now return errors directing users to use SessionCoordinator functions
         
         let accept_result = incoming_call.accept().await;
-        // Should return error directing to use accept_call() function with SessionManager
+        // Should return error directing to use accept_call() function with SessionCoordinator
         assert!(accept_result.is_err());
         let accept_error = accept_result.unwrap_err().to_string();
         assert!(accept_error.contains("accept_call"));
-        assert!(accept_error.contains("session_manager") || accept_error.contains("SessionManager"));
+        assert!(accept_error.contains("session_manager") || accept_error.contains("SessionCoordinator"));
         
         let reject_result = incoming_call.reject("Method test rejection").await;
-        // Should return error directing to use reject_call() function with SessionManager
+        // Should return error directing to use reject_call() function with SessionCoordinator
         assert!(reject_result.is_err());
         let reject_error = reject_result.unwrap_err().to_string();
         assert!(reject_error.contains("reject_call"));
-        assert!(reject_error.contains("session_manager") || reject_error.contains("SessionManager"));
+        assert!(reject_error.contains("session_manager") || reject_error.contains("SessionCoordinator"));
         
         println!("Completed test_incoming_call_methods");
     }).await;
@@ -275,14 +277,14 @@ async fn test_session_stats_and_listing_structure() {
     let result = time::timeout(Duration::from_secs(5), async {
         println!("Starting test_session_stats_and_listing_structure");
         
-        // These functions require a SessionManager instance
+        // These functions require a SessionCoordinator instance
         // We'll test their structure and expected behavior
         
         let builder_helper = ApiBuilderTestHelper::new();
         let builder = builder_helper.create_test_builder();
         
         // The functions get_session_stats, list_active_sessions, and find_session
-        // all require a built SessionManager, which may not be available in test environment
+        // all require a built SessionCoordinator, which may not be available in test environment
         
         // Test that we can validate session stats structure
         let helper = ApiTypesTestHelper::new();

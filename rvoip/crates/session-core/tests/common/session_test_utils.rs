@@ -1,6 +1,7 @@
-//! Session Test Utilities
-//!
-//! Common functions and helpers for session library testing.
+use rvoip_session_core::api::control::SessionControl;
+// Session Test Utilities
+//
+// Common functions and helpers for session library testing.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -391,6 +392,8 @@ impl MediaCoordinatorTestHelper {
             codec: Some("PCMU".to_string()),
             local_rtp_port: Some(49170),
             remote_rtp_port: None,
+            quality_metrics: None,
+        rtp_stats: None,
         };
         
         self.media_sessions.write().await.insert(session_id.clone(), media_info.clone());

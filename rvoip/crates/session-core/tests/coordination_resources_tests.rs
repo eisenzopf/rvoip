@@ -1,6 +1,7 @@
-//! Tests for Coordination Resource Management
-//!
-//! Tests for resource limits and allocation management in session coordination.
+use rvoip_session_core::api::control::SessionControl;
+// Tests for Coordination Resource Management
+//
+// Tests for resource limits and allocation management in session coordination.
 
 mod common;
 

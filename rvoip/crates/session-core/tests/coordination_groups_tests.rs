@@ -1,6 +1,7 @@
-//! Tests for Coordination Session Groups
-//!
-//! Tests for session grouping and group management in session coordination.
+use rvoip_session_core::api::control::SessionControl;
+// Tests for Coordination Session Groups
+//
+// Tests for session grouping and group management in session coordination.
 
 mod common;
 

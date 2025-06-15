@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Media Performance Integration Tests
 //!
 //! Tests the performance characteristics of session-core integration with
@@ -8,7 +9,7 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use rvoip_session_core::{SessionManager, SessionError};
+use rvoip_session_core::{SessionCoordinator, SessionError};
 use rvoip_session_core::media::MediaConfig;
 use rvoip_session_core::media::DialogId;
 use uuid::Uuid;

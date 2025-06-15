@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! DTMF Integration Tests
 //!
 //! Tests the coordination between SIP DTMF signaling (INFO, RFC2833) and
@@ -8,7 +9,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use rvoip_session_core::{SessionManager, SessionError};
+use rvoip_session_core::{SessionCoordinator, SessionError};
 use rvoip_session_core::media::DialogId;
 use uuid::Uuid;
 

@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Tests for NOTIFY Dialog Integration
 //!
 //! Tests the session-core functionality for NOTIFY requests (event notifications),
@@ -8,7 +9,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 use rvoip_session_core::{
-    SessionManager,
+    SessionCoordinator,
     SessionError,
     api::{
         types::{CallState, SessionId, IncomingCall, CallSession, CallDecision},

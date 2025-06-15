@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 mod common;
 
 use std::sync::Arc;

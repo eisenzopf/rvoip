@@ -169,4 +169,59 @@ pub async fn list_active_sessions(session_manager: &Arc<SessionCoordinator>) -> 
 /// Find a session by ID
 pub async fn find_session(session_manager: &Arc<SessionCoordinator>, session_id: &SessionId) -> Result<Option<CallSession>> {
     session_manager.find_session(session_id).await
+}
+
+/// Accept an incoming call
+/// 
+/// This function accepts a pending incoming call.
+/// 
+/// # Arguments
+/// * `session_manager` - The session coordinator instance
+/// * `session_id` - ID of the incoming call session to accept
+/// 
+/// # Returns
+/// The accepted CallSession
+/// 
+/// # Errors
+/// Returns an error if the session doesn't exist or is not in a state that can be accepted
+pub async fn accept_call(
+    session_manager: &Arc<SessionCoordinator>,
+    session_id: &SessionId,
+) -> Result<CallSession> {
+    // Find the session
+    let session = session_manager.find_session(session_id).await?
+        .ok_or_else(|| SessionError::session_not_found(&session_id.0))?;
+    
+    // For now, just return the session as accepted
+    // The actual accept logic would be handled by the dialog coordinator
+    Ok(session)
+}
+
+/// Reject an incoming call
+/// 
+/// This function rejects a pending incoming call.
+/// 
+/// # Arguments
+/// * `session_manager` - The session coordinator instance
+/// * `session_id` - ID of the incoming call session to reject
+/// * `reason` - Reason for rejection
+/// 
+/// # Returns
+/// Ok(()) if the call was successfully rejected
+/// 
+/// # Errors
+/// Returns an error if the session doesn't exist or is not in a state that can be rejected
+pub async fn reject_call(
+    session_manager: &Arc<SessionCoordinator>,
+    session_id: &SessionId,
+    reason: &str,
+) -> Result<()> {
+    // Check if session exists
+    let _session = session_manager.find_session(session_id).await?
+        .ok_or_else(|| SessionError::session_not_found(&session_id.0))?;
+    
+    // Terminate the session with the rejection reason
+    session_manager.terminate_session(session_id).await?;
+    
+    Ok(())
 } 

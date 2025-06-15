@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Tests for Bridge Configuration and Advanced Scenarios
 //!
 //! Tests bridge configuration options, auto-start/stop behavior, and advanced

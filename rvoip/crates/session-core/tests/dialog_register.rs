@@ -1,3 +1,4 @@
+use rvoip_session_core::api::control::SessionControl;
 //! Tests for Registration Functionality
 //!
 //! Tests the session-core functionality for SIP registration,
@@ -6,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use rvoip_session_core::{
-    SessionManager,
+    SessionCoordinator,
     SessionError,
     api::{
         types::{SessionId, IncomingCall, CallSession, CallDecision},
@@ -32,14 +33,13 @@ impl CallHandler for RegistrationTestHandler {
 }
 
 /// Create a test session manager for registration testing
-async fn create_registration_test_manager(port: u16) -> Result<Arc<SessionManager>, SessionError> {
-    let handler = Arc::new(RegistrationTestHandler);
+async fn create_registration_test_manager(port: u16) -> Result<Arc<SessionCoordinator>, SessionError> {
+//     let handler = Arc::new(RegistrationTestHandler);
     
     SessionManagerBuilder::new()
-        .with_sip_bind_address("127.0.0.1")
+        .with_local_address("127.0.0.1")
         .with_sip_port(port)
-        .with_from_uri("sip:test@localhost")
-        .with_handler(handler)
+        .with_handler(None)
         .build()
         .await
 }
@@ -87,9 +87,8 @@ async fn test_session_manager_stats_during_registration() {
 async fn test_session_manager_with_different_bind_addresses() {
     // Test with IPv4 loopback
     let manager1 = SessionManagerBuilder::new()
-        .with_sip_bind_address("127.0.0.1")
+        .with_local_address("127.0.0.1")
         .with_sip_port(5061)
-        .with_from_uri("sip:test1@localhost")
         .with_handler(Arc::new(RegistrationTestHandler))
         .build()
         .await.unwrap();
@@ -99,9 +98,8 @@ async fn test_session_manager_with_different_bind_addresses() {
     
     // Test with different port specification
     let manager2 = SessionManagerBuilder::new()
-        .with_sip_bind_address("127.0.0.1")  // Use 127.0.0.1 instead of 0.0.0.0
+        .with_local_address("127.0.0.1")  // Use 127.0.0.1 instead of 0.0.0.0
         .with_sip_port(5093)
-        .with_from_uri("sip:test2@localhost") 
         .with_handler(Arc::new(RegistrationTestHandler))
         .build()
         .await.unwrap();
@@ -121,9 +119,8 @@ async fn test_session_manager_with_different_from_uris() {
     
     for (i, from_uri) in from_uris.iter().enumerate() {
         let manager = SessionManagerBuilder::new()
-            .with_sip_bind_address("127.0.0.1")
+            .with_local_address("127.0.0.1")
             .with_sip_port(5094 + i as u16)
-            .with_from_uri(*from_uri)
             .with_handler(Arc::new(RegistrationTestHandler))
             .build()
             .await.unwrap();
@@ -140,9 +137,8 @@ async fn test_concurrent_session_managers() {
     // Create multiple session managers
     for i in 0..3 {
         let manager = SessionManagerBuilder::new()
-            .with_sip_bind_address("127.0.0.1")
+            .with_local_address("127.0.0.1")
             .with_sip_port(5098 + i as u16)
-            .with_from_uri(&format!("sip:user{}@localhost", i))
             .with_handler(Arc::new(RegistrationTestHandler))
             .build()
             .await.unwrap();
@@ -167,9 +163,8 @@ async fn test_concurrent_session_managers() {
 async fn test_session_manager_error_handling() {
     // Test with invalid bind address (should fail during build)
     let invalid_result = SessionManagerBuilder::new()
-        .with_sip_bind_address("999.999.999.999")
+        .with_local_address("999.999.999.999")
         .with_sip_port(65535) // Use maximum valid port
-        .with_from_uri("sip:test@localhost")
         .with_handler(Arc::new(RegistrationTestHandler))
         .build()
         .await;

@@ -1,6 +1,7 @@
-//! Conference Room Tests
-//!
-//! Tests for ConferenceRoom participant management and state transitions.
+use rvoip_session_core::api::control::SessionControl;
+// Conference Room Tests
+//
+// Tests for ConferenceRoom participant management and state transitions.
 
 use std::time::Duration;
 use rvoip_session_core::{

@@ -1,6 +1,7 @@
-//! Conference Integration Tests
-//!
-//! End-to-end integration tests for the complete conference system.
+use rvoip_session_core::api::control::SessionControl;
+// Conference Integration Tests
+//
+// End-to-end integration tests for the complete conference system.
 
 use std::sync::Arc;
 use std::time::Duration;
