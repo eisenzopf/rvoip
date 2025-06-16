@@ -65,7 +65,7 @@ async fn create_subscription_test_manager(behavior: HandlerBehavior, port: u16) 
     let handler = Arc::new(SubscriptionTestHandler::new(behavior));
     
     SessionManagerBuilder::new()
-        .with_local_address("127.0.0.1")
+        .with_local_address("sip:test@127.0.0.1")
         .with_sip_port(port)
         .with_handler(handler)
         .build()
@@ -217,19 +217,19 @@ async fn test_session_lifecycle_events() {
         println!("Resume operation succeeded");
     }
     
-    // let dtmf_result = manager.send_dtmf(&session_id, "123").await;
-    // if dtmf_result.is_err() {
-    //     println!("DTMF operation failed as expected: {:?}", dtmf_result.unwrap_err());
-    // } else {
-    //     println!("DTMF operation succeeded");
-    // }
+    let dtmf_result = manager.send_dtmf(&session_id, "123").await;
+    if dtmf_result.is_err() {
+        println!("DTMF operation failed as expected: {:?}", dtmf_result.unwrap_err());
+    } else {
+        println!("DTMF operation succeeded");
+    }
     
-    // let media_result = manager.update_media(&session_id, "Updated SDP").await;
-    // if media_result.is_err() {
-    //     println!("Media update operation failed as expected: {:?}", media_result.unwrap_err());
-    // } else {
-    //     println!("Media update operation succeeded");
-    // }
+    let media_result = manager.update_media(&session_id, "Updated SDP").await;
+    if media_result.is_err() {
+        println!("Media update operation failed as expected: {:?}", media_result.unwrap_err());
+    } else {
+        println!("Media update operation succeeded");
+    }
     
     let transfer_result = manager.transfer_session(&session_id, "sip:charlie@example.com").await;
     if transfer_result.is_err() {
@@ -284,7 +284,7 @@ async fn test_concurrent_session_operations() {
             tokio::time::sleep(Duration::from_millis(1)).await;
             let _ = manager_clone.resume_session(&session_id_clone).await;
             tokio::time::sleep(Duration::from_millis(1)).await;
-            // let _ = // manager_clone.send_dtmf(&session_id_clone, &format!("{}", i)).await;
+            let _ = manager_clone.send_dtmf(&session_id_clone, &format!("{}", i)).await;
         });
         handles.push(handle);
     }
@@ -415,19 +415,19 @@ async fn test_session_operation_ordering() {
         println!("Operation 0 (hold) succeeded");
     }
     
-    // let result = manager.send_dtmf(&session_id, "1").await;
-    // if result.is_err() {
-    //     println!("Operation 1 (dtmf) failed as expected: {:?}", result.unwrap_err());
-    // } else {
-    //     println!("Operation 1 (dtmf) succeeded");
-    // }
+    let result = manager.send_dtmf(&session_id, "1").await;
+    if result.is_err() {
+        println!("Operation 1 (dtmf) failed as expected: {:?}", result.unwrap_err());
+    } else {
+        println!("Operation 1 (dtmf) succeeded");
+    }
     
-    // let result = manager.update_media(&session_id, "Updated SDP 1").await;
-    // if result.is_err() {
-    //     println!("Operation 2 (media update) failed as expected: {:?}", result.unwrap_err());
-    // } else {
-    //     println!("Operation 2 (media update) succeeded");
-    // }
+    let result = manager.update_media(&session_id, "Updated SDP 1").await;
+    if result.is_err() {
+        println!("Operation 2 (media update) failed as expected: {:?}", result.unwrap_err());
+    } else {
+        println!("Operation 2 (media update) succeeded");
+    }
     
     let result = manager.resume_session(&session_id).await;
     if result.is_err() {
@@ -436,19 +436,19 @@ async fn test_session_operation_ordering() {
         println!("Operation 3 (resume) succeeded");
     }
     
-    // let result = manager.send_dtmf(&session_id, "2").await;
-    // if result.is_err() {
-    //     println!("Operation 4 (dtmf) failed as expected: {:?}", result.unwrap_err());
-    // } else {
-    //     println!("Operation 4 (dtmf) succeeded");
-    // }
+    let result = manager.send_dtmf(&session_id, "2").await;
+    if result.is_err() {
+        println!("Operation 4 (dtmf) failed as expected: {:?}", result.unwrap_err());
+    } else {
+        println!("Operation 4 (dtmf) succeeded");
+    }
     
-    // let result = manager.update_media(&session_id, "Updated SDP 2").await;
-    // if result.is_err() {
-    //     println!("Operation 5 (media update) failed as expected: {:?}", result.unwrap_err());
-    // } else {
-    //     println!("Operation 5 (media update) succeeded");
-    // }
+    let result = manager.update_media(&session_id, "Updated SDP 2").await;
+    if result.is_err() {
+        println!("Operation 5 (media update) failed as expected: {:?}", result.unwrap_err());
+    } else {
+        println!("Operation 5 (media update) succeeded");
+    }
     
     let result = manager.transfer_session(&session_id, "sip:charlie@example.com").await;
     if result.is_err() {
@@ -457,12 +457,12 @@ async fn test_session_operation_ordering() {
         println!("Operation 6 (transfer) succeeded");
     }
     
-    // let result = manager.send_dtmf(&session_id, "3").await;
-    // if result.is_err() {
-    //     println!("Operation 7 (dtmf) failed as expected: {:?}", result.unwrap_err());
-    // } else {
-    //     println!("Operation 7 (dtmf) succeeded");
-    // }
+    let result = manager.send_dtmf(&session_id, "3").await;
+    if result.is_err() {
+        println!("Operation 7 (dtmf) failed as expected: {:?}", result.unwrap_err());
+    } else {
+        println!("Operation 7 (dtmf) succeeded");
+    }
     
     let result = manager.hold_session(&session_id).await;
     if result.is_err() {

@@ -617,6 +617,26 @@ impl UnifiedDialogApi {
         self.manager.send_info(dialog_id, info_body).await
     }
     
+    /// Send CANCEL request to cancel a pending INVITE
+    ///
+    /// This method cancels a pending INVITE transaction that hasn't received a final response.
+    /// Only works for dialogs in the Early state (before 200 OK is received).
+    ///
+    /// # Arguments
+    /// * `dialog_id` - The dialog to cancel
+    ///
+    /// # Returns
+    /// Transaction key for the CANCEL request
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Dialog is not found
+    /// - Dialog is not in Early state
+    /// - No pending INVITE transaction found
+    pub async fn send_cancel(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
+        self.manager.send_cancel(dialog_id).await
+    }
+    
     // ========================================
     // DIALOG MANAGEMENT (ALL MODES)
     // ========================================

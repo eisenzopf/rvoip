@@ -16,6 +16,9 @@ use rvoip_session_core::{
     },
 };
 
+mod common;
+use common::media_test_utils;
+
 /// Test handler for UPDATE testing
 #[derive(Debug)]
 struct UpdateTestHandler {
@@ -50,12 +53,12 @@ impl CallHandler for UpdateTestHandler {
 
 /// Create a test session manager for UPDATE testing
 async fn create_update_test_manager(port: u16) -> Result<Arc<SessionCoordinator>, SessionError> {
-let handler = Arc::new(UpdateTestHandler::new());
+    let handler = Arc::new(UpdateTestHandler::new());
     
     SessionManagerBuilder::new()
-        .with_local_address("127.0.0.1")
+        .with_local_address("sip:test@127.0.0.1")
         .with_sip_port(port)
-        .with_handler(Arc::new(media_test_utils::TestCallHandler::new(true)))
+        .with_handler(handler)
         .build()
         .await
 }
@@ -77,7 +80,7 @@ async fn test_media_update_basic() {
     
     // Test media update - expect failure on terminated session
     let new_sdp = "v=0\r\no=alice 123 789 IN IP4 192.168.1.100\r\nm=audio 5006 RTP/AVP 0 8\r\n";
-    let update_result = // manager.update_media(&session_id, new_sdp).await;
+    let update_result = manager.update_media(&session_id, new_sdp).await;
     if update_result.is_err() {
         println!("Media update failed as expected: {:?}", update_result.unwrap_err());
     } else {
@@ -105,7 +108,7 @@ async fn test_multiple_media_updates() {
     // Multiple media updates - expect failures on terminated session
     for i in 1..=5 {
         let sdp = format!("Updated SDP version {}", i);
-        let update_result = // manager.update_media(&session_id, &sdp).await;
+        let update_result = manager.update_media(&session_id, &sdp).await;
         if update_result.is_err() {
             println!("Update {} failed as expected: {:?}", i, update_result.unwrap_err());
         } else {
@@ -136,7 +139,7 @@ async fn test_update_with_codec_changes() {
     
     // Update with different codec - expect failure on terminated session
     let updated_sdp = "v=0\r\no=alice 123 789 IN IP4 192.168.1.100\r\nm=audio 5004 RTP/AVP 8 0\r\n";
-    let update_result = // manager.update_media(&session_id, updated_sdp).await;
+    let update_result = manager.update_media(&session_id, updated_sdp).await;
     if update_result.is_err() {
         println!("Codec change update failed as expected: {:?}", update_result.unwrap_err());
     } else {
@@ -163,7 +166,7 @@ async fn test_update_with_video_addition() {
     
     // Update to add video - expect failure on terminated session
     let updated_sdp = "v=0\r\no=alice 123 789 IN IP4 192.168.1.100\r\nm=audio 5004 RTP/AVP 0\r\nm=video 5006 RTP/AVP 96\r\n";
-    let update_result = // manager.update_media(&session_id, updated_sdp).await;
+    let update_result = manager.update_media(&session_id, updated_sdp).await;
     if update_result.is_err() {
         println!("Video addition update failed as expected: {:?}", update_result.unwrap_err());
     } else {
@@ -181,7 +184,7 @@ async fn test_update_nonexistent_session() {
     
     // Try to update a non-existent session
     let fake_session_id = SessionId::new();
-    let update_result = // manager.update_media(&fake_session_id, "Some SDP").await;
+    let update_result = manager.update_media(&fake_session_id, "Some SDP").await;
     assert!(update_result.is_err());
     assert!(matches!(update_result.unwrap_err(), SessionError::SessionNotFound(_)));
     
@@ -254,7 +257,7 @@ async fn test_update_after_hold() {
     }
     
     // Update media while on hold - expect failure
-    let update_result = // manager.update_media(&session_id, "Updated hold SDP").await;
+    let update_result = manager.update_media(&session_id, "Updated hold SDP").await;
     if update_result.is_err() {
         println!("Update after hold failed as expected: {:?}", update_result.unwrap_err());
     } else {
@@ -288,11 +291,11 @@ async fn test_update_session_state_consistency() {
     let session_id = call.id().clone();
     
     // Verify session exists before update
-    let session_before = manager.find_session(&session_id).await.unwrap();
+    let session_before = manager.get_session(&session_id).await.unwrap();
     assert!(session_before.is_some());
     
     // Update media - expect failure on terminated session
-    let update_result = // manager.update_media(&session_id, "Updated SDP").await;
+    let update_result = manager.update_media(&session_id, "Updated SDP").await;
     if update_result.is_err() {
         println!("Update failed as expected: {:?}", update_result.unwrap_err());
     } else {
@@ -300,7 +303,7 @@ async fn test_update_session_state_consistency() {
     }
     
     // Verify session state after update attempt
-    let session_after = manager.find_session(&session_id).await.unwrap();
+    let session_after = manager.get_session(&session_id).await.unwrap();
     if session_after.is_some() {
         println!("Session still exists after update");
         assert_eq!(session_after.unwrap().id(), &session_id);
@@ -327,7 +330,7 @@ async fn test_update_with_empty_sdp() {
     let session_id = call.id().clone();
     
     // Try update with empty SDP - expect failure on terminated session
-    let update_result = // manager.update_media(&session_id, "").await;
+    let update_result = manager.update_media(&session_id, "").await;
     if update_result.is_err() {
         println!("Empty SDP update failed as expected: {:?}", update_result.unwrap_err());
     } else {
@@ -355,7 +358,7 @@ async fn test_rapid_consecutive_updates() {
     // Rapid consecutive updates - expect failures on terminated session
     for i in 0..10 {
         let sdp = format!("Rapid update {}", i);
-        let update_result = // manager.update_media(&session_id, &sdp).await;
+        let update_result = manager.update_media(&session_id, &sdp).await;
         if update_result.is_err() {
             println!("Rapid update {} failed as expected: {:?}", i, update_result.unwrap_err());
         } else {

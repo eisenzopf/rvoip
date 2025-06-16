@@ -103,6 +103,11 @@ impl SessionDialogCoordinator {
                 self.handle_call_terminated(dialog_id, reason).await?;
             }
             
+            SessionCoordinationEvent::CallCancelled { dialog_id, reason } => {
+                // Handle CANCEL - this is for early dialog termination
+                self.handle_call_terminated(dialog_id, reason).await?;
+            }
+            
             SessionCoordinationEvent::RegistrationRequest { transaction_id, from_uri, contact_uri, expires } => {
                 self.handle_registration_request(transaction_id, from_uri.to_string(), contact_uri.to_string(), expires).await?;
             }
@@ -117,6 +122,11 @@ impl SessionDialogCoordinator {
             
             SessionCoordinationEvent::AckReceived { dialog_id, transaction_id, negotiated_sdp } => {
                 self.handle_ack_received(dialog_id, transaction_id, negotiated_sdp).await?;
+            }
+            
+            SessionCoordinationEvent::CallProgress { dialog_id, status_code, reason_phrase } => {
+                tracing::debug!("Call progress for dialog {}: {} {}", dialog_id, status_code, reason_phrase);
+                // Progress events like 100 Trying don't change session state
             }
             
             _ => {

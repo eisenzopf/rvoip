@@ -563,16 +563,20 @@ let handler = Arc::new(ByeTestHandler::new());
     // Verify session exists
     verify_session_exists(&manager, &session_id, Some(&CallState::Initiating)).await.unwrap();
     
-    // Try to terminate - should fail with "requires remote tag" error
+    // Try to terminate - terminate_session() is now state-aware:
+    // - For early dialogs (Initiating), it will use CANCEL
+    // - For established dialogs, it will use BYE
+    // Since this is an early dialog to a non-existent endpoint, CANCEL will fail with
+    // "No INVITE transaction found to cancel"
     let terminate_result = manager.terminate_session(&session_id).await;
     assert!(terminate_result.is_err());
     
     // Verify the specific error
     match terminate_result.unwrap_err() {
-        SessionError::Other(msg) if msg.contains("requires remote tag") => {
-            println!("✓ Got expected error for BYE on non-established dialog: {}", msg);
+        SessionError::Other(msg) if msg.contains("No INVITE transaction found to cancel") => {
+            println!("✓ Got expected error for CANCEL on non-established dialog: {}", msg);
         }
-        other => panic!("Expected 'requires remote tag' error, got: {:?}", other),
+        other => panic!("Expected 'No INVITE transaction found to cancel' error, got: {:?}", other),
     }
     
     // Session should still exist since termination failed

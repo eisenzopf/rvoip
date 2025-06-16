@@ -45,7 +45,7 @@ async fn test_session_with_early_media_prack() {
     // In real scenario, this would be handled by dialog-core
     
     // Verify session exists and is in correct state
-    let session = manager_a.find_session(&session_id).await.unwrap();
+    let session = manager_a.get_session(&session_id).await.unwrap();
     assert!(session.is_some());
 }
 
@@ -62,7 +62,7 @@ async fn test_prack_sequence_handling() {
     
     // Each call should handle PRACK sequences independently
     for call in &calls {
-        let session = manager_a.find_session(call.id()).await.unwrap();
+        let session = manager_a.get_session(call.id()).await.unwrap();
         assert!(session.is_some());
     }
 }
@@ -121,7 +121,7 @@ async fn test_prack_session_state_consistency() {
     let session_id = call.id().clone();
     
     // Verify session exists before PRACK operations
-    let session_before = manager_a.find_session(&session_id).await.unwrap();
+    let session_before = manager_a.get_session(&session_id).await.unwrap();
     assert!(session_before.is_some());
     
     // Simulate PRACK-related media update
@@ -129,7 +129,7 @@ async fn test_prack_session_state_consistency() {
     assert!(update_result.is_ok());
     
     // Verify session consistency after PRACK
-    let session_after = manager_a.find_session(&session_id).await.unwrap();
+    let session_after = manager_a.get_session(&session_id).await.unwrap();
     assert!(session_after.is_some());
     assert_eq!(session_after.unwrap().id(), &session_id);
 }

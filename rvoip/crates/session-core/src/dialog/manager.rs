@@ -156,17 +156,58 @@ impl DialogManager {
     }
     
     /// Terminate a session
+    /// 
+    /// This method is state-aware:
+    /// - For sessions in Early state (no final response to INVITE), sends CANCEL
+    /// - For sessions in Active/Established state, sends BYE
     pub async fn terminate_session(&self, session_id: &SessionId) -> DialogResult<()> {
         let dialog_id = self.get_dialog_id_for_session(session_id)?;
         
-        // Send BYE request via dialog-core unified API
-        let _tx_key = self.dialog_api
-            .send_bye(&dialog_id)
+        // Get the session to check its state
+        let session = self.registry
+            .get_session(session_id)
             .await
-            .map_err(|e| DialogError::DialogCore {
-                source: Box::new(e),
+            .map_err(|_| DialogError::SessionNotFound {
+                session_id: session_id.0.clone(),
+            })?
+            .ok_or_else(|| DialogError::SessionNotFound {
+                session_id: session_id.0.clone(),
             })?;
-            
+        
+        // Check the session state to determine the appropriate termination method
+        match session.state() {
+            CallState::Initiating => {
+                // Early dialog - send CANCEL
+                tracing::info!("Canceling early dialog for session {} in state {:?}", session_id, session.state());
+                
+                let _tx_key = self.dialog_api
+                    .send_cancel(&dialog_id)
+                    .await
+                    .map_err(|e| DialogError::DialogCore {
+                        source: Box::new(e),
+                    })?;
+                
+                tracing::info!("Sent CANCEL for session: {}", session_id);
+            },
+            CallState::Ringing | CallState::Active | CallState::OnHold | CallState::Transferring => {
+                // Established dialog - send BYE
+                tracing::info!("Terminating established dialog for session {} in state {:?}", session_id, session.state());
+                
+                let _tx_key = self.dialog_api
+                    .send_bye(&dialog_id)
+                    .await
+                    .map_err(|e| DialogError::DialogCore {
+                        source: Box::new(e),
+                    })?;
+                
+                tracing::info!("Sent BYE for session: {}", session_id);
+            },
+            CallState::Terminating | CallState::Terminated | CallState::Cancelled | CallState::Failed(_) => {
+                // Already terminated - just clean up
+                tracing::warn!("Session {} is already in state {:?}, just cleaning up", session_id, session.state());
+            }
+        }
+        
         // Remove the dialog-to-session mapping
         self.dialog_to_session.remove(&dialog_id);
         

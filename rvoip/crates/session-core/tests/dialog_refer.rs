@@ -16,6 +16,9 @@ use rvoip_session_core::{
     },
 };
 
+mod common;
+use common::media_test_utils;
+
 /// Handler for transfer testing
 #[derive(Debug)]
 struct TransferTestHandler;
@@ -33,12 +36,12 @@ impl CallHandler for TransferTestHandler {
 
 /// Create a test session manager for transfer testing
 async fn create_transfer_test_manager(port: u16) -> Result<Arc<SessionCoordinator>, SessionError> {
-let handler = Arc::new(TransferTestHandler);
+    let handler = Arc::new(TransferTestHandler);
     
     SessionManagerBuilder::new()
-        .with_local_address("127.0.0.1")
+        .with_local_address("sip:test@127.0.0.1")
         .with_sip_port(port)
-        .with_handler(Arc::new(media_test_utils::TestCallHandler::new(true)))
+        .with_handler(handler)
         .build()
         .await
 }
@@ -163,8 +166,8 @@ async fn test_transfer_after_other_operations() {
     // Perform operations before transfer - expect these to fail on terminated session
     let _ = manager.hold_session(&session_id).await; // Don't unwrap, expect failure
     let _ = manager.resume_session(&session_id).await; // Don't unwrap, expect failure
-    let _ = // manager.send_dtmf(&session_id, "123").await; // Don't unwrap, expect failure
-    let _ = // manager.update_media(&session_id, "Updated SDP").await; // Don't unwrap, expect failure
+    let _ = manager.send_dtmf(&session_id, "123").await; // Don't unwrap, expect failure
+    let _ = manager.update_media(&session_id, "Updated SDP").await; // Don't unwrap, expect failure
     
     // Now try transfer - also expect failure
     let transfer_result = manager.transfer_session(&session_id, "sip:charlie@example.com").await;

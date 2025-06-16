@@ -376,10 +376,11 @@ pub async fn establish_call_between_managers_with_sdp(
     let caller_addr = caller.get_bound_address();
     let callee_addr = callee.get_bound_address();
     
-    // Subscribe to session events
-    // Event processor not available - commenting out event subscriptions
-    // let mut caller_events = caller.get_event_processor().subscribe().await?;
-    // let mut callee_events = callee.get_event_processor().subscribe().await?;
+    // Subscribe to session events to wait for state changes
+    let mut caller_events = caller.event_processor.subscribe().await
+        .map_err(|_| SessionError::Other("Failed to subscribe to events".to_string()))?;
+    let mut callee_events = callee.event_processor.subscribe().await
+        .map_err(|_| SessionError::Other("Failed to subscribe to events".to_string()))?;
     
     // Create outgoing call from A to B using B's actual address
     let from_uri = format!("sip:alice@{}", caller_addr.ip());
@@ -388,20 +389,66 @@ pub async fn establish_call_between_managers_with_sdp(
     println!("Making call: {} -> {}", from_uri, to_uri);
     
     let call = caller.create_outgoing_call(&from_uri, &to_uri, sdp).await?;
+    let caller_session_id = call.id().clone();
     
-    // Event system not available - simulating event wait
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    println!("Simulated wait for session creation");
+    // Wait for caller's session to reach Active state
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(3);
+    let mut caller_active = false;
     
-    // Wait for the call to be received by callee (through CallHandler events)
-    let callee_session_id = match tokio::time::timeout(Duration::from_secs(2), call_events.recv()).await {
-        Ok(Some(CallEvent::IncomingCall(session_id))) => Some(session_id),
-        _ => None,
-    };
+    while start.elapsed() < timeout && !caller_active {
+        match tokio::time::timeout(Duration::from_millis(100), caller_events.receive()).await {
+            Ok(Ok(event)) => {
+                if let SessionEvent::StateChanged { session_id, new_state, .. } = event {
+                    if session_id == caller_session_id && new_state == CallState::Active {
+                        caller_active = true;
+                        println!("Caller session {} reached Active state", session_id);
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
     
-    // Simulating state change wait
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    println!("Call state progression: Initiating -> (simulated)");
+    if !caller_active {
+        return Err(SessionError::Other("Timeout waiting for caller session to become active".to_string()));
+    }
+    
+    // Find the callee's session ID by waiting for SessionCreated event
+    let mut callee_session_id = None;
+    let start = std::time::Instant::now();
+    
+    while start.elapsed() < timeout && callee_session_id.is_none() {
+        match tokio::time::timeout(Duration::from_millis(100), callee_events.receive()).await {
+            Ok(Ok(event)) => {
+                if let SessionEvent::SessionCreated { session_id, .. } = event {
+                    callee_session_id = Some(session_id.clone());
+                    println!("Callee session {} created", session_id);
+                }
+            },
+            _ => {}
+        }
+    }
+    
+    // Wait for callee's session to reach Active state if we found it
+    if let Some(ref callee_id) = callee_session_id {
+        let start = std::time::Instant::now();
+        let mut callee_active = false;
+        
+        while start.elapsed() < timeout && !callee_active {
+            match tokio::time::timeout(Duration::from_millis(100), callee_events.receive()).await {
+                Ok(Ok(event)) => {
+                    if let SessionEvent::StateChanged { session_id, new_state, .. } = event {
+                        if session_id == *callee_id && new_state == CallState::Active {
+                            callee_active = true;
+                            println!("Callee session {} reached Active state", session_id);
+                        }
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
     
     Ok((call, callee_session_id))
 }

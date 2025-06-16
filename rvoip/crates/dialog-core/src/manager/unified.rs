@@ -768,6 +768,60 @@ impl UnifiedDialogManager {
         self.send_request_in_dialog(dialog_id, Method::Info, Some(bytes::Bytes::from(info_body))).await
     }
     
+    /// Send CANCEL request to cancel a pending INVITE
+    ///
+    /// This method cancels a pending INVITE transaction that hasn't received a final response.
+    /// Only works for dialogs in the Early or Initial state (before 200 OK is received).
+    ///
+    /// # Arguments
+    /// * `dialog_id` - The dialog to cancel
+    ///
+    /// # Returns
+    /// Transaction key for the CANCEL request
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - Dialog is not found
+    /// - Dialog is not in Early or Initial state
+    /// - No pending INVITE transaction found
+    pub async fn send_cancel(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
+        // Get the dialog state to verify it can be cancelled
+        let dialog_state = self.get_dialog_state(dialog_id).await?;
+        
+        match dialog_state {
+            DialogState::Initial | DialogState::Early => {
+                info!("Sending CANCEL for dialog {} in state {:?}", dialog_id, dialog_state);
+            },
+            _ => {
+                error!("Cannot send CANCEL for dialog {} in state {:?} - must be in Initial or Early state", 
+                      dialog_id, dialog_state);
+                return Err(ApiError::Protocol { 
+                    message: format!("Cannot cancel dialog in state {:?}", dialog_state) 
+                });
+            }
+        }
+        
+        // Find the INVITE transaction for this dialog
+        let invite_tx_id = self.core.find_invite_transaction_for_dialog(dialog_id)
+            .ok_or_else(|| {
+                error!("No INVITE transaction found for dialog {}", dialog_id);
+                ApiError::Protocol { 
+                    message: "No INVITE transaction found to cancel".to_string() 
+                }
+            })?;
+        
+        // Cancel the INVITE transaction
+        let cancel_tx_id = self.core.cancel_invite_transaction_with_dialog(&invite_tx_id).await
+            .map_err(|e| {
+                error!("Failed to cancel INVITE transaction {} for dialog {}: {}", 
+                      invite_tx_id, dialog_id, e);
+                ApiError::from(e)
+            })?;
+        
+        info!("Successfully sent CANCEL (tx: {}) for dialog {}", cancel_tx_id, dialog_id);
+        Ok(cancel_tx_id)
+    }
+    
     // ========================================
     // DIALOG MANAGEMENT (ALL MODES)
     // ========================================

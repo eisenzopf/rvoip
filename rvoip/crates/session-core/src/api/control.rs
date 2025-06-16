@@ -76,6 +76,17 @@ pub trait SessionControl {
     
     /// Enable/disable video
     async fn set_video_enabled(&self, session_id: &SessionId, enabled: bool) -> Result<()>;
+    
+    /// Send DTMF tones on an active session
+    /// 
+    /// # Arguments
+    /// * `session_id` - The ID of the session to send DTMF on
+    /// * `digits` - The DTMF digits to send (0-9, *, #, A-D)
+    /// 
+    /// # Returns
+    /// * `Ok(())` if the DTMF was sent successfully
+    /// * `Err(SessionError)` if the session doesn't exist or is not in an active state
+    async fn send_dtmf(&self, session_id: &SessionId, digits: &str) -> Result<()>;
 }
 
 /// Implementation of SessionControl for SessionCoordinator
@@ -232,5 +243,9 @@ impl SessionControl for Arc<SessionCoordinator> {
         // TODO: Implement video enable/disable
         tracing::warn!("Set video enabled not yet implemented for {}: {}", session_id, enabled);
         Ok(())
+    }
+    
+    async fn send_dtmf(&self, session_id: &SessionId, digits: &str) -> Result<()> {
+        SessionCoordinator::send_dtmf(self, session_id, digits).await
     }
 } 

@@ -480,6 +480,32 @@ impl DialogManager {
         }
     }
     
+    /// Find the INVITE transaction associated with a dialog
+    /// 
+    /// This is used for CANCEL operations to find the pending INVITE transaction
+    /// that needs to be cancelled.
+    /// 
+    /// # Arguments
+    /// * `dialog_id` - The dialog ID to find the INVITE transaction for
+    /// 
+    /// # Returns
+    /// The transaction key for the INVITE if found, None otherwise
+    pub fn find_invite_transaction_for_dialog(&self, dialog_id: &DialogId) -> Option<TransactionKey> {
+        // Search through transaction-to-dialog mappings to find INVITE transaction
+        for entry in self.transaction_to_dialog.iter() {
+            let (tx_key, mapped_dialog_id) = entry.pair();
+            
+            // Check if this transaction belongs to our dialog and is an INVITE
+            if mapped_dialog_id == dialog_id && tx_key.method() == &Method::Invite {
+                debug!("Found INVITE transaction {} for dialog {}", tx_key, dialog_id);
+                return Some(tx_key.clone());
+            }
+        }
+        
+        debug!("No INVITE transaction found for dialog {}", dialog_id);
+        None
+    }
+    
     // ========================================
     // **NEW**: UNIFIED CONFIGURATION SUPPORT
     // ========================================

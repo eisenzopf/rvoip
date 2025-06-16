@@ -88,9 +88,14 @@ impl SessionRegistry {
         let sessions = self.sessions.read().await;
         let stats = self.stats.read().await;
 
+        // Count only non-terminated sessions as active
+        let active_count = sessions.values()
+            .filter(|session| !matches!(session.state, crate::api::types::CallState::Terminated))
+            .count();
+
         Ok(SessionStats {
             total_sessions: stats.total_created,
-            active_sessions: sessions.len(),
+            active_sessions: active_count,
             failed_sessions: stats.failed_sessions,
             average_duration: None, // TODO: Calculate from session data
         })

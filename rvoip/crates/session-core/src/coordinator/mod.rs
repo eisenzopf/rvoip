@@ -526,6 +526,30 @@ impl SessionCoordinator {
         self.registry.get_session(session_id).await
     }
 
+    /// Send DTMF tones on an active session
+    pub async fn send_dtmf(&self, session_id: &SessionId, digits: &str) -> Result<()> {
+        // Verify session exists and is active
+        if let Some(session) = self.find_session(session_id).await? {
+            match session.state {
+                CallState::Active => {
+                    // Send DTMF through the dialog manager
+                    self.dialog_manager
+                        .send_dtmf(session_id, digits)
+                        .await
+                        .map_err(|e| SessionError::internal(&format!("Failed to send DTMF: {}", e)))?;
+                    
+                    tracing::info!("Sent DTMF '{}' for session {}", digits, session_id);
+                    Ok(())
+                }
+                _ => {
+                    Err(SessionError::invalid_state(&format!("Session {} is not active, current state: {:?}", session_id, session.state)))
+                }
+            }
+        } else {
+            Err(SessionError::session_not_found(&session_id.0))
+        }
+    }
+
     /// Get the bound address
     pub fn get_bound_address(&self) -> std::net::SocketAddr {
         self.dialog_manager.get_bound_address()
