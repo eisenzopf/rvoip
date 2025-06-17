@@ -5,7 +5,7 @@ use thiserror::Error;
 pub enum CallCenterError {
     /// Session-related errors
     #[error("Session error: {0}")]
-    Session(#[from] rvoip_session_core::Error),
+    Session(#[from] rvoip_session_core::api::SessionError),
     
     /// SIP-related errors
     #[error("SIP error: {0}")]

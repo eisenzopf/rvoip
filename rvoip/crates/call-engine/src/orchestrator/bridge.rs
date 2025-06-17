@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use tracing::{info, debug};
 
 use crate::error::{CallCenterError, Result};
-use rvoip_session_core::{SessionId, session::bridge::BridgeId};
+use rvoip_session_core::api::{SessionId, BridgeId};
 
 /// Bridge type enumeration for call center operations
 #[derive(Debug, Clone)]

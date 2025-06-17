@@ -1,0 +1,43 @@
+# Packet Capture Analysis: stress_tests_20250617_155147.pcap
+# Generated: Tue Jun 17 15:53:15 PDT 2025
+
+## Basic Statistics
+
+=============================
+| IO Statistics             |
+|                           |
+| Duration: 7. 16045 secs   |
+| Interval: 1 secs          |
+|                           |
+| Col 1: Frames and bytes   |
+|---------------------------|
+|          |1               |
+| Interval | Frames | Bytes |
+|---------------------------|
+|  0 <> 1  |      6 |  3224 |
+|  1 <> 2  |      7 |  3846 |
+|  2 <> 3  |      6 |  3224 |
+|  3 <> 4  |      6 |  3224 |
+|  4 <> 5  |      5 |  2611 |
+|  5 <> 6  |      4 |  1516 |
+|  6 <> 7  |      4 |  1516 |
+|  7 <> Dur|      1 |   441 |
+=============================
+Basic stats not available
+
+## UDP Flow Summary
+  25 127.0.0.1	127.0.0.1	5061	5062
+  14 127.0.0.1	127.0.0.1	5062	5061
+UDP flow analysis not available
+
+## RTP Audio Stream Analysis
+### RTP Packet Counts
+Total RTP packets: 0
+RTP analysis not available
+
+### RTP Stream Summary
+RTP stream details not available
+
+### Conference Audio Verification
+❌ NO AUDIO DETECTED: No RTP packets found
+⚠️ Conference test may have been signaling-only

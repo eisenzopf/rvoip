@@ -197,7 +197,7 @@ pub mod prelude {
         // Server management
         ServerSessionManager, ServerConfig, create_full_server_manager,
         // Bridge management  
-        BridgeId, BridgeConfig, BridgeInfo, BridgeEvent,
+        BridgeId, BridgeInfo, BridgeEvent,
     };
     pub use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
     pub use rvoip_transaction_core::TransactionManager;

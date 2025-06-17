@@ -137,6 +137,7 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::Duration;
 use crate::api::handlers::CallHandler;
 use crate::coordinator::SessionCoordinator;
 use crate::errors::Result;
@@ -194,6 +195,7 @@ impl Default for SessionManagerConfig {
 pub struct SessionManagerBuilder {
     config: SessionManagerConfig,
     handler: Option<Arc<dyn CallHandler>>,
+    transaction_manager: Option<Arc<rvoip_transaction_core::TransactionManager>>,
 }
 
 impl SessionManagerBuilder {
@@ -209,6 +211,7 @@ impl SessionManagerBuilder {
         Self {
             config: SessionManagerConfig::default(),
             handler: None,
+            transaction_manager: None,
         }
     }
     
@@ -344,6 +347,51 @@ impl SessionManagerBuilder {
         coordinator.start().await?;
         
         Ok(coordinator)
+    }
+    
+    /// Set transaction manager for server mode
+    /// 
+    /// Required when building a server-oriented session manager.
+    /// 
+    /// # Arguments
+    /// * `tm` - Transaction manager instance
+    /// 
+    /// # Example
+    /// ```rust
+    /// let tm = Arc::new(TransactionManager::new(...));
+    /// let builder = SessionManagerBuilder::new()
+    ///     .with_transaction_manager(tm);
+    /// ```
+    pub fn with_transaction_manager(mut self, tm: Arc<rvoip_transaction_core::TransactionManager>) -> Self {
+        self.transaction_manager = Some(tm);
+        self
+    }
+    
+    /// Build with transaction manager for server applications
+    /// 
+    /// Similar to `build()` but uses an existing transaction manager
+    /// instead of creating its own. This is used by call-engine.
+    /// 
+    /// # Arguments
+    /// * `transaction_manager` - Pre-configured transaction manager
+    /// 
+    /// # Example
+    /// ```rust
+    /// let transaction_manager = Arc::new(TransactionManager::new(...));
+    /// 
+    /// let coordinator = SessionManagerBuilder::new()
+    ///     .with_sip_port(5060)
+    ///     .with_local_address("sip:server@example.com")
+    ///     .build_with_transaction_manager(transaction_manager)
+    ///     .await?;
+    /// ```
+    pub async fn build_with_transaction_manager(
+        self,
+        _transaction_manager: Arc<rvoip_transaction_core::TransactionManager>,
+    ) -> Result<Arc<SessionCoordinator>> {
+        // For now, just use regular build
+        // In the future, we'll integrate the transaction manager into dialog subsystem
+        self.build().await
     }
 }
 

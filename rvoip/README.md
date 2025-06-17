@@ -19,17 +19,20 @@ rvoip follows a **session-centric architecture** with `session-core` as the cent
 │                    Application Layer                        │
 ├─────────────────────────────────────────────────────────────┤
 │  sip-client                    │  call-engine               │
-│  (High-level API)              │  (Call orchestration)     │
+│  (High-level SIP API)          │  (Call center logic)       │
 ├─────────────────────────────────────────────────────────────┤
 │                 *** session-core ***                        │
 │           (Session Manager - Central Coordinator)           │
-│      • SIP Session Management    • Media Coordination       │
-│      • Dialog Lifecycle          • RTP Stream Management    │  
-│      • Public API for SIP/Media  • Unified Event System     │
+│      • Session Management        • Bridge Management        │
+│      • Dialog Lifecycle          • Conference Support       │  
+│      • Media Coordination        • Unified Event System     │
 ├─────────────────────────────────────────────────────────────┤
-│         Processing Layer                                    │
-│  transaction-core              │  media-core               │
-│  (SIP transactions)            │  (Media processing)       │
+│         Protocol & Processing Layer                         │
+│  dialog-core                   │  media-core               │
+│  (Dialog state machine)        │  (Media processing)       │
+│                                │                            │
+│  transaction-core              │                            │
+│  (SIP transactions)            │                            │
 ├─────────────────────────────────────────────────────────────┤
 │              Transport Layer                                │
 │  sip-transport    │  rtp-core    │  ice-core               │
@@ -43,327 +46,317 @@ rvoip follows a **session-centric architecture** with `session-core` as the cent
 
 ## Session Manager Design
 
-### Core Concept: **Session Manager as Central Coordinator**
+### Core Concept: **SessionCoordinator as Central Hub**
 
-**session-core** provides a `SessionManager` that serves as the primary interface for both SIP clients and servers. It coordinates between SIP signaling (dialogs, transactions) and RTP media streams, providing a unified API that maintains proper separation of concerns across layers.
+**session-core** provides a `SessionCoordinator` that serves as the primary interface for both SIP clients and servers. It coordinates between SIP signaling (dialogs, transactions) and RTP media streams, providing a unified API that maintains proper separation of concerns across layers.
 
 ### Key Design Principles
 
-1. **Single Source of Truth**: SessionManager maintains the authoritative state for all active sessions
+1. **Single Source of Truth**: SessionCoordinator maintains the authoritative state for all active sessions
 2. **Layer Coordination**: Bridges SIP signaling layer with media processing layer
 3. **Event-Driven**: Uses a unified event system for loose coupling between components
 4. **Clean Public API**: Exposes high-level operations while hiding protocol complexity
 
-### Session Manager Public Interface
+### SessionCoordinator Public Interface
 
 ```rust
-// High-level session management
-pub struct SessionManager {
-    // Creates and manages SIP sessions with integrated media
-    pub async fn create_outgoing_session(&self) -> Result<Arc<Session>, Error>;
-    pub async fn create_incoming_session(&self, invite: Request) -> Result<Arc<Session>, Error>;
-    
+// High-level session management via SessionCoordinator
+pub struct SessionCoordinator {
     // Session lifecycle management
-    pub async fn start(&self) -> Result<(), Error>;
-    pub async fn stop(&self) -> Result<(), Error>;
-    pub async fn terminate_session(&self, session_id: &SessionId, reason: &str) -> Result<(), Error>;
+    pub async fn create_outgoing_call(&self, from: &str, to: &str, sdp: Option<String>) -> Result<CallSession>;
+    pub async fn terminate_session(&self, session_id: &SessionId) -> Result<()>;
     
     // Session discovery and management
-    pub fn get_session(&self, session_id: &SessionId) -> Result<Arc<Session>, Error>;
-    pub async fn session_count(&self) -> usize;
-    pub fn find_session_by_dialog(&self, dialog_id: &DialogId) -> Result<Arc<Session>, Error>;
+    pub async fn find_session(&self, session_id: &SessionId) -> Result<Option<CallSession>>;
+    pub async fn list_active_sessions(&self) -> Result<Vec<SessionId>>;
+    pub async fn get_stats(&self) -> Result<SessionStats>;
     
-    // Integrated dialog management
-    pub fn dialog_manager(&self) -> &Arc<DialogManager>;
-    pub fn set_default_dialog(&self, session_id: &SessionId, dialog_id: &DialogId) -> Result<(), Error>;
+    // Bridge management (2-party conferences)
+    pub async fn bridge_sessions(&self, session1: &SessionId, session2: &SessionId) -> Result<BridgeId>;
+    pub async fn destroy_bridge(&self, bridge_id: &BridgeId) -> Result<()>;
+    pub async fn get_session_bridge(&self, session_id: &SessionId) -> Result<Option<BridgeId>>;
+    pub async fn remove_session_from_bridge(&self, bridge_id: &BridgeId, session_id: &SessionId) -> Result<()>;
+    pub async fn list_bridges(&self) -> Vec<BridgeInfo>;
+    
+    // Advanced bridge operations
+    pub async fn create_bridge(&self) -> Result<BridgeId>;
+    pub async fn add_session_to_bridge(&self, bridge_id: &BridgeId, session_id: &SessionId) -> Result<()>;
+    pub async fn subscribe_to_bridge_events(&self) -> mpsc::UnboundedReceiver<BridgeEvent>;
+    
+    // Media control
+    pub async fn send_dtmf(&self, session_id: &SessionId, digits: &str) -> Result<()>;
+    pub async fn generate_sdp_offer(&self, session_id: &SessionId) -> Result<String>;
 }
 
-// Individual session management
-pub struct Session {
-    // Session state management
-    pub async fn state(&self) -> SessionState;
-    pub async fn set_state(&self, state: SessionState) -> Result<(), Error>;
-    
-    // SIP dialog integration
-    pub async fn dialog(&self) -> Option<Dialog>;
-    pub async fn set_dialog(&self, dialog: Option<Dialog>);
-    
-    // Media coordination (integrated with RTP core)
-    pub async fn start_media(&self) -> Result<(), Error>;
-    pub async fn stop_media(&self) -> Result<(), Error>;
-    
-    // Transaction tracking for SIP coordination
-    pub async fn track_transaction(&self, tx_id: TransactionKey, tx_type: SessionTransactionType);
+// Session state and information
+pub struct CallSession {
+    pub id: SessionId,
+    pub from: String,
+    pub to: String,
+    pub state: CallState,
+    pub started_at: Option<Instant>,
 }
 
-// High-level convenience API (helpers.rs)
-pub async fn make_call(session_manager: &Arc<SessionManager>, destination: Uri) -> Result<Arc<Session>, Error>;
-pub async fn answer_call(session: &Arc<Session>) -> Result<(), Error>;
-pub async fn end_call(session: &Arc<Session>) -> Result<(), Error>;
+// Bridge management types
+pub struct BridgeInfo {
+    pub id: BridgeId,
+    pub sessions: Vec<SessionId>,
+    pub created_at: Instant,
+    pub participant_count: usize,
+}
 
-// SIP + Media coordination helpers  
-pub async fn create_dialog_from_invite(dialog_manager: &Arc<DialogManager>, 
-    tx_id: &TransactionKey, request: &Request, response: &Response, 
-    session_id: &SessionId, is_initiator: bool) -> Result<DialogId, Error>;
-
-pub async fn update_dialog_media(dialog_manager: &Arc<DialogManager>, 
-    dialog_id: &DialogId, new_sdp: SessionDescription) -> Result<TransactionKey, Error>;
-
-pub fn get_dialog_media_config(dialog_manager: &Arc<DialogManager>, 
-    dialog_id: &DialogId) -> Result<MediaConfig, Error>;
-
-// SIP dialog management
-pub async fn put_call_on_hold(dialog_manager: &Arc<DialogManager>, dialog_id: &DialogId) -> Result<TransactionKey, Error>;
-pub async fn resume_held_call(dialog_manager: &Arc<DialogManager>, dialog_id: &DialogId) -> Result<TransactionKey, Error>;
-pub async fn refresh_dialog(dialog_manager: &Arc<DialogManager>, dialog_id: &DialogId) -> Result<(), Error>;
+// Builder pattern for configuration
+pub struct SessionManagerBuilder {
+    pub fn new() -> Self;
+    pub fn with_sip_port(self, port: u16) -> Self;
+    pub fn with_local_address(self, address: impl Into<String>) -> Self;
+    pub fn with_media_ports(self, start: u16, end: u16) -> Self;
+    pub fn with_handler(self, handler: Arc<dyn CallHandler>) -> Self;
+    pub async fn build(self) -> Result<Arc<SessionCoordinator>>;
+    pub async fn build_with_transaction_manager(self, tm: Arc<TransactionManager>) -> Result<Arc<SessionCoordinator>>;
+}
 ```
 
 ### Usage Examples
 
 #### SIP Server Implementation
 ```rust
-// Create session manager with integrated SIP and media coordination
-let session_manager = Arc::new(SessionManager::new(
-    transaction_manager.clone(),
-    SessionConfig::default(),
-    event_bus.clone()
-));
+// Create session coordinator
+let coordinator = SessionManagerBuilder::new()
+    .with_sip_port(5060)
+    .with_handler(Arc::new(MyCallHandler))
+    .build()
+    .await?;
 
-// Start the session manager
-session_manager.start().await?;
+// Start the coordinator
+SessionControl::start(&coordinator).await?;
 
-// Handle incoming INVITE
-let session = session_manager.create_incoming_session(invite_request).await?;
-
-// Session manager automatically:
-// - Creates and manages SIP dialog
-// - Handles SDP negotiation
+// The coordinator automatically:
+// - Manages SIP dialogs via dialog-core
+// - Handles transactions via transaction-core
 // - Coordinates with media-core for RTP streams
-// - Manages transaction lifecycle
+// - Manages bridges (2-party conferences)
 // - Provides unified event notifications
-
-// Answer the call (automatically coordinates SIP response + media setup)
-answer_call(&session).await?;
 ```
 
-#### SIP Client Implementation  
+#### Call Center Implementation (via call-engine)
 ```rust
-// Make an outgoing call
-let session = make_call(&session_manager, destination_uri).await?;
+// Create call center with session-core integration
+let call_center = CallCenterEngine::new(
+    transaction_manager,
+    config,
+    database
+).await?;
 
-// Session manager coordinates:
-// - INVITE transaction creation
-// - Dialog establishment  
-// - SDP offer/answer negotiation
-// - Media stream setup
-// - Event propagation
+// Register agents
+let agent_session = call_center.register_agent(&agent).await?;
 
-// Put call on hold (SIP re-INVITE + media direction change)
-let dialog_id = session.dialog().await.unwrap().id;
-put_call_on_hold(&session_manager.dialog_manager(), &dialog_id).await?;
+// Call center uses session-core for:
+// - Creating and managing agent sessions
+// - Bridging customer and agent calls
+// - Conference management for multi-party calls
+// - Real-time bridge event monitoring
 
-// Resume call
-resume_held_call(&session_manager.dialog_manager(), &dialog_id).await?;
-
-// End call (BYE transaction + media cleanup)
-end_call(&session).await?;
+// Bridge a customer to an agent
+let bridge_id = call_center.session_manager()
+    .bridge_sessions(&customer_session, &agent_session)
+    .await?;
 ```
 
 ## Current Library Structure
 
-**Corrected Dependencies (proper transport layering):**
+### Application Layer:
+- **`sip-client`** → `client-core`, `session-core`, `media-core`, `rtp-core`, `ice-core`, `transaction-core`, `sip-transport`, `sip-core`
+  - High-level SIP client API
+  - Simplified interface for making/receiving calls
+  
+- **`call-engine`** → `session-core`, `transaction-core`, `sip-core`
+  - Call center orchestration (agents, queues, routing)
+  - Uses session-core for all SIP/media operations
+  - No direct transport layer dependencies (proper separation)
 
-### Application Integration Layer:
-- `sip-client` → `call-engine`, `session-core`, `media-core`, `rtp-core`, `ice-core`, `transaction-core`, `sip-transport`, `sip-core`
-- `call-engine` → `session-core`, `media-core`, `rtp-core`, `transaction-core`, `sip-transport`, `sip-core`
+### Central Integration Layer:
+- **`session-core`** → `dialog-core`, `media-core`, `conference`, `bridge`, `manager`, `coordinator`
+  - Central coordination hub for all session-related operations
+  - Integrates dialog management from dialog-core
+  - Coordinates media via media-core
+  - Provides bridge management (2-party conferences)
+  - Unified API for both client and server use cases
 
-### **Central Integration Layer:**
-- **`session-core`** → `transaction-core`, `rtp-core`, `sip-transport`, `sip-core`
-  - *Coordinates SIP signaling (via transaction-core) with RTP media (via rtp-core)*
-  - *Manages complete session lifecycle including both signaling and media*
+### Protocol & Processing Layer:
+- **`dialog-core`** → `transaction-core`, `sip-transport`, `sip-core`
+  - Dialog state machine implementation
+  - Handles dialog lifecycle per RFC 3261
+  
+- **`transaction-core`** → `sip-transport`, `sip-core`
+  - Client and server transactions
+  - Timer management
+  - Retransmission logic
 
-### Processing Layer:
-- `transaction-core` → `sip-transport`, `sip-core`
-- `media-core` → `rtp-core`, `ice-core`
+- **`media-core`** → `rtp-core`, `ice-core`
+  - Audio processing and codec support
+  - Media session management
 
 ### Transport Layer:
-- `sip-transport` → `sip-core`
-- `rtp-core` → (no internal dependencies)
-- `ice-core` → (no internal dependencies)
+- **`sip-transport`** → `sip-core`
+  - UDP, TCP, TLS, WebSocket transports
+  - Connection management
+  
+- **`rtp-core`** → (no internal dependencies)
+  - RTP/RTCP packet processing
+  - SRTP support
+  
+- **`ice-core`** → (no internal dependencies)
+  - ICE/STUN/TURN support (partial)
 
 ### Foundation Layer:
-- `sip-core` → (no internal dependencies)
+- **`sip-core`** → (no internal dependencies)
+  - SIP message parsing and serialization
+  - SDP support
+  - Core protocol types
 
 ### Infrastructure:
-- `infra-common` → (standalone, not currently used by other crates)
+- **`infra-common`** → (standalone)
+  - Event bus, configuration, lifecycle management
+  - Currently underutilized but available
 
 ## Component Responsibilities
 
 ### Currently Implemented Components
 
-#### High-Level Components
+#### Application Layer
 
-- **sip-client**: High-level client library providing unified access to all SIP and media functionality
-- **call-engine**: Manages high-level call processing logic and coordinates between SIP signaling and media processing
+- **sip-client**: High-level client library
+  - Simple API for making/receiving calls
+  - Abstracts protocol complexity
+  - Includes example CLI applications
 
-#### Core Protocol Components
+- **call-engine**: Call center orchestration
+  - Agent management and routing
+  - Queue management
+  - Call distribution algorithms
+  - Bridge orchestration via session-core
 
-- **session-core**: Manages SIP dialogs and call state
-  - **Dialog Management**: Tracks dialogs per RFC 3261, handles dialog matching, and manages dialog-related states
+#### Central Coordination
 
-- **transaction-core**: Implements the SIP transaction layer
-  - **Transaction Processing**: Handles client and server transactions according to the SIP specification
+- **session-core**: The heart of the system
+  - **SessionCoordinator**: Main entry point for all operations
+  - **Dialog Management**: Integrates dialog-core for SIP dialogs
+  - **Media Coordination**: Integrates media-core for RTP
+  - **Bridge Management**: 2-party conferences for call bridging
+  - **Event System**: Unified event propagation
 
-- **sip-transport**: Manages SIP message transport
-  - **Protocol Transport**: UDP, TCP, TLS, and WebSocket transport implementations
+#### Protocol Implementation
 
-- **sip-core**: Core SIP message processing
-  - **Message Parsing**: SIP message parsing, serialization, URI handling, and SDP support
+- **dialog-core**: Dialog layer implementation
+  - RFC 3261 compliant dialog state machine
+  - Dialog matching and routing
+  - Integrated with session-core
 
-#### Media Components
+- **transaction-core**: Transaction layer
+  - Client and server transactions
+  - Timer management
+  - Retransmission logic
 
-- **media-core**: Manages media processing and codec operations
-  - **Media Pipeline**: Processing chain for media (encoding, decoding, basic mixing)
-  - **Codec Support**: G.711 (PCMU/PCMA), G.722, Opus codec implementations
+- **sip-transport**: Transport management
+  - Multiple transport protocols
+  - Connection pooling
+  - Message routing
 
-- **rtp-core**: Handles RTP/RTCP packet processing
-  - **Packet Handling**: RTP packet processing, RTCP reports, and media synchronization
-  - **Security**: SRTP support for encrypted media
+- **sip-core**: Core protocol support
+  - Message parsing/serialization
+  - Header manipulation
+  - SDP handling
 
-#### Infrastructure
+#### Media Handling
 
-- **infra-common**: Provides cross-cutting infrastructure
-  - **Event Bus**: Inter-component communication
-  - **Configuration**: Dynamic configuration management
-  - **Lifecycle Management**: Component startup/shutdown coordination
-  - **Logging**: Structured logging and tracing
+- **media-core**: Media processing
+  - Codec support (G.711, G.722, Opus)
+  - Audio processing pipeline
+  - Echo cancellation (basic)
+  - Conference mixing support
 
-### Planned Components (Not Yet Implemented)
+- **rtp-core**: RTP/RTCP implementation
+  - Packet processing
+  - Jitter buffering
+  - SRTP encryption
+  - Statistics collection
 
-#### Future High-Level Components
+#### Additional Components
 
-- **api-server**: External control API (REST/gRPC/WebSocket) - *directory exists but empty*
+- **ice-core**: NAT traversal (partial implementation)
+  - STUN client
+  - Candidate gathering
+  - Basic ICE state machine
 
-#### Future Media & Analysis Components
+- **client-core**: Client-specific utilities
+  - Used by sip-client
+  - Call state management
+  - Event handling
 
-- **media-recorder**: Media recording, compliance, and analysis
-  - **Capture Engine**: Records audio, video, text, and screen sharing in various formats
-  - **Standards Compliance**: SIPrec (SIPREC) and vCon standards for interoperable recording
-  - **Analysis Pipeline**: Real-time and post-call analysis of media content
+### Builder Crates (Higher-level abstractions)
 
-- **ai-engine**: AI capabilities coordination
-  - **Speech Processing**: Speech recognition, transcription, and generation interfaces
-  - **Intelligent Routing**: Context-aware routing decisions based on call analysis
-  - **Media Intelligence**: Media analysis for sentiment, intent detection, and conversation insights
-
-#### Future Infrastructure Components
-
-- **storage-service**: Distributed storage for recordings and metadata
-  - **Object Storage**: Scalable storage for media recordings and large binary data
-  - **Time Series DB**: Storage for metrics, events, and time-based analytics
-  - **Metadata Store**: Structured storage for session records and call details
-
-## State Management Architecture
-
-rvoip implements explicit state machines at multiple layers:
-
-1. **Transaction State Machine**
-   - Client and server transaction states per RFC 3261
-   - Handles retransmissions and timeout logic
-
-2. **Dialog State Machine**
-   - Early, Confirmed, and Terminated states
-   - Manages dialog creation, updates, and termination
-
-3. **Call State Machine**
-   - Application-level call states (Initial, Ringing, Connected, etc.)
-   - Maps user-facing operations to protocol operations
-
-4. **Session State Machine**
-   - Media negotiation and management states
-   - Handles codec selection and media flow
+- **rvoip-builder**: Fluent API for building VoIP applications
+- **rvoip-presets**: Pre-configured setups for common use cases
+- **rvoip-simple**: Simplified API for basic use cases
 
 ## Development Status
 
 ### Phase 1: Core Foundations ✅
 
-- [x] Project structure setup
 - [x] SIP message parser/serializer
 - [x] Basic SIP transaction state machine
 - [x] UDP transport for SIP messages
 - [x] Basic RTP packet handling
 - [x] G.711 codec implementation
-- [x] Simple call session management
+- [x] Session management via session-core
+- [x] Dialog state machine in dialog-core
 - [x] SIP client library
 
-### Phase 2: Library Integration 🔄
+### Phase 2: Integration & Architecture ✅
 
-- [ ] Improved dialog layer integration
-- [ ] Enhanced state management patterns
-- [ ] Complete transaction handling
-- [ ] Better separation of concerns across libraries
-- [ ] Consistent event propagation
-- [ ] Full SDP negotiation support
-- [ ] Enhanced media session handling
+- [x] SessionCoordinator as central hub
+- [x] Dialog-core integration with session-core
+- [x] Bridge management (2-party conferences)
+- [x] Call-engine integration with session-core
+- [x] Proper separation of concerns
+- [x] Event propagation system
+- [x] Media coordination
 
-### Phase 3: Softswitch Capabilities 🔜
+### Phase 3: Protocol Completeness 🔄
 
-- [ ] Complete SIP method support
-- [ ] TCP/TLS transport
-- [ ] Call transfer and forwarding
-- [ ] Media relay functionality
-- [ ] Call recording with SIPrec/vCon standard compliance
-- [ ] Extended API for call control
-- [ ] WebSocket events for call state changes
-- [ ] Multi-format recording (audio, video, text, screen)
-- [ ] Media storage with retention policies
+- [x] INVITE, BYE, CANCEL support
+- [x] Basic SDP negotiation
+- [ ] Full RFC 3261 compliance
+- [ ] REGISTER support
+- [ ] SUBSCRIBE/NOTIFY
+- [ ] MESSAGE method
+- [ ] UPDATE method
+- [x] TCP transport (basic)
+- [ ] TLS transport
+- [ ] WebSocket transport
 
 ### Phase 4: Advanced Features 🔜
 
-- [ ] NAT traversal with ICE/STUN/TURN
-- [ ] SRTP for media encryption
-- [ ] Additional codec support (G.722, Opus, VP8, H.264)
-- [ ] Transcoding engine for audio and video
-- [ ] WebRTC gateway with full media support
-- [ ] IVR capabilities
-- [ ] Call queuing and distribution
-- [ ] High availability and clustering
-- [ ] AI agent framework integration
-- [ ] Speech recognition and generation interfaces
-- [ ] Real-time media analysis capabilities
-- [ ] Multi-modal sessions (audio+video+text)
-- [ ] Group communication support
-- [ ] Broadcast streaming capabilities
-- [ ] Real-Time Text (RTT) support
-- [ ] End-to-end encryption for all media types
-- [ ] Advanced media analytics (speaker identification, topic detection)
-- [ ] Distributed storage for high-volume recording
-- [ ] Compliance features (legal hold, PII redaction, GDPR controls)
-- [ ] Conversation intelligence and insights
+- [x] Basic bridge/conference support
+- [ ] Full conference mixing
+- [ ] Call transfer (REFER)
+- [ ] Call forwarding
+- [ ] Call recording
+- [ ] Advanced codecs
+- [ ] Video support
+- [ ] Full ICE/STUN/TURN
+- [ ] WebRTC gateway
 
-## Implementation Roadmap
+### Phase 5: Production Features 🔜
 
-### Current Focus: Improving Architecture and Component Integration
-
-1. **Dialog Integration**
-   - Fully integrate session-core Dialog implementation with sip-client
-   - Refactor Call to use Dialog for SIP protocol state
-   - Implement proper dialog matching and routing
-
-2. **State Machine Refactoring**
-   - Implement explicit state transition validation
-   - Separate application and protocol states
-   - Create modular state handlers
-
-3. **Layer Integration**
-   - Improve transaction-to-dialog routing
-   - Enhance session-to-call coordination
-   - Establish consistent event propagation model
-   
-4. **Common Infrastructure**
-   - Implement shared event system across components
-   - Standardize configuration and lifecycle management
-   - Create common logging and metrics infrastructure
+- [ ] High availability
+- [ ] Clustering support
+- [ ] External API (REST/gRPC)
+- [ ] Monitoring/metrics
+- [ ] Admin interface
+- [ ] Database persistence
+- [ ] Message queue integration
 
 ## Getting Started
 
@@ -375,27 +368,64 @@ cd rvoip
 cargo build
 ```
 
-### Running the Examples
+### Running Examples
 
 ```bash
-# Run a SIP client demo (caller)
-cd examples/sip-client-demo
-cargo run --bin caller -- -a 127.0.0.1:5070 -u alice -s 127.0.0.1:5071 -t sip:bob@example.com
+# Simple peer-to-peer call
+cd rvoip/crates/session-core/examples
+cargo run --example simple_peer_to_peer
 
-# Run a SIP client demo (receiver)
-cargo run --bin receiver -- -a 127.0.0.1:5071 -u bob
+# SIP client demo
+cd rvoip/examples/sip-client-demo
+cargo run --bin caller -- -a 127.0.0.1:5070 -u alice -s 127.0.0.1:5071 -t sip:bob@example.com
 ```
 
-## Comparison with Existing Solutions
+### Creating a Basic SIP Server
 
-Unlike PJSIP (C) and sofia-sip (C), rvoip is built as a pure Rust stack without C dependencies. While drawing inspiration from these battle-tested libraries, rvoip adopts Rust's memory safety guarantees and modern async programming model. The architecture is designed to be:
+```rust
+use rvoip_session_core::prelude::*;
 
-- More modular than PJSIP
-- More concurrent than sofia-sip
-- More type-safe than both
-- Better suited for modern cloud-native deployments
+#[tokio::main]
+async fn main() -> Result<()> {
+    let coordinator = SessionManagerBuilder::new()
+        .with_sip_port(5060)
+        .with_handler(Arc::new(AutoAnswerHandler))
+        .build()
+        .await?;
+    
+    SessionControl::start(&coordinator).await?;
+    
+    // Server is now running and accepting calls
+    tokio::signal::ctrl_c().await?;
+    Ok(())
+}
+```
 
-The SIP client library is modelled off of PJSIP and sofia-sip and the server logic is inspired by Kamailio for carrier scalability and FreeSWITCH for media handling.
+## Architecture Decisions
+
+### Why SessionCoordinator?
+
+The SessionCoordinator pattern emerged as the best way to:
+1. Provide a unified API for diverse use cases
+2. Maintain proper separation between protocol layers
+3. Coordinate between independent subsystems (dialog, media, transport)
+4. Enable both client and server implementations from the same codebase
+
+### Bridge as Conference
+
+Bridges are implemented as 2-party conferences, which:
+1. Reuses existing conference infrastructure
+2. Provides a clean abstraction
+3. Enables future extension to multi-party bridges
+4. Maintains consistency in the API
+
+### Event-Driven Architecture
+
+The event system enables:
+1. Loose coupling between components
+2. Real-time monitoring capabilities
+3. Easy extension points for new features
+4. Debugging and troubleshooting
 
 ## License
 
@@ -403,4 +433,11 @@ MIT License
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request. 
+Contributions are welcome! Please feel free to submit a Pull Request. Areas particularly welcoming contributions:
+
+1. Protocol completeness (REGISTER, SUBSCRIBE/NOTIFY, etc.)
+2. Transport implementations (TLS, WebSocket)
+3. Codec implementations
+4. Test coverage
+5. Documentation
+6. Example applications 

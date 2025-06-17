@@ -190,6 +190,10 @@ pub mod media;
 pub mod create;
 pub mod examples;
 
+// New API modules
+pub mod bridge;
+pub mod server_types;
+
 // Re-export main types
 pub use types::{
     SessionId, CallSession, CallState, IncomingCall, CallDecision, 
@@ -201,8 +205,42 @@ pub use builder::{SessionManagerBuilder, SessionManagerConfig};
 pub use control::SessionControl;
 pub use media::MediaControl;
 
+// Re-export bridge functionality
+pub use bridge::{
+    BridgeId, BridgeInfo, BridgeEvent, BridgeEventType,
+};
+
+// Re-export server types
+pub use server_types::{
+    IncomingCallEvent, CallerInfo,
+};
+
+// Re-export conference functionality (make it public)
+pub use crate::conference::{
+    ConferenceManager, ConferenceApi, ConferenceCoordinator,
+    ConferenceId, ConferenceConfig, ConferenceEvent,
+    ConferenceRoom, ConferenceParticipant,
+};
+
 // Re-export error types
 pub use crate::errors::{Result, SessionError};
+
+// Type aliases for compatibility with call-engine
+pub type Session = CallSession;
+pub type ServerSessionManager = SessionCoordinator;
+pub type ServerConfig = SessionManagerConfig;
+pub type IncomingCallNotification = IncomingCallEvent;
+
+// Re-export create helper function
+pub async fn create_full_server_manager(
+    transaction_manager: std::sync::Arc<rvoip_transaction_core::TransactionManager>,
+    _config: ServerConfig,
+) -> Result<std::sync::Arc<ServerSessionManager>> {
+    // Use builder to create coordinator with transaction manager
+    SessionManagerBuilder::new()
+        .build_with_transaction_manager(transaction_manager)
+        .await
+}
 
 // Re-export the SessionCoordinator as the main entry point
 pub use crate::coordinator::SessionCoordinator; 

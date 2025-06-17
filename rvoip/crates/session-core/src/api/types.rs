@@ -87,6 +87,12 @@ use uuid::Uuid;
 use crate::errors::Result;
 use std::fmt;
 
+// Re-export StatusCode for convenience
+pub use rvoip_sip_core::StatusCode;
+
+// Re-export SessionError as Error for compatibility
+pub use crate::errors::SessionError as Error;
+
 /// Unique identifier for a session
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub String);
@@ -118,6 +124,9 @@ impl Default for SessionId {
         Self::new()
     }
 }
+
+/// Alias for CallSession for compatibility
+pub type Session = CallSession;
 
 /// Represents a prepared outgoing call with allocated resources
 /// This is created before initiating the actual SIP INVITE
@@ -308,6 +317,28 @@ pub enum CallDecision {
     Defer,
     /// Forward the call to another destination
     Forward(String),
+}
+
+impl CallDecision {
+    /// Create a reject decision with status code
+    pub fn reject_with_code(status_code: StatusCode, reason: Option<String>) -> Self {
+        CallDecision::Reject(reason.unwrap_or_else(|| status_code.to_string()))
+    }
+    
+    /// Create an accept decision with optional SDP
+    pub fn accept(sdp: Option<String>) -> Self {
+        CallDecision::Accept(sdp)
+    }
+    
+    /// Create a defer decision
+    pub fn defer() -> Self {
+        CallDecision::Defer
+    }
+    
+    /// Create a forward decision
+    pub fn forward(destination: impl Into<String>) -> Self {
+        CallDecision::Forward(destination.into())
+    }
 }
 
 /// Statistics about active sessions

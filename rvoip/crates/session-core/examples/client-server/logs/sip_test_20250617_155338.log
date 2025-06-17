@@ -1,0 +1,40 @@
+# SIP Client-Server Test Log
+# Started: Tue Jun 17 15:53:38 PDT 2025
+# Server port: 5062
+# Client port: 5061
+# Target: 127.0.0.1:5062
+# Calls: 1
+# Call duration: 10s
+
+[2025-06-17 15:53:38] [INFO] Test started at Tue Jun 17 15:53:38 PDT 2025
+[2025-06-17 15:53:38] [INFO] Log directory: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/client-server/logs
+[2025-06-17 15:53:38] [INFO] Starting UAS server on port 5062...
+[2025-06-17 15:53:38] [INFO] Server log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/client-server/logs/uas_server_20250617_155338.log
+[2025-06-17 15:53:38] [INFO] UAS server started with PID 64851
+[2025-06-17 15:53:38] [INFO] Waiting for server to be ready...
+[2025-06-17 15:53:41] [SUCCESS] UAS server is ready
+[2025-06-17 15:53:41] [INFO] Waiting 2 seconds before starting client...
+[2025-06-17 15:53:43] [INFO] Starting UAC client on port 5061...
+[2025-06-17 15:53:43] [INFO] Client log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/client-server/logs/uac_client_20250617_155338.log
+[2025-06-17 15:53:43] [INFO] Target: 127.0.0.1:5062
+[2025-06-17 15:53:43] [INFO] Number of calls: 1
+[2025-06-17 15:53:43] [INFO] Call duration: 10s
+[2025-06-17 15:53:58] [SUCCESS] UAC client completed successfully
+[2025-06-17 15:53:58] [INFO] Stopping UAS server (PID: 64851)...
+[2025-06-17 15:53:58] [INFO] Checking server log for successful calls...
+[2025-06-17 15:53:58] [INFO] Checking client log for successful calls...
+[2025-06-17 15:53:58] [INFO] Test Metrics:
+[2025-06-17 15:53:58] [INFO]   Server received:  1 calls (expected: 1)
+[2025-06-17 15:53:58] [INFO]   Server accepted:  1 calls (expected: 1)
+[2025-06-17 15:53:58] [INFO]   Server ended:     1 calls (expected: 1)
+[2025-06-17 15:53:58] [INFO]   Client initiated: 1 calls (expected: 1)
+[2025-06-17 15:53:58] [INFO]   Client connected: 1 calls (expected: 1)
+[2025-06-17 15:53:58] [INFO]   Client ended:     1 calls (expected: 1)
+[2025-06-17 15:53:58] [SUCCESS] Test PASSED: All 1 calls were successfully established and completed
+[2025-06-17 15:53:58] [SUCCESS] Test completed successfully
+[2025-06-17 15:53:58] [INFO] Test ended at Tue Jun 17 15:53:58 PDT 2025
+[2025-06-17 15:53:58] [INFO] 
+[2025-06-17 15:53:58] [INFO] Log files:
+[2025-06-17 15:53:58] [INFO]   Combined: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/client-server/logs/sip_test_20250617_155338.log
+[2025-06-17 15:53:58] [INFO]   Server:   /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/client-server/logs/uas_server_20250617_155338.log
+[2025-06-17 15:53:58] [INFO]   Client:   /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/client-server/logs/uac_client_20250617_155338.log
