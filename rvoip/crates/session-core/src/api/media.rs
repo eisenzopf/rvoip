@@ -1,6 +1,157 @@
 //! Media Control API
 //!
 //! High-level API for controlling media sessions, including audio transmission.
+//! 
+//! # Overview
+//! 
+//! The `MediaControl` trait provides methods for:
+//! - SDP generation and negotiation
+//! - Media session lifecycle management
+//! - Audio transmission control
+//! - Statistics monitoring and quality metrics
+//! - Remote endpoint configuration
+//! 
+//! # Key Concepts
+//! 
+//! ## SDP Negotiation Patterns
+//! 
+//! ### UAC (Caller) Pattern
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! 
+//! async fn uac_flow(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
+//!     let session_id = SessionId::new();
+//!     
+//!     // 1. Generate SDP offer (allocates RTP port)
+//!     let sdp_offer = MediaControl::generate_sdp_offer(
+//!         coordinator, 
+//!         &session_id
+//!     ).await?;
+//!     
+//!     // 2. Send INVITE with offer...
+//!     // 3. Receive 200 OK with answer
+//!     let sdp_answer = receive_answer().await?;
+//!     
+//!     // 4. Update media with answer
+//!     MediaControl::update_remote_sdp(
+//!         coordinator, 
+//!         &session_id, 
+//!         &sdp_answer
+//!     ).await?;
+//!     
+//!     // 5. Establish media flow
+//!     let remote_addr = parse_sdp_connection(&sdp_answer)?;
+//!     MediaControl::establish_media_flow(
+//!         coordinator,
+//!         &session_id,
+//!         &format!("{}:{}", remote_addr.ip, remote_addr.port)
+//!     ).await?;
+//!     
+//!     Ok(())
+//! }
+//! ```
+//! 
+//! ### UAS (Callee) Pattern  
+//! ```rust
+//! async fn uas_flow(
+//!     coordinator: &Arc<SessionCoordinator>,
+//!     call: &IncomingCall
+//! ) -> Result<String> {
+//!     // 1. Generate SDP answer based on offer
+//!     let sdp_answer = MediaControl::generate_sdp_answer(
+//!         coordinator,
+//!         &call.id,
+//!         &call.sdp.as_ref().unwrap()
+//!     ).await?;
+//!     
+//!     // 2. Return answer in 200 OK
+//!     Ok(sdp_answer)
+//! }
+//! 
+//! // Later, when call is established:
+//! async fn on_call_established(
+//!     coordinator: &Arc<SessionCoordinator>,
+//!     session: &CallSession,
+//!     remote_sdp: &str
+//! ) -> Result<()> {
+//!     // 3. Establish media flow to caller
+//!     let sdp_info = parse_sdp_connection(remote_sdp)?;
+//!     MediaControl::establish_media_flow(
+//!         coordinator,
+//!         session.id(),
+//!         &format!("{}:{}", sdp_info.ip, sdp_info.port)
+//!     ).await?;
+//!     
+//!     Ok(())
+//! }
+//! ```
+//! 
+//! ## Media Quality Monitoring
+//! 
+//! ```rust
+//! use std::time::Duration;
+//! 
+//! async fn monitor_call_quality(
+//!     coordinator: Arc<SessionCoordinator>,
+//!     session_id: SessionId
+//! ) -> Result<()> {
+//!     // Start automatic monitoring
+//!     MediaControl::start_statistics_monitoring(
+//!         &coordinator,
+//!         &session_id,
+//!         Duration::from_secs(5)
+//!     ).await?;
+//!     
+//!     // Manual polling
+//!     loop {
+//!         tokio::time::sleep(Duration::from_secs(10)).await;
+//!         
+//!         let stats = MediaControl::get_media_statistics(
+//!             &coordinator,
+//!             &session_id
+//!         ).await?;
+//!         
+//!         if let Some(stats) = stats {
+//!             if let Some(quality) = &stats.quality_metrics {
+//!                 println!("MOS Score: {:.1}", quality.mos_score.unwrap_or(0.0));
+//!                 println!("Packet Loss: {:.1}%", quality.packet_loss_percent);
+//!                 println!("Jitter: {:.1}ms", quality.jitter_ms);
+//!                 
+//!                 // Alert on poor quality
+//!                 if quality.mos_score.unwrap_or(5.0) < 3.0 {
+//!                     alert_poor_quality(&session_id).await;
+//!                 }
+//!             }
+//!         }
+//!     }
+//! }
+//! ```
+//! 
+//! ## Audio Control
+//! 
+//! ```rust
+//! async fn control_audio(
+//!     coordinator: &Arc<SessionCoordinator>,
+//!     session_id: &SessionId
+//! ) -> Result<()> {
+//!     // Start transmission (usually done automatically by establish_media_flow)
+//!     MediaControl::start_audio_transmission(coordinator, session_id).await?;
+//!     
+//!     // Mute (stop transmission)
+//!     MediaControl::stop_audio_transmission(coordinator, session_id).await?;
+//!     
+//!     // Unmute (resume transmission)
+//!     MediaControl::start_audio_transmission(coordinator, session_id).await?;
+//!     
+//!     // Check status
+//!     let is_active = MediaControl::is_audio_transmission_active(
+//!         coordinator, 
+//!         session_id
+//!     ).await?;
+//!     
+//!     Ok(())
+//! }
+//! ```
 
 use std::sync::Arc;
 use crate::api::types::{SessionId, MediaInfo};

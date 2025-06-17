@@ -1,6 +1,206 @@
 //! Event Handlers for Session Management
 //!
 //! Provides a simplified event handling system with pre-built handlers for common use cases.
+//! 
+//! # Overview
+//! 
+//! Call handlers allow you to customize how your application responds to VoIP events.
+//! The system supports two main patterns:
+//! 
+//! 1. **Immediate Decision**: Make a decision synchronously in the callback
+//! 2. **Deferred Decision**: Defer the decision for async processing
+//! 
+//! # Built-in Handlers
+//! 
+//! ## AutoAnswerHandler
+//! 
+//! Automatically accepts all incoming calls:
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! 
+//! let handler = AutoAnswerHandler::default();
+//! let coordinator = SessionManagerBuilder::new()
+//!     .with_handler(Arc::new(handler))
+//!     .build()
+//!     .await?;
+//! ```
+//! 
+//! ## QueueHandler
+//! 
+//! Queues incoming calls for later processing:
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! use tokio::sync::mpsc;
+//! 
+//! // Create queue handler with max 10 calls
+//! let queue_handler = Arc::new(QueueHandler::new(10));
+//! 
+//! // Set up notification channel
+//! let (tx, mut rx) = mpsc::unbounded_channel();
+//! queue_handler.set_notify_channel(tx);
+//! 
+//! // Process queued calls in another task
+//! tokio::spawn(async move {
+//!     while let Some(call) = rx.recv().await {
+//!         // Process the queued call asynchronously
+//!         process_queued_call(call).await;
+//!     }
+//! });
+//! ```
+//! 
+//! ## RoutingHandler
+//! 
+//! Routes calls based on destination patterns:
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! 
+//! let mut router = RoutingHandler::new();
+//! 
+//! // Add routing rules
+//! router.add_route("sip:support@", "sip:queue@support.internal");
+//! router.add_route("sip:sales@", "sip:queue@sales.internal");
+//! router.add_route("sip:+1800", "sip:tollfree@gateway.com");
+//! 
+//! // Set default action for unmatched calls
+//! router.set_default_action(CallDecision::Reject("Unknown destination"));
+//! 
+//! let coordinator = SessionManagerBuilder::new()
+//!     .with_handler(Arc::new(router))
+//!     .build()
+//!     .await?;
+//! ```
+//! 
+//! ## CompositeHandler
+//! 
+//! Combines multiple handlers in a chain:
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! 
+//! let composite = CompositeHandler::new()
+//!     .add_handler(Arc::new(SecurityHandler::new()))
+//!     .add_handler(Arc::new(RateLimitHandler::new(10)))
+//!     .add_handler(Arc::new(RoutingHandler::new()))
+//!     .add_handler(Arc::new(QueueHandler::new(100)));
+//! 
+//! let coordinator = SessionManagerBuilder::new()
+//!     .with_handler(Arc::new(composite))
+//!     .build()
+//!     .await?;
+//! ```
+//! 
+//! # Custom Handlers
+//! 
+//! ## Example: Business Hours Handler
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! use chrono::{Local, Timelike};
+//! 
+//! #[derive(Debug)]
+//! struct BusinessHoursHandler {
+//!     start_hour: u32,
+//!     end_hour: u32,
+//!     after_hours_message: String,
+//! }
+//! 
+//! #[async_trait::async_trait]
+//! impl CallHandler for BusinessHoursHandler {
+//!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+//!         let hour = Local::now().hour();
+//!         
+//!         if hour >= self.start_hour && hour < self.end_hour {
+//!             // During business hours, defer to next handler
+//!             CallDecision::Defer
+//!         } else {
+//!             // After hours, reject with message
+//!             CallDecision::Reject(self.after_hours_message.clone())
+//!         }
+//!     }
+//!     
+//!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
+//!         // Log call duration for business analytics
+//!         if let Some(started_at) = call.started_at {
+//!             let duration = started_at.elapsed();
+//!             log_call_duration(&call.id(), duration).await;
+//!         }
+//!     }
+//! }
+//! ```
+//! 
+//! ## Example: Database-Backed Handler
+//! 
+//! ```rust
+//! #[derive(Debug)]
+//! struct DatabaseHandler {
+//!     db: Arc<Database>,
+//!     coordinator: Arc<RwLock<Option<Arc<SessionCoordinator>>>>,
+//! }
+//! 
+//! #[async_trait::async_trait]
+//! impl CallHandler for DatabaseHandler {
+//!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+//!         // Defer for async database lookup
+//!         CallDecision::Defer
+//!     }
+//!     
+//!     async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
+//!         // Record call in database
+//!         self.db.record_call_start(&call, &local_sdp, &remote_sdp).await;
+//!         
+//!         // Set up media if we have the coordinator reference
+//!         if let Some(coord) = self.coordinator.read().await.as_ref() {
+//!             if let Some(sdp) = remote_sdp {
+//!                 if let Ok(info) = parse_sdp_connection(&sdp) {
+//!                     let _ = MediaControl::establish_media_flow(
+//!                         coord,
+//!                         call.id(),
+//!                         &format!("{}:{}", info.ip, info.port)
+//!                     ).await;
+//!                 }
+//!             }
+//!         }
+//!     }
+//! }
+//! 
+//! // Process deferred calls from database handler
+//! async fn process_database_calls(
+//!     coordinator: &Arc<SessionCoordinator>,
+//!     call: IncomingCall,
+//!     db: &Database
+//! ) -> Result<()> {
+//!     // Check caller in database
+//!     let caller_info = db.lookup_caller(&call.from).await?;
+//!     
+//!     if caller_info.is_blocked {
+//!         SessionControl::reject_incoming_call(
+//!             coordinator,
+//!             &call,
+//!             "Caller blocked"
+//!         ).await?;
+//!     } else if caller_info.is_vip {
+//!         // VIP callers get priority handling
+//!         let sdp_answer = generate_high_quality_sdp(&call.sdp);
+//!         SessionControl::accept_incoming_call(
+//!             coordinator,
+//!             &call,
+//!             Some(sdp_answer)
+//!         ).await?;
+//!     } else {
+//!         // Regular callers
+//!         SessionControl::accept_incoming_call(
+//!             coordinator,
+//!             &call,
+//!             None
+//!         ).await?;
+//!     }
+//!     
+//!     Ok(())
+//! }
+//! ```
 
 use async_trait::async_trait;
 use std::collections::HashMap;

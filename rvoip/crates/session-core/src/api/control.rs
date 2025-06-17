@@ -1,6 +1,149 @@
 //! Session Control API
 //!
 //! This module provides the main control interface for managing SIP sessions.
+//! 
+//! # Overview
+//! 
+//! The `SessionControl` trait is the primary interface for call control operations.
+//! It provides methods for:
+//! - Creating and managing outgoing calls
+//! - Accepting and rejecting incoming calls  
+//! - Media control (mute, hold, transfer)
+//! - Session state monitoring
+//! - DTMF tone generation
+//! 
+//! # Usage Patterns
+//! 
+//! ## Pattern 1: Immediate Decision (CallHandler)
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! 
+//! #[derive(Debug)]
+//! struct MyHandler;
+//! 
+//! #[async_trait::async_trait]
+//! impl CallHandler for MyHandler {
+//!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+//!         // Immediate decision in callback
+//!         if call.from.contains("trusted") {
+//!             CallDecision::Accept(Some(generate_sdp_answer()))
+//!         } else {
+//!             CallDecision::Reject("Untrusted caller".to_string())
+//!         }
+//!     }
+//! }
+//! ```
+//! 
+//! ## Pattern 2: Deferred Decision (Programmatic)
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! 
+//! #[derive(Debug)]
+//! struct DeferHandler;
+//! 
+//! #[async_trait::async_trait]
+//! impl CallHandler for DeferHandler {
+//!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+//!         // Defer for async processing
+//!         CallDecision::Defer
+//!     }
+//! }
+//! 
+//! // Later, after async operations:
+//! async fn process_deferred_call(
+//!     coordinator: &Arc<SessionCoordinator>,
+//!     call: IncomingCall
+//! ) -> Result<()> {
+//!     // Check database, apply business rules, etc.
+//!     let allowed = check_caller_permissions(&call.from).await?;
+//!     
+//!     if allowed {
+//!         let sdp_answer = MediaControl::generate_sdp_answer(
+//!             coordinator, 
+//!             &call.id, 
+//!             &call.sdp.unwrap()
+//!         ).await?;
+//!         
+//!         SessionControl::accept_incoming_call(
+//!             coordinator, 
+//!             &call, 
+//!             Some(sdp_answer)
+//!         ).await?;
+//!     } else {
+//!         SessionControl::reject_incoming_call(
+//!             coordinator, 
+//!             &call, 
+//!             "Permission denied"
+//!         ).await?;
+//!     }
+//!     
+//!     Ok(())
+//! }
+//! ```
+//! 
+//! # Example: Complete Call Flow
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! use std::time::Duration;
+//! 
+//! async fn example_call_flow(coordinator: Arc<SessionCoordinator>) -> Result<()> {
+//!     // 1. Make an outgoing call
+//!     let (sdp_offer, rtp_port) = SessionControl::prepare_outgoing_call(
+//!         &coordinator,
+//!         "unique-call-123"  
+//!     ).await?;
+//!     
+//!     let session = SessionControl::create_outgoing_call(
+//!         &coordinator,
+//!         "sip:alice@example.com",
+//!         "sip:bob@myserver.com",
+//!         Some(sdp_offer)
+//!     ).await?;
+//!     
+//!     // 2. Wait for answer
+//!     SessionControl::wait_for_answer(
+//!         &coordinator,
+//!         session.id(),
+//!         Duration::from_secs(30)
+//!     ).await?;
+//!     
+//!     // 3. Monitor call quality
+//!     let stats = MediaControl::get_media_statistics(
+//!         &coordinator,
+//!         session.id()
+//!     ).await?;
+//!     
+//!     // 4. Send DTMF tones
+//!     SessionControl::send_dtmf(
+//!         &coordinator,
+//!         session.id(),
+//!         "1234#"
+//!     ).await?;
+//!     
+//!     // 5. Hold the call
+//!     SessionControl::hold_session(
+//!         &coordinator,
+//!         session.id()
+//!     ).await?;
+//!     
+//!     // 6. Resume the call
+//!     SessionControl::resume_session(
+//!         &coordinator,
+//!         session.id()
+//!     ).await?;
+//!     
+//!     // 7. End the call
+//!     SessionControl::terminate_session(
+//!         &coordinator,
+//!         session.id()
+//!     ).await?;
+//!     
+//!     Ok(())
+//! }
+//! ```
 
 use crate::api::types::*;
 use crate::api::handlers::CallHandler;
@@ -10,10 +153,40 @@ use crate::errors::{Result, SessionError};
 use crate::manager::events::SessionEvent;
 use std::sync::Arc;
 
-/// Main session control trait
+/// Main session control trait for managing SIP sessions
+/// 
+/// This trait provides the primary interface for call control operations.
+/// All methods are async and return proper error types for robust error handling.
 pub trait SessionControl {
     /// Prepare an outgoing call by allocating resources and generating SDP
-    /// This does NOT send the INVITE yet
+    /// 
+    /// This method allocates media resources (RTP port) and generates an SDP offer,
+    /// but does NOT send the INVITE yet. This allows you to prepare multiple calls
+    /// or add custom headers before initiating.
+    /// 
+    /// # Arguments
+    /// * `from` - Local SIP URI (e.g., "sip:alice@example.com")
+    /// * `to` - Remote SIP URI (e.g., "sip:bob@example.com")
+    /// 
+    /// # Returns
+    /// * `PreparedCall` containing session ID, SDP offer, and allocated RTP port
+    /// 
+    /// # Example
+    /// ```rust
+    /// let prepared = SessionControl::prepare_outgoing_call(
+    ///     &coordinator,
+    ///     "sip:alice@ourserver.com", 
+    ///     "sip:bob@example.com"
+    /// ).await?;
+    /// 
+    /// println!("Allocated RTP port: {}", prepared.local_rtp_port);
+    /// 
+    /// // Now initiate the call
+    /// let session = SessionControl::initiate_prepared_call(
+    ///     &coordinator,
+    ///     &prepared
+    /// ).await?;
+    /// ```
     async fn prepare_outgoing_call(
         &self,
         from: &str,

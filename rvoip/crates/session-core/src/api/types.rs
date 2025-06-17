@@ -1,6 +1,84 @@
 //! Core API Types
 //!
 //! Defines the main types that developers interact with when using the session API.
+//! 
+//! # Key Types Overview
+//! 
+//! - **`SessionId`** - Unique identifier for each call session
+//! - **`CallSession`** - Represents an active call with state and metadata
+//! - **`IncomingCall`** - Data about an incoming call requiring a decision
+//! - **`CallState`** - Current state of a call (Ringing, Active, etc.)
+//! - **`CallDecision`** - How to handle an incoming call
+//! - **`MediaInfo`** - Information about media streams and quality
+//! 
+//! # Call Lifecycle Example
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! 
+//! // 1. Incoming call arrives
+//! let incoming_call = IncomingCall {
+//!     id: SessionId::new(),
+//!     from: "sip:alice@example.com".to_string(),
+//!     to: "sip:bob@ourserver.com".to_string(),
+//!     sdp: Some(sdp_offer),
+//!     headers: headers,
+//!     received_at: Instant::now(),
+//! };
+//! 
+//! // 2. Handler makes a decision
+//! let decision = CallDecision::Accept(Some(sdp_answer));
+//! 
+//! // 3. Call becomes active
+//! let session = CallSession {
+//!     id: incoming_call.id.clone(),
+//!     from: incoming_call.from,
+//!     to: incoming_call.to,
+//!     state: CallState::Active,
+//!     started_at: Some(Instant::now()),
+//! };
+//! 
+//! // 4. Monitor call state
+//! match session.state() {
+//!     CallState::Active => println!("Call is connected"),
+//!     CallState::OnHold => println!("Call is on hold"),
+//!     CallState::Failed(reason) => println!("Call failed: {}", reason),
+//!     _ => {}
+//! }
+//! ```
+//! 
+//! # Call States
+//! 
+//! ```text
+//! Initiating -> Ringing -> Active -> Terminated
+//!                |           |
+//!                |           +-----> OnHold -> Active
+//!                |           |
+//!                |           +-----> Transferring -> Terminated
+//!                |
+//!                +--------> Failed/Cancelled
+//! ```
+//! 
+//! # SDP Parsing
+//! 
+//! ```rust
+//! use rvoip_session_core::api::parse_sdp_connection;
+//! 
+//! let sdp = r#"v=0
+//! o=- 0 0 IN IP4 127.0.0.1
+//! s=-
+//! c=IN IP4 192.168.1.100
+//! t=0 0
+//! m=audio 5004 RTP/AVP 0 8 101
+//! a=rtpmap:0 PCMU/8000
+//! a=rtpmap:8 PCMA/8000
+//! a=rtpmap:101 telephone-event/8000"#;
+//! 
+//! let info = parse_sdp_connection(sdp)?;
+//! assert_eq!(info.ip, "192.168.1.100");
+//! assert_eq!(info.port, 5004);
+//! assert!(info.codecs.contains(&"PCMU".to_string()));
+//! ```
 
 use std::sync::Arc;
 use std::time::Instant;

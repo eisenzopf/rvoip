@@ -2,6 +2,139 @@
 //!
 //! Provides a fluent builder interface for creating and configuring
 //! the SessionManager with all necessary components.
+//! 
+//! # Overview
+//! 
+//! The `SessionManagerBuilder` provides a convenient way to configure and create
+//! a `SessionCoordinator` with all the necessary components. It uses the builder
+//! pattern to allow flexible configuration while ensuring all required settings
+//! are properly initialized.
+//! 
+//! # Basic Usage
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! use std::sync::Arc;
+//! 
+//! #[tokio::main]
+//! async fn main() -> Result<()> {
+//!     // Simple configuration
+//!     let coordinator = SessionManagerBuilder::new()
+//!         .with_sip_port(5060)
+//!         .build()
+//!         .await?;
+//!     
+//!     // Start using the coordinator
+//!     SessionControl::start(&coordinator).await?;
+//!     
+//!     Ok(())
+//! }
+//! ```
+//! 
+//! # Advanced Configuration
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! 
+//! async fn create_pbx_system() -> Result<Arc<SessionCoordinator>> {
+//!     // Create a routing handler
+//!     let mut router = RoutingHandler::new();
+//!     router.add_route("sip:support@", "sip:queue@support.local");
+//!     router.add_route("sip:sales@", "sip:queue@sales.local");
+//!     
+//!     // Configure the coordinator
+//!     let coordinator = SessionManagerBuilder::new()
+//!         // Network settings
+//!         .with_sip_port(5060)
+//!         .with_local_address("sip:pbx@company.com:5060")
+//!         
+//!         // Media settings
+//!         .with_media_ports(10000, 20000)  // RTP port range
+//!         
+//!         // NAT traversal (if needed)
+//!         .with_stun("stun.l.google.com:19302")
+//!         
+//!         // Call handling
+//!         .with_handler(Arc::new(router))
+//!         
+//!         .build()
+//!         .await?;
+//!     
+//!     Ok(coordinator)
+//! }
+//! ```
+//! 
+//! # Configuration Examples
+//! 
+//! ## Softphone Configuration
+//! 
+//! ```rust
+//! let coordinator = SessionManagerBuilder::new()
+//!     .with_sip_port(5060)
+//!     .with_local_address("sip:john@192.168.1.100:5060")
+//!     .with_handler(Arc::new(AutoAnswerHandler))
+//!     .build()
+//!     .await?;
+//! ```
+//! 
+//! ## Call Center Configuration
+//! 
+//! ```rust
+//! // Create queue handler
+//! let queue = Arc::new(QueueHandler::new(100));
+//! 
+//! // Create composite handler with business logic
+//! let composite = CompositeHandler::new()
+//!     .add_handler(Arc::new(BusinessHoursHandler::new(9, 17)))
+//!     .add_handler(queue.clone())
+//!     .add_handler(Arc::new(RoutingHandler::default()));
+//! 
+//! let coordinator = SessionManagerBuilder::new()
+//!     .with_sip_port(5060)
+//!     .with_local_address("sip:callcenter@company.com")
+//!     .with_media_ports(30000, 40000)  // Larger range for many calls
+//!     .with_handler(Arc::new(composite))
+//!     .build()
+//!     .await?;
+//! ```
+//! 
+//! ## Behind NAT Configuration
+//! 
+//! ```rust
+//! let coordinator = SessionManagerBuilder::new()
+//!     .with_sip_port(5060)
+//!     .with_local_address("sip:user@publicdomain.com")
+//!     .with_stun("stun.stunprotocol.org:3478")  // Enable STUN
+//!     .with_media_ports(50000, 51000)  // Specific port range
+//!     .build()
+//!     .await?;
+//! ```
+//! 
+//! # Error Handling
+//! 
+//! The builder's `build()` method can fail if:
+//! - Network ports are already in use
+//! - Invalid configuration values
+//! - System resource limitations
+//! 
+//! ```rust
+//! match SessionManagerBuilder::new()
+//!     .with_sip_port(5060)
+//!     .build()
+//!     .await 
+//! {
+//!     Ok(coordinator) => {
+//!         println!("Coordinator created successfully");
+//!     }
+//!     Err(e) => {
+//!         eprintln!("Failed to create coordinator: {}", e);
+//!         // Handle specific error types
+//!         if e.to_string().contains("Address already in use") {
+//!             eprintln!("Port 5060 is already taken, try another port");
+//!         }
+//!     }
+//! }
+//! ```
 
 use std::sync::Arc;
 use crate::api::handlers::CallHandler;
@@ -44,6 +177,20 @@ impl Default for SessionManagerConfig {
 }
 
 /// Builder for creating a configured SessionManager
+/// 
+/// This builder ensures all components are properly configured before
+/// creating the SessionCoordinator. It provides sensible defaults while
+/// allowing customization of all aspects.
+/// 
+/// # Example
+/// ```rust
+/// let coordinator = SessionManagerBuilder::new()
+///     .with_sip_port(5060)
+///     .with_local_address("sip:alice@example.com")
+///     .with_handler(Arc::new(MyCallHandler))
+///     .build()
+///     .await?;
+/// ```
 pub struct SessionManagerBuilder {
     config: SessionManagerConfig,
     handler: Option<Arc<dyn CallHandler>>,
@@ -51,6 +198,13 @@ pub struct SessionManagerBuilder {
 
 impl SessionManagerBuilder {
     /// Create a new builder with default configuration
+    /// 
+    /// Default values:
+    /// - SIP port: 5060
+    /// - Local address: "sip:user@localhost"
+    /// - Media ports: 10000-20000
+    /// - STUN: disabled
+    /// - Handler: None
     pub fn new() -> Self {
         Self {
             config: SessionManagerConfig::default(),
@@ -59,25 +213,76 @@ impl SessionManagerBuilder {
     }
     
     /// Set the SIP listening port
+    /// 
+    /// # Arguments
+    /// * `port` - The UDP port to listen on for SIP messages
+    /// 
+    /// # Example
+    /// ```rust
+    /// // Use non-standard port to avoid conflicts
+    /// let builder = SessionManagerBuilder::new()
+    ///     .with_sip_port(5061);
+    /// ```
     pub fn with_sip_port(mut self, port: u16) -> Self {
         self.config.sip_port = port;
         self
     }
     
     /// Set the local SIP address
+    /// 
+    /// This should be a full SIP URI that represents this endpoint.
+    /// 
+    /// # Arguments
+    /// * `address` - SIP URI (e.g., "sip:alice@192.168.1.100:5060")
+    /// 
+    /// # Example
+    /// ```rust
+    /// let builder = SessionManagerBuilder::new()
+    ///     .with_local_address("sip:alice@company.com:5060");
+    /// ```
     pub fn with_local_address(mut self, address: impl Into<String>) -> Self {
         self.config.local_address = address.into();
         self
     }
     
-    /// Set the media port range
+    /// Set the media port range for RTP
+    /// 
+    /// These ports are used for RTP media streams. Each call uses
+    /// one port from this range.
+    /// 
+    /// # Arguments
+    /// * `start` - First port in the range (inclusive)
+    /// * `end` - Last port in the range (inclusive)
+    /// 
+    /// # Example
+    /// ```rust
+    /// // Reserve ports 30000-31000 for RTP
+    /// let builder = SessionManagerBuilder::new()
+    ///     .with_media_ports(30000, 31000);
+    /// ```
     pub fn with_media_ports(mut self, start: u16, end: u16) -> Self {
         self.config.media_port_start = start;
         self.config.media_port_end = end;
         self
     }
     
-    /// Enable STUN with the specified server
+    /// Enable STUN for NAT traversal
+    /// 
+    /// STUN helps discover public IP addresses when behind NAT.
+    /// 
+    /// # Arguments
+    /// * `server` - STUN server address (e.g., "stun.l.google.com:19302")
+    /// 
+    /// # Example
+    /// ```rust
+    /// let builder = SessionManagerBuilder::new()
+    ///     .with_stun("stun.stunprotocol.org:3478");
+    /// ```
+    /// 
+    /// # Popular STUN Servers
+    /// - Google: "stun.l.google.com:19302"
+    /// - Twilio: "global.stun.twilio.com:3478"
+    /// - Cloudflare: "stun.cloudflare.com:3478"
     pub fn with_stun(mut self, server: impl Into<String>) -> Self {
         self.config.enable_stun = true;
         self.config.stun_server = Some(server.into());
@@ -85,12 +290,49 @@ impl SessionManagerBuilder {
     }
     
     /// Set the call event handler
+    /// 
+    /// The handler receives callbacks for incoming calls and other events.
+    /// If no handler is set, incoming calls will be automatically rejected.
+    /// 
+    /// # Arguments
+    /// * `handler` - Implementation of the CallHandler trait
+    /// 
+    /// # Example
+    /// ```rust
+    /// let handler = Arc::new(MyCallHandler::new());
+    /// let builder = SessionManagerBuilder::new()
+    ///     .with_handler(handler);
+    /// ```
     pub fn with_handler(mut self, handler: Arc<dyn CallHandler>) -> Self {
         self.handler = Some(handler);
         self
     }
     
     /// Build and initialize the SessionManager
+    /// 
+    /// This method:
+    /// 1. Creates all subsystems (dialog manager, media manager, etc.)
+    /// 2. Binds to the configured network ports
+    /// 3. Starts background tasks for processing
+    /// 4. Returns the ready-to-use SessionCoordinator
+    /// 
+    /// # Errors
+    /// 
+    /// Can fail if:
+    /// - Network ports are already in use
+    /// - Invalid configuration
+    /// - System resource limitations
+    /// 
+    /// # Example
+    /// ```rust
+    /// let coordinator = SessionManagerBuilder::new()
+    ///     .with_sip_port(5060)
+    ///     .build()
+    ///     .await?;
+    ///     
+    /// // Now ready to make/receive calls
+    /// SessionControl::start(&coordinator).await?;
+    /// ```
     pub async fn build(self) -> Result<Arc<SessionCoordinator>> {
         // Create the top-level coordinator with all subsystems
         let coordinator = SessionCoordinator::new(

@@ -1,6 +1,103 @@
 //! Session Creation API
 //!
-//! High-level API for creating new sessions.
+//! High-level API for creating new sessions and generating SDP.
+//! 
+//! # Overview
+//! 
+//! This module provides convenience functions for common session operations:
+//! - Creating outgoing calls
+//! - Generating SDP offers and answers
+//! - Parsing SDP responses
+//! - Managing session lifecycle
+//! 
+//! # Key Functions
+//! 
+//! ## Call Creation
+//! - `create_call()` - Simple outgoing call
+//! - `create_call_with_sdp()` - Call with custom SDP
+//! 
+//! ## SDP Generation
+//! - `generate_sdp_offer()` - Create SDP for outgoing calls
+//! - `generate_sdp_answer()` - Respond to incoming SDP offers
+//! - `parse_sdp_answer()` - Extract media parameters from SDP
+//! 
+//! ## Session Management
+//! - `accept_call()` - Accept incoming calls programmatically
+//! - `reject_call()` - Reject incoming calls
+//! - `find_session()` - Look up active sessions
+//! 
+//! # Example: Complete Call Flow
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! use std::sync::Arc;
+//! 
+//! async fn make_call_example(
+//!     coordinator: Arc<SessionCoordinator>
+//! ) -> Result<()> {
+//!     // 1. Generate SDP offer
+//!     let sdp_offer = generate_sdp_offer("192.168.1.100", 10000)?;
+//!     
+//!     // 2. Create call with SDP
+//!     let session = create_call_with_sdp(
+//!         &coordinator,
+//!         "sip:bob@example.com",
+//!         Some("sip:alice@ourserver.com"),
+//!         sdp_offer
+//!     ).await?;
+//!     
+//!     // 3. Wait for answer (using SessionControl)
+//!     SessionControl::wait_for_answer(
+//!         &coordinator,
+//!         &session.id,
+//!         Duration::from_secs(30)
+//!     ).await?;
+//!     
+//!     // 4. Get the answer SDP
+//!     if let Some(media_info) = SessionControl::get_media_info(
+//!         &coordinator,
+//!         &session.id
+//!     ).await? {
+//!         if let Some(remote_sdp) = media_info.remote_sdp {
+//!             // 5. Parse the answer to get media parameters
+//!             let negotiated = parse_sdp_answer(&remote_sdp)?;
+//!             println!("Call established with {}", negotiated.codec.name);
+//!             println!("Remote RTP: {}:{}", 
+//!                 negotiated.remote_ip, 
+//!                 negotiated.remote_port
+//!             );
+//!         }
+//!     }
+//!     
+//!     Ok(())
+//! }
+//! ```
+//! 
+//! # SDP Negotiation Example
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! 
+//! // In your CallHandler implementation
+//! async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+//!     if let Some(offer) = &call.sdp {
+//!         // Generate compatible answer
+//!         match generate_sdp_answer(offer, "192.168.1.100", 20000) {
+//!             Ok(answer) => {
+//!                 println!("Accepting call with SDP answer");
+//!                 CallDecision::Accept(Some(answer))
+//!             }
+//!             Err(e) => {
+//!                 println!("SDP negotiation failed: {}", e);
+//!                 CallDecision::Reject("Incompatible media".to_string())
+//!             }
+//!         }
+//!     } else {
+//!         // No SDP in offer, accept without media
+//!         CallDecision::Accept(None)
+//!     }
+//! }
+//! ```
 
 use std::sync::Arc;
 use crate::api::types::{CallSession, SessionId, CallState, IncomingCall, CallDecision};
@@ -8,6 +105,37 @@ use crate::coordinator::SessionCoordinator;
 use crate::errors::{Result, SessionError};
 
 /// Create an outgoing call
+/// 
+/// This is a convenience function for simple call creation. It automatically
+/// generates an SDP offer with default media capabilities.
+/// 
+/// # Arguments
+/// * `manager` - The session coordinator instance
+/// * `to` - Destination SIP URI (e.g., "sip:bob@example.com")
+/// * `from` - Optional source SIP URI (defaults to "sip:user@localhost")
+/// 
+/// # Example
+/// ```rust
+/// use rvoip_session_core::api::*;
+/// 
+/// async fn quick_call(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
+///     // Simple call with defaults
+///     let session = create_call(
+///         coordinator,
+///         "sip:alice@example.com",
+///         None
+///     ).await?;
+///     
+///     // Call with specific from address
+///     let session2 = create_call(
+///         coordinator,
+///         "sip:bob@example.com",
+///         Some("sip:john@mycompany.com")
+///     ).await?;
+///     
+///     Ok(())
+/// }
+/// ```
 pub async fn create_call(
     manager: &Arc<SessionCoordinator>,
     to: &str,
@@ -18,6 +146,38 @@ pub async fn create_call(
 }
 
 /// Create an outgoing call with custom SDP
+/// 
+/// Use this when you need specific media capabilities or have already
+/// generated an SDP offer using `generate_sdp_offer()`.
+/// 
+/// # Arguments
+/// * `manager` - The session coordinator instance
+/// * `to` - Destination SIP URI
+/// * `from` - Optional source SIP URI
+/// * `sdp` - Pre-generated SDP offer
+/// 
+/// # Example
+/// ```rust
+/// use rvoip_session_core::api::*;
+/// 
+/// async fn call_with_specific_media(
+///     coordinator: &Arc<SessionCoordinator>
+/// ) -> Result<()> {
+///     // Generate SDP with specific port
+///     let sdp = generate_sdp_offer("192.168.1.100", 15000)?;
+///     
+///     // Create call with that SDP
+///     let session = create_call_with_sdp(
+///         coordinator,
+///         "sip:conference@server.com",
+///         Some("sip:participant@client.com"),
+///         sdp
+///     ).await?;
+///     
+///     println!("Call created with custom media on port 15000");
+///     Ok(())
+/// }
+/// ```
 pub async fn create_call_with_sdp(
     manager: &Arc<SessionCoordinator>,
     to: &str,
@@ -126,6 +286,31 @@ pub fn parse_sdp_answer(answer_sdp: &str) -> Result<crate::media::config::Negoti
 /// Create an incoming call object from SIP INVITE request
 /// 
 /// This is typically called internally when a SIP INVITE is received.
+/// You usually won't need to call this directly - incoming calls are
+/// handled through the CallHandler interface.
+/// 
+/// # Arguments
+/// * `from` - Caller's SIP URI
+/// * `to` - Called party's SIP URI
+/// * `sdp` - Optional SDP offer from the caller
+/// * `headers` - SIP headers from the INVITE
+/// 
+/// # Example
+/// ```rust
+/// use rvoip_session_core::api::*;
+/// use std::collections::HashMap;
+/// 
+/// // Simulate an incoming call for testing
+/// let mut headers = HashMap::new();
+/// headers.insert("User-Agent".to_string(), "TestPhone/1.0".to_string());
+/// 
+/// let call = create_incoming_call(
+///     "sip:alice@example.com",
+///     "sip:bob@ourserver.com",
+///     Some(sdp_offer),
+///     headers
+/// );
+/// ```
 pub fn create_incoming_call(
     from: &str,
     to: &str,
@@ -143,6 +328,23 @@ pub fn create_incoming_call(
 }
 
 /// Helper function to create a CallSession from an accepted IncomingCall
+/// 
+/// Converts an IncomingCall into an active CallSession after acceptance.
+/// This is typically used internally after a call is accepted.
+/// 
+/// # Example
+/// ```rust
+/// use rvoip_session_core::api::*;
+/// 
+/// fn handle_accepted_call(
+///     incoming: &IncomingCall,
+///     coordinator: Arc<SessionCoordinator>
+/// ) -> CallSession {
+///     let session = create_call_session(incoming, coordinator);
+///     println!("Call {} is now active", session.id());
+///     session
+/// }
+/// ```
 pub fn create_call_session(
     incoming: &IncomingCall,
     _manager: Arc<SessionCoordinator>,
@@ -157,16 +359,97 @@ pub fn create_call_session(
 }
 
 /// Get statistics about active sessions
+/// 
+/// Returns aggregate statistics about all sessions managed by this coordinator.
+/// 
+/// # Example
+/// ```rust
+/// use rvoip_session_core::api::*;
+/// 
+/// async fn monitor_system(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
+///     let stats = get_session_stats(coordinator).await?;
+///     
+///     println!("System Statistics:");
+///     println!("  Total sessions: {}", stats.total_sessions);
+///     println!("  Active calls: {}", stats.active_sessions);
+///     println!("  Failed calls: {}", stats.failed_sessions);
+///     
+///     if let Some(avg_duration) = stats.average_duration {
+///         println!("  Average duration: {:?}", avg_duration);
+///     }
+///     
+///     Ok(())
+/// }
+/// ```
 pub async fn get_session_stats(session_manager: &Arc<SessionCoordinator>) -> Result<crate::api::types::SessionStats> {
     session_manager.get_stats().await
 }
 
 /// List all active sessions
+/// 
+/// Returns the IDs of all currently active sessions. Useful for monitoring
+/// and administrative interfaces.
+/// 
+/// # Example
+/// ```rust
+/// use rvoip_session_core::api::*;
+/// 
+/// async fn show_active_calls(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
+///     let sessions = list_active_sessions(coordinator).await?;
+///     
+///     println!("Active calls: {}", sessions.len());
+///     for session_id in sessions {
+///         if let Some(session) = find_session(coordinator, &session_id).await? {
+///             println!("  {} -> {} ({})", 
+///                 session.from, 
+///                 session.to, 
+///                 session.state()
+///             );
+///         }
+///     }
+///     
+///     Ok(())
+/// }
+/// ```
 pub async fn list_active_sessions(session_manager: &Arc<SessionCoordinator>) -> Result<Vec<SessionId>> {
     session_manager.list_active_sessions().await
 }
 
 /// Find a session by ID
+/// 
+/// Look up detailed information about a specific session.
+/// 
+/// # Arguments
+/// * `session_manager` - The coordinator instance
+/// * `session_id` - ID of the session to find
+/// 
+/// # Returns
+/// * `Some(CallSession)` if found
+/// * `None` if not found
+/// 
+/// # Example
+/// ```rust
+/// use rvoip_session_core::api::*;
+/// 
+/// async fn check_call_status(
+///     coordinator: &Arc<SessionCoordinator>,
+///     session_id: &SessionId
+/// ) -> Result<()> {
+///     match find_session(coordinator, session_id).await? {
+///         Some(session) => {
+///             println!("Call {} is {}", session.id(), session.state());
+///             if session.is_active() {
+///                 println!("Call is connected!");
+///             }
+///         }
+///         None => {
+///             println!("Call not found - may have ended");
+///         }
+///     }
+///     
+///     Ok(())
+/// }
+/// ```
 pub async fn find_session(session_manager: &Arc<SessionCoordinator>, session_id: &SessionId) -> Result<Option<CallSession>> {
     session_manager.find_session(session_id).await
 }
