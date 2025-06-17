@@ -76,29 +76,46 @@ analyze_results() {
     
     log_info "Checking server log for successful calls..."
     # Strip ANSI color codes before grepping
-    SERVER_CALLS=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "uas_server.*Incoming call from" | wc -l | tr -d ' ')
-    SERVER_ACCEPTED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "calls_accepted += 1" | wc -l | tr -d ' ')
-    SERVER_ENDED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "uas_server.*Call.*ended:" | wc -l | tr -d ' ')
+    SERVER_CALLS=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "uas_server: Incoming call from" | wc -l | tr -d ' ')
+    SERVER_ACCEPTED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "Successfully answered incoming call" | wc -l | tr -d ' ')
+    SERVER_ENDED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "uas_server: Call.*ended:" | wc -l | tr -d ' ')
     
     log_info "Checking client log for successful calls..."
     CLIENT_INITIATED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Making call.*of" | wc -l | tr -d ' ')
-    CLIENT_CONNECTED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "uac_client.*Call.*established" | wc -l | tr -d ' ')
+    CLIENT_CONNECTED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Call.*established and active" | wc -l | tr -d ' ')
     CLIENT_ENDED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Terminated session:" | wc -l | tr -d ' ')
     CLIENT_SUCCESS=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "All calls completed successfully" | wc -l | tr -d ' ')
     
-    log_info "Server received $SERVER_CALLS calls"
-    log_info "Server accepted $SERVER_ACCEPTED calls"
-    log_info "Server ended $SERVER_ENDED calls"
-    log_info "Client initiated $CLIENT_INITIATED calls"
-    log_info "Client connected $CLIENT_CONNECTED calls"
-    log_info "Client ended $CLIENT_ENDED calls"
+    log_info "Test Metrics:"
+    log_info "  Server received:  $SERVER_CALLS calls (expected: $NUM_CALLS)"
+    log_info "  Server accepted:  $SERVER_ACCEPTED calls (expected: $NUM_CALLS)"
+    log_info "  Server ended:     $SERVER_ENDED calls (expected: $NUM_CALLS)"
+    log_info "  Client initiated: $CLIENT_INITIATED calls (expected: $NUM_CALLS)"
+    log_info "  Client connected: $CLIENT_CONNECTED calls (expected: $NUM_CALLS)"
+    log_info "  Client ended:     $CLIENT_ENDED calls (expected: $NUM_CALLS)"
     
     # Determine test success
-    if [ "$SERVER_CALLS" -eq "$NUM_CALLS" ] && [ "$CLIENT_ENDED" -eq "$NUM_CALLS" ] && [ "$CLIENT_SUCCESS" -eq "1" ]; then
-        log_success "Test PASSED: All $NUM_CALLS calls were successful"
+    if [ "$SERVER_CALLS" -eq "$NUM_CALLS" ] && \
+       [ "$SERVER_ACCEPTED" -eq "$NUM_CALLS" ] && \
+       [ "$CLIENT_CONNECTED" -eq "$NUM_CALLS" ] && \
+       [ "$CLIENT_ENDED" -eq "$NUM_CALLS" ] && \
+       [ "$CLIENT_SUCCESS" -eq "1" ]; then
+        log_success "Test PASSED: All $NUM_CALLS calls were successfully established and completed"
         TEST_SUCCESS=0
     else
-        log_error "Test FAILED: Not all calls were successful"
+        log_error "Test FAILED: Not all calls were successfully established"
+        if [ "$SERVER_CALLS" -ne "$NUM_CALLS" ]; then
+            log_error "  - Server received $SERVER_CALLS calls (expected $NUM_CALLS)"
+        fi
+        if [ "$SERVER_ACCEPTED" -ne "$NUM_CALLS" ]; then
+            log_error "  - Server accepted $SERVER_ACCEPTED calls (expected $NUM_CALLS)"
+        fi
+        if [ "$CLIENT_CONNECTED" -ne "$NUM_CALLS" ]; then
+            log_error "  - Client connected $CLIENT_CONNECTED calls (expected $NUM_CALLS)"
+        fi
+        if [ "$CLIENT_ENDED" -ne "$NUM_CALLS" ]; then
+            log_error "  - Client ended $CLIENT_ENDED calls (expected $NUM_CALLS)"
+        fi
         TEST_SUCCESS=1
     fi
     
