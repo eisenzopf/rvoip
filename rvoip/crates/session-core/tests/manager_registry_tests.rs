@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for SessionRegistry Operations
-//!
-//! Tests the session registry functionality including session storage,
-//! lookup operations, statistics tracking, and registry management.
+// Tests for SessionRegistry Operations
+//
+// Tests the session registry functionality including session storage,
+// lookup operations, statistics tracking, and registry management.
 
 mod common;
 

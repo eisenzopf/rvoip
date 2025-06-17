@@ -1,11 +1,11 @@
 use rvoip_session_core::api::control::SessionControl;
-//! DTMF Integration Tests
-//!
-//! Tests the coordination between SIP DTMF signaling (INFO, RFC2833) and
-//! media-core DTMF audio processing. Validates both in-band and out-of-band
-//! DTMF detection and generation.
-//!
-//! **CRITICAL**: All tests use REAL audio DTMF generation/detection - no mocks.
+// DTMF Integration Tests
+//
+// Tests the coordination between SIP DTMF signaling (INFO, RFC2833) and
+// media-core DTMF audio processing. Validates both in-band and out-of-band
+// DTMF detection and generation.
+//
+// **CRITICAL**: All tests use REAL audio DTMF generation/detection - no mocks.
 
 use std::sync::Arc;
 use std::time::Duration;

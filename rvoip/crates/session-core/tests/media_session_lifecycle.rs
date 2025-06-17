@@ -1,11 +1,11 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Media Session Lifecycle Integration Tests
-//!
-//! Tests the coordination between SIP session lifecycle events and media-core
-//! session management. Validates that MediaEngine sessions are properly created,
-//! managed, and destroyed in sync with SIP dialog state changes.
-//!
-//! **CRITICAL**: All tests use REAL media-core components - no mocks.
+// Media Session Lifecycle Integration Tests
+//
+// Tests the coordination between SIP session lifecycle events and media-core
+// session management. Validates that MediaEngine sessions are properly created,
+// managed, and destroyed in sync with SIP dialog state changes.
+//
+// **CRITICAL**: All tests use REAL media-core components - no mocks.
 
 use std::sync::Arc;
 use std::time::Duration;

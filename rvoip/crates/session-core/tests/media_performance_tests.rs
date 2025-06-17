@@ -1,11 +1,11 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Media Performance Integration Tests
-//!
-//! Tests the performance characteristics of session-core integration with
-//! media-core. Validates latency, throughput, memory usage, and scalability
-//! under realistic load conditions.
-//!
-//! **CRITICAL**: All tests use REAL MediaEngine and measure actual performance.
+// Media Performance Integration Tests
+//
+// Tests the performance characteristics of session-core integration with
+// media-core. Validates latency, throughput, memory usage, and scalability
+// under realistic load conditions.
+//
+// **CRITICAL**: All tests use REAL MediaEngine and measure actual performance.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -386,28 +386,121 @@ async fn test_error_handling_capabilities() {
     let fake_session_id = SessionId::new();
     
     // Test that all operations gracefully handle non-existent sessions
-    // Note: hold, resume, transfer, and update_media are TODO implementations and currently return Ok(())
     let hold_result = manager.hold_session(&fake_session_id).await;
-    // TODO: When implemented, this should return error for non-existent session
-    assert!(hold_result.is_ok(), "Hold is TODO implementation, returns Ok for now");
+    assert!(hold_result.is_err(), "Hold should return error for non-existent session");
+    assert!(matches!(hold_result.unwrap_err(), SessionError::SessionNotFound(_)));
     
     let resume_result = manager.resume_session(&fake_session_id).await;
-    // TODO: When implemented, this should return error for non-existent session
-    assert!(resume_result.is_ok(), "Resume is TODO implementation, returns Ok for now");
+    assert!(resume_result.is_err(), "Resume should return error for non-existent session");
+    assert!(matches!(resume_result.unwrap_err(), SessionError::SessionNotFound(_)));
     
     let transfer_result = manager.transfer_session(&fake_session_id, "sip:target@example.com").await;
-    // TODO: When implemented, this should return error for non-existent session
-    assert!(transfer_result.is_ok(), "Transfer is TODO implementation, returns Ok for now");
+    assert!(transfer_result.is_err(), "Transfer should return error for non-existent session");
+    assert!(matches!(transfer_result.unwrap_err(), SessionError::SessionNotFound(_)));
     
     let dtmf_result = manager.send_dtmf(&fake_session_id, "123").await;
     assert!(dtmf_result.is_err(), "DTMF should return error for non-existent session");
+    assert!(matches!(dtmf_result.unwrap_err(), SessionError::SessionNotFound(_)));
     
     let media_result = manager.update_media(&fake_session_id, "fake SDP").await;
-    // TODO: When implemented, this should return error for non-existent session
-    assert!(media_result.is_ok(), "Update media is TODO implementation, returns Ok for now");
+    assert!(media_result.is_err(), "Media update should return error for non-existent session");
+    assert!(matches!(media_result.unwrap_err(), SessionError::SessionNotFound(_)));
     
     let terminate_result = manager.terminate_session(&fake_session_id).await;
     assert!(terminate_result.is_err(), "Terminate should return error for non-existent session");
+    assert!(matches!(terminate_result.unwrap_err(), SessionError::SessionNotFound(_)));
+    
+    manager.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_hold_resume_functionality() {
+    let manager = create_capabilities_test_manager(true, 5065).await.unwrap();
+    
+    manager.start().await.unwrap();
+    
+    // Create an outgoing call
+    let call = manager.create_outgoing_call(
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+        Some("Test SDP".to_string())
+    ).await.unwrap();
+    
+    let session_id = call.id().clone();
+    
+    // Try to hold a non-active session (should fail)
+    let hold_result = manager.hold_session(&session_id).await;
+    assert!(hold_result.is_err(), "Hold should fail for non-active session");
+    
+    // Try to resume a non-held session (should fail) 
+    let resume_result = manager.resume_session(&session_id).await;
+    assert!(resume_result.is_err(), "Resume should fail for non-held session");
+    
+    manager.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_media_info_retrieval() {
+    let manager = create_capabilities_test_manager(true, 5066).await.unwrap();
+    
+    manager.start().await.unwrap();
+    
+    // Create an outgoing call
+    let call = manager.create_outgoing_call(
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+        Some("Test SDP".to_string())
+    ).await.unwrap();
+    
+    let session_id = call.id().clone();
+    
+    // Get media info (should work even for non-active sessions)
+    let media_info_result = manager.get_media_info(&session_id).await;
+    // Media info might not exist yet for sessions that haven't been established
+    assert!(media_info_result.is_ok(), "Getting media info should not fail");
+    
+    // Test with non-existent session
+    let fake_session_id = SessionId::new();
+    let media_info_result = manager.get_media_info(&fake_session_id).await;
+    assert!(media_info_result.is_err(), "Getting media info should fail for non-existent session");
+    assert!(matches!(media_info_result.unwrap_err(), SessionError::SessionNotFound(_)));
+    
+    manager.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_audio_mute_video_enable() {
+    let manager = create_capabilities_test_manager(true, 5067).await.unwrap();
+    
+    manager.start().await.unwrap();
+    
+    // Create an outgoing call
+    let call = manager.create_outgoing_call(
+        "sip:alice@example.com",
+        "sip:bob@example.com",
+        Some("Test SDP".to_string())
+    ).await.unwrap();
+    
+    let session_id = call.id().clone();
+    
+    // Try to mute audio on non-active session (should fail)
+    let mute_result = manager.set_audio_muted(&session_id, true).await;
+    assert!(mute_result.is_err(), "Audio mute should fail for non-active session");
+    
+    // Try to enable video on non-active session (should fail)
+    let video_result = manager.set_video_enabled(&session_id, true).await;
+    assert!(video_result.is_err(), "Video enable should fail for non-active session");
+    
+    // Test with non-existent session
+    let fake_session_id = SessionId::new();
+    
+    let mute_result = manager.set_audio_muted(&fake_session_id, true).await;
+    assert!(mute_result.is_err(), "Audio mute should fail for non-existent session");
+    assert!(matches!(mute_result.unwrap_err(), SessionError::SessionNotFound(_)));
+    
+    let video_result = manager.set_video_enabled(&fake_session_id, true).await;
+    assert!(video_result.is_err(), "Video enable should fail for non-existent session");
+    assert!(matches!(video_result.unwrap_err(), SessionError::SessionNotFound(_)));
     
     manager.stop().await.unwrap();
 } 

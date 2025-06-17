@@ -1,11 +1,11 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Media Codec Negotiation Integration Tests
-//!
-//! Tests the coordination between SIP SDP offer/answer and media-core codec
-//! negotiation. Validates that codec selection works properly between SIP
-//! signaling and real MediaEngine codec capabilities.
-//!
-//! **CRITICAL**: All tests use REAL codecs - no mocks.
+// Media Codec Negotiation Integration Tests
+//
+// Tests the coordination between SIP SDP offer/answer and media-core codec
+// negotiation. Validates that codec selection works properly between SIP
+// signaling and real MediaEngine codec capabilities.
+//
+// **CRITICAL**: All tests use REAL codecs - no mocks.
 
 use std::sync::Arc;
 use std::time::Duration;

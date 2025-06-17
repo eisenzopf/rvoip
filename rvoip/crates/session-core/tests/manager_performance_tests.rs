@@ -280,7 +280,7 @@ async fn test_load_balancing_simulation() {
             from_uri_base: format!("load-test-{}@localhost", i),
             ..ManagerTestConfig::default()
         };
-//         let (handler, _) = EventTrackingHandler::new();
+        let (handler, _) = EventTrackingHandler::new();
         let manager = create_test_session_manager_with_config(config, Arc::new(handler)).await.unwrap();
         managers.push(manager);
     }

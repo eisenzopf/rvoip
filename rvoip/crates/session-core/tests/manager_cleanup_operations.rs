@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for CleanupManager Operations
-//!
-//! Tests the cleanup manager functionality including resource cleanup,
-//! session timeouts, and general cleanup management.
+// Tests for CleanupManager Operations
+//
+// Tests the cleanup manager functionality including resource cleanup,
+// session timeouts, and general cleanup management.
 
 mod common;
 

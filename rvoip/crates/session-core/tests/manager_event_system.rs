@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for SessionEventProcessor Operations
-//!
-//! Tests the session event system functionality including event publishing,
-//! subscribing, filtering, and integration with the infra-common event system.
+// Tests for SessionEventProcessor Operations
+//
+// Tests the session event system functionality including event publishing,
+// subscribing, filtering, and integration with the infra-common event system.
 
 mod common;
 

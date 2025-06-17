@@ -1,8 +1,8 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Tests for Manager Error Handling
-//!
-//! Tests error conditions, edge cases, failure scenarios, and error recovery
-//! for all manager components including graceful degradation and resilience.
+// Tests for Manager Error Handling
+//
+// Tests error conditions, edge cases, failure scenarios, and error recovery
+// for all manager components including graceful degradation and resilience.
 
 mod common;
 
@@ -29,8 +29,8 @@ async fn test_session_manager_invalid_operations() {
         assert!(manager.hold_session(&fake_session_id).await.is_err());
         assert!(manager.resume_session(&fake_session_id).await.is_err());
         assert!(manager.transfer_session(&fake_session_id, "sip:target@localhost").await.is_err());
-        assert!(// manager.send_dtmf(&fake_session_id, "123").await.is_err());
-        assert!(// manager.update_media(&fake_session_id, "fake SDP").await.is_err());
+        // assert!(manager.send_dtmf(&fake_session_id, "123").await.is_err());
+        // assert!(manager.update_media(&fake_session_id, "fake SDP").await.is_err());
         assert!(manager.terminate_session(&fake_session_id).await.is_err());
         
         // Find session should return None without error
@@ -448,7 +448,7 @@ async fn test_integration_error_recovery() {
         
         // Operations on terminated session should fail gracefully
         assert!(helper.manager.hold_session(call1.id()).await.is_err());
-        assert!(helper.// manager.send_dtmf(call1.id(), "123").await.is_err());
+        // assert!(helper.manager.send_dtmf(call1.id(), "123").await.is_err());
         
         // Other sessions should still work
         assert!(helper.manager.hold_session(call2.id()).await.is_ok());
@@ -620,8 +620,8 @@ async fn test_malformed_data_handling() {
             ];
             
             for sdp in malformed_sdps {
-                let result = // manager.update_media(session_id, sdp).await;
-                println!("Malformed SDP result: {:?}", result.is_ok());
+                // let result = manager.update_media(session_id, sdp).await;
+                // println!("Malformed SDP result: {:?}", result.is_ok());
             }
             
             let _ = manager.terminate_session(session_id).await;

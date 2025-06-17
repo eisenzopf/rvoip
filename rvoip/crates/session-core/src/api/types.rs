@@ -84,9 +84,12 @@ impl CallSession {
     }
 
     /// Wait for the call to be answered
+    /// Note: Use SessionManager::wait_for_answer() method instead
     pub async fn wait_for_answer(&self) -> Result<()> {
-        // TODO: Implement waiting for answer
-        todo!("wait_for_answer implementation")
+        // This method requires access to the event system
+        Err(crate::errors::SessionError::Other(
+            "Use SessionManager::wait_for_answer() method instead".to_string()
+        ))
     }
 
     /// Hold the call

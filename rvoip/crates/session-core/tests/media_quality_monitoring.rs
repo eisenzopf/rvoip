@@ -1,11 +1,11 @@
 use rvoip_session_core::api::control::SessionControl;
-//! Media Quality Monitoring Integration Tests
-//!
-//! Tests the integration between SIP session management and media-core quality
-//! monitoring. Validates real-time quality metrics collection, MOS scoring,
-//! and quality-based adaptations.
-//!
-//! **CRITICAL**: All tests use REAL QualityMonitor - no mocks.
+// Media Quality Monitoring Integration Tests
+//
+// Tests the integration between SIP session management and media-core quality
+// monitoring. Validates real-time quality metrics collection, MOS scoring,
+// and quality-based adaptations.
+//
+// **CRITICAL**: All tests use REAL QualityMonitor - no mocks.
 
 use std::sync::Arc;
 use std::time::Duration;
