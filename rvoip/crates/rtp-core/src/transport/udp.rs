@@ -787,7 +787,7 @@ mod tests {
         match tokio::time::timeout(tokio::time::Duration::from_millis(500), events.recv()).await {
             Ok(Ok(event)) => {
                 match event {
-                    RtpEvent::MediaReceived { payload_type, timestamp, marker, payload: received_payload, source } => {
+                    RtpEvent::MediaReceived { payload_type, timestamp, marker, payload: received_payload, source, .. } => {
                         assert_eq!(payload_type, 96);
                         assert_eq!(timestamp, 12345);
                         assert_eq!(marker, false);

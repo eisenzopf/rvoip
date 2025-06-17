@@ -544,12 +544,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_mikey_initialization_placeholder() {
-        // Test MIKEY initialization (currently returns error as placeholder)
+        // Test MIKEY initialization - now fully implemented
         let key = test_srtp_key();
         let context = SecurityContextFactory::create_mikey_psk_context(key).unwrap();
         
         let result = context.initialize().await;
-        assert!(result.is_err()); // Should error until MIKEY is fully implemented
+        assert!(result.is_ok()); // MIKEY is now fully implemented
+        assert_eq!(context.get_state().await, SecurityState::Negotiating);
     }
 
     #[tokio::test]
