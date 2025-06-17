@@ -286,7 +286,7 @@ async fn test_session_manager_config_default() {
         
         // Test default values
         assert_eq!(config.sip_port, 5060);
-        assert_eq!(config.local_address, "user@localhost");
+        assert_eq!(config.local_address, "sip:user@localhost");
         assert_eq!(config.media_port_start, 10000);
         assert_eq!(config.media_port_end, 20000);
         assert_eq!(config.enable_stun, false);

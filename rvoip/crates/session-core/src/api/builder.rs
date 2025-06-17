@@ -34,7 +34,7 @@ impl Default for SessionManagerConfig {
     fn default() -> Self {
         Self {
             sip_port: 5060,
-            local_address: "user@localhost".to_string(),
+            local_address: "sip:user@localhost".to_string(),
             media_port_start: 10000,
             media_port_end: 20000,
             enable_stun: false,
