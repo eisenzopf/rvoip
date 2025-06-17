@@ -9,28 +9,32 @@ A practical guide with recipes for common VoIP scenarios using the session-core 
 3. [Handling Incoming Calls](#handling-incoming-calls)
 4. [Media Control](#media-control)
 5. [Call Features](#call-features)
-6. [Advanced Patterns](#advanced-patterns)
-7. [Error Handling](#error-handling)
-8. [Performance & Monitoring](#performance--monitoring)
+6. [Bridge Management](#bridge-management)
+7. [Advanced Patterns](#advanced-patterns)
+8. [Error Handling](#error-handling)
+9. [Performance & Monitoring](#performance--monitoring)
 
 ## Getting Started
 
 ### Basic Setup
 
 ```rust
-use rvoip_session_core::api::*;  // Single import for everything
+use rvoip_session_core::api::*;
 use std::sync::Arc;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<()> {
     // Initialize logging
-    tracing_subscriber::fmt().init();
+    tracing_subscriber::fmt()
+        .with_env_filter("rvoip=debug")
+        .init();
     
     // Build a session coordinator
     let coordinator = SessionManagerBuilder::new()
         .with_sip_port(5060)
         .with_local_address("sip:user@192.168.1.100:5060")
-        .with_media_ports(10000, 20000)  // RTP port range
+        .with_rtp_port_range(10000, 20000)  // RTP port range
+        .with_handler(Arc::new(AutoAnswerHandler))
         .build()
         .await?;
     
@@ -51,55 +55,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 async fn make_simple_call(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
-    // Prepare the call (allocates media resources)
-    let (sdp_offer, rtp_port) = SessionControl::prepare_outgoing_call(
-        coordinator, 
-        "unique-call-id"
-    ).await?;
-    
-    // Create the call with SDP
+    // Create call with auto-generated SDP
     let session = SessionControl::create_outgoing_call(
         coordinator,
-        "sip:alice@example.com",     // to
-        "sip:bob@192.168.1.100",     // from
-        Some(sdp_offer)
+        "sip:alice@example.com",     // from
+        "sip:bob@192.168.1.100",     // to
+        None                         // SDP will be auto-generated
     ).await?;
     
-    info!("Call created: {}", session.id());
+    println!("Call created: {}", session.id());
     
-    // Wait for answer
-    let answered_session = SessionControl::wait_for_answer(
+    // Wait for answer (with timeout)
+    SessionControl::wait_for_answer(
         coordinator, 
         session.id(), 
         Duration::from_secs(30)
     ).await?;
     
-    // Handle the call...
+    println!("Call answered!");
+    
+    // Call is now active, media flows automatically
     Ok(())
 }
 ```
 
-### Recipe 2: Call with Custom Headers
+### Recipe 2: Call with Prepared Media
 
 ```rust
-async fn make_call_with_headers(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
-    // Use the builder pattern for more control
-    let mut builder = CallBuilder::new()
-        .to("sip:alice@example.com")
-        .from("sip:bob@192.168.1.100")
-        .with_header("X-Custom-ID", "12345")
-        .with_header("X-Department", "Sales");
-    
-    // Add SDP if needed
-    let (sdp_offer, _) = SessionControl::prepare_outgoing_call(
-        coordinator, 
-        "call-123"
-    ).await?;
-    builder = builder.with_sdp(sdp_offer);
-    
-    let session = SessionControl::create_outgoing_call_with_builder(
+async fn make_call_with_prepared_media(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
+    // Prepare call (allocates RTP port and generates SDP)
+    let prepared = SessionControl::prepare_outgoing_call(
         coordinator,
-        builder
+        "sip:alice@example.com",
+        "sip:bob@192.168.1.100"
+    ).await?;
+    
+    println!("Allocated RTP port: {}", prepared.local_rtp_port);
+    println!("Generated SDP:\n{}", prepared.sdp_offer);
+    
+    // Initiate the call with prepared resources
+    let session = SessionControl::initiate_prepared_call(
+        coordinator,
+        &prepared
+    ).await?;
+    
+    // Wait for answer
+    SessionControl::wait_for_answer(
+        coordinator,
+        &session.id,
+        Duration::from_secs(30)
     ).await?;
     
     Ok(())
@@ -108,146 +112,232 @@ async fn make_call_with_headers(coordinator: &Arc<SessionCoordinator>) -> Result
 
 ## Handling Incoming Calls
 
-### Recipe 3: Auto-Accept Pattern (CallHandler)
+### Recipe 3: Simple Auto-Accept Handler
 
 ```rust
 #[derive(Debug)]
-struct AutoAcceptHandler;
+struct SimpleAcceptHandler;
 
 #[async_trait::async_trait]
-impl CallHandler for AutoAcceptHandler {
+impl CallHandler for SimpleAcceptHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-        info!("Incoming call from {}", call.from);
+        println!("Incoming call from: {}", call.from);
         
-        // Auto-accept with SDP answer
-        if let Some(offer) = &call.sdp {
-            // In real app, generate answer based on offer
-            let answer = generate_compatible_answer(offer);
-            CallDecision::Accept(Some(answer))
-        } else {
-            CallDecision::Accept(None)
-        }
+        // Accept all calls
+        CallDecision::Accept(None)  // SDP answer will be auto-generated
     }
     
-    async fn on_call_established(&self, session: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
-        info!("Call established: {}", session.id());
+    async fn on_call_ended(&self, call: CallSession, reason: &str) {
+        println!("Call {} ended: {}", call.id(), reason);
+    }
+    
+    async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
+        println!("Call {} established", call.id());
         
-        // Set up media flow
-        if let Some(sdp) = remote_sdp {
-            if let Ok(info) = parse_sdp_connection(&sdp) {
-                let remote_addr = format!("{}:{}", info.ip, info.port);
-                // Media flow setup would go here
-            }
-        }
+        // Media flow is automatically set up by session-core
+        // No need to manually establish media flow
     }
 }
 ```
 
-### Recipe 4: Deferred Decision Pattern
+### Recipe 4: Conditional Accept Handler
 
 ```rust
 #[derive(Debug)]
-struct DeferredHandler {
+struct ConditionalHandler {
+    allowed_domains: Vec<String>,
+}
+
+#[async_trait::async_trait]
+impl CallHandler for ConditionalHandler {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+        // Extract domain from caller
+        let caller_domain = call.from.split('@').nth(1).unwrap_or("");
+        
+        if self.allowed_domains.iter().any(|d| caller_domain.contains(d)) {
+            println!("Accepting call from trusted domain: {}", caller_domain);
+            CallDecision::Accept(None)
+        } else {
+            println!("Rejecting call from untrusted domain: {}", caller_domain);
+            CallDecision::Reject("Untrusted domain".to_string())
+        }
+    }
+    
+    async fn on_call_ended(&self, call: CallSession, reason: &str) {
+        println!("Call ended: {}", reason);
+    }
+}
+```
+
+### Recipe 5: Deferred Decision with Database Lookup
+
+```rust
+#[derive(Debug)]
+struct DatabaseHandler {
     pending_calls: Arc<Mutex<Vec<IncomingCall>>>,
 }
 
 #[async_trait::async_trait]
-impl CallHandler for DeferredHandler {
+impl CallHandler for DatabaseHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-        info!("Deferring decision for call from {}", call.from);
+        println!("Deferring call from {} for database lookup", call.from);
         
-        // Store for later processing
-        self.pending_calls.lock().await.push(call);
+        // Store for async processing
+        self.pending_calls.lock().unwrap().push(call);
         
-        // Defer the decision
         CallDecision::Defer
+    }
+    
+    async fn on_call_ended(&self, call: CallSession, reason: &str) {
+        // Update call records
+        update_call_record(&call.id, reason).await;
     }
 }
 
-// Later, in your business logic:
+// Process deferred calls in background
 async fn process_pending_calls(
-    coordinator: &Arc<SessionCoordinator>,
-    handler: &DeferredHandler
-) -> Result<()> {
-    let calls = handler.pending_calls.lock().await.drain(..).collect::<Vec<_>>();
-    
-    for call in calls {
-        // Check business rules (database, permissions, etc.)
-        if should_accept_call(&call).await? {
-            // Generate SDP answer
-            let answer = if let Some(offer) = &call.sdp {
-                Some(MediaControl::generate_sdp_answer(coordinator, &call.id, offer).await?)
-            } else {
-                None
-            };
-            
-            // Accept the call
-            SessionControl::accept_incoming_call(coordinator, &call, answer).await?;
-        } else {
-            // Reject the call
-            SessionControl::reject_incoming_call(coordinator, &call, "Forbidden").await?;
+    coordinator: Arc<SessionCoordinator>,
+    handler: Arc<DatabaseHandler>
+) {
+    loop {
+        // Get pending calls
+        let calls = {
+            let mut pending = handler.pending_calls.lock().unwrap();
+            pending.drain(..).collect::<Vec<_>>()
+        };
+        
+        for call in calls {
+            // Database lookup
+            match lookup_caller_in_database(&call.from).await {
+                Ok(caller_info) if caller_info.is_authorized => {
+                    // Generate SDP answer if needed
+                    let sdp_answer = if let Some(offer) = &call.sdp {
+                        Some(MediaControl::generate_sdp_answer(
+                            &coordinator,
+                            &call.id,
+                            offer
+                        ).await?)
+                    } else {
+                        None
+                    };
+                    
+                    // Accept the call
+                    SessionControl::accept_incoming_call(
+                        &coordinator,
+                        &call,
+                        sdp_answer
+                    ).await?;
+                    
+                    println!("Accepted call from authorized user: {}", call.from);
+                }
+                _ => {
+                    // Reject unauthorized
+                    SessionControl::reject_incoming_call(
+                        &coordinator,
+                        &call,
+                        "Not authorized"
+                    ).await?;
+                    
+                    println!("Rejected unauthorized call from: {}", call.from);
+                }
+            }
         }
+        
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    
-    Ok(())
 }
 ```
 
 ## Media Control
 
-### Recipe 5: Setting Up Media Flow
+### Recipe 6: Manual Media Control
 
 ```rust
-async fn setup_media_flow(
+async fn control_media_during_call(
     coordinator: &Arc<SessionCoordinator>,
-    session_id: &SessionId,
-    remote_sdp: &str
+    session_id: &SessionId
 ) -> Result<()> {
-    // Parse the remote SDP
-    let sdp_info = parse_sdp_connection(remote_sdp)?;
-    info!("Remote endpoint: {}:{}", sdp_info.ip, sdp_info.port);
-    info!("Codecs: {:?}", sdp_info.codecs);
+    // Get current media info
+    let media_info = MediaControl::get_media_info(coordinator, session_id).await?;
     
-    // Establish media flow
-    let remote_addr = format!("{}:{}", sdp_info.ip, sdp_info.port);
-    MediaControl::establish_media_flow(coordinator, session_id, &remote_addr).await?;
+    if let Some(info) = media_info {
+        println!("Local RTP port: {:?}", info.local_rtp_port);
+        println!("Remote RTP port: {:?}", info.remote_rtp_port);
+        println!("Codec: {:?}", info.codec);
+    }
     
-    // Start monitoring
-    MediaControl::start_statistics_monitoring(
-        coordinator, 
-        session_id, 
-        Duration::from_secs(5)
-    ).await?;
+    // Mute audio (stop transmission)
+    MediaControl::stop_audio_transmission(coordinator, session_id).await?;
+    println!("Audio muted");
+    
+    // Wait a bit
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    
+    // Unmute audio (resume transmission)
+    MediaControl::start_audio_transmission(coordinator, session_id).await?;
+    println!("Audio unmuted");
     
     Ok(())
 }
 ```
 
-### Recipe 6: Media Control During Call
+### Recipe 7: Quality Monitoring
 
 ```rust
-async fn control_media(
-    coordinator: &Arc<SessionCoordinator>,
-    session_id: &SessionId
+async fn monitor_call_quality(
+    coordinator: Arc<SessionCoordinator>,
+    session_id: SessionId
 ) -> Result<()> {
-    // Mute audio
-    SessionControl::set_audio_muted(coordinator, session_id, true).await?;
+    // Start automatic monitoring every 5 seconds
+    MediaControl::start_statistics_monitoring(
+        &coordinator,
+        &session_id,
+        Duration::from_secs(5)
+    ).await?;
     
-    // Get current media info
-    let media_info = SessionControl::get_media_info(coordinator, session_id).await?;
-    if let Some(info) = media_info {
-        info!("Local SDP: {:?}", info.local_sdp);
-        info!("Remote SDP: {:?}", info.remote_sdp);
-        info!("RTP port: {}", info.rtp_port);
-    }
+    // Also do manual checks
+    let mut poor_quality_count = 0;
     
-    // Monitor quality
-    let stats = MediaControl::get_media_statistics(coordinator, session_id).await?;
-    if let Some(stats) = stats {
-        if let Some(quality) = &stats.quality_metrics {
-            info!("Packet loss: {:.1}%", quality.packet_loss_percent);
-            info!("Jitter: {:.1}ms", quality.jitter_ms);
-            info!("MOS score: {:.1}", quality.mos_score.unwrap_or(0.0));
+    loop {
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        
+        let stats = MediaControl::get_media_statistics(&coordinator, &session_id).await?;
+        
+        if let Some(stats) = stats {
+            if let Some(quality) = stats.quality_metrics {
+                let mos = quality.mos_score.unwrap_or(0.0);
+                
+                println!("Call Quality Report:");
+                println!("  MOS Score: {:.1} ({})", mos, match mos {
+                    x if x >= 4.0 => "Excellent",
+                    x if x >= 3.5 => "Good",
+                    x if x >= 3.0 => "Fair",
+                    x if x >= 2.5 => "Poor",
+                    _ => "Bad"
+                });
+                println!("  Packet Loss: {:.1}%", quality.packet_loss_percent);
+                println!("  Jitter: {:.1}ms", quality.jitter_ms);
+                println!("  RTT: {:.0}ms", quality.round_trip_time_ms);
+                
+                if mos < 3.0 {
+                    poor_quality_count += 1;
+                    if poor_quality_count >= 3 {
+                        println!("⚠️  Sustained poor quality detected!");
+                        // Take action: notify user, switch codec, etc.
+                    }
+                } else {
+                    poor_quality_count = 0;
+                }
+            }
+        }
+        
+        // Check if call is still active
+        if let Ok(Some(session)) = SessionControl::get_session(&coordinator, &session_id).await {
+            if session.state().is_final() {
+                break;
+            }
+        } else {
+            break;
         }
     }
     
@@ -257,42 +347,24 @@ async fn control_media(
 
 ## Call Features
 
-### Recipe 7: Call Hold/Resume
+### Recipe 8: Call Hold/Resume
 
 ```rust
-async fn toggle_hold(
+async fn demonstrate_hold_resume(
     coordinator: &Arc<SessionCoordinator>,
-    session_id: &SessionId,
-    hold: bool
+    session_id: &SessionId
 ) -> Result<()> {
-    if hold {
-        SessionControl::hold_session(coordinator, session_id).await?;
-        info!("Call {} is now on hold", session_id);
-    } else {
-        SessionControl::resume_session(coordinator, session_id).await?;
-        info!("Call {} resumed", session_id);
-    }
-    Ok(())
-}
-```
-
-### Recipe 8: Call Transfer
-
-```rust
-async fn transfer_call(
-    coordinator: &Arc<SessionCoordinator>,
-    session_id: &SessionId,
-    transfer_to: &str
-) -> Result<()> {
-    // Blind transfer
-    SessionControl::transfer_session(
-        coordinator, 
-        session_id, 
-        transfer_to,
-        false  // blind transfer
-    ).await?;
+    // Put call on hold
+    SessionControl::hold_session(coordinator, session_id).await?;
+    println!("Call is now on hold");
     
-    info!("Call {} transferred to {}", session_id, transfer_to);
+    // Do something else...
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    
+    // Resume the call
+    SessionControl::resume_session(coordinator, session_id).await?;
+    println!("Call resumed");
+    
     Ok(())
 }
 ```
@@ -300,158 +372,314 @@ async fn transfer_call(
 ### Recipe 9: DTMF Tones
 
 ```rust
-async fn send_dtmf_sequence(
+async fn send_dtmf_menu_selection(
     coordinator: &Arc<SessionCoordinator>,
-    session_id: &SessionId,
-    digits: &str
+    session_id: &SessionId
 ) -> Result<()> {
-    for digit in digits.chars() {
-        if digit.is_numeric() || matches!(digit, '*' | '#') {
-            SessionControl::send_dtmf(coordinator, session_id, digit).await?;
-            // Small delay between digits
-            tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for menu prompt
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    
+    // Press 1 for English
+    SessionControl::send_dtmf(coordinator, session_id, "1").await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    // Press 2 for Sales
+    SessionControl::send_dtmf(coordinator, session_id, "2").await?;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    
+    // Enter account number
+    SessionControl::send_dtmf(coordinator, session_id, "1234567890#").await?;
+    
+    println!("DTMF sequence sent");
+    Ok(())
+}
+```
+
+### Recipe 10: Call Transfer
+
+```rust
+async fn transfer_call_example(
+    coordinator: &Arc<SessionCoordinator>,
+    session_id: &SessionId
+) -> Result<()> {
+    // Blind transfer to another extension
+    SessionControl::transfer_session(
+        coordinator,
+        session_id,
+        "sip:support@example.com"
+    ).await?;
+    
+    println!("Call transferred to support");
+    
+    // The original call will be terminated after successful transfer
+    Ok(())
+}
+```
+
+## Bridge Management
+
+### Recipe 11: Simple Two-Party Bridge
+
+```rust
+async fn bridge_two_calls(
+    coordinator: Arc<SessionCoordinator>
+) -> Result<()> {
+    // Create first call
+    let call1 = SessionControl::create_outgoing_call(
+        &coordinator,
+        "sip:bridge@server.com",
+        "sip:alice@example.com",
+        None
+    ).await?;
+    
+    // Create second call
+    let call2 = SessionControl::create_outgoing_call(
+        &coordinator,
+        "sip:bridge@server.com",
+        "sip:bob@example.com",
+        None
+    ).await?;
+    
+    // Wait for both to answer
+    SessionControl::wait_for_answer(&coordinator, &call1.id, Duration::from_secs(30)).await?;
+    SessionControl::wait_for_answer(&coordinator, &call2.id, Duration::from_secs(30)).await?;
+    
+    // Bridge them together
+    let bridge_id = coordinator.bridge_sessions(&call1.id, &call2.id).await?;
+    println!("Created bridge: {}", bridge_id);
+    
+    // Monitor bridge events
+    let mut events = coordinator.subscribe_to_bridge_events().await;
+    
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            match event {
+                BridgeEvent::ParticipantAdded { bridge_id, session_id } => {
+                    println!("Session {} joined bridge {}", session_id, bridge_id);
+                }
+                BridgeEvent::ParticipantRemoved { bridge_id, session_id, reason } => {
+                    println!("Session {} left bridge {}: {}", session_id, bridge_id, reason);
+                }
+                BridgeEvent::BridgeDestroyed { bridge_id } => {
+                    println!("Bridge {} destroyed", bridge_id);
+                    break;
+                }
+            }
+        }
+    });
+    
+    Ok(())
+}
+```
+
+### Recipe 12: Call Center Agent Bridge
+
+```rust
+async fn connect_customer_to_agent(
+    coordinator: Arc<SessionCoordinator>,
+    customer_session_id: SessionId,
+    agent_uri: &str
+) -> Result<BridgeId> {
+    // Call the agent
+    let agent_session = SessionControl::create_outgoing_call(
+        &coordinator,
+        "sip:callcenter@server.com",
+        agent_uri,
+        None
+    ).await?;
+    
+    // Wait for agent to answer
+    match SessionControl::wait_for_answer(
+        &coordinator,
+        &agent_session.id,
+        Duration::from_secs(20)
+    ).await {
+        Ok(_) => {
+            // Bridge customer and agent
+            let bridge_id = coordinator.bridge_sessions(
+                &customer_session_id,
+                &agent_session.id
+            ).await?;
+            
+            println!("Customer connected to agent");
+            Ok(bridge_id)
+        }
+        Err(_) => {
+            // Agent didn't answer, try next agent
+            SessionControl::terminate_session(&coordinator, &agent_session.id).await?;
+            Err(anyhow::anyhow!("Agent unavailable"))
         }
     }
-    Ok(())
 }
 ```
 
 ## Advanced Patterns
 
-### Recipe 10: Conference Calls
+### Recipe 13: Composite Handler Chain
 
 ```rust
-async fn create_conference(
-    coordinator: &Arc<SessionCoordinator>,
-    participant_uris: Vec<&str>
-) -> Result<Vec<SessionId>> {
-    let mut sessions = Vec::new();
+use std::sync::Arc;
+
+async fn create_advanced_call_handler() -> Arc<CompositeHandler> {
+    let composite = CompositeHandler::new()
+        // First: Check blacklist
+        .add_handler(Arc::new(BlacklistHandler {
+            blocked_numbers: vec![
+                "sip:spam@example.com".to_string(),
+                "sip:*@blocked-domain.com".to_string(),
+            ],
+        }))
+        // Then: Check business hours
+        .add_handler(Arc::new(BusinessHoursHandler {
+            start_hour: 9,
+            end_hour: 17,
+            timezone: "America/New_York".to_string(),
+        }))
+        // Then: Route by destination
+        .add_handler(Arc::new({
+            let mut router = RoutingHandler::new();
+            router.add_route("sip:support@*", "sip:queue@support.internal");
+            router.add_route("sip:sales@*", "sip:queue@sales.internal");
+            router.add_route("sip:+1800*", "sip:tollfree@gateway.internal");
+            router.set_default_action(CallDecision::Forward("sip:operator@default.internal".to_string()));
+            router
+        }))
+        // Finally: Queue any remaining
+        .add_handler(Arc::new(QueueHandler::new(100)));
     
-    // Create calls to all participants
-    for uri in participant_uris {
-        let (sdp_offer, _) = SessionControl::prepare_outgoing_call(
-            coordinator, 
-            &format!("conf-{}", uuid::Uuid::new_v4())
-        ).await?;
-        
-        let session = SessionControl::create_outgoing_call(
-            coordinator,
-            uri,
-            "sip:conference@server.com",
-            Some(sdp_offer)
-        ).await?;
-        
-        sessions.push(session.id().clone());
-    }
-    
-    // Wait for all to answer
-    let mut answered = Vec::new();
-    for session_id in sessions {
-        match SessionControl::wait_for_answer(
-            coordinator, 
-            &session_id, 
-            Duration::from_secs(30)
-        ).await {
-            Ok(session) => answered.push(session.id().clone()),
-            Err(e) => warn!("Participant failed to answer: {}", e),
+    Arc::new(composite)
+}
+
+// Custom blacklist handler
+#[derive(Debug)]
+struct BlacklistHandler {
+    blocked_numbers: Vec<String>,
+}
+
+#[async_trait::async_trait]
+impl CallHandler for BlacklistHandler {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+        for blocked in &self.blocked_numbers {
+            if blocked.contains('*') {
+                // Wildcard matching
+                let pattern = blocked.replace("*", "");
+                if call.from.contains(&pattern) {
+                    return CallDecision::Reject("Blocked number".to_string());
+                }
+            } else if call.from == *blocked {
+                return CallDecision::Reject("Blocked number".to_string());
+            }
         }
+        
+        // Not blocked, let next handler decide
+        CallDecision::Defer
     }
     
-    // Set up conference mixing (application-specific)
-    setup_conference_bridge(&answered).await?;
-    
-    Ok(answered)
+    async fn on_call_ended(&self, _call: CallSession, _reason: &str) {}
 }
 ```
 
-### Recipe 11: Failover and Retry
+### Recipe 14: Failover Pattern
 
 ```rust
 async fn call_with_failover(
-    coordinator: &Arc<SessionCoordinator>,
-    primary_uri: &str,
-    backup_uris: Vec<&str>
+    coordinator: Arc<SessionCoordinator>,
+    destinations: Vec<&str>
 ) -> Result<CallSession> {
-    // Try primary first
-    match try_call(coordinator, primary_uri).await {
-        Ok(session) => return Ok(session),
-        Err(e) => warn!("Primary failed: {}", e),
-    }
+    let mut last_error = None;
     
-    // Try backups
-    for backup_uri in backup_uris {
-        match try_call(coordinator, backup_uri).await {
-            Ok(session) => return Ok(session),
-            Err(e) => warn!("Backup {} failed: {}", backup_uri, e),
+    for (idx, dest) in destinations.iter().enumerate() {
+        println!("Trying destination {} of {}: {}", idx + 1, destinations.len(), dest);
+        
+        match SessionControl::create_outgoing_call(
+            &coordinator,
+            "sip:system@local",
+            dest,
+            None
+        ).await {
+            Ok(session) => {
+                // Try to wait for answer with short timeout
+                match SessionControl::wait_for_answer(
+                    &coordinator,
+                    &session.id,
+                    Duration::from_secs(15)
+                ).await {
+                    Ok(_) => {
+                        println!("Successfully connected to {}", dest);
+                        return Ok(session);
+                    }
+                    Err(e) => {
+                        println!("Destination {} didn't answer: {}", dest, e);
+                        SessionControl::terminate_session(&coordinator, &session.id).await?;
+                        last_error = Some(e);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("Failed to call {}: {}", dest, e);
+                last_error = Some(e);
+            }
+        }
+        
+        // Brief delay before next attempt
+        if idx < destinations.len() - 1 {
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
     }
     
-    Err(anyhow::anyhow!("All endpoints failed"))
-}
-
-async fn try_call(
-    coordinator: &Arc<SessionCoordinator>,
-    uri: &str
-) -> Result<CallSession> {
-    let (sdp_offer, _) = SessionControl::prepare_outgoing_call(
-        coordinator, 
-        &format!("call-{}", uuid::Uuid::new_v4())
-    ).await?;
-    
-    let session = SessionControl::create_outgoing_call(
-        coordinator,
-        uri,
-        "sip:user@local",
-        Some(sdp_offer)
-    ).await?;
-    
-    // Short timeout for failover scenario
-    SessionControl::wait_for_answer(
-        coordinator, 
-        session.id(), 
-        Duration::from_secs(10)
-    ).await
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("All destinations failed")))
 }
 ```
 
 ## Error Handling
 
-### Recipe 12: Comprehensive Error Handling
+### Recipe 15: Comprehensive Error Handling
 
 ```rust
-use rvoip_session_core::api::{SessionError, ErrorKind};
+use rvoip_session_core::errors::SessionError;
 
-async fn handle_call_with_recovery(
-    coordinator: &Arc<SessionCoordinator>,
-    uri: &str
-) -> Result<()> {
-    match make_call(coordinator, uri).await {
-        Ok(session) => {
-            info!("Call successful: {}", session.id());
-            Ok(())
-        }
-        Err(e) => {
-            match e.downcast_ref::<SessionError>() {
-                Some(session_err) => match session_err.kind() {
-                    ErrorKind::Timeout => {
-                        warn!("Call timed out, retrying...");
-                        make_call(coordinator, uri).await?;
-                        Ok(())
+async fn handle_call_with_retry(
+    coordinator: Arc<SessionCoordinator>,
+    destination: &str,
+    max_retries: u32
+) -> Result<CallSession> {
+    let mut retries = 0;
+    
+    loop {
+        match SessionControl::create_outgoing_call(
+            &coordinator,
+            "sip:app@local",
+            destination,
+            None
+        ).await {
+            Ok(session) => return Ok(session),
+            Err(e) => {
+                // Pattern match on specific errors
+                match e.downcast_ref::<SessionError>() {
+                    Some(SessionError::ResourceExhausted) => {
+                        if retries < max_retries {
+                            println!("No resources available, waiting before retry...");
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            retries += 1;
+                            continue;
+                        }
                     }
-                    ErrorKind::InvalidState => {
-                        error!("Invalid state: {}", session_err);
-                        Err(e)
+                    Some(SessionError::InvalidUri(uri)) => {
+                        // Can't retry invalid URI
+                        return Err(anyhow::anyhow!("Invalid SIP URI: {}", uri));
                     }
-                    ErrorKind::ResourceExhausted => {
-                        error!("No resources available");
-                        // Wait and retry
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        make_call(coordinator, uri).await?;
-                        Ok(())
+                    Some(SessionError::TransportError(msg)) => {
+                        if retries < max_retries && msg.contains("timeout") {
+                            println!("Network timeout, retrying...");
+                            retries += 1;
+                            continue;
+                        }
                     }
-                    _ => Err(e),
-                },
-                None => Err(e),
+                    _ => {}
+                }
+                
+                // Unrecoverable error or max retries reached
+                return Err(e);
             }
         }
     }
@@ -460,81 +688,104 @@ async fn handle_call_with_recovery(
 
 ## Performance & Monitoring
 
-### Recipe 13: Real-time Quality Monitoring
+### Recipe 16: Call Statistics Dashboard
 
 ```rust
-async fn monitor_call_quality(
-    coordinator: Arc<SessionCoordinator>,
-    session_id: SessionId
+async fn run_statistics_monitor(
+    coordinator: Arc<SessionCoordinator>
 ) {
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
-    let mut degraded_count = 0;
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
     
     loop {
         interval.tick().await;
         
-        match MediaControl::get_media_statistics(&coordinator, &session_id).await {
-            Ok(Some(stats)) => {
-                if let Some(quality) = &stats.quality_metrics {
-                    let mos = quality.mos_score.unwrap_or(0.0);
-                    
-                    if mos < 3.0 {
-                        degraded_count += 1;
-                        warn!("Poor quality detected: MOS={:.1}", mos);
-                        
-                        if degraded_count >= 3 {
-                            // Take action on sustained poor quality
-                            notify_poor_quality(&session_id, mos).await;
-                        }
-                    } else {
-                        degraded_count = 0;
-                    }
-                    
-                    // Log metrics
-                    metrics::gauge!("call_mos_score", mos, "session_id" => session_id.to_string());
-                    metrics::gauge!("call_packet_loss", quality.packet_loss_percent, "session_id" => session_id.to_string());
-                    metrics::gauge!("call_jitter_ms", quality.jitter_ms, "session_id" => session_id.to_string());
+        // Get overall statistics
+        match SessionControl::get_stats(&coordinator).await {
+            Ok(stats) => {
+                println!("\n📊 Session Statistics:");
+                println!("  Active Sessions: {}", stats.active_sessions);
+                println!("  Total Sessions: {}", stats.total_sessions);
+                println!("  Failed Sessions: {}", stats.failed_sessions);
+                
+                if let Some(avg_duration) = stats.average_duration {
+                    println!("  Average Duration: {:?}", avg_duration);
                 }
             }
-            Ok(None) => {
-                info!("Call {} ended", session_id);
-                break;
+            Err(e) => eprintln!("Failed to get statistics: {}", e),
+        }
+        
+        // Get active session details
+        match SessionControl::list_active_sessions(&coordinator).await {
+            Ok(sessions) => {
+                for session_id in sessions {
+                    if let Ok(Some(stats)) = MediaControl::get_media_statistics(
+                        &coordinator,
+                        &session_id
+                    ).await {
+                        if let Some(quality) = stats.quality_metrics {
+                            println!("\n  Session {}: MOS={:.1}, Loss={:.1}%, Jitter={:.1}ms",
+                                session_id,
+                                quality.mos_score.unwrap_or(0.0),
+                                quality.packet_loss_percent,
+                                quality.jitter_ms
+                            );
+                        }
+                    }
+                }
             }
-            Err(e) => {
-                error!("Failed to get statistics: {}", e);
-                break;
-            }
+            Err(e) => eprintln!("Failed to list sessions: {}", e),
         }
     }
 }
 ```
 
-### Recipe 14: Load Testing Pattern
+### Recipe 17: Load Testing Pattern
 
 ```rust
-async fn load_test_calls(
+async fn load_test_concurrent_calls(
     coordinator: Arc<SessionCoordinator>,
     target_uri: &str,
-    concurrent_calls: usize,
-    call_duration: Duration
+    concurrent_calls: usize
 ) -> Result<()> {
-    let mut handles = vec![];
+    println!("Starting load test with {} concurrent calls", concurrent_calls);
     
+    let start_time = Instant::now();
+    let mut handles = Vec::new();
+    
+    // Spawn concurrent call tasks
     for i in 0..concurrent_calls {
         let coord = coordinator.clone();
         let uri = target_uri.to_string();
-        let duration = call_duration;
         
         let handle = tokio::spawn(async move {
-            match test_single_call(&coord, &uri, duration).await {
-                Ok(stats) => {
-                    info!("Call {} completed: {:?}", i, stats);
-                    Ok(stats)
+            let call_start = Instant::now();
+            
+            match SessionControl::create_outgoing_call(
+                &coord,
+                &format!("sip:test{}@loadtest.local", i),
+                &uri,
+                None
+            ).await {
+                Ok(session) => {
+                    // Wait for answer
+                    if let Ok(_) = SessionControl::wait_for_answer(
+                        &coord,
+                        &session.id,
+                        Duration::from_secs(30)
+                    ).await {
+                        // Hold call for some time
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        
+                        // Terminate
+                        let _ = SessionControl::terminate_session(&coord, &session.id).await;
+                        
+                        let duration = call_start.elapsed();
+                        Ok((i, duration))
+                    } else {
+                        Err((i, "Failed to answer"))
+                    }
                 }
-                Err(e) => {
-                    error!("Call {} failed: {}", i, e);
-                    Err(e)
-                }
+                Err(e) => Err((i, e.to_string().as_str())),
             }
         });
         
@@ -548,8 +799,35 @@ async fn load_test_calls(
     let results = futures::future::join_all(handles).await;
     
     // Analyze results
-    let successful = results.iter().filter(|r| r.is_ok()).count();
-    info!("Load test complete: {}/{} calls successful", successful, concurrent_calls);
+    let mut successful = 0;
+    let mut total_duration = Duration::ZERO;
+    
+    for result in results {
+        match result {
+            Ok(Ok((idx, duration))) => {
+                successful += 1;
+                total_duration += duration;
+                println!("Call {} succeeded, duration: {:?}", idx, duration);
+            }
+            Ok(Err((idx, error))) => {
+                println!("Call {} failed: {}", idx, error);
+            }
+            Err(e) => {
+                println!("Task panicked: {}", e);
+            }
+        }
+    }
+    
+    let elapsed = start_time.elapsed();
+    
+    println!("\n📈 Load Test Results:");
+    println!("  Total Time: {:?}", elapsed);
+    println!("  Successful Calls: {}/{}", successful, concurrent_calls);
+    println!("  Success Rate: {:.1}%", (successful as f64 / concurrent_calls as f64) * 100.0);
+    
+    if successful > 0 {
+        println!("  Average Call Duration: {:?}", total_duration / successful as u32);
+    }
     
     Ok(())
 }
@@ -557,47 +835,106 @@ async fn load_test_calls(
 
 ## Best Practices
 
-1. **Always use the public API** - Never access internal fields like `coordinator.dialog_manager`
-2. **Handle errors gracefully** - Network operations can fail
-3. **Clean up resources** - Always call `terminate_session` when done
-4. **Monitor call quality** - Use statistics API for production monitoring
-5. **Use appropriate timeouts** - Don't wait forever for responses
-6. **Log important events** - But avoid logging sensitive data like passwords
-7. **Test edge cases** - Network failures, timeouts, busy responses
+### ✅ DO:
 
-## Common Pitfalls
+1. **Use the Public API** - Always use `SessionControl` and `MediaControl` traits
+2. **Handle Errors Gracefully** - Network operations can and will fail
+3. **Monitor Call Quality** - Use statistics API for production monitoring
+4. **Clean Up Resources** - Always terminate sessions when done
+5. **Use Appropriate Timeouts** - Don't wait forever for responses
+6. **Log Important Events** - But avoid logging sensitive data
+7. **Test Edge Cases** - Network failures, timeouts, busy responses
 
-### ❌ Don't do this:
+### ❌ DON'T:
+
+1. **Access Internal Fields** - Never use `coordinator.dialog_manager` directly
+2. **Block in Handlers** - Use `CallDecision::Defer` for async operations
+3. **Ignore Errors** - Always handle potential failures
+4. **Leak Resources** - Always clean up sessions and bridges
+5. **Hardcode Values** - Use configuration for ports, timeouts, etc.
+
+### Example: Proper Resource Cleanup
+
 ```rust
-// Direct internal access
-coordinator.media_manager.create_session(...).await;
-coordinator.dialog_manager.accept_call(...).await;
-```
+// Use a guard pattern for automatic cleanup
+struct CallGuard {
+    coordinator: Arc<SessionCoordinator>,
+    session_id: SessionId,
+}
 
-### ✅ Do this instead:
-```rust
-// Use public API methods
-MediaControl::create_media_session(&coordinator, ...).await;
-SessionControl::accept_incoming_call(&coordinator, ...).await;
-```
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        let coordinator = self.coordinator.clone();
+        let session_id = self.session_id.clone();
+        
+        // Spawn cleanup task
+        tokio::spawn(async move {
+            if let Err(e) = SessionControl::terminate_session(&coordinator, &session_id).await {
+                eprintln!("Failed to terminate session on drop: {}", e);
+            }
+        });
+    }
+}
 
-### ❌ Don't forget error handling:
-```rust
-let session = SessionControl::create_outgoing_call(...).await.unwrap(); // Bad!
-```
-
-### ✅ Always handle errors:
-```rust
-let session = SessionControl::create_outgoing_call(...).await?; // Good!
-// or
-match SessionControl::create_outgoing_call(...).await {
-    Ok(session) => { /* handle success */ },
-    Err(e) => { /* handle error */ }
+async fn make_guarded_call(coordinator: Arc<SessionCoordinator>) -> Result<()> {
+    let session = SessionControl::create_outgoing_call(
+        &coordinator,
+        "sip:test@local",
+        "sip:echo@example.com",
+        None
+    ).await?;
+    
+    let _guard = CallGuard {
+        coordinator: coordinator.clone(),
+        session_id: session.id().clone(),
+    };
+    
+    // Do work with the call...
+    // Session will be terminated when guard is dropped
+    
+    Ok(())
 }
 ```
 
+## Troubleshooting
+
+### Common Issues and Solutions
+
+1. **"No available RTP ports"**
+   ```rust
+   // Increase port range
+   let coordinator = SessionManagerBuilder::new()
+       .with_rtp_port_range(10000, 60000)
+       .build()
+       .await?;
+   ```
+
+2. **"Failed to bind SIP port"**
+   ```rust
+   // Use a different port or check if already in use
+   let coordinator = SessionManagerBuilder::new()
+       .with_sip_port(5061)  // Try alternate port
+       .build()
+       .await?;
+   ```
+
+3. **Poor Call Quality**
+   ```rust
+   // Enable quality monitoring and adapt
+   async fn monitor_and_adapt(coordinator: &Arc<SessionCoordinator>, session_id: &SessionId) {
+       let stats = MediaControl::get_media_statistics(coordinator, session_id).await?;
+       
+       if let Some(quality) = stats.and_then(|s| s.quality_metrics) {
+           if quality.packet_loss_percent > 5.0 {
+               // Consider switching to more resilient codec
+               // or adjusting jitter buffer
+           }
+       }
+   }
+   ```
+
 ## Further Reading
 
-- [API Reference](src/api/mod.rs) - Complete API documentation
+- [API Documentation](src/api/mod.rs) - Complete API reference
 - [Examples](examples/) - Full working examples
-- [Migration Guide](src/api/MIGRATION_GUIDE.md) - Upgrading from older versions 
+- [API Guide](API_GUIDE.md) - Comprehensive developer guide 

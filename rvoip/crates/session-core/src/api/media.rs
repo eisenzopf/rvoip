@@ -1,92 +1,145 @@
 //! Media Control API
 //!
-//! High-level API for controlling media sessions, including audio transmission.
+//! Comprehensive API for managing media streams in SIP sessions, including audio
+//! transmission, SDP negotiation, and quality monitoring.
 //! 
 //! # Overview
 //! 
-//! The `MediaControl` trait provides methods for:
-//! - SDP generation and negotiation
-//! - Media session lifecycle management
-//! - Audio transmission control
-//! - Statistics monitoring and quality metrics
-//! - Remote endpoint configuration
+//! The `MediaControl` trait provides a high-level interface for:
+//! - **SDP Management**: Offer/answer generation and negotiation
+//! - **Media Flow**: Establishing and controlling RTP streams
+//! - **Quality Monitoring**: Real-time statistics and MOS scores
+//! - **Audio Control**: Mute/unmute and transmission management
 //! 
-//! # Key Concepts
+//! # Architecture
 //! 
-//! ## SDP Negotiation Patterns
+//! ```text
+//! Application Layer
+//!        |
+//!   MediaControl API
+//!        |
+//! ┌──────┴──────┐
+//! │   Session   │
+//! │ Coordinator │
+//! └──────┬──────┘
+//!        |
+//! ┌──────┴──────┐     ┌─────────┐
+//! │    Media    │────▶│   RTP   │
+//! │   Manager   │     │  Core   │
+//! └─────────────┘     └─────────┘
+//! ```
 //! 
-//! ### UAC (Caller) Pattern
+//! # SDP Negotiation Patterns
+//! 
+//! ## Pattern 1: UAC (Outgoing Call) Flow
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! use std::sync::Arc;
+//! 
+//! async fn make_outgoing_call(
+//!     coordinator: Arc<SessionCoordinator>
+//! ) -> Result<()> {
+//!     // 1. Prepare the call (allocates media resources)
+//!     let prepared = SessionControl::prepare_outgoing_call(
+//!         &coordinator,
+//!         "sip:alice@ourserver.com",
+//!         "sip:bob@example.com"
+//!     ).await?;
+//!     
+//!     println!("Allocated RTP port: {}", prepared.local_rtp_port);
+//!     println!("SDP Offer:\n{}", prepared.sdp_offer);
+//!     
+//!     // 2. Initiate the call (sends INVITE)
+//!     let session = SessionControl::initiate_prepared_call(
+//!         &coordinator,
+//!         &prepared
+//!     ).await?;
+//!     
+//!     // 3. Wait for answer (200 OK with SDP)
+//!     SessionControl::wait_for_answer(
+//!         &coordinator,
+//!         &session.id,
+//!         Duration::from_secs(30)
+//!     ).await?;
+//!     
+//!     // 4. Media flow is automatically established when answer is received
+//!     // But you can also manually control it:
+//!     let media_info = MediaControl::get_media_info(
+//!         &coordinator,
+//!         &session.id
+//!     ).await?;
+//!     
+//!     if let Some(info) = media_info {
+//!         println!("Codec: {}", info.codec.unwrap_or("unknown".to_string()));
+//!         println!("Remote RTP: {}:{}", 
+//!             info.remote_sdp.as_ref().map(|_| "connected").unwrap_or("pending"),
+//!             info.remote_rtp_port.unwrap_or(0)
+//!         );
+//!     }
+//!     
+//!     Ok(())
+//! }
+//! ```
+//! 
+//! ## Pattern 2: UAS (Incoming Call) Flow
+//! 
 //! ```rust
 //! use rvoip_session_core::api::*;
 //! 
-//! async fn uac_flow(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
-//!     let session_id = SessionId::new();
-//!     
-//!     // 1. Generate SDP offer (allocates RTP port)
-//!     let sdp_offer = MediaControl::generate_sdp_offer(
-//!         coordinator, 
-//!         &session_id
-//!     ).await?;
-//!     
-//!     // 2. Send INVITE with offer...
-//!     // 3. Receive 200 OK with answer
-//!     let sdp_answer = receive_answer().await?;
-//!     
-//!     // 4. Update media with answer
-//!     MediaControl::update_remote_sdp(
-//!         coordinator, 
-//!         &session_id, 
-//!         &sdp_answer
-//!     ).await?;
-//!     
-//!     // 5. Establish media flow
-//!     let remote_addr = parse_sdp_connection(&sdp_answer)?;
-//!     MediaControl::establish_media_flow(
-//!         coordinator,
-//!         &session_id,
-//!         &format!("{}:{}", remote_addr.ip, remote_addr.port)
-//!     ).await?;
-//!     
-//!     Ok(())
-//! }
-//! ```
+//! #[derive(Debug)]
+//! struct MyCallHandler;
 //! 
-//! ### UAS (Callee) Pattern  
-//! ```rust
-//! async fn uas_flow(
+//! #[async_trait::async_trait]
+//! impl CallHandler for MyCallHandler {
+//!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+//!         // For immediate decision with SDP answer generation
+//!         CallDecision::Defer  // We'll handle it programmatically
+//!     }
+//!     
+//!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
+//!         println!("Call {} ended: {}", call.id(), reason);
+//!     }
+//! }
+//! 
+//! // Handle the deferred call programmatically
+//! async fn handle_incoming_call(
 //!     coordinator: &Arc<SessionCoordinator>,
-//!     call: &IncomingCall
-//! ) -> Result<String> {
-//!     // 1. Generate SDP answer based on offer
-//!     let sdp_answer = MediaControl::generate_sdp_answer(
+//!     call: IncomingCall
+//! ) -> Result<()> {
+//!     // 1. Analyze the offer
+//!     let offer = call.sdp.as_ref().unwrap();
+//!     let offer_info = parse_sdp_connection(offer)?;
+//!     println!("Caller wants to use: {:?}", offer_info.codecs);
+//!     
+//!     // 2. Generate answer based on our capabilities
+//!     let answer = MediaControl::generate_sdp_answer(
 //!         coordinator,
 //!         &call.id,
-//!         &call.sdp.as_ref().unwrap()
+//!         offer
 //!     ).await?;
 //!     
-//!     // 2. Return answer in 200 OK
-//!     Ok(sdp_answer)
-//! }
-//! 
-//! // Later, when call is established:
-//! async fn on_call_established(
-//!     coordinator: &Arc<SessionCoordinator>,
-//!     session: &CallSession,
-//!     remote_sdp: &str
-//! ) -> Result<()> {
-//!     // 3. Establish media flow to caller
-//!     let sdp_info = parse_sdp_connection(remote_sdp)?;
+//!     // 3. Accept the call with our answer
+//!     let session = SessionControl::accept_incoming_call(
+//!         coordinator,
+//!         &call,
+//!         Some(answer)
+//!     ).await?;
+//!     
+//!     // 4. Establish media flow to the caller
 //!     MediaControl::establish_media_flow(
 //!         coordinator,
-//!         session.id(),
-//!         &format!("{}:{}", sdp_info.ip, sdp_info.port)
+//!         &session.id,
+//!         &format!("{}:{}", offer_info.ip, offer_info.port)
 //!     ).await?;
 //!     
 //!     Ok(())
 //! }
 //! ```
 //! 
-//! ## Media Quality Monitoring
+//! # Quality Monitoring
+//! 
+//! ## Real-time Quality Metrics
 //! 
 //! ```rust
 //! use std::time::Duration;
@@ -95,61 +148,187 @@
 //!     coordinator: Arc<SessionCoordinator>,
 //!     session_id: SessionId
 //! ) -> Result<()> {
-//!     // Start automatic monitoring
+//!     // Start automatic monitoring every 5 seconds
 //!     MediaControl::start_statistics_monitoring(
 //!         &coordinator,
 //!         &session_id,
 //!         Duration::from_secs(5)
 //!     ).await?;
 //!     
-//!     // Manual polling
+//!     // Also do manual checks
+//!     let mut quality_warnings = 0;
+//!     
 //!     loop {
 //!         tokio::time::sleep(Duration::from_secs(10)).await;
 //!         
+//!         // Get comprehensive statistics
 //!         let stats = MediaControl::get_media_statistics(
 //!             &coordinator,
 //!             &session_id
 //!         ).await?;
 //!         
 //!         if let Some(stats) = stats {
+//!             // Check quality metrics
 //!             if let Some(quality) = &stats.quality_metrics {
-//!                 println!("MOS Score: {:.1}", quality.mos_score.unwrap_or(0.0));
-//!                 println!("Packet Loss: {:.1}%", quality.packet_loss_percent);
-//!                 println!("Jitter: {:.1}ms", quality.jitter_ms);
+//!                 let mos = quality.mos_score.unwrap_or(0.0);
+//!                 
+//!                 println!("Call Quality Report:");
+//!                 println!("  MOS Score: {:.1} ({})", mos, match mos {
+//!                     x if x >= 4.0 => "Excellent",
+//!                     x if x >= 3.5 => "Good",
+//!                     x if x >= 3.0 => "Fair",
+//!                     x if x >= 2.5 => "Poor",
+//!                     _ => "Bad"
+//!                 });
+//!                 println!("  Packet Loss: {:.1}%", quality.packet_loss_percent);
+//!                 println!("  Jitter: {:.1}ms", quality.jitter_ms);
+//!                 println!("  Round Trip: {:.0}ms", quality.round_trip_time_ms);
 //!                 
 //!                 // Alert on poor quality
-//!                 if quality.mos_score.unwrap_or(5.0) < 3.0 {
-//!                     alert_poor_quality(&session_id).await;
+//!                 if mos < 3.0 {
+//!                     quality_warnings += 1;
+//!                     if quality_warnings >= 3 {
+//!                         // Sustained poor quality
+//!                         notify_poor_quality(&session_id, mos).await?;
+//!                     }
+//!                 } else {
+//!                     quality_warnings = 0;
 //!                 }
 //!             }
+//!             
+//!             // Check RTP statistics
+//!             if let Some(rtp_stats) = &stats.rtp_stats {
+//!                 println!("RTP Statistics:");
+//!                 println!("  Packets Sent: {}", rtp_stats.packets_sent);
+//!                 println!("  Packets Received: {}", rtp_stats.packets_received);
+//!                 println!("  Packets Lost: {}", rtp_stats.packets_lost);
+//!             }
+//!         }
+//!         
+//!         // Check if call is still active
+//!         if let Ok(Some(session)) = SessionControl::get_session(&coordinator, &session_id).await {
+//!             if session.state().is_final() {
+//!                 break;
+//!             }
+//!         } else {
+//!             break;
 //!         }
 //!     }
+//!     
+//!     Ok(())
 //! }
 //! ```
 //! 
-//! ## Audio Control
+//! # Audio Control
+//! 
+//! ## Mute/Unmute and Hold Operations
 //! 
 //! ```rust
-//! async fn control_audio(
+//! async fn handle_user_controls(
+//!     coordinator: Arc<SessionCoordinator>,
+//!     session_id: SessionId
+//! ) -> Result<()> {
+//!     // Mute (stop sending audio)
+//!     MediaControl::stop_audio_transmission(&coordinator, &session_id).await?;
+//!     println!("Microphone muted");
+//!     
+//!     // Check mute status
+//!     let is_muted = !MediaControl::is_audio_transmission_active(
+//!         &coordinator, 
+//!         &session_id
+//!     ).await?;
+//!     
+//!     // Unmute (resume sending audio)
+//!     MediaControl::start_audio_transmission(&coordinator, &session_id).await?;
+//!     println!("Microphone unmuted");
+//!     
+//!     // Put call on hold (SIP level)
+//!     SessionControl::hold_session(&coordinator, &session_id).await?;
+//!     println!("Call on hold");
+//!     
+//!     // Resume from hold
+//!     SessionControl::resume_session(&coordinator, &session_id).await?;
+//!     println!("Call resumed");
+//!     
+//!     Ok(())
+//! }
+//! ```
+//! 
+//! # Advanced Use Cases
+//! 
+//! ## Dynamic Codec Switching
+//! 
+//! ```rust
+//! async fn switch_to_hd_audio(
 //!     coordinator: &Arc<SessionCoordinator>,
 //!     session_id: &SessionId
 //! ) -> Result<()> {
-//!     // Start transmission (usually done automatically by establish_media_flow)
-//!     MediaControl::start_audio_transmission(coordinator, session_id).await?;
+//!     // Generate new SDP with HD codec preference
+//!     let new_sdp = r#"v=0
+//! o=- 0 0 IN IP4 127.0.0.1
+//! s=-
+//! c=IN IP4 127.0.0.1
+//! t=0 0
+//! m=audio 5004 RTP/AVP 9 0 8
+//! a=rtpmap:9 G722/8000
+//! a=rtpmap:0 PCMU/8000
+//! a=rtpmap:8 PCMA/8000"#;
 //!     
-//!     // Mute (stop transmission)
-//!     MediaControl::stop_audio_transmission(coordinator, session_id).await?;
-//!     
-//!     // Unmute (resume transmission)
-//!     MediaControl::start_audio_transmission(coordinator, session_id).await?;
-//!     
-//!     // Check status
-//!     let is_active = MediaControl::is_audio_transmission_active(
-//!         coordinator, 
-//!         session_id
-//!     ).await?;
+//!     // Update media session
+//!     SessionControl::update_media(coordinator, session_id, new_sdp).await?;
 //!     
 //!     Ok(())
+//! }
+//! ```
+//! 
+//! ## Network Change Handling
+//! 
+//! ```rust
+//! async fn handle_network_change(
+//!     coordinator: &Arc<SessionCoordinator>,
+//!     session_id: &SessionId,
+//!     new_ip: &str
+//! ) -> Result<()> {
+//!     // Stop current transmission
+//!     MediaControl::stop_audio_transmission(coordinator, session_id).await?;
+//!     
+//!     // Update with new network info
+//!     let media_info = MediaControl::get_media_info(coordinator, session_id).await?
+//!         .ok_or("No media session")?;
+//!     
+//!     if let Some(remote_port) = media_info.remote_rtp_port {
+//!         // Re-establish with new IP
+//!         MediaControl::establish_media_flow(
+//!             coordinator,
+//!             session_id,
+//!             &format!("{}:{}", new_ip, remote_port)
+//!         ).await?;
+//!     }
+//!     
+//!     Ok(())
+//! }
+//! ```
+//! 
+//! # Best Practices
+//! 
+//! 1. **Always check media state** before operations
+//! 2. **Monitor quality** for calls longer than 1 minute  
+//! 3. **Handle network errors** gracefully with retries
+//! 4. **Use proper SDP negotiation** - don't assume codecs
+//! 5. **Clean up resources** when calls end
+//! 
+//! # Error Handling
+//! 
+//! ```rust
+//! use rvoip_session_core::errors::SessionError;
+//! 
+//! match MediaControl::establish_media_flow(&coordinator, &session_id, addr).await {
+//!     Ok(_) => println!("Media established"),
+//!     Err(SessionError::MediaIntegration { message }) => {
+//!         eprintln!("Media error: {}", message);
+//!         // Try fallback or notify user
+//!     }
+//!     Err(e) => eprintln!("Unexpected error: {}", e),
 //! }
 //! ```
 

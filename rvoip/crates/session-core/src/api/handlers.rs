@@ -1,206 +1,381 @@
 //! Event Handlers for Session Management
 //!
-//! Provides a simplified event handling system with pre-built handlers for common use cases.
+//! This module provides the `CallHandler` trait and pre-built implementations for
+//! handling incoming calls and call lifecycle events in your VoIP applications.
 //! 
 //! # Overview
 //! 
-//! Call handlers allow you to customize how your application responds to VoIP events.
-//! The system supports two main patterns:
+//! Call handlers are the primary mechanism for customizing how your application
+//! responds to incoming calls. They support two decision patterns:
 //! 
-//! 1. **Immediate Decision**: Make a decision synchronously in the callback
-//! 2. **Deferred Decision**: Defer the decision for async processing
+//! 1. **Immediate Decision**: Synchronously decide to accept/reject/forward
+//! 2. **Deferred Decision**: Defer for asynchronous processing with external systems
+//! 
+//! # The CallHandler Trait
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! use async_trait::async_trait;
+//! 
+//! #[async_trait]
+//! pub trait CallHandler: Send + Sync + std::fmt::Debug {
+//!     /// Decide what to do with an incoming call
+//!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision;
+//!
+//!     /// Handle when a call ends
+//!     async fn on_call_ended(&self, call: CallSession, reason: &str);
+//!     
+//!     /// Handle when a call is established (optional)
+//!     async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
+//!         // Default implementation
+//!     }
+//! }
+//! ```
 //! 
 //! # Built-in Handlers
 //! 
 //! ## AutoAnswerHandler
 //! 
-//! Automatically accepts all incoming calls:
+//! Automatically accepts all incoming calls. Useful for testing or simple scenarios.
 //! 
 //! ```rust
 //! use rvoip_session_core::api::*;
+//! use std::sync::Arc;
 //! 
-//! let handler = AutoAnswerHandler::default();
-//! let coordinator = SessionManagerBuilder::new()
-//!     .with_handler(Arc::new(handler))
-//!     .build()
-//!     .await?;
+//! #[tokio::main]
+//! async fn main() -> Result<()> {
+//!     let coordinator = SessionManagerBuilder::new()
+//!         .with_sip_port(5060)
+//!         .with_handler(Arc::new(AutoAnswerHandler))
+//!         .build()
+//!         .await?;
+//!     
+//!     SessionControl::start(&coordinator).await?;
+//!     
+//!     // All incoming calls will be automatically accepted
+//!     Ok(())
+//! }
 //! ```
 //! 
 //! ## QueueHandler
 //! 
-//! Queues incoming calls for later processing:
+//! Queues incoming calls for later processing. Perfect for call centers or when
+//! you need to process calls asynchronously.
 //! 
 //! ```rust
 //! use rvoip_session_core::api::*;
 //! use tokio::sync::mpsc;
+//! use std::sync::Arc;
 //! 
-//! // Create queue handler with max 10 calls
-//! let queue_handler = Arc::new(QueueHandler::new(10));
-//! 
-//! // Set up notification channel
-//! let (tx, mut rx) = mpsc::unbounded_channel();
-//! queue_handler.set_notify_channel(tx);
-//! 
-//! // Process queued calls in another task
-//! tokio::spawn(async move {
-//!     while let Some(call) = rx.recv().await {
-//!         // Process the queued call asynchronously
-//!         process_queued_call(call).await;
-//!     }
-//! });
+//! async fn setup_queue_handler() -> Result<()> {
+//!     // Create queue handler with max 100 calls
+//!     let queue_handler = Arc::new(QueueHandler::new(100));
+//!     
+//!     // Set up notification channel
+//!     let (tx, mut rx) = mpsc::unbounded_channel();
+//!     queue_handler.set_notify_channel(tx);
+//!     
+//!     let coordinator = SessionManagerBuilder::new()
+//!         .with_sip_port(5060)
+//!         .with_handler(queue_handler.clone())
+//!         .build()
+//!         .await?;
+//!     
+//!     SessionControl::start(&coordinator).await?;
+//!     
+//!     // Process queued calls in background
+//!     let coord_clone = coordinator.clone();
+//!     tokio::spawn(async move {
+//!         while let Some(call) = rx.recv().await {
+//!             // Perform async operations (database lookup, etc.)
+//!             let allowed = check_caller_permissions(&call.from).await;
+//!             
+//!             if allowed {
+//!                 let sdp = MediaControl::generate_sdp_answer(
+//!                     &coord_clone,
+//!                     &call.id,
+//!                     &call.sdp.unwrap()
+//!                 ).await.unwrap();
+//!                 
+//!                 SessionControl::accept_incoming_call(
+//!                     &coord_clone,
+//!                     &call,
+//!                     Some(sdp)
+//!                 ).await.unwrap();
+//!             } else {
+//!                 SessionControl::reject_incoming_call(
+//!                     &coord_clone,
+//!                     &call,
+//!                     "Not authorized"
+//!                 ).await.unwrap();
+//!             }
+//!         }
+//!     });
+//!     
+//!     Ok(())
+//! }
 //! ```
 //! 
 //! ## RoutingHandler
 //! 
-//! Routes calls based on destination patterns:
+//! Routes calls based on destination patterns. Supports prefix matching and
+//! default actions for unmatched calls.
 //! 
 //! ```rust
 //! use rvoip_session_core::api::*;
 //! 
-//! let mut router = RoutingHandler::new();
-//! 
-//! // Add routing rules
-//! router.add_route("sip:support@", "sip:queue@support.internal");
-//! router.add_route("sip:sales@", "sip:queue@sales.internal");
-//! router.add_route("sip:+1800", "sip:tollfree@gateway.com");
-//! 
-//! // Set default action for unmatched calls
-//! router.set_default_action(CallDecision::Reject("Unknown destination"));
-//! 
-//! let coordinator = SessionManagerBuilder::new()
-//!     .with_handler(Arc::new(router))
-//!     .build()
-//!     .await?;
+//! fn create_pbx_router() -> RoutingHandler {
+//!     let mut router = RoutingHandler::new();
+//!     
+//!     // Department routing
+//!     router.add_route("sip:support@", "sip:queue@support.internal");
+//!     router.add_route("sip:sales@", "sip:queue@sales.internal");
+//!     router.add_route("sip:billing@", "sip:queue@billing.internal");
+//!     
+//!     // Geographic routing
+//!     router.add_route("sip:+1212", "sip:nyc@gateway.com");
+//!     router.add_route("sip:+1415", "sip:sf@gateway.com");
+//!     
+//!     // Toll-free routing
+//!     router.add_route("sip:+1800", "sip:tollfree@special.gateway.com");
+//!     router.add_route("sip:+1888", "sip:tollfree@special.gateway.com");
+//!     
+//!     // Set default for unknown destinations
+//!     router.set_default_action(
+//!         CallDecision::Forward("sip:operator@default.internal".to_string())
+//!     );
+//!     
+//!     router
+//! }
 //! ```
 //! 
 //! ## CompositeHandler
 //! 
-//! Combines multiple handlers in a chain:
+//! Chains multiple handlers together. Handlers are tried in order until one
+//! makes a decision (doesn't defer).
 //! 
 //! ```rust
 //! use rvoip_session_core::api::*;
+//! use std::sync::Arc;
 //! 
-//! let composite = CompositeHandler::new()
-//!     .add_handler(Arc::new(SecurityHandler::new()))
-//!     .add_handler(Arc::new(RateLimitHandler::new(10)))
-//!     .add_handler(Arc::new(RoutingHandler::new()))
-//!     .add_handler(Arc::new(QueueHandler::new(100)));
-//! 
-//! let coordinator = SessionManagerBuilder::new()
-//!     .with_handler(Arc::new(composite))
-//!     .build()
-//!     .await?;
+//! async fn create_advanced_handler() -> Arc<CompositeHandler> {
+//!     let composite = CompositeHandler::new()
+//!         // First, check blacklist
+//!         .add_handler(Arc::new(BlacklistHandler::new(vec![
+//!             "sip:spammer@example.com".to_string()
+//!         ])))
+//!         // Then check business hours
+//!         .add_handler(Arc::new(BusinessHoursHandler {
+//!             start_hour: 9,
+//!             end_hour: 17,
+//!             timezone: "America/New_York".to_string(),
+//!         }))
+//!         // Then apply rate limiting
+//!         .add_handler(Arc::new(RateLimitHandler::new(
+//!             10, // max calls per minute
+//!             Duration::from_secs(60)
+//!         )))
+//!         // Then route based on destination
+//!         .add_handler(Arc::new(create_pbx_router()))
+//!         // Finally, queue any remaining calls
+//!         .add_handler(Arc::new(QueueHandler::new(50)));
+//!     
+//!     Arc::new(composite)
+//! }
 //! ```
 //! 
-//! # Custom Handlers
+//! # Custom Handler Examples
 //! 
 //! ## Example: Business Hours Handler
 //! 
 //! ```rust
 //! use rvoip_session_core::api::*;
-//! use chrono::{Local, Timelike};
+//! use chrono::{Local, Timelike, Datelike, Weekday};
 //! 
 //! #[derive(Debug)]
 //! struct BusinessHoursHandler {
 //!     start_hour: u32,
 //!     end_hour: u32,
-//!     after_hours_message: String,
+//!     timezone: String,
 //! }
 //! 
 //! #[async_trait::async_trait]
 //! impl CallHandler for BusinessHoursHandler {
 //!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-//!         let hour = Local::now().hour();
+//!         let now = Local::now();
+//!         let hour = now.hour();
+//!         let weekday = now.weekday();
 //!         
+//!         // Check if weekend
+//!         if weekday == Weekday::Sat || weekday == Weekday::Sun {
+//!             return CallDecision::Forward("sip:weekend@voicemail.com".to_string());
+//!         }
+//!         
+//!         // Check business hours
 //!         if hour >= self.start_hour && hour < self.end_hour {
-//!             // During business hours, defer to next handler
+//!             // During business hours, let next handler decide
 //!             CallDecision::Defer
 //!         } else {
-//!             // After hours, reject with message
-//!             CallDecision::Reject(self.after_hours_message.clone())
+//!             // After hours, send to voicemail
+//!             CallDecision::Forward("sip:afterhours@voicemail.com".to_string())
 //!         }
 //!     }
 //!     
 //!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
-//!         // Log call duration for business analytics
-//!         if let Some(started_at) = call.started_at {
-//!             let duration = started_at.elapsed();
-//!             log_call_duration(&call.id(), duration).await;
-//!         }
+//!         // Log for business analytics
+//!         log::info!(
+//!             "Call {} ended after {} seconds: {}",
+//!             call.id(),
+//!             call.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+//!             reason
+//!         );
 //!     }
 //! }
 //! ```
 //! 
-//! ## Example: Database-Backed Handler
+//! ## Example: Database-Backed VIP Handler
 //! 
 //! ```rust
+//! use rvoip_session_core::api::*;
+//! use std::sync::Arc;
+//! use tokio::sync::RwLock;
+//! 
 //! #[derive(Debug)]
-//! struct DatabaseHandler {
+//! struct VipHandler {
 //!     db: Arc<Database>,
-//!     coordinator: Arc<RwLock<Option<Arc<SessionCoordinator>>>>,
+//!     vip_queue: Arc<RwLock<Vec<IncomingCall>>>,
 //! }
 //! 
 //! #[async_trait::async_trait]
-//! impl CallHandler for DatabaseHandler {
+//! impl CallHandler for VipHandler {
 //!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-//!         // Defer for async database lookup
+//!         // Always defer for async database lookup
+//!         self.vip_queue.write().await.push(call);
 //!         CallDecision::Defer
 //!     }
 //!     
 //!     async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
-//!         // Record call in database
-//!         self.db.record_call_start(&call, &local_sdp, &remote_sdp).await;
+//!         // Record high-priority call establishment
+//!         self.db.record_vip_call(&call, &local_sdp, &remote_sdp).await;
+//!     }
+//!     
+//!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
+//!         // Update VIP call statistics
+//!         self.db.update_vip_call_stats(&call.id(), reason).await;
+//!     }
+//! }
+//! 
+//! // Background processor for VIP calls
+//! async fn process_vip_calls(
+//!     handler: Arc<VipHandler>,
+//!     coordinator: Arc<SessionCoordinator>
+//! ) {
+//!     loop {
+//!         let calls = handler.vip_queue.write().await.drain(..).collect::<Vec<_>>();
 //!         
-//!         // Set up media if we have the coordinator reference
-//!         if let Some(coord) = self.coordinator.read().await.as_ref() {
-//!             if let Some(sdp) = remote_sdp {
-//!                 if let Ok(info) = parse_sdp_connection(&sdp) {
-//!                     let _ = MediaControl::establish_media_flow(
-//!                         coord,
-//!                         call.id(),
-//!                         &format!("{}:{}", info.ip, info.port)
-//!                     ).await;
+//!         for call in calls {
+//!             // Check VIP status in database
+//!             let caller_info = handler.db.get_caller_info(&call.from).await;
+//!             
+//!             if let Ok(info) = caller_info {
+//!                 if info.is_vip {
+//!                     // VIP gets high-quality codec and priority routing
+//!                     let sdp = generate_hd_audio_sdp(&call.id);
+//!                     SessionControl::accept_incoming_call(
+//!                         &coordinator,
+//!                         &call,
+//!                         Some(sdp)
+//!                     ).await.unwrap();
+//!                 } else {
+//!                     // Non-VIP goes to regular queue
+//!                     SessionControl::reject_incoming_call(
+//!                         &coordinator,
+//!                         &call,
+//!                         "Please use regular support line"
+//!                     ).await.unwrap();
 //!                 }
 //!             }
+//!         }
+//!         
+//!         tokio::time::sleep(Duration::from_millis(100)).await;
+//!     }
+//! }
+//! ```
+//! 
+//! ## Example: Geographic Load Balancer
+//! 
+//! ```rust
+//! #[derive(Debug)]
+//! struct GeoLoadBalancer {
+//!     regions: HashMap<String, Vec<String>>,
+//!     current_index: Arc<Mutex<HashMap<String, usize>>>,
+//! }
+//! 
+//! impl GeoLoadBalancer {
+//!     fn new() -> Self {
+//!         let mut regions = HashMap::new();
+//!         regions.insert("US-East".to_string(), vec![
+//!             "sip:server1@east.example.com".to_string(),
+//!             "sip:server2@east.example.com".to_string(),
+//!         ]);
+//!         regions.insert("US-West".to_string(), vec![
+//!             "sip:server1@west.example.com".to_string(),
+//!             "sip:server2@west.example.com".to_string(),
+//!         ]);
+//!         
+//!         Self {
+//!             regions,
+//!             current_index: Arc::new(Mutex::new(HashMap::new())),
+//!         }
+//!     }
+//!     
+//!     fn get_region_from_number(&self, number: &str) -> &str {
+//!         if number.starts_with("sip:+1212") || number.starts_with("sip:+1646") {
+//!             "US-East"
+//!         } else if number.starts_with("sip:+1415") || number.starts_with("sip:+1650") {
+//!             "US-West"
+//!         } else {
+//!             "US-East" // default
 //!         }
 //!     }
 //! }
 //! 
-//! // Process deferred calls from database handler
-//! async fn process_database_calls(
-//!     coordinator: &Arc<SessionCoordinator>,
-//!     call: IncomingCall,
-//!     db: &Database
-//! ) -> Result<()> {
-//!     // Check caller in database
-//!     let caller_info = db.lookup_caller(&call.from).await?;
-//!     
-//!     if caller_info.is_blocked {
-//!         SessionControl::reject_incoming_call(
-//!             coordinator,
-//!             &call,
-//!             "Caller blocked"
-//!         ).await?;
-//!     } else if caller_info.is_vip {
-//!         // VIP callers get priority handling
-//!         let sdp_answer = generate_high_quality_sdp(&call.sdp);
-//!         SessionControl::accept_incoming_call(
-//!             coordinator,
-//!             &call,
-//!             Some(sdp_answer)
-//!         ).await?;
-//!     } else {
-//!         // Regular callers
-//!         SessionControl::accept_incoming_call(
-//!             coordinator,
-//!             &call,
-//!             None
-//!         ).await?;
+//! #[async_trait::async_trait]
+//! impl CallHandler for GeoLoadBalancer {
+//!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+//!         let region = self.get_region_from_number(&call.from);
+//!         
+//!         if let Some(servers) = self.regions.get(region) {
+//!             // Round-robin within region
+//!             let mut indices = self.current_index.lock().unwrap();
+//!             let index = indices.entry(region.to_string()).or_insert(0);
+//!             let server = &servers[*index % servers.len()];
+//!             *index = (*index + 1) % servers.len();
+//!             
+//!             CallDecision::Forward(server.clone())
+//!         } else {
+//!             CallDecision::Reject("No servers available in region".to_string())
+//!         }
 //!     }
 //!     
-//!     Ok(())
+//!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
+//!         // Could track server performance metrics here
+//!     }
 //! }
 //! ```
+//! 
+//! # Best Practices
+//! 
+//! 1. **Use Defer for Async Operations**: Don't block in `on_incoming_call`
+//! 2. **Chain Handlers**: Use CompositeHandler for complex logic
+//! 3. **Handle Errors Gracefully**: Always have a fallback decision
+//! 4. **Log Important Events**: Use the callbacks for monitoring
+//! 5. **Clean Up Resources**: Use `on_call_ended` for cleanup
+//! 
+//! # Thread Safety
+//! 
+//! All handlers must be `Send + Sync` as they're called from multiple async tasks.
+//! Use `Arc<Mutex<>>` or `Arc<RwLock<>>` for shared mutable state.
 
 use async_trait::async_trait;
 use std::collections::HashMap;
