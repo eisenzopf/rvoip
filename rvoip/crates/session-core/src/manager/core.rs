@@ -248,7 +248,7 @@ impl SessionManager {
         
         // Accept incoming call using DialogManager (high-level delegation)
         self.dialog_manager
-            .accept_incoming_call(session_id)
+            .accept_incoming_call(session_id, None)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to accept call via dialog manager: {}", e)))?;
         

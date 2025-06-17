@@ -3,6 +3,10 @@
 //! This is a simplified conference server that accepts multiple concurrent calls
 //! to simulate conference behavior. In a real implementation, you would use
 //! the media-core conference functionality.
+//!
+//! NOTE: This example uses some internal implementation details.
+//! For the recommended approach using only the public API, see:
+//! `examples/api_best_practices/uas_server_clean.rs`
 
 use anyhow::Result;
 use clap::Parser;

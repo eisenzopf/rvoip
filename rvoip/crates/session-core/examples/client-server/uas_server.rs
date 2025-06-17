@@ -2,6 +2,10 @@
 //! 
 //! This example demonstrates a simple SIP User Agent Server (UAS)
 //! that accepts incoming calls from UAC clients.
+//!
+//! NOTE: This example uses some internal implementation details for demonstration.
+//! For the recommended approach using only the public API, see:
+//! `examples/api_best_practices/uas_server_clean.rs`
 
 use anyhow::Result;
 use clap::Parser;

@@ -4,6 +4,7 @@
 
 use crate::api::types::*;
 use crate::api::handlers::CallHandler;
+use crate::api::media::MediaControl;
 use crate::coordinator::SessionCoordinator;
 use crate::errors::{Result, SessionError};
 use crate::manager::events::SessionEvent;
@@ -102,6 +103,34 @@ pub trait SessionControl {
     /// * `Ok(())` if the call was answered
     /// * `Err(SessionError)` if the call failed, was cancelled, or timed out
     async fn wait_for_answer(&self, session_id: &SessionId, timeout: std::time::Duration) -> Result<()>;
+    
+    /// Accept an incoming call programmatically outside of CallHandler
+    /// 
+    /// This is useful for more complex decision logic that can't be handled
+    /// in the synchronous on_incoming_call callback.
+    /// 
+    /// # Arguments
+    /// * `call` - The incoming call to accept
+    /// * `sdp_answer` - Optional SDP answer to send with the acceptance
+    /// 
+    /// # Returns
+    /// * `Ok(CallSession)` if the call was accepted successfully
+    /// * `Err(SessionError)` if the call cannot be accepted
+    async fn accept_incoming_call(&self, call: &IncomingCall, sdp_answer: Option<String>) -> Result<CallSession>;
+    
+    /// Reject an incoming call programmatically outside of CallHandler
+    /// 
+    /// This complements accept_incoming_call for cases where the decision
+    /// needs to be made outside the callback.
+    /// 
+    /// # Arguments
+    /// * `call` - The incoming call to reject
+    /// * `reason` - The rejection reason
+    /// 
+    /// # Returns
+    /// * `Ok(())` if the call was rejected successfully
+    /// * `Err(SessionError)` if the call cannot be rejected
+    async fn reject_incoming_call(&self, call: &IncomingCall, reason: &str) -> Result<()>;
 }
 
 /// Implementation of SessionControl for SessionCoordinator
@@ -548,5 +577,132 @@ impl SessionControl for Arc<SessionCoordinator> {
                 format!("Timeout waiting for call {} to be answered", session_id)
             )),
         }
+    }
+    
+    async fn accept_incoming_call(&self, call: &IncomingCall, sdp_answer: Option<String>) -> Result<CallSession> {
+        // Check if session already exists
+        if let Ok(Some(session)) = self.get_session(&call.id).await {
+            // Check if already accepted
+            match session.state() {
+                CallState::Active => {
+                    return Err(SessionError::invalid_state(
+                        "Call already accepted"
+                    ));
+                }
+                CallState::Failed(_) | CallState::Terminated | CallState::Cancelled => {
+                    return Err(SessionError::invalid_state(
+                        "Call already ended"
+                    ));
+                }
+                CallState::Ringing => {
+                    // This is OK - we can accept a ringing call
+                }
+                _ => {}
+            }
+        }
+        
+        // Create session if it doesn't exist
+        let mut session = if let Ok(Some(existing)) = self.get_session(&call.id).await {
+            // Use existing session
+            existing
+        } else {
+            // Create new session
+            let new_session = CallSession {
+                id: call.id.clone(),
+                from: call.from.clone(),
+                to: call.to.clone(),
+                state: CallState::Ringing,
+                started_at: Some(std::time::Instant::now()),
+            };
+            
+            // Register the new session
+            self.registry.register_session(call.id.clone(), new_session.clone()).await?;
+            new_session
+        };
+        
+        // If we have SDP in the offer and no answer provided, generate one
+        let final_sdp_answer = if call.sdp.is_some() && sdp_answer.is_none() {
+            // Use MediaControl to generate answer
+            match MediaControl::generate_sdp_answer(self, &call.id, call.sdp.as_ref().unwrap()).await {
+                Ok(answer) => Some(answer),
+                Err(e) => {
+                    tracing::warn!("Failed to generate SDP answer: {}", e);
+                    None
+                }
+            }
+        } else {
+            sdp_answer
+        };
+        
+        // Accept the call at the dialog level with the SDP answer
+        self.dialog_manager.accept_incoming_call(&call.id, final_sdp_answer.clone()).await
+            .map_err(|e| SessionError::internal(&format!("Failed to accept call: {}", e)))?;
+        
+        // Update session state to Active
+        if let Ok(Some(mut session)) = self.registry.get_session(&call.id).await {
+            let old_state = session.state.clone();
+            session.state = CallState::Active;
+            self.registry.register_session(call.id.clone(), session.clone()).await?;
+            
+            // Emit state change event
+            let _ = self.event_tx.send(SessionEvent::StateChanged {
+                session_id: call.id.clone(),
+                old_state,
+                new_state: CallState::Active,
+            }).await;
+            
+            // Call the handler's on_call_established
+            if let Some(handler) = &self.handler {
+                handler.on_call_established(
+                    session.clone(),
+                    final_sdp_answer,
+                    call.sdp.clone()
+                ).await;
+            }
+            
+            Ok(session)
+        } else {
+            Err(SessionError::session_not_found(&call.id.0))
+        }
+    }
+    
+    async fn reject_incoming_call(&self, call: &IncomingCall, reason: &str) -> Result<()> {
+        // Check if session exists and is in a state where it can be rejected
+        if let Ok(Some(session)) = self.get_session(&call.id).await {
+            match session.state() {
+                CallState::Failed(_) | CallState::Terminated | CallState::Cancelled => {
+                    return Err(SessionError::invalid_state(
+                        "Call already ended"
+                    ));
+                }
+                CallState::Active => {
+                    return Err(SessionError::invalid_state(
+                        "Cannot reject an active call - use terminate_session instead"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        
+        // Since dialog manager doesn't have a specific reject method,
+        // we'll use terminate_session which handles the state appropriately
+        self.dialog_manager.terminate_session(&call.id).await
+            .map_err(|e| SessionError::internal(&format!("Failed to reject call: {}", e)))?;
+        
+        // Update session state if it exists
+        if let Ok(Some(mut session)) = self.registry.get_session(&call.id).await {
+            let old_state = session.state.clone();
+            session.state = CallState::Failed(reason.to_string());
+            self.registry.register_session(call.id.clone(), session).await?;
+            
+            // Emit state change event
+            let _ = self.event_tx.send(SessionEvent::StateChanged {
+                session_id: call.id.clone(),
+                old_state,
+                new_state: CallState::Failed(reason.to_string()),
+            }).await;
+        }
+        
+        Ok(())
     }
 } 

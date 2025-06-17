@@ -4,6 +4,10 @@
 //! session-core API with real media-core integration. It establishes actual SIP 
 //! sessions with SDP negotiation and real media sessions.
 //!
+//! NOTE: This example uses some internal implementation details for demonstration.
+//! For the recommended approach using only the public API, see the examples in:
+//! `examples/api_best_practices/`
+//!
 //! Usage:
 //!   cargo run --bin simple_peer_to_peer
 //!   cargo run --bin simple_peer_to_peer -- --duration 10

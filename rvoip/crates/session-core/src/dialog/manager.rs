@@ -85,7 +85,7 @@ impl DialogManager {
     }
     
     /// Accept an incoming call
-    pub async fn accept_incoming_call(&self, session_id: &SessionId) -> DialogResult<()> {
+    pub async fn accept_incoming_call(&self, session_id: &SessionId, sdp_answer: Option<String>) -> DialogResult<()> {
         let dialog_id = self.get_dialog_id_for_session(session_id)?;
         
         // Get the call handle and answer the call
@@ -97,7 +97,7 @@ impl DialogManager {
             })?;
             
         call_handle
-            .answer(None)
+            .answer(sdp_answer)
             .await
             .map_err(|e| DialogError::DialogCore {
                 source: Box::new(e),

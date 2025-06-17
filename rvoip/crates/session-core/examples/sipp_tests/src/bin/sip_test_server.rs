@@ -2,6 +2,10 @@
 //! 
 //! This application uses session-core to create a SIP User Agent Server (UAS)
 //! that can receive and respond to calls from SIPp test scenarios.
+//!
+//! NOTE: This example uses some internal implementation details.
+//! For the recommended approach using only the public API, see:
+//! `examples/api_best_practices/uas_server_clean.rs`
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};

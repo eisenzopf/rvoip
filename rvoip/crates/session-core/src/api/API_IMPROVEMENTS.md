@@ -12,12 +12,12 @@ This document tracks improvements to the session-core API to ensure consistent u
 - [x] Create `examples/api_best_practices/README.md` - explains the patterns and why they're preferred
 
 ### Documentation Updates
-- [ ] Add comments to existing examples noting that newer patterns are available
-- [ ] Create migration guide showing how to move from direct access to API usage
-- [ ] Document the pattern for storing coordinator reference in handlers
+- [x] Add comments to existing examples noting that newer patterns are available
+- [x] Create migration guide showing how to move from direct access to API usage
+- [x] Document the pattern for storing coordinator reference in handlers
 
 ### API Compatibility Layer
-- [ ] Ensure new API methods work alongside existing patterns
+- [x] Ensure new API methods work alongside existing patterns
 - [ ] Add deprecation warnings (non-breaking) for internal access patterns
 - [ ] Create compatibility shims where needed
 
@@ -38,11 +38,11 @@ This document tracks improvements to the session-core API to ensure consistent u
   - Provides proper offer/answer negotiation without internal access
 
 ### New SessionControl Methods
-- [ ] Add `accept_incoming_call(&self, call: &IncomingCall, sdp_answer: Option<String>) -> Result<CallSession>`
+- [x] Add `accept_incoming_call(&self, call: &IncomingCall, sdp_answer: Option<String>) -> Result<CallSession>`
   - Programmatic way to accept calls outside of CallHandler
   - Useful for more complex decision logic
 
-- [ ] Add `reject_incoming_call(&self, call: &IncomingCall, reason: &str) -> Result<()>`
+- [x] Add `reject_incoming_call(&self, call: &IncomingCall, reason: &str) -> Result<()>`
   - Programmatic way to reject calls
   - Complements accept method
 
@@ -136,4 +136,16 @@ This document tracks improvements to the session-core API to ensure consistent u
 ## Related Issues
 - Link to any GitHub issues or PRs here
 - Track user feedback about API usage
-- Document any discovered edge cases 
+- Document any discovered edge cases
+
+## Completed Fixes
+
+### SDP Answer Gap Fix (Completed)
+- **Issue**: The `SessionControl::accept_incoming_call` API accepted an `sdp_answer` parameter but couldn't pass it through to the dialog layer
+- **Root Cause**: `DialogManager::accept_incoming_call` didn't have an SDP parameter
+- **Fix Applied**:
+  - Updated `DialogManager::accept_incoming_call` to accept `sdp_answer: Option<String>` parameter
+  - Updated call sites to pass the SDP answer through
+  - Now programmatic call acceptance with custom SDP answers works correctly
+- **Test**: Added `tests/accept_with_sdp_test.rs` to verify the fix
+- **Use Case**: Enables deferred call handling where the handler returns `CallDecision::Defer` and the call is accepted later with a custom SDP answer 
