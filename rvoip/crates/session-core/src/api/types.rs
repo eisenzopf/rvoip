@@ -289,6 +289,69 @@ impl fmt::Display for TerminationReason {
     }
 }
 
+/// Parsed SDP information for easier handling
+#[derive(Debug, Clone)]
+pub struct SdpInfo {
+    /// Connection IP address
+    pub ip: String,
+    /// Media port (typically RTP port)
+    pub port: u16,
+    /// List of supported codecs
+    pub codecs: Vec<String>,
+}
+
+/// Parse SDP connection information
+/// 
+/// # Example
+/// ```no_run
+/// use rvoip_session_core::api::parse_sdp_connection;
+/// 
+/// let sdp = "v=0\r\nc=IN IP4 192.168.1.100\r\nm=audio 5004 RTP/AVP 0 8\r\n";
+/// if let Ok(info) = parse_sdp_connection(sdp) {
+///     println!("Remote endpoint: {}:{}", info.ip, info.port);
+/// }
+/// ```
+pub fn parse_sdp_connection(sdp: &str) -> Result<SdpInfo> {
+    let mut ip = None;
+    let mut port = None;
+    let mut codecs = Vec::new();
+    
+    for line in sdp.lines() {
+        if line.starts_with("c=IN IP4 ") {
+            ip = line.strip_prefix("c=IN IP4 ").map(|s| s.to_string());
+        } else if line.starts_with("m=audio ") {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() > 1 {
+                port = parts[1].parse().ok();
+            }
+            // Extract codec numbers
+            if parts.len() > 3 {
+                for codec in &parts[3..] {
+                    codecs.push(codec.to_string());
+                }
+            }
+        } else if line.starts_with("a=rtpmap:") {
+            // Parse codec names
+            if let Some(codec_info) = line.strip_prefix("a=rtpmap:") {
+                let parts: Vec<&str> = codec_info.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    // Format: "0 PCMU/8000" -> add "PCMU" to codecs
+                    if let Some(codec_name) = parts[1].split('/').next() {
+                        codecs.push(codec_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    
+    match (ip, port) {
+        (Some(ip), Some(port)) => Ok(SdpInfo { ip, port, codecs }),
+        _ => Err(crate::errors::SessionError::MediaIntegration {
+            message: "Failed to parse SDP connection information".to_string()
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

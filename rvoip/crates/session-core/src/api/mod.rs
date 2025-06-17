@@ -14,6 +14,7 @@ pub mod examples;
 pub use types::{
     SessionId, CallSession, CallState, IncomingCall, CallDecision, 
     SessionStats, MediaInfo, PreparedCall, CallDirection, TerminationReason,
+    SdpInfo, parse_sdp_connection,
 };
 pub use handlers::CallHandler;
 pub use builder::{SessionManagerBuilder, SessionManagerConfig};

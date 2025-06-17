@@ -42,6 +42,21 @@ pub trait MediaControl {
     
     /// Start periodic statistics monitoring with the specified interval
     async fn start_statistics_monitoring(&self, session_id: &SessionId, interval: std::time::Duration) -> Result<()>;
+    
+    /// Create a media session without generating SDP
+    /// This is useful when you need to prepare media before SDP negotiation,
+    /// particularly in UAS scenarios where you receive an offer first
+    async fn create_media_session(&self, session_id: &SessionId) -> Result<()>;
+    
+    /// Update media session with remote SDP without starting transmission
+    /// This separates SDP handling from media flow establishment, allowing
+    /// more control over when audio transmission begins
+    async fn update_remote_sdp(&self, session_id: &SessionId, remote_sdp: &str) -> Result<()>;
+    
+    /// Generate SDP answer based on received offer
+    /// This provides proper offer/answer negotiation for UAS scenarios
+    /// without requiring direct access to internal components
+    async fn generate_sdp_answer(&self, session_id: &SessionId, offer: &str) -> Result<String>;
 }
 
 impl MediaControl for Arc<SessionCoordinator> {
@@ -234,6 +249,71 @@ impl MediaControl for Arc<SessionCoordinator> {
             .map_err(|e| crate::errors::SessionError::MediaIntegration { 
                 message: format!("Failed to start statistics monitoring: {}", e) 
             })
+    }
+    
+    async fn create_media_session(&self, session_id: &SessionId) -> Result<()> {
+        // Get the media manager through the coordinator
+        let media_manager = &self.media_manager;
+        
+        // Create media session without generating SDP
+        media_manager.create_media_session(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to create media session: {}", e) 
+            })?;
+        
+        tracing::info!("Created media session for {}", session_id);
+        Ok(())
+    }
+    
+    async fn update_remote_sdp(&self, session_id: &SessionId, remote_sdp: &str) -> Result<()> {
+        // Get the media manager through the coordinator
+        let media_manager = &self.media_manager;
+        
+        // Update media session with remote SDP but don't start transmission
+        media_manager.update_media_session(session_id, remote_sdp).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to update remote SDP: {}", e) 
+            })?;
+        
+        // Store the remote SDP
+        {
+            let mut sdp_storage = media_manager.sdp_storage.write().await;
+            let entry = sdp_storage.entry(session_id.clone()).or_insert((None, None));
+            entry.1 = Some(remote_sdp.to_string());
+        }
+        
+        tracing::info!("Updated remote SDP for session {}", session_id);
+        Ok(())
+    }
+    
+    async fn generate_sdp_answer(&self, session_id: &SessionId, offer: &str) -> Result<String> {
+        // First ensure we have a media session
+        let media_manager = &self.media_manager;
+        
+        // Create media session if it doesn't exist
+        if media_manager.get_media_info(session_id).await.ok().flatten().is_none() {
+            self.create_media_session(session_id).await?;
+        }
+        
+        // Update with the offer
+        self.update_remote_sdp(session_id, offer).await?;
+        
+        // Generate answer based on our capabilities and the offer
+        // For now, we'll generate a standard offer which acts as our answer
+        let answer = media_manager.generate_sdp_offer(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to generate SDP answer: {}", e) 
+            })?;
+        
+        // Store our local SDP
+        {
+            let mut sdp_storage = media_manager.sdp_storage.write().await;
+            let entry = sdp_storage.entry(session_id.clone()).or_insert((None, None));
+            entry.0 = Some(answer.clone());
+        }
+        
+        tracing::info!("Generated SDP answer for session {}", session_id);
+        Ok(answer)
     }
 }
 
