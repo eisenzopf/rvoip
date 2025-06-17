@@ -49,6 +49,7 @@ struct UasStats {
 }
 
 /// Clean UAS handler using only the public API
+#[derive(Debug)]
 struct CleanUasHandler {
     stats: Arc<Mutex<UasStats>>,
     auto_accept: bool,

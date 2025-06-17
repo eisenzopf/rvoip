@@ -64,3 +64,11 @@ path = "examples/client-server/uac_client.rs"
 [[bin]]
 name = "simple_peer_to_peer"
 path = "examples/peer-to-peer/simple_peer_to_peer.rs"
+
+[[bin]]
+name = "uac_client_clean"
+path = "examples/api_best_practices/uac_client_clean.rs"
+
+[[bin]]
+name = "uas_server_clean"
+path = "examples/api_best_practices/uas_server_clean.rs"

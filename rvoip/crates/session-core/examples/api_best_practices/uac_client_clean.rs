@@ -57,6 +57,7 @@ struct UacStats {
 }
 
 /// Clean UAC handler using only the public API
+#[derive(Debug)]
 struct CleanUacHandler {
     stats: Arc<Mutex<UacStats>>,
     // Store coordinator reference for API calls

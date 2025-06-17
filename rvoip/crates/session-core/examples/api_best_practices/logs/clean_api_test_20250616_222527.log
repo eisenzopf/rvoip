@@ -1,0 +1,22 @@
+# Clean API Examples Test Log
+# Started: Mon Jun 16 22:25:27 PDT 2025
+# Server port: 5062
+# Client port: 5061
+# Target: 127.0.0.1:5062
+# Calls: 2
+# Call duration: 5s
+# Call delay: 2s
+
+[2025-06-16 22:25:27] [INFO] Test started at Mon Jun 16 22:25:27 PDT 2025
+[2025-06-16 22:25:27] [INFO] Log directory: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs
+[2025-06-16 22:25:27] [INFO] 
+[2025-06-16 22:25:27] [INFO] This test demonstrates:
+[2025-06-16 22:25:27] [INFO]   • Public API usage only (no internal access)
+[2025-06-16 22:25:27] [INFO]   • Clean SDP handling with new API methods
+[2025-06-16 22:25:27] [INFO]   • Proper media flow establishment
+[2025-06-16 22:25:27] [INFO]   • Best practices for session-core usage
+[2025-06-16 22:25:27] [INFO] Starting clean UAS server on port 5062...
+[2025-06-16 22:25:27] [INFO] Server log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/uas_clean_20250616_222527.log
+[2025-06-16 22:25:27] [INFO] Clean UAS server started with PID 98504
+[2025-06-16 22:25:27] [INFO] Waiting for server to be ready...
+[2025-06-16 22:25:37] [ERROR] Timeout waiting for clean UAS server to start

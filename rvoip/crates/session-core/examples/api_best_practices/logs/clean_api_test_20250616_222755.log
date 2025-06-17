@@ -1,0 +1,63 @@
+# Clean API Examples Test Log
+# Started: Mon Jun 16 22:27:55 PDT 2025
+# Server port: 5062
+# Client port: 5061
+# Target: 127.0.0.1:5062
+# Calls: 2
+# Call duration: 5s
+# Call delay: 2s
+
+[2025-06-16 22:27:55] [INFO] Test started at Mon Jun 16 22:27:55 PDT 2025
+[2025-06-16 22:27:55] [INFO] Log directory: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs
+[2025-06-16 22:27:55] [INFO] 
+[2025-06-16 22:27:55] [INFO] This test demonstrates:
+[2025-06-16 22:27:55] [INFO]   • Public API usage only (no internal access)
+[2025-06-16 22:27:55] [INFO]   • Clean SDP handling with new API methods
+[2025-06-16 22:27:55] [INFO]   • Proper media flow establishment
+[2025-06-16 22:27:55] [INFO]   • Best practices for session-core usage
+[2025-06-16 22:27:55] [INFO] Starting clean UAS server on port 5062...
+[2025-06-16 22:27:55] [INFO] Server log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/uas_clean_20250616_222755.log
+[2025-06-16 22:27:55] [INFO] Clean UAS server started with PID 99255
+[2025-06-16 22:27:55] [INFO] Waiting for server to be ready...
+[2025-06-16 22:27:56] [SUCCESS] Clean UAS server is ready
+[2025-06-16 22:27:56] [INFO] Waiting 2 seconds before starting client...
+[2025-06-16 22:27:58] [INFO] Starting clean UAC client on port 5061...
+[2025-06-16 22:27:58] [INFO] Client log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/uac_clean_20250616_222755.log
+[2025-06-16 22:27:58] [INFO] Target: 127.0.0.1:5062
+[2025-06-16 22:27:58] [INFO] Number of calls: 2
+[2025-06-16 22:27:58] [INFO] Call duration: 5s
+[2025-06-16 22:27:58] [INFO] Delay between calls: 2s
+[2025-06-16 22:28:15] [SUCCESS] Clean UAC client completed successfully
+[2025-06-16 22:28:15] [INFO] Stopping clean UAS server (PID: 99255)...
+[2025-06-16 22:28:15] [INFO] Checking server log for API usage...
+[2025-06-16 22:28:15] [INFO] Checking client log for API usage...
+[2025-06-16 22:28:15] [INFO] Test Metrics:
+[2025-06-16 22:28:15] [INFO]   Server API ready:    1 (expected: 1)
+[2025-06-16 22:28:15] [INFO]   Server incoming:     2 calls (expected: 2)
+[2025-06-16 22:28:15] [INFO]   Server SDP answer:   2 (expected: 2)
+[2025-06-16 22:28:15] [INFO]   Server media flow:   2 (expected: 2)
+[2025-06-16 22:28:15] [INFO]   Server ended:        2 calls (expected: 2)
+[2025-06-16 22:28:15] [INFO]   Client API ready:    1 (expected: 1)
+[2025-06-16 22:28:15] [INFO]   Client initiated:    2 calls (expected: 2)
+[2025-06-16 22:28:15] [INFO]   Client prepared:     2 calls (expected: 2)
+[2025-06-16 22:28:15] [INFO]   Client established:  2 calls (expected: 2)
+[2025-06-16 22:28:15] [INFO]   Client media flow:   2 (expected: 2)
+[2025-06-16 22:28:15] [INFO] 
+[2025-06-16 22:28:15] [INFO] Checking API best practices...
+[2025-06-16 22:28:15] [SUCCESS] ✓ No internal coordinator access detected (clean API usage)
+[2025-06-16 22:28:15] [SUCCESS] Test PASSED: All 2 calls completed using clean public API
+[2025-06-16 22:28:15] [SUCCESS] Clean API examples test completed successfully
+[2025-06-16 22:28:15] [INFO] 
+[2025-06-16 22:28:15] [INFO] ✅ Key achievements demonstrated:
+[2025-06-16 22:28:15] [INFO]   • Used only public API methods
+[2025-06-16 22:28:15] [INFO]   • SDP answer generation via generate_sdp_answer()
+[2025-06-16 22:28:15] [INFO]   • Media flow via establish_media_flow()
+[2025-06-16 22:28:15] [INFO]   • Statistics monitoring via get_media_statistics()
+[2025-06-16 22:28:15] [INFO]   • No internal coordinator access
+[2025-06-16 22:28:15] [INFO] 
+[2025-06-16 22:28:15] [INFO] Test ended at Mon Jun 16 22:28:15 PDT 2025
+[2025-06-16 22:28:15] [INFO] 
+[2025-06-16 22:28:15] [INFO] Log files:
+[2025-06-16 22:28:15] [INFO]   Combined: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/clean_api_test_20250616_222755.log
+[2025-06-16 22:28:15] [INFO]   Server:   /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/uas_clean_20250616_222755.log
+[2025-06-16 22:28:15] [INFO]   Client:   /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/uac_clean_20250616_222755.log
