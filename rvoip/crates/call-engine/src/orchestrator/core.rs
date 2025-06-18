@@ -6,14 +6,16 @@ use std::net::SocketAddr;
 use async_trait::async_trait;
 
 use rvoip_sip_core::{Request, Response, StatusCode};
-use rvoip_session_core::api::{
+use rvoip_session_core::{
+    // Core coordinator
+    SessionCoordinator, SessionManagerBuilder,
     // Basic session types from API
     SessionId, Session,
     // Server management
-    ServerSessionManager, ServerConfig, create_full_server_manager,
+    ServerSessionManager,
     IncomingCallEvent, CallerInfo, CallDecision,
     // Bridge management
-    BridgeId, BridgeInfo, BridgeEvent, BridgeEventType,
+    BridgeId, BridgeInfo, BridgeEvent,
 };
 use rvoip_transaction_core::{TransactionManager, TransactionKey};
 
@@ -42,8 +44,8 @@ pub struct CallCenterEngine {
     /// Database layer for persistence
     database: CallCenterDatabase,
     
-    /// **REAL**: Session-core server manager integration
-    server_manager: Arc<ServerSessionManager>,
+    /// **REAL**: Session-core coordinator integration
+    server_manager: Arc<SessionCoordinator>,
     
     /// **PHASE 2**: Queue manager for call queuing and routing
     queue_manager: Arc<RwLock<QueueManager>>,
@@ -220,19 +222,24 @@ impl IncomingCallNotificationTrait for CallCenterNotificationHandler {
 impl CallCenterEngine {
     /// **REAL INTEGRATION**: Create call center engine with session-core
     pub async fn new(
-        transaction_manager: Arc<TransactionManager>,
         config: CallCenterConfig,
         database: CallCenterDatabase,
     ) -> CallCenterResult<Arc<Self>> {
         info!("🚀 Creating CallCenterEngine with REAL session-core API integration");
         
-        // Convert call center config to session-core ServerConfig
-        let server_config = ServerConfig::default();
-        
-        // **REAL**: Create session-core server manager using the API
-        let server_manager = create_full_server_manager(transaction_manager, server_config)
+        // **REAL**: Create session-core using the high-level API
+        let session_coordinator = rvoip_session_core::SessionManagerBuilder::new()
+            .with_sip_port(config.general.local_signaling_addr.port())
+            .with_media_ports(
+                config.general.local_media_addr.port(),
+                config.general.local_media_addr.port() + 1000
+            )
+            .build()
             .await
-            .map_err(|e| CallCenterError::orchestration(&format!("Failed to create server manager: {}", e)))?;
+            .map_err(|e| CallCenterError::orchestration(&format!("Failed to create session coordinator: {}", e)))?;
+        
+        // The SessionCoordinator provides all the functionality we need
+        let server_manager = session_coordinator;
         
         info!("✅ ServerSessionManager created successfully");
         
@@ -968,26 +975,16 @@ impl CallCenterEngine {
     
     /// **NEW**: Handle bridge events for monitoring and metrics
     async fn handle_bridge_event(&self, event: BridgeEvent) {
-        match event.event_type {
-            BridgeEventType::Created => {
-                info!("🌉 Bridge created: {}", event.bridge_id);
+        match event {
+            BridgeEvent::ParticipantAdded { bridge_id, session_id } => {
+                info!("➕ Session {} added to bridge {}", session_id, bridge_id);
             },
-            BridgeEventType::Destroyed => {
-                info!("🗑️ Bridge destroyed: {}", event.bridge_id);
+            BridgeEvent::ParticipantRemoved { bridge_id, session_id, reason } => {
+                info!("➖ Session {} removed from bridge {}: {}", session_id, bridge_id, reason);
             },
-            BridgeEventType::SessionAdded => {
-                if let Some(session_id) = &event.session_id {
-                    info!("➕ Session {} added to bridge {}", session_id, event.bridge_id);
-                }
+            BridgeEvent::BridgeDestroyed { bridge_id } => {
+                info!("🗑️ Bridge destroyed: {}", bridge_id);
             },
-            BridgeEventType::SessionRemoved => {
-                if let Some(session_id) = &event.session_id {
-                    info!("➖ Session {} removed from bridge {}", session_id, event.bridge_id);
-                }
-            },
-            _ => {
-                debug!("🔔 Bridge event: {:?}", event);
-            }
         }
     }
     
@@ -1023,8 +1020,8 @@ impl CallCenterEngine {
         }
     }
     
-    /// Get the underlying session manager for advanced operations
-    pub fn session_manager(&self) -> &Arc<ServerSessionManager> {
+    /// Get the underlying session coordinator for advanced operations
+    pub fn session_manager(&self) -> &Arc<SessionCoordinator> {
         &self.server_manager
     }
     

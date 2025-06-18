@@ -18,7 +18,6 @@ use rvoip_call_engine::prelude::*;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing_subscriber;
-use async_trait::async_trait;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,53 +38,12 @@ async fn main() -> Result<()> {
     let config = CallCenterConfig::default();
     println!("✅ Configuration ready\n");
 
-    // Step 3: Create transaction manager for session-core
-    println!("⚡ Creating transaction manager for session-core...");
-    
-    // Create dummy transport for demonstration
-    let local_addr: std::net::SocketAddr = "127.0.0.1:5060".parse()?;
-    let (_transport_tx, transport_rx) = tokio::sync::mpsc::channel(10);
-    
-    #[derive(Debug, Clone)]
-    struct DemoTransport {
-        local_addr: std::net::SocketAddr,
-    }
-    
-    #[async_trait]
-    impl rvoip_sip_transport::Transport for DemoTransport {
-        async fn send_message(
-            &self, 
-            _message: rvoip_sip_core::Message, 
-            _destination: std::net::SocketAddr
-        ) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
-            Ok(())
-        }
-        
-        fn local_addr(&self) -> std::result::Result<std::net::SocketAddr, rvoip_sip_transport::error::Error> {
-            Ok(self.local_addr)
-        }
-        
-        async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
-            Ok(())
-        }
-        
-        fn is_closed(&self) -> bool {
-            false
-        }
-    }
-    
-    let transport = Arc::new(DemoTransport { local_addr });
-    let (tm, _events) = rvoip_transaction_core::TransactionManager::new(transport, transport_rx, Some(10)).await
-        .map_err(|e| anyhow::anyhow!("Failed to create transaction manager: {}", e))?;
-    
-    println!("✅ Transaction manager created\n");
-
-    // Step 4: Create CallCenterEngine with Phase 2 capabilities
+    // Step 3: Create CallCenterEngine with Phase 2 capabilities
     println!("🎯 Creating CallCenterEngine with Phase 2 routing capabilities...");
-    let call_center = CallCenterEngine::new(Arc::new(tm), config, database).await?;
+    let call_center = CallCenterEngine::new(config, database).await?;
     println!("✅ CallCenterEngine created with sophisticated routing!\n");
 
-    // Step 5: Register agents with different skills
+    // Step 4: Register agents with different skills
     println!("👥 Registering agents with different skills...");
     
     let agents = vec![
@@ -138,12 +96,12 @@ async fn main() -> Result<()> {
     }
     println!("✅ All agents registered with skills and capabilities\n");
 
-    // Step 6: Display initial statistics
+    // Step 5: Display initial statistics
     println!("📊 Initial Call Center Statistics:");
     display_statistics(&call_center).await;
     println!();
 
-    // Step 7: Simulate incoming calls with different characteristics
+    // Step 6: Simulate incoming calls with different characteristics
     println!("📞 Simulating Phase 2 Call Routing Scenarios...\n");
     
     // Scenario 1: VIP customer call (should get priority routing)
@@ -175,24 +133,24 @@ async fn main() -> Result<()> {
     simulate_incoming_call(&call_center, "+1555-standard-call", "Standard customer call").await;
     sleep(Duration::from_millis(500)).await;
 
-    // Step 8: Display updated statistics
+    // Step 7: Display updated statistics
     println!("\n📊 Updated Call Center Statistics (after routing):");
     display_statistics(&call_center).await;
     
-    // Step 9: Display queue statistics
+    // Step 8: Display queue statistics
     println!("\n📋 Queue Statistics:");
     display_queue_statistics(&call_center).await;
     
-    // Step 10: Display agent information
+    // Step 9: Display agent information
     println!("\n👥 Agent Status and Performance:");
     display_agent_information(&call_center).await;
     
-    // Step 11: Simulate agent becoming available (should trigger queue processing)
+    // Step 10: Simulate agent becoming available (should trigger queue processing)
     println!("\n🔄 Making agent available - should process queued calls...");
     call_center.update_agent_status(&"alice-sales".to_string(), AgentStatus::Available).await?;
     sleep(Duration::from_secs(1)).await; // Give time for queue processing
     
-    // Step 12: Final statistics
+    // Step 11: Final statistics
     println!("\n📊 Final Call Center Statistics:");
     display_statistics(&call_center).await;
     

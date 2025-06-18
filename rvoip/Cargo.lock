@@ -3181,6 +3181,7 @@ dependencies = [
  "rvoip-transaction-core",
  "serde",
  "serde_json",
+ "serial_test",
  "thiserror 1.0.69",
  "tokio",
  "tokio-test",

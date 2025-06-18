@@ -5,67 +5,31 @@
 
 use anyhow::Result;
 use rvoip_call_engine::prelude::*;
-use rvoip_transaction_core::TransactionManager;
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use async_trait::async_trait;
-
-/// Create a dummy transport for testing
-#[derive(Debug, Clone)]
-struct TestTransport {
-    local_addr: std::net::SocketAddr,
-}
-
-#[async_trait]
-impl rvoip_sip_transport::Transport for TestTransport {
-    async fn send_message(
-        &self, 
-        _message: rvoip_sip_core::Message, 
-        _destination: std::net::SocketAddr
-    ) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
-        Ok(())
-    }
-    
-    fn local_addr(&self) -> std::result::Result<std::net::SocketAddr, rvoip_sip_transport::error::Error> {
-        Ok(self.local_addr)
-    }
-    
-    async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
-        Ok(())
-    }
-    
-    fn is_closed(&self) -> bool {
-        false
-    }
-}
+use serial_test::serial;
 
 async fn create_test_call_center() -> Result<Arc<CallCenterEngine>> {
     // Create test database
     let database = CallCenterDatabase::new_in_memory().await?;
     
     // Create test configuration
-    let config = CallCenterConfig::default();
+    let mut config = CallCenterConfig::default();
+    // Use standard SIP port for testing
+    config.general.local_signaling_addr = "127.0.0.1:5060".parse()?;
+    config.general.local_media_addr = "127.0.0.1:10000".parse()?;
     
-    // Create test transaction manager
-    let local_addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
-    let (_transport_tx, transport_rx) = mpsc::channel(10);
-    let transport = Arc::new(TestTransport { local_addr });
+    println!("Creating call center with SIP on {} and media on {}", 
+             config.general.local_signaling_addr, 
+             config.general.local_media_addr);
     
-    let (transaction_manager, _events) = TransactionManager::new(
-        transport,
-        transport_rx,
-        Some(10)
-    ).await.map_err(|e| anyhow::anyhow!("Failed to create transaction manager: {}", e))?;
-    
-    let transaction_manager = Arc::new(transaction_manager);
-    
-    // Create call center engine
-    let call_center = CallCenterEngine::new(transaction_manager, config, database).await?;
+    // Create call center engine - session-core will handle all transport/transaction setup internally
+    let call_center = CallCenterEngine::new(config, database).await?;
     
     Ok(call_center)
 }
 
 #[tokio::test]
+#[serial]
 async fn test_call_center_creation() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
     let stats = call_center.get_stats().await;
@@ -78,6 +42,7 @@ async fn test_call_center_creation() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_agent_registration() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
     
@@ -105,6 +70,7 @@ async fn test_agent_registration() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_bridge_management() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
     
@@ -150,6 +116,7 @@ async fn test_bridge_management() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_database_integration() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
     
@@ -177,6 +144,7 @@ async fn test_database_integration() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_call_center_statistics() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
     
@@ -205,6 +173,7 @@ async fn test_call_center_statistics() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_call_center_config() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
     
@@ -216,6 +185,7 @@ async fn test_call_center_config() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_session_manager_access() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
     

@@ -22,18 +22,33 @@
 //!
 //! ## Real Session-Core APIs Used
 //!
-//! ```rust
-//! // Server creation
-//! let server_manager = create_full_server_manager(transaction_manager, config).await?;
+//! ```rust,no_run
+//! # use rvoip_call_engine::prelude::*;
+//! # use rvoip_session_core::{SessionCoordinator, SessionId};
+//! # use std::sync::Arc;
+//! # async fn example() -> anyhow::Result<()> {
+//! // Server creation - using high-level API
+//! let session_coordinator = rvoip_session_core::SessionManagerBuilder::new()
+//!     .with_sip_port(5060)
+//!     .with_media_ports(10000, 11000)
+//!     .build()
+//!     .await?;
 //!
 //! // Agent registration  
-//! let agent_session = server_manager.session_manager().create_outgoing_session().await?;
+//! let agent_session = session_coordinator.create_outgoing_session().await?;
 //!
-//! // Call bridging
-//! let bridge_id = server_manager.bridge_sessions(&customer_session, &agent_session).await?;
+//! // Call bridging (assuming we have session IDs)
+//! let customer_session_id = SessionId::new();
+//! let agent_session_id = SessionId::new();
+//! let bridge_id = session_coordinator.bridge_sessions(
+//!     &customer_session_id,
+//!     &agent_session_id
+//! ).await?;
 //!
 //! // Event monitoring
-//! let events = server_manager.subscribe_to_bridge_events().await;
+//! let mut events = session_coordinator.subscribe_to_bridge_events().await;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Note: Previously this module contained adapter stubs, but we now use

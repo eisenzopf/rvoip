@@ -14,11 +14,8 @@
 
 use anyhow::Result;
 use rvoip_call_engine::prelude::*;
-use rvoip_transaction_core::TransactionManager;
 use std::sync::Arc;
 use tracing_subscriber;
-use tokio::sync::mpsc;
-use async_trait;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,63 +31,7 @@ async fn main() -> Result<()> {
     let database = CallCenterDatabase::new_in_memory().await?;
     println!("✅ Database initialized\n");
 
-    // Step 2: Create transaction manager (required for session-core)
-    println!("⚡ Creating transaction manager for session-core...");
-    
-    // Create a dummy transport for demonstration
-    let local_addr: std::net::SocketAddr = "127.0.0.1:5060".parse()?;
-    let (transport_tx, transport_rx) = mpsc::channel(10);
-    
-    // Create a minimal dummy transport implementation
-    #[derive(Debug, Clone)]
-    struct DummyTransport {
-        local_addr: std::net::SocketAddr,
-    }
-    
-    impl DummyTransport {
-        fn new(local_addr: std::net::SocketAddr) -> Self {
-            Self { local_addr }
-        }
-    }
-    
-    #[async_trait::async_trait]
-    impl rvoip_sip_transport::Transport for DummyTransport {
-        async fn send_message(
-            &self, 
-            message: rvoip_sip_core::Message, 
-            destination: std::net::SocketAddr
-        ) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
-            println!("📤 Would send {} to {}", 
-                    if message.is_request() { "request" } else { "response" }, 
-                    destination);
-            Ok(())
-        }
-        
-        fn local_addr(&self) -> std::result::Result<std::net::SocketAddr, rvoip_sip_transport::error::Error> {
-            Ok(self.local_addr)
-        }
-        
-        async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
-            Ok(())
-        }
-        
-        fn is_closed(&self) -> bool {
-            false
-        }
-    }
-    
-    let transport = Arc::new(DummyTransport::new(local_addr));
-    
-    let (transaction_manager, _transaction_events) = TransactionManager::new(
-        transport.clone(),
-        transport_rx,
-        Some(10)
-    ).await.map_err(|e| anyhow::anyhow!("Failed to create transaction manager: {}", e))?;
-    
-    let transaction_manager = Arc::new(transaction_manager);
-    println!("✅ Transaction manager created\n");
-
-    // Step 3: Create call center configuration
+    // Step 2: Create call center configuration
     println!("⚙️ Creating call center configuration...");
     let config = CallCenterConfig {
         general: GeneralConfig {
@@ -141,16 +82,15 @@ async fn main() -> Result<()> {
     };
     println!("✅ Configuration ready\n");
 
-    // Step 4: Create CallCenterEngine with REAL session-core integration
+    // Step 3: Create CallCenterEngine with REAL session-core integration
     println!("🎯 Creating CallCenterEngine with session-core API integration...");
     let call_center = CallCenterEngine::new(
-        transaction_manager.clone(),
         config.clone(),
         database.clone()
     ).await?;
     println!("✅ CallCenterEngine created with REAL session-core integration!\n");
 
-    // Step 5: Register sample agents with session-core
+    // Step 4: Register sample agents with session-core
     println!("👥 Registering agents with session-core...");
     
     let agents = vec![
@@ -205,7 +145,7 @@ async fn main() -> Result<()> {
     }
     println!("✅ All agents registered with session-core\n");
 
-    // Step 6: Display call center statistics
+    // Step 5: Display call center statistics
     println!("📊 Call Center Statistics:");
     let stats = call_center.get_stats().await;
     println!("  🏢 Active Calls: {}", stats.active_calls);
@@ -214,7 +154,7 @@ async fn main() -> Result<()> {
     println!("  📋 Queued Calls: {}", stats.queued_calls);
     println!("  📈 Total Calls Handled: {}", stats.total_calls_handled);
 
-    // Step 7: Demonstrate bridge management capabilities
+    // Step 6: Demonstrate bridge management capabilities
     println!("\n🌉 Bridge Management Capabilities:");
     let bridges = call_center.list_active_bridges().await;
     println!("  📊 Currently active bridges: {}", bridges.len());
@@ -228,7 +168,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Step 8: Show database and session-core integration
+    // Step 7: Show database and session-core integration
     println!("\n🔗 Integration Summary:");
     println!("  ✅ Real session-core ServerSessionManager integration");
     println!("  ✅ Incoming call notification system");
@@ -263,56 +203,14 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_transaction_core::TransactionManager;
     
     #[tokio::test]
     async fn test_call_center_integration() -> Result<()> {
-        // Create dummy transport for testing
-        let local_addr: std::net::SocketAddr = "127.0.0.1:0".parse()?;
-        let (_transport_tx, transport_rx) = mpsc::channel(10);
-        
-        #[derive(Debug, Clone)]
-        struct TestTransport {
-            local_addr: std::net::SocketAddr,
-        }
-        
-        #[async_trait::async_trait]
-        impl rvoip_sip_transport::Transport for TestTransport {
-            async fn send_message(
-                &self, 
-                _message: rvoip_sip_core::Message, 
-                _destination: std::net::SocketAddr
-            ) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
-                Ok(())
-            }
-            
-            fn local_addr(&self) -> std::result::Result<std::net::SocketAddr, rvoip_sip_transport::error::Error> {
-                Ok(self.local_addr)
-            }
-            
-            async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
-                Ok(())
-            }
-            
-            fn is_closed(&self) -> bool {
-                false
-            }
-        }
-        
-        let transport = Arc::new(TestTransport { local_addr });
-        let (transaction_manager, _events) = TransactionManager::new(
-            transport,
-            transport_rx,
-            Some(10)
-        ).await.map_err(|e| anyhow::anyhow!("Failed to create transaction manager: {}", e))?;
-        
-        let transaction_manager = Arc::new(transaction_manager);
         let database = CallCenterDatabase::new_in_memory().await?;
         let config = CallCenterConfig::default();
         
         // Test call center creation
         let call_center = CallCenterEngine::new(
-            transaction_manager,
             config,
             database
         ).await?;

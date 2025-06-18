@@ -30,39 +30,7 @@
 //!
 //! ```no_run
 //! use rvoip_call_engine::prelude::*;
-//! use rvoip_transaction_core::TransactionManager;
 //! use std::sync::Arc;
-//! use tokio::sync::mpsc;
-//! use async_trait::async_trait;
-//! 
-//! // Simple dummy transport for demo
-//! #[derive(Debug, Clone)]
-//! struct DemoTransport {
-//!     local_addr: std::net::SocketAddr,
-//! }
-//! 
-//! #[async_trait]
-//! impl rvoip_sip_transport::Transport for DemoTransport {
-//!     async fn send_message(
-//!         &self, 
-//!         _message: rvoip_sip_core::Message, 
-//!         _destination: std::net::SocketAddr
-//!     ) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
-//!         Ok(())
-//!     }
-//!     
-//!     fn local_addr(&self) -> std::result::Result<std::net::SocketAddr, rvoip_sip_transport::error::Error> {
-//!         Ok(self.local_addr)
-//!     }
-//!     
-//!     async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::error::Error> {
-//!         Ok(())
-//!     }
-//!     
-//!     fn is_closed(&self) -> bool {
-//!         false
-//!     }
-//! }
 //! 
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -72,15 +40,9 @@
 //!     // Create configuration
 //!     let config = CallCenterConfig::default();
 //!     
-//!     // Create transaction manager for session-core
-//!     let local_addr = "127.0.0.1:5060".parse()?;
-//!     let (_tx, rx) = mpsc::channel(10);
-//!     let transport = Arc::new(DemoTransport { local_addr });
-//!     let (tm, _events) = TransactionManager::new(transport, rx, Some(10)).await
-//!         .map_err(|e| anyhow::anyhow!("Failed to create transaction manager: {}", e))?;
-//!     
 //!     // Create call center with real session-core integration
-//!     let call_center = CallCenterEngine::new(Arc::new(tm), config, database).await?;
+//!     // Session-core manages all transport and transaction layers internally
+//!     let call_center = CallCenterEngine::new(config, database).await?;
 //!     
 //!     // Register agents with session-core
 //!     let agent = Agent {

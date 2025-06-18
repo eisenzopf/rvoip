@@ -612,11 +612,15 @@ impl SessionCoordinator {
             .map_err(|e| SessionError::internal(&format!("Failed to add session2 to bridge: {}", e)))?;
         
         // Emit bridge created event
-        self.emit_bridge_event(BridgeEvent {
+        // Note: BridgeEvent enum doesn't have a Created variant, emit participant added events instead
+        self.emit_bridge_event(BridgeEvent::ParticipantAdded {
             bridge_id: bridge_id.clone(),
-            event_type: BridgeEventType::Created,
-            session_id: None,
-            timestamp: Instant::now(),
+            session_id: session1.clone(),
+        }).await;
+        
+        self.emit_bridge_event(BridgeEvent::ParticipantAdded {
+            bridge_id: bridge_id.clone(),
+            session_id: session2.clone(),
         }).await;
         
         Ok(bridge_id)
@@ -628,11 +632,8 @@ impl SessionCoordinator {
         self.conference_manager.terminate_conference(&conf_id).await
             .map_err(|e| SessionError::internal(&format!("Failed to destroy bridge: {}", e)))?;
         
-        self.emit_bridge_event(BridgeEvent {
+        self.emit_bridge_event(BridgeEvent::BridgeDestroyed {
             bridge_id: bridge_id.clone(),
-            event_type: BridgeEventType::Destroyed,
-            session_id: None,
-            timestamp: Instant::now(),
         }).await;
         
         Ok(())
@@ -666,11 +667,10 @@ impl SessionCoordinator {
         self.conference_manager.leave_conference(&conf_id, session_id).await
             .map_err(|e| SessionError::internal(&format!("Failed to remove session from bridge: {}", e)))?;
         
-        self.emit_bridge_event(BridgeEvent {
+        self.emit_bridge_event(BridgeEvent::ParticipantRemoved {
             bridge_id: bridge_id.clone(),
-            event_type: BridgeEventType::SessionRemoved,
-            session_id: Some(session_id.clone()),
-            timestamp: Instant::now(),
+            session_id: session_id.clone(),
+            reason: "Manually removed from bridge".to_string(),
         }).await;
         
         Ok(())
@@ -766,13 +766,8 @@ impl SessionCoordinator {
         self.conference_manager.create_named_conference(conf_id.clone(), config).await
             .map_err(|e| SessionError::internal(&format!("Failed to create bridge: {}", e)))?;
         
-        // Emit bridge created event
-        self.emit_bridge_event(BridgeEvent {
-            bridge_id: bridge_id.clone(),
-            event_type: BridgeEventType::Created,
-            session_id: None,
-            timestamp: Instant::now(),
-        }).await;
+        // No emit for bridge creation without participants
+        // The BridgeEvent enum only has participant-related events and destruction
         
         Ok(bridge_id)
     }
@@ -788,11 +783,9 @@ impl SessionCoordinator {
         self.conference_manager.join_conference(&conf_id, session_id).await
             .map_err(|e| SessionError::internal(&format!("Failed to add session to bridge: {}", e)))?;
         
-        self.emit_bridge_event(BridgeEvent {
+        self.emit_bridge_event(BridgeEvent::ParticipantAdded {
             bridge_id: bridge_id.clone(),
-            event_type: BridgeEventType::SessionAdded,
-            session_id: Some(session_id.clone()),
-            timestamp: Instant::now(),
+            session_id: session_id.clone(),
         }).await;
         
         Ok(())
