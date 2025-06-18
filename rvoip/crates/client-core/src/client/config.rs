@@ -20,6 +20,8 @@ pub struct ClientConfig {
     pub enable_audio: bool,
     /// Enable video processing (future)
     pub enable_video: bool,
+    /// SIP domain (optional)
+    pub domain: Option<String>,
 }
 
 impl ClientConfig {
@@ -34,6 +36,7 @@ impl ClientConfig {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         }
     }
 

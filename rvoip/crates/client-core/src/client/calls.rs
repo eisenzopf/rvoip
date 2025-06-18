@@ -42,7 +42,7 @@ impl super::manager::ClientManager {
             
         // Create call ID and mapping
         let call_id = CallId::new_v4();
-        self.call_mapping.insert(session.id.clone(), call_id);
+        self.call_handler.call_mapping.insert(session.id.clone(), call_id);
         self.session_mapping.insert(call_id, session.id.clone());
         
         // Create enhanced call info

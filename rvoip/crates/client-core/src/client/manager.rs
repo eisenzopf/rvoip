@@ -9,6 +9,7 @@ use rvoip_session_core::api::{
     SessionCoordinator,
     SessionManagerBuilder,
     SessionControl,
+    SipClient,
     types::{SessionId, IncomingCall},
     handlers::CallHandler,
 };
@@ -18,7 +19,7 @@ use crate::{
     ClientConfig, ClientResult, ClientError,
     call::{CallId, CallInfo},
     registration::{RegistrationConfig, RegistrationInfo},
-    events::ClientEventHandler,
+    events::{ClientEventHandler, ClientEvent},
 };
 
 // Import types from our types module
@@ -30,22 +31,44 @@ use super::events::ClientCallHandler;
 /// Delegates to session-core for all SIP/media functionality while providing
 /// a client-focused API for application integration.
 pub struct ClientManager {
-    pub config: ClientConfig,
-    pub coordinator: Arc<SessionCoordinator>,
-    pub call_handler: Arc<ClientCallHandler>,
+    /// Session coordinator from session-core
+    pub(crate) coordinator: Arc<SessionCoordinator>,
     
-    // Call tracking
-    pub call_mapping: Arc<DashMap<SessionId, CallId>>,
-    pub session_mapping: Arc<DashMap<CallId, SessionId>>,
-    pub call_info: Arc<DashMap<CallId, CallInfo>>,
-    pub incoming_calls: Arc<DashMap<CallId, IncomingCall>>,
+    /// Local configuration
+    pub(crate) config: ClientConfig,
     
-    // Registration tracking (placeholder - session-core doesn't support REGISTER)
-    pub registrations: Arc<RwLock<HashMap<Uuid, RegistrationInfo>>>,
+    /// Local SIP address (bound)
+    pub(crate) local_sip_addr: std::net::SocketAddr,
     
-    // State
-    pub is_running: Arc<RwLock<bool>>,
-    pub stats: Arc<Mutex<ClientStats>>,
+    /// Local media address (configured)
+    pub(crate) local_media_addr: std::net::SocketAddr,
+    
+    /// User agent string
+    pub(crate) user_agent: String,
+    
+    /// Whether the client is running
+    pub(crate) is_running: Arc<RwLock<bool>>,
+    
+    /// Statistics
+    pub(crate) stats: Arc<Mutex<ClientStats>>,
+    
+    /// Active registrations
+    pub(crate) registrations: Arc<RwLock<HashMap<Uuid, RegistrationInfo>>>,
+    
+    /// Call/Session mapping (CallId -> SessionId)
+    pub(crate) session_mapping: Arc<DashMap<CallId, SessionId>>,
+    
+    /// Call info storage
+    pub(crate) call_info: Arc<DashMap<CallId, CallInfo>>,
+    
+    /// Incoming calls storage
+    pub(crate) incoming_calls: Arc<DashMap<CallId, IncomingCall>>,
+    
+    /// Call handler
+    pub(crate) call_handler: Arc<ClientCallHandler>,
+    
+    /// Event broadcast channel
+    pub(crate) event_tx: tokio::sync::broadcast::Sender<ClientEvent>,
 }
 
 impl ClientManager {
@@ -88,17 +111,23 @@ impl ClientManager {
             active_registrations: 0,
         };
 
+        // Create event broadcast channel
+        let (event_tx, _) = tokio::sync::broadcast::channel(256);
+        
         Ok(Arc::new(Self {
-            config,
             coordinator,
-            call_handler,
-            call_mapping,
+            config: config.clone(),
+            local_sip_addr: config.local_sip_addr,
+            local_media_addr: config.local_media_addr,
+            user_agent: config.user_agent.clone(),
+            is_running: Arc::new(RwLock::new(false)),
+            stats: Arc::new(Mutex::new(stats)),
+            registrations: Arc::new(RwLock::new(HashMap::new())),
             session_mapping,
             call_info,
             incoming_calls,
-            registrations: Arc::new(RwLock::new(HashMap::new())),
-            is_running: Arc::new(RwLock::new(false)),
-            stats: Arc::new(Mutex::new(stats)),
+            call_handler,
+            event_tx,
         }))
     }
     
@@ -146,16 +175,233 @@ impl ClientManager {
     }
     
     /// Register with a SIP server
-    /// 
-    /// Note: Currently not implemented as session-core doesn't expose REGISTER functionality
-    pub async fn register(&self, _config: RegistrationConfig) -> ClientResult<Uuid> {
-        Err(ClientError::NotImplemented { 
-            feature: "SIP REGISTER".to_string(),
-            reason: "session-core does not expose REGISTER functionality".to_string(),
-        })
+    pub async fn register(&self, config: RegistrationConfig) -> ClientResult<Uuid> {
+        // Use SipClient trait to register
+        let registration_handle = SipClient::register(
+            &self.coordinator,
+            &config.server_uri,
+            &config.from_uri,
+            &config.contact_uri,
+            config.expires,
+        )
+        .await
+        .map_err(|e| ClientError::InternalError { 
+            message: format!("Failed to register: {}", e) 
+        })?;
+        
+        // Create registration info
+        let reg_id = Uuid::new_v4();
+        let registration_info = RegistrationInfo {
+            id: reg_id,
+            server_uri: config.server_uri.clone(),
+            from_uri: config.from_uri.clone(),
+            contact_uri: config.contact_uri.clone(),
+            expires: config.expires,
+            status: crate::registration::RegistrationStatus::Active,
+            registration_time: chrono::Utc::now(),
+            refresh_time: None,
+            handle: Some(registration_handle),
+        };
+        
+        // Store registration
+        self.registrations.write().await.insert(reg_id, registration_info);
+        
+        // Update stats
+        let mut stats = self.stats.lock().await;
+        stats.total_registrations += 1;
+        stats.active_registrations += 1;
+        
+        tracing::info!("Registered {} with server {}", config.from_uri, config.server_uri);
+        Ok(reg_id)
     }
     
-
+    /// Unregister from a SIP server
+    pub async fn unregister(&self, reg_id: Uuid) -> ClientResult<()> {
+        let mut registrations = self.registrations.write().await;
+        
+        if let Some(mut registration_info) = registrations.get_mut(&reg_id) {
+            // To unregister, send REGISTER with expires=0
+            if let Some(handle) = &registration_info.handle {
+                SipClient::register(
+                    &self.coordinator,
+                    &handle.registrar_uri,
+                    &registration_info.from_uri,
+                    &handle.contact_uri,
+                    0, // expires=0 means unregister
+                )
+                .await
+                .map_err(|e| ClientError::InternalError { 
+                    message: format!("Failed to unregister: {}", e) 
+                })?;
+            }
+            
+            // Update status
+            registration_info.status = crate::registration::RegistrationStatus::Cancelled;
+            registration_info.handle = None;
+            
+            // Update stats
+            let mut stats = self.stats.lock().await;
+            if stats.active_registrations > 0 {
+                stats.active_registrations -= 1;
+            }
+            
+            tracing::info!("Unregistered {}", registration_info.from_uri);
+            Ok(())
+        } else {
+            Err(ClientError::InvalidConfiguration { 
+                field: "registration_id".to_string(),
+                reason: "Registration not found".to_string() 
+            })
+        }
+    }
+    
+    /// Get registration information
+    pub async fn get_registration(&self, reg_id: Uuid) -> ClientResult<crate::registration::RegistrationInfo> {
+        let registrations = self.registrations.read().await;
+        registrations.get(&reg_id)
+            .cloned()
+            .ok_or(ClientError::InvalidConfiguration { 
+                field: "registration_id".to_string(),
+                reason: "Registration not found".to_string() 
+            })
+    }
+    
+    /// Get all active registrations
+    pub async fn get_all_registrations(&self) -> Vec<crate::registration::RegistrationInfo> {
+        let registrations = self.registrations.read().await;
+        registrations.values()
+            .filter(|r| r.status == crate::registration::RegistrationStatus::Active)
+            .cloned()
+            .collect()
+    }
+    
+    /// Refresh a registration
+    pub async fn refresh_registration(&self, reg_id: Uuid) -> ClientResult<()> {
+        // Get registration data
+        let (registrar_uri, from_uri, contact_uri, expires) = {
+            let registrations = self.registrations.read().await;
+            
+            if let Some(registration_info) = registrations.get(&reg_id) {
+                if let Some(handle) = &registration_info.handle {
+                    (
+                        handle.registrar_uri.clone(),
+                        registration_info.from_uri.clone(),
+                        handle.contact_uri.clone(),
+                        registration_info.expires,
+                    )
+                } else {
+                    return Err(ClientError::InvalidConfiguration { 
+                        field: "registration".to_string(),
+                        reason: "Registration has no handle".to_string() 
+                    });
+                }
+            } else {
+                return Err(ClientError::InvalidConfiguration { 
+                    field: "registration_id".to_string(),
+                    reason: "Registration not found".to_string() 
+                });
+            }
+        };
+        
+        // Re-register with the same parameters
+        let new_handle = SipClient::register(
+            &self.coordinator,
+            &registrar_uri,
+            &from_uri,
+            &contact_uri,
+            expires,
+        )
+        .await
+        .map_err(|e| ClientError::InternalError { 
+            message: format!("Failed to refresh registration: {}", e) 
+        })?;
+        
+        // Update registration with new handle
+        let mut registrations = self.registrations.write().await;
+        if let Some(reg) = registrations.get_mut(&reg_id) {
+            reg.handle = Some(new_handle);
+            reg.refresh_time = Some(chrono::Utc::now());
+        }
+        
+        tracing::info!("Refreshed registration for {}", from_uri);
+        Ok(())
+    }
+    
+    /// Clear expired registrations
+    pub async fn clear_expired_registrations(&self) {
+        let mut registrations = self.registrations.write().await;
+        let mut to_remove = Vec::new();
+        
+        for (id, reg) in registrations.iter() {
+            if reg.status == crate::registration::RegistrationStatus::Expired {
+                to_remove.push(*id);
+            }
+        }
+        
+        for id in to_remove {
+            registrations.remove(&id);
+            
+            // Update stats
+            let mut stats = self.stats.lock().await;
+            if stats.active_registrations > 0 {
+                stats.active_registrations -= 1;
+            }
+        }
+    }
+    
+    // ===== CONVENIENCE METHODS FOR EXAMPLES =====
+    
+    /// Convenience method: Register with simple parameters (for examples)
+    pub async fn register_simple(
+        &self, 
+        agent_uri: &str, 
+        server_addr: &std::net::SocketAddr,
+        duration: std::time::Duration
+    ) -> ClientResult<()> {
+        let config = RegistrationConfig {
+            server_uri: format!("sip:{}", server_addr),
+            from_uri: agent_uri.to_string(),
+            contact_uri: format!("sip:{}:{}", self.local_sip_addr.ip(), self.local_sip_addr.port()),
+            expires: duration.as_secs() as u32,
+            username: None,
+            password: None,
+            realm: None,
+        };
+        
+        self.register(config).await?;
+        Ok(())
+    }
+    
+    /// Convenience method: Unregister with simple parameters (for examples)
+    pub async fn unregister_simple(
+        &self, 
+        agent_uri: &str, 
+        server_addr: &std::net::SocketAddr
+    ) -> ClientResult<()> {
+        // Find the registration matching these parameters
+        let registrations = self.registrations.read().await;
+        let reg_id = registrations.iter()
+            .find(|(_, reg)| {
+                reg.from_uri == agent_uri && 
+                reg.server_uri == format!("sip:{}", server_addr)
+            })
+            .map(|(id, _)| *id);
+        drop(registrations);
+        
+        if let Some(id) = reg_id {
+            self.unregister(id).await
+        } else {
+            Err(ClientError::InvalidConfiguration { 
+                field: "registration".to_string(),
+                reason: "No matching registration found".to_string() 
+            })
+        }
+    }
+    
+    /// Subscribe to client events
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<ClientEvent> {
+        self.event_tx.subscribe()
+    }
     
     // ===== PRIORITY 3.2: CALL CONTROL OPERATIONS =====
     // Call control operations have been moved to controls.rs

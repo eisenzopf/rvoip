@@ -291,9 +291,11 @@ impl super::manager::ClientManager {
         }
             
         // Use session-core to start audio transmission
-        // Note: session-core doesn't have start_media_transmission, using placeholder
-        // TODO: Replace with actual session-core API when available
-        // self.session_manager.start_media_transmission(&session_id).await?;
+        MediaControl::start_audio_transmission(&self.coordinator, &session_id)
+            .await
+            .map_err(|e| ClientError::CallSetupFailed { 
+                reason: format!("Failed to start audio transmission: {}", e) 
+            })?;
             
         // Update call metadata
         if let Some(mut call_info) = self.call_info.get_mut(call_id) {
@@ -327,9 +329,11 @@ impl super::manager::ClientManager {
             .clone();
             
         // Use session-core to stop audio transmission
-        // Note: session-core doesn't have stop_media_transmission, using placeholder
-        // TODO: Replace with actual session-core API when available
-        // self.session_manager.stop_media_transmission(&session_id).await?;
+        MediaControl::stop_audio_transmission(&self.coordinator, &session_id)
+            .await
+            .map_err(|e| ClientError::CallSetupFailed { 
+                reason: format!("Failed to stop audio transmission: {}", e) 
+            })?;
             
         // Update call metadata
         if let Some(mut call_info) = self.call_info.get_mut(call_id) {
@@ -840,5 +844,64 @@ impl super::manager::ClientManager {
             }
         }
         None
+    }
+    
+    /// Generate SDP answer for an incoming call
+    pub async fn generate_sdp_answer(&self, call_id: &CallId, offer: &str) -> ClientResult<String> {
+        let session_id = self.session_mapping.get(call_id)
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+            .clone();
+            
+        // Validate SDP offer
+        if offer.trim().is_empty() {
+            return Err(ClientError::InvalidConfiguration { 
+                field: "sdp_offer".to_string(),
+                reason: "SDP offer cannot be empty".to_string() 
+            });
+        }
+            
+        // Use session-core to generate SDP answer
+        let sdp_answer = MediaControl::generate_sdp_answer(&self.coordinator, &session_id, offer)
+            .await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to generate SDP answer: {}", e) 
+            })?;
+            
+        // Update call metadata
+        if let Some(mut call_info) = self.call_info.get_mut(call_id) {
+            call_info.metadata.insert("last_sdp_answer".to_string(), sdp_answer.clone());
+            call_info.metadata.insert("sdp_answer_generated_at".to_string(), Utc::now().to_rfc3339());
+        }
+        
+        tracing::info!("Generated SDP answer for call {}: {} bytes", call_id, sdp_answer.len());
+        Ok(sdp_answer)
+    }
+    
+    /// Get RTP statistics for a call
+    pub async fn get_rtp_statistics(&self, call_id: &CallId) -> ClientResult<Option<rvoip_rtp_core::session::RtpSessionStats>> {
+        let session_id = self.session_mapping.get(call_id)
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+            .clone();
+            
+        // Get RTP statistics from session-core
+        MediaControl::get_rtp_statistics(&self.coordinator, &session_id)
+            .await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to get RTP statistics: {}", e) 
+            })
+    }
+    
+    /// Get comprehensive media statistics for a call
+    pub async fn get_media_statistics(&self, call_id: &CallId) -> ClientResult<Option<rvoip_media_core::types::MediaStatistics>> {
+        let session_id = self.session_mapping.get(call_id)
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+            .clone();
+            
+        // Get media statistics from session-core
+        MediaControl::get_media_statistics(&self.coordinator, &session_id)
+            .await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to get media statistics: {}", e) 
+            })
     }
 }

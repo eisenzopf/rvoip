@@ -26,6 +26,9 @@ pub mod error;
 // Public API exports (only high-level client-core types)
 pub use client::{
     ClientManager,
+    ClientCallHandler,
+    Client,
+    ClientBuilder,
     // All types are now re-exported from types module via client::mod
     ClientStats,
     CallCapabilities,
