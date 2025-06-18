@@ -18,6 +18,8 @@ use crate::{
 };
 
 use super::types::*;
+use super::recovery::{retry_with_backoff, RetryConfig, ErrorContext, with_timeout};
+use std::time::Duration;
 
 /// Call operations implementation for ClientManager
 impl super::manager::ClientManager {
@@ -87,17 +89,25 @@ impl super::manager::ClientManager {
         to: String,
         subject: Option<String>,
     ) -> ClientResult<CallId> {
-        // Create call via session-core using SessionControl trait
-        let session = SessionControl::create_outgoing_call(
-            &self.coordinator,
-            &from,
-            &to,
-            None  // Let session-core generate SDP
+        // Create call via session-core with retry logic for network errors
+        let session = retry_with_backoff(
+            "create_outgoing_call",
+            RetryConfig::quick(),
+            || async {
+                SessionControl::create_outgoing_call(
+                    &self.coordinator,
+                    &from,
+                    &to,
+                    None  // Let session-core generate SDP
+                )
+                .await
+                .map_err(|e| ClientError::CallSetupFailed { 
+                    reason: format!("Session creation failed: {}", e) 
+                })
+            }
         )
         .await
-        .map_err(|e| ClientError::CallSetupFailed { 
-            reason: format!("Session creation failed: {}", e) 
-        })?;
+        .with_context(|| format!("Failed to create call from {} to {}", from, to))?;
             
         // Create call ID and mapping
         let call_id = CallId::new_v4();

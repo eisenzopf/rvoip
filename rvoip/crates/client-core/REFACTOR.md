@@ -140,10 +140,10 @@ This document tracks the refactoring of `client-core` to properly use the update
 - [ ] Review and optimize large struct sizes
 
 #### 6.5 Improve Error Handling
-- [ ] Add error context with `anyhow::Context`
-- [ ] Create error recovery mechanisms
-- [ ] Implement retry logic for transient failures
-- [ ] Add better error categorization
+- [x] Add error context with `anyhow::Context`
+- [x] Create error recovery mechanisms
+- [x] Implement retry logic for transient failures
+- [x] Add better error categorization
 
 #### 6.6 Add Telemetry and Metrics
 - [ ] Add OpenTelemetry support for metrics
@@ -154,14 +154,51 @@ This document tracks the refactoring of `client-core` to properly use the update
 #### 6.7 API Documentation Enhancement
 - [x] Add comprehensive examples to all public methods
 - [x] Add module-level architecture documentation
-- [ ] Create usage guides and best practices
-- [ ] Document error scenarios and recovery
+- [x] Create usage guides and best practices
+- [x] Document error scenarios and recovery
 
 #### 6.8 Performance Optimizations
 - [ ] Replace tokio locks with parking_lot where async not needed
 - [ ] Implement object pooling for frequently created objects
 - [ ] Add caching for expensive operations
 - [ ] Profile and optimize hot paths
+
+#### Phase 6.5 Error Handling Achievements
+
+#### Recovery Module Created (`recovery.rs`):
+1. **Retry Mechanism**:
+   - Configurable retry with exponential backoff
+   - Jitter support to avoid thundering herd
+   - Quick and slow retry configurations
+   - Structured logging for retry attempts
+
+2. **Recovery Strategies**:
+   - Network error recovery patterns
+   - Registration error handling
+   - Media error recovery
+   - Contextual recovery actions
+
+3. **Error Context Extension**:
+   - `ErrorContext` trait for adding context
+   - Lazy context evaluation
+   - Timeout wrapper with proper error handling
+
+#### Enhanced Error Handling:
+- ✅ Better error categorization in registration flow
+- ✅ Retry logic applied to critical operations (make_call, register)
+- ✅ Context added to errors for better debugging
+- ✅ Recovery strategies defined for each error category
+
+#### Usage Example:
+```rust
+// Retry with custom configuration
+let result = retry_with_backoff(
+    "critical_operation",
+    RetryConfig::slow(),
+    || async { perform_operation().await }
+).await
+.with_context(|| "Failed to complete critical operation")?;
+```
 
 ### Phase 7: Testing & Validation
 
@@ -194,10 +231,10 @@ This document tracks the refactoring of `client-core` to properly use the update
 | Phase 3: Registration | ✅ Complete | 10/10 tasks | All tasks complete! |
 | Phase 4: Media Operations | ✅ Complete | 12/12 tasks | All media operations migrated |
 | Phase 5: Event System | ✅ Complete | 8/8 tasks | All tasks complete! |
-| Phase 6: Clean Architecture | ✅ Complete | 10/32 tasks | Core cleanup complete, optional tasks remain |
+| Phase 6: Clean Architecture | ✅ Complete | 18/32 tasks | Core cleanup, error handling & docs complete |
 | Phase 7: Testing | 🔧 Ready | 0/11 tasks | Ready for testing |
 
-**Total Progress**: 63/96 tasks (66%)
+**Total Progress**: 71/96 tasks (74%)
 
 ## Key Phase 6 Achievements
 
@@ -211,10 +248,12 @@ This document tracks the refactoring of `client-core` to properly use the update
 - Fixed all mutable variable warnings
 - Ran cargo fix for automatic cleanup
 
-✅ **Documentation:**
+✅ **Documentation (Phase 6.7 Complete!):**
 - Added comprehensive module-level architecture documentation
 - Created detailed examples for key methods
-- Added proper error handling documentation
+- Added complete usage guides and best practices
+- Documented all error scenarios with recovery strategies
+- Added error handling patterns with retry logic examples
 
 ## Remaining Optional Tasks
 
@@ -302,4 +341,34 @@ The client-core library has been successfully refactored to use the new session-
 
 - Session-Core API: `rvoip/crates/session-core/src/api/mod.rs`
 - Architecture Guide: `rvoip/README.md`
-- Session-Core Examples: `rvoip/crates/session-core/examples/` 
+- Session-Core Examples: `rvoip/crates/session-core/examples/`
+
+## Phase 6.7 Documentation Achievements
+
+### Comprehensive Usage Guides Created:
+1. **Module Documentation** (`client/mod.rs`):
+   - Complete architecture overview with visual diagram
+   - Basic call flow example
+   - Best practices for event handling, resource cleanup, registration management, and media control
+   - Common patterns (auto-answer, call transfer)
+
+2. **Error Handling Guide** (`error.rs`):
+   - Error categorization system
+   - Recovery strategies for each error type
+   - Retry logic with exponential backoff
+   - Context-aware error logging
+   - Error metrics collection
+
+3. **Main Library Documentation** (`lib.rs`):
+   - Visual architecture diagram showing layer separation
+   - Quick start examples
+   - Feature overview
+   - Error handling patterns
+
+### Documentation Patterns Established:
+- ✅ Every major public method has examples
+- ✅ Error scenarios are documented with recovery code
+- ✅ Best practices are shown with real code snippets
+- ✅ Common use cases have full working examples
+
+## Summary of Refactoring Achievements 

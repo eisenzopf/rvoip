@@ -38,6 +38,9 @@ tracing = "0.1"
 anyhow = "1.0"
 thiserror = "1.0"
 
+# Random number generation for jitter
+rand = "0.8"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tracing-test = "0.2"

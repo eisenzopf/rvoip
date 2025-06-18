@@ -1,4 +1,253 @@
-//! Error types for client-core operations
+//! Error types and handling for the client-core library
+//! 
+//! This module defines all error types that can occur during client operations
+//! and provides guidance on how to handle them.
+//! 
+//! # Error Categories
+//! 
+//! Errors are categorized to help with recovery strategies:
+//! 
+//! - **Configuration Errors** - Invalid settings, can't recover without fixing config
+//! - **Network Errors** - Temporary network issues, usually recoverable with retry
+//! - **Protocol Errors** - SIP protocol violations, may need different approach
+//! - **Media Errors** - Audio/RTP issues, might need codec renegotiation
+//! - **State Errors** - Invalid operation for current state, check state first
+//! 
+//! # Error Handling Guide
+//! 
+//! ## Basic Pattern
+//! 
+//! ```rust,no_run
+//! # use rvoip_client_core::{Client, ClientError};
+//! # use std::sync::Arc;
+//! # async fn example(client: Arc<Client>) {
+//! match client.make_call(
+//!     "sip:alice@example.com".to_string(),
+//!     "sip:bob@example.com".to_string(),
+//!     None
+//! ).await {
+//!     Ok(call_id) => {
+//!         println!("Call started: {}", call_id);
+//!     }
+//!     Err(ClientError::NetworkError { reason }) => {
+//!         eprintln!("Network problem: {}", reason);
+//!         // Retry after checking network connectivity
+//!     }
+//!     Err(ClientError::InvalidConfiguration { field, reason }) => {
+//!         eprintln!("Config error in {}: {}", field, reason);
+//!         // Fix configuration before retrying
+//!     }
+//!     Err(e) => {
+//!         eprintln!("Unexpected error: {}", e);
+//!         // Log and notify user
+//!     }
+//! }
+//! # }
+//! ```
+//! 
+//! ## Recovery Strategies
+//! 
+//! ### Network Errors
+//! 
+//! Network errors are often temporary. Implement exponential backoff:
+//! 
+//! ```rust,no_run
+//! # use rvoip_client_core::{Client, ClientError};
+//! # use std::sync::Arc;
+//! # use std::time::Duration;
+//! # async fn example(client: Arc<Client>) -> Result<(), Box<dyn std::error::Error>> {
+//! async fn with_retry<T, F, Fut>(
+//!     mut operation: F,
+//!     max_attempts: u32,
+//! ) -> Result<T, ClientError>
+//! where
+//!     F: FnMut() -> Fut,
+//!     Fut: std::future::Future<Output = Result<T, ClientError>>,
+//! {
+//!     let mut attempt = 0;
+//!     let mut delay = Duration::from_millis(100);
+//!     
+//!     loop {
+//!         match operation().await {
+//!             Ok(result) => return Ok(result),
+//!             Err(e) if e.is_recoverable() && attempt < max_attempts => {
+//!                 attempt += 1;
+//!                 tokio::time::sleep(delay).await;
+//!                 delay *= 2; // Exponential backoff
+//!             }
+//!             Err(e) => return Err(e),
+//!         }
+//!     }
+//! }
+//! 
+//! // Use with any operation
+//! let call_id = with_retry(|| async {
+//!     client.make_call(
+//!         "sip:alice@example.com".to_string(),
+//!         "sip:bob@example.com".to_string(),
+//!         None
+//!     ).await
+//! }, 3).await?;
+//! # Ok(())
+//! # }
+//! ```
+//! 
+//! ### Registration Errors
+//! 
+//! Handle authentication and server errors:
+//! 
+//! ```rust,no_run
+//! # use rvoip_client_core::{Client, ClientError};
+//! # use std::sync::Arc;
+//! # use std::time::Duration;
+//! # async fn example(client: Arc<Client>) -> Result<(), Box<dyn std::error::Error>> {
+//! match client.register_simple(
+//!     "sip:alice@example.com",
+//!     "registrar.example.com:5060",
+//!     Duration::from_secs(3600)
+//! ).await {
+//!     Ok(reg_id) => {
+//!         println!("Registered successfully");
+//!     }
+//!     Err(e) if e.is_auth_error() => {
+//!         // Prompt user for credentials
+//!         println!("Please check your username and password");
+//!     }
+//!     Err(ClientError::RegistrationFailed { reason }) => {
+//!         if reason.contains("timeout") {
+//!             // Server might be down
+//!             println!("Server not responding, try again later");
+//!         } else if reason.contains("forbidden") {
+//!             // Account might be disabled
+//!             println!("Registration forbidden, contact support");
+//!         }
+//!     }
+//!     Err(e) => eprintln!("Registration error: {}", e),
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//! 
+//! ### Call State Errors
+//! 
+//! Check state before operations:
+//! 
+//! ```rust,no_run
+//! # use rvoip_client_core::{Client, ClientError, CallId};
+//! # use std::sync::Arc;
+//! # async fn example(client: Arc<Client>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+//! // Safe call control with state checking
+//! async fn safe_hold_call(client: &Arc<Client>, call_id: &CallId) -> Result<(), ClientError> {
+//!     // Get call info first
+//!     let info = client.get_call_info(call_id).await?
+//!         .ok_or(ClientError::CallNotFound { call_id: *call_id })?;
+//!     
+//!     // Check if we can hold
+//!     match info.state {
+//!         rvoip_client_core::call::CallState::Connected => {
+//!             client.hold_call(call_id).await
+//!         }
+//!         rvoip_client_core::call::CallState::OnHold => {
+//!             // Already on hold
+//!             Ok(())
+//!         }
+//!         _ => {
+//!             Err(ClientError::InvalidCallStateGeneric {
+//!                 expected: "Connected".to_string(),
+//!                 actual: format!("{:?}", info.state),
+//!             })
+//!         }
+//!     }
+//! }
+//! 
+//! safe_hold_call(&client, &call_id).await?;
+//! # Ok(())
+//! # }
+//! ```
+//! 
+//! ### Media Errors
+//! 
+//! Handle codec and port allocation issues:
+//! 
+//! ```rust,no_run
+//! # use rvoip_client_core::{Client, ClientError, CallId};
+//! # use std::sync::Arc;
+//! # async fn example(client: Arc<Client>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+//! match client.establish_media(&call_id, "remote.example.com:30000").await {
+//!     Ok(_) => println!("Media established"),
+//!     Err(ClientError::MediaNegotiationFailed { reason }) => {
+//!         if reason.contains("codec") {
+//!             // Try with different codec
+//!             println!("Codec mismatch, trying fallback");
+//!         } else if reason.contains("port") {
+//!             // Port allocation failed
+//!             println!("No available media ports");
+//!         }
+//!     }
+//!     Err(e) => eprintln!("Media setup failed: {}", e),
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//! 
+//! ## Error Context
+//! 
+//! Always log errors with context for debugging:
+//! 
+//! ```rust,no_run
+//! # use rvoip_client_core::{Client, ClientError, CallId};
+//! # use std::sync::Arc;
+//! # let call_id = CallId::new();
+//! # async fn example(client: Arc<Client>, call_id: CallId) {
+//! use tracing::{error, warn, info};
+//! 
+//! match client.answer_call(&call_id).await {
+//!     Ok(_) => info!(call_id = %call_id, "Call answered successfully"),
+//!     Err(e) => {
+//!         error!(
+//!             call_id = %call_id,
+//!             error = %e,
+//!             error_type = ?e,
+//!             category = e.category(),
+//!             "Failed to answer call"
+//!         );
+//!         
+//!         // Take appropriate action based on error type
+//!         match e {
+//!             ClientError::CallNotFound { .. } => {
+//!                 // Call might have been cancelled
+//!             }
+//!             ClientError::MediaNegotiationFailed { .. } => {
+//!                 // Try to recover media session
+//!             }
+//!             _ => {
+//!                 // Generic error handling
+//!             }
+//!         }
+//!     }
+//! }
+//! # }
+//! ```
+//! 
+//! ## Error Categories Helper
+//! 
+//! Use the `category()` method to group errors for metrics:
+//! 
+//! ```rust,no_run
+//! # use rvoip_client_core::ClientError;
+//! # use std::collections::HashMap;
+//! # let errors: Vec<ClientError> = vec![];
+//! let mut error_counts: HashMap<&'static str, usize> = HashMap::new();
+//! 
+//! for error in errors {
+//!     *error_counts.entry(error.category()).or_insert(0) += 1;
+//! }
+//! 
+//! // Report metrics
+//! for (category, count) in error_counts {
+//!     println!("{}: {} errors", category, count);
+//! }
+//! ```
 
 use thiserror::Error;
 use uuid::Uuid;
@@ -47,6 +296,9 @@ pub enum ClientError {
     /// Media related errors
     #[error("Media negotiation failed: {reason}")]
     MediaNegotiationFailed { reason: String },
+    
+    #[error("Media error: {details}")]
+    MediaError { details: String },
 
     #[error("No compatible codecs")]
     NoCompatibleCodecs,
@@ -199,6 +451,7 @@ impl ClientError {
             ClientError::CallNotFound { .. }
                 | ClientError::CallAlreadyExists { .. }
                 | ClientError::InvalidCallState { .. }
+                | ClientError::InvalidCallStateGeneric { .. }
                 | ClientError::CallSetupFailed { .. }
                 | ClientError::CallTerminated { .. }
         )
@@ -220,6 +473,7 @@ impl ClientError {
             ClientError::CallTerminated { .. } => "call",
             
             ClientError::MediaNegotiationFailed { .. } |
+            ClientError::MediaError { .. } |
             ClientError::NoCompatibleCodecs |
             ClientError::AudioDeviceError { .. } |
             ClientError::UnsupportedCodec { .. } |

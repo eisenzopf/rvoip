@@ -25,6 +25,7 @@ use crate::{
 // Import types from our types module
 use super::types::*;
 use super::events::ClientCallHandler;
+use super::recovery::{retry_with_backoff, RetryConfig, ErrorContext};
 
 /// High-level SIP client manager that coordinates all client operations
 /// 
@@ -160,18 +161,44 @@ impl ClientManager {
     
     /// Register with a SIP server
     pub async fn register(&self, config: RegistrationConfig) -> ClientResult<Uuid> {
-        // Use SipClient trait to register
-        let registration_handle = SipClient::register(
-            &self.coordinator,
-            &config.server_uri,
-            &config.from_uri,
-            &config.contact_uri,
-            config.expires,
+        // Use SipClient trait to register with retry logic for network errors
+        let registration_handle = retry_with_backoff(
+            "sip_registration",
+            RetryConfig::slow(),  // Use slower retry for registration
+            || async {
+                SipClient::register(
+                    &self.coordinator,
+                    &config.server_uri,
+                    &config.from_uri,
+                    &config.contact_uri,
+                    config.expires,
+                )
+                .await
+                .map_err(|e| {
+                    // Categorize the error properly based on response
+                    let error_msg = e.to_string();
+                    if error_msg.contains("401") || error_msg.contains("407") {
+                        ClientError::AuthenticationFailed {
+                            reason: format!("Authentication required: {}", e)
+                        }
+                    } else if error_msg.contains("timeout") {
+                        ClientError::NetworkError {
+                            reason: format!("Registration timeout: {}", e)
+                        }
+                    } else if error_msg.contains("403") {
+                        ClientError::RegistrationFailed {
+                            reason: format!("Registration forbidden: {}", e)
+                        }
+                    } else {
+                        ClientError::RegistrationFailed {
+                            reason: format!("Registration failed: {}", e)
+                        }
+                    }
+                })
+            }
         )
         .await
-        .map_err(|e| ClientError::InternalError { 
-            message: format!("Failed to register: {}", e) 
-        })?;
+        .with_context(|| format!("Failed to register {} with {}", config.from_uri, config.server_uri))?;
         
         // Create registration info
         let reg_id = Uuid::new_v4();
