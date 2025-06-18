@@ -55,13 +55,39 @@ The integration with session-core has been successfully completed:
 
 **Completed**: CallCenterEngine now properly creates SessionCoordinator with our CallHandler. Created example `phase0_basic_call_flow` to demonstrate.
 
-#### 0.4 Agent Registration & Call Delivery 🔄 (Partial)
+#### 0.4 Agent Registration & Call Delivery 🔄 (In Progress)
 - [x] Design how agents register their SIP endpoints (store in database)
-- [ ] When routing decision selects an agent, create outbound call to agent's SIP URI
-- [ ] Use session-core's bridge functionality to connect customer and agent
-- [ ] Handle agent busy/no-answer scenarios
+- [x] Create SipRegistrar module for handling SIP REGISTER requests
+- [x] Discovered dialog-core already handles REGISTER and forwards to session-core
+- [x] Added handle_register_request() method to CallCenterEngine
+- [ ] Integration with existing stack:
+  - [ ] Configure dialog-core to forward REGISTER requests (not auto-respond)
+  - [ ] Hook into session-core's RegistrationRequest events
+  - [ ] Process registrations with our SipRegistrar
+  - [ ] Send proper SIP responses back through the stack
+- [ ] Link REGISTER authentication with agent database:
+  - [ ] Parse AOR and match with agent records
+  - [ ] Validate agent credentials (digest auth)
+  - [ ] Update agent status when registration succeeds
+- [ ] When routing decision selects an agent:
+  - [ ] Look up agent's current contact URI from registrations
+  - [ ] Create outbound INVITE to agent's registered contact
+  - [ ] Use session-core's bridge functionality to connect customer and agent
+- [ ] Handle registration scenarios:
+  - [ ] Initial registration with authentication
+  - [ ] Registration refresh (before expiry)
+  - [ ] De-registration (expires=0)
+  - [ ] Multiple registrations per agent (multiple devices)
+  - [ ] Registration expiry and cleanup
+- [ ] Handle agent availability:
+  - [ ] Agent offline (no active registration)
+  - [ ] Agent busy (active but on calls)
+  - [ ] Agent available (registered and ready)
 
-**In Progress**: Agent registration is working, but need to implement actual SIP call delivery to agent endpoints.
+**In Progress**: Discovered that dialog-core/session-core already have REGISTER support. Need to:
+1. Configure dialog-core to forward REGISTER (not auto-respond)
+2. Hook into session-core's event handling to process registrations
+3. Use our SipRegistrar to manage the registration state
 
 #### 0.5 End-to-End Testing
 - [ ] Create test scenario: customer calls → CallHandler receives it → routes to agent

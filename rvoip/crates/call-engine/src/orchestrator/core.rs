@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Mutex};
 use tracing::info;
 
 use rvoip_session_core::{SessionCoordinator, SessionManagerBuilder, SessionId, BridgeEvent};
@@ -13,8 +13,9 @@ use rvoip_session_core::{SessionCoordinator, SessionManagerBuilder, SessionId, B
 use crate::error::{CallCenterError, Result as CallCenterResult};
 use crate::config::CallCenterConfig;
 use crate::database::CallCenterDatabase;
-use crate::agent::{AgentId, AgentStatus};
-use crate::queue::QueueManager;
+use crate::agent::{Agent, AgentId, AgentRegistry, AgentStatus, SipRegistrar};
+use crate::queue::{CallQueue, QueueManager};
+use crate::routing::RoutingEngine;
 
 use super::types::{CallInfo, AgentInfo, RoutingStats, OrchestratorStats, CallStatus};
 use super::handler::CallCenterCallHandler;
@@ -47,6 +48,12 @@ pub struct CallCenterEngine {
     
     /// Call routing statistics and metrics
     pub(super) routing_stats: Arc<RwLock<RoutingStats>>,
+    
+    /// Agent registry
+    pub(crate) agent_registry: Arc<Mutex<AgentRegistry>>,
+    
+    /// SIP Registrar for handling agent registrations
+    pub(crate) sip_registrar: Arc<Mutex<SipRegistrar>>,
 }
 
 impl CallCenterEngine {
@@ -67,6 +74,8 @@ impl CallCenterEngine {
             active_calls: Arc::new(RwLock::new(HashMap::new())),
             available_agents: Arc::new(RwLock::new(HashMap::new())),
             routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
+            agent_registry: Arc::new(Mutex::new(AgentRegistry::new(database.clone()))),
+            sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
         });
         
         // Create CallHandler with weak reference to placeholder
@@ -93,13 +102,15 @@ impl CallCenterEngine {
         
         let engine = Arc::new(Self {
             config,
-            database,
+            database: database.clone(),
             session_coordinator: Some(session_coordinator),
             queue_manager: Arc::new(RwLock::new(QueueManager::new())),
             bridge_events: None,
             active_calls: Arc::new(RwLock::new(HashMap::new())),
             available_agents: Arc::new(RwLock::new(HashMap::new())),
             routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
+            agent_registry: Arc::new(Mutex::new(AgentRegistry::new(database))),
+            sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
         });
         
         info!("✅ Call center engine initialized with session-core integration");
@@ -167,6 +178,8 @@ impl Clone for CallCenterEngine {
             active_calls: self.active_calls.clone(),
             available_agents: self.available_agents.clone(),
             routing_stats: self.routing_stats.clone(),
+            agent_registry: self.agent_registry.clone(),
+            sip_registrar: self.sip_registrar.clone(),
         }
     }
 } 
