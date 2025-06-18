@@ -32,6 +32,7 @@ pub struct ClientCallHandler {
     pub session_mapping: Arc<DashMap<CallId, SessionId>>,
     pub call_info: Arc<DashMap<CallId, CallInfo>>,
     pub incoming_calls: Arc<DashMap<CallId, IncomingCall>>,
+    pub event_tx: Option<tokio::sync::broadcast::Sender<crate::events::ClientEvent>>,
 }
 
 impl std::fmt::Debug for ClientCallHandler {
@@ -59,7 +60,13 @@ impl ClientCallHandler {
             session_mapping,
             call_info,
             incoming_calls,
+            event_tx: None,
         }
+    }
+    
+    pub fn with_event_tx(mut self, event_tx: tokio::sync::broadcast::Sender<crate::events::ClientEvent>) -> Self {
+        self.event_tx = Some(event_tx);
+        self
     }
     
     pub async fn set_event_handler(&self, handler: Arc<dyn ClientEventHandler>) {
@@ -248,6 +255,14 @@ impl CallHandler for ClientCallHandler {
             created_at: Utc::now(),
         };
         
+        // Broadcast event
+        if let Some(event_tx) = &self.event_tx {
+            let _ = event_tx.send(crate::events::ClientEvent::IncomingCall { 
+                info: incoming_call_info.clone(),
+                priority: crate::events::EventPriority::High,
+            });
+        }
+        
         // Forward to client event handler
         if let Some(handler) = self.client_event_handler.read().await.as_ref() {
             let action = handler.on_incoming_call(incoming_call_info).await;
@@ -281,6 +296,14 @@ impl CallHandler for ClientCallHandler {
                 timestamp: Utc::now(),
             };
             
+            // Broadcast event
+            if let Some(event_tx) = &self.event_tx {
+                let _ = event_tx.send(crate::events::ClientEvent::CallStateChanged { 
+                    info: status_info.clone(),
+                    priority: crate::events::EventPriority::Normal,
+                });
+            }
+            
             // Forward to client event handler
             if let Some(handler) = self.client_event_handler.read().await.as_ref() {
                 handler.on_call_state_changed(status_info).await;
@@ -289,6 +312,50 @@ impl CallHandler for ClientCallHandler {
             // Clean up mappings but keep call_info for history
             self.call_mapping.remove(&session.id);
             self.session_mapping.remove(&call_id);
+        }
+    }
+    
+    async fn on_call_established(&self, session: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
+        // Map session to client call
+        if let Some(call_id) = self.call_mapping.get(&session.id).map(|entry| *entry.value()) {
+            // Update call info with establishment
+            if let Some(mut call_info_ref) = self.call_info.get_mut(&call_id) {
+                call_info_ref.state = crate::call::CallState::Connected;
+                if call_info_ref.connected_at.is_none() {
+                    call_info_ref.connected_at = Some(Utc::now());
+                }
+                
+                // Store SDP information
+                if let Some(local_sdp) = &local_sdp {
+                    call_info_ref.metadata.insert("local_sdp".to_string(), local_sdp.clone());
+                }
+                if let Some(remote_sdp) = &remote_sdp {
+                    call_info_ref.metadata.insert("remote_sdp".to_string(), remote_sdp.clone());
+                }
+            }
+            
+            let status_info = CallStatusInfo {
+                call_id,
+                new_state: crate::call::CallState::Connected,
+                previous_state: Some(crate::call::CallState::Proceeding),
+                reason: Some("Call established".to_string()),
+                timestamp: Utc::now(),
+            };
+            
+            // Broadcast event
+            if let Some(event_tx) = &self.event_tx {
+                let _ = event_tx.send(crate::events::ClientEvent::CallStateChanged { 
+                    info: status_info.clone(),
+                    priority: crate::events::EventPriority::High,
+                });
+            }
+            
+            // Forward to client event handler
+            if let Some(handler) = self.client_event_handler.read().await.as_ref() {
+                handler.on_call_state_changed(status_info).await;
+            }
+            
+            tracing::info!("Call {} established with SDP exchange", call_id);
         }
     }
 }

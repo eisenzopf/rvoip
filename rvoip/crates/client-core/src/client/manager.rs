@@ -80,13 +80,16 @@ impl ClientManager {
         let call_info = Arc::new(DashMap::new());
         let incoming_calls = Arc::new(DashMap::new());
         
+        // Create event broadcast channel
+        let (event_tx, _) = tokio::sync::broadcast::channel(256);
+        
         // Create call handler
         let call_handler = Arc::new(ClientCallHandler::new(
             call_mapping.clone(),
             session_mapping.clone(),
             call_info.clone(),
             incoming_calls.clone(),
-        ));
+        ).with_event_tx(event_tx.clone()));
         
         // Create session manager using session-core builder
         let coordinator = SessionManagerBuilder::new()
@@ -109,10 +112,7 @@ impl ClientManager {
             connected_calls: 0,
             total_registrations: 0,
             active_registrations: 0,
-        };
-
-        // Create event broadcast channel
-        let (event_tx, _) = tokio::sync::broadcast::channel(256);
+                };
         
         Ok(Arc::new(Self {
             coordinator,
@@ -210,6 +210,19 @@ impl ClientManager {
         let mut stats = self.stats.lock().await;
         stats.total_registrations += 1;
         stats.active_registrations += 1;
+        
+        // Broadcast registration event
+        let _ = self.event_tx.send(ClientEvent::RegistrationStatusChanged {
+            info: crate::events::RegistrationStatusInfo {
+                registration_id: reg_id,
+                server_uri: config.server_uri.clone(),
+                user_uri: config.from_uri.clone(),
+                status: crate::registration::RegistrationStatus::Active,
+                reason: Some("Registration successful".to_string()),
+                timestamp: chrono::Utc::now(),
+            },
+            priority: crate::events::EventPriority::Normal,
+        });
         
         tracing::info!("Registered {} with server {}", config.from_uri, config.server_uri);
         Ok(reg_id)

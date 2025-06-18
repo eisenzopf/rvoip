@@ -16,7 +16,6 @@ use clap::Parser;
 use rvoip_client_core::{
     client::{ClientBuilder, Client},
     events::ClientEvent,
-    call::CallDirection,
 };
 
 #[derive(Parser, Debug)]
@@ -74,7 +73,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()
         .await?;
     
-    let client = Arc::new(client);
+    // Start the client
+    client.start().await?;
     
     // Start event handler
     let event_client = client.clone();
@@ -114,18 +114,18 @@ async fn handle_client_events(client: Arc<Client>, call_duration: u64) {
     
     while let Ok(event) = event_rx.recv().await {
         match event {
-            ClientEvent::IncomingCall { call_id, from, .. } => {
-                info!("📞 Incoming call {} from {}", call_id, from);
+            ClientEvent::IncomingCall { info, priority } => {
+                info!("📞 Incoming call {} from {}", info.call_id, info.caller_uri);
                 
                 // Auto-answer the call
-                match client.answer_call(&call_id).await {
+                match client.answer_call(&info.call_id).await {
                     Ok(_) => {
-                        info!("✅ Answered call {}", call_id);
+                        info!("✅ Answered call {}", info.call_id);
                         
                         // If call_duration is set, automatically hang up after duration
                         if call_duration > 0 {
                             let client_clone = client.clone();
-                            let call_id_clone = call_id.clone();
+                            let call_id_clone = info.call_id.clone();
                             tokio::spawn(async move {
                                 sleep(Duration::from_secs(call_duration)).await;
                                 info!("⏰ Auto-hanging up call {} after {} seconds", 
@@ -136,29 +136,48 @@ async fn handle_client_events(client: Arc<Client>, call_duration: u64) {
                             });
                         }
                     }
-                    Err(e) => error!("❌ Failed to answer call {}: {}", call_id, e),
+                    Err(e) => error!("❌ Failed to answer call {}: {}", info.call_id, e),
                 }
             }
             
-            ClientEvent::CallEstablished { call_id, .. } => {
-                info!("🔊 Call {} established - audio should be flowing", call_id);
+            ClientEvent::CallStateChanged { info, priority } => {
+                use rvoip_client_core::call::CallState;
+                match info.new_state {
+                    CallState::Connected => {
+                        info!("🔊 Call {} established - audio should be flowing", info.call_id);
+                    }
+                    CallState::Terminated | CallState::Failed | CallState::Cancelled => {
+                        info!("📴 Call {} ended: {:?} ({})", 
+                              info.call_id, 
+                              info.new_state,
+                              info.reason.as_deref().unwrap_or("no reason"));
+                    }
+                    _ => {
+                        tracing::debug!("Call {} state changed to {:?}", info.call_id, info.new_state);
+                    }
+                }
             }
             
-            ClientEvent::CallEnded { call_id, reason } => {
-                info!("📴 Call {} ended: {}", call_id, reason);
+            ClientEvent::RegistrationStatusChanged { info, priority } => {
+                use rvoip_client_core::registration::RegistrationStatus;
+                match info.status {
+                    RegistrationStatus::Active => {
+                        info!("✅ Registration confirmed: {} (server: {})", 
+                              info.user_uri, info.server_uri);
+                    }
+                    RegistrationStatus::Failed => {
+                        error!("❌ Registration failed: {}", 
+                               info.reason.as_deref().unwrap_or("unknown reason"));
+                    }
+                    _ => {
+                        tracing::debug!("Registration status: {:?}", info.status);
+                    }
+                }
             }
             
-            ClientEvent::RegistrationSuccess { contact, expires } => {
-                info!("✅ Registration confirmed: {} (expires in {}s)", contact, expires);
-            }
-            
-            ClientEvent::RegistrationFailed { reason } => {
-                error!("❌ Registration failed: {}", reason);
-            }
-            
-            ClientEvent::MediaEvent { call_id, event } => {
+            ClientEvent::MediaEvent { info, priority } => {
                 // Log media events if verbose
-                tracing::debug!("🎵 Media event for call {}: {:?}", call_id, event);
+                tracing::debug!("🎵 Media event for call {}: {:?}", info.call_id, info.event_type);
             }
             
             _ => {
