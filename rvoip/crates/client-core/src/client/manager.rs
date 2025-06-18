@@ -10,7 +10,7 @@ use rvoip_session_core::api::{
     SessionManagerBuilder,
     SessionControl,
     SipClient,
-    types::{SessionId, IncomingCall},
+    types::SessionId,
     handlers::CallHandler,
 };
 
@@ -34,17 +34,8 @@ pub struct ClientManager {
     /// Session coordinator from session-core
     pub(crate) coordinator: Arc<SessionCoordinator>,
     
-    /// Local configuration
-    pub(crate) config: ClientConfig,
-    
     /// Local SIP address (bound)
     pub(crate) local_sip_addr: std::net::SocketAddr,
-    
-    /// Local media address (configured)
-    pub(crate) local_media_addr: std::net::SocketAddr,
-    
-    /// User agent string
-    pub(crate) user_agent: String,
     
     /// Whether the client is running
     pub(crate) is_running: Arc<RwLock<bool>>,
@@ -60,9 +51,6 @@ pub struct ClientManager {
     
     /// Call info storage
     pub(crate) call_info: Arc<DashMap<CallId, CallInfo>>,
-    
-    /// Incoming calls storage
-    pub(crate) incoming_calls: Arc<DashMap<CallId, IncomingCall>>,
     
     /// Call handler
     pub(crate) call_handler: Arc<ClientCallHandler>,
@@ -116,16 +104,12 @@ impl ClientManager {
         
         Ok(Arc::new(Self {
             coordinator,
-            config: config.clone(),
             local_sip_addr: config.local_sip_addr,
-            local_media_addr: config.local_media_addr,
-            user_agent: config.user_agent.clone(),
             is_running: Arc::new(RwLock::new(false)),
             stats: Arc::new(Mutex::new(stats)),
             registrations: Arc::new(RwLock::new(HashMap::new())),
             session_mapping,
             call_info,
-            incoming_calls,
             call_handler,
             event_tx,
         }))
@@ -232,7 +216,7 @@ impl ClientManager {
     pub async fn unregister(&self, reg_id: Uuid) -> ClientResult<()> {
         let mut registrations = self.registrations.write().await;
         
-        if let Some(mut registration_info) = registrations.get_mut(&reg_id) {
+        if let Some(registration_info) = registrations.get_mut(&reg_id) {
             // To unregister, send REGISTER with expires=0
             if let Some(handle) = &registration_info.handle {
                 SipClient::register(

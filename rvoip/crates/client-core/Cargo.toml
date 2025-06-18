@@ -13,10 +13,6 @@ categories = ["network-programming", "multimedia"]
 # session-core handles ALL lower-level integration
 rvoip-session-core = { path = "../session-core" }
 
-# For RTP statistics types (used in API only)
-rvoip-rtp-core = { path = "../rtp-core" }
-rvoip-media-core = { path = "../media-core" }
-
 # No direct access to lower layers - session-core handles ALL of these:
 # rvoip-transaction-core, rvoip-sip-core, rvoip-sip-transport, 
 # rvoip-media-core, rvoip-rtp-core, rvoip-dialog-core

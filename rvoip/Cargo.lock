@@ -3202,8 +3202,6 @@ dependencies = [
  "dashmap",
  "futures",
  "infra-common",
- "rvoip-media-core",
- "rvoip-rtp-core",
  "rvoip-session-core",
  "serde",
  "serde_json",

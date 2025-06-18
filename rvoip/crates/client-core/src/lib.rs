@@ -1,21 +1,134 @@
-//! Client-core: High-level SIP client coordination layer
-//!
-//! This crate provides a high-level API for SIP client applications by delegating
-//! to session-core for all SIP session and media orchestration.
-//!
-//! ## Proper Layer Separation
+//! High-level SIP client library for VoIP applications
+//! 
+//! This crate provides a user-friendly API for building SIP/VoIP client applications.
+//! It handles the complexity of SIP signaling, media negotiation, and call management
+//! while presenting a simple, async-first interface.
+//! 
+//! # Architecture
+//! 
 //! ```text
-//! client-core -> session-core -> {transaction-core, media-core, sip-transport, sip-core}
+//! ┌─────────────────────────┐
+//! │    Your Application     │
+//! └───────────┬─────────────┘
+//!             │ 
+//! ┌───────────▼─────────────┐
+//! │     client-core         │ ◄── You are here
+//! │ ┌─────────────────────┐ │
+//! │ │   ClientManager     │ │     • High-level call control
+//! │ │   Registration      │ │     • Event handling  
+//! │ │   Media Control     │ │     • Clean async API
+//! │ └─────────────────────┘ │
+//! └───────────┬─────────────┘
+//!             │
+//! ┌───────────▼─────────────┐
+//! │     session-core        │     • Session management
+//! │                         │     • Protocol coordination
+//! └───────────┬─────────────┘     • Infrastructure abstraction
+//!             │
+//! ┌───────────▼─────────────┐
+//! │   Lower-level crates    │     • SIP, RTP, Media
+//! │ (transaction, dialog,   │     • Transport layers
+//! │  sip-core, etc.)        │     • Codec processing
+//! └─────────────────────────┘
 //! ```
-//!
-//! Client-core focuses on:
-//! - User-friendly call management API
-//! - Event handling for UI integration
-//! - Configuration management
-//! - Call state mapping and tracking
-//!
-//! All SIP protocol details, media management, and infrastructure
-//! are handled by session-core and lower layers.
+//! 
+//! # Quick Start
+//! 
+//! ## Basic Client Setup
+//! 
+//! ```rust,no_run
+//! use rvoip_client_core::{ClientBuilder, Client, ClientEvent};
+//! use std::sync::Arc;
+//! 
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Build and start a client
+//!     let client = ClientBuilder::new()
+//!         .user_agent("MyApp/1.0")
+//!         .local_address("0.0.0.0:5060".parse()?)
+//!         .build()
+//!         .await?;
+//!         
+//!     client.start().await?;
+//!     
+//!     // Subscribe to events
+//!     let mut events = client.subscribe_events();
+//!     
+//!     // Make a call
+//!     let call_id = client.make_call(
+//!         "sip:alice@example.com".to_string(),
+//!         "sip:bob@example.com".to_string(),
+//!         None, // Let session-core generate SDP
+//!     ).await?;
+//!     
+//!     // Handle events
+//!     while let Ok(event) = events.recv().await {
+//!         match event {
+//!             ClientEvent::CallStateChanged { info, .. } => {
+//!                 println!("Call {} state: {:?}", info.call_id, info.new_state);
+//!             }
+//!             _ => {}
+//!         }
+//!     }
+//!     
+//!     Ok(())
+//! }
+//! ```
+//! 
+//! ## Registration Example
+//! 
+//! ```rust,no_run
+//! # use rvoip_client_core::{ClientBuilder, registration::RegistrationConfig};
+//! # async fn example(client: Arc<rvoip_client_core::Client>) -> Result<(), Box<dyn std::error::Error>> {
+//! // Register with a SIP server
+//! let config = RegistrationConfig::new(
+//!     "sip:registrar.example.com".to_string(),
+//!     "sip:alice@example.com".to_string(),
+//!     "sip:alice@192.168.1.100:5060".to_string(),
+//! )
+//! .with_credentials("alice".to_string(), "secret123".to_string())
+//! .with_expires(3600); // 1 hour
+//! 
+//! let reg_id = client.register(config).await?;
+//! 
+//! // Later, refresh the registration
+//! client.refresh_registration(reg_id).await?;
+//! 
+//! // Or unregister
+//! client.unregister(reg_id).await?;
+//! # Ok(())
+//! # }
+//! ```
+//! 
+//! # Features
+//! 
+//! - **Call Management**: Make, receive, hold, transfer calls
+//! - **Registration**: SIP REGISTER support with authentication
+//! - **Media Control**: Audio mute/unmute, codec selection, SDP handling
+//! - **Event System**: Async event notifications for all operations
+//! - **Clean Architecture**: All complexity handled through session-core
+//! 
+//! # Error Handling
+//! 
+//! All operations return `ClientResult<T>` which wraps `ClientError`:
+//! 
+//! ```rust,no_run
+//! # use rvoip_client_core::{Client, ClientError};
+//! # async fn example(client: Arc<Client>) -> Result<(), Box<dyn std::error::Error>> {
+//! match client.make_call("sip:alice@example.com".to_string(), "sip:bob@example.com".to_string(), None).await {
+//!     Ok(call_id) => println!("Call started: {}", call_id),
+//!     Err(ClientError::NetworkError { details }) => {
+//!         eprintln!("Network problem: {}", details);
+//!         // Retry or notify user
+//!     }
+//!     Err(e) => eprintln!("Call failed: {}", e),
+//! }
+//! # Ok(())
+//! # }
+//! ```
+
+#![warn(missing_docs)]
+#![doc(html_root_url = "https://docs.rs/rvoip-client-core/0.1.0")]
 
 pub mod client;
 pub mod call;

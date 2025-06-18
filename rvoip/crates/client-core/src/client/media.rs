@@ -878,30 +878,42 @@ impl super::manager::ClientManager {
     }
     
     /// Get RTP statistics for a call
-    pub async fn get_rtp_statistics(&self, call_id: &CallId) -> ClientResult<Option<rvoip_rtp_core::session::RtpSessionStats>> {
-        let session_id = self.session_mapping.get(call_id)
-            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
-            .clone();
-            
-        // Get RTP statistics from session-core
-        MediaControl::get_rtp_statistics(&self.coordinator, &session_id)
-            .await
-            .map_err(|e| ClientError::InternalError { 
-                message: format!("Failed to get RTP statistics: {}", e) 
-            })
+    /// 
+    /// Currently returns None as session-core doesn't re-export the RTP statistics type.
+    /// TODO: Enable when session-core provides proper type re-exports
+    pub async fn get_rtp_statistics(&self, _call_id: &CallId) -> ClientResult<Option<serde_json::Value>> {
+        // Temporarily disabled until session-core re-exports RtpSessionStats
+        // let session_id = self.session_mapping.get(call_id)
+        //     .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+        //     .clone();
+        //     
+        // MediaControl::get_rtp_statistics(&self.coordinator, &session_id)
+        //     .await
+        //     .map(|stats| stats.map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null)))
+        //     .map_err(|e| ClientError::InternalError { 
+        //         message: format!("Failed to get RTP statistics: {}", e) 
+        //     })
+        
+        Ok(None)
     }
     
     /// Get comprehensive media statistics for a call
-    pub async fn get_media_statistics(&self, call_id: &CallId) -> ClientResult<Option<rvoip_media_core::types::MediaStatistics>> {
-        let session_id = self.session_mapping.get(call_id)
-            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
-            .clone();
-            
-        // Get media statistics from session-core
-        MediaControl::get_media_statistics(&self.coordinator, &session_id)
-            .await
-            .map_err(|e| ClientError::InternalError { 
-                message: format!("Failed to get media statistics: {}", e) 
-            })
+    /// 
+    /// Currently returns None as session-core doesn't re-export the media statistics type.
+    /// TODO: Enable when session-core provides proper type re-exports
+    pub async fn get_media_statistics(&self, _call_id: &CallId) -> ClientResult<Option<serde_json::Value>> {
+        // Temporarily disabled until session-core re-exports MediaStatistics
+        // let session_id = self.session_mapping.get(call_id)
+        //     .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+        //     .clone();
+        //     
+        // MediaControl::get_media_statistics(&self.coordinator, &session_id)
+        //     .await
+        //     .map(|stats| stats.map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null)))
+        //     .map_err(|e| ClientError::InternalError { 
+        //         message: format!("Failed to get media statistics: {}", e) 
+        //     })
+        
+        Ok(None)
     }
 }

@@ -22,6 +22,65 @@ use super::types::*;
 /// Call operations implementation for ClientManager
 impl super::manager::ClientManager {
     /// Make an outgoing call with enhanced information tracking
+    /// 
+    /// This method initiates a new outgoing call using the session-core infrastructure.
+    /// It handles SDP generation, session creation, and proper event notification.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `from` - The caller's SIP URI (e.g., "sip:alice@example.com")
+    /// * `to` - The callee's SIP URI (e.g., "sip:bob@example.com")  
+    /// * `subject` - Optional call subject/reason
+    /// 
+    /// # Returns
+    /// 
+    /// Returns a unique `CallId` that can be used to track and control the call.
+    /// 
+    /// # Errors
+    /// 
+    /// * `ClientError::InvalidConfiguration` - If the URIs are malformed
+    /// * `ClientError::NetworkError` - If there's a network connectivity issue
+    /// * `ClientError::CallSetupFailed` - If the call cannot be initiated
+    /// 
+    /// # Examples
+    /// 
+    /// Basic call:
+    /// ```rust,no_run
+    /// # use rvoip_client_core::{Client, CallId};
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<Client>) -> Result<CallId, Box<dyn std::error::Error>> {
+    /// let call_id = client.make_call(
+    ///     "sip:alice@ourcompany.com".to_string(),
+    ///     "sip:bob@example.com".to_string(),
+    ///     None,
+    /// ).await?;
+    /// 
+    /// println!("Outgoing call started: {}", call_id);
+    /// # Ok(call_id)
+    /// # }
+    /// ```
+    /// 
+    /// Call with subject:
+    /// ```rust,no_run
+    /// # use rvoip_client_core::{Client, CallId};
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<Client>) -> Result<CallId, Box<dyn std::error::Error>> {
+    /// let call_id = client.make_call(
+    ///     "sip:support@ourcompany.com".to_string(),
+    ///     "sip:customer@example.com".to_string(),
+    ///     Some("Technical Support Call".to_string()),
+    /// ).await?;
+    /// # Ok(call_id)
+    /// # }
+    /// ```
+    /// 
+    /// # Call Flow
+    /// 
+    /// 1. Validates the SIP URIs
+    /// 2. Creates a new session via session-core
+    /// 3. Generates and stores call metadata
+    /// 4. Emits appropriate events
+    /// 5. Returns the CallId for tracking
     pub async fn make_call(
         &self,
         from: String,
