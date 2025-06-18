@@ -27,7 +27,7 @@ cargo build --examples --quiet
 
 # Start the server in the background
 echo -e "${GREEN}🔧 Starting CallCenterEngine server...${NC}"
-cargo run --example register_demo_server --quiet > server.log 2>&1 &
+cargo run --example register_demo_server --quiet 2>&1 | tee server.log &
 SERVER_PID=$!
 
 # Give the server time to start
@@ -45,11 +45,9 @@ echo -e "${GREEN}✅ Server running on PID $SERVER_PID${NC}"
 echo ""
 
 # Run the client
-echo -e "${BLUE}📱 Starting SIP client...${NC}"
+echo -e "${BLUE}📱 Starting SIP client (using session-core API)...${NC}"
 echo ""
 
-# For now, since we need to implement the SipClient trait first,
-# we'll use the existing client that uses sip-transport directly
 cargo run --example register_demo_client --quiet
 
 # Cleanup
@@ -60,4 +58,14 @@ wait $SERVER_PID 2>/dev/null || true
 
 echo -e "${GREEN}✅ Demo completed!${NC}"
 echo ""
-echo "Server log saved to: server.log" 
+echo "Server log saved to: server.log"
+echo ""
+echo -e "${BLUE}📋 Implementation Status:${NC}"
+echo "  ✅ SipClient trait defined and exported from session-core"
+echo "  ✅ Client uses session-core API exclusively"
+echo "  ⚠️  Full implementation pending dialog-core support for non-dialog requests"
+echo ""
+echo -e "${BLUE}Next steps:${NC}"
+echo "  1. Add send_non_dialog_request() to dialog-core's UnifiedDialogApi"
+echo "  2. Complete the register() implementation to send real SIP messages"
+echo "  3. Test against real SIP servers" 

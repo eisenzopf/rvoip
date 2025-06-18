@@ -162,6 +162,9 @@ pub struct SessionManagerConfig {
     
     /// STUN server address
     pub stun_server: Option<String>,
+    
+    /// Enable SIP client features (REGISTER, MESSAGE, etc.)
+    pub enable_sip_client: bool,
 }
 
 impl Default for SessionManagerConfig {
@@ -173,6 +176,7 @@ impl Default for SessionManagerConfig {
             media_port_end: 20000,
             enable_stun: false,
             stun_server: None,
+            enable_sip_client: false,
         }
     }
 }
@@ -308,6 +312,31 @@ impl SessionManagerBuilder {
     /// ```
     pub fn with_handler(mut self, handler: Arc<dyn CallHandler>) -> Self {
         self.handler = Some(handler);
+        self
+    }
+    
+    /// Enable SIP client features
+    /// 
+    /// Enables non-session SIP operations like REGISTER, MESSAGE, and SUBSCRIBE.
+    /// 
+    /// # Example
+    /// ```rust
+    /// let coordinator = SessionManagerBuilder::new()
+    ///     .with_sip_port(5060)
+    ///     .enable_sip_client()
+    ///     .build()
+    ///     .await?;
+    /// 
+    /// // Now can use SipClient methods
+    /// let registration = coordinator.register(
+    ///     "sip:registrar.example.com",
+    ///     "sip:alice@example.com",
+    ///     "sip:alice@192.168.1.100:5060",
+    ///     3600
+    /// ).await?;
+    /// ```
+    pub fn enable_sip_client(mut self) -> Self {
+        self.config.enable_sip_client = true;
         self
     }
     

@@ -86,8 +86,11 @@ pub async fn create_full_server_manager(
     transaction_manager: Arc<rvoip_transaction_core::TransactionManager>,
     config: ServerConfig,
 ) -> Result<Arc<dyn ServerSessionManager>> {
-    // This will be implemented in the internal server module
-    crate::server::create_server_manager_impl(transaction_manager, config).await
+    // TODO: Implement server-specific session manager
+    // For now, return an error indicating this is not yet implemented
+    Err(crate::errors::SessionError::NotImplemented { 
+        feature: "Server session manager".to_string() 
+    })
 }
 
 #[cfg(test)]

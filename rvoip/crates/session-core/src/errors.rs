@@ -40,6 +40,18 @@ pub enum SessionError {
     /// Timeout error
     Timeout(String),
     
+    /// Invalid URI format
+    InvalidUri(String),
+    
+    /// Feature not supported
+    NotSupported { feature: String, reason: String },
+    
+    /// Feature not implemented yet
+    NotImplemented { feature: String },
+    
+    /// Protocol error (e.g., invalid SIP response)
+    ProtocolError { message: String },
+    
     /// Generic error with message
     Other(String),
 }
@@ -57,6 +69,10 @@ impl fmt::Display for SessionError {
             SessionError::ConfigError(msg) => write!(f, "Configuration error: {}", msg),
             SessionError::ResourceLimitExceeded(msg) => write!(f, "Resource limit exceeded: {}", msg),
             SessionError::Timeout(msg) => write!(f, "Timeout: {}", msg),
+            SessionError::InvalidUri(msg) => write!(f, "Invalid URI: {}", msg),
+            SessionError::NotSupported { feature, reason } => write!(f, "{} not supported: {}", feature, reason),
+            SessionError::NotImplemented { feature } => write!(f, "{} not implemented yet", feature),
+            SessionError::ProtocolError { message } => write!(f, "Protocol error: {}", message),
             SessionError::Other(msg) => write!(f, "Error: {}", msg),
         }
     }
@@ -114,5 +130,9 @@ impl SessionError {
 
     pub fn internal(msg: &str) -> Self {
         SessionError::Other(msg.to_string())
+    }
+
+    pub fn invalid_uri(msg: &str) -> Self {
+        SessionError::InvalidUri(msg.to_string())
     }
 } 

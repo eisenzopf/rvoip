@@ -3,6 +3,100 @@
 //! This module provides the main public interface for the session-core crate.
 //! Session-core is the central coordination layer for SIP sessions in the rvoip stack.
 //! 
+//! # Module Organization
+//! 
+//! The API is organized into several specialized modules, each serving a specific purpose:
+//! 
+//! ## Core Types (`types.rs`)
+//! 
+//! Fundamental data types used throughout the API:
+//! - [`SessionId`] - Unique identifier for sessions
+//! - [`CallSession`] - Complete session information
+//! - [`CallState`] - Session state machine (Initiating, Ringing, Active, etc.)
+//! - [`IncomingCall`] - Incoming call representation
+//! - [`CallDecision`] - Decision types for incoming calls
+//! - [`MediaInfo`] - Media stream information
+//! - [`SessionStats`] - Call statistics and quality metrics
+//! 
+//! ## Session Control (`control.rs`)
+//! 
+//! The [`SessionControl`] trait provides high-level call control operations:
+//! - Creating outgoing calls
+//! - Accepting/rejecting incoming calls
+//! - Terminating sessions
+//! - Hold/resume operations
+//! - DTMF sending
+//! - Session queries and monitoring
+//! 
+//! ## Media Management (`media.rs`)
+//! 
+//! The [`MediaControl`] trait handles all media-related operations:
+//! - SDP offer/answer generation
+//! - Media session creation and updates
+//! - Codec negotiation
+//! - RTP/RTCP statistics
+//! - Audio quality monitoring
+//! - Media hold/resume
+//! 
+//! ## Event Handlers (`handlers.rs`)
+//! 
+//! The [`CallHandler`] trait for implementing call event callbacks:
+//! - `on_incoming_call()` - Handle incoming calls with immediate or deferred decisions
+//! - `on_call_established()` - Called when calls become active
+//! - `on_call_ended()` - Cleanup when calls terminate
+//! - `on_call_failed()` - Handle call failures
+//! 
+//! ## Configuration (`builder.rs`)
+//! 
+//! The [`SessionManagerBuilder`] provides a fluent interface for configuration:
+//! - Network settings (SIP port, local address)
+//! - Media port ranges
+//! - STUN/NAT traversal
+//! - Handler registration
+//! - SIP client features
+//! 
+//! ## Bridge Management (`bridge.rs`)
+//! 
+//! Two-party call bridging functionality:
+//! - [`BridgeId`] - Unique bridge identifier
+//! - [`BridgeInfo`] - Bridge state and participants
+//! - [`BridgeEvent`] - Real-time bridge events
+//! - Bridge creation, destruction, and monitoring
+//! 
+//! ## SIP Client Operations (`client.rs`)
+//! 
+//! The [`SipClient`] trait for non-session SIP operations:
+//! - REGISTER - Endpoint registration
+//! - OPTIONS - Capability discovery and keepalive
+//! - MESSAGE - Instant messaging
+//! - SUBSCRIBE/NOTIFY - Event subscriptions
+//! - Raw SIP request sending
+//! 
+//! ## Call Creation Helpers (`create.rs`)
+//! 
+//! Convenience functions for different call scenarios:
+//! - Simple outgoing calls
+//! - Calls with custom SDP
+//! - Early media handling
+//! - Prepared call patterns
+//! 
+//! ## Server Integration (`server.rs` & `server_types.rs`)
+//! 
+//! Types and utilities for server implementations:
+//! - [`IncomingCallEvent`] - Enhanced incoming call information
+//! - [`CallerInfo`] - Detailed caller information
+//! - Server-side session management
+//! - Integration with transaction layer
+//! 
+//! ## Code Examples (`examples.rs`)
+//! 
+//! Ready-to-use implementations of common patterns:
+//! - Auto-answer handler
+//! - Call queue handler
+//! - Routing handler
+//! - Business hours handler
+//! - Composite handler patterns
+//! 
 //! # Quick Start
 //! 
 //! ```rust
@@ -52,6 +146,11 @@
 //! | **`handlers`** | Event handling callbacks | `CallHandler` trait |
 //! | **`builder`** | Configuration and setup | `SessionManagerBuilder` |
 //! | **`bridge`** | 2-party call bridging | `BridgeId`, `BridgeInfo`, `BridgeEvent` |
+//! | **`client`** | Client-related operations | `SipClient`, `RegistrationHandle`, `SipResponse`, `SubscriptionHandle` |
+//! | **`create`** | Call creation helpers | Convenience functions for common patterns |
+//! | **`server`** | Server integration | Server-specific utilities |
+//! | **`server_types`** | Server data types | `IncomingCallEvent`, `CallerInfo` |
+//! | **`examples`** | Example handlers | Pre-built handlers for common use cases |
 //! 
 //! # Core Concepts
 //! 
@@ -216,6 +315,31 @@
 //!     .await?;
 //! ```
 //! 
+//! ## SIP Client Operations
+//! ```rust
+//! // Enable SIP client features
+//! let coordinator = SessionManagerBuilder::new()
+//!     .with_sip_port(5061)
+//!     .enable_sip_client()
+//!     .build()
+//!     .await?;
+//! 
+//! // Register with a SIP server
+//! let registration = coordinator.register(
+//!     "sip:registrar.example.com",
+//!     "sip:alice@example.com",
+//!     "sip:alice@192.168.1.100:5061",
+//!     3600  // 1 hour
+//! ).await?;
+//! 
+//! // Send an instant message
+//! let response = coordinator.send_message(
+//!     "sip:bob@example.com",
+//!     "Hello from session-core!",
+//!     Some("text/plain")
+//! ).await?;
+//! ```
+//! 
 //! # Bridge Management (2-Party Conferences)
 //! 
 //! Session-core provides bridge management for connecting two calls:
@@ -278,8 +402,10 @@
 //! - [`MediaControl`] - Media operations
 //! - [`CallHandler`] - Incoming call handling
 //! - [`SessionManagerBuilder`] - Configuration
+//! - [`SipClient`] - Non-session SIP operations
 //! - [examples/](https://github.com/yourusername/rvoip/tree/main/crates/session-core/examples) - Full examples
 //! - [COOKBOOK.md](https://github.com/yourusername/rvoip/blob/main/crates/session-core/COOKBOOK.md) - Recipes
+//! - [SIP_CLIENT_DESIGN.md](https://github.com/yourusername/rvoip/blob/main/crates/session-core/SIP_CLIENT_DESIGN.md) - SipClient design
 
 pub mod types;
 pub mod handlers;
@@ -292,6 +418,8 @@ pub mod examples;
 // New API modules
 pub mod bridge;
 pub mod server_types;
+pub mod server;
+pub mod client;
 
 // Re-export main types
 pub use types::{
@@ -303,6 +431,7 @@ pub use handlers::CallHandler;
 pub use builder::{SessionManagerBuilder, SessionManagerConfig};
 pub use control::SessionControl;
 pub use media::MediaControl;
+pub use client::{SipClient, RegistrationHandle, SipResponse, SubscriptionHandle};
 
 // Re-export bridge functionality
 pub use bridge::{
@@ -312,6 +441,12 @@ pub use bridge::{
 // Re-export server types
 pub use server_types::{
     IncomingCallEvent, CallerInfo,
+};
+
+// Re-export server configuration types from server module
+pub use server::{
+    ServerConfig, TransportProtocol, ServerSessionManager,
+    create_full_server_manager,
 };
 
 // Re-export conference functionality (make it public)
@@ -326,20 +461,7 @@ pub use crate::errors::{Result, SessionError};
 
 // Type aliases for compatibility with call-engine
 pub type Session = CallSession;
-pub type ServerSessionManager = SessionCoordinator;
-pub type ServerConfig = SessionManagerConfig;
 pub type IncomingCallNotification = IncomingCallEvent;
-
-// Re-export create helper function
-pub async fn create_full_server_manager(
-    transaction_manager: std::sync::Arc<rvoip_transaction_core::TransactionManager>,
-    _config: ServerConfig,
-) -> Result<std::sync::Arc<ServerSessionManager>> {
-    // Use builder to create coordinator with transaction manager
-    SessionManagerBuilder::new()
-        .build_with_transaction_manager(transaction_manager)
-        .await
-}
 
 // Re-export the SessionCoordinator as the main entry point
 pub use crate::coordinator::SessionCoordinator; 

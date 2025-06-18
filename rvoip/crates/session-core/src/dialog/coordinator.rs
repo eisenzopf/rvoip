@@ -46,6 +46,11 @@ impl SessionDialogCoordinator {
         }
     }
     
+    /// Get access to the dialog API
+    pub fn dialog_api(&self) -> &Arc<UnifiedDialogApi> {
+        &self.dialog_api
+    }
+    
     /// Initialize session coordination with dialog-core
     pub async fn initialize(&self, session_events_tx: mpsc::Sender<SessionCoordinationEvent>) -> DialogResult<()> {
         // Set up session coordination with dialog-core

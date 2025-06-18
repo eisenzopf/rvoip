@@ -858,4 +858,95 @@ impl UnifiedDialogApi {
         // Create the unified dialog API with all components
         Self::with_global_events(Arc::new(transaction_manager), global_rx, config).await
     }
+    
+    // ========================================
+    // NON-DIALOG OPERATIONS
+    // ========================================
+    
+    /// Send a non-dialog SIP request (for REGISTER, OPTIONS, etc.)
+    ///
+    /// This method allows sending SIP requests that don't establish or require
+    /// a dialog context. Useful for:
+    /// - REGISTER requests for endpoint registration
+    /// - OPTIONS requests for capability discovery
+    /// - MESSAGE requests for instant messaging
+    /// - SUBSCRIBE requests for event subscriptions
+    ///
+    /// # Arguments
+    /// * `request` - Complete SIP request to send
+    /// * `destination` - Target address to send the request to
+    /// * `timeout` - Maximum time to wait for a response
+    ///
+    /// # Returns
+    /// The SIP response received
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use std::time::Duration;
+    ///
+    /// # async fn example(api: rvoip_dialog_core::api::unified::UnifiedDialogApi) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Build a REGISTER request
+    /// let request = SimpleRequestBuilder::register("sip:registrar.example.com")?
+    ///     .from("", "sip:alice@example.com", Some("tag123"))
+    ///     .to("", "sip:alice@example.com", None)
+    ///     .call_id("reg-12345")
+    ///     .cseq(1)
+    ///     .via("192.168.1.100:5060", "UDP", Some("branch123"))
+    ///     .contact("sip:alice@192.168.1.100:5060", None)
+    ///     .expires(3600)
+    ///     .build();
+    ///
+    /// let destination = "192.168.1.1:5060".parse()?;
+    /// let response = api.send_non_dialog_request(
+    ///     request,
+    ///     destination,
+    ///     Duration::from_secs(32)
+    /// ).await?;
+    ///
+    /// println!("Registration response: {}", response.status_code());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_non_dialog_request(
+        &self,
+        request: Request,
+        destination: SocketAddr,
+        timeout: std::time::Duration,
+    ) -> ApiResult<Response> {
+        debug!("Sending non-dialog {} request to {}", request.method(), destination);
+        
+        // Create a non-dialog transaction directly with the transaction manager
+        let transaction_id = match request.method() {
+            Method::Invite => {
+                return Err(ApiError::protocol(
+                    "INVITE requests must use dialog context. Use make_call() instead."
+                ));
+            }
+            _ => {
+                // Create non-INVITE client transaction
+                self.manager.core().transaction_manager()
+                    .create_non_invite_client_transaction(request, destination)
+                    .await
+                    .map_err(|e| ApiError::internal(format!("Failed to create transaction: {}", e)))?
+            }
+        };
+        
+        // Send the request
+        self.manager.core().transaction_manager()
+            .send_request(&transaction_id)
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to send request: {}", e)))?;
+        
+        // Wait for final response
+        let response = self.manager.core().transaction_manager()
+            .wait_for_final_response(&transaction_id, timeout)
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to wait for response: {}", e)))?
+            .ok_or_else(|| ApiError::network(format!("Request timed out after {:?}", timeout)))?;
+        
+        debug!("Received response {} for non-dialog request", response.status_code());
+        Ok(response)
+    }
 } 

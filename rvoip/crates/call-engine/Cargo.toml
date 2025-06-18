@@ -71,4 +71,12 @@ path = "examples/phase2_call_routing_demo.rs"
 
 [[example]]
 name = "call_center_with_database"
-path = "examples/call_center_with_database.rs" 
+path = "examples/call_center_with_database.rs"
+
+[[example]]
+name = "register_demo_server"
+path = "examples/register_demo/server.rs"
+
+[[example]]
+name = "register_demo_client"
+path = "examples/register_demo/client.rs" 
