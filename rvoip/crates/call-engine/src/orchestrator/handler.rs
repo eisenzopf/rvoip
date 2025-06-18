@@ -76,7 +76,46 @@ impl CallCenterEngine {
                       transaction_id, from_uri, contact_uri, expires);
         
         // Parse the AOR (Address of Record) from the from_uri
-        let aor = from_uri; // In practice, might need to normalize this
+        let aor = from_uri.clone(); // In practice, might need to normalize this
+        
+        // Check if the agent exists in the database
+        let agent_exists = {
+            let conn = self.database.connection().await;
+            match conn.query(
+                "SELECT id FROM agents WHERE sip_uri = ?",
+                (aor.clone(),)
+            ).await {
+                Ok(mut rows) => rows.next().await.is_ok(),
+                Err(e) => {
+                    tracing::error!("Database error checking agent: {}", e);
+                    false
+                }
+            }
+        };
+        
+        if !agent_exists {
+            tracing::warn!("Registration attempt for unknown agent: {}", aor);
+            
+            // Send 404 Not Found response
+            let session_coord = self.session_coordinator.as_ref()
+                .ok_or_else(|| CallCenterError::internal(
+                    "Session coordinator not available"
+                ))?;
+            
+            session_coord.send_sip_response(
+                transaction_id,
+                404,
+                Some("Agent not found"),
+                None,
+            ).await
+            .map_err(|e| CallCenterError::internal(
+                &format!("Failed to send REGISTER response: {}", e)
+            ))?;
+            
+            return Err(CallCenterError::NotFound(
+                format!("Agent {} not registered in system", aor)
+            ));
+        }
         
         // Create a Contact header structure for the registrar
         // Note: This is simplified - in practice you'd parse the full Contact header
@@ -123,11 +162,12 @@ impl CallCenterEngine {
             }
         };
         
-        // Build headers (in future, add Contact headers with actual registration details)
+        // Build headers with Contact information
         let expires_str = expires.to_string();
+        let contact_header = format!("<{}>;expires={}", contact_uri, expires);
         let headers = vec![
             ("Expires", expires_str.as_str()),
-            // TODO: Add Contact headers with registered endpoints
+            ("Contact", contact_header.as_str()),
         ];
         
         session_coord.send_sip_response(
@@ -141,6 +181,19 @@ impl CallCenterEngine {
         ))?;
         
         tracing::info!("REGISTER response sent: {} {}", status_code, reason.unwrap_or(""));
+        
+        // Update agent status in database if registration was successful
+        if status_code == 200 && expires > 0 {
+            let conn = self.database.connection().await;
+            if let Err(e) = conn.execute(
+                "UPDATE agents SET status = 'available', last_seen_at = datetime('now') WHERE sip_uri = ?",
+                (&aor,)
+            ).await {
+                tracing::error!("Failed to update agent status: {}", e);
+            } else {
+                tracing::info!("Updated agent {} status to available", aor);
+            }
+        }
         
         Ok(())
     }

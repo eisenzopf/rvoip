@@ -57,6 +57,10 @@ serial_test = "3.1"
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 
+# For examples
+clap = { version = "4.5", features = ["derive"] }
+rvoip-client-core = { path = "../client-core" }
+
 [[bench]]
 name = "call_center_benchmarks"
 harness = false
@@ -79,4 +83,12 @@ path = "examples/register_demo/server.rs"
 
 [[example]]
 name = "register_demo_client"
-path = "examples/register_demo/client.rs" 
+path = "examples/register_demo/client.rs"
+
+[[example]]
+name = "e2e_test_server"
+path = "examples/e2e_test/server/basic_call_center_server.rs"
+
+[[example]]
+name = "e2e_test_agent"
+path = "examples/e2e_test/agent/agent_client.rs" 
