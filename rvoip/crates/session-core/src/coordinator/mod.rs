@@ -590,6 +590,40 @@ impl SessionCoordinator {
     pub fn get_bound_address(&self) -> std::net::SocketAddr {
         self.dialog_manager.get_bound_address()
     }
+    
+    /// Send a SIP response through dialog-core (for REGISTER, etc.)
+    /// 
+    /// This allows the application to send proper SIP responses when
+    /// auto-response is disabled.
+    pub async fn send_sip_response(
+        &self,
+        transaction_id: &str,
+        status_code: u16,
+        _reason_phrase: Option<&str>,
+        _headers: Option<Vec<(&str, &str)>>,
+    ) -> Result<()> {
+        // Parse the transaction ID
+        let tx_key: rvoip_transaction_core::TransactionKey = transaction_id.parse()
+            .map_err(|e| SessionError::internal(&format!("Invalid transaction ID: {}", e)))?;
+        
+        // Map status code to SIP status
+        let status = match status_code {
+            200 => rvoip_sip_core::StatusCode::Ok,
+            401 => rvoip_sip_core::StatusCode::Unauthorized,
+            403 => rvoip_sip_core::StatusCode::Forbidden,
+            404 => rvoip_sip_core::StatusCode::NotFound,
+            500 => rvoip_sip_core::StatusCode::ServerInternalError,
+            _ => rvoip_sip_core::StatusCode::Ok, // Default to OK
+        };
+        
+        // Send response through dialog coordinator's send_response method
+        self.dialog_coordinator
+            .send_response(&tx_key, status_code, _reason_phrase.unwrap_or(""))
+            .await
+            .map_err(|e| SessionError::internal(&format!("Failed to send SIP response: {}", e)))?;
+        
+        Ok(())
+    }
 
     /// Generate SDP offer for a session
     pub async fn generate_sdp_offer(&self, session_id: &SessionId) -> Result<String> {

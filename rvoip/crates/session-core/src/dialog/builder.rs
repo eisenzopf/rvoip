@@ -86,8 +86,11 @@ impl DialogBuilder {
         };
         
         // Create dialog configuration using hybrid mode to support both incoming and outgoing calls
+        // IMPORTANT: Disable auto_register_response so CallCenterEngine can handle REGISTER properly
         let dialog_config = DialogManagerConfig::hybrid(socket_addr)
             .with_from_uri(from_uri)
+            // Don't auto-respond to REGISTER - let application handle it
+            // .with_auto_register() // DISABLED - application will handle REGISTER
             .build();
         
         Ok(dialog_config)

@@ -876,7 +876,7 @@ impl SessionDialogCoordinator {
     }
     
     /// Send a simple response
-    async fn send_response(
+    pub async fn send_response(
         &self,
         transaction_id: &rvoip_dialog_core::TransactionKey,
         status_code: u16,

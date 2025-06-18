@@ -102,26 +102,45 @@ impl CallCenterEngine {
         
         tracing::info!("REGISTER processed: {:?} for {}", response.status, aor);
         
-        // TODO: Send appropriate SIP response back through session-core
-        // For now, session-core will auto-respond if we don't send anything
-        // 
-        // In a complete implementation, we would:
-        // 1. Build a proper SIP response with Contact headers
-        // 2. Send it through dialog-core's transaction API
-        // 3. The transaction_id parameter would be used to identify the transaction
-        //
-        // Example of what we'd do:
-        // let response = match response.status {
-        //     RegistrationStatus::Created => {
-        //         ResponseBuilder::new(StatusCode::Ok)
-        //             .contact(&contact_uri, Some(expires))
-        //             .build()
-        //     }
-        //     RegistrationStatus::Removed => {
-        //         ResponseBuilder::new(StatusCode::Ok).build()
-        //     }
-        // };
-        // dialog_api.send_response(&transaction_id.parse()?, response).await?;
+        // Send proper SIP response through session-core
+        let session_coord = self.session_coordinator.as_ref()
+            .ok_or_else(|| CallCenterError::internal(
+                "Session coordinator not available"
+            ))?;
+        
+        let (status_code, reason) = match response.status {
+            crate::agent::RegistrationStatus::Created => {
+                tracing::info!("Sending 200 OK for successful registration");
+                (200, Some("Registration successful"))
+            }
+            crate::agent::RegistrationStatus::Refreshed => {
+                tracing::info!("Sending 200 OK for registration refresh");
+                (200, Some("Registration refreshed"))
+            }
+            crate::agent::RegistrationStatus::Removed => {
+                tracing::info!("Sending 200 OK for de-registration");
+                (200, Some("De-registration successful"))
+            }
+        };
+        
+        // Build headers (in future, add Contact headers with actual registration details)
+        let expires_str = expires.to_string();
+        let headers = vec![
+            ("Expires", expires_str.as_str()),
+            // TODO: Add Contact headers with registered endpoints
+        ];
+        
+        session_coord.send_sip_response(
+            transaction_id,
+            status_code,
+            reason,
+            Some(headers),
+        ).await
+        .map_err(|e| CallCenterError::internal(
+            &format!("Failed to send REGISTER response: {}", e)
+        ))?;
+        
+        tracing::info!("REGISTER response sent: {} {}", status_code, reason.unwrap_or(""));
         
         Ok(())
     }
