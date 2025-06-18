@@ -67,12 +67,13 @@ impl CallCenterEngine {
     /// This is called when dialog-core receives a REGISTER and forwards it to us
     pub async fn handle_register_request(
         &self,
+        transaction_id: &str,
         from_uri: String,
         contact_uri: String,
         expires: u32,
     ) -> Result<(), CallCenterError> {
-        tracing::info!("Processing REGISTER: from={}, contact={}, expires={}", 
-                      from_uri, contact_uri, expires);
+        tracing::info!("Processing REGISTER: transaction={}, from={}, contact={}, expires={}", 
+                      transaction_id, from_uri, contact_uri, expires);
         
         // Parse the AOR (Address of Record) from the from_uri
         let aor = from_uri; // In practice, might need to normalize this
@@ -103,6 +104,24 @@ impl CallCenterEngine {
         
         // TODO: Send appropriate SIP response back through session-core
         // For now, session-core will auto-respond if we don't send anything
+        // 
+        // In a complete implementation, we would:
+        // 1. Build a proper SIP response with Contact headers
+        // 2. Send it through dialog-core's transaction API
+        // 3. The transaction_id parameter would be used to identify the transaction
+        //
+        // Example of what we'd do:
+        // let response = match response.status {
+        //     RegistrationStatus::Created => {
+        //         ResponseBuilder::new(StatusCode::Ok)
+        //             .contact(&contact_uri, Some(expires))
+        //             .build()
+        //     }
+        //     RegistrationStatus::Removed => {
+        //         ResponseBuilder::new(StatusCode::Ok).build()
+        //     }
+        // };
+        // dialog_api.send_response(&transaction_id.parse()?, response).await?;
         
         Ok(())
     }

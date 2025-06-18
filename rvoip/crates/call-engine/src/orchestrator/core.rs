@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, RwLock, Mutex};
 use tracing::info;
 
 use rvoip_session_core::{SessionCoordinator, SessionManagerBuilder, SessionId, BridgeEvent};
+use rvoip_session_core::prelude::SessionEvent;
 
 use crate::error::{CallCenterError, Result as CallCenterResult};
 use crate::config::CallCenterConfig;
@@ -163,6 +164,43 @@ impl CallCenterEngine {
     /// Get database handle
     pub fn database(&self) -> &CallCenterDatabase {
         &self.database
+    }
+    
+    /// Start monitoring session events (including REGISTER requests)
+    pub async fn start_event_monitoring(self: Arc<Self>) -> CallCenterResult<()> {
+        info!("Starting session event monitoring for REGISTER and other events");
+        
+        let session_manager = self.session_manager();
+        
+        // Subscribe to session events
+        let mut event_subscriber = session_manager.event_processor.subscribe().await
+            .map_err(|e| CallCenterError::orchestration(&format!("Failed to subscribe to events: {}", e)))?;
+        
+        // Spawn event processing task
+        let engine = self.clone();
+        tokio::spawn(async move {
+            while let Ok(event) = event_subscriber.receive().await {
+                if let Err(e) = engine.handle_session_event(event).await {
+                    tracing::error!("Error handling session event: {}", e);
+                }
+            }
+        });
+        
+        Ok(())
+    }
+    
+    /// Handle session events
+    async fn handle_session_event(&self, event: SessionEvent) -> CallCenterResult<()> {
+        match event {
+            SessionEvent::RegistrationRequest { transaction_id, from_uri, contact_uri, expires } => {
+                info!("Received REGISTER request: {} -> {} (expires: {})", from_uri, contact_uri, expires);
+                self.handle_register_request(&transaction_id, from_uri, contact_uri, expires).await?;
+            }
+            _ => {
+                // Other events are handled by existing mechanisms
+            }
+        }
+        Ok(())
     }
 } 
 

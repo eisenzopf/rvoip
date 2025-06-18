@@ -30,10 +30,14 @@ async fn main() -> Result<()> {
     // Step 3: Create CallCenterEngine with proper CallHandler integration
     println!("🎯 Creating CallCenterEngine with CallHandler integration...");
     let call_center = CallCenterEngine::new(config, database).await?;
-    println!("✅ CallCenterEngine created with session-core integration!\n");
+    println!("✅ CallCenterEngine created with session-core integration!");
+    
+    // Start monitoring session events (including REGISTER requests)
+    call_center.clone().start_event_monitoring().await?;
+    println!("✅ Started monitoring session events for REGISTER requests");
 
     // Step 4: Register some agents
-    println!("👥 Registering agents...");
+    println!("\n👥 Registering agents...");
     
     let agents = vec![
         Agent {

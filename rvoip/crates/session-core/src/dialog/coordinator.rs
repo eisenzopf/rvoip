@@ -696,14 +696,22 @@ impl SessionDialogCoordinator {
     /// Handle registration request coordination event
     async fn handle_registration_request(
         &self,
-        _transaction_id: rvoip_dialog_core::TransactionKey,
+        transaction_id: rvoip_dialog_core::TransactionKey,
         from_uri: String,
         contact_uri: String,
         expires: u32,
     ) -> DialogResult<()> {
         tracing::info!("Registration request: {} -> {} (expires: {})", from_uri, contact_uri, expires);
-        // Handle registration - for now just log it
-        // In a real implementation, this would update a registration database
+        
+        // Forward registration request to application via SessionEvent
+        self.send_session_event(SessionEvent::RegistrationRequest {
+            transaction_id: transaction_id.to_string(),
+            from_uri,
+            contact_uri,
+            expires,
+        }).await?;
+        
+        // The application (CallCenterEngine) will process this and send the response
         Ok(())
     }
     

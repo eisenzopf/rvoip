@@ -205,6 +205,10 @@ impl SessionCoordinator {
                 self.handle_sdp_event(session_id, event_type, sdp).await?;
             }
             
+            SessionEvent::RegistrationRequest { transaction_id, from_uri, contact_uri, expires } => {
+                self.handle_registration_request(transaction_id, from_uri, contact_uri, expires).await?;
+            }
+            
             _ => {
                 tracing::debug!("Unhandled event type");
             }
@@ -434,6 +438,26 @@ impl SessionCoordinator {
     async fn stop_media_session(&self, session_id: &SessionId) -> Result<()> {
         self.media_coordinator.on_session_terminated(session_id).await
             .map_err(|e| SessionError::internal(&format!("Failed to stop media: {}", e)))?;
+        Ok(())
+    }
+
+    /// Handle registration request
+    async fn handle_registration_request(
+        &self,
+        transaction_id: String,
+        from_uri: String,
+        contact_uri: String,
+        expires: u32,
+    ) -> Result<()> {
+        tracing::info!("REGISTER request forwarded to application: {} -> {} (expires: {})", from_uri, contact_uri, expires);
+        
+        // Forward to application handler if available
+        // In a complete implementation, the CallCenterEngine would subscribe to these events
+        // and process them with its SipRegistrar
+        
+        // For now, we just log it - the application should subscribe to SessionEvent::RegistrationRequest
+        // and handle it appropriately by sending a response back through dialog-core
+        
         Ok(())
     }
 

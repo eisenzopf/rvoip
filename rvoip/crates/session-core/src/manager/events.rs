@@ -75,6 +75,14 @@ pub enum SessionEvent {
         error: String,
     },
     
+    /// SIP REGISTER request received
+    RegistrationRequest {
+        transaction_id: String,
+        from_uri: String,
+        contact_uri: String,
+        expires: u32,
+    },
+    
     // ========== RTP Processing Events ==========
     
     /// RTP packet processed with zero-copy optimization

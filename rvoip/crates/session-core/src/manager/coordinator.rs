@@ -145,6 +145,12 @@ impl SessionCoordinator {
             SessionEvent::RtpBufferPoolUpdate { stats } => {
                 self.handle_rtp_buffer_pool_update(stats).await?;
             }
+            
+            SessionEvent::RegistrationRequest { .. } => {
+                // Registration requests are handled by the main coordinator
+                // and forwarded to the application
+                tracing::debug!("Registration request received - handled by main coordinator");
+            }
         }
         
         Ok(())
