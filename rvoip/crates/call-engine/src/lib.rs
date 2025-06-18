@@ -152,17 +152,18 @@ pub mod prelude {
         routing_store::{RoutingPolicy, RoutingPolicyType, RoutingStore},
     };
     
-    // **NEW**: Session-core integration types - all from API
-    pub use rvoip_session_core::api::{
+    // Session-core integration types
+    pub use rvoip_session_core::{
         // Basic session types
-        SessionId, Session,
-        // Server management
-        ServerSessionManager, ServerConfig, create_full_server_manager,
+        SessionId, CallSession, CallState,
+        // Session management
+        SessionCoordinator, SessionManagerBuilder,
+        // Call handling
+        CallHandler, IncomingCall, CallDecision,
         // Bridge management  
         BridgeId, BridgeInfo, BridgeEvent,
     };
     pub use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
-    pub use rvoip_transaction_core::TransactionManager;
     
     // Common external types
     pub use chrono::{DateTime, Utc};

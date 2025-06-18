@@ -59,4 +59,16 @@ criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 
 [[bench]]
 name = "call_center_benchmarks"
-harness = false 
+harness = false
+
+[[example]]
+name = "phase0_basic_call_flow"
+path = "examples/phase0_basic_call_flow.rs"
+
+[[example]]
+name = "phase2_call_routing_demo"
+path = "examples/phase2_call_routing_demo.rs"
+
+[[example]]
+name = "call_center_with_database"
+path = "examples/call_center_with_database.rs" 

@@ -7,13 +7,12 @@ use async_trait::async_trait;
 
 use rvoip_sip_core::{Request, Response, StatusCode};
 use rvoip_session_core::{
-    // Core coordinator
+    // Core coordinator and builder
     SessionCoordinator, SessionManagerBuilder,
     // Basic session types from API
-    SessionId, Session,
-    // Server management
-    ServerSessionManager,
-    IncomingCallEvent, CallerInfo, CallDecision,
+    SessionId, CallSession, CallState, 
+    // Call handling
+    CallHandler, IncomingCall, CallDecision,
     // Bridge management
     BridgeId, BridgeInfo, BridgeEvent,
 };
@@ -25,12 +24,53 @@ use crate::database::CallCenterDatabase;
 use crate::agent::{AgentId, Agent, AgentStatus};
 use crate::queue::{QueueManager, QueuedCall, QueueStats};
 
-/// Trait for incoming call notifications
+/// CallHandler implementation for the call center
+#[derive(Clone, Debug)]
+struct CallCenterCallHandler {
+    engine: std::sync::Weak<CallCenterEngine>,
+}
+
 #[async_trait]
-pub trait IncomingCallNotificationTrait: Send + Sync {
-    async fn on_incoming_call(&self, event: IncomingCallEvent) -> CallDecision;
-    async fn on_call_terminated_by_remote(&self, session_id: SessionId, call_id: String);
-    async fn on_call_ended_by_server(&self, session_id: SessionId, call_id: String);
+impl CallHandler for CallCenterCallHandler {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+        debug!("CallCenterCallHandler: Received incoming call {}", call.id);
+        
+        // Try to get a strong reference to the engine
+        if let Some(engine) = self.engine.upgrade() {
+            // Process the incoming call through the call center's routing logic
+            match engine.process_incoming_call(call).await {
+                Ok(decision) => decision,
+                Err(e) => {
+                    error!("Failed to process incoming call: {}", e);
+                    CallDecision::Reject("Call center processing error".to_string())
+                }
+            }
+        } else {
+            warn!("Call center engine has been dropped");
+            CallDecision::Reject("Call center not available".to_string())
+        }
+    }
+    
+    async fn on_call_ended(&self, call: CallSession, reason: &str) {
+        info!("CallCenterCallHandler: Call {} ended: {}", call.id, reason);
+        
+        if let Some(engine) = self.engine.upgrade() {
+            if let Err(e) = engine.handle_call_termination(call.id).await {
+                error!("Failed to handle call termination: {}", e);
+            }
+        }
+    }
+    
+    async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
+        info!("CallCenterCallHandler: Call {} established", call.id);
+        debug!("Local SDP available: {}, Remote SDP available: {}", 
+               local_sdp.is_some(), remote_sdp.is_some());
+        
+        // Update call state to active/bridged
+        if let Some(engine) = self.engine.upgrade() {
+            engine.update_call_established(call.id).await;
+        }
+    }
 }
 
 /// **REAL SESSION-CORE INTEGRATION**: Call center orchestration engine
@@ -44,22 +84,22 @@ pub struct CallCenterEngine {
     /// Database layer for persistence
     database: CallCenterDatabase,
     
-    /// **REAL**: Session-core coordinator integration
-    server_manager: Arc<SessionCoordinator>,
+    /// Session-core coordinator integration
+    session_coordinator: Option<Arc<SessionCoordinator>>,
     
-    /// **PHASE 2**: Queue manager for call queuing and routing
+    /// Queue manager for call queuing and routing
     queue_manager: Arc<RwLock<QueueManager>>,
     
-    /// **REAL**: Bridge event receiver for real-time notifications
+    /// Bridge event receiver for real-time notifications
     bridge_events: Option<mpsc::UnboundedReceiver<BridgeEvent>>,
     
-    /// **ENHANCED**: Call tracking and routing with detailed info
+    /// Call tracking and routing with detailed info
     active_calls: Arc<RwLock<HashMap<SessionId, CallInfo>>>,
     
-    /// **ENHANCED**: Agent availability and skill tracking
+    /// Agent availability and skill tracking
     available_agents: Arc<RwLock<HashMap<AgentId, AgentInfo>>>,
     
-    /// **PHASE 2**: Call routing statistics and metrics
+    /// Call routing statistics and metrics
     routing_stats: Arc<RwLock<RoutingStats>>,
 }
 
@@ -68,7 +108,8 @@ pub struct CallCenterEngine {
 pub struct CallInfo {
     pub session_id: SessionId,
     pub caller_id: String,
-    pub caller_info: CallerInfo,
+    pub from: String,
+    pub to: String,
     pub agent_id: Option<AgentId>,
     pub queue_id: Option<String>,
     pub bridge_id: Option<BridgeId>,
@@ -149,104 +190,19 @@ pub struct OrchestratorStats {
     pub routing_stats: RoutingStats,
 }
 
-/// **REAL**: Incoming call notification handler for session-core integration
-#[derive(Clone)]
-struct CallCenterNotificationHandler {
-    call_center: Arc<RwLock<Option<Arc<CallCenterEngine>>>>,
-}
-
-impl CallCenterNotificationHandler {
-    fn new() -> Self {
-        Self {
-            call_center: Arc::new(RwLock::new(None)),
-        }
-    }
-    
-    async fn set_call_center(&self, engine: Arc<CallCenterEngine>) {
-        let mut lock = self.call_center.write().await;
-        *lock = Some(engine);
-    }
-}
-
-#[async_trait]
-impl IncomingCallNotificationTrait for CallCenterNotificationHandler {
-    /// **REAL**: Handle incoming call notifications from session-core
-    async fn on_incoming_call(&self, event: IncomingCallEvent) -> CallDecision {
-        info!("📞 Call center received incoming call: {} from {}", 
-              event.session_id, event.caller_info.from);
-        
-        // Get the call center engine
-        let engine = {
-            let lock = self.call_center.read().await;
-            lock.clone()
-        };
-        
-        if let Some(engine) = engine {
-            // Process the incoming call through call center logic
-            match engine.process_incoming_call_event(event).await {
-                Ok(decision) => decision,
-                Err(e) => {
-                    error!("Failed to process incoming call: {}", e);
-                    CallDecision::Reject("Call center processing error".to_string())
-                }
-            }
-        } else {
-            warn!("Call center engine not initialized, deferring call");
-            CallDecision::Defer
-        }
-    }
-    
-    /// **REAL**: Handle call termination by remote party
-    async fn on_call_terminated_by_remote(&self, session_id: SessionId, call_id: String) {
-        info!("📞 Call terminated by remote: {} (call-id: {})", session_id, call_id);
-        
-        if let Some(engine) = self.call_center.read().await.as_ref() {
-            if let Err(e) = engine.handle_call_termination(session_id).await {
-                error!("Failed to handle call termination: {}", e);
-            }
-        }
-    }
-    
-    /// **REAL**: Handle call termination by server
-    async fn on_call_ended_by_server(&self, session_id: SessionId, call_id: String) {
-        info!("📞 Call ended by server: {} (call-id: {})", session_id, call_id);
-        
-        if let Some(engine) = self.call_center.read().await.as_ref() {
-            if let Err(e) = engine.handle_call_termination(session_id).await {
-                error!("Failed to handle call termination: {}", e);
-            }
-        }
-    }
-}
-
 impl CallCenterEngine {
-    /// **REAL INTEGRATION**: Create call center engine with session-core
+    /// Create call center engine with session-core integration
     pub async fn new(
         config: CallCenterConfig,
         database: CallCenterDatabase,
     ) -> CallCenterResult<Arc<Self>> {
-        info!("🚀 Creating CallCenterEngine with REAL session-core API integration");
+        info!("🚀 Creating CallCenterEngine with session-core CallHandler integration");
         
-        // **REAL**: Create session-core using the high-level API
-        let session_coordinator = rvoip_session_core::SessionManagerBuilder::new()
-            .with_sip_port(config.general.local_signaling_addr.port())
-            .with_media_ports(
-                config.general.local_media_addr.port(),
-                config.general.local_media_addr.port() + 1000
-            )
-            .build()
-            .await
-            .map_err(|e| CallCenterError::orchestration(&format!("Failed to create session coordinator: {}", e)))?;
-        
-        // The SessionCoordinator provides all the functionality we need
-        let server_manager = session_coordinator;
-        
-        info!("✅ ServerSessionManager created successfully");
-        
-        let engine = Arc::new(Self {
-            config,
-            database,
-            server_manager,
+        // First, create a placeholder engine that will be updated
+        let placeholder_engine = Arc::new(Self {
+            config: config.clone(),
+            database: database.clone(),
+            session_coordinator: None,
             queue_manager: Arc::new(RwLock::new(QueueManager::new())),
             bridge_events: None,
             active_calls: Arc::new(RwLock::new(HashMap::new())),
@@ -260,32 +216,66 @@ impl CallCenterEngine {
             })),
         });
         
-        // TODO: Set up incoming call notification handler when session-core API supports it
-        // For now, call-engine will need to poll or use a different mechanism
+        // Create CallHandler with weak reference to placeholder
+        let handler = Arc::new(CallCenterCallHandler {
+            engine: Arc::downgrade(&placeholder_engine),
+        });
         
-        // let notification_handler = CallCenterNotificationHandler::new();
-        // notification_handler.set_call_center(engine.clone()).await;
+        // Create session coordinator with our CallHandler
+        let session_coordinator = SessionManagerBuilder::new()
+            .with_sip_port(config.general.local_signaling_addr.port())
+            .with_media_ports(
+                config.general.local_media_addr.port(),
+                config.general.local_media_addr.port() + 1000
+            )
+            .with_handler(handler)
+            .build()
+            .await
+            .map_err(|e| CallCenterError::orchestration(&format!("Failed to create session coordinator: {}", e)))?;
         
-        info!("✅ Call center engine initialized with real session-core integration");
+        info!("✅ SessionCoordinator created with CallCenterCallHandler");
+        
+        // Drop the placeholder and create the real engine with coordinator
+        drop(placeholder_engine);
+        
+        let engine = Arc::new(Self {
+            config,
+            database,
+            session_coordinator: Some(session_coordinator),
+            queue_manager: Arc::new(RwLock::new(QueueManager::new())),
+            bridge_events: None,
+            active_calls: Arc::new(RwLock::new(HashMap::new())),
+            available_agents: Arc::new(RwLock::new(HashMap::new())),
+            routing_stats: Arc::new(RwLock::new(RoutingStats {
+                calls_routed_directly: 0,
+                calls_queued: 0,
+                calls_rejected: 0,
+                average_routing_time_ms: 0,
+                skill_match_success_rate: 0.0,
+            })),
+        });
+        
+        info!("✅ Call center engine initialized with session-core integration");
         
         Ok(engine)
     }
     
-    /// **PHASE 2**: Process incoming call event with sophisticated routing
-    async fn process_incoming_call_event(&self, event: IncomingCallEvent) -> CallCenterResult<CallDecision> {
-        let session_id = event.session_id.clone();
+    /// Process incoming call with sophisticated routing
+    async fn process_incoming_call(&self, call: IncomingCall) -> CallCenterResult<CallDecision> {
+        let session_id = call.id.clone();
         let routing_start = std::time::Instant::now();
         
-        info!("📞 Processing incoming call: {} from {} with PHASE 2 routing", session_id, event.caller_info.from);
+        info!("📞 Processing incoming call: {} from {}", session_id, call.from);
         
-        // **PHASE 2**: Analyze customer information and determine routing requirements
-        let (customer_type, priority, required_skills) = self.analyze_customer_info(&event.caller_info).await;
+        // Analyze customer information and determine routing requirements
+        let (customer_type, priority, required_skills) = self.analyze_customer_info(&call).await;
         
         // Create enhanced call info tracking
         let call_info = CallInfo {
             session_id: session_id.clone(),
-            caller_id: event.caller_info.from.clone(),
-            caller_info: event.caller_info.clone(),
+            caller_id: call.from.clone(),
+            from: call.from.clone(),
+            to: call.to.clone(),
             agent_id: None,
             queue_id: None,
             bridge_id: None,
@@ -304,7 +294,7 @@ impl CallCenterEngine {
             active_calls.insert(session_id.clone(), call_info);
         }
         
-        // **PHASE 2**: Intelligent routing decision based on multiple factors
+        // Make intelligent routing decision based on multiple factors
         let routing_decision = self.make_routing_decision(&session_id, &customer_type, priority, &required_skills).await?;
         
         info!("🎯 Routing decision for call {}: {:?}", session_id, routing_decision);
@@ -324,11 +314,14 @@ impl CallCenterEngine {
                 }
                 
                 // Schedule immediate agent assignment
-                let engine_clone = Arc::new(self.clone());
+                let engine = self.session_coordinator.as_ref()
+                    .ok_or_else(|| CallCenterError::orchestration("Session coordinator not initialized"))?
+                    .clone();
                 let session_id_clone = session_id.clone();
                 let agent_id_clone = agent_id.clone();
+                let self_clone = self.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = engine_clone.assign_specific_agent_to_call(session_id_clone, agent_id_clone).await {
+                    if let Err(e) = self_clone.assign_specific_agent_to_call(session_id_clone, agent_id_clone).await {
                         error!("Failed to assign specific agent to call: {}", e);
                     }
                 });
@@ -348,7 +341,7 @@ impl CallCenterEngine {
                 // Add call to queue
                 let queued_call = QueuedCall {
                     session_id: session_id.clone(),
-                    caller_id: event.caller_info.from.clone(),
+                    caller_id: call.from.clone(),
                     priority,
                     queued_at: chrono::Utc::now(),
                     estimated_wait_time: None,
@@ -432,12 +425,12 @@ impl CallCenterEngine {
         Ok(call_decision)
     }
     
-    /// **PHASE 2**: Analyze customer information to determine routing requirements
-    async fn analyze_customer_info(&self, caller_info: &CallerInfo) -> (CustomerType, u8, Vec<String>) {
-        // **FUTURE**: This would integrate with CRM systems, customer databases, etc.
+    /// Analyze customer information to determine routing requirements
+    async fn analyze_customer_info(&self, call: &IncomingCall) -> (CustomerType, u8, Vec<String>) {
+        // This would integrate with CRM systems, customer databases, etc.
         // For now, use simple heuristics based on caller information
         
-        let caller_number = &caller_info.from;
+        let caller_number = &call.from;
         
         // Determine customer type (would be from database lookup in production)
         let customer_type = if caller_number.contains("+1800") || caller_number.contains("vip") {
@@ -661,7 +654,7 @@ impl CallCenterEngine {
         
         if let Some(agent_info) = agent_info {
             // **REAL**: Bridge customer and agent using session-core API
-            match self.server_manager.bridge_sessions(&session_id, &agent_info.session_id).await {
+            match self.session_coordinator.as_ref().unwrap().bridge_sessions(&session_id, &agent_info.session_id).await {
                 Ok(bridge_id) => {
                     info!("✅ Successfully bridged customer {} with agent {} (bridge: {})", 
                           session_id, agent_id, bridge_id);
@@ -701,6 +694,16 @@ impl CallCenterEngine {
         }
         
         Ok(())
+    }
+    
+    /// Update call state when call is established
+    async fn update_call_established(&self, session_id: SessionId) {
+        let mut active_calls = self.active_calls.write().await;
+        if let Some(call_info) = active_calls.get_mut(&session_id) {
+            call_info.status = CallStatus::Bridged;
+            call_info.answered_at = Some(chrono::Utc::now());
+            info!("📞 Call {} marked as established/bridged", session_id);
+        }
     }
     
     /// **ENHANCED**: Handle call termination cleanup with agent status management
@@ -748,7 +751,7 @@ impl CallCenterEngine {
             
             // If call had a bridge, clean it up
             if let Some(bridge_id) = call_info.bridge_id {
-                if let Err(e) = self.server_manager.destroy_bridge(&bridge_id).await {
+                if let Err(e) = self.session_coordinator.as_ref().unwrap().destroy_bridge(&bridge_id).await {
                     warn!("Failed to destroy bridge {}: {}", bridge_id, e);
                 }
             }
@@ -805,7 +808,7 @@ impl CallCenterEngine {
               agent.id, agent.sip_uri, agent.skills);
         
         // **REAL**: Create outgoing session for agent registration
-        let session_id = self.server_manager
+        let session_id = self.session_coordinator.as_ref().unwrap()
             .create_outgoing_session()
             .await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to create agent session: {}", e)))?;
@@ -888,14 +891,14 @@ impl CallCenterEngine {
         info!("🎤 Creating conference with {} participants", session_ids.len());
         
         // **REAL**: Create bridge using session-core API
-        let bridge_id = self.server_manager
+        let bridge_id = self.session_coordinator.as_ref().unwrap()
             .create_bridge()
             .await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to create conference bridge: {}", e)))?;
         
         // **REAL**: Add all sessions to the bridge
         for session_id in session_ids {
-            self.server_manager
+            self.session_coordinator.as_ref().unwrap()
                 .add_session_to_bridge(&bridge_id, session_id)
                 .await
                 .map_err(|e| CallCenterError::orchestration(&format!("Failed to add session {} to conference: {}", session_id, e)))?;
@@ -921,15 +924,15 @@ impl CallCenterEngine {
             .session_id.clone();
         
         // Get current bridge if any
-        if let Ok(Some(current_bridge)) = self.server_manager.get_session_bridge(&customer_session).await {
+        if let Ok(Some(current_bridge)) = self.session_coordinator.as_ref().unwrap().get_session_bridge(&customer_session).await {
             // **REAL**: Remove customer from current bridge
-            if let Err(e) = self.server_manager.remove_session_from_bridge(&current_bridge, &customer_session).await {
+            if let Err(e) = self.session_coordinator.as_ref().unwrap().remove_session_from_bridge(&current_bridge, &customer_session).await {
                 warn!("Failed to remove customer from current bridge: {}", e);
             }
         }
         
         // **REAL**: Create new bridge with customer and new agent
-        let new_bridge = self.server_manager
+        let new_bridge = self.session_coordinator.as_ref().unwrap()
             .bridge_sessions(&customer_session, &to_agent_session)
             .await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to create transfer bridge: {}", e)))?;
@@ -940,7 +943,7 @@ impl CallCenterEngine {
     
     /// **NEW API**: Get real-time bridge information for monitoring
     pub async fn get_bridge_info(&self, bridge_id: &BridgeId) -> CallCenterResult<BridgeInfo> {
-        self.server_manager
+        self.session_coordinator.as_ref().unwrap()
             .get_bridge_info(bridge_id)
             .await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to get bridge info: {}", e)))?
@@ -949,7 +952,7 @@ impl CallCenterEngine {
     
     /// **NEW API**: List all active bridges for dashboard
     pub async fn list_active_bridges(&self) -> Vec<BridgeInfo> {
-        self.server_manager.list_bridges().await
+        self.session_coordinator.as_ref().unwrap().list_bridges().await
     }
     
     /// **NEW API**: Subscribe to bridge events for real-time monitoring
@@ -957,7 +960,7 @@ impl CallCenterEngine {
         info!("👁️ Starting bridge event monitoring");
         
         // **REAL**: Subscribe to session-core bridge events
-        let event_receiver = self.server_manager.subscribe_to_bridge_events().await;
+        let event_receiver = self.session_coordinator.as_ref().unwrap().subscribe_to_bridge_events().await;
         self.bridge_events = Some(event_receiver);
         
         // Process events in background task
@@ -1022,7 +1025,7 @@ impl CallCenterEngine {
     
     /// Get the underlying session coordinator for advanced operations
     pub fn session_manager(&self) -> &Arc<SessionCoordinator> {
-        &self.server_manager
+        self.session_coordinator.as_ref().unwrap()
     }
     
     /// Get call center configuration
@@ -1042,7 +1045,7 @@ impl Clone for CallCenterEngine {
         Self {
             config: self.config.clone(),
             database: self.database.clone(),
-            server_manager: self.server_manager.clone(),
+            session_coordinator: self.session_coordinator.clone(),
             queue_manager: self.queue_manager.clone(),
             bridge_events: None, // Don't clone the receiver
             active_calls: self.active_calls.clone(),
