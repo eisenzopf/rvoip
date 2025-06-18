@@ -884,6 +884,7 @@ impl UnifiedDialogApi {
     ///
     /// ```rust,no_run
     /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::builder::expires::ExpiresExt;
     /// use std::time::Duration;
     ///
     /// # async fn example(api: rvoip_dialog_core::api::unified::UnifiedDialogApi) -> Result<(), Box<dyn std::error::Error>> {
