@@ -68,6 +68,7 @@ async fn test_session_manager_config_validation() {
             media_port_end: 20000,
             enable_stun: false,
             stun_server: None,
+            ..Default::default()
         };
         
         assert!(helper.validate_config(&valid_config).is_ok());
@@ -80,6 +81,7 @@ async fn test_session_manager_config_validation() {
             media_port_end: 20000,
             enable_stun: false,
             stun_server: None,
+            ..Default::default()
         };
         
         assert!(helper.validate_config(&invalid_config1).is_err());
@@ -91,6 +93,7 @@ async fn test_session_manager_config_validation() {
             media_port_end: 20000,
             enable_stun: false,
             stun_server: None,
+            ..Default::default()
         };
         
         assert!(helper.validate_config(&invalid_config2).is_err());
@@ -102,6 +105,7 @@ async fn test_session_manager_config_validation() {
             media_port_end: 10000,
             enable_stun: false,
             stun_server: None,
+            ..Default::default()
         };
         
         assert!(helper.validate_config(&invalid_config3).is_err());

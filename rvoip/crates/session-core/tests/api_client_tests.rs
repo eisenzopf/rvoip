@@ -22,9 +22,9 @@ async fn test_sip_client_not_enabled_by_default() {
 
     // Try to use SipClient methods - should fail
     let result = coordinator.register(
-        "sip:registrar.example.com",
-        "sip:alice@example.com",
-        "sip:alice@192.168.1.100:5060",
+        "sip:127.0.0.1:5060",  // Use localhost instead of example.com
+        "sip:alice@127.0.0.1",
+        "sip:alice@127.0.0.1:5060",
         3600,
     ).await;
 
@@ -48,20 +48,25 @@ async fn test_sip_client_enabled() {
         .await
         .unwrap();
 
-    // Should be able to call register (even if it returns mock data for now)
+    // Now when we send a REGISTER to localhost it will fail to connect but won't fail DNS resolution
     let result = coordinator.register(
-        "sip:registrar.example.com",
-        "sip:alice@example.com",
-        "sip:alice@192.168.1.100:5060",
+        "sip:127.0.0.1:5060",  // Use localhost
+        "sip:alice@127.0.0.1",
+        "sip:alice@127.0.0.1:15061",
         3600,
     ).await;
 
-    assert!(result.is_ok());
-    let registration = result.unwrap();
-    assert_eq!(registration.expires, 3600);
-    assert_eq!(registration.contact_uri, "sip:alice@192.168.1.100:5060");
-    assert_eq!(registration.registrar_uri, "sip:registrar.example.com");
-    assert!(!registration.transaction_id.is_empty());
+    // Since there's no actual SIP server running, we expect a connection/protocol error
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        SessionError::Other(_) => {
+            // Expected - connection failed or timeout
+        }
+        SessionError::ProtocolError { .. } => {
+            // Also acceptable - server responded with error
+        }
+        other => panic!("Unexpected error type: {:?}", other),
+    }
 }
 
 #[tokio::test]
@@ -75,15 +80,23 @@ async fn test_register_with_zero_expires() {
         .unwrap();
 
     let result = coordinator.register(
-        "sip:registrar.example.com",
-        "sip:alice@example.com",
-        "sip:alice@192.168.1.100:5060",
+        "sip:127.0.0.1:5060",  // Use localhost
+        "sip:alice@127.0.0.1",
+        "sip:alice@127.0.0.1:15062",
         0, // De-register
     ).await;
 
-    assert!(result.is_ok());
-    let registration = result.unwrap();
-    assert_eq!(registration.expires, 0);
+    // Since there's no actual SIP server running, we expect a connection/protocol error
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        SessionError::Other(_) => {
+            // Expected - connection failed or timeout
+        }
+        SessionError::ProtocolError { .. } => {
+            // Also acceptable
+        }
+        other => panic!("Unexpected error type: {:?}", other),
+    }
 }
 
 #[tokio::test]
@@ -121,14 +134,18 @@ async fn test_send_options_not_implemented() {
         .await
         .unwrap();
 
-    let result = coordinator.send_options("sip:target@example.com").await;
+    let result = coordinator.send_options("sip:127.0.0.1:5060").await;
 
+    // Since there's no actual SIP server running, we expect a connection/protocol error
     assert!(result.is_err());
     match result.unwrap_err() {
-        SessionError::NotImplemented { feature } => {
-            assert_eq!(feature, "OPTIONS requests");
+        SessionError::Other(_) => {
+            // Expected - connection failed or timeout
         }
-        _ => panic!("Expected NotImplemented error"),
+        SessionError::NetworkError(_) => {
+            // Also acceptable - network error
+        }
+        other => panic!("Unexpected error type: {:?}", other),
     }
 }
 
@@ -142,17 +159,21 @@ async fn test_send_message_not_implemented() {
         .unwrap();
 
     let result = coordinator.send_message(
-        "sip:bob@example.com",
+        "sip:bob@127.0.0.1:5060",
         "Hello!",
         Some("text/plain"),
     ).await;
 
+    // Since there's no actual SIP server running, we expect a connection/protocol error
     assert!(result.is_err());
     match result.unwrap_err() {
-        SessionError::NotImplemented { feature } => {
-            assert_eq!(feature, "MESSAGE requests");
+        SessionError::Other(_) => {
+            // Expected - connection failed or timeout
         }
-        _ => panic!("Expected NotImplemented error"),
+        SessionError::NetworkError(_) => {
+            // Also acceptable - network error
+        }
+        other => panic!("Unexpected error type: {:?}", other),
     }
 }
 
@@ -191,7 +212,7 @@ async fn test_send_raw_request_not_implemented() {
 
     // Create a dummy request
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    let request = SimpleRequestBuilder::options("sip:test@example.com")
+    let request = SimpleRequestBuilder::options("sip:test@127.0.0.1:5060")
         .unwrap()
         .build();
 
@@ -200,12 +221,16 @@ async fn test_send_raw_request_not_implemented() {
         Duration::from_secs(5),
     ).await;
 
+    // Since there's no actual SIP server running, we expect a connection/protocol error
     assert!(result.is_err());
     match result.unwrap_err() {
-        SessionError::NotImplemented { feature } => {
-            assert_eq!(feature, "Raw SIP requests");
+        SessionError::Other(_) => {
+            // Expected - connection failed or timeout
         }
-        _ => panic!("Expected NotImplemented error"),
+        SessionError::NetworkError(_) => {
+            // Also acceptable - network error
+        }
+        other => panic!("Unexpected error type: {:?}", other),
     }
 }
 
@@ -285,25 +310,39 @@ async fn test_multiple_registrations() {
         .await
         .unwrap();
 
-    // Register multiple endpoints
+    // Register multiple endpoints using localhost addresses
     let reg1 = coordinator.register(
-        "sip:registrar1.example.com",
-        "sip:alice@example.com",
-        "sip:alice@192.168.1.100:5060",
+        "sip:127.0.0.1:5061",
+        "sip:alice@127.0.0.1",
+        "sip:alice@127.0.0.1:15068",
         3600,
-    ).await.unwrap();
+    ).await;
 
     let reg2 = coordinator.register(
-        "sip:registrar2.example.com",
-        "sip:bob@example.com",
-        "sip:bob@192.168.1.101:5060",
+        "sip:127.0.0.1:5062",
+        "sip:bob@127.0.0.1",
+        "sip:bob@127.0.0.1:15068",
         7200,
-    ).await.unwrap();
+    ).await;
 
-    // Each registration should have unique transaction IDs
-    assert_ne!(reg1.transaction_id, reg2.transaction_id);
-    assert_eq!(reg1.expires, 3600);
-    assert_eq!(reg2.expires, 7200);
+    // Both should fail with connection errors since no SIP servers are running
+    assert!(reg1.is_err());
+    assert!(reg2.is_err());
+    
+    // Verify we get expected error types
+    match reg1.unwrap_err() {
+        SessionError::Other(_) | SessionError::NetworkError(_) => {
+            // Expected
+        }
+        other => panic!("Unexpected error type for reg1: {:?}", other),
+    }
+    
+    match reg2.unwrap_err() {
+        SessionError::Other(_) | SessionError::NetworkError(_) => {
+            // Expected
+        }
+        other => panic!("Unexpected error type for reg2: {:?}", other),
+    }
 }
 
 #[tokio::test]
@@ -315,16 +354,25 @@ async fn test_register_with_ipv6() {
         .await
         .unwrap();
 
-    // Test with IPv6 addresses
+    // Test with IPv6 localhost addresses
     let result = coordinator.register(
-        "sip:[2001:db8::1]:5060",
-        "sip:alice@example.com",
-        "sip:alice@[2001:db8::2]:5060",
+        "sip:[::1]:5060",
+        "sip:alice@[::1]",
+        "sip:alice@[::1]:15069",
         3600,
     ).await;
 
-    // Currently returns mock success, but in future should handle IPv6
-    assert!(result.is_ok());
+    // Since there's no actual SIP server running, we expect a connection/protocol error
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        SessionError::Other(_) => {
+            // Expected - connection failed or timeout
+        }
+        SessionError::NetworkError(_) => {
+            // Also acceptable - network error
+        }
+        other => panic!("Unexpected error type: {:?}", other),
+    }
 }
 
 #[tokio::test]
@@ -342,13 +390,20 @@ async fn test_coordinator_with_sip_client_lifecycle() {
 
     // Use SIP client
     let reg = coordinator.register(
-        "sip:registrar.example.com",
-        "sip:alice@example.com",
-        "sip:alice@192.168.1.100:5060",
+        "sip:127.0.0.1:5060",
+        "sip:alice@127.0.0.1",
+        "sip:alice@127.0.0.1:15070",
         3600,
-    ).await.unwrap();
+    ).await;
 
-    assert!(!reg.transaction_id.is_empty());
+    // Expect connection error since no SIP server is running
+    assert!(reg.is_err());
+    match reg.unwrap_err() {
+        SessionError::Other(_) | SessionError::NetworkError(_) => {
+            // Expected
+        }
+        other => panic!("Unexpected error type: {:?}", other),
+    }
 
     // Stop the coordinator
     SessionControl::stop(&coordinator).await.unwrap();
@@ -372,24 +427,34 @@ mod integration_tests {
 
         // Use SIP client
         let reg = coordinator.register(
-            "sip:registrar.example.com",
-            "sip:alice@example.com",
-            "sip:alice@192.168.1.100:5060",
+            "sip:127.0.0.1:5060",
+            "sip:alice@127.0.0.1",
+            "sip:alice@127.0.0.1:15071",
             3600,
-        ).await.unwrap();
+        ).await;
 
-        // Verify registration was created
-        assert!(!reg.transaction_id.is_empty());
-        assert_eq!(reg.expires, 3600);
+        // Expect connection error since no SIP server is running
+        assert!(reg.is_err());
+        match reg.unwrap_err() {
+            SessionError::Other(_) | SessionError::NetworkError(_) => {
+                // Expected - this verifies SIP client is enabled and attempting to send
+            }
+            other => panic!("Unexpected error type: {:?}", other),
+        }
 
         // Also create a session to verify both features work together
-        let session = SessionControl::create_outgoing_call(
+        // Since we're testing locally, use a different port to avoid conflicts
+        let session_result = SessionControl::create_outgoing_call(
             &coordinator,
-            "sip:alice@example.com",
-            "sip:bob@example.com",
+            "sip:alice@127.0.0.1:15071",
+            "sip:bob@127.0.0.1:15072",
             None,
-        ).await.unwrap();
+        ).await;
 
+        // This should succeed in creating the session
+        assert!(session_result.is_ok());
+        let session = session_result.unwrap();
+        
         // Verify session was created
         assert!(!session.id().to_string().is_empty());
         
