@@ -31,6 +31,7 @@ pub struct ClientCallHandler {
     pub call_mapping: Arc<DashMap<SessionId, CallId>>,
     pub session_mapping: Arc<DashMap<CallId, SessionId>>,
     pub call_info: Arc<DashMap<CallId, CallInfo>>,
+    pub incoming_calls: Arc<DashMap<CallId, IncomingCall>>,
 }
 
 impl std::fmt::Debug for ClientCallHandler {
@@ -40,6 +41,7 @@ impl std::fmt::Debug for ClientCallHandler {
             .field("call_mapping", &self.call_mapping)
             .field("session_mapping", &self.session_mapping)
             .field("call_info", &self.call_info)
+            .field("incoming_calls", &self.incoming_calls)
             .finish()
     }
 }
@@ -49,17 +51,29 @@ impl ClientCallHandler {
         call_mapping: Arc<DashMap<SessionId, CallId>>,
         session_mapping: Arc<DashMap<CallId, SessionId>>,
         call_info: Arc<DashMap<CallId, CallInfo>>,
+        incoming_calls: Arc<DashMap<CallId, IncomingCall>>,
     ) -> Self {
         Self {
             client_event_handler: Arc::new(RwLock::new(None)),
             call_mapping,
             session_mapping,
             call_info,
+            incoming_calls,
         }
     }
     
     pub async fn set_event_handler(&self, handler: Arc<dyn ClientEventHandler>) {
         *self.client_event_handler.write().await = Some(handler);
+    }
+    
+    /// Store an IncomingCall object for later use
+    pub async fn store_incoming_call(&self, call_id: CallId, incoming_call: IncomingCall) {
+        self.incoming_calls.insert(call_id, incoming_call);
+    }
+    
+    /// Retrieve a stored IncomingCall object
+    pub async fn get_incoming_call(&self, call_id: &CallId) -> Option<IncomingCall> {
+        self.incoming_calls.get(call_id).map(|entry| entry.value().clone())
     }
     
     /// Extract display name from SIP URI or headers
@@ -193,6 +207,9 @@ impl CallHandler for ClientCallHandler {
         let call_id = CallId::new_v4();
         self.call_mapping.insert(call.id.clone(), call_id);
         self.session_mapping.insert(call_id, call.id.clone());
+        
+        // Store the IncomingCall for later use in answer/reject
+        self.incoming_calls.insert(call_id, call.clone());
         
         // Enhanced call info extraction
         let caller_display_name = self.extract_display_name(&call.from, &call.headers);

@@ -5,6 +5,11 @@
 
 use chrono::Utc;
 
+// Import session-core APIs
+use rvoip_session_core::api::{
+    SessionControl,
+};
+
 // Import client-core types
 use crate::{
     ClientResult, ClientError,
@@ -47,7 +52,7 @@ impl super::manager::ClientManager {
         }
             
         // Use session-core hold functionality
-        self.session_manager.hold_session(&session_id)
+        SessionControl::hold_session(&self.coordinator, &session_id)
             .await
             .map_err(|e| ClientError::CallSetupFailed { 
                 reason: format!("Failed to hold call: {}", e) 
@@ -85,7 +90,7 @@ impl super::manager::ClientManager {
             .clone();
             
         // Use session-core resume functionality
-        self.session_manager.resume_session(&session_id)
+        SessionControl::resume_session(&self.coordinator, &session_id)
             .await
             .map_err(|e| ClientError::CallSetupFailed { 
                 reason: format!("Failed to resume call: {}", e) 
@@ -177,7 +182,7 @@ impl super::manager::ClientManager {
         }
             
         // Use session-core DTMF functionality
-        self.session_manager.send_dtmf(&session_id, digits)
+        SessionControl::send_dtmf(&self.coordinator, &session_id, digits)
             .await
             .map_err(|e| ClientError::CallSetupFailed { 
                 reason: format!("Failed to send DTMF: {}", e) 
@@ -260,7 +265,7 @@ impl super::manager::ClientManager {
         }
             
         // Use session-core transfer functionality
-        self.session_manager.transfer_session(&session_id, target)
+        SessionControl::transfer_session(&self.coordinator, &session_id, target)
             .await
             .map_err(|e| ClientError::CallSetupFailed { 
                 reason: format!("Failed to transfer call: {}", e) 

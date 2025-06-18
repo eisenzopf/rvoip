@@ -4,14 +4,13 @@ use tokio::sync::{RwLock, Mutex};
 use dashmap::DashMap;
 use uuid::Uuid;
 
-// Import session-core APIs
-use rvoip_session_core::{
-    SessionManager,
-    api::{
-        builder::SessionManagerBuilder,
-        types::SessionId,
-        handlers::CallHandler,
-    },
+// Import session-core APIs - UPDATED to use new API structure
+use rvoip_session_core::api::{
+    SessionCoordinator,
+    SessionManagerBuilder,
+    SessionControl,
+    types::{SessionId, IncomingCall},
+    handlers::CallHandler,
 };
 
 // Import client-core types
@@ -32,13 +31,14 @@ use super::events::ClientCallHandler;
 /// a client-focused API for application integration.
 pub struct ClientManager {
     pub config: ClientConfig,
-    pub session_manager: Arc<SessionManager>,
+    pub coordinator: Arc<SessionCoordinator>,
     pub call_handler: Arc<ClientCallHandler>,
     
     // Call tracking
     pub call_mapping: Arc<DashMap<SessionId, CallId>>,
     pub session_mapping: Arc<DashMap<CallId, SessionId>>,
     pub call_info: Arc<DashMap<CallId, CallInfo>>,
+    pub incoming_calls: Arc<DashMap<CallId, IncomingCall>>,
     
     // Registration tracking (placeholder - session-core doesn't support REGISTER)
     pub registrations: Arc<RwLock<HashMap<Uuid, RegistrationInfo>>>,
@@ -55,24 +55,27 @@ impl ClientManager {
         let call_mapping = Arc::new(DashMap::new());
         let session_mapping = Arc::new(DashMap::new());
         let call_info = Arc::new(DashMap::new());
+        let incoming_calls = Arc::new(DashMap::new());
         
         // Create call handler
         let call_handler = Arc::new(ClientCallHandler::new(
             call_mapping.clone(),
             session_mapping.clone(),
             call_info.clone(),
+            incoming_calls.clone(),
         ));
         
         // Create session manager using session-core builder
-        let session_manager = SessionManagerBuilder::new()
+        let coordinator = SessionManagerBuilder::new()
             .with_local_address(&format!("sip:client@{}", config.local_sip_addr.ip()))
             .with_sip_port(config.local_sip_addr.port())
             .with_media_ports(config.local_media_addr.port(), config.local_media_addr.port() + 100)
             .with_handler(call_handler.clone() as Arc<dyn CallHandler>)
+            .enable_sip_client()  // Enable SIP client features for REGISTER support
             .build()
             .await
             .map_err(|e| ClientError::InternalError { 
-                message: format!("Failed to create session manager: {}", e) 
+                message: format!("Failed to create session coordinator: {}", e) 
             })?;
             
         let stats = ClientStats {
@@ -87,11 +90,12 @@ impl ClientManager {
 
         Ok(Arc::new(Self {
             config,
-            session_manager,
+            coordinator,
             call_handler,
             call_mapping,
             session_mapping,
             call_info,
+            incoming_calls,
             registrations: Arc::new(RwLock::new(HashMap::new())),
             is_running: Arc::new(RwLock::new(false)),
             stats: Arc::new(Mutex::new(stats)),
@@ -105,17 +109,17 @@ impl ClientManager {
     
     /// Start the client manager
     pub async fn start(&self) -> ClientResult<()> {
-        // Start the session manager
-        self.session_manager.start()
+        // Start the session coordinator using SessionControl trait
+        SessionControl::start(&self.coordinator)
             .await
             .map_err(|e| ClientError::InternalError { 
-                message: format!("Failed to start session manager: {}", e) 
+                message: format!("Failed to start session coordinator: {}", e) 
             })?;
             
         *self.is_running.write().await = true;
         
         // Update stats with actual bound addresses
-        let actual_addr = self.session_manager.get_bound_address();
+        let actual_addr = SessionControl::get_bound_address(&self.coordinator);
         let mut stats = self.stats.lock().await;
         stats.is_running = true;
         stats.local_sip_addr = actual_addr;
@@ -126,10 +130,10 @@ impl ClientManager {
     
     /// Stop the client manager
     pub async fn stop(&self) -> ClientResult<()> {
-        self.session_manager.stop()
+        SessionControl::stop(&self.coordinator)
             .await
             .map_err(|e| ClientError::InternalError { 
-                message: format!("Failed to stop session manager: {}", e) 
+                message: format!("Failed to stop session coordinator: {}", e) 
             })?;
             
         *self.is_running.write().await = false;

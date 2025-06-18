@@ -8,6 +8,12 @@
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 
+// Import session-core APIs
+use rvoip_session_core::api::{
+    SessionControl,
+    MediaControl,
+};
+
 // Import client-core types
 use crate::{
     ClientResult, ClientError,
@@ -51,10 +57,10 @@ impl super::manager::ClientManager {
         }
             
         // Use session-core mute/unmute functionality
-        self.session_manager.mute_session(&session_id, muted)
+        SessionControl::set_audio_muted(&self.coordinator, &session_id, muted)
             .await
             .map_err(|e| ClientError::CallSetupFailed { 
-                reason: format!("Failed to mute microphone: {}", e) 
+                reason: format!("Failed to set microphone mute: {}", e) 
             })?;
             
         // Update call metadata
@@ -129,10 +135,13 @@ impl super::manager::ClientManager {
             .clone();
             
         // Get media info from session-core
-        let media_info = self.session_manager.get_media_info(&session_id)
+        let media_info = MediaControl::get_media_info(&self.coordinator, &session_id)
             .await
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to get media info: {}", e) 
+            })?
+            .ok_or_else(|| ClientError::InternalError { 
+                message: "No media info available".to_string() 
             })?;
             
         // Determine audio direction before moving fields
@@ -374,7 +383,7 @@ impl super::manager::ClientManager {
         }
             
         // Use session-core to update media
-        self.session_manager.update_media(&session_id, new_sdp)
+        SessionControl::update_media(&self.coordinator, &session_id, new_sdp)
             .await
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to update call media: {}", e) 
@@ -464,7 +473,7 @@ impl super::manager::ClientManager {
         }
             
         // Use session-core SDP generation
-        let sdp_offer = self.session_manager.generate_sdp_offer(&session_id)
+        let sdp_offer = MediaControl::generate_sdp_offer(&self.coordinator, &session_id)
             .await
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to generate SDP offer: {}", e) 
@@ -510,7 +519,7 @@ impl super::manager::ClientManager {
             .clone();
             
         // Use session-core SDP processing
-        self.session_manager.process_sdp_answer(&session_id, sdp_answer)
+        MediaControl::update_remote_sdp(&self.coordinator, &session_id, sdp_answer)
             .await
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to process SDP answer: {}", e) 
@@ -547,8 +556,8 @@ impl super::manager::ClientManager {
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
             .clone();
             
-        // Terminate media session using session-core
-        self.session_manager.terminate_media_session(&session_id)
+        // Stop audio transmission first
+        MediaControl::stop_audio_transmission(&self.coordinator, &session_id)
             .await
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to stop media session: {}", e) 
@@ -601,17 +610,20 @@ impl super::manager::ClientManager {
         }
             
         // Create media session using session-core
-        self.session_manager.create_media_session(&session_id)
+        MediaControl::create_media_session(&self.coordinator, &session_id)
             .await
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to start media session: {}", e) 
             })?;
             
         // Get media info to create MediaSessionInfo
-        let media_info = self.session_manager.get_media_info(&session_id)
+        let media_info = MediaControl::get_media_info(&self.coordinator, &session_id)
             .await
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to get media info: {}", e) 
+            })?
+            .ok_or_else(|| ClientError::InternalError { 
+                message: "No media info available".to_string() 
             })?;
             
         let media_session_id = format!("media-{}", session_id.0);
@@ -682,10 +694,13 @@ impl super::manager::ClientManager {
             .clone();
             
         // Get media info from session-core
-        let media_info = self.session_manager.get_media_info(&session_id)
+        let media_info = MediaControl::get_media_info(&self.coordinator, &session_id)
             .await
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to get media info: {}", e) 
+            })?
+            .ok_or_else(|| ClientError::InternalError { 
+                message: "No media info available".to_string() 
             })?;
             
         let call_info = self.call_info.get(call_id)
@@ -733,7 +748,7 @@ impl super::manager::ClientManager {
             .clone();
             
         // Update media session using session-core
-        self.session_manager.update_media(&session_id, new_sdp)
+        SessionControl::update_media(&self.coordinator, &session_id, new_sdp)
             .await
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to update media session: {}", e) 

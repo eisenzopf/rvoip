@@ -6,6 +6,11 @@
 use std::collections::HashMap;
 use chrono::Utc;
 
+// Import session-core APIs
+use rvoip_session_core::api::{
+    SessionControl,
+};
+
 // Import client-core types
 use crate::{
     ClientResult, ClientError,
@@ -23,13 +28,17 @@ impl super::manager::ClientManager {
         to: String,
         subject: Option<String>,
     ) -> ClientResult<CallId> {
-        // Create call via session-core
-        let session = self.session_manager
-            .create_outgoing_call(&from, &to, Some("v=0\r\no=client 123 456 IN IP4 127.0.0.1\r\n...".to_string()))
-            .await
-            .map_err(|e| ClientError::CallSetupFailed { 
-                reason: format!("Session creation failed: {}", e) 
-            })?;
+        // Create call via session-core using SessionControl trait
+        let session = SessionControl::create_outgoing_call(
+            &self.coordinator,
+            &from,
+            &to,
+            None  // Let session-core generate SDP
+        )
+        .await
+        .map_err(|e| ClientError::CallSetupFailed { 
+            reason: format!("Session creation failed: {}", e) 
+        })?;
             
         // Create call ID and mapping
         let call_id = CallId::new_v4();
@@ -74,17 +83,22 @@ impl super::manager::ClientManager {
     
     /// Answer an incoming call
     pub async fn answer_call(&self, call_id: &CallId) -> ClientResult<()> {
-        let session_id = self.session_mapping.get(call_id)
-            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
-            .clone();
-            
-        // Use session-core to answer
-        self.session_manager.accept_incoming_call(&session_id)
+        // Get the stored IncomingCall object
+        let incoming_call = self.call_handler.get_incoming_call(call_id)
             .await
-            .map_err(|e| ClientError::CallSetupFailed { 
-                reason: format!("Failed to answer call: {}", e) 
-            })?;
-            
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?;
+        
+        // Use SessionControl to accept the call
+        SessionControl::accept_incoming_call(
+            &self.coordinator,
+            &incoming_call,
+            None  // Let session-core generate SDP answer
+        )
+        .await
+        .map_err(|e| ClientError::CallSetupFailed { 
+            reason: format!("Failed to answer call: {}", e) 
+        })?;
+        
         // Update call info
         if let Some(mut call_info) = self.call_info.get_mut(call_id) {
             call_info.state = crate::call::CallState::Connected;
@@ -102,17 +116,22 @@ impl super::manager::ClientManager {
     
     /// Reject an incoming call
     pub async fn reject_call(&self, call_id: &CallId) -> ClientResult<()> {
-        let session_id = self.session_mapping.get(call_id)
-            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
-            .clone();
-            
-        // Terminate the session to reject the call
-        self.session_manager.terminate_session(&session_id)
+        // Get the stored IncomingCall object
+        let incoming_call = self.call_handler.get_incoming_call(call_id)
             .await
-            .map_err(|e| ClientError::CallTerminated { 
-                reason: format!("Failed to reject call: {}", e) 
-            })?;
-            
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?;
+        
+        // Use SessionControl to reject the call
+        SessionControl::reject_incoming_call(
+            &self.coordinator,
+            &incoming_call,
+            "User rejected"
+        )
+        .await
+        .map_err(|e| ClientError::CallTerminated { 
+            reason: format!("Failed to reject call: {}", e) 
+        })?;
+        
         // Update call info
         if let Some(mut call_info) = self.call_info.get_mut(call_id) {
             call_info.state = crate::call::CallState::Terminated;
@@ -131,8 +150,8 @@ impl super::manager::ClientManager {
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
             .clone();
             
-        // Terminate the session
-        self.session_manager.terminate_session(&session_id)
+        // Terminate the session using SessionControl trait
+        SessionControl::terminate_session(&self.coordinator, &session_id)
             .await
             .map_err(|e| ClientError::CallTerminated { 
                 reason: format!("Failed to hangup call: {}", e) 
