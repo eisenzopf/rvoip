@@ -42,6 +42,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await;
@@ -65,6 +66,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -92,6 +94,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -131,6 +134,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -164,6 +168,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -197,6 +202,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -230,6 +236,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -270,6 +277,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -304,6 +312,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -336,6 +345,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -374,6 +384,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -412,6 +423,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -465,6 +477,7 @@ mod tests {
             session_timeout_secs: 300,
             enable_audio: true,
             enable_video: false,
+            domain: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();

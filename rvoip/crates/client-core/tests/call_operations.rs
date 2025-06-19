@@ -3,16 +3,16 @@
 //! Tests making calls, answering, hanging up, and call state management.
 
 use rvoip_client_core::{
-    ClientBuilder, Client, ClientError, ClientEvent,
-    call::{CallState, CallDirection, CallId},
-    retry_with_backoff, RetryConfig, ErrorContext,
+    ClientBuilder, ClientError, ClientEvent,
+    CallId, CallDirection, CallState,
 };
-use std::sync::Arc;
+use rvoip_client_core::client::ErrorContext;
 use std::time::Duration;
-use tokio::sync::broadcast;
+use serial_test::serial;
 
 /// Test making a basic outgoing call
 #[tokio::test]
+#[serial]
 async fn test_make_outgoing_call() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -21,6 +21,7 @@ async fn test_make_outgoing_call() {
 
     let client = ClientBuilder::new()
         .user_agent("CallTest/1.0")
+        .local_address("127.0.0.1:15100".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -62,6 +63,7 @@ async fn test_make_outgoing_call() {
 
 /// Test call with retry on network failure
 #[tokio::test]
+#[serial]
 async fn test_call_with_retry() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -70,6 +72,7 @@ async fn test_call_with_retry() {
 
     let client = ClientBuilder::new()
         .user_agent("RetryCallTest/1.0")
+        .local_address("127.0.0.1:15101".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -101,6 +104,7 @@ async fn test_call_with_retry() {
 
 /// Test multiple concurrent calls
 #[tokio::test]
+#[serial]
 async fn test_multiple_concurrent_calls() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -109,6 +113,7 @@ async fn test_multiple_concurrent_calls() {
 
     let client = ClientBuilder::new()
         .user_agent("MultiCallTest/1.0")
+        .local_address("127.0.0.1:15102".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -152,6 +157,7 @@ async fn test_multiple_concurrent_calls() {
 
 /// Test call state tracking
 #[tokio::test]
+#[serial]
 async fn test_call_state_tracking() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -160,6 +166,7 @@ async fn test_call_state_tracking() {
 
     let client = ClientBuilder::new()
         .user_agent("StateTest/1.0")
+        .local_address("127.0.0.1:15103".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -217,6 +224,7 @@ async fn test_call_state_tracking() {
 
 /// Test call history and filtering
 #[tokio::test]
+#[serial]
 async fn test_call_history_and_filtering() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -225,6 +233,7 @@ async fn test_call_history_and_filtering() {
 
     let client = ClientBuilder::new()
         .user_agent("HistoryTest/1.0")
+        .local_address("127.0.0.1:15104".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -278,6 +287,7 @@ async fn test_call_history_and_filtering() {
 
 /// Test call metadata and detailed info
 #[tokio::test]
+#[serial]
 async fn test_call_metadata() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -286,6 +296,7 @@ async fn test_call_metadata() {
 
     let client = ClientBuilder::new()
         .user_agent("MetadataTest/1.0")
+        .local_address("127.0.0.1:15105".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -323,6 +334,7 @@ async fn test_call_metadata() {
 
 /// Test error handling for invalid calls
 #[tokio::test]
+#[serial]
 async fn test_call_error_handling() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -331,6 +343,7 @@ async fn test_call_error_handling() {
 
     let client = ClientBuilder::new()
         .user_agent("ErrorCallTest/1.0")
+        .local_address("127.0.0.1:15106".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -338,13 +351,13 @@ async fn test_call_error_handling() {
     client.start().await.expect("Failed to start client");
 
     // Try to hang up a non-existent call
-    let fake_call_id = CallId::new();
+    let fake_call_id = CallId::new_v4();
     let result = client.hangup_call(&fake_call_id).await;
     
     assert!(result.is_err());
     match result {
         Err(ClientError::CallNotFound { call_id }) => {
-            assert_eq!(call_id, *fake_call_id);
+            assert_eq!(call_id, fake_call_id);
         }
         _ => panic!("Expected CallNotFound error"),
     }
@@ -358,6 +371,7 @@ async fn test_call_error_handling() {
 
 /// Test call operations with error context
 #[tokio::test]
+#[serial]
 async fn test_call_with_error_context() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -366,6 +380,7 @@ async fn test_call_with_error_context() {
 
     let client = ClientBuilder::new()
         .user_agent("ContextTest/1.0")
+        .local_address("127.0.0.1:15107".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -387,8 +402,8 @@ async fn test_call_with_error_context() {
             tracing::info!("Call created: {}", call_id);
             
             // Clean up with context
-            client.hangup_call(&call_id).await
-                .context("Failed to clean up test call")?;
+            let _ = client.hangup_call(&call_id).await
+                .context("Failed to clean up test call");
         }
         Err(e) => {
             tracing::info!("Call failed with context: {}", e);

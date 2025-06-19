@@ -144,7 +144,9 @@ pub enum ClientEvent {
     },
     /// Call state changed
     CallStateChanged {
+        /// Information about the state change
         info: CallStatusInfo,
+        /// Priority of this event  
         priority: EventPriority,
     },
     /// Media event occurred

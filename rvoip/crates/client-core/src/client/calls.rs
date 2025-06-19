@@ -18,8 +18,7 @@ use crate::{
 };
 
 use super::types::*;
-use super::recovery::{retry_with_backoff, RetryConfig, ErrorContext, with_timeout};
-use std::time::Duration;
+use super::recovery::{retry_with_backoff, RetryConfig, ErrorContext};
 
 /// Call operations implementation for ClientManager
 impl super::manager::ClientManager {
@@ -89,6 +88,13 @@ impl super::manager::ClientManager {
         to: String,
         subject: Option<String>,
     ) -> ClientResult<CallId> {
+        // Check if client is running
+        if !*self.is_running.read().await {
+            return Err(ClientError::InternalError {
+                message: "Client is not started. Call start() before making calls.".to_string()
+            });
+        }
+        
         // Create call via session-core with retry logic for network errors
         let session = retry_with_backoff(
             "create_outgoing_call",
@@ -139,6 +145,18 @@ impl super::manager::ClientManager {
         };
         
         self.call_info.insert(call_id, call_info.clone());
+        
+        // Emit call created event
+        let _ = self.event_tx.send(crate::events::ClientEvent::CallStateChanged {
+            info: crate::events::CallStatusInfo {
+                call_id,
+                new_state: crate::call::CallState::Initiating,
+                previous_state: None, // No previous state for new calls
+                reason: Some("Call created".to_string()),
+                timestamp: Utc::now(),
+            },
+            priority: crate::events::EventPriority::Normal,
+        });
         
         // Update stats
         let mut stats = self.stats.lock().await;
@@ -219,19 +237,62 @@ impl super::manager::ClientManager {
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
             .clone();
             
-        // Terminate the session using SessionControl trait
-        SessionControl::terminate_session(&self.coordinator, &session_id)
-            .await
-            .map_err(|e| ClientError::CallTerminated { 
-                reason: format!("Failed to hangup call: {}", e) 
-            })?;
+        // Check the current call state first
+        if let Some(call_info) = self.call_info.get(call_id) {
+            match call_info.state {
+                crate::call::CallState::Terminated |
+                crate::call::CallState::Failed |
+                crate::call::CallState::Cancelled => {
+                    tracing::info!("Call {} is already terminated (state: {:?}), skipping hangup", 
+                                 call_id, call_info.state);
+                    return Ok(());
+                }
+                _ => {
+                    // Proceed with termination for other states
+                }
+            }
+        }
             
+        // Terminate the session using SessionControl trait
+        match SessionControl::terminate_session(&self.coordinator, &session_id).await {
+            Ok(()) => {
+                tracing::info!("Successfully terminated session for call {}", call_id);
+            }
+            Err(e) => {
+                // Check if the error is because the session is already terminated
+                let error_msg = e.to_string();
+                if error_msg.contains("No INVITE transaction found") || 
+                   error_msg.contains("already terminated") ||
+                   error_msg.contains("already in state") {
+                    tracing::warn!("Session already terminated for call {}: {}", call_id, error_msg);
+                    // Continue to update our internal state even if session is already gone
+                } else {
+                    return Err(ClientError::CallTerminated { 
+                        reason: format!("Failed to hangup call: {}", e) 
+                    });
+                }
+            }
+        }
+        
         // Update call info
         if let Some(mut call_info) = self.call_info.get_mut(call_id) {
+            let old_state = call_info.state.clone();
             call_info.state = crate::call::CallState::Terminated;
             call_info.ended_at = Some(Utc::now());
             call_info.metadata.insert("hangup_at".to_string(), Utc::now().to_rfc3339());
             call_info.metadata.insert("hangup_reason".to_string(), "user_hangup".to_string());
+            
+            // Emit state change event
+            let _ = self.event_tx.send(crate::events::ClientEvent::CallStateChanged {
+                info: crate::events::CallStatusInfo {
+                    call_id: *call_id,
+                    new_state: crate::call::CallState::Terminated,
+                    previous_state: Some(old_state),
+                    reason: Some("User hangup".to_string()),
+                    timestamp: Utc::now(),
+                },
+                priority: crate::events::EventPriority::Normal,
+            });
         }
         
         // Update stats

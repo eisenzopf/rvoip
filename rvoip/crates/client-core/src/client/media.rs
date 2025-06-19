@@ -189,6 +189,11 @@ impl super::manager::ClientManager {
     }
     
     /// Get available audio codecs with enhanced information
+    /// Get supported audio codecs (alias for get_available_codecs)
+    pub async fn get_supported_audio_codecs(&self) -> Vec<AudioCodecInfo> {
+        self.get_available_codecs().await
+    }
+    
     pub async fn get_available_codecs(&self) -> Vec<AudioCodecInfo> {
         // Enhanced codec list with quality ratings and detailed information
         vec![
@@ -875,6 +880,29 @@ impl super::manager::ClientManager {
         
         tracing::info!("Generated SDP answer for call {}: {} bytes", call_id, sdp_answer.len());
         Ok(sdp_answer)
+    }
+    
+    /// Establish media flow to a remote address
+    pub async fn establish_media(&self, call_id: &CallId, remote_addr: &str) -> ClientResult<()> {
+        let session_id = self.session_mapping.get(call_id)
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+            .clone();
+            
+        // Use session-core to establish media flow
+        MediaControl::establish_media_flow(&self.coordinator, &session_id, remote_addr)
+            .await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to establish media flow: {}", e) 
+            })?;
+            
+        // Update call metadata
+        if let Some(mut call_info) = self.call_info.get_mut(call_id) {
+            call_info.metadata.insert("media_flow_established".to_string(), "true".to_string());
+            call_info.metadata.insert("remote_media_addr".to_string(), remote_addr.to_string());
+        }
+        
+        tracing::info!("Established media flow for call {} to {}", call_id, remote_addr);
+        Ok(())
     }
     
     /// Get RTP statistics for a call

@@ -3,32 +3,38 @@
 //! Tests retry logic, error categorization, and recovery strategies.
 
 use rvoip_client_core::{
-    ClientBuilder, Client, ClientError,
-    retry_with_backoff, RetryConfig, ErrorContext,
-    RecoveryStrategies, RecoveryAction,
-    with_timeout,
+    ClientBuilder, ClientError,
+    client::{
+        retry_with_backoff, RetryConfig,
+        RecoveryStrategies, RecoveryAction,
+        with_timeout,
+    },
 };
+use rvoip_client_core::client::ErrorContext;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
+use serial_test::serial;
 
 /// Test basic retry with backoff
 #[tokio::test]
 async fn test_retry_with_backoff_basic() {
     let attempts = Arc::new(AtomicU32::new(0));
-    let attempts_clone = attempts.clone();
     
     let result = retry_with_backoff(
         "test_operation",
         RetryConfig::quick(),
-        || async move {
-            let count = attempts_clone.fetch_add(1, Ordering::SeqCst);
-            if count < 2 {
-                Err(ClientError::NetworkError {
-                    reason: "Simulated network error".to_string()
-                })
-            } else {
-                Ok("Success")
+        || {
+            let attempts_clone = attempts.clone();
+            async move {
+                let count = attempts_clone.fetch_add(1, Ordering::SeqCst);
+                if count < 2 {
+                    Err(ClientError::NetworkError {
+                        reason: "Simulated network error".to_string()
+                    })
+                } else {
+                    Ok("Success")
+                }
             }
         }
     ).await;
@@ -42,17 +48,19 @@ async fn test_retry_with_backoff_basic() {
 #[tokio::test]
 async fn test_retry_non_recoverable() {
     let attempts = Arc::new(AtomicU32::new(0));
-    let attempts_clone = attempts.clone();
     
-    let result = retry_with_backoff(
+    let result: Result<i32, _> = retry_with_backoff(
         "test_operation",
         RetryConfig::default(),
-        || async move {
-            attempts_clone.fetch_add(1, Ordering::SeqCst);
-            Err(ClientError::InvalidConfiguration {
-                field: "test_field".to_string(),
-                reason: "Invalid value".to_string()
-            })
+        || {
+            let attempts_clone = attempts.clone();
+            async move {
+                attempts_clone.fetch_add(1, Ordering::SeqCst);
+                Err(ClientError::InvalidConfiguration {
+                    field: "test_field".to_string(),
+                    reason: "Invalid value".to_string()
+                })
+            }
         }
     ).await;
     
@@ -261,6 +269,7 @@ async fn test_is_auth_error() {
 
 /// Test integrated retry in client operations
 #[tokio::test]
+#[serial]
 async fn test_client_retry_integration() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -269,6 +278,7 @@ async fn test_client_retry_integration() {
 
     let client = ClientBuilder::new()
         .user_agent("RetryIntegrationTest/1.0")
+        .local_address("127.0.0.1:15300".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");

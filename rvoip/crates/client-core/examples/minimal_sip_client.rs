@@ -75,11 +75,11 @@ impl ClientEventHandler for ExampleEventHandler {
 
     async fn on_registration_status_changed(&self, status_info: RegistrationStatusInfo) {
         let status_emoji = match status_info.status {
-            rvoip_client_core::registration::RegistrationStatus::Unregistered => "❌",
-            rvoip_client_core::registration::RegistrationStatus::Registering => "⏳",
-            rvoip_client_core::registration::RegistrationStatus::Registered => "✅",
+            rvoip_client_core::registration::RegistrationStatus::Pending => "⏳",
+            rvoip_client_core::registration::RegistrationStatus::Active => "✅",
             rvoip_client_core::registration::RegistrationStatus::Failed => "💥",
-            rvoip_client_core::registration::RegistrationStatus::Unregistering => "🔄",
+            rvoip_client_core::registration::RegistrationStatus::Expired => "⏰",
+            rvoip_client_core::registration::RegistrationStatus::Cancelled => "❌",
         };
         
         info!(
@@ -187,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "sip:alice@demo.example.com".to_string(),
         "sip:alice@127.0.0.1:5060".to_string(),
     )
-    .with_auth("alice".to_string(), "secret123".to_string())
+    .with_credentials("alice".to_string(), "secret123".to_string())
     .with_expires(3600);
 
     match client.register(reg_config).await {

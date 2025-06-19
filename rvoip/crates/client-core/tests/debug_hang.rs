@@ -11,7 +11,8 @@ async fn test_minimal_client_creation() {
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         println!("Creating client builder...");
         let builder = ClientBuilder::new()
-            .user_agent("DebugTest/1.0");
+            .user_agent("DebugTest/1.0")
+            .local_address("127.0.0.1:15900".parse().unwrap());
         
         println!("Building client...");
         let client = builder.build().await;

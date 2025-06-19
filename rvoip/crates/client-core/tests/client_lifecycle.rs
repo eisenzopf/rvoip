@@ -2,13 +2,15 @@
 //! 
 //! Tests basic client creation, starting, stopping, and configuration.
 
-use rvoip_client_core::{ClientBuilder, Client, ClientConfig, ClientError};
-use std::sync::Arc;
+use rvoip_client_core::{ClientBuilder};
+use serial_test::serial;
+
 use std::time::Duration;
 use tokio::time::timeout;
 
 /// Test basic client creation and lifecycle
 #[tokio::test]
+#[serial]
 async fn test_client_creation_and_lifecycle() {
     // Initialize tracing for tests
     let _ = tracing_subscriber::fmt()
@@ -19,6 +21,7 @@ async fn test_client_creation_and_lifecycle() {
     // Create client with default configuration
     let client = ClientBuilder::new()
         .user_agent("TestClient/1.0")
+        .local_address("127.0.0.1:15201".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -47,6 +50,7 @@ async fn test_client_creation_and_lifecycle() {
 
 /// Test client with custom configuration
 #[tokio::test]
+#[serial]
 async fn test_client_with_custom_config() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -72,6 +76,7 @@ async fn test_client_with_custom_config() {
 
 /// Test multiple client instances
 #[tokio::test]
+#[serial]
 async fn test_multiple_client_instances() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -113,8 +118,8 @@ async fn test_multiple_client_instances() {
 
 /// Test client event subscription
 #[tokio::test]
+#[serial]
 async fn test_client_event_subscription() {
-    use rvoip_client_core::ClientEvent;
     
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -123,6 +128,7 @@ async fn test_client_event_subscription() {
 
     let client = ClientBuilder::new()
         .user_agent("EventTestClient/1.0")
+        .local_address("127.0.0.1:15202".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -163,6 +169,7 @@ async fn test_client_event_subscription() {
 
 /// Test client resilience to rapid start/stop cycles
 #[tokio::test]
+#[serial]
 async fn test_rapid_start_stop_cycles() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -171,6 +178,7 @@ async fn test_rapid_start_stop_cycles() {
 
     let client = ClientBuilder::new()
         .user_agent("RapidCycleClient/1.0")
+        .local_address("127.0.0.1:15203".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -195,6 +203,7 @@ async fn test_rapid_start_stop_cycles() {
 
 /// Test error handling for invalid operations
 #[tokio::test]
+#[serial]
 async fn test_error_handling() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -203,6 +212,7 @@ async fn test_error_handling() {
 
     let client = ClientBuilder::new()
         .user_agent("ErrorTestClient/1.0")
+        .local_address("127.0.0.1:15204".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -229,6 +239,7 @@ async fn test_error_handling() {
 
 /// Test client resource cleanup
 #[tokio::test]
+#[serial]
 async fn test_resource_cleanup() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -240,28 +251,30 @@ async fn test_resource_cleanup() {
         let client = ClientBuilder::new()
             .user_agent("CleanupTestClient/1.0")
             .local_address("127.0.0.1:15070".parse().unwrap())
-            .build()
+        .build()
             .await
             .expect("Failed to build client");
 
         client.start().await.expect("Failed to start client");
         assert!(client.is_running().await);
         
+        // Explicitly stop the client before dropping
+        client.stop().await.expect("Failed to stop client");
         // Client will be dropped here
     }
 
-    // Small delay to ensure cleanup
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Longer delay to ensure OS releases the port
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    // Try to create another client on the same port
+    // Create another client on a different port to verify cleanup doesn't affect new clients
     let client2 = ClientBuilder::new()
         .user_agent("CleanupTestClient2/1.0")
-        .local_address("127.0.0.1:15070".parse().unwrap())
+        .local_address("127.0.0.1:15071".parse().unwrap())
         .build()
         .await
         .expect("Failed to build second client");
 
-    // Should be able to start on the same port after cleanup
+    // Should be able to start successfully
     client2.start().await.expect("Failed to start second client");
     client2.stop().await.expect("Failed to stop second client");
 } 

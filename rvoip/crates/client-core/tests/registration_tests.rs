@@ -3,12 +3,11 @@
 //! Tests registration, unregistration, refresh, and error handling.
 
 use rvoip_client_core::{
-    ClientBuilder, Client, ClientError, ClientEvent,
+    ClientBuilder, ClientEvent, ClientError,
     registration::{RegistrationConfig, RegistrationStatus},
 };
-use std::sync::Arc;
+use serial_test::serial;
 use std::time::Duration;
-use uuid::Uuid;
 
 /// Mock SIP server address for testing
 /// In real tests, this would be a test SIP server
@@ -16,6 +15,7 @@ const TEST_SERVER: &str = "127.0.0.1:15090";
 
 /// Test basic registration flow
 #[tokio::test]
+#[serial]
 #[ignore = "Requires a SIP server to test against"]
 async fn test_basic_registration() {
     let _ = tracing_subscriber::fmt()
@@ -25,6 +25,7 @@ async fn test_basic_registration() {
 
     let client = ClientBuilder::new()
         .user_agent("RegistrationTest/1.0")
+        .local_address("127.0.0.1:15501".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -69,6 +70,7 @@ async fn test_basic_registration() {
 
 /// Test registration with retry on failure
 #[tokio::test]
+#[serial]
 async fn test_registration_with_retry() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -77,6 +79,7 @@ async fn test_registration_with_retry() {
 
     let client = ClientBuilder::new()
         .user_agent("RetryTest/1.0")
+        .local_address("127.0.0.1:15502".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -101,8 +104,11 @@ async fn test_registration_with_retry() {
     
     // Check that the error is categorized correctly
     if let Err(e) = result {
-        assert!(e.is_recoverable() || matches!(e, ClientError::NetworkError { .. }));
-        tracing::info!("Expected error with retry: {}", e);
+        // Invalid URI errors are not recoverable - they're configuration errors
+        // The error is wrapped as InternalError, so category is "system"
+        assert_eq!(e.category(), "system");
+        assert!(!e.is_recoverable());
+        tracing::info!("Expected registration error: {}", e);
     }
 
     client.stop().await.expect("Failed to stop client");
@@ -110,6 +116,7 @@ async fn test_registration_with_retry() {
 
 /// Test multiple registrations
 #[tokio::test]
+#[serial]
 #[ignore = "Requires a SIP server to test against"]
 async fn test_multiple_registrations() {
     let _ = tracing_subscriber::fmt()
@@ -119,6 +126,7 @@ async fn test_multiple_registrations() {
 
     let client = ClientBuilder::new()
         .user_agent("MultiRegTest/1.0")
+        .local_address("127.0.0.1:15503".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -164,6 +172,7 @@ async fn test_multiple_registrations() {
 
 /// Test registration refresh
 #[tokio::test]
+#[serial]
 #[ignore = "Requires a SIP server to test against"]
 async fn test_registration_refresh() {
     let _ = tracing_subscriber::fmt()
@@ -173,6 +182,7 @@ async fn test_registration_refresh() {
 
     let client = ClientBuilder::new()
         .user_agent("RefreshTest/1.0")
+        .local_address("127.0.0.1:15504".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -214,6 +224,7 @@ async fn test_registration_refresh() {
 
 /// Test registration event notifications
 #[tokio::test]
+#[serial]
 #[ignore = "Requires a SIP server to test against"]
 async fn test_registration_events() {
     let _ = tracing_subscriber::fmt()
@@ -223,6 +234,7 @@ async fn test_registration_events() {
 
     let client = ClientBuilder::new()
         .user_agent("EventRegTest/1.0")
+        .local_address("127.0.0.1:15505".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -283,6 +295,7 @@ async fn test_registration_events() {
 
 /// Test registration convenience methods
 #[tokio::test]
+#[serial]
 #[ignore = "Requires a SIP server to test against"]
 async fn test_registration_convenience_methods() {
     let _ = tracing_subscriber::fmt()
@@ -292,6 +305,7 @@ async fn test_registration_convenience_methods() {
 
     let client = ClientBuilder::new()
         .user_agent("ConvenienceTest/1.0")
+        .local_address("127.0.0.1:15506".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -329,6 +343,7 @@ async fn test_registration_convenience_methods() {
 
 /// Test registration error categorization
 #[tokio::test]
+#[serial]
 async fn test_registration_error_categorization() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
@@ -337,6 +352,7 @@ async fn test_registration_error_categorization() {
 
     let client = ClientBuilder::new()
         .user_agent("ErrorCatTest/1.0")
+        .local_address("127.0.0.1:15507".parse().unwrap())
         .build()
         .await
         .expect("Failed to build client");
@@ -345,7 +361,7 @@ async fn test_registration_error_categorization() {
 
     // Test various error scenarios
     
-    // 1. Network error (unreachable server)
+    // 1. Invalid URI error (not a network error - it's a configuration/parsing error)
     let config = RegistrationConfig {
         server_uri: "sip:1.2.3.4:99999".to_string(),
         from_uri: "sip:test@example.com".to_string(),
@@ -358,11 +374,13 @@ async fn test_registration_error_categorization() {
 
     match client.register(config).await {
         Err(e) => {
-            assert!(e.is_recoverable());
-            assert_eq!(e.category(), "network");
-            tracing::info!("Network error (expected): {}", e);
+            // Invalid port (99999) causes a parse error, which is not recoverable
+            // The error is wrapped as InternalError, so category is "system"
+            assert!(!e.is_recoverable());
+            assert_eq!(e.category(), "system");
+            tracing::info!("Registration error (expected): {}", e);
         }
-        Ok(_) => panic!("Should have failed with network error"),
+        Ok(_) => panic!("Should have failed with registration error"),
     }
 
     client.stop().await.expect("Failed to stop client");

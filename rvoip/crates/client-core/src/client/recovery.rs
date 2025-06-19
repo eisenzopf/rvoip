@@ -326,13 +326,15 @@ mod tests {
     
     #[tokio::test]
     async fn test_retry_with_backoff_success() {
-        let mut attempts = 0;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = AtomicU32::new(0);
+        
         let result = retry_with_backoff(
             "test_operation",
             RetryConfig::quick(),
             || async {
-                attempts += 1;
-                if attempts < 3 {
+                let current = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                if current < 3 {
                     Err(ClientError::NetworkError {
                         reason: "temporary failure".to_string()
                     })
@@ -343,17 +345,19 @@ mod tests {
         ).await;
         
         assert_eq!(result.unwrap(), 42);
-        assert_eq!(attempts, 3);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
     }
     
     #[tokio::test]
     async fn test_retry_non_recoverable() {
-        let mut attempts = 0;
-        let result = retry_with_backoff(
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = AtomicU32::new(0);
+        
+        let result: Result<i32, _> = retry_with_backoff(
             "test_operation",
             RetryConfig::default(),
             || async {
-                attempts += 1;
+                attempts.fetch_add(1, Ordering::SeqCst);
                 Err(ClientError::InvalidConfiguration {
                     field: "test".to_string(),
                     reason: "bad config".to_string()
@@ -362,6 +366,6 @@ mod tests {
         ).await;
         
         assert!(result.is_err());
-        assert_eq!(attempts, 1); // Should not retry
+        assert_eq!(attempts.load(Ordering::SeqCst), 1); // Should not retry
     }
 } 

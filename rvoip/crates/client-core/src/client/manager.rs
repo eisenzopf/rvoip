@@ -427,11 +427,27 @@ impl ClientManager {
         self.event_tx.subscribe()
     }
     
+    /// Check if the client is running
+    pub async fn is_running(&self) -> bool {
+        *self.is_running.read().await
+    }
+    
     // ===== PRIORITY 3.2: CALL CONTROL OPERATIONS =====
     // Call control operations have been moved to controls.rs
     
     // ===== PRIORITY 4.1: ENHANCED MEDIA INTEGRATION =====
     // Media operations have been moved to media.rs
+}
+
+impl Drop for ClientManager {
+    fn drop(&mut self) {
+        // Check if still running using try_read to avoid blocking
+        if let Ok(is_running) = self.is_running.try_read() {
+            if *is_running {
+                tracing::warn!("ClientManager dropped while still running! Call stop() before dropping to ensure proper cleanup.");
+            }
+        }
+    }
 }
 
 

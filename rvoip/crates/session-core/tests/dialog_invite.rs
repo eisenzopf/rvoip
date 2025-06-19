@@ -248,17 +248,47 @@ async fn test_session_operations_on_nonexistent_session() {
     // Test hold on non-existent session (currently returns Ok due to stub implementation)
     let hold_result = manager_a.hold_session(&fake_session_id).await;
     println!("Hold result (stub): {:?}", hold_result);
-    assert!(hold_result.is_ok(), "Hold is currently a stub that returns Ok()");
+    
+    // The hold_session method now properly returns an error for non-existent sessions
+    assert!(hold_result.is_err(), "Hold should return an error for non-existent session");
+    match hold_result.unwrap_err() {
+        SessionError::SessionNotFound(_) => {
+            println!("Got expected SessionNotFound error for hold on non-existent session");
+        }
+        other => {
+            panic!("Expected SessionNotFound error for hold, got: {:?}", other);
+        }
+    }
     
     // Test resume on non-existent session (currently returns Ok due to stub implementation)
     let resume_result = manager_a.resume_session(&fake_session_id).await;
     println!("Resume result (stub): {:?}", resume_result);
-    assert!(resume_result.is_ok(), "Resume is currently a stub that returns Ok()");
+    
+    // The resume_session method now properly returns an error for non-existent sessions
+    assert!(resume_result.is_err(), "Resume should return an error for non-existent session");
+    match resume_result.unwrap_err() {
+        SessionError::SessionNotFound(_) => {
+            println!("Got expected SessionNotFound error for resume on non-existent session");
+        }
+        other => {
+            panic!("Expected SessionNotFound error for resume, got: {:?}", other);
+        }
+    }
     
     // Test transfer on non-existent session (currently returns Ok due to stub implementation)
     let transfer_result = manager_a.transfer_session(&fake_session_id, "sip:other@localhost").await;
     println!("Transfer result (stub): {:?}", transfer_result);
-    assert!(transfer_result.is_ok(), "Transfer is currently a stub that returns Ok()");
+    
+    // The transfer_session method now properly returns an error for non-existent sessions
+    assert!(transfer_result.is_err(), "Transfer should return an error for non-existent session");
+    match transfer_result.unwrap_err() {
+        SessionError::SessionNotFound(_) => {
+            println!("Got expected SessionNotFound error for transfer on non-existent session");
+        }
+        other => {
+            panic!("Expected SessionNotFound error for transfer, got: {:?}", other);
+        }
+    }
     
     // Test DTMF on non-existent session (this is properly implemented and should fail)
     let dtmf_result = manager_a.send_dtmf(&fake_session_id, "123").await;
