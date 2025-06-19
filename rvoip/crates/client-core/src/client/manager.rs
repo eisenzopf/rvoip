@@ -8,8 +8,10 @@ use uuid::Uuid;
 use rvoip_session_core::api::{
     SessionCoordinator,
     SessionManagerBuilder,
+    SessionManagerConfig,
     SessionControl,
     SipClient,
+    MediaConfig as SessionMediaConfig,
     types::SessionId,
     handlers::CallHandler,
 };
@@ -26,6 +28,7 @@ use crate::{
 use super::types::*;
 use super::events::ClientCallHandler;
 use super::recovery::{retry_with_backoff, RetryConfig, ErrorContext};
+use super::config::MediaConfig;
 
 /// High-level SIP client manager that coordinates all client operations
 /// 
@@ -37,6 +40,9 @@ pub struct ClientManager {
     
     /// Local SIP address (bound)
     pub(crate) local_sip_addr: std::net::SocketAddr,
+    
+    /// Media configuration
+    pub(crate) media_config: MediaConfig,
     
     /// Whether the client is running
     pub(crate) is_running: Arc<RwLock<bool>>,
@@ -80,11 +86,35 @@ impl ClientManager {
             incoming_calls.clone(),
         ).with_event_tx(event_tx.clone()));
         
-        // Create session manager using session-core builder
+        // Build session coordinator with media preferences
+        // The media preferences will be used by session-core's SDP negotiator
+        // to generate offers/answers based on the configured codecs
+        let session_config = SessionManagerConfig {
+            sip_port: config.sip_port,
+            local_address: config.local_address.clone(),
+            media_port_start: config.media_config.port_range.0,
+            media_port_end: config.media_config.port_range.1,
+            enable_stun: config.stun_server.is_some(),
+            stun_server: config.stun_server.clone(),
+            enable_sip_client: true,
+            media_config: SessionMediaConfig {
+                preferred_codecs: config.media_config.preferred_codecs.clone(),
+                dtmf_enabled: config.media_config.dtmf_support,
+                echo_cancellation: config.media_config.echo_cancellation,
+                noise_suppression: config.media_config.noise_suppression,
+                auto_gain_control: config.media_config.auto_gain_control,
+                max_bandwidth_kbps: config.media_config.max_bandwidth_kbps,
+                preferred_ptime: config.media_config.preferred_ptime,
+                custom_sdp_attributes: Default::default(),
+            },
+        };
+        
+        // Create session manager using session-core builder with media preferences
         let coordinator = SessionManagerBuilder::new()
             .with_local_address(&format!("sip:client@{}", config.local_sip_addr.ip()))
             .with_sip_port(config.local_sip_addr.port())
-            .with_media_ports(config.local_media_addr.port(), config.local_media_addr.port() + 100)
+            .with_media_ports(config.media_config.port_range.0, config.media_config.port_range.1)
+            .with_media_config(session_config.media_config)  // Pass media preferences to session-core
             .with_handler(call_handler.clone() as Arc<dyn CallHandler>)
             .enable_sip_client()  // Enable SIP client features for REGISTER support
             .build()
@@ -106,6 +136,7 @@ impl ClientManager {
         Ok(Arc::new(Self {
             coordinator,
             local_sip_addr: config.local_sip_addr,
+            media_config: config.media_config.clone(),
             is_running: Arc::new(RwLock::new(false)),
             stats: Arc::new(Mutex::new(stats)),
             registrations: Arc::new(RwLock::new(HashMap::new())),

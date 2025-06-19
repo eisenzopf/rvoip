@@ -12,68 +12,27 @@
 
 use anyhow::Result;
 use clap::Parser;
-use rvoip_session_core::api::*;  // Single, clean import - everything we need
+use rvoip_session_core::api::{
+    CallHandler, CallDecision, IncomingCall, CallSession,
+    SessionManagerBuilder, SessionControl, MediaControl,
+    SessionCoordinator, parse_sdp_connection,
+};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, error, warn};
-
-#[derive(Parser, Debug)]
-#[command(name = "uac_client_clean")]
-#[command(about = "Clean UAC Client demonstrating API best practices")]
-struct Args {
-    /// SIP listening port
-    #[arg(short, long, default_value = "5061")]
-    port: u16,
-    
-    /// Target SIP server (IP:port)
-    #[arg(short, long, default_value = "127.0.0.1:5062")]
-    target: String,
-    
-    /// Number of calls to make
-    #[arg(short = 'n', long, default_value = "1")]
-    num_calls: usize,
-    
-    /// Call duration in seconds
-    #[arg(short, long, default_value = "30")]
-    duration: u64,
-    
-    /// Delay between calls in seconds
-    #[arg(short = 'w', long, default_value = "2")]
-    delay: u64,
-    
-    /// Log level (trace, debug, info, warn, error)
-    #[arg(short, long, default_value = "info")]
-    log_level: String,
-}
-
-/// Statistics for the UAC
-#[derive(Debug, Default)]
-struct UacStats {
-    calls_initiated: usize,
-    calls_connected: usize,
-    calls_failed: usize,
-    total_duration: Duration,
-}
 
 /// Clean UAC handler using only the public API
 #[derive(Debug)]
 struct CleanUacHandler {
     stats: Arc<Mutex<UacStats>>,
-    // Store coordinator reference for API calls
-    coordinator: Arc<tokio::sync::RwLock<Option<Arc<SessionCoordinator>>>>,
 }
 
 impl CleanUacHandler {
     fn new() -> Self {
         Self {
             stats: Arc::new(Mutex::new(UacStats::default())),
-            coordinator: Arc::new(tokio::sync::RwLock::new(None)),
         }
-    }
-    
-    async fn set_coordinator(&self, coordinator: Arc<SessionCoordinator>) {
-        *self.coordinator.write().await = Some(coordinator);
     }
 }
 
@@ -85,65 +44,13 @@ impl CallHandler for CleanUacHandler {
         CallDecision::Reject("UAC does not accept incoming calls".to_string())
     }
     
-    async fn on_call_established(&self, session: CallSession, _local_sdp: Option<String>, remote_sdp: Option<String>) {
+    async fn on_call_established(&self, session: CallSession, _local_sdp: Option<String>, _remote_sdp: Option<String>) {
         info!("✅ Call {} established", session.id());
         
         // Update statistics
         {
             let mut stats = self.stats.lock().await;
             stats.calls_connected += 1;
-        }
-        
-        let coordinator = self.coordinator.read().await;
-        if let Some(coord) = coordinator.as_ref() {
-            // Parse and establish media flow using the clean API
-            if let Some(sdp) = remote_sdp {
-                match parse_sdp_connection(&sdp) {
-                    Ok(sdp_info) => {
-                        let remote_addr = format!("{}:{}", sdp_info.ip, sdp_info.port);
-                        info!("📡 Establishing media flow to {}", remote_addr);
-                        
-                        // Use MediaControl API - clean and consistent!
-                        match MediaControl::establish_media_flow(coord, session.id(), &remote_addr).await {
-                            Ok(_) => {
-                                info!("✅ Media flow established, audio transmission active");
-                                
-                                // Start monitoring
-                                if let Err(e) = MediaControl::start_statistics_monitoring(
-                                    coord,
-                                    session.id(),
-                                    Duration::from_secs(5)
-                                ).await {
-                                    warn!("Failed to start statistics monitoring: {}", e);
-                                }
-                            }
-                            Err(e) => error!("Failed to establish media flow: {}", e),
-                        }
-                    }
-                    Err(e) => error!("Failed to parse SDP: {}", e),
-                }
-            }
-            
-            // Monitor call quality
-            let session_id = session.id().clone();
-            let coord_clone = coord.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(10));
-                loop {
-                    interval.tick().await;
-                    
-                    match MediaControl::get_media_statistics(&coord_clone, &session_id).await {
-                        Ok(Some(stats)) => {
-                            if let Some(rtp) = &stats.rtp_stats {
-                                info!("📊 RTP - Sent: {} pkts, Recv: {} pkts, Lost: {}",
-                                    rtp.packets_sent, rtp.packets_received, rtp.packets_lost);
-                            }
-                        }
-                        Ok(None) => break,
-                        Err(_) => break,
-                    }
-                }
-            });
         }
     }
     
@@ -198,8 +105,59 @@ async fn make_test_calls(
                             session.id(), 
                             Duration::from_secs(30)
                         ).await {
-                            Ok(_) => {
+                            Ok(()) => {
                                 info!("✅ Call answered successfully");
+                                
+                                // Get the session info to access media details
+                                if let Ok(Some(session_info)) = SessionControl::get_session(&coordinator, session.id()).await {
+                                    // Get media info which includes the remote SDP
+                                    if let Ok(Some(media_info)) = SessionControl::get_media_info(&coordinator, session.id()).await {
+                                        if let Some(remote_sdp) = media_info.remote_sdp {
+                                            match parse_sdp_connection(&remote_sdp) {
+                                                Ok(sdp_info) => {
+                                                    let remote_addr = format!("{}:{}", sdp_info.ip, sdp_info.port);
+                                                    info!("📡 Establishing media flow to {}", remote_addr);
+                                                    
+                                                    // Use MediaControl API
+                                                    match MediaControl::establish_media_flow(&coordinator, session.id(), &remote_addr).await {
+                                                        Ok(_) => {
+                                                            info!("✅ Media flow established, audio transmission active");
+                                                            
+                                                            // Start monitoring
+                                                            if let Err(e) = MediaControl::start_statistics_monitoring(
+                                                                &coordinator,
+                                                                session.id(),
+                                                                Duration::from_secs(5)
+                                                            ).await {
+                                                                warn!("Failed to start statistics monitoring: {}", e);
+                                                            }
+                                                        }
+                                                        Err(e) => error!("Failed to establish media flow: {}", e),
+                                                    }
+                                                }
+                                                Err(e) => error!("Failed to parse SDP: {}", e),
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                // Monitor call quality
+                                let session_id = session.id().clone();
+                                let coord_clone = coordinator.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                    
+                                    match MediaControl::get_media_statistics(&coord_clone, &session_id).await {
+                                        Ok(Some(stats)) => {
+                                            if let Some(rtp) = &stats.rtp_stats {
+                                                info!("📊 RTP - Sent: {} pkts, Recv: {} pkts, Lost: {}",
+                                                    rtp.packets_sent, rtp.packets_received, rtp.packets_lost);
+                                            }
+                                        }
+                                        Ok(None) => {},
+                                        Err(_) => {},
+                                    }
+                                });
                                 
                                 // Let the call run for the specified duration
                                 info!("📞 Call active for {} seconds...", call_duration.as_secs());
@@ -242,6 +200,44 @@ async fn make_test_calls(
     Ok(())
 }
 
+#[derive(Parser, Debug)]
+#[command(name = "uac_client_clean")]
+#[command(about = "Clean UAC Client demonstrating API best practices")]
+struct Args {
+    /// SIP listening port
+    #[arg(short, long, default_value = "5061")]
+    port: u16,
+    
+    /// Target SIP server (IP:port)
+    #[arg(short, long, default_value = "127.0.0.1:5062")]
+    target: String,
+    
+    /// Number of calls to make
+    #[arg(short = 'n', long, default_value = "1")]
+    num_calls: usize,
+    
+    /// Call duration in seconds
+    #[arg(short, long, default_value = "30")]
+    duration: u64,
+    
+    /// Delay between calls in seconds
+    #[arg(short = 'w', long, default_value = "2")]
+    delay: u64,
+    
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(short, long, default_value = "info")]
+    log_level: String,
+}
+
+/// Statistics for the UAC
+#[derive(Debug, Default)]
+struct UacStats {
+    calls_initiated: usize,
+    calls_connected: usize,
+    calls_failed: usize,
+    total_duration: Duration,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -274,9 +270,6 @@ async fn main() -> Result<()> {
         .with_handler(handler.clone())
         .build()
         .await?;
-    
-    // Store coordinator reference
-    handler.set_coordinator(coordinator.clone()).await;
     
     // Start the session manager
     SessionControl::start(&coordinator).await?;

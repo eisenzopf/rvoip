@@ -91,7 +91,12 @@ pub async fn create_test_session_manager_with_config(
     handler: Arc<dyn CallHandler>,
 ) -> Result<Arc<SessionCoordinator>, SessionError> {
     let port = get_test_ports().0;
-    let from_uri = format!("sip:{}", config.from_uri_base);
+    // Don't add sip: prefix if it's already there
+    let from_uri = if config.from_uri_base.starts_with("sip:") {
+        config.from_uri_base.clone()
+    } else {
+        format!("sip:{}", config.from_uri_base)
+    };
     
     let manager = SessionManagerBuilder::new()
         .with_local_address(&config.bind_address)
@@ -392,7 +397,7 @@ impl ManagerPerformanceHelper {
         for i in 0..manager_count {
             let handler = TestCallHandler::new(true);
             let config = ManagerTestConfig {
-                from_uri_base: format!("perf-test-{}@localhost", i),
+                from_uri_base: format!("sip:perf-test-{}@localhost", i),
                 ..ManagerTestConfig::default()
             };
             let manager = create_test_session_manager_with_config(config, Arc::new(handler)).await?;

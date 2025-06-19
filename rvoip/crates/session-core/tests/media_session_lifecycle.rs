@@ -24,12 +24,9 @@ async fn test_media_session_created_on_sip_establishment() {
     
     // Test media session creation (simulating SIP session establishment)
     let dialog_id = DialogId::new(&format!("sip-establish-{}", Uuid::new_v4()));
-    let session_config = rvoip_session_core::media::MediaConfig {
-        preferred_codecs: vec!["PCMU".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: false,
-    };
+    let mut session_config = rvoip_session_core::media::MediaConfig::default();
+    session_config.preferred_codecs = vec!["PCMU".to_string()];
+    session_config.dtmf_support = false;
     let local_addr = "127.0.0.1:30000".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &session_config,
@@ -59,12 +56,10 @@ async fn test_media_session_destroyed_on_sip_termination() {
     
     // Create media session (simulating SIP call establishment)
     let dialog_id = DialogId::new(&format!("sip-terminate-{}", Uuid::new_v4()));
-    let session_config = rvoip_session_core::media::MediaConfig {
-        preferred_codecs: vec!["PCMU".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: false,
-        dtmf_support: false,
-    };
+    let mut session_config = rvoip_session_core::media::MediaConfig::default();
+    session_config.preferred_codecs = vec!["PCMU".to_string()];
+    session_config.quality_monitoring = false;
+    session_config.dtmf_support = false;
     let local_addr = "127.0.0.1:30004".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &session_config,
@@ -97,12 +92,9 @@ async fn test_media_session_state_synchronization() {
     
     // Test media session state transitions (simulating SIP state changes)
     let dialog_id = DialogId::new(&format!("state-sync-{}", Uuid::new_v4()));
-    let session_config = rvoip_session_core::media::MediaConfig {
-        preferred_codecs: vec!["PCMU".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: false,
-    };
+    let mut session_config = rvoip_session_core::media::MediaConfig::default();
+    session_config.preferred_codecs = vec!["PCMU".to_string()];
+    session_config.dtmf_support = false;
     let local_addr = "127.0.0.1:30008".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &session_config,
@@ -142,12 +134,10 @@ async fn test_concurrent_media_session_lifecycle() {
     // Create multiple media sessions concurrently
     for i in 0..session_count {
         let dialog_id = DialogId::new(&format!("concurrent-{}-{}", i, Uuid::new_v4()));
-        let session_config = rvoip_session_core::media::MediaConfig {
-            preferred_codecs: vec!["PCMU".to_string()],
-            port_range: Some((10000, 20000)),
-            quality_monitoring: false,
-            dtmf_support: false,
-        };
+        let mut session_config = rvoip_session_core::media::MediaConfig::default();
+        session_config.preferred_codecs = vec!["PCMU".to_string()];
+        session_config.quality_monitoring = false;
+        session_config.dtmf_support = false;
         let local_addr = format!("127.0.0.1:3{}0{}", i + 1, i).parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,
@@ -195,12 +185,10 @@ async fn test_media_session_reinvite_handling() {
     
     // Establish initial media session (simulating initial SIP INVITE)
     let dialog_id = DialogId::new(&format!("reinvite-{}", Uuid::new_v4()));
-    let initial_config = rvoip_session_core::media::MediaConfig {
-        preferred_codecs: vec!["PCMU".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: false,
-        dtmf_support: false,
-    };
+    let mut initial_config = rvoip_session_core::media::MediaConfig::default();
+    initial_config.preferred_codecs = vec!["PCMU".to_string()];
+    initial_config.quality_monitoring = false;
+    initial_config.dtmf_support = false;
     let local_addr = "127.0.0.1:30012".parse().unwrap();
     let initial_media_config = rvoip_session_core::media::convert_to_media_core_config(
         &initial_config,
@@ -215,12 +203,10 @@ async fn test_media_session_reinvite_handling() {
     println!("✅ Initial media session: Dialog={}, Port={:?}", dialog_id, initial_port);
     
     // Simulate re-INVITE with different media parameters
-    let updated_config = rvoip_session_core::media::MediaConfig {
-        preferred_codecs: vec!["PCMA".to_string(), "PCMU".to_string()], // Different codec preference
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true, // Enable quality monitoring
-        dtmf_support: true,      // Enable DTMF support
-    };
+    let mut updated_config = rvoip_session_core::media::MediaConfig::default();
+    updated_config.preferred_codecs = vec!["PCMA".to_string(), "PCMU".to_string()]; // Different codec preference
+    updated_config.quality_monitoring = true; // Enable quality monitoring
+    updated_config.dtmf_support = true;      // Enable DTMF support
     let updated_media_config = rvoip_session_core::media::convert_to_media_core_config(
         &updated_config,
         local_addr,
@@ -262,12 +248,9 @@ async fn test_media_session_cleanup_on_abnormal_termination() {
     
     for (scenario_name, port) in scenarios {
         let dialog_id = DialogId::new(&format!("abnormal-{}-{}", scenario_name, Uuid::new_v4()));
-        let session_config = rvoip_session_core::media::MediaConfig {
-            preferred_codecs: vec!["PCMU".to_string()],
-            port_range: Some((10000, 20000)),
-            quality_monitoring: true,
-            dtmf_support: false,
-        };
+        let mut session_config = rvoip_session_core::media::MediaConfig::default();
+        session_config.preferred_codecs = vec!["PCMU".to_string()];
+        session_config.dtmf_support = false;
         let local_addr = format!("127.0.0.1:{}", port).parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,
@@ -320,12 +303,10 @@ async fn test_media_session_early_media_support() {
     let dialog_id = DialogId::new(&format!("early-media-{}", Uuid::new_v4()));
     
     // Phase 1: Early media setup (simulating 183 Session Progress with SDP)
-    let early_config = rvoip_session_core::media::MediaConfig {
-        preferred_codecs: vec!["PCMU".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: false,
-        dtmf_support: false,
-    };
+    let mut early_config = rvoip_session_core::media::MediaConfig::default();
+    early_config.preferred_codecs = vec!["PCMU".to_string()];
+    early_config.quality_monitoring = false;
+    early_config.dtmf_support = false;
     let local_addr = "127.0.0.1:30020".parse().unwrap();
     let early_media_config = rvoip_session_core::media::convert_to_media_core_config(
         &early_config,
@@ -345,12 +326,10 @@ async fn test_media_session_early_media_support() {
     println!("✅ Early media period simulated (ringback/announcements)");
     
     // Phase 2: Transition to full media (simulating 200 OK with SDP)
-    let full_config = rvoip_session_core::media::MediaConfig {
-        preferred_codecs: vec!["PCMU".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true, // Enable full monitoring for answered call
-        dtmf_support: true,      // Enable DTMF for answered call
-    };
+    let mut full_config = rvoip_session_core::media::MediaConfig::default();
+    full_config.preferred_codecs = vec!["PCMU".to_string()];
+    full_config.quality_monitoring = true; // Enable full monitoring for answered call
+    full_config.dtmf_support = true;      // Enable DTMF for answered call
     let full_media_config = rvoip_session_core::media::convert_to_media_core_config(
         &full_config,
         local_addr,
@@ -388,12 +367,10 @@ async fn test_media_session_resource_management() {
     // Phase 1: Create sessions up to reasonable limits
     for i in 0..max_sessions {
         let dialog_id = DialogId::new(&format!("resource-test-{}-{}", i, Uuid::new_v4()));
-        let session_config = rvoip_session_core::media::MediaConfig {
-            preferred_codecs: vec!["PCMU".to_string()],
-            port_range: Some((10000, 20000)),
-            quality_monitoring: i % 2 == 0, // Alternate quality monitoring
-            dtmf_support: i % 3 == 0,       // Alternate DTMF support
-        };
+        let mut session_config = rvoip_session_core::media::MediaConfig::default();
+        session_config.preferred_codecs = vec!["PCMU".to_string()];
+        session_config.quality_monitoring = i % 2 == 0; // Alternate quality monitoring
+        session_config.dtmf_support = i % 3 == 0;       // Alternate DTMF support
                  let local_addr = format!("127.0.0.1:{}", 31000 + i).parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,
@@ -450,12 +427,10 @@ async fn test_media_session_resource_management() {
     let reuse_count = 2;
     for i in 0..reuse_count {
         let dialog_id = DialogId::new(&format!("reuse-test-{}-{}", i, Uuid::new_v4()));
-        let session_config = rvoip_session_core::media::MediaConfig {
-            preferred_codecs: vec!["PCMU".to_string()],
-            port_range: Some((10000, 20000)),
-            quality_monitoring: true,
-            dtmf_support: true,
-        };
+        let mut session_config = rvoip_session_core::media::MediaConfig::default();
+        session_config.preferred_codecs = vec!["PCMU".to_string()];
+        session_config.quality_monitoring = true;
+        session_config.dtmf_support = true;
         let local_addr = format!("127.0.0.1:310{}", 30 + i).parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,

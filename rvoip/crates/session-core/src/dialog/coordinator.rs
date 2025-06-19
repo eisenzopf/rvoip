@@ -4,7 +4,7 @@
 //! handling event bridging and lifecycle management.
 
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use rvoip_dialog_core::{
     api::unified::UnifiedDialogApi,
     events::SessionCoordinationEvent,
@@ -17,6 +17,8 @@ use crate::api::{
 };
 use crate::manager::{registry::SessionRegistry, events::SessionEvent};
 use crate::dialog::{DialogError, DialogResult};
+use dashmap::DashMap;
+use tracing;
 
 /// Session dialog coordinator for automatic dialog lifecycle management
 /// (parallel to SessionMediaCoordinator)
@@ -26,6 +28,8 @@ pub struct SessionDialogCoordinator {
     handler: Option<Arc<dyn CallHandler>>,
     session_events_tx: mpsc::Sender<SessionEvent>,
     dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
+    // Store incoming SDP offers for negotiation
+    incoming_sdp_offers: Arc<DashMap<SessionId, String>>,
 }
 
 impl SessionDialogCoordinator {
@@ -36,6 +40,7 @@ impl SessionDialogCoordinator {
         handler: Option<Arc<dyn CallHandler>>,
         session_events_tx: mpsc::Sender<SessionEvent>,
         dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
+        incoming_sdp_offers: Arc<DashMap<SessionId, String>>,
     ) -> Self {
         Self {
             dialog_api,
@@ -43,6 +48,7 @@ impl SessionDialogCoordinator {
             handler,
             session_events_tx,
             dialog_to_session,
+            incoming_sdp_offers,
         }
     }
     
@@ -201,6 +207,11 @@ impl SessionDialogCoordinator {
                 received_at: std::time::Instant::now(),
             };
             
+            // Store the SDP offer if present
+            if let Some(ref sdp) = incoming_call.sdp {
+                self.incoming_sdp_offers.insert(session_id.clone(), sdp.clone());
+            }
+            
             let decision = handler.on_incoming_call(incoming_call).await;
             tracing::info!("Handler decision for session {}: {:?}", session_id, decision);
             self.process_call_decision(session_id, dialog_id, decision).await?;
@@ -220,13 +231,47 @@ impl SessionDialogCoordinator {
     ) -> DialogResult<()> {
         match decision {
             CallDecision::Accept(sdp_answer) => {
-                // Get the call handle for this dialog and answer it
+                // Get the call handle for this dialog
                 if let Ok(call_handle) = self.dialog_api.get_call_handle(&dialog_id).await {
-                    if let Err(e) = call_handle.answer(sdp_answer).await {
-                        tracing::error!("Failed to answer incoming call for session {}: {}", session_id, e);
-                        self.update_session_state(session_id, CallState::Failed(format!("Answer failed: {}", e))).await?;
+                    // If no SDP answer provided, request negotiation
+                    if sdp_answer.is_none() {
+                        // Get the stored incoming SDP offer
+                        if let Some(their_offer) = self.incoming_sdp_offers.get(&session_id) {
+                            tracing::info!("Requesting SDP negotiation for session {} as UAS", session_id);
+                            
+                            // Send negotiation request event
+                            self.send_session_event(SessionEvent::SdpNegotiationRequested {
+                                session_id: session_id.clone(),
+                                role: "uas".to_string(),
+                                local_sdp: None,
+                                remote_sdp: Some(their_offer.value().clone()),
+                            }).await?;
+                            
+                            // The negotiation will generate a "generated_sdp_answer" event
+                            // For now, we need to wait for that or use a placeholder
+                            tracing::warn!("Waiting for SDP negotiation to complete");
+                            
+                            // TODO: This is still async - we need a way to wait for the result
+                            // For now, just accept without SDP
+                            if let Err(e) = call_handle.answer(None).await {
+                                tracing::error!("Failed to answer incoming call for session {}: {}", session_id, e);
+                                self.update_session_state(session_id, CallState::Failed(format!("Answer failed: {}", e))).await?;
+                            }
+                        } else {
+                            // No offer stored, proceed with empty answer
+                            if let Err(e) = call_handle.answer(sdp_answer).await {
+                                tracing::error!("Failed to answer incoming call for session {}: {}", session_id, e);
+                                self.update_session_state(session_id, CallState::Failed(format!("Answer failed: {}", e))).await?;
+                            }
+                        }
                     } else {
-                        tracing::info!("Successfully answered incoming call for session {}", session_id);
+                        // SDP answer provided, use it directly
+                        if let Err(e) = call_handle.answer(sdp_answer).await {
+                            tracing::error!("Failed to answer incoming call for session {}: {}", session_id, e);
+                            self.update_session_state(session_id, CallState::Failed(format!("Answer failed: {}", e))).await?;
+                        } else {
+                            tracing::info!("Successfully answered incoming call for session {}", session_id);
+                        }
                     }
                 } else {
                     tracing::error!("Failed to get call handle for dialog {} to answer call", dialog_id);
@@ -980,6 +1025,7 @@ impl Clone for SessionDialogCoordinator {
             handler: self.handler.clone(),
             session_events_tx: self.session_events_tx.clone(),
             dialog_to_session: Arc::clone(&self.dialog_to_session),
+            incoming_sdp_offers: Arc::clone(&self.incoming_sdp_offers),
         }
     }
 }

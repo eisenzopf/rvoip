@@ -62,6 +62,22 @@ pub enum SessionEvent {
         offered_sdp: Option<String>,
     },
     
+    /// Media negotiated successfully
+    MediaNegotiated {
+        session_id: SessionId,
+        local_addr: std::net::SocketAddr,
+        remote_addr: std::net::SocketAddr,
+        codec: String,
+    },
+    
+    /// SDP negotiation requested
+    SdpNegotiationRequested {
+        session_id: SessionId,
+        role: String,  // "uac" or "uas"
+        local_sdp: Option<String>,
+        remote_sdp: Option<String>,
+    },
+    
     /// SDP event (offer, answer, or update)
     SdpEvent {
         session_id: SessionId,

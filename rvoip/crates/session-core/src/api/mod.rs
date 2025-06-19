@@ -428,7 +428,7 @@ pub use types::{
     SdpInfo, parse_sdp_connection,
 };
 pub use handlers::CallHandler;
-pub use builder::{SessionManagerBuilder, SessionManagerConfig};
+pub use builder::{SessionManagerBuilder, SessionManagerConfig, MediaConfig};
 pub use control::SessionControl;
 pub use media::MediaControl;
 pub use client::{SipClient, RegistrationHandle, SipResponse, SubscriptionHandle};

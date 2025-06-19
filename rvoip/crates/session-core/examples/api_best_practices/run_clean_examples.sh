@@ -174,14 +174,14 @@ main() {
     
     # Wait for server to be ready
     log_info "Waiting for server to be ready..."
-    for i in {1..10}; do
+    for i in {1..60}; do
         if grep -q "Clean UAS Server ready and listening" "$SERVER_LOG" 2>/dev/null; then
             log_success "Clean UAS server is ready"
             break
         fi
         sleep 1
-        if [ $i -eq 10 ]; then
-            log_error "Timeout waiting for clean UAS server to start"
+        if [ $i -eq 60 ]; then
+            log_error "Timeout waiting for clean UAS server to start (waited 60 seconds)"
             kill $SERVER_PID 2>/dev/null || true
             exit 1
         fi

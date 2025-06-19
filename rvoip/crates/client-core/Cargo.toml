@@ -59,4 +59,12 @@ advanced-codecs = []
 # Example configurations
 [[example]]
 name = "minimal_sip_client"
-path = "examples/minimal_sip_client.rs" 
+path = "examples/minimal_sip_client.rs"
+
+[[example]]
+name = "sipp_integration_sip_test_server"
+path = "examples/sipp_integration/sip_test_server.rs"
+
+[[example]]
+name = "media_preferences_demo"
+path = "examples/media_preferences_demo.rs" 

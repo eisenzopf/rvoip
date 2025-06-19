@@ -878,4 +878,67 @@ impl SessionControl for Arc<SessionCoordinator> {
         
         Ok(())
     }
+}
+
+/// Generate an SDP answer for an incoming call
+/// 
+/// This function is used when you need to generate an SDP answer based on
+/// your media preferences for an incoming call that was deferred.
+/// 
+/// # Arguments
+/// * `coordinator` - The session coordinator
+/// * `session_id` - The session to generate answer for  
+/// * `their_offer` - The SDP offer from the remote party
+/// 
+/// # Returns
+/// The generated SDP answer string
+/// 
+/// # Example
+/// ```rust
+/// // In deferred call handling
+/// let answer = generate_sdp_answer(
+///     &coordinator,
+///     &call.id,
+///     &call.sdp.unwrap()
+/// ).await?;
+/// 
+/// SessionControl::accept_incoming_call(&coordinator, &call, Some(answer)).await?;
+/// ```
+pub async fn generate_sdp_answer(
+    coordinator: &Arc<SessionCoordinator>,
+    session_id: &SessionId,
+    their_offer: &str,
+) -> Result<String> {
+    let (answer, _negotiated) = coordinator.negotiate_sdp_as_uas(session_id, their_offer).await?;
+    Ok(answer)
+}
+
+/// Get the negotiated media configuration for a session
+/// 
+/// Returns information about the negotiated codec, addresses, and other
+/// media parameters after SDP negotiation is complete.
+/// 
+/// # Arguments
+/// * `coordinator` - The session coordinator
+/// * `session_id` - The session to query
+/// 
+/// # Returns
+/// The negotiated configuration if available
+/// 
+/// # Example
+/// ```rust
+/// if let Some(config) = get_negotiated_media_config(
+///     &coordinator,
+///     &session_id
+/// ).await? {
+///     println!("Using codec: {}", config.codec);
+///     println!("Local RTP: {}", config.local_addr);
+///     println!("Remote RTP: {}", config.remote_addr);
+/// }
+/// ```
+pub async fn get_negotiated_media_config(
+    coordinator: &Arc<SessionCoordinator>,
+    session_id: &SessionId,
+) -> Result<Option<crate::sdp::NegotiatedMediaConfig>> {
+    Ok(coordinator.get_negotiated_config(session_id).await)
 } 

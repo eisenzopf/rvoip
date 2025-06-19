@@ -11,9 +11,13 @@
 
 use anyhow::Result;
 use clap::Parser;
-use rvoip_session_core::api::*;  // Single, clean import - everything we need
+use rvoip_session_core::api::{
+    CallHandler, CallDecision, IncomingCall, CallSession,
+    SessionManagerBuilder, SessionControl, MediaControl,
+    SessionCoordinator, parse_sdp_connection,
+};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{info, error, warn};
 

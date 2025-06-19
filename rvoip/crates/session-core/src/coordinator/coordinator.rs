@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, RwLock};
 use crate::api::{
     types::{SessionId, SessionStats, MediaInfo},
     handlers::CallHandler,
-    builder::SessionManagerConfig,
+    builder::{SessionManagerConfig, MediaConfig},
     bridge::BridgeEvent,
 };
 use crate::errors::{Result, SessionError};
@@ -17,8 +17,10 @@ use crate::manager::{
 use crate::dialog::{DialogManager, SessionDialogCoordinator, DialogBuilder};
 use crate::media::{MediaManager, SessionMediaCoordinator};
 use crate::conference::{ConferenceManager};
+use crate::sdp::{SdpNegotiator, NegotiatedMediaConfig, SdpRole};
 use rvoip_dialog_core::events::SessionCoordinationEvent;
 use std::collections::HashMap;
+use dashmap::DashMap;
 
 /// The main coordinator for the entire session system
 pub struct SessionCoordinator {
@@ -36,6 +38,9 @@ pub struct SessionCoordinator {
     pub dialog_coordinator: Arc<SessionDialogCoordinator>,
     pub media_coordinator: Arc<SessionMediaCoordinator>,
     
+    // SDP Negotiator
+    pub sdp_negotiator: Arc<SdpNegotiator>,
+    
     // User handler
     pub handler: Option<Arc<dyn CallHandler>>,
     
@@ -47,6 +52,9 @@ pub struct SessionCoordinator {
     
     // Bridge event subscribers
     pub bridge_event_subscribers: Arc<RwLock<Vec<mpsc::UnboundedSender<BridgeEvent>>>>,
+    
+    // Negotiated media configs
+    pub negotiated_configs: Arc<RwLock<HashMap<SessionId, NegotiatedMediaConfig>>>,
 }
 
 impl SessionCoordinator {
@@ -74,10 +82,32 @@ impl SessionCoordinator {
 
         // Create media subsystem
         let local_bind_addr = "127.0.0.1:0".parse().unwrap();
-        let media_manager = Arc::new(MediaManager::with_port_range(
+        
+        // Create media config from session config
+        let media_config = crate::media::types::MediaConfig {
+            preferred_codecs: config.media_config.preferred_codecs.clone(),
+            port_range: Some((config.media_port_start, config.media_port_end)),
+            quality_monitoring: true,
+            dtmf_support: config.media_config.dtmf_support,
+            echo_cancellation: config.media_config.echo_cancellation,
+            noise_suppression: config.media_config.noise_suppression,
+            auto_gain_control: config.media_config.auto_gain_control,
+            max_bandwidth_kbps: config.media_config.max_bandwidth_kbps,
+            preferred_ptime: config.media_config.preferred_ptime,
+            custom_sdp_attributes: config.media_config.custom_sdp_attributes.clone(),
+        };
+        
+        let media_manager = Arc::new(MediaManager::with_port_range_and_config(
             local_bind_addr,
             config.media_port_start,
             config.media_port_end,
+            media_config,
+        ));
+        
+        // Create SDP negotiator
+        let sdp_negotiator = Arc::new(SdpNegotiator::new(
+            config.media_config.clone(),
+            media_manager.clone(),
         ));
 
         // Create event channels
@@ -91,6 +121,7 @@ impl SessionCoordinator {
             handler.clone(),
             event_tx.clone(),
             dialog_to_session,
+            Arc::new(DashMap::new()),
         ));
 
         let media_coordinator = Arc::new(SessionMediaCoordinator::new(
@@ -109,10 +140,12 @@ impl SessionCoordinator {
             conference_manager,
             dialog_coordinator,
             media_coordinator,
+            sdp_negotiator,
             handler,
             config,
             event_tx: event_tx.clone(),
             bridge_event_subscribers: Arc::new(RwLock::new(Vec::new())),
+            negotiated_configs: Arc::new(RwLock::new(HashMap::new())),
         });
 
         // Initialize subsystems
@@ -201,6 +234,63 @@ impl SessionCoordinator {
         self.media_coordinator.on_session_terminated(session_id).await
             .map_err(|e| SessionError::internal(&format!("Failed to stop media: {}", e)))?;
         Ok(())
+    }
+
+    /// Negotiate SDP as UAC (we sent offer, received answer)
+    pub async fn negotiate_sdp_as_uac(
+        &self,
+        session_id: &SessionId,
+        our_offer: &str,
+        their_answer: &str,
+    ) -> Result<NegotiatedMediaConfig> {
+        let negotiated = self.sdp_negotiator.negotiate_as_uac(
+            session_id,
+            our_offer,
+            their_answer,
+        ).await?;
+        
+        // Store negotiated config
+        self.negotiated_configs.write().await.insert(session_id.clone(), negotiated.clone());
+        
+        // Emit event
+        let _ = self.event_tx.send(SessionEvent::MediaNegotiated {
+            session_id: session_id.clone(),
+            local_addr: negotiated.local_addr,
+            remote_addr: negotiated.remote_addr,
+            codec: negotiated.codec.clone(),
+        }).await;
+        
+        Ok(negotiated)
+    }
+    
+    /// Negotiate SDP as UAS (we received offer, generate answer)
+    pub async fn negotiate_sdp_as_uas(
+        &self,
+        session_id: &SessionId,
+        their_offer: &str,
+    ) -> Result<(String, NegotiatedMediaConfig)> {
+        let (answer, negotiated) = self.sdp_negotiator.negotiate_as_uas(
+            session_id,
+            their_offer,
+        ).await?;
+        
+        // Store negotiated config
+        self.negotiated_configs.write().await.insert(session_id.clone(), negotiated.clone());
+        
+        // Emit event
+        let _ = self.event_tx.send(SessionEvent::MediaNegotiated {
+            session_id: session_id.clone(),
+            local_addr: negotiated.local_addr,
+            remote_addr: negotiated.remote_addr,
+            codec: negotiated.codec.clone(),
+        }).await;
+        
+        Ok((answer, negotiated))
+    }
+    
+    /// Get negotiated media configuration for a session
+    pub async fn get_negotiated_config(&self, session_id: &SessionId) -> Option<NegotiatedMediaConfig> {
+        self.negotiated_configs.read().await.get(session_id).cloned()
     }
 }
 

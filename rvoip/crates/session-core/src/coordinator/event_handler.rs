@@ -55,6 +55,10 @@ impl SessionCoordinator {
                 self.handle_sdp_event(session_id, event_type, sdp).await?;
             }
             
+            SessionEvent::SdpNegotiationRequested { session_id, role, local_sdp, remote_sdp } => {
+                self.handle_sdp_negotiation_request(session_id, role, local_sdp, remote_sdp).await?;
+            }
+            
             SessionEvent::RegistrationRequest { transaction_id, from_uri, contact_uri, expires } => {
                 self.handle_registration_request(transaction_id, from_uri, contact_uri, expires).await?;
             }
@@ -258,7 +262,27 @@ impl SessionCoordinator {
         tracing::debug!("SDP event for session {}: {}", session_id, event_type);
 
         match event_type.as_str() {
-            "remote_sdp_answer" | "final_negotiated_sdp" => {
+            "remote_sdp_answer" => {
+                // For UAC: we sent offer, received answer - negotiate
+                if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                    // Get our offer from media manager
+                    if let Ok(Some(media_info)) = self.media_manager.get_media_info(&session_id).await {
+                        if let Some(our_offer) = media_info.local_sdp {
+                            tracing::info!("Negotiating SDP as UAC for session {}", session_id);
+                            match self.negotiate_sdp_as_uac(&session_id, &our_offer, &sdp).await {
+                                Ok(negotiated) => {
+                                    tracing::info!("SDP negotiation successful: codec={}, local={}, remote={}", 
+                                        negotiated.codec, negotiated.local_addr, negotiated.remote_addr);
+                                }
+                                Err(e) => {
+                                    tracing::error!("SDP negotiation failed: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "final_negotiated_sdp" => {
                 if let Ok(Some(_)) = self.media_manager.get_media_info(&session_id).await {
                     if let Err(e) = self.media_manager.update_media_session(&session_id, &sdp).await {
                         tracing::error!("Failed to update media session with SDP: {}", e);
@@ -287,6 +311,60 @@ impl SessionCoordinator {
         
         // For now, we just log it - the application should subscribe to SessionEvent::RegistrationRequest
         // and handle it appropriately by sending a response back through dialog-core
+        
+        Ok(())
+    }
+
+    /// Handle SDP negotiation request
+    async fn handle_sdp_negotiation_request(
+        &self,
+        session_id: SessionId,
+        role: String,
+        local_sdp: Option<String>,
+        remote_sdp: Option<String>,
+    ) -> Result<()> {
+        tracing::info!("SDP negotiation requested for session {} as {}", session_id, role);
+        
+        match role.as_str() {
+            "uas" => {
+                // We're the UAS - received offer, need to generate answer
+                if let Some(their_offer) = remote_sdp {
+                    match self.negotiate_sdp_as_uas(&session_id, &their_offer).await {
+                        Ok((our_answer, negotiated)) => {
+                            tracing::info!("SDP negotiation as UAS successful: codec={}, local={}, remote={}", 
+                                negotiated.codec, negotiated.local_addr, negotiated.remote_addr);
+                            
+                            // Send event with the generated answer
+                            let _ = self.event_tx.send(SessionEvent::SdpEvent {
+                                session_id,
+                                event_type: "generated_sdp_answer".to_string(),
+                                sdp: our_answer,
+                            }).await;
+                        }
+                        Err(e) => {
+                            tracing::error!("SDP negotiation as UAS failed: {}", e);
+                        }
+                    }
+                }
+            }
+            "uac" => {
+                // We're the UAC - sent offer, received answer
+                if let (Some(our_offer), Some(their_answer)) = (local_sdp, remote_sdp) {
+                    match self.negotiate_sdp_as_uac(&session_id, &our_offer, &their_answer).await {
+                        Ok(negotiated) => {
+                            tracing::info!("SDP negotiation as UAC successful: codec={}, local={}, remote={}", 
+                                negotiated.codec, negotiated.local_addr, negotiated.remote_addr);
+                        }
+                        Err(e) => {
+                            tracing::error!("SDP negotiation as UAC failed: {}", e);
+                        }
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!("Unknown SDP negotiation role: {}", role);
+            }
+        }
         
         Ok(())
     }

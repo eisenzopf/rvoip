@@ -77,12 +77,16 @@ impl SessionManager {
         // Create session events channel (for coordinator to event processor communication)
         let (session_events_tx, session_events_rx) = mpsc::channel(1000);
         
+        // Create storage for incoming SDP offers
+        let incoming_sdp_offers = Arc::new(dashmap::DashMap::new());
+        
         let dialog_coordinator = Arc::new(SessionDialogCoordinator::new(
             dialog_api,
             registry.clone(),
             handler.clone(),
             session_events_tx.clone(),
             dialog_to_session,
+            incoming_sdp_offers,
         ));
 
         // Create media manager with proper configuration

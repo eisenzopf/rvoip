@@ -96,13 +96,38 @@ pub struct CodecInfo {
     pub channels: u8,
 }
 
-/// Session-core specific media configuration (wrapper)
+/// Media configuration for session management
 #[derive(Debug, Clone)]
 pub struct MediaConfig {
+    /// Preferred codecs in priority order
     pub preferred_codecs: Vec<String>,
+    
+    /// RTP port range for media sessions
     pub port_range: Option<(RtpPort, RtpPort)>,
+    
+    /// Enable quality monitoring and metrics collection
     pub quality_monitoring: bool,
+    
+    /// Enable DTMF support
     pub dtmf_support: bool,
+    
+    /// Enable echo cancellation
+    pub echo_cancellation: bool,
+    
+    /// Enable noise suppression
+    pub noise_suppression: bool,
+    
+    /// Enable automatic gain control
+    pub auto_gain_control: bool,
+    
+    /// Maximum bandwidth in kbps
+    pub max_bandwidth_kbps: Option<u32>,
+    
+    /// Preferred packetization time
+    pub preferred_ptime: Option<u8>,
+    
+    /// Custom SDP attributes for advanced use cases
+    pub custom_sdp_attributes: std::collections::HashMap<String, String>,
 }
 
 impl Default for MediaConfig {
@@ -112,6 +137,12 @@ impl Default for MediaConfig {
             port_range: Some((10000, 20000)),
             quality_monitoring: true,
             dtmf_support: true,
+            echo_cancellation: true,
+            noise_suppression: true,
+            auto_gain_control: true,
+            max_bandwidth_kbps: None,
+            preferred_ptime: Some(20),
+            custom_sdp_attributes: std::collections::HashMap::new(),
         }
     }
 }

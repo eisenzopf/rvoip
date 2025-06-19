@@ -42,6 +42,12 @@ impl MediaConfigConverter {
                     channels: 1,
                 },
                 CodecInfo {
+                    name: "G722".to_string(),
+                    payload_type: 9,
+                    sample_rate: 8000,
+                    channels: 1,
+                },
+                CodecInfo {
                     name: "opus".to_string(),
                     payload_type: 96,
                     sample_rate: 48000,
@@ -68,6 +74,19 @@ impl MediaConfigConverter {
         }
     }
     
+    /// Create converter with codec preferences from MediaConfig
+    pub fn with_media_config(media_config: &super::types::MediaConfig) -> Self {
+        let mut converter = Self::new();
+        if !media_config.preferred_codecs.is_empty() {
+            converter.codec_preferences = media_config.preferred_codecs.clone();
+        }
+        // Apply port range if specified
+        if let Some(port_range) = media_config.port_range {
+            converter.port_range = port_range;
+        }
+        converter
+    }
+    
     /// Generate SDP offer from media capabilities
     /// 
     /// This will be expanded with logic from src-old/media/config.rs
@@ -75,7 +94,20 @@ impl MediaConfigConverter {
     pub fn generate_sdp_offer(&self, local_ip: &str, local_port: RtpPort) -> super::MediaResult<String> {
         tracing::debug!("Generating SDP offer for {}:{}", local_ip, local_port);
         
-        // TODO: Adapt from src-old/media/config.rs SDP generation logic
+        // Order codecs based on preferences
+        let mut ordered_codecs = Vec::new();
+        for pref_name in &self.codec_preferences {
+            if let Some(codec) = self.supported_codecs.iter().find(|c| &c.name == pref_name) {
+                ordered_codecs.push(codec.clone());
+            }
+        }
+        // Add any remaining codecs not in preferences
+        for codec in &self.supported_codecs {
+            if !ordered_codecs.iter().any(|c| c.name == codec.name) {
+                ordered_codecs.push(codec.clone());
+            }
+        }
+        
         let mut sdp = String::new();
         
         // SDP version
@@ -96,15 +128,15 @@ impl MediaConfigConverter {
         // Time
         sdp.push_str("t=0 0\r\n");
         
-        // Media description
+        // Media description - codecs in preference order
         sdp.push_str(&format!("m=audio {} RTP/AVP", local_port));
-        for codec in &self.supported_codecs {
+        for codec in &ordered_codecs {
             sdp.push_str(&format!(" {}", codec.payload_type));
         }
         sdp.push_str("\r\n");
         
-        // RTP map attributes
-        for codec in &self.supported_codecs {
+        // RTP map attributes - in preference order
+        for codec in &ordered_codecs {
             if codec.channels == 1 {
                 sdp.push_str(&format!("a=rtpmap:{} {}/{}\r\n", 
                                     codec.payload_type, codec.name, codec.sample_rate));
@@ -257,6 +289,12 @@ impl MediaConfigConverter {
             port_range: Some(self.port_range),
             quality_monitoring: true,
             dtmf_support: true,
+            echo_cancellation: true,
+            noise_suppression: true,
+            auto_gain_control: true,
+            max_bandwidth_kbps: None,
+            preferred_ptime: Some(20),
+            custom_sdp_attributes: std::collections::HashMap::new(),
         }
     }
     

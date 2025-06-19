@@ -8,6 +8,7 @@ pub mod api;
 pub mod session;
 pub mod dialog;        // NEW - dialog-core integration
 pub mod media;         // EXISTING - media-core integration
+pub mod sdp;           // NEW - SDP negotiation engine
 pub mod manager;       // SIMPLIFIED - orchestration only
 pub mod coordination;
 pub mod bridge;

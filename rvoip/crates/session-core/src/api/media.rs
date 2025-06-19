@@ -625,24 +625,46 @@ impl MediaControl for Arc<SessionCoordinator> {
             self.create_media_session(session_id).await?;
         }
         
-        // Update with the offer
-        self.update_remote_sdp(session_id, offer).await?;
+        // Get the allocated RTP port for this session
+        let media_info = media_manager.get_media_info(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to get media info: {}", e) 
+            })?
+            .ok_or_else(|| crate::errors::SessionError::MediaIntegration { 
+                message: "Media session not found".to_string() 
+            })?;
         
-        // Generate answer based on our capabilities and the offer
-        // For now, we'll generate a standard offer which acts as our answer
-        let answer = media_manager.generate_sdp_offer(session_id).await
+        let local_port = media_info.local_rtp_port
+            .ok_or_else(|| crate::errors::SessionError::MediaIntegration { 
+                message: "No local RTP port allocated".to_string() 
+            })?;
+        
+        // Generate answer using MediaConfigConverter with our media config
+        use crate::media::config::MediaConfigConverter;
+        let converter = MediaConfigConverter::with_media_config(&media_manager.media_config);
+        
+        let local_ip = media_manager.local_bind_addr.ip().to_string();
+        let answer = converter.generate_sdp_answer(offer, &local_ip, local_port)
             .map_err(|e| crate::errors::SessionError::MediaIntegration { 
                 message: format!("Failed to generate SDP answer: {}", e) 
             })?;
         
-        // Store our local SDP
+        // Store both the offer and our answer
         {
             let mut sdp_storage = media_manager.sdp_storage.write().await;
             let entry = sdp_storage.entry(session_id.clone()).or_insert((None, None));
-            entry.0 = Some(answer.clone());
+            entry.0 = Some(answer.clone());  // Our answer
+            entry.1 = Some(offer.to_string()); // Their offer
         }
         
-        tracing::info!("Generated SDP answer for session {}", session_id);
+        // Update media session with the offer to configure remote endpoint
+        media_manager.update_media_session(session_id, offer).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to update media session: {}", e) 
+            })?;
+        
+        tracing::info!("Generated SDP answer for session {} with codecs: {:?}", 
+                      session_id, media_manager.media_config.preferred_codecs);
         Ok(answer)
     }
 }

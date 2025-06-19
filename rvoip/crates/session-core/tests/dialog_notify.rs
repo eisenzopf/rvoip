@@ -119,7 +119,7 @@ async fn test_notify_error_handling() {
     
     // Operations that might involve NOTIFY should fail appropriately
     let transfer_result = manager_a.transfer_session(&fake_session_id, "sip:target@127.0.0.1").await;
-    assert!(transfer_result.is_ok()); // Note: transfer is currently a stub that returns Ok()
+    assert!(transfer_result.is_err()); // Should fail because session doesn't exist
     
     let dtmf_result = manager_a.send_dtmf(&fake_session_id, "123").await;
     assert!(dtmf_result.is_err());

@@ -1,7 +1,7 @@
-//! Call control operations for the client-core library
-//! 
-//! This module contains all call control operations including hold/resume,
-//! DTMF transmission, call transfer, and capabilities management.
+// Call control operations for the client-core library
+// 
+// This module contains all call control operations including hold/resume,
+// DTMF transmission, call transfer, and capabilities management.
 
 use chrono::Utc;
 
@@ -16,7 +16,7 @@ use crate::{
     call::CallId,
 };
 
-use super::types::*;
+use crate::client::types::*;
 
 /// Call control operations implementation for ClientManager
 impl super::manager::ClientManager {

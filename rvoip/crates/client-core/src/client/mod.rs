@@ -234,19 +234,24 @@
 //! # }
 //! ```
 
-pub mod config;
-pub mod manager;
-pub mod types;
 pub mod calls;
-pub mod events;
-pub mod media;
+pub mod config;
 pub mod controls;
-pub mod tests;
-pub mod builder;
+pub mod events;
+pub mod manager;
+pub mod media;
+pub mod media_builder;
 pub mod recovery;
+pub mod registration;
+pub mod types;
+pub mod builder;
 
-// Re-export the main ClientManager
+#[cfg(test)]
+pub mod tests;
+
 pub use manager::ClientManager;
+pub use config::{ClientConfig, MediaConfig, MediaPreset};
+pub use media_builder::MediaConfigBuilder;
 
 // Re-export all types from types.rs
 pub use types::{

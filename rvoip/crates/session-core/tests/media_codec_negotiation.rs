@@ -35,12 +35,8 @@ async fn test_pcmu_codec_negotiation() {
     
     // Test real media session with PCMU
     let dialog_id = DialogId::new(&format!("pcmu-test-{}", Uuid::new_v4()));
-    let session_config = MediaConfig {
-        preferred_codecs: vec!["PCMU".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: true,
-    };
+    let mut session_config = MediaConfig::default();
+    session_config.preferred_codecs = vec!["PCMU".to_string()];
     let local_addr = "127.0.0.1:10004".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &session_config,
@@ -78,12 +74,8 @@ async fn test_pcma_codec_negotiation() {
     
     // Test real media session with PCMA
     let dialog_id = DialogId::new(&format!("pcma-test-{}", Uuid::new_v4()));
-    let session_config = MediaConfig {
-        preferred_codecs: vec!["PCMA".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: true,
-    };
+    let mut session_config = MediaConfig::default();
+    session_config.preferred_codecs = vec!["PCMA".to_string()];
     let local_addr = "127.0.0.1:10008".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &session_config,
@@ -123,12 +115,8 @@ async fn test_opus_codec_negotiation() {
     
     // Test real media session with Opus
     let dialog_id = DialogId::new(&format!("opus-test-{}", Uuid::new_v4()));
-    let session_config = MediaConfig {
-        preferred_codecs: vec!["Opus".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: true,
-    };
+    let mut session_config = MediaConfig::default();
+    session_config.preferred_codecs = vec!["Opus".to_string()];
     let local_addr = "127.0.0.1:10012".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &session_config,
@@ -162,12 +150,8 @@ async fn test_g729_codec_negotiation() {
     
     // Test real media session with G.729
     let dialog_id = DialogId::new(&format!("g729-test-{}", Uuid::new_v4()));
-    let session_config = MediaConfig {
-        preferred_codecs: vec!["G.729".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: true,
-    };
+    let mut session_config = MediaConfig::default();
+    session_config.preferred_codecs = vec!["G.729".to_string()];
     let local_addr = "127.0.0.1:10016".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &session_config,
@@ -201,12 +185,8 @@ async fn test_codec_preference_negotiation() {
     
     for (i, preferences) in preference_scenarios.iter().enumerate() {
         let dialog_id = DialogId::new(&format!("pref-test-{}-{}", i, Uuid::new_v4()));
-        let session_config = MediaConfig {
-            preferred_codecs: preferences.clone(),
-            port_range: Some((10000, 20000)),
-            quality_monitoring: true,
-            dtmf_support: true,
-        };
+        let mut session_config = MediaConfig::default();
+        session_config.preferred_codecs = preferences.clone();
         let local_addr = format!("127.0.0.1:{}", 10020 + i * 4).parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,
@@ -267,12 +247,8 @@ async fn test_dynamic_codec_renegotiation() {
     let dialog_id = DialogId::new(&format!("renego-test-{}", Uuid::new_v4()));
     
     // Start with PCMU
-    let initial_config = MediaConfig {
-        preferred_codecs: vec!["PCMU".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: true,
-    };
+    let mut initial_config = MediaConfig::default();
+    initial_config.preferred_codecs = vec!["PCMU".to_string()];
     let local_addr = "127.0.0.1:10040".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &initial_config,
@@ -288,12 +264,8 @@ async fn test_dynamic_codec_renegotiation() {
     // Stop and restart with different codec (simulating re-INVITE)
     media_engine.stop_media(&dialog_id).await.unwrap();
     
-    let new_config = MediaConfig {
-        preferred_codecs: vec!["Opus".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: true,
-    };
+    let mut new_config = MediaConfig::default();
+    new_config.preferred_codecs = vec!["Opus".to_string()];
     let new_media_config = rvoip_session_core::media::convert_to_media_core_config(
         &new_config,
         local_addr,
@@ -316,12 +288,8 @@ async fn test_codec_negotiation_failures() {
     
     // Test with unsupported codec
     let dialog_id = DialogId::new(&format!("fail-test-{}", Uuid::new_v4()));
-    let unsupported_config = MediaConfig {
-        preferred_codecs: vec!["UnsupportedCodec".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: true,
-    };
+    let mut unsupported_config = MediaConfig::default();
+    unsupported_config.preferred_codecs = vec!["UnsupportedCodec".to_string()];
     let local_addr = "127.0.0.1:10044".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &unsupported_config,
@@ -353,12 +321,8 @@ async fn test_cross_codec_transcoding() {
     
     for (i, codec) in codecs.iter().enumerate() {
         let dialog_id = DialogId::new(&format!("transcode-{}-{}", codec, Uuid::new_v4()));
-        let session_config = MediaConfig {
-            preferred_codecs: vec![codec.to_string()],
-            port_range: Some((10000, 20000)),
-            quality_monitoring: true,
-            dtmf_support: true,
-        };
+        let mut session_config = MediaConfig::default();
+        session_config.preferred_codecs = vec![codec.to_string()];
         let local_addr = format!("127.0.0.1:{}", 10050 + i * 4).parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,
@@ -388,12 +352,8 @@ async fn test_codec_performance_validation() {
     // Test performance for each supported codec
     for codec in &capabilities.codecs {
         let dialog_id = DialogId::new(&format!("perf-{}-{}", codec.name, Uuid::new_v4()));
-        let session_config = MediaConfig {
-            preferred_codecs: vec![codec.name.clone()],
-            port_range: Some((10000, 20000)),
-            quality_monitoring: true,
-            dtmf_support: true,
-        };
+        let mut session_config = MediaConfig::default();
+        session_config.preferred_codecs = vec![codec.name.clone()];
         let local_addr = "127.0.0.1:10070".parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,
@@ -462,12 +422,8 @@ async fn test_codec_preference_order() {
     
     for (scenario_name, preferred_codecs) in pcmu_scenarios {
         let dialog_id = DialogId::new(&format!("codec-pref-{}-{}", scenario_name, Uuid::new_v4()));
-        let session_config = MediaConfig {
-            preferred_codecs: preferred_codecs.iter().map(|s| s.to_string()).collect(),
-            port_range: Some((10000, 20000)),
-            quality_monitoring: true,
-            dtmf_support: true,
-        };
+        let mut session_config = MediaConfig::default();
+        session_config.preferred_codecs = preferred_codecs.iter().map(|s| s.to_string()).collect();
         let local_addr = "127.0.0.1:10004".parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,
@@ -490,12 +446,8 @@ async fn test_codec_compatibility_fallback() {
     
     // Test compatibility scenarios
     let dialog_id = DialogId::new(&format!("codec-fallback-{}", Uuid::new_v4()));
-    let session_config = MediaConfig {
-        preferred_codecs: vec!["PCMU".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: true,
-    };
+    let mut session_config = MediaConfig::default();
+    session_config.preferred_codecs = vec!["PCMU".to_string()];
     let local_addr = "127.0.0.1:10004".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &session_config,
@@ -510,12 +462,8 @@ async fn test_codec_compatibility_fallback() {
     // Test fallback by restarting with different config
     media_engine.stop_media(&dialog_id).await.unwrap();
     
-    let new_config = MediaConfig {
-        preferred_codecs: vec!["PCMA".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: true,
-    };
+    let mut new_config = MediaConfig::default();
+    new_config.preferred_codecs = vec!["PCMA".to_string()];
     let new_media_config = rvoip_session_core::media::convert_to_media_core_config(
         &new_config,
         local_addr,
@@ -537,12 +485,8 @@ async fn test_dynamic_codec_switching() {
     
     // Test codec switching scenarios
     let dialog_id = DialogId::new(&format!("codec-switch-{}", Uuid::new_v4()));
-    let session_config = MediaConfig {
-        preferred_codecs: vec!["PCMU".to_string()],
-        port_range: Some((10000, 20000)),
-        quality_monitoring: true,
-        dtmf_support: true,
-    };
+    let mut session_config = MediaConfig::default();
+    session_config.preferred_codecs = vec!["PCMU".to_string()];
     let local_addr = "127.0.0.1:10004".parse().unwrap();
     let media_config = rvoip_session_core::media::convert_to_media_core_config(
         &session_config,
@@ -576,12 +520,8 @@ async fn test_concurrent_codec_negotiation() {
     // Create concurrent sessions with different codec preferences
     for i in 0..session_count {
         let dialog_id = DialogId::new(&format!("concurrent-codec-{}-{}", i, Uuid::new_v4()));
-        let session_config = MediaConfig {
-            preferred_codecs: codec_combinations[i].iter().map(|s| s.to_string()).collect(),
-            port_range: Some((10000, 20000)),
-            quality_monitoring: true,
-            dtmf_support: true,
-        };
+        let mut session_config = MediaConfig::default();
+        session_config.preferred_codecs = codec_combinations[i].iter().map(|s| s.to_string()).collect();
         let local_addr = "127.0.0.1:10004".parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,
@@ -617,12 +557,8 @@ async fn test_codec_negotiation_performance() {
     // Rapid codec negotiation testing
     for i in 0..performance_session_count {
         let dialog_id = DialogId::new(&format!("perf-codec-{}-{}", i, Uuid::new_v4()));
-        let session_config = MediaConfig {
-            preferred_codecs: vec!["PCMU".to_string()],
-            port_range: Some((10000, 20000)),
-            quality_monitoring: true,
-            dtmf_support: true,
-        };
+        let mut session_config = MediaConfig::default();
+        session_config.preferred_codecs = vec!["PCMU".to_string()];
         let local_addr = "127.0.0.1:10004".parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,
@@ -663,12 +599,8 @@ async fn test_codec_bandwidth_optimization() {
     
     for (scenario_name, codecs) in bandwidth_scenarios {
         let dialog_id = DialogId::new(&format!("bandwidth-{}-{}", scenario_name, Uuid::new_v4()));
-        let session_config = MediaConfig {
-            preferred_codecs: codecs.iter().map(|s| s.to_string()).collect(),
-            port_range: Some((10000, 20000)),
-            quality_monitoring: true,
-            dtmf_support: true,
-        };
+        let mut session_config = MediaConfig::default();
+        session_config.preferred_codecs = codecs.iter().map(|s| s.to_string()).collect();
         let local_addr = "127.0.0.1:10004".parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,

@@ -146,6 +146,14 @@ impl SessionCoordinator {
                 self.handle_rtp_buffer_pool_update(stats).await?;
             }
             
+            SessionEvent::MediaNegotiated { session_id, local_addr, remote_addr, codec } => {
+                self.handle_media_negotiated(session_id, local_addr, remote_addr, codec).await?;
+            }
+            
+            SessionEvent::SdpNegotiationRequested { session_id, role, local_sdp, remote_sdp } => {
+                self.handle_sdp_negotiation_requested(session_id, role, local_sdp, remote_sdp).await?;
+            }
+            
             SessionEvent::RegistrationRequest { .. } => {
                 // Registration requests are handled by the main coordinator
                 // and forwarded to the application
@@ -557,6 +565,56 @@ impl SessionCoordinator {
         if stats.available_buffers == 0 {
             tracing::warn!("RTP buffer pool exhausted - all {} buffers in use", stats.total_buffers);
             // Could trigger automatic pool expansion or session throttling
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle media negotiated event
+    async fn handle_media_negotiated(
+        &self,
+        session_id: SessionId,
+        local_addr: std::net::SocketAddr,
+        remote_addr: std::net::SocketAddr,
+        codec: String,
+    ) -> Result<(), SessionError> {
+        tracing::info!(
+            "Media negotiated for session {}: codec={}, local={}, remote={}",
+            session_id, codec, local_addr, remote_addr
+        );
+        
+        // Media has been successfully negotiated
+        // This typically happens after SDP offer/answer exchange
+        // The media session should already be configured at this point
+        
+        Ok(())
+    }
+    
+    /// Handle SDP negotiation requested event
+    async fn handle_sdp_negotiation_requested(
+        &self,
+        session_id: SessionId,
+        role: String,
+        local_sdp: Option<String>,
+        remote_sdp: Option<String>,
+    ) -> Result<(), SessionError> {
+        tracing::info!(
+            "SDP negotiation requested for session {}: role={}, has_local={}, has_remote={}",
+            session_id, role, local_sdp.is_some(), remote_sdp.is_some()
+        );
+        
+        // This event is typically sent when the dialog layer needs SDP negotiation
+        // For now, we'll just log it as the actual negotiation happens in the dialog layer
+        match role.as_str() {
+            "uac" => {
+                tracing::debug!("UAC-side SDP negotiation for session {}", session_id);
+            }
+            "uas" => {
+                tracing::debug!("UAS-side SDP negotiation for session {}", session_id);
+            }
+            _ => {
+                tracing::warn!("Unknown SDP negotiation role '{}' for session {}", role, session_id);
+            }
         }
         
         Ok(())

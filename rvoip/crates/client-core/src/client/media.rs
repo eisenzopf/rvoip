@@ -864,6 +864,16 @@ impl super::manager::ClientManager {
                 reason: "SDP offer cannot be empty".to_string() 
             });
         }
+        
+        // Before generating SDP answer, configure session-core with our media preferences
+        // This ensures the generated SDP reflects our configured codecs and capabilities
+        
+        // TODO: Once session-core supports setting codec preferences per-session,
+        // we would do something like:
+        // MediaControl::set_session_codecs(&self.coordinator, &session_id, &self.media_config.preferred_codecs).await?;
+        
+        // For now, session-core will use the codecs configured during initialization
+        // The media config was passed when building the SessionCoordinator
             
         // Use session-core to generate SDP answer
         let sdp_answer = MediaControl::generate_sdp_answer(&self.coordinator, &session_id, offer)
@@ -871,6 +881,9 @@ impl super::manager::ClientManager {
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to generate SDP answer: {}", e) 
             })?;
+            
+        // Post-process the SDP if needed based on media configuration
+        let sdp_answer = self.apply_media_config_to_sdp(sdp_answer).await;
             
         // Update call metadata
         if let Some(mut call_info) = self.call_info.get_mut(call_id) {
@@ -880,6 +893,66 @@ impl super::manager::ClientManager {
         
         tracing::info!("Generated SDP answer for call {}: {} bytes", call_id, sdp_answer.len());
         Ok(sdp_answer)
+    }
+    
+    /// Apply media configuration to generated SDP
+    async fn apply_media_config_to_sdp(&self, mut sdp: String) -> String {
+        // Add custom attributes if configured
+        if !self.media_config.custom_sdp_attributes.is_empty() {
+            let mut lines: Vec<String> = sdp.lines().map(|s| s.to_string()).collect();
+            
+            // Find where to insert attributes (after the first m= line)
+            if let Some(m_line_idx) = lines.iter().position(|line| line.starts_with("m=")) {
+                let mut insert_idx = m_line_idx + 1;
+                
+                // Insert custom attributes
+                for (key, value) in &self.media_config.custom_sdp_attributes {
+                    lines.insert(insert_idx, format!("{}:{}", key, value));
+                    insert_idx += 1;
+                }
+            }
+            
+            sdp = lines.join("\r\n");
+            if !sdp.ends_with("\r\n") {
+                sdp.push_str("\r\n");
+            }
+        }
+        
+        // Add bandwidth constraint if configured
+        if let Some(max_bw) = self.media_config.max_bandwidth_kbps {
+            if !sdp.contains("b=AS:") {
+                let mut lines: Vec<String> = sdp.lines().map(|s| s.to_string()).collect();
+                
+                // Insert bandwidth after c= line
+                if let Some(c_line_idx) = lines.iter().position(|line| line.starts_with("c=")) {
+                    lines.insert(c_line_idx + 1, format!("b=AS:{}", max_bw));
+                }
+                
+                sdp = lines.join("\r\n");
+                if !sdp.ends_with("\r\n") {
+                    sdp.push_str("\r\n");
+                }
+            }
+        }
+        
+        // Add ptime if configured
+        if let Some(ptime) = self.media_config.preferred_ptime {
+            if !sdp.contains("a=ptime:") {
+                // Add ptime attribute after the last a=rtpmap line
+                let mut lines: Vec<String> = sdp.lines().map(|s| s.to_string()).collect();
+                
+                if let Some(last_rtpmap_idx) = lines.iter().rposition(|line| line.starts_with("a=rtpmap:")) {
+                    lines.insert(last_rtpmap_idx + 1, format!("a=ptime:{}", ptime));
+                }
+                
+                sdp = lines.join("\r\n");
+                if !sdp.ends_with("\r\n") {
+                    sdp.push_str("\r\n");
+                }
+            }
+        }
+        
+        sdp
     }
     
     /// Establish media flow to a remote address

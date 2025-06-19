@@ -38,6 +38,9 @@ pub struct MediaManager {
     
     /// SDP storage per session
     pub sdp_storage: Arc<tokio::sync::RwLock<HashMap<SessionId, (Option<String>, Option<String>)>>>,
+    
+    /// Media configuration (codec preferences, etc.)
+    pub media_config: MediaConfig,
 }
 
 /// Configuration for zero-copy RTP processing per session
@@ -76,6 +79,7 @@ impl MediaManager {
             zero_copy_config: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             event_processor,
             sdp_storage: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            media_config: MediaConfig::default(),
         }
     }
     
@@ -90,6 +94,27 @@ impl MediaManager {
             zero_copy_config: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             event_processor,
             sdp_storage: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            media_config: MediaConfig::default(),
+        }
+    }
+    
+    /// Create a MediaManager with custom port range and media configuration
+    pub fn with_port_range_and_config(
+        local_bind_addr: SocketAddr, 
+        base_port: u16, 
+        max_port: u16, 
+        media_config: MediaConfig
+    ) -> Self {
+        let event_processor = Arc::new(SessionEventProcessor::new());
+        
+        Self {
+            controller: Arc::new(MediaSessionController::with_port_range(base_port, max_port)),
+            session_mapping: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            local_bind_addr,
+            zero_copy_config: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            event_processor,
+            sdp_storage: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            media_config,
         }
     }
     
@@ -377,10 +402,9 @@ impl MediaManager {
         // Create dialog ID for media session (use session ID as base)
         let dialog_id = DialogId::new(format!("media-{}", session_id));
         
-        // Create media configuration using conversion helper
-        let session_config = MediaConfig::default();
+        // Create media configuration using the manager's configured preferences
         let media_config = convert_to_media_core_config(
-            &session_config,
+            &self.media_config,
             self.local_bind_addr,
             None, // Will be set later when remote SDP is processed
         );
@@ -537,9 +561,9 @@ impl MediaManager {
             None
         };
         
-        // Generate SDP using MediaConfigConverter 
+        // Generate SDP using MediaConfigConverter with configured preferences
         use crate::media::config::MediaConfigConverter;
-        let converter = MediaConfigConverter::new();
+        let converter = MediaConfigConverter::with_media_config(&self.media_config);
         
         let local_ip = self.local_bind_addr.ip().to_string();
         let local_port = if let Some(info) = media_info {
@@ -558,7 +582,8 @@ impl MediaManager {
             entry.0 = Some(sdp.clone());
         }
         
-        tracing::info!("✅ Generated SDP offer for session: {} with port: {}", session_id, local_port);
+        tracing::info!("✅ Generated SDP offer for session: {} with port: {} and codecs: {:?}", 
+                      session_id, local_port, self.media_config.preferred_codecs);
         Ok(sdp)
     }
     

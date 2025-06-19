@@ -153,6 +153,10 @@ pub use client::{
     MediaSessionInfo,
     NegotiatedMediaParams,
     EnhancedMediaCapabilities,
+    ClientConfig,
+    MediaConfig,
+    MediaPreset,
+    MediaConfigBuilder,
 };
 pub use call::{CallId, CallInfo, CallDirection, CallState};
 pub use registration::{RegistrationConfig, RegistrationInfo, RegistrationStatus};
@@ -171,9 +175,6 @@ pub use events::{
     EventEmitter,
 };
 pub use error::{ClientError, ClientResult};
-
-// Re-export config builder
-pub use client::config::ClientConfig;
 
 // Re-export commonly used types from session-core (for convenience)
 pub use rvoip_session_core::api::types::SessionId;

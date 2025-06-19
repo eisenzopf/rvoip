@@ -142,6 +142,9 @@ use crate::api::handlers::CallHandler;
 use crate::coordinator::SessionCoordinator;
 use crate::errors::Result;
 
+// Re-export MediaConfig from the media module
+pub use crate::media::types::MediaConfig;
+
 /// Configuration for the SessionManager
 #[derive(Debug, Clone)]
 pub struct SessionManagerConfig {
@@ -165,6 +168,9 @@ pub struct SessionManagerConfig {
     
     /// Enable SIP client features (REGISTER, MESSAGE, etc.)
     pub enable_sip_client: bool,
+    
+    /// Media configuration preferences
+    pub media_config: MediaConfig,
 }
 
 impl Default for SessionManagerConfig {
@@ -177,6 +183,7 @@ impl Default for SessionManagerConfig {
             enable_stun: false,
             stun_server: None,
             enable_sip_client: false,
+            media_config: MediaConfig::default(),
         }
     }
 }
@@ -337,6 +344,93 @@ impl SessionManagerBuilder {
     /// ```
     pub fn enable_sip_client(mut self) -> Self {
         self.config.enable_sip_client = true;
+        self
+    }
+    
+    /// Set media configuration
+    /// 
+    /// Configure media preferences including codecs, audio processing, and SDP attributes.
+    /// 
+    /// # Example
+    /// ```rust
+    /// let media_config = MediaConfig {
+    ///     preferred_codecs: vec!["opus".to_string(), "PCMU".to_string()],
+    ///     echo_cancellation: true,
+    ///     noise_suppression: true,
+    ///     ..Default::default()
+    /// };
+    /// 
+    /// let coordinator = SessionManagerBuilder::new()
+    ///     .with_sip_port(5060)
+    ///     .with_media_config(media_config)
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_media_config(mut self, media_config: MediaConfig) -> Self {
+        self.config.media_config = media_config;
+        self
+    }
+    
+    /// Set preferred codecs
+    /// 
+    /// Convenience method to set codec preferences without creating a full MediaConfig.
+    /// 
+    /// # Arguments
+    /// * `codecs` - List of codec names in priority order (e.g., ["opus", "PCMU", "PCMA"])
+    /// 
+    /// # Example
+    /// ```rust
+    /// let coordinator = SessionManagerBuilder::new()
+    ///     .with_sip_port(5060)
+    ///     .with_preferred_codecs(vec!["opus", "G722", "PCMU"])
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_preferred_codecs<I, S>(mut self, codecs: I) -> Self 
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config.media_config.preferred_codecs = codecs.into_iter()
+            .map(Into::into)
+            .collect();
+        self
+    }
+    
+    /// Enable or disable echo cancellation
+    /// 
+    /// # Example
+    /// ```rust
+    /// let coordinator = SessionManagerBuilder::new()
+    ///     .with_sip_port(5060)
+    ///     .with_echo_cancellation(true)
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_echo_cancellation(mut self, enabled: bool) -> Self {
+        self.config.media_config.echo_cancellation = enabled;
+        self
+    }
+    
+    /// Configure audio processing options
+    /// 
+    /// Enable or disable all audio processing features at once.
+    /// 
+    /// # Arguments
+    /// * `enabled` - Whether to enable echo cancellation, noise suppression, and AGC
+    /// 
+    /// # Example
+    /// ```rust
+    /// let coordinator = SessionManagerBuilder::new()
+    ///     .with_sip_port(5060)
+    ///     .with_audio_processing(true)  // Enables all audio processing
+    ///     .build()
+    ///     .await?;
+    /// ```
+    pub fn with_audio_processing(mut self, enabled: bool) -> Self {
+        self.config.media_config.echo_cancellation = enabled;
+        self.config.media_config.noise_suppression = enabled;
+        self.config.media_config.auto_gain_control = enabled;
         self
     }
     

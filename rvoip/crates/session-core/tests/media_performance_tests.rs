@@ -475,10 +475,8 @@ async fn test_performance_monitoring_overhead() {
     let monitored_start = Instant::now();
     for i in 0..operation_count {
         let dialog_id = DialogId::new(&format!("monitored-{}-{}", i, Uuid::new_v4()));
-        let session_config = MediaConfig {
-            quality_monitoring: true, // Enable monitoring
-            ..MediaConfig::default()
-        };
+        let mut session_config = MediaConfig::default();
+        session_config.quality_monitoring = true; // Enable monitoring
         let local_addr = format!("127.0.0.1:{}", 19200 + i * 4).parse().unwrap();
         let media_config = rvoip_session_core::media::convert_to_media_core_config(
             &session_config,
