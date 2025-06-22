@@ -382,8 +382,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-use crate::api::types::{IncomingCall, CallSession, CallDecision};
+use crate::api::types::{IncomingCall, CallSession, CallDecision, SessionId, CallState};
 use crate::errors::Result;
+use crate::manager::events::{MediaQualityAlertLevel, MediaFlowDirection, WarningCategory};
 
 /// Main trait for handling call events
 #[async_trait]
@@ -406,6 +407,122 @@ pub trait CallHandler: Send + Sync + std::fmt::Debug {
         tracing::info!("Call {} established", call.id());
         if let Some(remote) = remote_sdp {
             tracing::debug!("Remote SDP: {}", remote);
+        }
+    }
+
+    // === New optional methods with default implementations ===
+    
+    /// Called on any session state change
+    /// 
+    /// This method is called for all state transitions, allowing fine-grained
+    /// monitoring of call progress. The default implementation does nothing.
+    /// 
+    /// # Arguments
+    /// * `session_id` - The session that changed state
+    /// * `old_state` - The previous state
+    /// * `new_state` - The new state
+    /// * `reason` - Optional reason for the state change
+    async fn on_call_state_changed(
+        &self, 
+        session_id: &SessionId, 
+        old_state: &CallState, 
+        new_state: &CallState, 
+        reason: Option<&str>
+    ) {
+        // Default: do nothing - maintains backward compatibility
+        tracing::debug!(
+            "Call {} state changed from {:?} to {:?} (reason: {:?})",
+            session_id, old_state, new_state, reason
+        );
+    }
+    
+    /// Called when media quality metrics are available
+    /// 
+    /// This method provides real-time quality metrics for active calls.
+    /// The alert level is calculated based on the MOS score.
+    /// 
+    /// # Arguments
+    /// * `session_id` - The session with quality metrics
+    /// * `mos_score` - Mean Opinion Score (1.0-5.0)
+    /// * `packet_loss` - Packet loss percentage
+    /// * `alert_level` - Calculated quality alert level
+    async fn on_media_quality(
+        &self, 
+        session_id: &SessionId, 
+        mos_score: f32, 
+        packet_loss: f32, 
+        alert_level: MediaQualityAlertLevel
+    ) {
+        // Default: do nothing
+        if matches!(alert_level, MediaQualityAlertLevel::Poor | MediaQualityAlertLevel::Critical) {
+            tracing::warn!(
+                "Call {} has poor quality: MOS={}, packet_loss={}%",
+                session_id, mos_score, packet_loss
+            );
+        }
+    }
+    
+    /// Called when DTMF digit is received
+    /// 
+    /// This method is called for each DTMF digit received during a call.
+    /// 
+    /// # Arguments
+    /// * `session_id` - The session that received DTMF
+    /// * `digit` - The DTMF digit (0-9, *, #, A-D)
+    /// * `duration_ms` - Duration of the digit press in milliseconds
+    async fn on_dtmf(&self, session_id: &SessionId, digit: char, duration_ms: u32) {
+        // Default: do nothing
+        tracing::debug!(
+            "Call {} received DTMF digit '{}' (duration: {}ms)",
+            session_id, digit, duration_ms
+        );
+    }
+    
+    /// Called when media starts/stops flowing
+    /// 
+    /// This method notifies when media flow changes for a session.
+    /// 
+    /// # Arguments
+    /// * `session_id` - The session with media flow change
+    /// * `direction` - Direction of media flow (Send/Receive/Both)
+    /// * `active` - Whether media is now flowing or stopped
+    /// * `codec` - The codec being used
+    async fn on_media_flow(
+        &self, 
+        session_id: &SessionId, 
+        direction: MediaFlowDirection, 
+        active: bool, 
+        codec: &str
+    ) {
+        // Default: do nothing
+        tracing::debug!(
+            "Call {} media flow {:?} {} (codec: {})",
+            session_id, 
+            direction,
+            if active { "started" } else { "stopped" },
+            codec
+        );
+    }
+    
+    /// Called on non-fatal warnings
+    /// 
+    /// This method is called for warnings that don't prevent operation
+    /// but might indicate issues that should be addressed.
+    /// 
+    /// # Arguments
+    /// * `session_id` - Optional session ID if warning is session-specific
+    /// * `category` - Category of the warning
+    /// * `message` - Warning message
+    async fn on_warning(
+        &self, 
+        session_id: Option<&SessionId>, 
+        category: WarningCategory, 
+        message: &str
+    ) {
+        // Default: do nothing
+        match session_id {
+            Some(id) => tracing::warn!("Warning for call {} ({:?}): {}", id, category, message),
+            None => tracing::warn!("Warning ({:?}): {}", category, message),
         }
     }
 }

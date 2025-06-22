@@ -4,6 +4,15 @@
 
 This document outlines improvements needed for the session-core public API based on real-world usage patterns and identified limitations.
 
+## Architecture Principles
+
+**Important**: The API module is a high-level abstraction that depends on lower-level modules. Dependencies must flow in this direction:
+```
+api → coordinator → manager → events
+```
+
+Events and types should be defined in lower-level modules and re-exported by the API layer, not the other way around.
+
 ## Current Limitations
 
 ### 1. Limited Event Handler Callbacks
@@ -70,110 +79,76 @@ let answer = MediaControl::generate_sdp_answer(&coordinator, &session_id, offer)
 
 ## Proposed Improvements
 
-### 1. Extend Existing CallHandler Trait
+### 1. Extend Events in manager/events.rs
 
-**Important**: Session-core already has a working event system through the `CallHandler` trait that client-core successfully uses. Instead of creating a duplicate event system, we'll extend the existing trait with new optional methods.
+First, we'll extend the existing `SessionEvent` enum in `manager/events.rs` with richer event types:
 
 ```rust
-/// Extended CallHandler trait with comprehensive event callbacks
-#[async_trait]
-pub trait CallHandler: Send + Sync + std::fmt::Debug {
-    // === Existing methods (keep as-is) ===
+// In manager/events.rs - extend the existing SessionEvent enum
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SessionEvent {
+    // ... existing events ...
     
-    /// Handle an incoming call and decide what to do with it
-    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision;
-
-    /// Handle when a call ends
-    async fn on_call_ended(&self, call: CallSession, reason: &str);
+    /// Enhanced state change event with metadata
+    DetailedStateChange {
+        session_id: SessionId,
+        old_state: CallState,
+        new_state: CallState,
+        timestamp: std::time::Instant,
+        reason: Option<String>,
+    },
     
-    /// Handle when a call is established (200 OK received/sent)
-    async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
-        // Default implementation
-    }
+    /// Media quality metrics event
+    MediaQuality {
+        session_id: SessionId,
+        mos_score: f32,
+        packet_loss: f32,
+        jitter_ms: f32,
+        round_trip_ms: f32,
+        alert_level: MediaQualityAlertLevel,
+    },
     
-    // === New optional methods with default implementations ===
+    /// DTMF digit received (enhanced version)
+    DtmfDigit {
+        session_id: SessionId,
+        digit: char,
+        duration_ms: u32,
+        timestamp: std::time::Instant,
+    },
     
-    /// Called on any session state change
-    async fn on_call_state_changed(&self, event: StateChangeEvent) {
-        // Default: do nothing - maintains backward compatibility
-    }
+    /// Media flow status change
+    MediaFlowChange {
+        session_id: SessionId,
+        direction: MediaFlowDirection,
+        active: bool,
+        codec: String,
+    },
     
-    /// Called when media quality metrics are available
-    async fn on_media_quality(&self, event: MediaQualityEvent) {
-        // Default: do nothing
-    }
-    
-    /// Called when DTMF digit is received
-    async fn on_dtmf(&self, event: DtmfEvent) {
-        // Default: do nothing
-    }
-    
-    /// Called when media starts/stops flowing
-    async fn on_media_flow(&self, event: MediaFlowEvent) {
-        // Default: do nothing
-    }
-    
-    /// Called on non-fatal warnings
-    async fn on_warning(&self, event: WarningEvent) {
-        // Default: do nothing
-    }
+    /// Non-fatal warning event
+    Warning {
+        session_id: Option<SessionId>,
+        category: WarningCategory,
+        message: String,
+    },
 }
 
-/// State change event
-pub struct StateChangeEvent {
-    pub session_id: SessionId,
-    pub old_state: CallState,
-    pub new_state: CallState,
-    pub timestamp: Instant,
-    pub reason: Option<String>,
-}
-
-/// Media quality event
-pub struct MediaQualityEvent {
-    pub session_id: SessionId,
-    pub mos_score: f32,
-    pub packet_loss: f32,
-    pub jitter_ms: f32,
-    pub round_trip_ms: f32,
-    pub alert_level: QualityAlertLevel,
-}
-
-/// DTMF event
-pub struct DtmfEvent {
-    pub session_id: SessionId,
-    pub digit: char,
-    pub duration_ms: u32,
-    pub timestamp: Instant,
-}
-
-/// Media flow event
-pub struct MediaFlowEvent {
-    pub session_id: SessionId,
-    pub direction: MediaDirection,
-    pub active: bool,
-    pub codec: String,
-}
-
-/// Warning event for non-fatal issues
-pub struct WarningEvent {
-    pub session_id: Option<SessionId>,
-    pub category: WarningCategory,
-    pub message: String,
-}
-
-pub enum QualityAlertLevel {
+// Also add supporting types in manager/events.rs
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum MediaQualityAlertLevel {
     Good,      // MOS >= 4.0
     Fair,      // MOS >= 3.0
     Poor,      // MOS >= 2.0
     Critical,  // MOS < 2.0
 }
 
-pub enum MediaDirection {
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum MediaFlowDirection {
     Send,
     Receive,
     Both,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum WarningCategory {
     Network,
     Media,
@@ -182,229 +157,235 @@ pub enum WarningCategory {
 }
 ```
 
-**Key advantages of extending CallHandler**:
-- No breaking changes - existing implementations continue to work
-- Client-core already uses this trait, so events flow naturally
-- Consistent with existing architecture
-- Optional methods allow gradual adoption
+### 2. Extend CallHandler to Consume Internal Events
 
-**Integration with internal events**:
+In the API layer, extend `CallHandler` to translate internal events into handler callbacks:
+
 ```rust
-// SessionCoordinator already processes SessionEvent internally
-// We just need to ensure it calls the appropriate CallHandler methods
-match event {
-    SessionEvent::StateChanged { session_id, old_state, new_state } => {
-        // Call existing handler methods when appropriate
+// In api/handlers.rs - extend the existing trait
+#[async_trait]
+pub trait CallHandler: Send + Sync + std::fmt::Debug {
+    // === Existing methods (keep as-is) ===
+    
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision;
+    async fn on_call_ended(&self, call: CallSession, reason: &str);
+    async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>);
+    
+    // === New optional methods with default implementations ===
+    
+    /// Called on any session state change
+    async fn on_call_state_changed(&self, session_id: &SessionId, old_state: &CallState, new_state: &CallState, reason: Option<&str>) {
+        // Default: do nothing - maintains backward compatibility
+    }
+    
+    /// Called when media quality metrics are available
+    async fn on_media_quality(&self, session_id: &SessionId, mos_score: f32, packet_loss: f32, alert_level: MediaQualityAlertLevel) {
+        // Default: do nothing
+    }
+    
+    /// Called when DTMF digit is received
+    async fn on_dtmf(&self, session_id: &SessionId, digit: char, duration_ms: u32) {
+        // Default: do nothing
+    }
+    
+    /// Called when media starts/stops flowing
+    async fn on_media_flow(&self, session_id: &SessionId, direction: MediaFlowDirection, active: bool, codec: &str) {
+        // Default: do nothing
+    }
+    
+    /// Called on non-fatal warnings
+    async fn on_warning(&self, session_id: Option<&SessionId>, category: WarningCategory, message: &str) {
+        // Default: do nothing
+    }
+}
+```
+
+### 3. Update SessionCoordinator Event Processing
+
+The `SessionCoordinator` will subscribe to internal events and translate them to CallHandler calls:
+
+```rust
+// In coordinator/event_handler.rs - process internal events
+impl SessionCoordinator {
+    async fn process_session_event(&self, event: SessionEvent) {
         if let Some(handler) = &self.handler {
-            // New: Always call on_call_state_changed
-            handler.on_call_state_changed(StateChangeEvent {
-                session_id: session_id.clone(),
-                old_state: old_state.clone(),
-                new_state: new_state.clone(),
-                timestamp: Instant::now(),
-                reason: None,
-            }).await;
-            
-            // Existing: Call specific methods for important transitions
-            match (old_state, new_state) {
-                (_, CallState::Active) => {
-                    // Still call on_call_established for compatibility
-                    if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                        handler.on_call_established(session, local_sdp, remote_sdp).await;
+            match event {
+                SessionEvent::DetailedStateChange { session_id, old_state, new_state, reason, .. } => {
+                    // Call the new handler method
+                    handler.on_call_state_changed(&session_id, &old_state, &new_state, reason.as_deref()).await;
+                    
+                    // Also call legacy methods for compatibility
+                    match (&old_state, &new_state) {
+                        (_, CallState::Active) => {
+                            if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                                handler.on_call_established(session, local_sdp, remote_sdp).await;
+                            }
+                        }
+                        (_, CallState::Terminated) | (_, CallState::Failed(_)) => {
+                            if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                                handler.on_call_ended(session, &reason.unwrap_or_default()).await;
+                            }
+                        }
+                        _ => {}
                     }
                 }
-                (_, CallState::Terminated) | (_, CallState::Failed(_)) => {
-                    // Still call on_call_ended
-                    if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                        handler.on_call_ended(session, &reason).await;
-                    }
+                SessionEvent::MediaQuality { session_id, mos_score, packet_loss, alert_level, .. } => {
+                    handler.on_media_quality(&session_id, mos_score, packet_loss, alert_level).await;
                 }
+                SessionEvent::DtmfDigit { session_id, digit, duration_ms, .. } => {
+                    handler.on_dtmf(&session_id, digit, duration_ms).await;
+                }
+                SessionEvent::MediaFlowChange { session_id, direction, active, codec } => {
+                    handler.on_media_flow(&session_id, direction, active, &codec).await;
+                }
+                SessionEvent::Warning { session_id, category, message } => {
+                    handler.on_warning(session_id.as_ref(), category, &message).await;
+                }
+                // Handle other events...
                 _ => {}
             }
         }
     }
-    // Handle other events similarly...
 }
 ```
 
-### 2. Improved Statistics API
+### 4. API Layer Re-exports
 
-Add convenience methods and unified statistics retrieval:
+The API layer simply re-exports the event types for public use:
 
 ```rust
-/// Comprehensive call statistics
+// In api/mod.rs - re-export event types from lower layers
+pub use crate::manager::events::{
+    MediaQualityAlertLevel,
+    MediaFlowDirection,
+    WarningCategory,
+    // Note: We don't export SessionEvent itself - that's internal
+};
+```
+
+### 5. Statistics API Improvements
+
+Add convenience types in a lower-level module and re-export:
+
+```rust
+// In media/stats.rs - define comprehensive statistics types
+#[derive(Debug, Clone)]
 pub struct CallStatistics {
     pub session_id: SessionId,
     pub duration: Duration,
-    pub state: State,
+    pub state: CallState,
     pub media: MediaStatistics,
     pub rtp: RtpSessionStats,
     pub quality: QualityMetrics,
 }
 
-impl MediaControl for Arc<SessionCoordinator> {
-    /// Get all statistics in one call
-    async fn get_call_statistics(&self, session_id: &SessionId) -> Result<Option<CallStatistics>>;
-    
-    /// Convenience: Get just the MOS score
-    async fn get_call_quality_score(&self, session_id: &SessionId) -> Result<Option<f32>>;
-    
-    /// Convenience: Get packet loss percentage
-    async fn get_packet_loss_rate(&self, session_id: &SessionId) -> Result<Option<f32>>;
-    
-    /// Convenience: Get current bitrate
-    async fn get_current_bitrate(&self, session_id: &SessionId) -> Result<Option<u32>>;
-    
-    /// Start quality monitoring with automatic alerts
-    async fn monitor_call_quality(
-        &self, 
-        session_id: &SessionId,
-        thresholds: QualityThresholds
-    ) -> Result<()>;
+#[derive(Debug, Clone)]
+pub struct QualityMetrics {
+    pub mos_score: f32,
+    pub packet_loss_rate: f32,
+    pub jitter_ms: f32,
+    pub round_trip_ms: f32,
 }
 
-/// Quality monitoring thresholds
-pub struct QualityThresholds {
-    pub min_mos: f32,              // Default: 3.0
-    pub max_packet_loss: f32,       // Default: 5.0%
-    pub max_jitter_ms: f32,         // Default: 50.0
-    pub check_interval: Duration,    // Default: 5 seconds
+// In api/media.rs - add convenience methods that use these types
+impl MediaControl for Arc<SessionCoordinator> {
+    /// Get all statistics in one call
+    async fn get_call_statistics(&self, session_id: &SessionId) -> Result<Option<CallStatistics>> {
+        // Implementation collects from various sources
+    }
+    
+    /// Convenience: Get just the MOS score
+    async fn get_call_quality_score(&self, session_id: &SessionId) -> Result<Option<f32>> {
+        // Extract from CallStatistics
+    }
 }
 ```
 
-### 3. Enhanced SDP Control
+### 6. SDP Control Options
 
-Add negotiation options and custom SDP handling:
+Define negotiation options in a lower-level module:
 
 ```rust
-/// SDP negotiation options
+// In sdp/negotiation.rs - define negotiation types
 pub struct SdpNegotiationOptions {
-    /// Force specific codecs for this call
     pub required_codecs: Vec<String>,
-    
-    /// Additional SDP attributes to include
     pub custom_attributes: Vec<SdpAttribute>,
-    
-    /// Negotiation strategy
     pub strategy: NegotiationStrategy,
-    
-    /// Media preferences override
     pub media_config_override: Option<MediaConfig>,
 }
 
-pub struct SdpAttribute {
-    pub name: String,
-    pub value: String,
-}
-
 pub enum NegotiationStrategy {
-    /// Use first mutually supported codec (default)
     FirstMatch,
-    
-    /// Prefer wideband codecs
     PreferWideband,
-    
-    /// Prefer narrowband for bandwidth savings
     PreferNarrowband,
-    
-    /// Custom priority function
     Custom(Box<dyn Fn(&[String], &[String]) -> Option<String> + Send + Sync>),
 }
 
+// In api/media.rs - expose methods that use these types
 impl MediaControl for Arc<SessionCoordinator> {
-    /// Generate SDP answer with options
     async fn generate_sdp_answer_with_options(
         &self,
         session_id: &SessionId,
         offer: &str,
         options: SdpNegotiationOptions
-    ) -> Result<String>;
-    
-    /// Generate SDP offer with options
-    async fn generate_sdp_offer_with_options(
-        &self,
-        session_id: &SessionId,
-        options: SdpNegotiationOptions
-    ) -> Result<String>;
-    
-    /// Get the negotiated media configuration
-    async fn get_negotiated_config(
-        &self,
-        session_id: &SessionId
-    ) -> Result<Option<NegotiatedMediaConfig>>;
-}
-```
-
-### 4. Session Control Enhancements
-
-Add missing session operations:
-
-```rust
-impl SessionControl for Arc<SessionCoordinator> {
-    /// Get all active sessions
-    async fn get_active_sessions(&self) -> Result<Vec<SessionInfo>>;
-    
-    /// Transfer a call to another destination
-    async fn transfer_call(
-        &self,
-        session_id: &SessionId,
-        transfer_to: &str,
-        transfer_type: TransferType
-    ) -> Result<()>;
-    
-    /// Conference multiple sessions
-    async fn create_conference(
-        &self,
-        session_ids: Vec<SessionId>
-    ) -> Result<ConferenceId>;
-    
-    /// Add early media support
-    async fn send_early_media(
-        &self,
-        session_id: &SessionId,
-        sdp: &str
-    ) -> Result<()>;
-}
-
-pub enum TransferType {
-    Blind,
-    Attended,
+    ) -> Result<String> {
+        // Delegate to sdp::negotiation module
+    }
 }
 ```
 
 ## Implementation Plan
 
-### Phase 1: Extend CallHandler (Priority: High)
-1. Add new optional methods to CallHandler trait
-2. Update SessionCoordinator to call new methods from internal events
-3. Test with existing client-core implementation
-4. Update examples to showcase new callbacks
+### Phase 1: Extend Internal Events (Priority: High)
+1. Add new event variants to `SessionEvent` in `manager/events.rs`
+2. Update event publishers throughout the codebase to emit richer events
+3. Ensure backward compatibility with existing event handling
 
-### Phase 2: Statistics API (Priority: Medium)
-1. Create `CallStatistics` aggregate type
-2. Implement convenience methods
-3. Add quality monitoring
-4. Document statistics fields
+### Phase 2: Extend CallHandler (Priority: High)
+1. Add new optional methods to `CallHandler` trait in `api/handlers.rs`
+2. Update `SessionCoordinator` to subscribe to internal events
+3. Translate internal events to CallHandler method calls
+4. Test with existing client-core implementation
 
-### Phase 3: SDP Enhancements (Priority: Medium)
-1. Create options types
-2. Extend negotiator with strategies
-3. Add codec enforcement
-4. Support custom attributes
+### Phase 3: Statistics API (Priority: Medium)
+1. Create statistics types in `media/stats.rs`
+2. Implement aggregation logic in media module
+3. Add convenience methods to `MediaControl` trait
+4. Re-export types through API layer
 
-### Phase 4: Session Control (Priority: Low)
-1. Add `get_active_sessions`
-2. Implement call transfer
-3. Add conference support
-4. Early media handling
+### Phase 4: SDP Enhancements (Priority: Medium)
+1. Create negotiation types in `sdp/negotiation.rs`
+2. Extend SDP negotiator with strategy support
+3. Add methods to `MediaControl` that use these types
+4. Re-export necessary types through API
+
+### Phase 5: Session Control (Priority: Low)
+1. Add missing operations to `SessionControl` trait
+2. Implement in `SessionCoordinator`
+3. Add supporting types where needed
+
+## Dependency Flow
+
+The refactored architecture maintains proper dependency hierarchy:
+
+```
+┌─────────────┐
+│     API     │ ← Public interface, re-exports types
+├─────────────┤
+│ Coordinator │ ← Orchestrates and translates events
+├─────────────┤
+│   Manager   │ ← Core session management
+├─────────────┤
+│   Events    │ ← Event definitions (lowest level)
+└─────────────┘
+```
 
 ## Migration Guide
 
 ### For Event Handling
 
-**Before** (still supported):
+**Before** (still works):
 ```rust
-// Existing handlers continue to work unchanged
 struct MyHandler;
 
 #[async_trait]
@@ -421,11 +402,11 @@ impl CallHandler for MyHandler {
 
 **After** (with new events):
 ```rust
-// Same handler can now opt into additional events
 struct MyHandler;
 
 #[async_trait]
 impl CallHandler for MyHandler {
+    // Existing methods continue to work
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         CallDecision::Accept(None)
     }
@@ -434,118 +415,45 @@ impl CallHandler for MyHandler {
         println!("Call ended: {}", reason);
     }
     
-    // Opt into state change events
-    async fn on_call_state_changed(&self, event: StateChangeEvent) {
-        println!("State changed from {:?} to {:?}", event.old_state, event.new_state);
+    // Opt into new events
+    async fn on_call_state_changed(&self, session_id: &SessionId, old_state: &CallState, new_state: &CallState, reason: Option<&str>) {
+        println!("State changed from {:?} to {:?}", old_state, new_state);
     }
     
-    // Opt into quality monitoring
-    async fn on_media_quality(&self, event: MediaQualityEvent) {
-        if event.alert_level == QualityAlertLevel::Critical {
-            eprintln!("Poor call quality: MOS={}", event.mos_score);
+    async fn on_media_quality(&self, session_id: &SessionId, mos_score: f32, packet_loss: f32, alert_level: MediaQualityAlertLevel) {
+        if matches!(alert_level, MediaQualityAlertLevel::Critical) {
+            eprintln!("Poor call quality: MOS={}", mos_score);
         }
     }
 }
-```
-
-**Client-core integration** (no changes needed):
-```rust
-// Client-core's existing ClientCallHandler already implements CallHandler
-// It can gradually adopt new methods to emit more ClientEvents
-impl CallHandler for ClientCallHandler {
-    // Existing methods work as before
-    
-    // New: Can now forward state changes directly
-    async fn on_call_state_changed(&self, event: StateChangeEvent) {
-        // Map to ClientEvent and emit to application
-        if let Some(call_id) = self.call_mapping.get(&event.session_id) {
-            let client_event = ClientEvent::CallStateChanged {
-                info: CallStatusInfo {
-                    call_id: *call_id,
-                    new_state: self.map_session_state_to_client_state(&event.new_state),
-                    previous_state: Some(self.map_session_state_to_client_state(&event.old_state)),
-                    reason: event.reason,
-                    timestamp: event.timestamp,
-                },
-                priority: EventPriority::Normal,
-            };
-            // Emit to application...
-        }
-    }
-}
-```
-
-### For Statistics
-
-**Before**:
-```rust
-let info = MediaControl::get_media_info(&coord, &id).await?;
-let stats = MediaControl::get_media_statistics(&coord, &id).await?;
-// Manually combine...
-```
-
-**After**:
-```rust
-let stats = MediaControl::get_call_statistics(&coord, &id).await?;
-// Everything in one place
-```
-
-### For SDP Control
-
-**Before**:
-```rust
-// Fixed behavior
-let answer = MediaControl::generate_sdp_answer(&coord, &id, offer).await?;
-```
-
-**After**:
-```rust
-// Customizable
-let options = SdpNegotiationOptions {
-    required_codecs: vec!["G722".to_string()],
-    strategy: NegotiationStrategy::PreferWideband,
-    ..Default::default()
-};
-let answer = MediaControl::generate_sdp_answer_with_options(
-    &coord, &id, offer, options
-).await?;
 ```
 
 ## Benefits
 
-1. **Better Developer Experience**
+1. **Proper Architecture**
+   - Respects dependency hierarchy
+   - No circular dependencies
+   - Clear separation of concerns
+
+2. **Better Developer Experience**
    - More comprehensive event callbacks
    - No breaking changes to existing code
    - Natural integration with client-core
-   - Fewer async calls needed
 
-2. **Performance**
-   - No polling overhead
-   - Leverages existing event flow
-   - Efficient event dispatching
-
-3. **Flexibility**
-   - Backward compatible
-   - Optional adoption of new features
-   - Extensible for future events
+3. **Performance**
+   - Leverages existing event system
+   - No additional overhead
+   - Efficient event translation
 
 4. **Maintainability**
-   - Builds on existing architecture
-   - No duplicate event systems
-   - Clear upgrade path
-
-## Open Questions
-
-1. Should we add event filtering to CallHandler methods?
-2. How to handle back-pressure if handler is slow?
-3. Should quality metrics be pushed or pulled?
-4. Frequency of media quality events?
-5. Should we provide a CallHandlerAdapter with empty defaults?
+   - Events defined in appropriate modules
+   - API layer remains thin
+   - Easy to extend further
 
 ## Next Steps
 
-1. Review and approve design
-2. Extend CallHandler trait
-3. Update SessionCoordinator event processing
-4. Test with client-core
+1. Review and approve updated design
+2. Extend `SessionEvent` in manager/events.rs
+3. Update event publishers throughout codebase
+4. Extend CallHandler trait with event translation
 5. Update documentation and examples 

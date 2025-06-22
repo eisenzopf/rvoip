@@ -42,6 +42,16 @@ impl SessionCoordinator {
                 self.handle_state_changed(session_id, old_state, new_state).await?;
             }
             
+            SessionEvent::DetailedStateChange { session_id, old_state, new_state, reason, .. } => {
+                // Handle the enhanced state change event
+                self.handle_state_changed(session_id.clone(), old_state.clone(), new_state.clone()).await?;
+                
+                // Also notify the CallHandler about the state change
+                if let Some(handler) = &self.handler {
+                    handler.on_call_state_changed(&session_id, &old_state, &new_state, reason.as_deref()).await;
+                }
+            }
+            
             SessionEvent::SessionTerminated { session_id, reason } => {
                 println!("🎯 COORDINATOR: Matched SessionTerminated event for {} - {}", session_id, reason);
                 self.handle_session_terminated(session_id, reason).await?;
@@ -49,6 +59,34 @@ impl SessionCoordinator {
             
             SessionEvent::MediaEvent { session_id, event } => {
                 self.handle_media_event(session_id, event).await?;
+            }
+            
+            SessionEvent::MediaQuality { session_id, mos_score, packet_loss, alert_level, .. } => {
+                // Notify handler about media quality
+                if let Some(handler) = &self.handler {
+                    handler.on_media_quality(&session_id, mos_score, packet_loss, alert_level).await;
+                }
+            }
+            
+            SessionEvent::DtmfDigit { session_id, digit, duration_ms, .. } => {
+                // Notify handler about DTMF digit
+                if let Some(handler) = &self.handler {
+                    handler.on_dtmf(&session_id, digit, duration_ms).await;
+                }
+            }
+            
+            SessionEvent::MediaFlowChange { session_id, direction, active, codec } => {
+                // Notify handler about media flow change
+                if let Some(handler) = &self.handler {
+                    handler.on_media_flow(&session_id, direction, active, &codec).await;
+                }
+            }
+            
+            SessionEvent::Warning { session_id, category, message } => {
+                // Notify handler about warning
+                if let Some(handler) = &self.handler {
+                    handler.on_warning(session_id.as_ref(), category, &message).await;
+                }
             }
             
             SessionEvent::SdpEvent { session_id, event_type, sdp } => {

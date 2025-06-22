@@ -159,6 +159,36 @@ impl SessionCoordinator {
                 // and forwarded to the application
                 tracing::debug!("Registration request received - handled by main coordinator");
             }
+            
+            // Handle new events from refactoring
+            SessionEvent::DetailedStateChange { session_id, old_state, new_state, reason, .. } => {
+                // Handle like regular state change but with more info
+                self.handle_state_changed(session_id, old_state, new_state).await?;
+            }
+            
+            SessionEvent::MediaQuality { session_id, .. } => {
+                // Media quality events are forwarded to the main coordinator
+                tracing::debug!("Media quality event for session {} - handled by main coordinator", session_id);
+            }
+            
+            SessionEvent::DtmfDigit { session_id, digit, .. } => {
+                // Handle single DTMF digit
+                self.handle_dtmf_received(session_id, digit.to_string()).await?;
+            }
+            
+            SessionEvent::MediaFlowChange { session_id, .. } => {
+                // Media flow changes are informational
+                tracing::debug!("Media flow change for session {} - handled by main coordinator", session_id);
+            }
+            
+            SessionEvent::Warning { session_id, .. } => {
+                // Warnings are informational
+                if let Some(id) = session_id {
+                    tracing::debug!("Warning for session {} - handled by main coordinator", id);
+                } else {
+                    tracing::debug!("General warning - handled by main coordinator");
+                }
+            }
         }
         
         Ok(())

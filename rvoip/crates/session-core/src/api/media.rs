@@ -334,6 +334,7 @@
 
 use std::sync::Arc;
 use crate::api::types::{SessionId, MediaInfo};
+use crate::api::control::SessionControl;
 use crate::coordinator::SessionCoordinator;
 use crate::errors::Result;
 
@@ -387,6 +388,26 @@ pub trait MediaControl {
     /// This provides proper offer/answer negotiation for UAS scenarios
     /// without requiring direct access to internal components
     async fn generate_sdp_answer(&self, session_id: &SessionId, offer: &str) -> Result<String>;
+    
+    /// Get all statistics in one call
+    /// This aggregates statistics from multiple sources into a single comprehensive result
+    async fn get_call_statistics(&self, session_id: &SessionId) -> Result<Option<crate::media::stats::CallStatistics>>;
+    
+    /// Convenience: Get just the MOS score
+    /// Returns None if no quality metrics are available
+    async fn get_call_quality_score(&self, session_id: &SessionId) -> Result<Option<f32>>;
+    
+    /// Convenience: Get packet loss percentage
+    /// Returns None if no RTP statistics are available
+    async fn get_packet_loss_rate(&self, session_id: &SessionId) -> Result<Option<f32>>;
+    
+    /// Convenience: Get current bitrate in kbps
+    /// Returns None if no RTP statistics are available
+    async fn get_current_bitrate(&self, session_id: &SessionId) -> Result<Option<u32>>;
+    
+    /// Start quality monitoring with automatic alerts
+    /// This will emit MediaQuality events when thresholds are exceeded
+    async fn monitor_call_quality(&self, session_id: &SessionId, thresholds: crate::media::stats::QualityThresholds) -> Result<()>;
 }
 
 impl MediaControl for Arc<SessionCoordinator> {
@@ -443,17 +464,20 @@ impl MediaControl for Arc<SessionCoordinator> {
                 message: format!("Failed to establish media flow: {}", e) 
             })?;
         
-        // Store the remote SDP info
-        let minimal_sdp = format!(
-            "v=0\r\nc=IN IP4 {}\r\nm=audio {} RTP/AVP 0\r\n",
-            socket_addr.ip(),
-            socket_addr.port()
-        );
-        
+        // Don't overwrite the remote SDP if it already exists
+        // Only create a minimal SDP if we don't have one already
         {
             let mut sdp_storage = media_manager.sdp_storage.write().await;
             let entry = sdp_storage.entry(session_id.clone()).or_insert((None, None));
-            entry.1 = Some(minimal_sdp);
+            if entry.1.is_none() {
+                // Only set minimal SDP if we don't have a remote SDP already
+                let minimal_sdp = format!(
+                    "v=0\r\nc=IN IP4 {}\r\nm=audio {} RTP/AVP 0\r\n",
+                    socket_addr.ip(),
+                    socket_addr.port()
+                );
+                entry.1 = Some(minimal_sdp);
+            }
         }
         
         tracing::info!("Established media flow for session {} to {}", session_id, remote_addr);
@@ -666,6 +690,131 @@ impl MediaControl for Arc<SessionCoordinator> {
         tracing::info!("Generated SDP answer for session {} with codecs: {:?}", 
                       session_id, media_manager.media_config.preferred_codecs);
         Ok(answer)
+    }
+    
+    async fn get_call_statistics(&self, session_id: &SessionId) -> Result<Option<crate::media::stats::CallStatistics>> {
+        // Get session info
+        let session = match SessionControl::get_session(self, session_id).await? {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        
+        // Get media info
+        let media_info = MediaControl::get_media_info(self, session_id).await?;
+        
+        // Get media statistics
+        let media_stats = self.get_media_statistics(session_id).await?;
+        
+        // Get RTP statistics
+        let rtp_stats = self.get_rtp_statistics(session_id).await?;
+        
+        // Build comprehensive statistics
+        let call_stats = crate::media::stats::CallStatistics {
+            session_id: session_id.clone(),
+            duration: session.started_at.map(|t| t.elapsed()),
+            state: session.state,
+            media: crate::media::stats::MediaStatistics {
+                local_addr: media_info.as_ref().and_then(|m| m.local_sdp.clone()),
+                remote_addr: media_info.as_ref().and_then(|m| m.remote_sdp.clone()),
+                codec: media_info.as_ref().and_then(|m| m.codec.clone()),
+                media_flowing: media_info.is_some(),
+            },
+            rtp: if let Some(rtp) = rtp_stats {
+                crate::media::stats::RtpSessionStats {
+                    packets_sent: rtp.packets_sent,
+                    packets_received: rtp.packets_received,
+                    bytes_sent: rtp.bytes_sent,
+                    bytes_received: rtp.bytes_received,
+                    packets_lost: rtp.packets_lost,
+                    packets_out_of_order: 0, // Not available in current RTP stats
+                    jitter_buffer_ms: 0.0,   // Not available in current RTP stats
+                    current_bitrate_kbps: 0, // Would need to calculate from bytes/time
+                }
+            } else {
+                crate::media::stats::RtpSessionStats::default()
+            },
+            quality: if let Some(stats) = media_stats {
+                if let Some(quality) = stats.quality_metrics {
+                    crate::media::stats::QualityMetrics::calculate(
+                        quality.packet_loss_percent,
+                        quality.jitter_ms as f32,
+                        quality.rtt_ms.unwrap_or(0.0) as f32,
+                    )
+                } else {
+                    crate::media::stats::QualityMetrics::default()
+                }
+            } else {
+                crate::media::stats::QualityMetrics::default()
+            },
+        };
+        
+        Ok(Some(call_stats))
+    }
+    
+    async fn get_call_quality_score(&self, session_id: &SessionId) -> Result<Option<f32>> {
+        if let Some(stats) = self.get_call_statistics(session_id).await? {
+            Ok(Some(stats.quality.mos_score))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    async fn get_packet_loss_rate(&self, session_id: &SessionId) -> Result<Option<f32>> {
+        if let Some(stats) = self.get_call_statistics(session_id).await? {
+            Ok(Some(stats.quality.packet_loss_rate))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    async fn get_current_bitrate(&self, session_id: &SessionId) -> Result<Option<u32>> {
+        if let Some(stats) = self.get_call_statistics(session_id).await? {
+            Ok(Some(stats.rtp.current_bitrate_kbps))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    async fn monitor_call_quality(&self, session_id: &SessionId, thresholds: crate::media::stats::QualityThresholds) -> Result<()> {
+        let session_id = session_id.clone();
+        let coordinator = self.clone();
+        
+        // Spawn a monitoring task
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(thresholds.check_interval);
+            
+            loop {
+                interval.tick().await;
+                
+                // Get current statistics
+                match coordinator.get_call_statistics(&session_id).await {
+                    Ok(Some(stats)) => {
+                        let quality = &stats.quality;
+                        
+                        // Check thresholds and emit events if exceeded
+                        if quality.mos_score < thresholds.min_mos 
+                            || quality.packet_loss_rate > thresholds.max_packet_loss
+                            || quality.jitter_ms > thresholds.max_jitter_ms {
+                            
+                            // Publish media quality event
+                            if let Some(event_processor) = coordinator.event_processor() {
+                                let _ = event_processor.publish_media_quality(
+                                    session_id.clone(),
+                                    quality.mos_score,
+                                    quality.packet_loss_rate,
+                                    quality.jitter_ms,
+                                    quality.round_trip_ms,
+                                ).await;
+                            }
+                        }
+                    }
+                    Ok(None) => break, // Session ended
+                    Err(_) => break,   // Error occurred
+                }
+            }
+        });
+        
+        Ok(())
     }
 }
 

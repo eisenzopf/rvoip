@@ -1,0 +1,74 @@
+
+[0;36m============================================================[0m
+[0;36mClean API Examples Test[0m
+[0;36m============================================================[0m
+[0;34m[INFO][0m Test started at Thu Jun 19 16:45:22 PDT 2025
+[0;34m[INFO][0m Log directory: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs
+[0;34m[INFO][0m 
+[0;34m[INFO][0m This test demonstrates:
+[0;34m[INFO][0m   • Public API usage only (no internal access)
+[0;34m[INFO][0m   • Clean SDP handling with new API methods
+[0;34m[INFO][0m   • Proper media flow establishment
+[0;34m[INFO][0m   • Best practices for session-core usage
+
+[0;36m============================================================[0m
+[0;36mStarting Clean UAS Server[0m
+[0;36m============================================================[0m
+[0;34m[INFO][0m Starting clean UAS server on port 5062...
+[0;34m[INFO][0m Server log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/uas_clean_20250619_164522.log
+[0;34m[INFO][0m Clean UAS server started with PID 86769
+[0;34m[INFO][0m Waiting for server to be ready...
+[0;32m[SUCCESS][0m Clean UAS server is ready
+[0;34m[INFO][0m Waiting 2 seconds before starting client...
+
+[0;36m============================================================[0m
+[0;36mStarting Clean UAC Client[0m
+[0;36m============================================================[0m
+[0;34m[INFO][0m Starting clean UAC client on port 5061...
+[0;34m[INFO][0m Client log: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/uac_clean_20250619_164522.log
+[0;34m[INFO][0m Target: 127.0.0.1:5062
+[0;34m[INFO][0m Number of calls: 1
+[0;34m[INFO][0m Call duration: 2s
+[0;34m[INFO][0m Delay between calls: 2s
+[0;32m[SUCCESS][0m Clean UAC client completed successfully
+[0;34m[INFO][0m Stopping clean UAS server (PID: 86769)...
+
+[0;36m============================================================[0m
+[0;36mAnalyzing Test Results[0m
+[0;36m============================================================[0m
+[0;34m[INFO][0m Checking server log for API usage...
+[0;34m[INFO][0m Checking client log for API usage...
+[0;34m[INFO][0m Test Metrics:
+[0;34m[INFO][0m   Server API ready:    1 (expected: 1)
+[0;34m[INFO][0m   Server incoming:     1 calls (expected: 1)
+[0;34m[INFO][0m   Server SDP answer:   1 (expected: 1)
+[0;34m[INFO][0m   Server media flow:   1 (expected: 1)
+[0;34m[INFO][0m   Server ended:        1 calls (expected: 1)
+[0;34m[INFO][0m   Client API ready:    1 (expected: 1)
+[0;34m[INFO][0m   Client initiated:    1 calls (expected: 1)
+[0;34m[INFO][0m   Client prepared:     1 calls (expected: 1)
+[0;34m[INFO][0m   Client established:  1 calls (expected: 1)
+[0;34m[INFO][0m   Client media flow:   2 (expected: 1)
+[0;34m[INFO][0m 
+[0;34m[INFO][0m Checking API best practices...
+[0;32m[SUCCESS][0m ✓ No internal coordinator access detected (clean API usage)
+[0;32m[SUCCESS][0m Test PASSED: All 1 calls completed using clean public API
+
+[0;36m============================================================[0m
+[0;36mTest Summary[0m
+[0;36m============================================================[0m
+[0;32m[SUCCESS][0m Clean API examples test completed successfully
+[0;34m[INFO][0m 
+[0;34m[INFO][0m ✅ Key achievements demonstrated:
+[0;34m[INFO][0m   • Used only public API methods
+[0;34m[INFO][0m   • SDP answer generation via generate_sdp_answer()
+[0;34m[INFO][0m   • Media flow via establish_media_flow()
+[0;34m[INFO][0m   • Statistics monitoring via get_media_statistics()
+[0;34m[INFO][0m   • No internal coordinator access
+[0;34m[INFO][0m 
+[0;34m[INFO][0m Test ended at Thu Jun 19 16:45:31 PDT 2025
+[0;34m[INFO][0m 
+[0;34m[INFO][0m Log files:
+[0;34m[INFO][0m   Combined: /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/clean_api_test_20250619_164522.log
+[0;34m[INFO][0m   Server:   /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/uas_clean_20250619_164522.log
+[0;34m[INFO][0m   Client:   /Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/session-core/examples/api_best_practices/logs/uac_clean_20250619_164522.log

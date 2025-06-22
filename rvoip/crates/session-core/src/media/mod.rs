@@ -10,18 +10,19 @@
 //! - `MediaBridge`: Event integration between media and session systems (new)
 //! - `types`: Modern type definitions adapted to new architecture (new)
 
-pub mod manager;
-pub mod coordinator;
 pub mod config;
-pub mod bridge;
+pub mod coordinator;
+pub mod manager;
 pub mod types;
+pub mod bridge;
+pub mod stats;
 
 // Re-exports for convenience
-pub use manager::{MediaManager, ZeroCopyConfig};
+pub use manager::MediaManager;
 pub use coordinator::SessionMediaCoordinator;
-pub use config::MediaConfigConverter;
-pub use bridge::MediaBridge;
 pub use types::*;
+pub use bridge::MediaBridge;
+pub use stats::{CallStatistics, MediaStatistics, RtpSessionStats, QualityMetrics, QualityThresholds};
 
 /// Media integration result type
 pub type MediaResult<T> = Result<T, MediaError>;

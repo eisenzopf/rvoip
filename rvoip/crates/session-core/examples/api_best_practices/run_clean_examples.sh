@@ -85,18 +85,18 @@ analyze_results() {
     
     log_info "Checking server log for API usage..."
     # Strip ANSI color codes before grepping
-    SERVER_API_READY=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "Clean UAS Server ready and listening" | wc -l | tr -d ' ')
+    SERVER_API_READY=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "Enhanced UAS Server ready and listening" | wc -l | tr -d ' ')
     SERVER_INCOMING=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "📞 Incoming call from" | wc -l | tr -d ' ')
     SERVER_SDP_GENERATED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "Generated SDP answer successfully" | wc -l | tr -d ' ')
     SERVER_MEDIA_FLOW=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "Media flow established successfully" | wc -l | tr -d ' ')
     SERVER_ENDED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "Call.*ended:" | wc -l | tr -d ' ')
     
     log_info "Checking client log for API usage..."
-    CLIENT_API_READY=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Clean UAC Client ready" | wc -l | tr -d ' ')
+    CLIENT_API_READY=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Enhanced UAC Client ready" | wc -l | tr -d ' ')
     CLIENT_INITIATED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Making call.*of" | wc -l | tr -d ' ')
     CLIENT_PREPARED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Prepared call.*with RTP port" | wc -l | tr -d ' ')
     CLIENT_ESTABLISHED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Call.*established" | wc -l | tr -d ' ')
-    CLIENT_MEDIA_FLOW=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "✅ Media flow established, audio transmission active" | wc -l | tr -d ' ')
+    CLIENT_MEDIA_FLOW=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "✅ Media flow established" | wc -l | tr -d ' ')
     CLIENT_SUCCESS=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "All calls completed successfully" | wc -l | tr -d ' ')
     
     log_info "Test Metrics:"
@@ -167,7 +167,7 @@ main() {
     fi
     CMD="$CMD --max-calls $MAX_CALLS"
     
-    eval "$CMD > \"$SERVER_LOG\" 2>&1 &"
+    RUST_LOG=$LOG_LEVEL eval "$CMD > \"$SERVER_LOG\" 2>&1 &"
     SERVER_PID=$!
     
     log_info "Clean UAS server started with PID $SERVER_PID"
@@ -175,7 +175,7 @@ main() {
     # Wait for server to be ready
     log_info "Waiting for server to be ready..."
     for i in {1..60}; do
-        if grep -q "Clean UAS Server ready and listening" "$SERVER_LOG" 2>/dev/null; then
+        if grep -q "Enhanced UAS Server ready and listening" "$SERVER_LOG" 2>/dev/null; then
             log_success "Clean UAS server is ready"
             break
         fi
@@ -201,7 +201,7 @@ main() {
     log_info "Delay between calls: ${CALL_DELAY}s"
     
     # Run client
-    cargo run --bin uac_client_clean -- \
+    RUST_LOG=$LOG_LEVEL cargo run --bin uac_client_clean -- \
         --port "$CLIENT_PORT" \
         --target "$TARGET" \
         --num-calls "$NUM_CALLS" \

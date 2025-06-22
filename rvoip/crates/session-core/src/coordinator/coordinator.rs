@@ -292,6 +292,11 @@ impl SessionCoordinator {
     pub async fn get_negotiated_config(&self, session_id: &SessionId) -> Option<NegotiatedMediaConfig> {
         self.negotiated_configs.read().await.get(session_id).cloned()
     }
+    
+    /// Get the event processor for publishing events
+    pub fn event_processor(&self) -> Option<Arc<SessionEventProcessor>> {
+        Some(self.event_processor.clone())
+    }
 }
 
 impl std::fmt::Debug for SessionCoordinator {

@@ -85,7 +85,8 @@ impl Default for RtpTransportConfig {
             symmetric_rtp: true,
             rtcp_mux: true, // Enable by default as it's the modern approach
             session_id: None,
-            use_port_allocator: true,
+            // Don't use port allocator by default - let the caller decide
+            use_port_allocator: false,
         }
     }
 }

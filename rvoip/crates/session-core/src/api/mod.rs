@@ -459,6 +459,22 @@ pub use crate::conference::{
 // Re-export error types
 pub use crate::errors::{Result, SessionError};
 
+// Re-export event types for CallHandler use
+pub use crate::manager::events::{
+    MediaQualityAlertLevel,
+    MediaFlowDirection,
+    WarningCategory,
+};
+
+// Re-export statistics types from media module
+pub use crate::media::stats::{
+    CallStatistics,
+    MediaStatistics as MediaSessionStats,  // Alias for compatibility
+    RtpSessionStats,
+    QualityMetrics,
+    QualityThresholds,
+};
+
 // Type aliases for compatibility with call-engine
 pub type Session = CallSession;
 pub type IncomingCallNotification = IncomingCallEvent;

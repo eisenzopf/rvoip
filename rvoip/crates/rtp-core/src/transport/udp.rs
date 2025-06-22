@@ -197,6 +197,7 @@ impl UdpRtpTransport {
         
         let rtp_receiver = tokio::spawn(async move {
             let mut buffer = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
+            debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
             
             loop {
                 // Check if we should continue running
@@ -207,6 +208,8 @@ impl UdpRtpTransport {
                 // Receive packet
                 match rtp_socket.recv_from(&mut buffer).await {
                     Ok((size, addr)) => {
+                        debug!("UDP recv_from returned {} bytes from {}", size, addr);
+                        
                         // Check if it looks like an RTP or RTCP packet
                         if size < 8 {
                             // Too small to be either RTP or RTCP
@@ -474,9 +477,10 @@ impl RtpTransport for UdpRtpTransport {
         }
         
         // Send the data
-        self.rtp_socket.send_to(bytes, dest).await
+        let sent_bytes = self.rtp_socket.send_to(bytes, dest).await
             .map_err(|e| Error::Transport(format!("Failed to send RTP packet: {}", e)))?;
             
+        debug!("UDP send_to sent {} bytes to {}", sent_bytes, dest);
         Ok(())
     }
     

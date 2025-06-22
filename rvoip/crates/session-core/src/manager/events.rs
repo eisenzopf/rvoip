@@ -9,6 +9,46 @@ use serde::{Serialize, Deserialize};
 use crate::api::types::{SessionId, CallSession, CallState};
 use crate::media::types::{RtpProcessingType, RtpProcessingMode, RtpProcessingMetrics, RtpBufferPoolStats};
 use crate::errors::Result;
+use chrono;
+
+// ========== Supporting Types for Events ==========
+
+/// Media quality alert levels
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MediaQualityAlertLevel {
+    /// Good quality (MOS >= 4.0)
+    Good,
+    /// Fair quality (MOS >= 3.0)
+    Fair,
+    /// Poor quality (MOS >= 2.0)
+    Poor,
+    /// Critical quality (MOS < 2.0)
+    Critical,
+}
+
+/// Media flow direction
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MediaFlowDirection {
+    /// Sending media only
+    Send,
+    /// Receiving media only
+    Receive,
+    /// Both sending and receiving
+    Both,
+}
+
+/// Warning categories for non-fatal issues
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WarningCategory {
+    /// Network-related warnings
+    Network,
+    /// Media processing warnings
+    Media,
+    /// Protocol compliance warnings
+    Protocol,
+    /// Resource usage warnings
+    Resource,
+}
 
 /// Session events that can be published through the event system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +68,15 @@ pub enum SessionEvent {
         new_state: CallState,
     },
     
+    /// Enhanced state change event with metadata
+    DetailedStateChange {
+        session_id: SessionId,
+        old_state: CallState,
+        new_state: CallState,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        reason: Option<String>,
+    },
+    
     /// Session was terminated
     SessionTerminated { 
         session_id: SessionId, 
@@ -40,10 +89,36 @@ pub enum SessionEvent {
         event: String,
     },
     
+    /// Media quality metrics event
+    MediaQuality {
+        session_id: SessionId,
+        mos_score: f32,
+        packet_loss: f32,
+        jitter_ms: f32,
+        round_trip_ms: f32,
+        alert_level: MediaQualityAlertLevel,
+    },
+    
+    /// Media flow status change
+    MediaFlowChange {
+        session_id: SessionId,
+        direction: MediaFlowDirection,
+        active: bool,
+        codec: String,
+    },
+    
     /// DTMF digits received
     DtmfReceived {
         session_id: SessionId,
         digits: String,
+    },
+    
+    /// DTMF digit received (enhanced version)
+    DtmfDigit {
+        session_id: SessionId,
+        digit: char,
+        duration_ms: u32,
+        timestamp: chrono::DateTime<chrono::Utc>,
     },
     
     /// Session was held
@@ -83,6 +158,13 @@ pub enum SessionEvent {
         session_id: SessionId,
         event_type: String, // "local_sdp_offer", "remote_sdp_answer", "sdp_update", etc.
         sdp: String,
+    },
+    
+    /// Non-fatal warning event
+    Warning {
+        session_id: Option<SessionId>,
+        category: WarningCategory,
+        message: String,
     },
     
     /// Error event
@@ -331,6 +413,104 @@ impl SessionEventProcessor {
     /// Publish an RTP buffer pool update event
     pub async fn publish_rtp_buffer_pool_update(&self, stats: RtpBufferPoolStats) -> Result<()> {
         let event = SessionEvent::RtpBufferPoolUpdate { stats };
+        self.publish_event(event).await
+    }
+
+    // ========== New Event Publishing Helper Methods ==========
+
+    /// Publish a detailed state change event
+    pub async fn publish_detailed_state_change(
+        &self,
+        session_id: SessionId,
+        old_state: CallState,
+        new_state: CallState,
+        reason: Option<String>,
+    ) -> Result<()> {
+        let event = SessionEvent::DetailedStateChange {
+            session_id,
+            old_state,
+            new_state,
+            timestamp: chrono::Utc::now(),
+            reason,
+        };
+        self.publish_event(event).await
+    }
+
+    /// Publish a media quality event
+    pub async fn publish_media_quality(
+        &self,
+        session_id: SessionId,
+        mos_score: f32,
+        packet_loss: f32,
+        jitter_ms: f32,
+        round_trip_ms: f32,
+    ) -> Result<()> {
+        let alert_level = if mos_score >= 4.0 {
+            MediaQualityAlertLevel::Good
+        } else if mos_score >= 3.0 {
+            MediaQualityAlertLevel::Fair
+        } else if mos_score >= 2.0 {
+            MediaQualityAlertLevel::Poor
+        } else {
+            MediaQualityAlertLevel::Critical
+        };
+
+        let event = SessionEvent::MediaQuality {
+            session_id,
+            mos_score,
+            packet_loss,
+            jitter_ms,
+            round_trip_ms,
+            alert_level,
+        };
+        self.publish_event(event).await
+    }
+
+    /// Publish a DTMF digit event
+    pub async fn publish_dtmf_digit(
+        &self,
+        session_id: SessionId,
+        digit: char,
+        duration_ms: u32,
+    ) -> Result<()> {
+        let event = SessionEvent::DtmfDigit {
+            session_id,
+            digit,
+            duration_ms,
+            timestamp: chrono::Utc::now(),
+        };
+        self.publish_event(event).await
+    }
+
+    /// Publish a media flow change event
+    pub async fn publish_media_flow_change(
+        &self,
+        session_id: SessionId,
+        direction: MediaFlowDirection,
+        active: bool,
+        codec: String,
+    ) -> Result<()> {
+        let event = SessionEvent::MediaFlowChange {
+            session_id,
+            direction,
+            active,
+            codec,
+        };
+        self.publish_event(event).await
+    }
+
+    /// Publish a warning event
+    pub async fn publish_warning(
+        &self,
+        session_id: Option<SessionId>,
+        category: WarningCategory,
+        message: String,
+    ) -> Result<()> {
+        let event = SessionEvent::Warning {
+            session_id,
+            category,
+            message,
+        };
         self.publish_event(event).await
     }
 }

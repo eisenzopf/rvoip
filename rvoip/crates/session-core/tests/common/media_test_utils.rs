@@ -650,9 +650,11 @@ pub fn create_test_media_session_info(session_id: &str, codec: &str) -> MediaSes
 /// Creates test quality metrics for integration testing
 pub fn create_test_quality_metrics(mos: f32, packet_loss: f32) -> QualityMetrics {
     QualityMetrics {
-        mos_score: Some(mos),
-        packet_loss: Some(packet_loss),
-        jitter: Some(10.0),
-        latency: Some(100),
+        mos_score: mos,
+        packet_loss_rate: packet_loss,
+        jitter_ms: 10.0,
+        round_trip_ms: 100.0,
+        network_effectiveness: 1.0 - packet_loss,
+        is_acceptable: mos >= 3.0,
     }
 } 
