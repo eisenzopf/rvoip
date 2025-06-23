@@ -124,6 +124,10 @@ echo "   Auto-answer: enabled"
 # Start server with cargo run and capture output
 cd "$PROJECT_ROOT"
 SERVER_READY=false
+
+# Enable debug logging for better diagnostics
+export RUST_LOG=rvoip_client_core=debug,rvoip_session_core=debug,info
+
 cargo run --release --example sipp_integration_sip_test_server -- \
     $SIP_PORT \
     $MEDIA_PORT \
@@ -142,6 +146,20 @@ for i in {1..10}; do
         SERVER_READY=true
         break
     fi
+    
+    # Also check server log for ready message
+    if [ -f "$PROJECT_ROOT/server.log" ] && grep -q "SIP Server ready!" "$PROJECT_ROOT/server.log"; then
+        echo -e "\n${GREEN}✅ Server is ready (confirmed by log)${NC}"
+        SERVER_READY=true
+        break
+    fi
+    
+    # Check if server process is still running
+    if ! kill -0 $SERVER_PID 2>/dev/null; then
+        echo -e "\n${RED}❌ Server process died${NC}"
+        break
+    fi
+    
     echo -n "."
     sleep 1
 done
@@ -174,6 +192,7 @@ run_simple_test() {
     sipp -sf simple_uac.xml \
          -s test \
          127.0.0.1:$SIP_PORT \
+         -p $SIPP_PORT \
          -l 1 \
          -m 1 \
          -trace_msg \
@@ -197,16 +216,23 @@ run_media_test() {
     echo "   Duration: $CALL_DURATION seconds per call"
     echo "   RTP: Audio transmission using G.711 PCAP"
     
+    # Use dynamic media ports (like session-core does)
+    local base_media_port=$((6000 + (RANDOM % 1000)))
+    echo "   Media Port Range: ${base_media_port}-$((base_media_port + 100))"
+    
     cd "$SCRIPT_DIR"
     sipp -sf uac_with_media.xml \
          -s service \
          127.0.0.1:$SIP_PORT \
+         -p $SIPP_PORT \
          -l $NUM_CALLS \
          -r $CALL_RATE \
          -m $NUM_CALLS \
-         -d $((CALL_DURATION * 1000)) \
+         -d $(($CALL_DURATION * 1000)) \
          -mi 127.0.0.1 \
-         -mp $SIPP_MEDIA_PORT \
+         -mp $base_media_port \
+         -min_rtp_port $base_media_port \
+         -max_rtp_port $((base_media_port + 100)) \
          -rtp_echo \
          -trace_msg \
          -message_file sipp_messages_media.log \

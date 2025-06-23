@@ -40,6 +40,13 @@ impl ClientEventHandler for TestServerEventHandler {
             call_info.call_id
         );
         
+        // Add debug info about the call
+        info!("📋 Call Info Debug:");
+        info!("   - CallId: {}", call_info.call_id);
+        info!("   - Caller URI: {}", call_info.caller_uri);
+        info!("   - Callee URI: {}", call_info.callee_uri);
+        info!("   - Display Name: {:?}", call_info.caller_display_name);
+        
         if let Some(subject) = &call_info.subject {
             info!("📝 Call subject: {}", subject);
         }
@@ -89,16 +96,53 @@ impl ClientEventHandler for TestServerEventHandler {
 
     async fn on_media_event(&self, event: MediaEventInfo) {
         let emoji = match &event.event_type {
-            MediaEventType::AudioStarted => "▶️",
-            MediaEventType::AudioStopped => "⏹️",
-            MediaEventType::MediaSessionStarted { .. } => "🎵",
-            MediaEventType::MediaSessionStopped => "⏹️",
-            MediaEventType::SdpOfferGenerated { .. } => "📄",
-            MediaEventType::SdpAnswerProcessed { .. } => "📥",
+            MediaEventType::AudioStarted => {
+                info!("🎵 Audio transmission STARTED for call {}", event.call_id);
+                "▶️"
+            },
+            MediaEventType::AudioStopped => {
+                info!("🛑 Audio transmission STOPPED for call {}", event.call_id);
+                "⏹️"
+            },
+            MediaEventType::MediaSessionStarted { media_session_id } => {
+                info!("🎵 Media session STARTED: {} for call {}", media_session_id, event.call_id);
+                "🎵"
+            },
+            MediaEventType::MediaSessionStopped => {
+                info!("⏹️ Media session STOPPED for call {}", event.call_id);
+                "⏹️"
+            },
+            MediaEventType::SdpOfferGenerated { sdp_size } => {
+                info!("📄 SDP Offer Generated for call {}: {} bytes", event.call_id, sdp_size);
+                "📄"
+            },
+            MediaEventType::SdpAnswerProcessed { sdp_size } => {
+                info!("📥 SDP Answer Processed for call {}: {} bytes", event.call_id, sdp_size);
+                "📥"
+            },
+            MediaEventType::QualityChanged { mos_score_x100 } => {
+                let mos = *mos_score_x100 as f32 / 100.0;
+                info!("📊 Audio quality changed for call {}: MOS score {:.2}", event.call_id, mos);
+                "📊"
+            },
+            MediaEventType::PacketLoss { percentage_x100 } => {
+                let loss = *percentage_x100 as f32 / 100.0;
+                info!("📉 Packet loss detected for call {}: {:.1}%", event.call_id, loss);
+                "📉"
+            },
+            MediaEventType::JitterChanged { jitter_ms } => {
+                info!("📈 Jitter changed for call {}: {} ms", event.call_id, jitter_ms);
+                "📈"
+            },
             _ => "🔊",
         };
         
         info!("{} Media Event for call {}: {:?}", emoji, event.call_id, event.event_type);
+        
+        // Log any metadata
+        if !event.metadata.is_empty() {
+            info!("   📋 Metadata: {:?}", event.metadata);
+        }
     }
 
     async fn on_client_error(&self, error: ClientError, call_id: Option<CallId>) {
@@ -121,6 +165,8 @@ impl ClientEventHandler for TestServerEventHandler {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("🚀 Starting RVOIP SIP Test Server (console output)");
+    
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -178,15 +224,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("   🔄 Auto-answer: {}", auto_answer);
 
     // Create the client manager
-    let client = ClientManager::new(config).await?;
+    info!("🔧 Creating ClientManager...");
+    
+    // Add timeout to catch hanging issues
+    let client = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        ClientManager::new(config)
+    ).await {
+        Ok(Ok(client)) => {
+            info!("✅ ClientManager created successfully");
+            client
+        }
+        Ok(Err(e)) => {
+            error!("❌ Failed to create ClientManager: {}", e);
+            return Err(e.into());
+        }
+        Err(_) => {
+            error!("❌ ClientManager creation timed out after 10 seconds");
+            return Err("ClientManager creation timeout".into());
+        }
+    };
     
     // Set up event handler
+    info!("🔧 Setting up event handler...");
     let event_handler = Arc::new(TestServerEventHandler::new(auto_answer));
     client.set_event_handler(event_handler).await;
+    info!("✅ Event handler set");
 
     // Start the client
     info!("▶️  Starting SIP server...");
     client.start().await?;
+    info!("✅ SIP server started successfully");
     
     let stats = client.get_client_stats().await;
     info!("✅ SIP Server ready!");
@@ -208,7 +276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut answered_calls = std::collections::HashSet::new();
     
     loop {
-        sleep(Duration::from_secs(1)).await;
+        sleep(Duration::from_millis(100)).await;
         
         // Get current stats
         let stats = client.get_client_stats().await;
@@ -216,12 +284,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Check for new calls
         let active_calls = client.get_active_calls().await;
         
+        // Debug: Log all active calls
+        if !active_calls.is_empty() {
+            info!("📊 Active calls: {}", active_calls.len());
+            for call in &active_calls {
+                info!("   - Call {}: state={:?}, direction={:?}", 
+                      call.call_id, call.state, call.direction);
+            }
+        }
+        
         // Auto-answer pending incoming calls if enabled
         if auto_answer {
             for call_info in &active_calls {
                 if call_info.state == CallState::IncomingPending && 
                    !answered_calls.contains(&call_info.call_id) {
-                    info!("✅ Auto-answering call {}", call_info.call_id);
+                    info!("✅ Found pending call to answer: {}", call_info.call_id);
+                    info!("   📋 Call details: state={:?}, direction={:?}", 
+                          call_info.state, call_info.direction);
+                    info!("   📞 URIs: {} -> {}", call_info.remote_uri, call_info.local_uri);
+                    
                     match client.answer_call(&call_info.call_id).await {
                         Ok(_) => {
                             info!("📞 Successfully answered call {} with SDP", call_info.call_id);
@@ -229,6 +310,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Err(e) => {
                             error!("❌ Failed to answer call {}: {}", call_info.call_id, e);
+                            error!("   Error type: {:?}", e);
+                            // Don't mark as answered, will retry
                         }
                     }
                 }
@@ -250,6 +333,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             info!("   📡 Local RTP: {:?}", media_info.local_rtp_port);
                             info!("   📡 Remote RTP: {:?}", media_info.remote_rtp_port);
                             info!("   🎵 Codec: {:?}", media_info.codec);
+                            
+                            if let (Some(local_port), Some(remote_port)) = 
+                                (media_info.local_rtp_port, media_info.remote_rtp_port) {
+                                info!("   ✅ Ready to receive RTP packets on port {} from port {}", 
+                                      local_port, remote_port);
+                                info!("   📨 The media session will automatically process incoming RTP packets");
+                            }
                         }
                         Err(e) => {
                             warn!("   ⚠️  No media info yet: {}", e);

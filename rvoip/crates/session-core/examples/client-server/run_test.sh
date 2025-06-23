@@ -132,13 +132,24 @@ main() {
     # Change to project directory
     cd "$PROJECT_DIR"
     
+    # Build the binaries first
+    print_header "Building Binaries"
+    log_info "Building UAS server and UAC client binaries..."
+    
+    if cargo build --release --bin uas_server --bin uac_client; then
+        log_success "Binaries built successfully"
+    else
+        log_error "Failed to build binaries"
+        exit 1
+    fi
+    
     # Start the server
     print_header "Starting UAS Server"
     log_info "Starting UAS server on port $SERVER_PORT..."
     log_info "Server log: $SERVER_LOG"
     
     # Run server in background with auto-shutdown after 60 seconds
-    cargo run --bin uas_server -- --port "$SERVER_PORT" --log-level "$LOG_LEVEL" --auto-shutdown 60 > "$SERVER_LOG" 2>&1 &
+    cargo run --release --bin uas_server -- --port "$SERVER_PORT" --log-level "$LOG_LEVEL" --auto-shutdown 60 > "$SERVER_LOG" 2>&1 &
     SERVER_PID=$!
     
     log_info "UAS server started with PID $SERVER_PID"
@@ -171,7 +182,7 @@ main() {
     log_info "Call duration: ${CALL_DURATION}s"
     
     # Run client (not in background, so we wait for it to complete)
-    cargo run --bin uac_client -- \
+    cargo run --release --bin uac_client -- \
         --port "$CLIENT_PORT" \
         --target "$TARGET" \
         --calls "$NUM_CALLS" \
