@@ -303,20 +303,46 @@ impl SessionCoordinator {
             "remote_sdp_answer" => {
                 // For UAC: we sent offer, received answer - negotiate
                 if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                    // Get our offer from media manager
-                    if let Ok(Some(media_info)) = self.media_manager.get_media_info(&session_id).await {
+                    // Get our offer from media manager (if media session exists)
+                    let media_info = self.media_manager.get_media_info(&session_id).await.ok().flatten();
+                    
+                    if let Some(media_info) = media_info {
+                        // Media session exists - normal flow
                         if let Some(our_offer) = media_info.local_sdp {
                             tracing::info!("Negotiating SDP as UAC for session {}", session_id);
                             match self.negotiate_sdp_as_uac(&session_id, &our_offer, &sdp).await {
                                 Ok(negotiated) => {
                                     tracing::info!("SDP negotiation successful: codec={}, local={}, remote={}", 
                                         negotiated.codec, negotiated.local_addr, negotiated.remote_addr);
+                                    
+                                    // Update the media session with the remote SDP
+                                    // This stores the SDP and configures the remote RTP endpoint
+                                    if let Err(e) = self.media_manager.update_media_session(&session_id, &sdp).await {
+                                        tracing::error!("Failed to update media session with remote SDP: {}", e);
+                                    } else {
+                                        tracing::info!("Updated media session with remote SDP for session {}", session_id);
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::error!("SDP negotiation failed: {}", e);
                                 }
                             }
                         }
+                    } else {
+                        // Media session doesn't exist yet - this happens when we receive 
+                        // the remote SDP before media creation (RFC 3261 compliant flow)
+                        // Store the remote SDP for later processing
+                        tracing::info!("Media session not yet created for {}, storing remote SDP for later", session_id);
+                        
+                        // Store the remote SDP in the MediaManager's storage
+                        let mut sdp_storage = self.media_manager.sdp_storage.write().await;
+                        let entry = sdp_storage.entry(session_id.clone()).or_insert((None, None));
+                        entry.1 = Some(sdp.clone());
+                        tracing::info!("Stored remote SDP for session {} in MediaManager storage", session_id);
+                        
+                        // The media session will be created later when we receive the
+                        // rfc_compliant_media_creation_uac event, and at that point
+                        // it will pick up the stored remote SDP
                     }
                 }
             }
@@ -371,6 +397,14 @@ impl SessionCoordinator {
                         Ok((our_answer, negotiated)) => {
                             tracing::info!("SDP negotiation as UAS successful: codec={}, local={}, remote={}", 
                                 negotiated.codec, negotiated.local_addr, negotiated.remote_addr);
+                            
+                            // Update the media session with the remote SDP (their offer)
+                            // This stores the SDP and configures the remote RTP endpoint
+                            if let Err(e) = self.media_manager.update_media_session(&session_id, &their_offer).await {
+                                tracing::error!("Failed to update media session with remote SDP: {}", e);
+                            } else {
+                                tracing::info!("Updated media session with remote SDP (offer) for session {}", session_id);
+                            }
                             
                             // Send event with the generated answer
                             let _ = self.event_tx.send(SessionEvent::SdpEvent {

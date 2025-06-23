@@ -9,7 +9,7 @@ use rvoip_client_core::{
 use std::sync::Arc;
 use std::collections::HashSet;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -88,6 +88,14 @@ impl ClientEventHandler for SimpleUasHandler {
                     info!("📊 Media info - Local RTP: {:?}, Remote RTP: {:?}, Codec: {:?}",
                         media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);
                     info!("👂 Listening for RTP packets on port {:?}", media_info.local_rtp_port);
+                    
+                    // The remote SDP should now be automatically populated by session-core
+                    if media_info.remote_sdp.is_some() {
+                        info!("✅ Remote SDP is available - RTP endpoint configured automatically");
+                        info!("📡 Ready to receive RTP packets from the negotiated remote endpoint");
+                    } else {
+                        warn!("⚠️ Remote SDP not found - this might indicate an issue");
+                    }
                 }
             }
         } else if status_info.new_state == CallState::Terminated {

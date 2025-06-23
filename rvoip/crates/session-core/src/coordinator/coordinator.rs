@@ -113,7 +113,7 @@ impl SessionCoordinator {
         // Create event channels
         let (event_tx, event_rx) = mpsc::channel(1000);
         let (dialog_coord_tx, dialog_coord_rx) = mpsc::channel(1000);
-
+        
         // Create subsystem coordinators
         let dialog_coordinator = Arc::new(SessionDialogCoordinator::new(
             dialog_api,

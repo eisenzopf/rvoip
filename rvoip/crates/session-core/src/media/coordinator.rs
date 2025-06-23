@@ -54,6 +54,22 @@ impl SessionMediaCoordinator {
         let mut mapping = self.session_mapping.write().await;
         mapping.insert(session_id.clone(), media_session.session_id.clone());
         
+        // Check if there's any stored remote SDP that was received before media creation
+        let sdp_storage = self.media_manager.sdp_storage.read().await;
+        if let Some((_, Some(stored_remote_sdp))) = sdp_storage.get(session_id) {
+            let stored_remote_sdp = stored_remote_sdp.clone(); // Clone before dropping lock
+            drop(sdp_storage); // Release the read lock
+            
+            tracing::info!("Found stored remote SDP for session {}, applying it now", session_id);
+            
+            // Update the media session with the stored remote SDP
+            if let Err(e) = self.media_manager.update_media_session(session_id, &stored_remote_sdp).await {
+                tracing::error!("Failed to apply stored remote SDP: {}", e);
+            } else {
+                tracing::info!("Successfully applied stored remote SDP to media session {}", session_id);
+            }
+        }
+        
         // Notify event handlers
         let event = MediaEvent::SessionEstablished {
             session_id: media_session.session_id.clone(),

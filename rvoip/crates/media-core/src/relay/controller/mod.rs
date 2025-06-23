@@ -407,9 +407,23 @@ impl MediaSessionController {
         let old_remote = session_info.config.remote_addr;
         session_info.config = config.clone();
         
-        // If remote address was set/changed, emit event
+        // If remote address was set/changed, update the RTP session
         if config.remote_addr != old_remote {
             if let Some(remote_addr) = config.remote_addr {
+                // Update the RTP session's remote address
+                let mut rtp_sessions = self.rtp_sessions.write().await;
+                if let Some(rtp_wrapper) = rtp_sessions.get_mut(&dialog_id) {
+                    // Update the wrapper's remote address
+                    rtp_wrapper.remote_addr = Some(remote_addr);
+                    
+                    // Update the actual RTP session
+                    let mut rtp_session = rtp_wrapper.session.lock().await;
+                    rtp_session.set_remote_addr(remote_addr).await;
+                    
+                    info!("✅ Updated RTP session remote address for dialog {}: {}", dialog_id, remote_addr);
+                }
+                
+                // Emit event
                 let _ = self.event_tx.send(MediaSessionEvent::RemoteAddressUpdated {
                     dialog_id: dialog_id.clone(),
                     remote_addr,

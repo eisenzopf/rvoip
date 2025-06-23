@@ -134,40 +134,12 @@ impl ClientEventHandler for SimpleUacHandler {
                             info!("📊 Media info - Local RTP: {:?}, Remote RTP: {:?}, Codec: {:?}",
                                 media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);
                             
-                            // Debug: Log the full media info
-                            info!("📋 Full media info: remote_sdp present: {}", media_info.remote_sdp.is_some());
-                            
-                            // For this demo, since we're running locally and know the server setup,
-                            // we'll establish media flow based on what we know:
-                            // The server allocates dynamic RTP ports and we need to extract from SDP
-                            
-                            // Since remote_sdp is not available in MediaInfo, and for demo purposes,
-                            // we'll use a workaround. In a real implementation, this would be
-                            // handled by the session-core layer properly exposing the remote endpoint.
-                            
-                            // For now, let's just log that we need the remote endpoint
-                            warn!("⚠️ Demo limitation: MediaInfo doesn't include remote SDP");
-                            warn!("⚠️ In production, the remote RTP endpoint would be extracted from SDP negotiation");
-                            warn!("⚠️ RTP packets are being generated but not sent due to missing destination");
-                            
-                            // The RTP session is created and generating packets, just missing the destination
-                            info!("📡 RTP session is active and generating 440Hz test tone packets");
-                            info!("📡 Packets would be sent if remote endpoint was properly configured");
-                            
-                            // DEMO WORKAROUND: For testing RTP flow in local environment
-                            // Normally this would come from SDP negotiation
-                            if std::env::var("DEMO_RTP_HARDCODE").is_ok() {
-                                // Hardcode to common server RTP port for demo
-                                let remote_addr = "127.0.0.1:30000";
-                                info!("🔧 DEMO MODE: Using hardcoded remote RTP endpoint: {}", remote_addr);
-                                match client.establish_media(&status_info.call_id, remote_addr).await {
-                                    Ok(_) => {
-                                        info!("✅ Media flow established to {} (demo mode)", remote_addr);
-                                    }
-                                    Err(e) => {
-                                        error!("❌ Failed to establish media flow: {}", e);
-                                    }
-                                }
+                            // The remote SDP should now be automatically populated by session-core
+                            if media_info.remote_sdp.is_some() {
+                                info!("✅ Remote SDP is available - RTP endpoint configured automatically");
+                                info!("📡 RTP packets are being sent to the negotiated remote endpoint");
+                            } else {
+                                warn!("⚠️ Remote SDP not found - this might indicate an issue");
                             }
                         } else {
                             error!("❌ Failed to get media info for call {}", status_info.call_id);
@@ -199,24 +171,6 @@ impl ClientEventHandler for SimpleUacHandler {
                 "🎵 Media event for call {}: {:?}",
                 event.call_id, event.event_type
             );
-        }
-
-        // Check for MediaNegotiated event which should contain remote address
-        if let Some(remote_addr) = event.metadata.get("remote_addr") {
-            info!("🎯 Found remote RTP address in media event: {}", remote_addr);
-            
-            // Get client manager and establish media flow
-            if let Some(client) = self.client_manager.read().await.as_ref() {
-                info!("📤 Establishing media flow to {} for call {}", remote_addr, event.call_id);
-                match client.establish_media(&event.call_id, remote_addr).await {
-                    Ok(_) => {
-                        info!("✅ Media flow established via media event - RTP packets should now be sent to {}", remote_addr);
-                    }
-                    Err(e) => {
-                        error!("❌ Failed to establish media flow via media event: {}", e);
-                    }
-                }
-            }
         }
 
         // Log RTP packet statistics
@@ -342,35 +296,4 @@ async fn main() -> Result<()> {
     client.stop().await?;
     
     Ok(())
-}
-
-/// Extract RTP address from SDP
-fn extract_rtp_address_from_sdp(sdp: &str, _rtp_port: Option<u16>) -> Option<String> {
-    // Extract IP from c= line
-    let ip = sdp.lines()
-        .find(|line| line.starts_with("c="))
-        .and_then(|line| {
-            // c=IN IP4 192.168.1.100
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                Some(parts[3].to_string())
-            } else {
-                None
-            }
-        })?;
-    
-    // Extract port from m= line
-    let port = sdp.lines()
-        .find(|line| line.starts_with("m=audio"))
-        .and_then(|line| {
-            // m=audio 5004 RTP/AVP 0 8
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                parts[1].parse::<u16>().ok()
-            } else {
-                None
-            }
-        })?;
-    
-    Some(format!("{}:{}", ip, port))
 } 
