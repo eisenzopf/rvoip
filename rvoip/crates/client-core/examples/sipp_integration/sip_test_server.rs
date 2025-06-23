@@ -45,8 +45,9 @@ impl ClientEventHandler for TestServerEventHandler {
         }
         
         if self.auto_answer {
-            info!("✅ Auto-accepting incoming call");
-            CallAction::Accept
+            info!("🔔 Auto-answer enabled, deferring for SDP generation");
+            // Defer so we can accept with SDP answer
+            CallAction::Ignore
         } else {
             info!("🔔 Call ringing (manual answer required)");
             CallAction::Ignore
@@ -204,6 +205,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Main loop - handle incoming calls
     let mut call_count = 0;
+    let mut answered_calls = std::collections::HashSet::new();
+    
     loop {
         sleep(Duration::from_secs(1)).await;
         
@@ -212,6 +215,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         // Check for new calls
         let active_calls = client.get_active_calls().await;
+        
+        // Auto-answer pending incoming calls if enabled
+        if auto_answer {
+            for call_info in &active_calls {
+                if call_info.state == CallState::IncomingPending && 
+                   !answered_calls.contains(&call_info.call_id) {
+                    info!("✅ Auto-answering call {}", call_info.call_id);
+                    match client.answer_call(&call_info.call_id).await {
+                        Ok(_) => {
+                            info!("📞 Successfully answered call {} with SDP", call_info.call_id);
+                            answered_calls.insert(call_info.call_id);
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to answer call {}: {}", call_info.call_id, e);
+                        }
+                    }
+                }
+            }
+        }
         
         if active_calls.len() > call_count {
             call_count = active_calls.len();

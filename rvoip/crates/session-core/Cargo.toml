@@ -66,14 +66,6 @@ name = "simple_peer_to_peer"
 path = "examples/peer-to-peer/simple_peer_to_peer.rs"
 
 [[bin]]
-name = "test_rtp_direct"
-path = "examples/api_best_practices/test_rtp_direct.rs"
-
-[[bin]]
-name = "test_rtp_direct_fixed"
-path = "examples/api_best_practices/test_rtp_direct_fixed.rs"
-
-[[bin]]
 name = "uac_client_clean"
 path = "examples/api_best_practices/uac_client_clean.rs"
 

@@ -46,9 +46,7 @@
   <!-- Expect 200 OK -->
   <recv response="200" rtd="true">
     <action>
-      <!-- Extract remote media port from SDP -->
-      <ereg regexp="m=audio ([0-9]+)" search_in="body" assign_to="dummy,remote_media_port"/>
-      <exec int_cmd="echo 'Call connected! Remote RTP port: [$remote_media_port]'"/>
+      <exec int_cmd="echo 'Call connected!'"/>
     </action>
   </recv>
 

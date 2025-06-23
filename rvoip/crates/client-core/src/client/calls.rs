@@ -9,6 +9,7 @@ use chrono::Utc;
 // Import session-core APIs
 use rvoip_session_core::api::{
     SessionControl,
+    MediaControl,
 };
 
 // Import client-core types
@@ -175,11 +176,35 @@ impl super::manager::ClientManager {
             .await
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?;
         
-        // Use SessionControl to accept the call
+        // Generate SDP answer based on the offer
+        let sdp_answer = if let Some(offer) = &incoming_call.sdp {
+            // Use MediaControl to generate SDP answer
+            MediaControl::generate_sdp_answer(
+                &self.coordinator,
+                &incoming_call.id,
+                offer
+            )
+            .await
+            .map_err(|e| ClientError::CallSetupFailed { 
+                reason: format!("Failed to generate SDP answer: {}", e) 
+            })?
+        } else {
+            // No offer provided, generate our own SDP
+            MediaControl::generate_sdp_offer(
+                &self.coordinator,
+                &incoming_call.id
+            )
+            .await
+            .map_err(|e| ClientError::CallSetupFailed { 
+                reason: format!("Failed to generate SDP: {}", e) 
+            })?
+        };
+        
+        // Use SessionControl to accept the call with SDP answer
         SessionControl::accept_incoming_call(
             &self.coordinator,
             &incoming_call,
-            None  // Let session-core generate SDP answer
+            Some(sdp_answer)  // Provide the generated SDP answer
         )
         .await
         .map_err(|e| ClientError::CallSetupFailed { 

@@ -158,8 +158,14 @@ fi
 # Run test based on argument
 TEST_TYPE="${1:-media}"
 
-if [ "$TEST_TYPE" == "simple" ]; then
-    # Run simple test without media
+echo -e "\n${BLUE}🎯 Test mode: ${YELLOW}$TEST_TYPE${NC}"
+echo "   Available modes:"
+echo "     simple - SIP signaling only (no RTP media)"
+echo "     media  - Full test with RTP audio transmission"
+echo "     both   - Run both tests in sequence"
+
+# Function to run simple test
+run_simple_test() {
     echo -e "\n${BLUE}📞 Running simple SIPp test (no media)...${NC}"
     echo "   Target: 127.0.0.1:$SIP_PORT"
     echo "   Calls: 1"
@@ -171,19 +177,25 @@ if [ "$TEST_TYPE" == "simple" ]; then
          -l 1 \
          -m 1 \
          -trace_msg \
-         -message_file sipp_messages.log \
+         -message_file sipp_messages_simple.log \
          -trace_screen \
-         -screen_file sipp_screen.log \
+         -screen_file sipp_screen_simple.log \
          -trace_err \
-         -error_file sipp_errors.log
-         
-else
-    # Run full test with media
-    echo -e "\n${BLUE}📞 Running SIPp test scenario with media...${NC}"
+         -error_file sipp_errors_simple.log
+    
+    local result=$?
+    echo -e "\n${BLUE}📊 Simple test completed with exit code: $result${NC}"
+    return $result
+}
+
+# Function to run media test
+run_media_test() {
+    echo -e "\n${BLUE}📞 Running SIPp test scenario with RTP media...${NC}"
     echo "   Target: 127.0.0.1:$SIP_PORT"
     echo "   Calls: $NUM_CALLS"
     echo "   Rate: $CALL_RATE call/s"
     echo "   Duration: $CALL_DURATION seconds per call"
+    echo "   RTP: Audio transmission using G.711 PCAP"
     
     cd "$SCRIPT_DIR"
     sipp -sf uac_with_media.xml \
@@ -197,24 +209,82 @@ else
          -mp $SIPP_MEDIA_PORT \
          -rtp_echo \
          -trace_msg \
-         -message_file sipp_messages.log \
+         -message_file sipp_messages_media.log \
          -trace_screen \
-         -screen_file sipp_screen.log \
+         -screen_file sipp_screen_media.log \
          -trace_err \
-         -error_file sipp_errors.log
-fi
+         -error_file sipp_errors_media.log
+    
+    local result=$?
+    echo -e "\n${BLUE}📊 Media test completed with exit code: $result${NC}"
+    return $result
+}
 
-# Check results
-echo -e "\n${BLUE}📊 Test Results:${NC}"
-if [ -f sipp_screen.log ]; then
-    echo "SIPp Screen Output:"
-    echo "==================="
-    tail -20 sipp_screen.log
-fi
+# Execute tests based on type
+case "$TEST_TYPE" in
+    simple)
+        run_simple_test
+        ;;
+    media)
+        run_media_test
+        ;;
+    both)
+        echo -e "\n${YELLOW}Running both test scenarios...${NC}"
+        
+        # Run simple test first
+        echo -e "\n${GREEN}=== Test 1/2: Simple (signaling only) ===${NC}"
+        run_simple_test
+        simple_result=$?
+        
+        # Brief pause between tests
+        echo -e "\n${YELLOW}Pausing 2 seconds before next test...${NC}"
+        sleep 2
+        
+        # Run media test
+        echo -e "\n${GREEN}=== Test 2/2: Media (with RTP audio) ===${NC}"
+        run_media_test
+        media_result=$?
+        
+        # Summary
+        echo -e "\n${BLUE}📊 Test Summary:${NC}"
+        echo "   Simple test: $([ $simple_result -eq 0 ] && echo -e "${GREEN}PASSED${NC}" || echo -e "${RED}FAILED${NC}")"
+        echo "   Media test:  $([ $media_result -eq 0 ] && echo -e "${GREEN}PASSED${NC}" || echo -e "${RED}FAILED${NC}")"
+        
+        # Exit with failure if either test failed
+        [ $simple_result -ne 0 ] || [ $media_result -ne 0 ] && exit 1
+        ;;
+    *)
+        echo -e "${RED}❌ Invalid test type: $TEST_TYPE${NC}"
+        echo "   Use: simple, media, or both"
+        exit 1
+        ;;
+esac
 
-if [ -f sipp_errors.log ]; then
-    echo -e "\n${YELLOW}⚠️  SIPp Errors:${NC}"
-    cat sipp_errors.log
+# Check results (only if not running "both" mode, as it has its own summary)
+if [ "$TEST_TYPE" != "both" ]; then
+    echo -e "\n${BLUE}📊 Test Results:${NC}"
+    
+    # Determine which log files to check based on test type
+    if [ "$TEST_TYPE" == "simple" ]; then
+        SCREEN_LOG="sipp_screen_simple.log"
+        ERRORS_LOG="sipp_errors_simple.log"
+        MESSAGES_LOG="sipp_messages_simple.log"
+    else
+        SCREEN_LOG="sipp_screen_media.log"
+        ERRORS_LOG="sipp_errors_media.log"
+        MESSAGES_LOG="sipp_messages_media.log"
+    fi
+    
+    if [ -f "$SCREEN_LOG" ]; then
+        echo "SIPp Screen Output:"
+        echo "==================="
+        tail -20 "$SCREEN_LOG"
+    fi
+
+    if [ -f "$ERRORS_LOG" ]; then
+        echo -e "\n${YELLOW}⚠️  SIPp Errors:${NC}"
+        cat "$ERRORS_LOG"
+    fi
 fi
 
 # Show server log
@@ -225,6 +295,15 @@ tail -30 "$PROJECT_ROOT/server.log"
 echo -e "\n${GREEN}✅ Test completed!${NC}"
 echo "Log files available:"
 echo "  - Server log: $PROJECT_ROOT/server.log"
-echo "  - SIPp messages: $SCRIPT_DIR/sipp_messages.log"
-echo "  - SIPp screen: $SCRIPT_DIR/sipp_screen.log"
-echo "  - SIPp statistics: $SCRIPT_DIR/sipp_stats.csv" 
+if [ "$TEST_TYPE" == "both" ]; then
+    echo "  - Simple test logs: $SCRIPT_DIR/sipp_*_simple.log"
+    echo "  - Media test logs: $SCRIPT_DIR/sipp_*_media.log"
+elif [ "$TEST_TYPE" == "simple" ]; then
+    echo "  - SIPp messages: $SCRIPT_DIR/sipp_messages_simple.log"
+    echo "  - SIPp screen: $SCRIPT_DIR/sipp_screen_simple.log"
+    echo "  - SIPp errors: $SCRIPT_DIR/sipp_errors_simple.log"
+else
+    echo "  - SIPp messages: $SCRIPT_DIR/sipp_messages_media.log"
+    echo "  - SIPp screen: $SCRIPT_DIR/sipp_screen_media.log"
+    echo "  - SIPp errors: $SCRIPT_DIR/sipp_errors_media.log"
+fi 
