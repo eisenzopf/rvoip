@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::collections::HashSet;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -37,12 +38,12 @@ struct SimpleUasHandler {
 }
 
 impl SimpleUasHandler {
-    fn new(rtp_debug: bool, auto_answer_delay_ms: u64) -> Self {
+    pub fn new(rtp_debug: bool) -> Self {
         Self {
-            rtp_debug,
-            auto_answer_delay_ms,
-            active_calls: Arc::new(Mutex::new(HashSet::new())),
+            config: Arc::new(RwLock::new(ClientConfig::default())),
             client_manager: Arc::new(RwLock::new(None)),
+            active_calls: Arc::new(Mutex::new(HashSet::new())),
+            rtp_debug,
         }
     }
     
@@ -68,40 +69,52 @@ impl ClientEventHandler for SimpleUasHandler {
     }
 
     async fn on_call_state_changed(&self, status_info: CallStatusInfo) {
+        let state_emoji = match status_info.new_state {
+            CallState::Initiating => "🔄",
+            CallState::Ringing => "🔔",
+            CallState::Connected => "✅",
+            CallState::OnHold => "⏸️",
+            CallState::Terminating => "🔚",
+            CallState::Terminated => "❌",
+            CallState::Failed => "⚠️",
+        };
+        
         info!(
-            "📞 Call {} state changed: {:?} -> {:?}",
-            status_info.call_id, 
-            status_info.previous_state, 
-            status_info.new_state
+            "{} Call {} state changed: {:?} → {:?} {}",
+            state_emoji,
+            status_info.call_id,
+            status_info.previous_state,
+            status_info.new_state,
+            status_info.reason.as_deref().unwrap_or("")
         );
-
+        
         if status_info.new_state == CallState::Connected {
             let mut calls = self.active_calls.lock().await;
             calls.insert(status_info.call_id);
             info!("✅ Call {} connected - ready to receive RTP", status_info.call_id);
+            
+            // Start monitoring RTP statistics
+            self.start_stats_monitoring(status_info.call_id).await;
             
             // The server doesn't need to explicitly start audio transmission
             // as it will automatically receive RTP packets sent by the client
             // However, we can get media info to see the negotiated parameters
             if let Some(client) = self.client_manager.read().await.as_ref() {
                 if let Ok(media_info) = client.get_call_media_info(&status_info.call_id).await {
-                    info!("📊 Media info - Local RTP: {:?}, Remote RTP: {:?}, Codec: {:?}",
-                        media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);
-                    info!("👂 Listening for RTP packets on port {:?}", media_info.local_rtp_port);
-                    
-                    // The remote SDP should now be automatically populated by session-core
-                    if media_info.remote_sdp.is_some() {
-                        info!("✅ Remote SDP is available - RTP endpoint configured automatically");
-                        info!("📡 Ready to receive RTP packets from the negotiated remote endpoint");
-                    } else {
-                        warn!("⚠️ Remote SDP not found - this might indicate an issue");
-                    }
+                    info!(
+                        "📊 Media info for call {}: codec={:?}, local_port={}, remote_port={:?}, remote_sdp={}",
+                        status_info.call_id,
+                        media_info.codec,
+                        media_info.local_rtp_port,
+                        media_info.remote_rtp_port,
+                        media_info.remote_sdp.is_some()
+                    );
                 }
             }
         } else if status_info.new_state == CallState::Terminated {
             let mut calls = self.active_calls.lock().await;
             calls.remove(&status_info.call_id);
-            info!("🔚 Call {} terminated", status_info.call_id);
+            info!("Call {} terminated", status_info.call_id);
         }
     }
 
@@ -160,6 +173,65 @@ impl ClientEventHandler for SimpleUasHandler {
     }
 }
 
+impl SimpleUasHandler {
+    async fn start_stats_monitoring(&self, call_id: CallId) {
+        let client_ref = Arc::clone(&self.client_manager);
+        let call_id = call_id.clone();
+        let rtp_debug = self.rtp_debug;
+        
+        tokio::spawn(async move {
+            // Wait a bit for RTP to start flowing
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            
+            // Monitor statistics every second
+            loop {
+                if let Some(client) = client_ref.read().await.as_ref() {
+                    // Get RTP statistics
+                    if let Ok(Some(rtp_stats)) = client.get_rtp_statistics(&call_id).await {
+                        if rtp_debug || rtp_stats.packets_received > 0 {
+                            info!("📊 Server RTP Stats for {}: Sent: {} packets ({} bytes), Received: {} packets ({} bytes), Lost: {}", 
+                                call_id,
+                                rtp_stats.packets_sent,
+                                rtp_stats.bytes_sent,
+                                rtp_stats.packets_received,
+                                rtp_stats.bytes_received,
+                                rtp_stats.packets_lost
+                            );
+                        }
+                    }
+                    
+                    // Get call statistics for quality metrics
+                    if let Ok(Some(call_stats)) = client.get_call_statistics(&call_id).await {
+                        if let Some(quality) = &call_stats.quality_metrics {
+                            if rtp_debug {
+                                info!("📈 Server Quality for {}: MOS: {:.2}, Jitter: {}ms, Packet Loss: {:.1}%",
+                                    call_id,
+                                    quality.mos_score,
+                                    quality.jitter_ms,
+                                    quality.packet_loss_percent
+                                );
+                            }
+                        }
+                    }
+                    
+                    // Check if call is still active
+                    if let Ok(call_info) = client.get_call(&call_id).await {
+                        if call_info.state == CallState::Terminated {
+                            info!("Call {} terminated, stopping stats monitoring", call_id);
+                            break;
+                        }
+                    } else {
+                        // Call not found, stop monitoring
+                        break;
+                    }
+                }
+                
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
@@ -197,7 +269,7 @@ async fn main() -> Result<()> {
         });
 
     // Create handler with auto-answer delay
-    let handler = Arc::new(SimpleUasHandler::new(args.rtp_debug, 100));
+    let handler = Arc::new(SimpleUasHandler::new(args.rtp_debug));
 
     // Build and start server
     let client = ClientManager::new(config).await?;
