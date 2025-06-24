@@ -1,14 +1,17 @@
-//! Agent SIP Registration Demo
+//! Agent Registration Demo using CallCenterClient API
 //!
-//! This example demonstrates how agents would register with the call center
-//! using SIP REGISTER and how the system tracks their availability.
+//! This example demonstrates how to use the new CallCenterClient API
+//! for agent registration and management in the call center.
 
 use anyhow::Result;
-use rvoip_call_engine::agent::{SipRegistrar, RegistrationStatus};
-use rvoip_sip_core::{Contact, Address};
-use rvoip_sip_core::prelude::ContactParamInfo;
-use std::collections::HashMap;
-use tokio::time::{sleep, Duration, interval};
+use rvoip_call_engine::{
+    prelude::*,
+    api::{CallCenterClient, CallCenterClientBuilder},
+    agent::{Agent, AgentId, AgentStatus},
+};
+use std::sync::Arc;
+use tokio::time::{sleep, Duration};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,118 +20,112 @@ async fn main() -> Result<()> {
         .with_env_filter("info")
         .init();
 
-    println!("🎯 SIP Agent Registration Demo\n");
+    println!("🎯 Agent Registration Demo - Using CallCenterClient API\n");
 
-    // Create a SIP registrar
-    let mut registrar = SipRegistrar::new();
-
-    // Simulate agent Alice registering
-    println!("📱 Agent Alice registers from her softphone...");
-    let alice_uri = "sip:alice@192.168.1.100:5060".parse()?;
-    let mut alice_address = Address::new_with_display_name("Alice", alice_uri);
-    alice_address.set_param("transport", Some("tcp"));
-    let alice_contact_info = ContactParamInfo { address: alice_address };
-    let alice_contact = Contact::new_params(vec![alice_contact_info]);
+    // Step 1: Create database and configuration
+    println!("📦 Setting up call center infrastructure...");
+    let database = CallCenterDatabase::new_in_memory().await?;
+    let config = CallCenterConfig::default();
     
-    let response = registrar.process_register(
-        "sip:alice@callcenter.example.com",  // AOR (Address of Record)
-        &alice_contact,
-        Some(3600),  // 1 hour expiry
-        Some("X-Lite/5.0".to_string()),
-        "192.168.1.100:45678".to_string(),
-    )?;
+    // Step 2: Build the CallCenterClient
+    let client = CallCenterClientBuilder::new()
+        .with_config(config)
+        .with_database(database)
+        .build()
+        .await?;
     
-    match response.status {
-        RegistrationStatus::Created => {
-            println!("✅ Alice registered successfully!");
-            if let Some(addr) = alice_contact.address() {
-                println!("   - Contact: {}", addr.uri);
-            }
-            println!("   - Expires: {} seconds", response.expires);
-        }
-        _ => println!("❌ Unexpected registration status"),
-    }
+    println!("✅ CallCenterClient created successfully!\n");
 
-    // Simulate agent Bob registering from WebRTC
-    println!("\n📱 Agent Bob registers from WebRTC client...");
-    let bob_uri = "sip:bob@ws-client-xyz.example.com".parse()?;
-    let mut bob_address = Address::new_with_display_name("Bob", bob_uri);
-    bob_address.set_param("transport", Some("wss"));
-    let bob_contact_info = ContactParamInfo { address: bob_address };
-    let bob_contact = Contact::new_params(vec![bob_contact_info]);
+    // Step 3: Register Agent Alice
+    println!("👤 Registering Agent Alice...");
+    let alice = Agent {
+        id: AgentId::from("alice-001"),
+        sip_uri: "sip:alice@callcenter.example.com".to_string(),
+        display_name: "Alice Smith".to_string(),
+        skills: vec!["english".to_string(), "sales".to_string(), "support".to_string()],
+        max_concurrent_calls: 3,
+        status: AgentStatus::Available,
+        department: Some("sales".to_string()),
+        extension: Some("1001".to_string()),
+    };
     
-    registrar.process_register(
-        "sip:bob@callcenter.example.com",
-        &bob_contact,
-        Some(600),  // 10 minutes (typical for WebRTC)
-        Some("WebPhone/2.0".to_string()),
-        "203.0.113.45:8443".to_string(),
-    )?;
-    println!("✅ Bob registered successfully!");
+    let alice_session = client.register_agent(&alice).await?;
+    println!("✅ Alice registered with session: {}", alice_session);
+    println!("   - Skills: {:?}", alice.skills);
+    println!("   - Max concurrent calls: {}", alice.max_concurrent_calls);
 
-    // Show current registrations
-    println!("\n📊 Current Registrations:");
-    for (aor, registration) in registrar.list_registrations() {
-        println!("   {} -> {}", aor, registration.contact_uri);
-        println!("      Transport: {}", registration.transport);
-        println!("      User-Agent: {}", registration.user_agent.as_ref().unwrap_or(&"Unknown".to_string()));
+    // Step 4: Register Agent Bob
+    println!("\n👤 Registering Agent Bob...");
+    let bob = Agent {
+        id: AgentId::from("bob-002"),
+        sip_uri: "sip:bob@callcenter.example.com".to_string(),
+        display_name: "Bob Johnson".to_string(),
+        skills: vec!["english".to_string(), "spanish".to_string(), "support".to_string()],
+        max_concurrent_calls: 2,
+        status: AgentStatus::Available,
+        department: Some("support".to_string()),
+        extension: Some("1002".to_string()),
+    };
+    
+    let bob_session = client.register_agent(&bob).await?;
+    println!("✅ Bob registered with session: {}", bob_session);
+
+    // Step 5: Check agent information
+    println!("\n📊 Checking agent information...");
+    if let Some(alice_info) = client.get_agent_info(&alice.id).await {
+        println!("Alice's current info:");
+        println!("  - Status: {:?}", alice_info.status);
+        println!("  - Active calls: {}", alice_info.current_calls);
+        println!("  - Performance score: {:.2}", alice_info.performance_score);
     }
 
-    // Demonstrate how to find where to route calls
-    println!("\n📞 Routing a call to Alice:");
-    if let Some(alice_reg) = registrar.get_registration("sip:alice@callcenter.example.com") {
-        println!("   ➡️ Route to: {}", alice_reg.contact_uri);
-        println!("   This is where we'd create an outbound INVITE");
+    // Step 6: Update agent status
+    println!("\n🔄 Updating agent statuses...");
+    
+    // Alice goes on break
+    client.update_agent_status(
+        &alice.id, 
+        AgentStatus::Break { duration_minutes: 15 }
+    ).await?;
+    println!("✅ Alice is now on a 15-minute break");
+    
+    // Bob becomes busy
+    client.update_agent_status(
+        &bob.id,
+        AgentStatus::Busy { active_calls: 1 }
+    ).await?;
+    println!("✅ Bob is now busy with 1 active call");
+
+    // Step 7: Check queue statistics
+    println!("\n📈 Checking queue statistics...");
+    let queue_stats = client.get_queue_stats().await?;
+    for (queue_id, stats) in queue_stats {
+        println!("Queue '{}': {} calls waiting", queue_id, stats.total_calls);
     }
 
-    // Simulate registration refresh
-    println!("\n🔄 Alice refreshes her registration...");
-    registrar.process_register(
-        "sip:alice@callcenter.example.com",
-        &alice_contact,
-        Some(3600),
-        Some("X-Lite/5.0".to_string()),
-        "192.168.1.100:45678".to_string(),
-    )?;
-    println!("✅ Registration refreshed");
+    // Step 8: Demonstrate session-core integration
+    println!("\n🔌 Session-Core Integration:");
+    let session_manager = client.session_manager();
+    println!("✅ Direct access to SessionCoordinator available");
+    println!("   - Can handle incoming calls via CallHandler");
+    println!("   - Can create outgoing calls for agents");
+    println!("   - Manages all SIP transport internally");
 
-    // Simulate de-registration
-    println!("\n📴 Bob logs out (de-registers)...");
-    registrar.process_register(
-        "sip:bob@callcenter.example.com",
-        &bob_contact,
-        Some(0),  // expires=0 means de-register
-        Some("WebPhone/2.0".to_string()),
-        "203.0.113.45:8443".to_string(),
-    )?;
-    println!("✅ Bob de-registered");
+    // Step 9: Agent logout simulation
+    println!("\n📴 Simulating agent logout...");
+    client.update_agent_status(&alice.id, AgentStatus::Offline).await?;
+    println!("✅ Alice is now offline");
 
-    // Show updated registrations
-    println!("\n📊 Updated Registrations:");
-    for (aor, registration) in registrar.list_registrations() {
-        println!("   {} -> {}", aor, registration.contact_uri);
-    }
-
-    // Demonstrate the complete flow
-    println!("\n🔄 Complete Agent Registration Flow:");
-    println!("1. Agent starts softphone/WebRTC client");
-    println!("2. Client sends REGISTER to call center");
-    println!("3. Call center authenticates agent (TODO: implement auth)");
-    println!("4. Call center stores registration with contact URI");
-    println!("5. When customer calls arrive:");
-    println!("   - Call center looks up agent's contact URI");
-    println!("   - Creates outbound INVITE to agent");
-    println!("   - Bridges customer and agent calls");
-    println!("6. Agent must refresh registration before expiry");
-    println!("7. On logout, agent sends REGISTER with expires=0");
-
-    // Show what's missing for full integration
-    println!("\n⚠️ Integration Requirements:");
-    println!("- Session-core needs to handle REGISTER method");
-    println!("- Need to link registration with agent database");
-    println!("- Need authentication (digest auth)");
-    println!("- Need to handle multiple registrations per agent");
-    println!("- Need background task to clean expired registrations");
+    // Summary
+    println!("\n📋 Summary - CallCenterClient API Benefits:");
+    println!("✅ Simple, type-safe agent management");
+    println!("✅ Integrated with session-core for SIP handling");
+    println!("✅ Real-time status updates");
+    println!("✅ Performance tracking built-in");
+    println!("✅ Queue statistics and monitoring");
+    println!("✅ Clean separation of concerns");
+    
+    println!("\n🎉 Demo completed successfully!");
 
     Ok(())
 } 

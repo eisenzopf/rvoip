@@ -1,15 +1,55 @@
-# Call Engine - Call Center with Limbo Database
+# Call Engine - Advanced Call Center with Session-Core Integration
 
-This crate provides call center orchestration functionality with integrated [Limbo](https://github.com/tursodatabase/limbo) database support for persistent storage.
+This crate provides enterprise-grade call center orchestration functionality with deep integration into session-core for SIP/RTP handling and a clean API layer for different user types.
+
+## Architecture
+
+The call-engine now follows a clean architecture with session-core as its only direct dependency:
+
+```
+┌─────────────────┐  ┌──────────────────┐  ┌─────────────────┐
+│ Agent Apps      │  │ Supervisor Apps  │  │ Admin Apps      │
+└────────┬────────┘  └────────┬─────────┘  └────────┬────────┘
+         │                    │                      │
+    ┌────▼────────┐    ┌──────▼────────┐    ┌──────▼────────┐
+    │CallCenterClient│  │SupervisorApi  │    │AdminApi       │
+    └────────┬────────┘ └──────┬────────┘    └──────┬────────┘
+             └──────────────────┼────────────────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │  CallCenterEngine   │
+                    │  - CallHandler impl │
+                    │  - Event processors │
+                    └──────────┬──────────┘
+                               │
+                    ┌──────────▼──────────┐
+                    │    session-core     │
+                    │  - SIP handling     │
+                    │  - RTP/Media        │
+                    │  - Transport        │
+                    └─────────────────────┘
+```
 
 ## Features
 
-- 🗄️ **Limbo Database Integration**: Modern SQLite-compatible database written in Rust
-- 👥 **Agent Management**: Registration, skills, availability tracking
-- 📞 **Call Records**: Complete call history and analytics
-- 📋 **Queue Management**: Call queuing with overflow policies
-- 🎯 **Routing Policies**: Skill-based and rule-based call routing
-- 🚀 **Async-First**: Built on tokio for high performance
+### Core Capabilities
+- 🎯 **Session-Core Integration**: CallHandler implementation for incoming calls
+- 📞 **Real-Time Events**: Call state, media quality, DTMF, and warnings
+- 🌉 **Call Bridging**: Automatic agent-customer call bridging
+- 🗄️ **Limbo Database**: Modern async SQLite-compatible storage
+- 🔌 **Clean API Layer**: Type-safe APIs for agents, supervisors, and admins
+
+### Agent Management
+- 👥 **Registration**: SIP-based agent registration with skills
+- 📊 **Status Tracking**: Available, busy, break, offline states
+- 🎯 **Skill Routing**: Match calls to agents based on skills
+- 📈 **Performance**: Track agent performance metrics
+
+### Call Processing
+- 📋 **Smart Queuing**: Priority-based queues with overflow
+- 🚦 **Routing Engine**: Business rules and skill-based routing
+- 📊 **Real-Time Monitoring**: Live call and queue statistics
+- 🎙️ **Quality Tracking**: MOS scores and packet loss monitoring
 
 ## Quick Start
 
@@ -24,162 +64,152 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 ```
 
-### Basic Usage
+### Basic Usage - Agent Application
 
 ```rust
-use rvoip_call_engine::prelude::*;
-use rvoip_call_engine::database::{
-    CallCenterDatabase,
-    agent_store::{AgentStore, CreateAgentRequest, AgentStatus},
+use rvoip_call_engine::{
+    prelude::*,
+    api::{CallCenterClient, CallCenterClientBuilder},
+    agent::{Agent, AgentId, AgentStatus},
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize database
-    let db = CallCenterDatabase::new("call_center.db").await?;
-    
-    // Create agent store
-    let agent_store = AgentStore::new(db);
+    // Build the client
+    let client = CallCenterClientBuilder::new()
+        .with_config(CallCenterConfig::default())
+        .with_database(CallCenterDatabase::new_in_memory().await?)
+        .build()
+        .await?;
     
     // Register an agent
-    let agent_request = CreateAgentRequest {
-        sip_uri: "sip:alice@company.com".to_string(),
-        display_name: "Alice Johnson".to_string(),
-        max_concurrent_calls: Some(2),
-        department: Some("Support".to_string()),
+    let agent = Agent {
+        id: AgentId::from("alice-001"),
+        sip_uri: "sip:alice@callcenter.local".to_string(),
+        display_name: "Alice Smith".to_string(),
+        skills: vec!["english".to_string(), "sales".to_string()],
+        max_concurrent_calls: 3,
+        status: AgentStatus::Available,
+        department: Some("sales".to_string()),
         extension: Some("1001".to_string()),
-        skills: Some(vec![
-            ("english".to_string(), 5),
-            ("technical_support".to_string(), 4),
-        ]),
-        ..Default::default()
     };
     
-    let agent = agent_store.create_agent(agent_request).await?;
-    println!("Created agent: {} ({})", agent.display_name, agent.id);
+    let session_id = client.register_agent(&agent).await?;
+    println!("Agent registered with session: {}", session_id);
     
-    // Set agent as available
-    agent_store.update_agent_status(&agent.id, AgentStatus::Available).await?;
+    // Update status
+    client.update_agent_status(&agent.id, AgentStatus::Available).await?;
     
-    // Find available agents with technical support skills
-    let skilled_agents = agent_store.get_available_agents(
-        Some(&["technical_support".to_string()])
-    ).await?;
-    
-    println!("Found {} agents with technical support skills", skilled_agents.len());
+    // Check queue stats
+    let stats = client.get_queue_stats().await?;
+    for (queue, info) in stats {
+        println!("Queue {}: {} calls", queue, info.total_calls);
+    }
     
     Ok(())
 }
 ```
 
-## Database Schema
+### Supervisor Monitoring
 
-### Agents Table
-- **Agent Registration**: SIP URI, display name, department, extension
-- **Availability Tracking**: Status (available/busy/away/offline), last seen
-- **Capacity Management**: Max concurrent calls per agent
-- **Skill Profiles**: Multi-level skills for routing
+```rust
+use rvoip_call_engine::api::SupervisorApi;
 
-### Call Records Table  
-- **Call Tracking**: Session ID, bridge ID, caller/callee information
-- **Timing Data**: Start time, answer time, end time, duration
-- **Quality Metrics**: Call quality scores, disconnect reasons
-- **Agent Association**: Which agent handled the call
+// Create supervisor API
+let supervisor = SupervisorApi::new(engine);
 
-### Call Queues Table
-- **Queue Configuration**: Name, description, priority, max wait time
-- **Skill Requirements**: JSON array of required skills
-- **Overflow Handling**: Overflow queue routing
-- **Business Hours**: JSON business hours configuration
+// Get real-time statistics
+let stats = supervisor.get_stats().await;
+println!("Active calls: {}", stats.active_calls);
+println!("Available agents: {}", stats.available_agents);
 
-### Routing Policies Table
-- **Policy Rules**: JSON conditions and actions
-- **Priority Management**: Policy execution order
-- **Dynamic Configuration**: Enable/disable policies at runtime
+// Monitor specific agent
+let agent_calls = supervisor.monitor_agent_calls(&agent_id).await;
+
+// Force assign a queued call
+supervisor.force_assign_call(session_id, agent_id).await?;
+
+// Get performance metrics
+let metrics = supervisor.get_performance_metrics(start_time, end_time).await;
+println!("Service level: {:.1}%", metrics.service_level_percentage);
+```
+
+### Administrative Management
+
+```rust
+use rvoip_call_engine::api::AdminApi;
+
+// Create admin API
+let admin = AdminApi::new(engine);
+
+// Add new agent
+admin.add_agent(agent).await?;
+
+// Update agent skills
+admin.update_agent_skills(&agent_id, vec![
+    AgentSkill { skill_name: "spanish".into(), skill_level: 4 }
+]).await?;
+
+// Create queue
+admin.create_queue("priority_support").await?;
+
+// Check system health
+let health = admin.get_system_health().await;
+println!("System status: {:?}", health.status);
+```
+
+## Event Handling
+
+The call-engine implements all CallHandler trait methods:
+
+### Core Events
+- `on_incoming_call` - Route incoming calls to agents or queues
+- `on_call_ended` - Clean up resources and update agent status
+- `on_call_established` - Track bridged calls
+
+### New Real-Time Events
+- `on_call_state_changed` - Track call lifecycle transitions
+- `on_media_quality` - Monitor MOS scores and packet loss
+- `on_dtmf` - Handle IVR and feature codes
+- `on_media_flow` - Track media stream status
+- `on_warning` - System-level alerts and warnings
 
 ## Examples
 
-### Running the Example
+### Running Examples
 
 ```bash
-cd rvoip/crates/call-engine
+cd rvoip/crates/call-engine/examples
+
+# Agent registration with new API
+cargo run --example agent_registration_demo
+
+# Basic call flow with all APIs
+cargo run --example phase0_basic_call_flow
+
+# Supervisor monitoring dashboard
+cargo run --example supervisor_monitoring_demo
+
+# Database integration
 cargo run --example call_center_with_database
 ```
 
-This example demonstrates:
-- 🏗️ Database initialization
-- 👥 Creating agents with skills
-- 📱 Updating agent availability status
-- 🔍 Finding agents by skills
-- 📊 Querying agent information
+## Database Schema
 
-### Example Output
+### Core Tables
+- **agents** - Agent profiles, skills, and status
+- **call_records** - Complete call history and metrics
+- **call_queues** - Queue configuration and policies
+- **routing_policies** - Dynamic routing rules
+- **agent_skills** - Skill assignments and proficiency
 
-```
-🚀 Starting Call Center with Limbo Database Example
-✅ Database initialized successfully
-👥 Creating sample agents...
-✅ Created agent: Alice Johnson (a1b2c3d4-...)
-✅ Created agent: Bob Smith (e5f6g7h8-...)
-✅ Created agent: Carol Davis (i9j0k1l2-...)
-📱 Setting agents to available status...
-✅ Agent Alice Johnson is now available
-✅ Agent Bob Smith is now available
-🔍 Finding available agents...
-Found 2 available agents:
-  📞 Alice Johnson (1001) - sip:alice@company.com
-  📞 Bob Smith (1002) - sip:bob@company.com
-🎯 Finding agents with technical support skills...
-Found 1 agents with technical support skills:
-  🔧 Alice Johnson - Technical Support Agent
-    - english (level 5)
-    - technical_support (level 4)
-    - billing (level 3)
-💚 Testing database health...
-✅ Database health check passed
-🎉 Call Center Database Example Complete!
-```
+## Performance Optimization
 
-## Database Configuration
-
-### File-based Database
-
-```rust
-// Production setup with persistent storage
-let db = CallCenterDatabase::new("./data/call_center.db").await?;
-```
-
-### In-Memory Database
-
-```rust
-// Testing setup with in-memory storage  
-let db = CallCenterDatabase::new_in_memory().await?;
-```
-
-## Performance Features
-
-- **Async I/O**: Limbo's native async support for high concurrency
-- **Optimized Queries**: Indexed columns for fast agent lookups
-- **Connection Pooling**: Efficient database connection management
-- **Batch Operations**: Bulk operations for high-volume scenarios
-
-## Integration with Session-Core
-
-The database layer integrates seamlessly with session-core for complete call center functionality:
-
-```rust
-// Call center orchestration with database persistence
-let call_center = CallCenterEngine::new(session_manager, config).await?;
-
-// Incoming call gets routed based on database policies
-let session_id = call_center.handle_incoming_call(request).await?;
-
-// Agent selection uses database skill matching
-let agent = call_center.find_best_agent(call_requirements).await?;
-
-// Bridge creation with database call record tracking
-let bridge_id = call_center.bridge_to_agent(session_id, agent_id).await?;
-```
+- **Async Architecture**: Non-blocking operations throughout
+- **Connection Pooling**: Efficient database connections
+- **Event-Driven**: React to changes without polling
+- **Minimal Dependencies**: Only depends on session-core
+- **Zero-Copy**: Efficient data handling
 
 ## Testing
 
@@ -187,44 +217,45 @@ let bridge_id = call_center.bridge_to_agent(session_id, agent_id).await?;
 # Run all tests
 cargo test
 
-# Run database integration tests specifically
-cargo test test_database_integration
+# Run with logging
+RUST_LOG=debug cargo test
+
+# Run specific test
+cargo test test_api_layer
 ```
+
+## Migration from Direct SIP Usage
+
+If you're migrating from direct SIP library usage:
+
+1. **Remove Dependencies**: Remove sip-core, rtp-core, etc.
+2. **Use CallCenterClient**: Replace manual SIP handling
+3. **Implement CallHandler**: For custom call processing
+4. **Use Event Callbacks**: Replace polling with events
+5. **Leverage APIs**: Use appropriate API for your user type
 
 ## Architecture Benefits
 
-### Why Limbo?
+### Clean Separation
+- **API Layer**: Type-safe interfaces for different users
+- **Session Abstraction**: No direct SIP/RTP handling needed
+- **Event-Driven**: Real-time updates without polling
+- **Modular Design**: Easy to extend and maintain
 
-1. **Pure Rust**: Perfect integration with our Rust stack
-2. **Async-First**: Built for high-performance async applications
-3. **SQLite Compatible**: Familiar SQL dialect and tooling
-4. **Embedded**: No separate database server required
-5. **Modern**: Active development by database experts at Turso
-
-### Performance Characteristics
-
-- **Async I/O**: Non-blocking database operations
-- **Zero-Copy**: Efficient memory usage for large datasets  
-- **Indexing**: Fast lookups for agent availability and skills
-- **Transactions**: ACID compliance for data consistency
+### Scalability
+- **Async-First**: Handle thousands of concurrent calls
+- **Efficient Routing**: O(1) agent lookups
+- **Queue Management**: Prevent system overload
+- **Database Backed**: Persistent state across restarts
 
 ## Future Enhancements
 
-- **Clustering**: Multi-node database distribution
-- **Replication**: Real-time data synchronization
-- **Analytics**: Advanced call center metrics and reporting
-- **Machine Learning**: Predictive routing and capacity planning
-
-## Contributing
-
-When adding new database functionality:
-
-1. Create the data model in the appropriate store module
-2. Add database schema in `schema.rs`
-3. Implement the store methods with proper error handling
-4. Add comprehensive tests
-5. Update the example if needed
+- **WebSocket Events**: Real-time browser dashboards
+- **Recording Integration**: Call recording with session-core
+- **Advanced Analytics**: ML-based routing optimization
+- **Multi-Tenant**: Isolated call center instances
+- **High Availability**: Distributed architecture support
 
 ---
 
-For more information about Limbo, visit: https://github.com/tursodatabase/limbo 
+For more examples and documentation, see the [examples](./examples) directory. 

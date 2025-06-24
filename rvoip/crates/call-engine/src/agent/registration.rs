@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
-use rvoip_sip_core::{Uri, Contact};
 
 use crate::error::Result;
 
@@ -22,8 +21,8 @@ pub struct Registration {
     /// Agent ID
     pub agent_id: String,
     
-    /// Contact URI where the agent can be reached
-    pub contact_uri: Uri,
+    /// Contact URI where the agent can be reached (as string)
+    pub contact_uri: String,
     
     /// When this registration expires
     pub expires_at: Instant,
@@ -56,11 +55,11 @@ impl SipRegistrar {
         }
     }
     
-    /// Process a REGISTER request
-    pub fn process_register(
+    /// Process a REGISTER request with simplified string-based interface
+    pub fn process_register_simple(
         &mut self,
         aor: &str,  // Address of Record (e.g., "sip:alice@example.com")
-        contact: &Contact,
+        contact_uri: &str,  // Contact URI as string
         expires: Option<u32>,
         user_agent: Option<String>,
         remote_addr: String,
@@ -87,20 +86,23 @@ impl SipRegistrar {
             expires_duration
         };
         
-        // Extract contact URI and transport
-        let contact_uri = contact.address()
-            .ok_or_else(|| crate::error::CallCenterError::InvalidInput("Contact has no address".to_string()))?
-            .uri.clone();
-        let transport = contact.address()
-            .and_then(|addr| addr.get_param("transport"))
-            .flatten()
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "UDP".to_string());
+        // Extract transport from contact URI if present (simple parsing)
+        let transport = if contact_uri.contains("transport=tcp") {
+            "TCP".to_string()
+        } else if contact_uri.contains("transport=tls") {
+            "TLS".to_string()
+        } else if contact_uri.contains("transport=ws") {
+            "WS".to_string()
+        } else if contact_uri.contains("transport=wss") {
+            "WSS".to_string()
+        } else {
+            "UDP".to_string()
+        };
         
         // Create registration entry
         let registration = Registration {
             agent_id: aor.to_string(), // Could be parsed from AOR
-            contact_uri: contact_uri.clone(),
+            contact_uri: contact_uri.to_string(),
             expires_at: Instant::now() + expires_duration,
             user_agent,
             transport,
@@ -126,7 +128,7 @@ impl SipRegistrar {
     /// Remove a registration
     pub fn remove_registration(&mut self, aor: &str) {
         if let Some(reg) = self.registrations.remove(aor) {
-            self.contact_to_aor.remove(&reg.contact_uri.to_string());
+            self.contact_to_aor.remove(&reg.contact_uri);
             info!("🗑️ Removed registration for {}", aor);
         }
     }
@@ -191,18 +193,10 @@ mod tests {
     fn test_basic_registration() {
         let mut registrar = SipRegistrar::new();
         
-        // Create a mock contact
-        use rvoip_sip_core::Address;
-        use rvoip_sip_core::prelude::ContactParamInfo;
-        let uri = "sip:alice@192.168.1.100:5060".parse().unwrap();
-        let address = Address::new(uri);
-        let contact_info = ContactParamInfo { address };
-        let contact = Contact::new_params(vec![contact_info]);
-        
-        // Process registration
-        let response = registrar.process_register(
+        // Process registration with simplified interface
+        let response = registrar.process_register_simple(
             "sip:alice@example.com",
-            &contact,
+            "sip:alice@192.168.1.100:5060",
             Some(3600),
             Some("MySoftphone/1.0".to_string()),
             "192.168.1.100:5060".to_string(),
@@ -213,6 +207,6 @@ mod tests {
         
         // Verify registration exists
         let reg = registrar.get_registration("sip:alice@example.com").unwrap();
-        assert_eq!(reg.contact_uri.to_string(), "sip:alice@192.168.1.100:5060");
+        assert_eq!(reg.contact_uri, "sip:alice@192.168.1.100:5060");
     }
 } 

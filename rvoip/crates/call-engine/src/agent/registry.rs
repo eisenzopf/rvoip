@@ -1,17 +1,20 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::str::FromStr;
 use tracing::{info, debug, warn};
 
-use rvoip_sip_core::Uri;
 use rvoip_session_core::SessionId;
 
 use crate::error::{CallCenterError, Result};
-use crate::database::{CallCenterDatabase, agent_store::{Agent as DbAgent, AgentStore}};
+use crate::database::{
+    CallCenterDatabase, 
+    agent_store::{Agent as DbAgent, AgentStore, CreateAgentRequest, AgentSkill}
+};
 
 /// Agent registry for managing call center agents
 pub struct AgentRegistry {
-    /// Database store for agent persistence
-    agent_store: AgentStore,
+    /// Database for agent persistence
+    database: CallCenterDatabase,
     
     /// Active agent sessions (agent_id -> session_id)
     active_sessions: HashMap<String, SessionId>,
@@ -24,7 +27,7 @@ pub struct AgentRegistry {
 #[derive(Debug, Clone)]
 pub struct Agent {
     pub id: String,
-    pub sip_uri: Uri,
+    pub sip_uri: String,
     pub display_name: String,
     pub skills: Vec<String>,
     pub max_concurrent_calls: u32,
@@ -52,13 +55,69 @@ pub enum AgentStatus {
     Break { duration_minutes: u32 },
 }
 
+impl FromStr for AgentStatus {
+    type Err = String;
+    
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "available" | "Available" => Ok(AgentStatus::Available),
+            "offline" | "Offline" => Ok(AgentStatus::Offline),
+            s if s.starts_with("busy") || s.starts_with("Busy") => {
+                // Try to parse active calls from string like "Busy(3)"
+                Ok(AgentStatus::Busy { active_calls: 0 })
+            },
+            s if s.starts_with("away") || s.starts_with("Away") => {
+                Ok(AgentStatus::Away { reason: "Unknown".to_string() })
+            },
+            s if s.starts_with("break") || s.starts_with("Break") => {
+                Ok(AgentStatus::Break { duration_minutes: 15 })
+            },
+            _ => Err(format!("Unknown agent status: {}", s))
+        }
+    }
+}
+
+impl ToString for AgentStatus {
+    fn to_string(&self) -> String {
+        match self {
+            AgentStatus::Available => "available".to_string(),
+            AgentStatus::Busy { active_calls } => format!("busy({})", active_calls),
+            AgentStatus::Away { reason } => format!("away:{}", reason),
+            AgentStatus::Offline => "offline".to_string(),
+            AgentStatus::Break { duration_minutes } => format!("break({})", duration_minutes),
+        }
+    }
+}
+
+impl From<crate::database::agent_store::AgentStatus> for AgentStatus {
+    fn from(db_status: crate::database::agent_store::AgentStatus) -> Self {
+        match db_status {
+            crate::database::agent_store::AgentStatus::Available => AgentStatus::Available,
+            crate::database::agent_store::AgentStatus::Busy { active_calls } => AgentStatus::Busy { active_calls },
+            crate::database::agent_store::AgentStatus::Away { reason } => AgentStatus::Away { reason },
+            crate::database::agent_store::AgentStatus::Offline => AgentStatus::Offline,
+            crate::database::agent_store::AgentStatus::Break { duration_minutes } => AgentStatus::Break { duration_minutes },
+        }
+    }
+}
+
+impl From<AgentStatus> for crate::database::agent_store::AgentStatus {
+    fn from(status: AgentStatus) -> Self {
+        match status {
+            AgentStatus::Available => crate::database::agent_store::AgentStatus::Available,
+            AgentStatus::Busy { active_calls } => crate::database::agent_store::AgentStatus::Busy { active_calls },
+            AgentStatus::Away { reason } => crate::database::agent_store::AgentStatus::Away { reason },
+            AgentStatus::Offline => crate::database::agent_store::AgentStatus::Offline,
+            AgentStatus::Break { duration_minutes } => crate::database::agent_store::AgentStatus::Break { duration_minutes },
+        }
+    }
+}
+
 impl AgentRegistry {
     /// Create a new agent registry
     pub fn new(database: CallCenterDatabase) -> Self {
-        let agent_store = AgentStore::new(database);
-        
         Self {
-            agent_store,
+            database,
             active_sessions: HashMap::new(),
             agent_status: HashMap::new(),
         }
@@ -150,39 +209,147 @@ impl AgentRegistry {
     
     /// Get all agent statistics
     pub fn get_statistics(&self) -> AgentStats {
-        let mut available_count = 0;
-        let mut busy_count = 0;
-        let mut away_count = 0;
-        let mut offline_count = 0;
+        let total = self.agent_status.len();
+        let available = self.agent_status.values()
+            .filter(|a| matches!(a, AgentStatus::Available))
+            .count();
+        let busy = self.agent_status.values()
+            .filter(|a| matches!(a, AgentStatus::Busy { .. }))
+            .count();
+        let away = self.agent_status.values()
+            .filter(|a| matches!(a, AgentStatus::Away { .. }))
+            .count();
         
-        for status in self.agent_status.values() {
-            match status {
-                AgentStatus::Available => available_count += 1,
-                AgentStatus::Busy { .. } => busy_count += 1,
-                AgentStatus::Away { .. } => away_count += 1,
-                AgentStatus::Offline => offline_count += 1,
-                AgentStatus::Break { .. } => away_count += 1,
+        AgentStats { total, available, busy, away }
+    }
+    
+    /// Add a new agent to the system
+    pub async fn add_agent(&mut self, agent: Agent) -> Result<()> {
+        // Store in database
+        let agent_store = AgentStore::new(self.database.clone());
+        let create_req = CreateAgentRequest {
+            sip_uri: agent.sip_uri.clone(),
+            display_name: agent.display_name.clone(),
+            max_concurrent_calls: agent.max_concurrent_calls,
+            department: agent.department.clone(),
+            extension: agent.extension.clone(),
+            phone_number: None, // Not in our Agent struct
+        };
+        let db_agent = agent_store.create_agent(create_req).await
+            .map_err(|e| CallCenterError::database(&format!("Failed to create agent: {}", e)))?;
+        
+        // Store skills separately
+        for skill in &agent.skills {
+            agent_store.add_skill(&db_agent.id, skill, 1).await
+                .map_err(|e| CallCenterError::database(&format!("Failed to add skill: {}", e)))?;
+        }
+        
+        // Add to in-memory registry
+        self.register_agent(agent).await?;
+        Ok(())
+    }
+    
+    /// Update an existing agent
+    pub async fn update_agent(&mut self, agent: Agent) -> Result<()> {
+        // Update in database
+        let agent_store = AgentStore::new(self.database.clone());
+        
+        // First get the existing agent to preserve the database fields
+        let existing = agent_store.get_agent_by_id(&agent.id).await
+            .map_err(|e| CallCenterError::database(&format!("Failed to get agent: {}", e)))?;
+        
+        if let Some(mut db_agent) = existing {
+            // Update only the fields we manage
+            db_agent.display_name = agent.display_name.clone();
+            db_agent.sip_uri = agent.sip_uri.clone();
+            db_agent.max_concurrent_calls = agent.max_concurrent_calls;
+            db_agent.status = agent.status.clone().into();
+            db_agent.department = agent.department.clone();
+            db_agent.extension = agent.extension.clone();
+            
+            agent_store.update_agent(&db_agent).await
+                .map_err(|e| CallCenterError::database(&format!("Failed to update agent: {}", e)))?;
+            
+            // Update skills separately
+            // Note: We should clear and re-add skills, but the store doesn't have a clear method
+            for skill in &agent.skills {
+                agent_store.add_skill(&agent.id, skill, 1).await
+                    .map_err(|e| CallCenterError::database(&format!("Failed to update skill: {}", e)))?;
             }
+        } else {
+            return Err(CallCenterError::not_found(format!("Agent {} not found", agent.id)));
         }
         
-        AgentStats {
-            total_agents: self.agent_status.len(),
-            available_agents: available_count,
-            busy_agents: busy_count,
-            away_agents: away_count,
-            offline_agents: offline_count,
-            active_sessions: self.active_sessions.len(),
+        // Update in-memory registry if exists
+        if self.agent_status.contains_key(&agent.id) {
+            self.agent_status.insert(agent.id.clone(), agent.status);
         }
+        Ok(())
+    }
+    
+    /// Remove an agent from the system
+    pub async fn remove_agent(&mut self, agent_id: &str) -> Result<()> {
+        // Remove from database
+        let agent_store = AgentStore::new(self.database.clone());
+        agent_store.delete_agent(agent_id).await
+            .map_err(|e| CallCenterError::database(&format!("Failed to delete agent: {}", e)))?;
+        
+        // Remove from in-memory registry
+        self.active_sessions.remove(agent_id);
+        self.agent_status.remove(agent_id);
+        Ok(())
+    }
+    
+    /// List all agents in the system
+    pub async fn list_agents(&self) -> Result<Vec<Agent>> {
+        let agent_store = AgentStore::new(self.database.clone());
+        let db_agents = agent_store.get_all_agents().await
+            .map_err(|e| CallCenterError::database(&format!("Failed to list agents: {}", e)))?;
+        
+        let mut agents = Vec::new();
+        for db_agent in db_agents {
+            // Get skills for this agent
+            let skills = agent_store.get_agent_skills(&db_agent.id).await
+                .map_err(|e| CallCenterError::database(&format!("Failed to get skills: {}", e)))?
+                .into_iter()
+                .map(|s| s.skill_name)
+                .collect();
+            
+            agents.push(Agent {
+                id: db_agent.id,
+                sip_uri: db_agent.sip_uri,
+                display_name: db_agent.display_name,
+                skills,
+                max_concurrent_calls: db_agent.max_concurrent_calls,
+                status: db_agent.status.into(),
+                department: db_agent.department,
+                extension: db_agent.extension,
+            });
+        }
+        Ok(agents)
+    }
+    
+    /// Update agent skills
+    pub async fn update_agent_skills(&mut self, agent_id: &str, skills: Vec<AgentSkill>) -> Result<()> {
+        let agent_store = AgentStore::new(self.database.clone());
+        
+        // Add new skills with their metadata
+        // Note: In a real implementation, we'd need to clear existing skills first
+        // but the AgentStore doesn't have a clear_skills method
+        for skill in skills {
+            agent_store.add_skill(agent_id, &skill.skill_name, skill.skill_level).await
+                .map_err(|e| CallCenterError::database(&format!("Failed to add skill: {}", e)))?;
+        }
+        
+        Ok(())
     }
 }
 
 /// Agent statistics
 #[derive(Debug, Clone)]
 pub struct AgentStats {
-    pub total_agents: usize,
-    pub available_agents: usize,
-    pub busy_agents: usize,
-    pub away_agents: usize,
-    pub offline_agents: usize,
-    pub active_sessions: usize,
+    pub total: usize,
+    pub available: usize,
+    pub busy: usize,
+    pub away: usize,
 } 

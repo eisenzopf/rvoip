@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
     let agents = vec![
         Agent {
             id: "agent-001".to_string(),
-            sip_uri: "sip:alice@callcenter.local".parse()?,
+            sip_uri: "sip:alice@callcenter.local".to_string(),
             display_name: "Alice Johnson".to_string(),
             skills: vec!["english".to_string(), "sales".to_string()],
             max_concurrent_calls: 2,
@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
         },
         Agent {
             id: "agent-002".to_string(),
-            sip_uri: "sip:bob@callcenter.local".parse()?,
+            sip_uri: "sip:bob@callcenter.local".to_string(),
             display_name: "Bob Smith".to_string(),
             skills: vec!["english".to_string(), "technical".to_string()],
             max_concurrent_calls: 3,
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
         },
         Agent {
             id: "agent-003".to_string(),
-            sip_uri: "sip:carol@callcenter.local".parse()?,
+            sip_uri: "sip:carol@callcenter.local".to_string(),
             display_name: "Carol Davis".to_string(),
             skills: vec!["spanish".to_string(), "support".to_string()],
             max_concurrent_calls: 2,
@@ -218,7 +218,7 @@ mod tests {
         // Test agent registration
         let agent = Agent {
             id: "test-agent".to_string(),
-            sip_uri: "sip:test@example.com".parse()?,
+            sip_uri: "sip:test@example.com".to_string(),
             display_name: "Test Agent".to_string(),
             skills: vec!["test".to_string()],
             max_concurrent_calls: 1,

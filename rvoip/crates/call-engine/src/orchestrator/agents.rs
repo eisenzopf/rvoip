@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 use tracing::info;
-use rvoip_session_core::SessionId;
+use rvoip_session_core::{SessionId, SessionControl};
 
 use crate::agent::{Agent, AgentId, AgentStatus};
 use crate::error::{CallCenterError, Result as CallCenterResult};
@@ -18,11 +18,17 @@ impl CallCenterEngine {
         info!("👤 Registering agent {} with session-core: {} (skills: {:?})", 
               agent.id, agent.sip_uri, agent.skills);
         
-        // **REAL**: Create outgoing session for agent registration
-        let session_id = self.session_coordinator.as_ref().unwrap()
-            .create_outgoing_session()
-            .await
-            .map_err(|e| CallCenterError::orchestration(&format!("Failed to create agent session: {}", e)))?;
+        // Use SessionControl trait to create outgoing call for agent registration
+        let session = SessionControl::create_outgoing_call(
+            self.session_manager(),
+            &agent.sip_uri,  // From: agent's SIP URI
+            "sip:registrar@callcenter.local",  // To: local registrar
+            None  // No SDP for registration
+        )
+        .await
+        .map_err(|e| CallCenterError::orchestration(&format!("Failed to create agent session: {}", e)))?;
+        
+        let session_id = session.id;
         
         // Add agent to available pool with enhanced information
         {

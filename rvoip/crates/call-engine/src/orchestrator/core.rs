@@ -8,7 +8,10 @@ use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock, Mutex};
 use tracing::info;
 
-use rvoip_session_core::{SessionCoordinator, SessionManagerBuilder, SessionId, BridgeEvent};
+use rvoip_session_core::{
+    SessionCoordinator, SessionManagerBuilder, SessionId, BridgeEvent, CallState,
+    MediaQualityAlertLevel, MediaFlowDirection, WarningCategory
+};
 use rvoip_session_core::prelude::SessionEvent;
 
 use crate::error::{CallCenterError, Result as CallCenterResult};
@@ -201,6 +204,131 @@ impl CallCenterEngine {
             }
         }
         Ok(())
+    }
+    
+    /// Update call state tracking
+    pub async fn update_call_state(&self, session_id: &SessionId, new_state: &CallState) -> CallCenterResult<()> {
+        let mut calls = self.active_calls.write().await;
+        if let Some(call_info) = calls.get_mut(session_id) {
+            info!("Updating call {} state to {:?}", session_id, new_state);
+            call_info.status = match new_state {
+                CallState::Initiating => CallStatus::Incoming,
+                CallState::Ringing => CallStatus::Ringing,
+                CallState::Active => CallStatus::Bridged,
+                CallState::Terminated => CallStatus::Ended,
+                CallState::Failed(_) => CallStatus::Ended,
+                // For any other states, keep the current status
+                _ => call_info.status.clone(),
+            };
+        }
+        Ok(())
+    }
+    
+    /// Route incoming call when it starts ringing
+    pub async fn route_incoming_call(&self, session_id: &SessionId) -> CallCenterResult<()> {
+        info!("Routing incoming call {} to available agent", session_id);
+        // TODO: Implement actual routing logic
+        Ok(())
+    }
+    
+    /// Clean up resources when call terminates
+    pub async fn cleanup_call(&self, session_id: &SessionId) -> CallCenterResult<()> {
+        info!("Cleaning up terminated call {}", session_id);
+        self.active_calls.write().await.remove(session_id);
+        Ok(())
+    }
+    
+    /// Record quality metrics for a call
+    pub async fn record_quality_metrics(
+        &self, 
+        session_id: &SessionId, 
+        mos_score: f32, 
+        packet_loss: f32
+    ) -> CallCenterResult<()> {
+        info!("Recording quality metrics for call {}: MOS={}, Loss={}%", 
+              session_id, mos_score, packet_loss);
+        // TODO: Store in database
+        Ok(())
+    }
+    
+    /// Alert supervisors about poor call quality
+    pub async fn alert_poor_quality(
+        &self, 
+        session_id: &SessionId, 
+        mos_score: f32, 
+        alert_level: MediaQualityAlertLevel
+    ) -> CallCenterResult<()> {
+        tracing::warn!("Poor quality alert for call {}: MOS={}, Level={:?}", 
+                      session_id, mos_score, alert_level);
+        // TODO: Send notification to supervisors
+        Ok(())
+    }
+    
+    /// Process DTMF input for IVR or features
+    pub async fn process_dtmf_input(
+        &self, 
+        session_id: &SessionId, 
+        digit: char
+    ) -> CallCenterResult<()> {
+        info!("Processing DTMF '{}' for call {}", digit, session_id);
+        // TODO: Implement DTMF processing (IVR navigation, agent codes, etc.)
+        Ok(())
+    }
+    
+    /// Update media flow status
+    pub async fn update_media_flow(
+        &self, 
+        session_id: &SessionId, 
+        direction: MediaFlowDirection, 
+        active: bool, 
+        codec: &str
+    ) -> CallCenterResult<()> {
+        info!("Media flow update for call {}: {:?} {} ({})", 
+              session_id, direction, if active { "active" } else { "inactive" }, codec);
+        // TODO: Track media flow state
+        Ok(())
+    }
+    
+    /// Log warning for monitoring
+    pub async fn log_warning(
+        &self, 
+        session_id: Option<&SessionId>, 
+        category: WarningCategory, 
+        message: &str
+    ) -> CallCenterResult<()> {
+        match session_id {
+            Some(id) => tracing::warn!("Warning for call {} ({:?}): {}", id, category, message),
+            None => tracing::warn!("General warning ({:?}): {}", category, message),
+        }
+        // TODO: Store in monitoring system
+        Ok(())
+    }
+    
+    // === Public accessor methods for APIs ===
+    
+    /// Get read access to active calls
+    pub fn active_calls(&self) -> &Arc<RwLock<HashMap<SessionId, CallInfo>>> {
+        &self.active_calls
+    }
+    
+    /// Get read access to routing stats
+    pub fn routing_stats(&self) -> &Arc<RwLock<RoutingStats>> {
+        &self.routing_stats
+    }
+    
+    /// Get read access to queue manager
+    pub fn queue_manager(&self) -> &Arc<RwLock<QueueManager>> {
+        &self.queue_manager
+    }
+    
+    /// Assign a specific agent to a call (public for supervisor API)
+    pub async fn assign_agent_to_call(&self, session_id: SessionId, agent_id: AgentId) -> CallCenterResult<()> {
+        self.assign_specific_agent_to_call(session_id, agent_id).await
+    }
+    
+    /// Ensure a queue exists (public for admin API)
+    pub async fn create_queue(&self, queue_id: &str) -> CallCenterResult<()> {
+        self.ensure_queue_exists(queue_id).await
     }
 } 
 

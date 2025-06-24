@@ -10,13 +10,10 @@ license = "MIT OR Apache-2.0"
 warnings = "allow"
 
 [dependencies]
-# Our own crates
-rvoip-sip-core = { path = "../sip-core" }
-rvoip-transaction-core = { path = "../transaction-core" }
+# Our own crates - following client-core pattern
 rvoip-session-core = { path = "../session-core" }
-rvoip-media-core = { path = "../media-core" }
-rvoip-rtp-core = { path = "../rtp-core" }
-rvoip-sip-transport = { path = "../sip-transport" }
+# Infrastructure - shared types
+infra-common = { path = "../infra-common", features = ["no-global-allocator"] }
 
 # Database
 limbo = "0.0.20"
@@ -41,9 +38,6 @@ chrono = { version = "0.4", features = ["serde"] }
 # Logging
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-
-# Infrastructure
-infra-common = { path = "../infra-common", features = ["no-global-allocator"] }
 
 # Collections
 dashmap = "5.5"

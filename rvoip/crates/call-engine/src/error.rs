@@ -7,17 +7,9 @@ pub enum CallCenterError {
     #[error("Session error: {0}")]
     Session(#[from] rvoip_session_core::api::SessionError),
     
-    /// SIP-related errors
-    #[error("SIP error: {0}")]
-    Sip(#[from] rvoip_sip_core::Error),
-    
-    /// Transaction-related errors
-    #[error("Transaction error: {0}")]
-    Transaction(#[from] rvoip_transaction_core::Error),
-    
     /// Database errors
     #[error("Database error: {0}")]
-    Database(#[from] anyhow::Error),
+    Database(String),
     
     /// Agent-related errors
     #[error("Agent error: {0}")]
@@ -41,7 +33,7 @@ pub enum CallCenterError {
     
     /// Configuration errors
     #[error("Configuration error: {0}")]
-    Config(String),
+    Configuration(String),
     
     /// Authentication errors
     #[error("Authentication error: {0}")]
@@ -74,6 +66,14 @@ pub enum CallCenterError {
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
+    
+    /// Integration errors
+    #[error("Integration error: {0}")]
+    Integration(String),
+    
+    /// Validation errors
+    #[error("Validation error: {0}")]
+    Validation(String),
 }
 
 impl CallCenterError {
@@ -102,9 +102,14 @@ impl CallCenterError {
         Self::Orchestration(msg.into())
     }
     
-    /// Create a new Config error
-    pub fn config<S: Into<String>>(msg: S) -> Self {
-        Self::Config(msg.into())
+    /// Create a new Database error
+    pub fn database<S: Into<String>>(msg: S) -> Self {
+        Self::Database(msg.into())
+    }
+    
+    /// Create a new Configuration error
+    pub fn configuration<S: Into<String>>(msg: S) -> Self {
+        Self::Configuration(msg.into())
     }
     
     /// Create a new NotFound error
@@ -115,6 +120,16 @@ impl CallCenterError {
     /// Create a new Internal error
     pub fn internal<S: Into<String>>(msg: S) -> Self {
         Self::Internal(msg.into())
+    }
+    
+    /// Create a new Integration error
+    pub fn integration<S: Into<String>>(msg: S) -> Self {
+        Self::Integration(msg.into())
+    }
+    
+    /// Create a new Validation error
+    pub fn validation<S: Into<String>>(msg: S) -> Self {
+        Self::Validation(msg.into())
     }
 }
 

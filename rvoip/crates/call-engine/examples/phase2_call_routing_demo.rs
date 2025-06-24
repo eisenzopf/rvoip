@@ -48,43 +48,43 @@ async fn main() -> Result<()> {
     
     let agents = vec![
         Agent {
-            id: "alice-sales".to_string(),
-            sip_uri: "sip:alice@callcenter.local".parse()?,
-            display_name: "Alice Johnson (Sales)".to_string(),
-            skills: vec!["sales".to_string(), "general".to_string()],
+            id: "alice-001".to_string(),
+            sip_uri: "sip:alice@callcenter.local".to_string(),
+            display_name: "Alice Johnson".to_string(),
+            skills: vec!["english".to_string(), "sales".to_string()],
             max_concurrent_calls: 2,
             status: AgentStatus::Available,
             department: Some("sales".to_string()),
             extension: Some("1001".to_string()),
         },
         Agent {
-            id: "bob-support".to_string(),
-            sip_uri: "sip:bob@callcenter.local".parse()?,
-            display_name: "Bob Smith (Technical Support)".to_string(),
-            skills: vec!["technical_support".to_string(), "general".to_string()],
+            id: "bob-002".to_string(),
+            sip_uri: "sip:bob@callcenter.local".to_string(),
+            display_name: "Bob Smith".to_string(),
+            skills: vec!["english".to_string(), "technical_support".to_string()],
             max_concurrent_calls: 3,
             status: AgentStatus::Available,
             department: Some("support".to_string()),
             extension: Some("1002".to_string()),
         },
         Agent {
-            id: "carol-billing".to_string(),
-            sip_uri: "sip:carol@callcenter.local".parse()?,
-            display_name: "Carol Davis (Billing)".to_string(),
-            skills: vec!["billing".to_string(), "general".to_string()],
+            id: "carol-003".to_string(),
+            sip_uri: "sip:carol@callcenter.local".to_string(),
+            display_name: "Carol Davis".to_string(),
+            skills: vec!["spanish".to_string(), "general".to_string()],
             max_concurrent_calls: 2,
             status: AgentStatus::Available,
-            department: Some("billing".to_string()),
+            department: Some("general".to_string()),
             extension: Some("1003".to_string()),
         },
         Agent {
-            id: "david-vip".to_string(),
-            sip_uri: "sip:david@callcenter.local".parse()?,
-            display_name: "David Wilson (VIP Support)".to_string(),
-            skills: vec!["sales".to_string(), "technical_support".to_string(), "billing".to_string(), "vip".to_string()],
-            max_concurrent_calls: 1, // VIP agent handles fewer concurrent calls
-            status: AgentStatus::Available,
-            department: Some("vip".to_string()),
+            id: "david-004".to_string(),
+            sip_uri: "sip:david@callcenter.local".to_string(),
+            display_name: "David Wilson".to_string(),
+            skills: vec!["english".to_string(), "billing".to_string()],
+            max_concurrent_calls: 2,
+            status: AgentStatus::Away { reason: "Lunch".to_string() },
+            department: Some("billing".to_string()),
             extension: Some("1004".to_string()),
         },
     ];
@@ -127,8 +127,8 @@ async fn main() -> Result<()> {
     // Scenario 5: Standard call when all agents busy (should queue)
     println!("📋 Scenario 5: Standard Call (agents busy - should queue)");
     // First, make some agents busy
-    call_center.update_agent_status(&"alice-sales".to_string(), AgentStatus::Busy { active_calls: 1 }).await?;
-    call_center.update_agent_status(&"bob-support".to_string(), AgentStatus::Busy { active_calls: 1 }).await?;
+    call_center.update_agent_status(&"alice-001".to_string(), AgentStatus::Busy { active_calls: 1 }).await?;
+    call_center.update_agent_status(&"bob-002".to_string(), AgentStatus::Busy { active_calls: 1 }).await?;
     
     simulate_incoming_call(&call_center, "+1555-standard-call", "Standard customer call").await;
     sleep(Duration::from_millis(500)).await;
@@ -147,7 +147,7 @@ async fn main() -> Result<()> {
     
     // Step 10: Simulate agent becoming available (should trigger queue processing)
     println!("\n🔄 Making agent available - should process queued calls...");
-    call_center.update_agent_status(&"alice-sales".to_string(), AgentStatus::Available).await?;
+    call_center.update_agent_status(&"alice-001".to_string(), AgentStatus::Available).await?;
     sleep(Duration::from_secs(1)).await; // Give time for queue processing
     
     // Step 11: Final statistics

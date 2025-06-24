@@ -92,6 +92,9 @@ pub use config::CallCenterConfig;
 // **NEW**: Import the REAL CallCenterEngine with session-core integration
 pub use orchestrator::core::CallCenterEngine;
 
+// Export API types
+pub use api::{CallCenterClient, SupervisorApi, AdminApi};
+
 /// Call center statistics
 #[derive(Debug, Clone)]
 pub struct CallCenterStats {
@@ -163,7 +166,11 @@ pub mod prelude {
         // Bridge management  
         BridgeId, BridgeInfo, BridgeEvent,
     };
-    pub use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
+    // StatusCode is available from session-core's types module
+    pub use rvoip_session_core::types::StatusCode;
+    
+    // Note: Uri, Request, Response, Method are no longer directly accessible
+    // Use session-core's high-level APIs instead
     
     // Common external types
     pub use chrono::{DateTime, Utc};
