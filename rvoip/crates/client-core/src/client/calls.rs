@@ -97,24 +97,44 @@ impl super::manager::ClientManager {
         }
         
         // Create call via session-core with retry logic for network errors
-        let session = retry_with_backoff(
-            "create_outgoing_call",
+        let prepared_call = retry_with_backoff(
+            "prepare_outgoing_call",
             RetryConfig::quick(),
             || async {
-                SessionControl::create_outgoing_call(
+                SessionControl::prepare_outgoing_call(
                     &self.coordinator,
                     &from,
-                    &to,
-                    None  // Let session-core generate SDP
+                    &to
                 )
                 .await
                 .map_err(|e| ClientError::CallSetupFailed { 
-                    reason: format!("Session creation failed: {}", e) 
+                    reason: format!("Failed to prepare call: {}", e) 
                 })
             }
         )
         .await
-        .with_context(|| format!("Failed to create call from {} to {}", from, to))?;
+        .with_context(|| format!("Failed to prepare call from {} to {}", from, to))?;
+        
+        // Log the allocated RTP port
+        tracing::info!("Prepared call with allocated RTP port: {}", prepared_call.local_rtp_port);
+        
+        // Now initiate the prepared call
+        let session = retry_with_backoff(
+            "initiate_prepared_call", 
+            RetryConfig::quick(),
+            || async {
+                SessionControl::initiate_prepared_call(
+                    &self.coordinator,
+                    &prepared_call
+                )
+                .await
+                .map_err(|e| ClientError::CallSetupFailed { 
+                    reason: format!("Failed to initiate call: {}", e) 
+                })
+            }
+        )
+        .await
+        .with_context(|| format!("Failed to initiate call from {} to {}", from, to))?;
             
         // Create call ID and mapping
         let call_id = CallId::new_v4();

@@ -7,10 +7,12 @@ use rvoip_client_core::{
     client::ClientManager,
 };
 use std::sync::Arc;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
+use std::net::SocketAddr;
 use tokio::sync::{Mutex, RwLock};
+use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
-use std::time::Duration;
+use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -31,19 +33,21 @@ struct Args {
 /// Simple UAS server that auto-answers calls and receives RTP
 #[derive(Clone)]
 struct SimpleUasHandler {
-    rtp_debug: bool,
-    auto_answer_delay_ms: u64,
-    active_calls: Arc<Mutex<HashSet<CallId>>>,
     client_manager: Arc<RwLock<Option<Arc<ClientManager>>>>,
+    active_calls: Arc<Mutex<HashSet<CallId>>>,
+    auto_answer_delay_ms: u64,
+    rtp_debug: bool,
+    call_stats: Arc<Mutex<HashMap<CallId, (u64, u64, u64, u64)>>>, // (sent_packets, sent_bytes, recv_packets, recv_bytes)
 }
 
 impl SimpleUasHandler {
     pub fn new(rtp_debug: bool) -> Self {
         Self {
-            config: Arc::new(RwLock::new(ClientConfig::default())),
             client_manager: Arc::new(RwLock::new(None)),
             active_calls: Arc::new(Mutex::new(HashSet::new())),
+            auto_answer_delay_ms: 500, // Default 500ms delay
             rtp_debug,
+            call_stats: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     
@@ -72,11 +76,11 @@ impl ClientEventHandler for SimpleUasHandler {
         let state_emoji = match status_info.new_state {
             CallState::Initiating => "🔄",
             CallState::Ringing => "🔔",
-            CallState::Connected => "✅",
-            CallState::OnHold => "⏸️",
-            CallState::Terminating => "🔚",
-            CallState::Terminated => "❌",
-            CallState::Failed => "⚠️",
+            CallState::Connected => "📞",
+            CallState::Failed => "❌",
+            CallState::Cancelled => "🚫",
+            CallState::Terminated => "☎️",
+            _ => "❓",
         };
         
         info!(
@@ -93,24 +97,28 @@ impl ClientEventHandler for SimpleUasHandler {
             calls.insert(status_info.call_id);
             info!("✅ Call {} connected - ready to receive RTP", status_info.call_id);
             
-            // Start monitoring RTP statistics
-            self.start_stats_monitoring(status_info.call_id).await;
-            
-            // The server doesn't need to explicitly start audio transmission
-            // as it will automatically receive RTP packets sent by the client
-            // However, we can get media info to see the negotiated parameters
+            // Start audio transmission for the server side
             if let Some(client) = self.client_manager.read().await.as_ref() {
+                info!("📤 Starting audio transmission for call {}", status_info.call_id);
+                match client.start_audio_transmission(&status_info.call_id).await {
+                    Ok(_) => info!("✅ Audio transmission started for call {}", status_info.call_id),
+                    Err(e) => error!("❌ Failed to start audio transmission: {}", e),
+                }
+                
+                // Get media info to see the negotiated parameters
                 if let Ok(media_info) = client.get_call_media_info(&status_info.call_id).await {
-                    info!(
-                        "📊 Media info for call {}: codec={:?}, local_port={}, remote_port={:?}, remote_sdp={}",
-                        status_info.call_id,
-                        media_info.codec,
-                        media_info.local_rtp_port,
-                        media_info.remote_rtp_port,
-                        media_info.remote_sdp.is_some()
-                    );
+                    info!("📊 Media info for call {}:", status_info.call_id);
+                    info!("    📊 Media Info:");
+                    info!("       Local SDP: {}", media_info.local_sdp.as_ref().map(|_| "Present").unwrap_or("None"));
+                    info!("       Remote SDP: {}", media_info.remote_sdp.as_ref().map(|_| "Present").unwrap_or("None"));
+                    info!("       Local RTP Port: {}", media_info.local_rtp_port.map(|p| p.to_string()).unwrap_or_else(|| "None".to_string()));
+                    info!("       Remote RTP Port: {}", media_info.remote_rtp_port.map(|p| p.to_string()).unwrap_or_else(|| "None".to_string()));
+                    info!("       Codec: {}", media_info.codec.as_ref().unwrap_or(&"Unknown".to_string()));
                 }
             }
+            
+            // Start monitoring RTP statistics
+            self.start_stats_monitoring(status_info.call_id).await;
         } else if status_info.new_state == CallState::Terminated {
             let mut calls = self.active_calls.lock().await;
             calls.remove(&status_info.call_id);
@@ -178,6 +186,7 @@ impl SimpleUasHandler {
         let client_ref = Arc::clone(&self.client_manager);
         let call_id = call_id.clone();
         let rtp_debug = self.rtp_debug;
+        let call_stats = Arc::clone(&self.call_stats);
         
         tokio::spawn(async move {
             // Wait a bit for RTP to start flowing
@@ -198,19 +207,27 @@ impl SimpleUasHandler {
                                 rtp_stats.packets_lost
                             );
                         }
+                        
+                        // Store stats for final summary
+                        call_stats.lock().await.insert(
+                            call_id.clone(),
+                            (
+                                rtp_stats.packets_sent,
+                                rtp_stats.bytes_sent,
+                                rtp_stats.packets_received,
+                                rtp_stats.bytes_received
+                            )
+                        );
                     }
                     
                     // Get call statistics for quality metrics
                     if let Ok(Some(call_stats)) = client.get_call_statistics(&call_id).await {
-                        if let Some(quality) = &call_stats.quality_metrics {
-                            if rtp_debug {
-                                info!("📈 Server Quality for {}: MOS: {:.2}, Jitter: {}ms, Packet Loss: {:.1}%",
-                                    call_id,
-                                    quality.mos_score,
-                                    quality.jitter_ms,
-                                    quality.packet_loss_percent
-                                );
-                            }
+                        if rtp_debug {
+                            info!("🎯 Quality Metrics:");
+                            info!("       MOS Score: {:.2}", call_stats.quality.mos_score);
+                            info!("       Packet Loss: {:.2}%", call_stats.quality.packet_loss_rate);
+                            info!("       Jitter: {:.2}ms", call_stats.quality.jitter_ms);
+                            info!("       Network Effectiveness: {:.2}%", call_stats.quality.network_effectiveness * 100.0);
                         }
                     }
                     
@@ -268,7 +285,7 @@ async fn main() -> Result<()> {
             ..Default::default()
         });
 
-    // Create handler with auto-answer delay
+    // Initialize handler
     let handler = Arc::new(SimpleUasHandler::new(args.rtp_debug));
 
     // Build and start server
@@ -283,26 +300,87 @@ async fn main() -> Result<()> {
     info!("✅ UAS Server ready and listening on port {}", args.port);
     info!("⏳ Will auto-answer incoming calls after 100ms");
     info!("📥 Ready to receive RTP packets");
+    info!("");
+    info!("Press Ctrl+C to stop...");
 
     // Main loop to handle incoming calls
     let mut check_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
     
+    // Set up Ctrl+C handler
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    
     loop {
-        check_interval.tick().await;
-        
-        // Get active calls and answer pending ones
-        let active_calls = client.get_active_calls().await;
-        for call_info in active_calls {
-            if call_info.state == CallState::IncomingPending {
-                info!("📞 Answering pending call: {}", call_info.call_id);
-                match client.answer_call(&call_info.call_id).await {
-                    Ok(_) => info!("✅ Call {} answered", call_info.call_id),
-                    Err(e) => error!("❌ Failed to answer call {}: {}", call_info.call_id, e),
+        tokio::select! {
+            _ = &mut ctrl_c => {
+                info!("\n🛑 Received shutdown signal...");
+                break;
+            }
+            _ = check_interval.tick() => {
+                // Get active calls and answer pending ones
+                let active_calls = client.get_active_calls().await;
+                for call_info in active_calls {
+                    if call_info.state == CallState::IncomingPending {
+                        info!("📞 Answering pending call: {}", call_info.call_id);
+                        match client.answer_call(&call_info.call_id).await {
+                            Ok(_) => info!("✅ Call {} answered", call_info.call_id),
+                            Err(e) => error!("❌ Failed to answer call {}: {}", call_info.call_id, e),
+                        }
+                    }
                 }
             }
         }
-        
-        // Optional: Add graceful shutdown mechanism here
-        // For now, the server runs indefinitely
     }
+    
+    // Print final statistics
+    info!("");
+    info!("📊 ========== FINAL RTP STATISTICS SUMMARY ==========");
+    
+    let call_stats = handler.call_stats.lock().await;
+    let mut total_sent_packets = 0u64;
+    let mut total_sent_bytes = 0u64;
+    let mut total_recv_packets = 0u64;
+    let mut total_recv_bytes = 0u64;
+    let mut call_count = 0;
+    
+    for (call_id, (sent_packets, sent_bytes, recv_packets, recv_bytes)) in call_stats.iter() {
+        call_count += 1;
+        info!("📞 Call {}: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
+            call_id,
+            sent_packets,
+            sent_bytes,
+            recv_packets,
+            recv_bytes
+        );
+        total_sent_packets += sent_packets;
+        total_sent_bytes += sent_bytes;
+        total_recv_packets += recv_packets;
+        total_recv_bytes += recv_bytes;
+    }
+    
+    if call_count > 0 {
+        info!("──────────────────────────────────────────────────");
+        info!("📈 TOTAL {} calls: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
+            call_count,
+            total_sent_packets,
+            total_sent_bytes,
+            total_recv_packets,
+            total_recv_bytes
+        );
+        
+        if total_sent_packets == 0 && total_recv_packets > 0 {
+            warn!("⚠️  Server received RTP packets but didn't send any!");
+            warn!("    This may indicate the server didn't start audio transmission.");
+        }
+    } else {
+        info!("📈 No calls were processed");
+    }
+    info!("===================================================");
+    info!("");
+    
+    // Stop the client
+    client.stop().await?;
+    
+    info!("✅ UAS server stopped");
+    Ok(())
 } 

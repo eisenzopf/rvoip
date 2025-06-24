@@ -580,13 +580,31 @@ impl SessionControl for Arc<SessionCoordinator> {
             // Get RTP statistics
             let rtp_stats = self.media_manager.get_rtp_statistics(session_id).await
                 .ok()
-                .flatten();
+                .flatten()
+                .map(|stats| crate::media::stats::RtpSessionStats {
+                    packets_sent: stats.packets_sent,
+                    packets_received: stats.packets_received,
+                    bytes_sent: stats.bytes_sent,
+                    bytes_received: stats.bytes_received,
+                    packets_lost: stats.packets_lost,
+                    packets_out_of_order: 0, // Not available in rtp-core
+                    jitter_buffer_ms: 0.0,   // Not available in rtp-core
+                    current_bitrate_kbps: 0, // Would need to calculate
+                });
             
             // Get quality metrics from media statistics
             let quality_metrics = self.media_manager.get_media_statistics(session_id).await
                 .ok()
                 .flatten()
-                .and_then(|stats| stats.quality_metrics.clone());
+                .and_then(|stats| stats.quality_metrics.clone())
+                .map(|qm| crate::media::stats::QualityMetrics {
+                    mos_score: qm.mos_score.unwrap_or(5.0),
+                    packet_loss_rate: qm.packet_loss_percent,
+                    jitter_ms: qm.jitter_ms as f32,
+                    round_trip_ms: qm.rtt_ms.unwrap_or(0.0) as f32,
+                    network_effectiveness: 1.0 - (qm.packet_loss_percent / 100.0),
+                    is_acceptable: qm.mos_score.unwrap_or(5.0) >= 3.0,
+                });
             
             Ok(Some(MediaInfo {
                 local_sdp,

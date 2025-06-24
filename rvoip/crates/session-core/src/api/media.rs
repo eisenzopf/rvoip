@@ -366,10 +366,10 @@ pub trait MediaControl {
     async fn generate_sdp_offer(&self, session_id: &SessionId) -> Result<String>;
     
     /// Get RTP/RTCP statistics for a session
-    async fn get_rtp_statistics(&self, session_id: &SessionId) -> Result<Option<rvoip_rtp_core::session::RtpSessionStats>>;
+    async fn get_rtp_statistics(&self, session_id: &SessionId) -> Result<Option<crate::media::stats::RtpSessionStats>>;
     
     /// Get comprehensive media statistics including quality metrics
-    async fn get_media_statistics(&self, session_id: &SessionId) -> Result<Option<rvoip_media_core::types::MediaStatistics>>;
+    async fn get_media_statistics(&self, session_id: &SessionId) -> Result<Option<crate::media::stats::MediaStatistics>>;
     
     /// Start periodic statistics monitoring with the specified interval
     async fn start_statistics_monitoring(&self, session_id: &SessionId, interval: std::time::Duration) -> Result<()>;
@@ -494,10 +494,9 @@ impl MediaControl for Arc<SessionCoordinator> {
                 message: format!("Failed to update media with SDP: {}", e) 
             })?;
         
-        // Extract remote RTP port from SDP and start audio if found
-        if let Some(remote_port) = parse_rtp_port_from_sdp(sdp) {
-            // Assume remote IP is same as local for now (127.0.0.1)
-            let remote_addr = format!("127.0.0.1:{}", remote_port);
+        // Extract remote RTP address from SDP
+        if let Ok(sdp_info) = crate::api::parse_sdp_connection(sdp) {
+            let remote_addr = format!("{}:{}", sdp_info.ip, sdp_info.port);
             
             // Start audio transmission
             media_manager.start_audio_transmission(session_id).await
@@ -540,10 +539,16 @@ impl MediaControl for Arc<SessionCoordinator> {
             let rtp_stats = self.get_rtp_statistics(session_id).await.ok().flatten();
             
             // Get quality metrics from media statistics
-            let quality_metrics = self.get_media_statistics(session_id).await
-                .ok()
-                .flatten()
-                .and_then(|stats| stats.quality_metrics);
+            let media_stats = media_manager.get_media_statistics(session_id).await.ok().flatten();
+            let quality_metrics = media_stats.and_then(|stats| stats.quality_metrics)
+                .map(|qm| crate::media::stats::QualityMetrics {
+                    mos_score: qm.mos_score.unwrap_or(5.0),
+                    packet_loss_rate: qm.packet_loss_percent,
+                    jitter_ms: qm.jitter_ms as f32,
+                    round_trip_ms: qm.rtt_ms.unwrap_or(0.0) as f32,
+                    network_effectiveness: 1.0 - (qm.packet_loss_percent / 100.0),
+                    is_acceptable: qm.mos_score.unwrap_or(5.0) >= 3.0,
+                });
             
             // Convert to API MediaInfo type
             Ok(Some(MediaInfo {
@@ -572,26 +577,79 @@ impl MediaControl for Arc<SessionCoordinator> {
             })
     }
     
-    async fn get_rtp_statistics(&self, session_id: &SessionId) -> Result<Option<rvoip_rtp_core::session::RtpSessionStats>> {
+    async fn get_rtp_statistics(&self, session_id: &SessionId) -> Result<Option<crate::media::stats::RtpSessionStats>> {
         // Get the media manager through the coordinator
         let media_manager = &self.media_manager;
         
-        // Get RTP statistics
-        media_manager.get_rtp_statistics(session_id).await
+        // Get RTP statistics from media manager
+        if let Some(rtp_stats) = media_manager.get_rtp_statistics(session_id).await
             .map_err(|e| crate::errors::SessionError::MediaIntegration { 
                 message: format!("Failed to get RTP statistics: {}", e) 
-            })
+            })? {
+            // Convert rtp-core stats to session-core stats
+            Ok(Some(crate::media::stats::RtpSessionStats {
+                packets_sent: rtp_stats.packets_sent,
+                packets_received: rtp_stats.packets_received,
+                bytes_sent: rtp_stats.bytes_sent,
+                bytes_received: rtp_stats.bytes_received,
+                packets_lost: rtp_stats.packets_lost,
+                packets_out_of_order: 0, // Not available in rtp-core
+                jitter_buffer_ms: 0.0,   // Not available in rtp-core
+                current_bitrate_kbps: 0, // Would need to calculate
+            }))
+        } else {
+            Ok(None)
+        }
     }
     
-    async fn get_media_statistics(&self, session_id: &SessionId) -> Result<Option<rvoip_media_core::types::MediaStatistics>> {
+    async fn get_media_statistics(&self, session_id: &SessionId) -> Result<Option<crate::media::stats::MediaStatistics>> {
         // Get the media manager through the coordinator
         let media_manager = &self.media_manager;
         
-        // Get media statistics
-        media_manager.get_media_statistics(session_id).await
+        // Get media info to build our statistics
+        if let Some(media_info) = media_manager.get_media_info(session_id).await
             .map_err(|e| crate::errors::SessionError::MediaIntegration { 
-                message: format!("Failed to get media statistics: {}", e) 
-            })
+                message: format!("Failed to get media info: {}", e) 
+            })? {
+            
+            // Get stored SDP to extract actual addresses
+            let (local_sdp, remote_sdp) = {
+                let sdp_storage = media_manager.sdp_storage.read().await;
+                sdp_storage.get(session_id).cloned().unwrap_or((None, None))
+            };
+            
+            // Extract local address from local SDP or use bind address
+            let local_addr = if let Some(ref sdp) = local_sdp {
+                if let Ok(info) = crate::api::parse_sdp_connection(sdp) {
+                    Some(format!("{}:{}", info.ip, info.port))
+                } else {
+                    media_info.local_rtp_port.map(|p| format!("{}:{}", media_manager.local_bind_addr.ip(), p))
+                }
+            } else {
+                media_info.local_rtp_port.map(|p| format!("{}:{}", media_manager.local_bind_addr.ip(), p))
+            };
+            
+            // Extract remote address from remote SDP
+            let remote_addr = if let Some(ref sdp) = remote_sdp {
+                if let Ok(info) = crate::api::parse_sdp_connection(sdp) {
+                    Some(format!("{}:{}", info.ip, info.port))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            
+            // Build session-core MediaStatistics from available info
+            Ok(Some(crate::media::stats::MediaStatistics {
+                local_addr,
+                remote_addr,
+                codec: media_info.codec,
+                media_flowing: true, // Assume media is flowing if session exists
+            }))
+        } else {
+            Ok(None)
+        }
     }
     
     async fn start_statistics_monitoring(&self, session_id: &SessionId, interval: std::time::Duration) -> Result<()> {
@@ -713,36 +771,18 @@ impl MediaControl for Arc<SessionCoordinator> {
             session_id: session_id.clone(),
             duration: session.started_at.map(|t| t.elapsed()),
             state: session.state,
-            media: crate::media::stats::MediaStatistics {
-                local_addr: media_info.as_ref().and_then(|m| m.local_sdp.clone()),
-                remote_addr: media_info.as_ref().and_then(|m| m.remote_sdp.clone()),
-                codec: media_info.as_ref().and_then(|m| m.codec.clone()),
-                media_flowing: media_info.is_some(),
+            media: if let Some(stats) = media_stats {
+                stats
+            } else {
+                crate::media::stats::MediaStatistics::default()
             },
             rtp: if let Some(rtp) = rtp_stats {
-                crate::media::stats::RtpSessionStats {
-                    packets_sent: rtp.packets_sent,
-                    packets_received: rtp.packets_received,
-                    bytes_sent: rtp.bytes_sent,
-                    bytes_received: rtp.bytes_received,
-                    packets_lost: rtp.packets_lost,
-                    packets_out_of_order: 0, // Not available in current RTP stats
-                    jitter_buffer_ms: 0.0,   // Not available in current RTP stats
-                    current_bitrate_kbps: 0, // Would need to calculate from bytes/time
-                }
+                rtp
             } else {
                 crate::media::stats::RtpSessionStats::default()
             },
-            quality: if let Some(stats) = media_stats {
-                if let Some(quality) = stats.quality_metrics {
-                    crate::media::stats::QualityMetrics::calculate(
-                        quality.packet_loss_percent,
-                        quality.jitter_ms as f32,
-                        quality.rtt_ms.unwrap_or(0.0) as f32,
-                    )
-                } else {
-                    crate::media::stats::QualityMetrics::default()
-                }
+            quality: if let Some(quality) = media_info.as_ref().and_then(|m| m.quality_metrics.as_ref()) {
+                quality.clone()
             } else {
                 crate::media::stats::QualityMetrics::default()
             },

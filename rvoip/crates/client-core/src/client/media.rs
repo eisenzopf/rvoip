@@ -1004,7 +1004,7 @@ impl super::manager::ClientManager {
     /// Get comprehensive media statistics for a call
     /// 
     /// Returns detailed statistics including RTP/RTCP metrics and quality monitoring
-    pub async fn get_media_statistics(&self, call_id: &CallId) -> ClientResult<Option<rvoip_media_core::types::MediaStatistics>> {
+    pub async fn get_media_statistics(&self, call_id: &CallId) -> ClientResult<Option<MediaSessionStats>> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
             .clone();

@@ -358,8 +358,8 @@ pub struct MediaInfo {
     pub local_rtp_port: Option<u16>,
     pub remote_rtp_port: Option<u16>,
     pub codec: Option<String>,
-    pub rtp_stats: Option<rvoip_rtp_core::session::RtpSessionStats>,
-    pub quality_metrics: Option<rvoip_media_core::types::QualityMetrics>,
+    pub rtp_stats: Option<crate::media::stats::RtpSessionStats>,
+    pub quality_metrics: Option<crate::media::stats::QualityMetrics>,
 }
 
 /// Call direction

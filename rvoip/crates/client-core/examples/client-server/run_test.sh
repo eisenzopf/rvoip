@@ -62,12 +62,25 @@ RUST_LOG=info,rvoip_client_core=debug,rvoip_media_core=debug target/release/uac_
     --port 5071 \
     --num-calls 2 \
     --duration 10 \
-    --rtp-debug
+    --rtp-debug &
+UAC_PID=$!
 
-echo -e "\n${GREEN}✅ Test completed!${NC}"
+wait $UAC_PID
+
+echo "✅ Test completed!"
 echo "======================================="
 
-# Wait a bit before cleanup
+# Give server a moment to print final statistics
+echo "📊 Waiting for server to print final statistics..."
 sleep 2
 
-echo -e "${BLUE}📊 Check the server logs for RTP packet statistics${NC}" 
+# Send interrupt signal to server for graceful shutdown
+echo "📊 Sending shutdown signal to server..."
+kill -INT $SERVER_PID 2>/dev/null || true
+
+# Wait a moment for graceful shutdown
+sleep 1
+
+# Check the server logs for RTP packet statistics
+echo "📊 Check the server logs for RTP packet statistics"
+echo "" 
