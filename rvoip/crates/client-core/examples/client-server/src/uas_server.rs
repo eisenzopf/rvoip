@@ -1,4 +1,5 @@
 use anyhow::Result;
+use async_trait::async_trait;
 use clap::Parser;
 use rvoip_client_core::{
     ClientConfig, ClientEventHandler, ClientError, 
@@ -13,6 +14,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+use dashmap::DashMap;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -37,7 +39,7 @@ struct SimpleUasHandler {
     active_calls: Arc<Mutex<HashSet<CallId>>>,
     auto_answer_delay_ms: u64,
     rtp_debug: bool,
-    call_stats: Arc<Mutex<HashMap<CallId, (u64, u64, u64, u64)>>>, // (sent_packets, sent_bytes, recv_packets, recv_bytes)
+    call_stats: Arc<DashMap<CallId, (u64, u64, u64, u64)>>, // (sent_packets, sent_bytes, recv_packets, recv_bytes)
 }
 
 impl SimpleUasHandler {
@@ -47,7 +49,7 @@ impl SimpleUasHandler {
             active_calls: Arc::new(Mutex::new(HashSet::new())),
             auto_answer_delay_ms: 500, // Default 500ms delay
             rtp_debug,
-            call_stats: Arc::new(Mutex::new(HashMap::new())),
+            call_stats: Arc::new(DashMap::new()),
         }
     }
     
@@ -197,50 +199,40 @@ impl SimpleUasHandler {
                 if let Some(client) = client_ref.read().await.as_ref() {
                     // Get RTP statistics
                     if let Ok(Some(rtp_stats)) = client.get_rtp_statistics(&call_id).await {
-                        if rtp_debug || rtp_stats.packets_received > 0 {
-                            info!("📊 Server RTP Stats for {}: Sent: {} packets ({} bytes), Received: {} packets ({} bytes), Lost: {}", 
-                                call_id,
-                                rtp_stats.packets_sent,
-                                rtp_stats.bytes_sent,
-                                rtp_stats.packets_received,
-                                rtp_stats.bytes_received,
-                                rtp_stats.packets_lost
-                            );
-                        }
+                        // Update our stats tracking
+                        call_stats.insert(call_id.clone(), (
+                            rtp_stats.packets_sent,
+                            rtp_stats.bytes_sent,
+                            rtp_stats.packets_received,
+                            rtp_stats.bytes_received
+                        ));
                         
-                        // Store stats for final summary
-                        call_stats.lock().await.insert(
-                            call_id.clone(),
-                            (
-                                rtp_stats.packets_sent,
-                                rtp_stats.bytes_sent,
-                                rtp_stats.packets_received,
-                                rtp_stats.bytes_received
-                            )
+                        info!("📊 Server RTP Stats for {}: Sent: {} packets ({} bytes), Received: {} packets ({} bytes)",
+                            call_id,
+                            rtp_stats.packets_sent,
+                            rtp_stats.bytes_sent,
+                            rtp_stats.packets_received,
+                            rtp_stats.bytes_received
                         );
-                    }
-                    
-                    // Get call statistics for quality metrics
-                    if let Ok(Some(call_stats)) = client.get_call_statistics(&call_id).await {
+                        
                         if rtp_debug {
-                            info!("🎯 Quality Metrics:");
-                            info!("       MOS Score: {:.2}", call_stats.quality.mos_score);
-                            info!("       Packet Loss: {:.2}%", call_stats.quality.packet_loss_rate);
-                            info!("       Jitter: {:.2}ms", call_stats.quality.jitter_ms);
-                            info!("       Network Effectiveness: {:.2}%", call_stats.quality.network_effectiveness * 100.0);
-                        }
-                    }
-                    
-                    // Check if call is still active
-                    if let Ok(call_info) = client.get_call(&call_id).await {
-                        if call_info.state == CallState::Terminated {
-                            info!("Call {} terminated, stopping stats monitoring", call_id);
-                            break;
+                            // Get call statistics for quality metrics
+                            if let Ok(Some(call_stats)) = client.get_call_statistics(&call_id).await {
+                                info!("🎯 Quality Metrics:");
+                                info!("       MOS Score: {:.2}", call_stats.quality.mos_score);
+                                info!("       Packet Loss: {:.2}%", call_stats.quality.packet_loss_rate);
+                                info!("       Jitter: {:.2}ms", call_stats.quality.jitter_ms);
+                                info!("       Network Effectiveness: {:.2}%", call_stats.quality.network_effectiveness * 100.0);
+                            }
                         }
                     } else {
-                        // Call not found, stop monitoring
+                        // Call no longer exists, stop monitoring
+                        info!("Call {} terminated, stopping stats monitoring", call_id);
                         break;
                     }
+                } else {
+                    error!("Client manager not available for stats monitoring");
+                    break;
                 }
                 
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -332,43 +324,39 @@ async fn main() -> Result<()> {
         }
     }
     
-    // Print final statistics
+    // Print final statistics before shutdown
     info!("");
     info!("📊 ========== FINAL RTP STATISTICS SUMMARY ==========");
     
-    let call_stats = handler.call_stats.lock().await;
-    let mut total_sent_packets = 0u64;
-    let mut total_sent_bytes = 0u64;
-    let mut total_recv_packets = 0u64;
-    let mut total_recv_bytes = 0u64;
+    let mut total_sent = 0u64;
+    let mut total_received = 0u64;
+    let mut total_bytes_sent = 0u64;
+    let mut total_bytes_received = 0u64;
     let mut call_count = 0;
     
-    for (call_id, (sent_packets, sent_bytes, recv_packets, recv_bytes)) in call_stats.iter() {
-        call_count += 1;
+    for entry in handler.call_stats.iter() {
+        let (call_id, (sent_pkts, sent_bytes, recv_pkts, recv_bytes)) = entry.pair();
         info!("📞 Call {}: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
-            call_id,
-            sent_packets,
-            sent_bytes,
-            recv_packets,
-            recv_bytes
+            call_id, sent_pkts, sent_bytes, recv_pkts, recv_bytes
         );
-        total_sent_packets += sent_packets;
-        total_sent_bytes += sent_bytes;
-        total_recv_packets += recv_packets;
-        total_recv_bytes += recv_bytes;
+        total_sent += sent_pkts;
+        total_received += recv_pkts;
+        total_bytes_sent += sent_bytes;
+        total_bytes_received += recv_bytes;
+        call_count += 1;
     }
     
     if call_count > 0 {
         info!("──────────────────────────────────────────────────");
         info!("📈 TOTAL {} calls: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
             call_count,
-            total_sent_packets,
-            total_sent_bytes,
-            total_recv_packets,
-            total_recv_bytes
+            total_sent,
+            total_bytes_sent,
+            total_received,
+            total_bytes_received
         );
         
-        if total_sent_packets == 0 && total_recv_packets > 0 {
+        if total_sent == 0 && total_received > 0 {
             warn!("⚠️  Server received RTP packets but didn't send any!");
             warn!("    This may indicate the server didn't start audio transmission.");
         }

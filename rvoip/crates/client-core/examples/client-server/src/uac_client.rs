@@ -7,12 +7,13 @@ use rvoip_client_core::{
     client::ClientManager,
 };
 use std::sync::Arc;
-use std::collections::{HashSet, HashMap};
+use std::collections::HashSet;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{error, info, warn};
 use std::path::Path;
 use std::error::Error;
+use dashmap::DashMap;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -55,7 +56,8 @@ struct SimpleUacHandler {
     client_manager: Arc<RwLock<Option<Arc<ClientManager>>>>,
     config: Arc<RwLock<ClientConfig>>,
     server_address: String,
-    last_call_ids: Arc<Mutex<HashMap<usize, CallId>>>,
+    last_call_ids: Arc<DashMap<usize, CallId>>,
+    final_stats: Arc<DashMap<usize, (u64, u64, u64, u64)>>, // (sent_packets, sent_bytes, recv_packets, recv_bytes)
 }
 
 impl SimpleUacHandler {
@@ -96,7 +98,8 @@ impl SimpleUacHandler {
             client_manager: Arc::new(RwLock::new(None)),
             config: Arc::new(RwLock::new(ClientConfig::default())),
             server_address,
-            last_call_ids: Arc::new(Mutex::new(HashMap::new())),
+            last_call_ids: Arc::new(DashMap::new()),
+            final_stats: Arc::new(DashMap::new()),
         }
     }
     
@@ -141,18 +144,25 @@ impl SimpleUacHandler {
             let duration = call_duration;
             let rtp_debug = self.rtp_debug;
             let last_call_ids = Arc::clone(&self.last_call_ids);
+            let final_stats = Arc::clone(&self.final_stats);
             
             let handle = tokio::spawn(async move {
-                if let Err(e) = make_single_call(
+                match make_single_call(
                     call_number,
                     client_ref,
                     server_addr,
                     active_calls,
                     duration,
                     rtp_debug,
-                    last_call_ids
+                    last_call_ids,
                 ).await {
-                    error!("Call {} failed: {}", call_number, e);
+                    Ok((sent_pkts, sent_bytes, recv_pkts, recv_bytes)) => {
+                        final_stats.insert(call_number, (sent_pkts, sent_bytes, recv_pkts, recv_bytes));
+                    }
+                    Err(e) => {
+                        error!("Call {} failed: {}", call_number, e);
+                        final_stats.insert(call_number, (0, 0, 0, 0));
+                    }
                 }
             });
             
@@ -170,45 +180,43 @@ impl SimpleUacHandler {
         info!("✅ All calls completed");
         
         // Print final RTP statistics summary
-        if let Some(client) = self.client_manager.read().await.as_ref() {
-            info!("");
-            info!("📊 ========== FINAL RTP STATISTICS SUMMARY ==========");
-            let mut total_sent = 0u64;
-            let mut total_received = 0u64;
-            let mut total_bytes_sent = 0u64;
-            let mut total_bytes_received = 0u64;
-            
-            for (call_num, call_id) in self.last_call_ids.lock().await.iter() {
-                if let Ok(Some(stats)) = client.get_rtp_statistics(call_id).await {
-                    info!("📞 Call {}: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
-                        call_num,
-                        stats.packets_sent,
-                        stats.bytes_sent,
-                        stats.packets_received,
-                        stats.bytes_received
-                    );
-                    total_sent += stats.packets_sent;
-                    total_received += stats.packets_received;
-                    total_bytes_sent += stats.bytes_sent;
-                    total_bytes_received += stats.bytes_received;
-                }
+        info!("");
+        info!("📊 ========== FINAL RTP STATISTICS SUMMARY ==========");
+        
+        let mut total_sent = 0u64;
+        let mut total_received = 0u64;
+        let mut total_bytes_sent = 0u64;
+        let mut total_bytes_received = 0u64;
+        
+        for i in 1..=num_concurrent_calls {
+            if let Some(stats) = self.final_stats.get(&i) {
+                let (sent_pkts, sent_bytes, recv_pkts, recv_bytes) = *stats;
+                info!("📞 Call {}: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
+                    i, sent_pkts, sent_bytes, recv_pkts, recv_bytes
+                );
+                total_sent += sent_pkts;
+                total_received += recv_pkts;
+                total_bytes_sent += sent_bytes;
+                total_bytes_received += recv_bytes;
+            } else {
+                warn!("⚠️  No statistics available for Call {}", i);
             }
-            
-            info!("──────────────────────────────────────────────────");
-            info!("📈 TOTAL: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
-                total_sent,
-                total_bytes_sent,
-                total_received,
-                total_bytes_received
-            );
-            
-            if total_received == 0 && total_sent > 0 {
-                warn!("⚠️  No RTP packets were received from the server!");
-                warn!("    This may indicate a network configuration issue.");
-            }
-            info!("===================================================");
-            info!("");
         }
+        
+        info!("──────────────────────────────────────────────────");
+        info!("📈 TOTAL: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
+            total_sent,
+            total_bytes_sent,
+            total_received,
+            total_bytes_received
+        );
+        
+        if total_received == 0 && total_sent > 0 {
+            warn!("⚠️  No RTP packets were received from the server!");
+            warn!("    This may indicate a network configuration issue.");
+        }
+        info!("===================================================");
+        info!("");
         
         Ok(())
     }
@@ -221,8 +229,8 @@ async fn make_single_call(
     active_calls: Arc<Mutex<HashSet<CallId>>>,
     duration: Duration,
     rtp_debug: bool,
-    last_call_ids: Arc<Mutex<HashMap<usize, CallId>>>,
-) -> Result<(), Box<dyn Error>> {
+    last_call_ids: Arc<DashMap<usize, CallId>>,
+) -> Result<(u64, u64, u64, u64), Box<dyn Error>> {
     info!("📞 Call {}: Initiating call to {}", call_number, server_addr);
     
     let from_uri = format!("sip:uac{}@127.0.0.1", call_number);
@@ -241,7 +249,8 @@ async fn make_single_call(
     active_calls.lock().await.insert(call_id.clone());
     
     // Store the mapping for final statistics
-    last_call_ids.lock().await.insert(call_number, call_id.clone());
+    last_call_ids.insert(call_number, call_id.clone());
+    info!("📝 Stored call mapping: Call {} -> {}", call_number, call_id);
     
     // Start statistics monitoring
     let stats_handle = {
@@ -290,6 +299,33 @@ async fn make_single_call(
     info!("📞 Call {}: Running for {:?}...", call_number, duration);
     tokio::time::sleep(duration).await;
     
+    // Capture final statistics before terminating
+    let (packets_sent, bytes_sent, packets_received, bytes_received) = {
+        let client = client_ref.read().await;
+        let client = client.as_ref().ok_or("Client not initialized")?;
+        
+        match client.get_rtp_statistics(&call_id).await {
+            Ok(Some(stats)) => {
+                info!("📊 Call {} Final Stats - Sent: {} packets ({} bytes), Received: {} packets ({} bytes)",
+                    call_number,
+                    stats.packets_sent,
+                    stats.bytes_sent,
+                    stats.packets_received,
+                    stats.bytes_received
+                );
+                (stats.packets_sent, stats.bytes_sent, stats.packets_received, stats.bytes_received)
+            }
+            Ok(None) => {
+                warn!("⚠️  No RTP statistics available for Call {} before termination", call_number);
+                (0, 0, 0, 0)
+            }
+            Err(e) => {
+                error!("❌ Failed to get final RTP statistics for Call {}: {}", call_number, e);
+                (0, 0, 0, 0)
+            }
+        }
+    };
+    
     // Terminate the call
     info!("📞 Call {}: Terminating...", call_number);
     {
@@ -305,7 +341,7 @@ async fn make_single_call(
     active_calls.lock().await.remove(&call_id);
     
     info!("✅ Call {}: Completed successfully", call_number);
-    Ok(())
+    Ok((packets_sent, bytes_sent, packets_received, bytes_received))
 }
 
 #[async_trait::async_trait]
@@ -327,10 +363,6 @@ impl ClientEventHandler for SimpleUacHandler {
         if status_info.new_state == CallState::Connected {
             let mut calls = self.active_calls.lock().await;
             calls.insert(status_info.call_id.clone());
-            
-            // Extract call number from the call ID or from active calls count
-            let call_number = calls.len();
-            self.last_call_ids.lock().await.insert(call_number, status_info.call_id.clone());
             
             info!("🎵 Call {} connected - starting RTP transmission", status_info.call_id);
             
