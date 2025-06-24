@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
+use dashmap::DashMap;
 use tokio::sync::{mpsc, RwLock, Mutex};
 use tracing::info;
 
@@ -48,7 +49,7 @@ pub struct CallCenterEngine {
     pub(super) active_calls: Arc<RwLock<HashMap<SessionId, CallInfo>>>,
     
     /// Agent availability and skill tracking
-    pub(super) available_agents: Arc<RwLock<HashMap<AgentId, AgentInfo>>>,
+    pub(super) available_agents: Arc<DashMap<AgentId, AgentInfo>>,
     
     /// Call routing statistics and metrics
     pub(super) routing_stats: Arc<RwLock<RoutingStats>>,
@@ -76,7 +77,7 @@ impl CallCenterEngine {
             queue_manager: Arc::new(RwLock::new(QueueManager::new())),
             bridge_events: None,
             active_calls: Arc::new(RwLock::new(HashMap::new())),
-            available_agents: Arc::new(RwLock::new(HashMap::new())),
+            available_agents: Arc::new(DashMap::new()),
             routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
             agent_registry: Arc::new(Mutex::new(AgentRegistry::new(database.clone()))),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
@@ -111,7 +112,7 @@ impl CallCenterEngine {
             queue_manager: Arc::new(RwLock::new(QueueManager::new())),
             bridge_events: None,
             active_calls: Arc::new(RwLock::new(HashMap::new())),
-            available_agents: Arc::new(RwLock::new(HashMap::new())),
+            available_agents: Arc::new(DashMap::new()),
             routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
             agent_registry: Arc::new(Mutex::new(AgentRegistry::new(database))),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
@@ -125,7 +126,6 @@ impl CallCenterEngine {
     /// Get orchestrator statistics with Phase 2 details
     pub async fn get_stats(&self) -> OrchestratorStats {
         let active_calls = self.active_calls.read().await;
-        let available_agents = self.available_agents.read().await;
         let bridges = self.list_active_bridges().await;
         
         let queued_calls = active_calls.values()
@@ -133,8 +133,10 @@ impl CallCenterEngine {
             .count();
             
         // Count available vs busy agents
-        let (available_count, busy_count) = available_agents.values()
-            .fold((0, 0), |(avail, busy), agent| {
+        let (available_count, busy_count) = self.available_agents
+            .iter()
+            .fold((0, 0), |(avail, busy), entry| {
+                let agent = entry.value();
                 match agent.status {
                     AgentStatus::Available if agent.current_calls == 0 => (avail + 1, busy),
                     _ => (avail, busy + 1),

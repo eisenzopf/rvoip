@@ -13,6 +13,7 @@ use rvoip_session_core::{
 use std::time::Instant;
 
 use super::core::CallCenterEngine;
+use super::types::AgentInfo;
 use crate::error::CallCenterError;
 
 /// CallHandler implementation for the call center
@@ -290,19 +291,95 @@ impl CallCenterEngine {
         
         // Update agent status in database if registration was successful
         if status_code == 200 && expires > 0 {
-            // TODO: Fix limbo parameter binding syntax
-            /*
-            let conn = self.database.connection().await;
-            if let Err(e) = conn.execute(
-                "UPDATE agents SET status = 'available', last_seen_at = datetime('now') WHERE sip_uri = :aor",
-                (("aor", aor.as_str()),)
-            ).await {
-                tracing::error!("Failed to update agent status: {}", e);
-            } else {
-                tracing::info!("Updated agent {} status to available", aor);
+            // Fix for Limbo: use positional parameters instead of named parameters
+            let now = chrono::Utc::now();
+            
+            // Create agent store instance
+            let agent_store = crate::database::agent_store::AgentStore::new(self.database.clone());
+            
+            // First update the database status
+            match agent_store.update_agent_status_by_sip_uri(&aor, "available", &now).await {
+                Ok(_) => {
+                    tracing::info!("✅ Updated agent {} status to available in database", aor);
+                    
+                    // Now fetch the agent and add to available_agents HashMap
+                    match agent_store.get_agent_by_sip_uri(&aor).await {
+                        Ok(Some(agent)) => {
+                            // Fetch agent skills from database
+                            let skills = match agent_store.get_agent_skills(&agent.id).await {
+                                Ok(skills) => skills.into_iter().map(|s| s.skill_name).collect(),
+                                Err(e) => {
+                                    tracing::warn!("Failed to fetch agent skills: {}", e);
+                                    Vec::new()
+                                }
+                            };
+                            
+                            // Convert database Agent to internal AgentId
+                            let agent_id = crate::agent::AgentId::from(agent.id.clone());
+                            
+                            // Add to available agents DashMap
+                            self.available_agents.insert(agent_id.clone(), AgentInfo {
+                                agent_id: agent_id.clone(),
+                                session_id: SessionId::new(), // TODO: Get proper session ID from registration
+                                status: crate::agent::AgentStatus::Available,
+                                skills,
+                                current_calls: 0,
+                                max_calls: agent.max_concurrent_calls as usize,
+                                last_call_end: None,
+                                performance_score: 0.5, // Default performance score
+                            });
+                            
+                            tracing::info!("✅ Agent {} added to available agents pool", agent.display_name);
+                            
+                            // Update available agent count in stats
+                            let available_count = self.available_agents.len();
+                            
+                            // TODO: Update routing stats with available agent count
+                            // let mut routing_stats = self.routing_stats.write().await;
+                            // routing_stats.agents_online = available_count;
+                        }
+                        Ok(None) => {
+                            tracing::warn!("⚠️ Agent with SIP URI {} not found in database after registration", aor);
+                        }
+                        Err(e) => {
+                            tracing::error!("❌ Failed to fetch agent after registration: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to update agent status: {}", e);
+                }
             }
-            */
-            tracing::info!("TODO: Update agent {} status to available in database", aor);
+        } else if status_code == 200 && expires == 0 {
+            // Handle de-registration - remove from available agents
+            let agent_store = crate::database::agent_store::AgentStore::new(self.database.clone());
+            match agent_store.get_agent_by_sip_uri(&aor).await {
+                Ok(Some(agent)) => {
+                    let agent_id = crate::agent::AgentId::from(agent.id);
+                    
+                    // Remove from available agents DashMap
+                    if self.available_agents.remove(&agent_id).is_some() {
+                        tracing::info!("✅ Agent {} removed from available agents pool", agent.display_name);
+                    }
+                    
+                    // Update available agent count in stats
+                    let available_count = self.available_agents.len();
+                    
+                    // TODO: Update routing stats with available agent count
+                    // let mut routing_stats = self.routing_stats.write().await;
+                    // routing_stats.agents_online = available_count;
+                    
+                    // Update database status to offline
+                    let now = chrono::Utc::now();
+                    let _ = agent_store.update_agent_status_by_sip_uri(&aor, "offline", &now).await;
+                }
+                Ok(None) => {
+                    tracing::warn!("⚠️ Agent with SIP URI {} not found for de-registration", aor);
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to fetch agent for de-registration: {}", e);
+                }
+            }
         }
         
         Ok(())

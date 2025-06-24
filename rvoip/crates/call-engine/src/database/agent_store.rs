@@ -344,6 +344,30 @@ impl AgentStore {
         Ok(true)
     }
     
+    /// Update agent status by SIP URI
+    pub async fn update_agent_status_by_sip_uri(&self, sip_uri: &str, status: &str, now: &DateTime<Utc>) -> Result<bool> {
+        info!("📱 Updating agent status by SIP URI: {} -> {}", sip_uri, status);
+        
+        let conn = self.db.connection().await;
+        
+        let mut stmt = conn.prepare(
+            r#"
+            UPDATE agents 
+            SET status = ?1, updated_at = ?2, last_seen_at = ?3
+            WHERE sip_uri = ?4
+            "#
+        ).await?;
+        
+        stmt.execute([
+            status,
+            &now.to_rfc3339(),
+            &now.to_rfc3339(),
+            sip_uri,
+        ]).await?;
+        
+        Ok(true)
+    }
+    
     /// Helper method to parse agent from row
     fn parse_agent_from_row(&self, row: &limbo::Row) -> Result<Agent> {
         Ok(Agent {

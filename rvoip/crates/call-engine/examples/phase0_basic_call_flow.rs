@@ -1,168 +1,109 @@
-//! Phase 0 Basic Call Flow Example
+//! Phase 0: Basic Call Flow Demo
 //!
-//! This example demonstrates the call-engine integration with session-core
-//! using both direct engine access and the new API layer.
+//! This example demonstrates the high-level API usage of the call-engine crate.
+//! It shows how to use CallCenterClient, SupervisorApi, and AdminApi.
 
-use anyhow::Result;
+use rvoip_call_engine::prelude::*;
 use rvoip_call_engine::{
-    prelude::*,
-    api::{CallCenterClient, SupervisorApi, AdminApi},
+    CallCenterServer, CallCenterServerBuilder,
+    CallCenterConfig,
     agent::{Agent, AgentId, AgentStatus},
 };
-use std::sync::Arc;
-use tokio::time::{sleep, Duration};
+use tracing::info;
+use std::time::Duration;
+use tokio::time::sleep;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter("info,rvoip_call_engine=debug")
+        .with_max_level(tracing::Level::INFO)
         .init();
 
-    println!("🚀 Phase 0 Basic Call Flow with New API Demonstration\n");
+    info!("🚀 Starting Phase 0 Basic Call Flow Demo");
 
-    // Step 1: Create call center infrastructure
-    println!("📊 Setting up call center...");
-    let database = CallCenterDatabase::new_in_memory().await?;
-    let config = CallCenterConfig::default();
-    
-    // Create the engine directly for core functionality
-    let engine = CallCenterEngine::new(config.clone(), database.clone()).await?;
-    
-    // Start event monitoring for REGISTER and other events
-    engine.clone().start_event_monitoring().await?;
-    println!("✅ Call center engine created with session-core integration\n");
+    // Create database and configuration
+    let database = CallCenterDatabase::new_in_memory().await
+        .map_err(|e| format!("Failed to create database: {}", e))?;
+    let mut config = CallCenterConfig::default();
+    config.general.domain = "example.com".to_string();
 
-    // Step 2: Create API clients for different user types
-    println!("🔌 Creating API clients...");
-    
-    // Agent client API
-    let agent_client = CallCenterClient::new(engine.clone());
-    println!("✅ Agent client created");
-    
-    // Supervisor API
-    let supervisor_api = SupervisorApi::new(engine.clone());
-    println!("✅ Supervisor API created");
-    
-    // Admin API
-    let admin_api = AdminApi::new(engine.clone());
-    println!("✅ Admin API created\n");
+    // Create server using builder pattern
+    let mut server = CallCenterServerBuilder::new()
+        .with_config(config)
+        .with_database(database)
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build server: {}", e))?;
 
-    // Step 3: Use Admin API to add agents
-    println!("👥 Using Admin API to add agents...");
+    // Start the server
+    server.start().await
+        .map_err(|e| format!("Failed to start server: {}", e))?;
+
+    // Example 1: Admin API - Add agents
+    info!("\n📋 Example 1: Adding agents using AdminApi");
+    let admin_api = server.admin_api();
     
     let alice = Agent {
-        id: AgentId::from("alice-001"),
-        sip_uri: "sip:alice@agents.local".to_string(),
-        display_name: "Alice Johnson".to_string(),
-        skills: vec!["sales".to_string(), "english".to_string()],
+        id: AgentId::from("alice"),
+        sip_uri: "sip:alice@example.com".to_string(),
+        display_name: "Alice Smith".to_string(),
+        skills: vec!["english".to_string(), "support".to_string()],
         max_concurrent_calls: 2,
-        status: AgentStatus::Available,
-        department: Some("sales".to_string()),
+        status: AgentStatus::Offline,
+        department: Some("support".to_string()),
         extension: Some("1001".to_string()),
     };
     
-    let bob = Agent {
-        id: AgentId::from("bob-002"),
-        sip_uri: "sip:bob@agents.local".to_string(),
-        display_name: "Bob Smith".to_string(),
-        skills: vec!["support".to_string(), "english".to_string(), "spanish".to_string()],
-        max_concurrent_calls: 3,
-        status: AgentStatus::Available,
-        department: Some("support".to_string()),
-        extension: Some("1002".to_string()),
-    };
-    
-    // Admin adds agents to the system
-    admin_api.add_agent(alice.clone()).await?;
-    println!("  ✅ Alice added by admin");
-    
-    admin_api.add_agent(bob.clone()).await?;
-    println!("  ✅ Bob added by admin\n");
+    admin_api.add_agent(alice.clone()).await
+        .map_err(|e| format!("Failed to add agent: {}", e))?;
+    info!("✅ Agent Alice added");
 
-    // Step 4: Agents register using the client API
-    println!("📱 Agents registering with the system...");
+    // Example 2: CallCenterClient - Agent registration
+    info!("\n📞 Example 2: Agent registration using CallCenterClient");
+    let alice_client = server.create_client("alice".to_string());
     
-    let alice_session = agent_client.register_agent(&alice).await?;
-    println!("  ✅ Alice registered with session: {}", alice_session);
+    // First register the agent
+    alice_client.register_agent(&alice).await
+        .map_err(|e| format!("Failed to register agent: {}", e))?;
+    info!("✅ Alice registered");
     
-    let bob_session = agent_client.register_agent(&bob).await?;
-    println!("  ✅ Bob registered with session: {}", bob_session);
-    println!();
+    // Update status to available
+    alice_client.update_agent_status(&alice.id, AgentStatus::Available).await
+        .map_err(|e| format!("Failed to update status: {}", e))?;
+    info!("✅ Alice is now available");
 
-    // Step 5: Supervisor checks system status
-    println!("📊 Supervisor checking system status...");
+    // Example 3: SupervisorApi - Monitor system
+    info!("\n👀 Example 3: System monitoring using SupervisorApi");
+    let supervisor_api = server.supervisor_api();
+    
     let stats = supervisor_api.get_stats().await;
-    println!("  Call Center Statistics:");
-    println!("  - Available Agents: {}", stats.available_agents);
-    println!("  - Busy Agents: {}", stats.busy_agents);
-    println!("  - Active Calls: {}", stats.active_calls);
-    println!("  - Queued Calls: {}", stats.queued_calls);
-    println!("  - Total Calls Handled: {}", stats.total_calls_handled);
+    info!("📊 System stats: {:?}", stats);
     
-    // List all agents
     let agents = supervisor_api.list_agents().await;
-    println!("\n  Agent Details:");
-    for agent_info in agents {
-        println!("  - {} ({}): {:?}", 
-                 agent_info.agent_id, 
-                 agent_info.skills.join(", "),
-                 agent_info.status);
+    info!("👥 Active agents: {}", agents.len());
+    for agent in &agents {
+        info!("  - {} ({}): {:?}", agent.agent_id, agent.agent_id, agent.status);
     }
-    println!();
 
-    // Step 6: Demonstrate call flow
-    println!("📞 Call Flow with New Architecture:\n");
+    // Example 4: Queue management
+    info!("\n📋 Example 4: Queue management");
+    admin_api.create_queue("support_queue").await
+        .map_err(|e| format!("Failed to create queue: {}", e))?;
+    info!("✅ Support queue created");
     
-    println!("  INCOMING CALL HANDLING:");
-    println!("  1. Customer calls → Session-core receives INVITE");
-    println!("  2. Session-core → CallHandler.on_incoming_call()");
-    println!("  3. CallCenterEngine analyzes and routes");
-    println!("  4. Returns CallDecision (Accept/Reject/Queue)");
-    println!("  5. If accepted → Bridge to agent\n");
-    
-    println!("  REAL-TIME EVENTS (NEW!):");
-    println!("  • on_call_state_changed → Track call lifecycle");
-    println!("  • on_media_quality → Monitor call quality (MOS)");
-    println!("  • on_dtmf → Handle IVR input");
-    println!("  • on_media_flow → Track media status");
-    println!("  • on_warning → System alerts\n");
+    let all_queue_stats = supervisor_api.get_all_queue_stats().await
+        .map_err(|e| format!("Failed to get queue stats: {}", e))?;
+    for (queue_id, stats) in all_queue_stats {
+        if queue_id == "support_queue" {
+            info!("📊 Support queue stats: {:?}", stats);
+        }
+    }
 
-    // Step 7: Simulate agent status changes
-    println!("🔄 Simulating agent status changes...");
+    // Keep running for a bit to show monitoring
+    info!("\n🔄 Running for 10 seconds to demonstrate monitoring...");
+    sleep(Duration::from_secs(10)).await;
     
-    // Alice takes a break
-    agent_client.update_agent_status(
-        &alice.id,
-        AgentStatus::Break { duration_minutes: 15 }
-    ).await?;
-    println!("  ✅ Alice is now on break");
-    
-    // Check updated stats
-    let updated_stats = supervisor_api.get_stats().await;
-    println!("  📊 Updated: {} available, {} on break", 
-             updated_stats.available_agents,
-             1);
-    println!();
-
-    // Step 8: Admin checks system health
-    println!("🏥 Admin checking system health...");
-    let health = admin_api.get_system_health().await;
-    println!("  System Health: {:?}", health.status);
-    println!("  - Database Connected: {}", health.database_connected);
-    println!("  - Active Sessions: {}", health.active_sessions);
-    println!("  - Registered Agents: {}", health.registered_agents);
-    println!();
-
-    // Summary
-    println!("✅ Phase 0 Complete - New Architecture Benefits:");
-    println!("  • Clean API separation (Agent/Supervisor/Admin)");
-    println!("  • Real-time event handling via CallHandler");
-    println!("  • Session-core manages all SIP/RTP complexity");
-    println!("  • Type-safe interfaces for all operations");
-    println!("  • Built-in monitoring and health checks");
-    
-    println!("\n🎉 The call center is ready for production use!");
-
+    info!("\n✅ Demo completed successfully!");
     Ok(())
 } 

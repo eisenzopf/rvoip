@@ -45,8 +45,7 @@ impl CallCenterEngine {
         info!("🔄 Transferring call from agent {} to agent {}", from_agent, to_agent);
         
         // Find sessions for agents
-        let available_agents = self.available_agents.read().await;
-        let to_agent_session = available_agents.get(&to_agent)
+        let to_agent_session = self.available_agents.get(&to_agent)
             .ok_or_else(|| CallCenterError::orchestration(&format!("Agent {} not available", to_agent)))?
             .session_id.clone();
         

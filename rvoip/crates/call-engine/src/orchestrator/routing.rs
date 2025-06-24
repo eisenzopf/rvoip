@@ -92,12 +92,11 @@ impl CallCenterEngine {
     
     /// Find the best available agent based on skills and performance
     pub(super) async fn find_best_available_agent(&self, required_skills: &[String], priority: u8) -> Option<AgentId> {
-        let available_agents = self.available_agents.read().await;
-        
         // Find agents with matching skills and availability
-        let mut suitable_agents: Vec<(&AgentId, &AgentInfo)> = available_agents
+        let mut suitable_agents: Vec<(AgentId, AgentInfo)> = self.available_agents
             .iter()
-            .filter(|(_, agent_info)| {
+            .filter(|entry| {
+                let agent_info = entry.value();
                 // Check if agent is available
                 matches!(agent_info.status, AgentStatus::Available) &&
                 // Check if agent has capacity
@@ -106,6 +105,7 @@ impl CallCenterEngine {
                 (required_skills.is_empty() || 
                  required_skills.iter().any(|skill| agent_info.skills.contains(skill)))
             })
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
             .collect();
         
         if suitable_agents.is_empty() {
@@ -114,15 +114,15 @@ impl CallCenterEngine {
         }
         
         // Sort by performance score and last call end time (round-robin effect)
-        suitable_agents.sort_by(|a, b| {
+        suitable_agents.sort_by(|(_, a), (_, b)| {
             // Primary: performance score (higher is better)
-            let score_cmp = b.1.performance_score.partial_cmp(&a.1.performance_score).unwrap_or(std::cmp::Ordering::Equal);
+            let score_cmp = b.performance_score.partial_cmp(&a.performance_score).unwrap_or(std::cmp::Ordering::Equal);
             if score_cmp != std::cmp::Ordering::Equal {
                 return score_cmp;
             }
             
             // Secondary: longest idle time (for round-robin)
-            match (&a.1.last_call_end, &b.1.last_call_end) {
+            match (&a.last_call_end, &b.last_call_end) {
                 (Some(a_end), Some(b_end)) => a_end.cmp(b_end), // Earlier end time first
                 (None, Some(_)) => std::cmp::Ordering::Less,     // Never handled call first
                 (Some(_), None) => std::cmp::Ordering::Greater,
@@ -130,7 +130,7 @@ impl CallCenterEngine {
             }
         });
         
-        let best_agent = suitable_agents.first().map(|(agent_id, _)| (*agent_id).clone());
+        let best_agent = suitable_agents.first().map(|(agent_id, _)| agent_id.clone());
         
         if let Some(ref agent_id) = best_agent {
             info!("🎯 Selected agent {} for skills {:?} (priority {})", agent_id, required_skills, priority);

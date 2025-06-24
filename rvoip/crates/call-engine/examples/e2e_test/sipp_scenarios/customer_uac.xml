@@ -65,10 +65,10 @@
     ]]>
   </send>
 
-  <!-- Play RTP audio for call duration -->
+  <!-- Play G.711 audio for 5 seconds -->
   <nop>
     <action>
-      <exec play_pcap_audio="./pcap/g711a.pcap"/>
+      <exec play_pcap_audio="../pcaps/g711a.pcap"/>
     </action>
   </nop>
 

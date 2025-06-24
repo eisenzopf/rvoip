@@ -1,128 +1,161 @@
-//! Agent Registration Demo using CallCenterClient API
+//! Agent Registration Demo
 //!
-//! This example demonstrates how to use the new CallCenterClient API
-//! for agent registration and management in the call center.
+//! This example demonstrates how agents can register with the call center
+//! using the CallCenterClient API.
 
-use anyhow::Result;
 use rvoip_call_engine::{
     prelude::*,
-    api::CallCenterClient,
+    CallCenterServer, CallCenterServerBuilder,
+    CallCenterConfig,
     agent::{Agent, AgentId, AgentStatus},
 };
-use std::sync::Arc;
-use tokio::time::{sleep, Duration};
 use tracing::info;
+use std::time::Duration;
+use tokio::time::sleep;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter("info")
+        .with_max_level(tracing::Level::INFO)
         .init();
 
-    println!("🎯 Agent Registration Demo - Using CallCenterClient API\n");
+    info!("🚀 Starting Agent Registration Demo");
 
-    // Step 1: Create database and configuration
-    println!("📦 Setting up call center infrastructure...");
-    let database = CallCenterDatabase::new_in_memory().await?;
-    let config = CallCenterConfig::default();
+    // Create configuration and database
+    let mut config = CallCenterConfig::default();
+    config.general.domain = "callcenter.example.com".to_string();
+    config.general.local_signaling_addr = "0.0.0.0:5060".parse()
+        .map_err(|e| format!("Failed to parse address: {}", e))?;
     
-    // Step 2: Build the CallCenterClient
-    let engine = CallCenterEngine::new(config, database).await?;
-    let client = CallCenterClient::new(engine.clone());
-    
-    println!("✅ CallCenterClient created successfully!\n");
+    let database = CallCenterDatabase::new_in_memory().await
+        .map_err(|e| format!("Failed to create database: {}", e))?;
 
-    // Step 3: Register Agent Alice
-    println!("👤 Registering Agent Alice...");
+    // Create and start server
+    let mut server = CallCenterServerBuilder::new()
+        .with_config(config)
+        .with_database(database)
+        .build()
+        .await
+        .map_err(|e| format!("Failed to build server: {}", e))?;
+    
+    server.start().await
+        .map_err(|e| format!("Failed to start server: {}", e))?;
+    info!("✅ Call center server started");
+
+    // Create test agents using admin API
+    let admin_api = server.admin_api();
+    
+    // Add Alice
     let alice = Agent {
-        id: AgentId::from("alice-001"),
+        id: AgentId::from("agent_alice"),
         sip_uri: "sip:alice@callcenter.example.com".to_string(),
         display_name: "Alice Smith".to_string(),
-        skills: vec!["english".to_string(), "sales".to_string(), "support".to_string()],
-        max_concurrent_calls: 3,
-        status: AgentStatus::Available,
-        department: Some("sales".to_string()),
+        skills: vec!["english".to_string(), "support".to_string()],
+        max_concurrent_calls: 2,
+        status: AgentStatus::Offline,
+        department: Some("support".to_string()),
         extension: Some("1001".to_string()),
     };
-    
-    let alice_session = client.register_agent(&alice).await?;
-    println!("✅ Alice registered with session: {}", alice_session);
-    println!("   - Skills: {:?}", alice.skills);
-    println!("   - Max concurrent calls: {}", alice.max_concurrent_calls);
+    admin_api.add_agent(alice.clone()).await
+        .map_err(|e| format!("Failed to add Alice: {}", e))?;
+    info!("✅ Agent Alice added to system");
 
-    // Step 4: Register Agent Bob
-    println!("\n👤 Registering Agent Bob...");
+    // Add Bob
     let bob = Agent {
-        id: AgentId::from("bob-002"),
+        id: AgentId::from("agent_bob"),
         sip_uri: "sip:bob@callcenter.example.com".to_string(),
         display_name: "Bob Johnson".to_string(),
-        skills: vec!["english".to_string(), "spanish".to_string(), "support".to_string()],
-        max_concurrent_calls: 2,
-        status: AgentStatus::Available,
-        department: Some("support".to_string()),
+        skills: vec!["english".to_string(), "sales".to_string()],
+        max_concurrent_calls: 1,
+        status: AgentStatus::Offline,
+        department: Some("sales".to_string()),
         extension: Some("1002".to_string()),
     };
-    
-    let bob_session = client.register_agent(&bob).await?;
-    println!("✅ Bob registered with session: {}", bob_session);
+    admin_api.add_agent(bob.clone()).await
+        .map_err(|e| format!("Failed to add Bob: {}", e))?;
+    info!("✅ Agent Bob added to system");
 
-    // Step 5: Check agent information
-    println!("\n📊 Checking agent information...");
-    if let Some(alice_info) = client.get_agent_info(&alice.id).await {
-        println!("Alice's current info:");
-        println!("  - Status: {:?}", alice_info.status);
-        println!("  - Active calls: {}", alice_info.current_calls);
-        println!("  - Performance score: {:.2}", alice_info.performance_score);
+    // Create queues
+    admin_api.create_queue("support_queue").await
+        .map_err(|e| format!("Failed to create support queue: {}", e))?;
+    admin_api.create_queue("sales_queue").await
+        .map_err(|e| format!("Failed to create sales queue: {}", e))?;
+    info!("✅ Queues created");
+
+    // Demonstrate agent registration using client API
+    info!("\n📱 Starting agent registration process...");
+
+    // Alice registers and becomes available
+    let alice_client = server.create_client("agent_alice".to_string());
+    
+    alice_client.register_agent(&alice).await
+        .map_err(|e| format!("Failed to register Alice: {}", e))?;
+    info!("✅ Alice registered with the system");
+    
+    alice_client.update_agent_status(&alice.id, AgentStatus::Available).await
+        .map_err(|e| format!("Failed to update Alice status: {}", e))?;
+    info!("✅ Alice is now available for calls");
+
+    // Bob registers but stays offline initially
+    let bob_client = server.create_client("agent_bob".to_string());
+    
+    bob_client.register_agent(&bob).await
+        .map_err(|e| format!("Failed to register Bob: {}", e))?;
+    info!("✅ Bob registered with the system");
+
+    // Check system status
+    let supervisor_api = server.supervisor_api();
+    let stats = supervisor_api.get_stats().await;
+    info!("\n📊 System Status:");
+    info!("  - Available agents: {}", stats.available_agents);
+    info!("  - Offline agents: {}", stats.busy_agents + (2 - stats.available_agents - stats.busy_agents));
+    info!("  - Active calls: {}", stats.active_calls);
+
+    // Simulate Bob becoming available
+    sleep(Duration::from_secs(2)).await;
+    bob_client.update_agent_status(&bob.id, AgentStatus::Available).await
+        .map_err(|e| format!("Failed to update Bob status: {}", e))?;
+    info!("\n✅ Bob is now available for calls");
+
+    // Check updated status
+    let stats = supervisor_api.get_stats().await;
+    info!("\n📊 Updated System Status:");
+    info!("  - Available agents: {}", stats.available_agents);
+
+    // List all agents
+    let agents = supervisor_api.list_agents().await;
+    info!("\n👥 Registered Agents:");
+    for agent in agents {
+        let status = match agent.status {
+            AgentStatus::Available => "Available ✅",
+            AgentStatus::Offline => "Offline ⭕",
+            AgentStatus::Busy { .. } => "Busy 🔴",
+            AgentStatus::Break { .. } => "On Break ☕",
+            AgentStatus::Away { .. } => "Away 🚪",
+        };
+        info!("  - {} ({}): {}", agent.agent_id, agent.agent_id, status);
     }
 
-    // Step 6: Update agent status
-    println!("\n🔄 Updating agent statuses...");
-    
-    // Alice goes on break
-    client.update_agent_status(
-        &alice.id, 
-        AgentStatus::Break { duration_minutes: 15 }
-    ).await?;
-    println!("✅ Alice is now on a 15-minute break");
-    
-    // Bob becomes busy
-    client.update_agent_status(
-        &bob.id,
-        AgentStatus::Busy { active_calls: 1 }
-    ).await?;
-    println!("✅ Bob is now busy with 1 active call");
+    // Demonstrate agent going on break
+    sleep(Duration::from_secs(2)).await;
+    alice_client.update_agent_status(&alice.id, AgentStatus::Break { duration_minutes: 15 }).await
+        .map_err(|e| format!("Failed to update Alice to break: {}", e))?;
+    info!("\n☕ Alice is taking a 15-minute break");
 
-    // Step 7: Check queue statistics
-    println!("\n📈 Checking queue statistics...");
-    let queue_stats = client.get_queue_stats().await?;
-    for (queue_id, stats) in queue_stats {
-        println!("Queue '{}': {} calls waiting", queue_id, stats.total_calls);
+    // Check queue stats
+    let all_queue_stats = supervisor_api.get_all_queue_stats().await
+        .map_err(|e| format!("Failed to get queue stats: {}", e))?;
+    info!("\n📊 Queue Stats:");
+    for (queue_id, stats) in all_queue_stats {
+        if queue_id == "support_queue" {
+            info!("  Support Queue - Calls waiting: {}, Avg wait time: {}s",
+                  stats.total_calls, stats.average_wait_time_seconds);
+        }
     }
 
-    // Step 8: Demonstrate session-core integration
-    println!("\n🔌 Session-Core Integration:");
-    let session_manager = client.session_manager();
-    println!("✅ Direct access to SessionCoordinator available");
-    println!("   - Can handle incoming calls via CallHandler");
-    println!("   - Can create outgoing calls for agents");
-    println!("   - Manages all SIP transport internally");
-
-    // Step 9: Agent logout simulation
-    println!("\n📴 Simulating agent logout...");
-    client.update_agent_status(&alice.id, AgentStatus::Offline).await?;
-    println!("✅ Alice is now offline");
-
-    // Summary
-    println!("\n📋 Summary - CallCenterClient API Benefits:");
-    println!("✅ Simple, type-safe agent management");
-    println!("✅ Integrated with session-core for SIP handling");
-    println!("✅ Real-time status updates");
-    println!("✅ Performance tracking built-in");
-    println!("✅ Queue statistics and monitoring");
-    println!("✅ Clean separation of concerns");
+    info!("\n✅ Agent registration demo completed!");
+    info!("💡 In a real deployment, agents would register via SIP REGISTER messages");
     
-    println!("\n🎉 Demo completed successfully!");
-
     Ok(())
 } 

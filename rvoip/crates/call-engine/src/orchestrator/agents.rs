@@ -31,19 +31,16 @@ impl CallCenterEngine {
         let session_id = session.id;
         
         // Add agent to available pool with enhanced information
-        {
-            let mut available_agents = self.available_agents.write().await;
-            available_agents.insert(agent.id.clone(), AgentInfo {
-                agent_id: agent.id.clone(),
-                session_id: session_id.clone(),
-                status: AgentStatus::Available,
-                skills: agent.skills.clone(),
-                current_calls: 0,
-                max_calls: agent.max_concurrent_calls as usize,
-                last_call_end: None,
-                performance_score: 0.5, // Start with neutral performance
-            });
-        }
+        self.available_agents.insert(agent.id.clone(), AgentInfo {
+            agent_id: agent.id.clone(),
+            session_id: session_id.clone(),
+            status: AgentStatus::Available,
+            skills: agent.skills.clone(),
+            current_calls: 0,
+            max_calls: agent.max_concurrent_calls as usize,
+            last_call_end: None,
+            performance_score: 0.5, // Start with neutral performance
+        });
         
         info!("✅ Agent {} registered with session-core (session: {}, max calls: {})", 
               agent.id, session_id, agent.max_concurrent_calls);
@@ -54,15 +51,17 @@ impl CallCenterEngine {
     pub async fn update_agent_status(&self, agent_id: &AgentId, new_status: AgentStatus) -> CallCenterResult<()> {
         info!("🔄 Updating agent {} status to {:?}", agent_id, new_status);
         
-        let mut available_agents = self.available_agents.write().await;
-        if let Some(agent_info) = available_agents.get_mut(agent_id) {
+        if let Some(mut agent_info) = self.available_agents.get_mut(agent_id) {
             let old_status = agent_info.status.clone();
             agent_info.status = new_status.clone();
             
             info!("✅ Agent {} status updated from {:?} to {:?}", agent_id, old_status, new_status);
             
             // If agent became available, check for queued calls
-            if matches!(new_status, AgentStatus::Available) && agent_info.current_calls == 0 {
+            let should_check_queue = matches!(new_status, AgentStatus::Available) && agent_info.current_calls == 0;
+            drop(agent_info); // Release the mutable reference
+            
+            if should_check_queue {
                 let agent_id_clone = agent_id.clone();
                 let engine = Arc::new(self.clone());
                 tokio::spawn(async move {
@@ -78,14 +77,14 @@ impl CallCenterEngine {
     
     /// Get detailed agent information
     pub async fn get_agent_info(&self, agent_id: &AgentId) -> Option<AgentInfo> {
-        let available_agents = self.available_agents.read().await;
-        available_agents.get(agent_id).cloned()
+        self.available_agents.get(agent_id).map(|entry| entry.clone())
     }
     
     /// List all agents with their current status
     pub async fn list_agents(&self) -> Vec<AgentInfo> {
-        let available_agents = self.available_agents.read().await;
-        available_agents.values().cloned().collect()
+        self.available_agents.iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
     
     /// Get queue statistics for monitoring

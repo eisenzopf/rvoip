@@ -81,6 +81,7 @@ pub mod monitoring;
 // External interfaces
 pub mod api;
 pub mod integration;
+pub mod server;
 
 // Database integration
 pub mod database;
@@ -176,3 +177,5 @@ pub mod prelude {
     pub use chrono::{DateTime, Utc};
     pub use uuid::Uuid;
 } 
+
+pub use server::{CallCenterServer, CallCenterServerBuilder}; 

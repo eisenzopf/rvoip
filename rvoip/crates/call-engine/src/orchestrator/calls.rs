@@ -185,15 +185,12 @@ impl CallCenterEngine {
         info!("🎯 Assigning specific agent {} to call: {}", agent_id, session_id);
         
         // Get agent information and update status
-        let agent_info = {
-            let mut available_agents = self.available_agents.write().await;
-            if let Some(mut agent_info) = available_agents.remove(&agent_id) {
-                agent_info.status = AgentStatus::Busy { active_calls: (agent_info.current_calls + 1) as u32 };
-                agent_info.current_calls += 1;
-                Some(agent_info)
-            } else {
-                return Err(CallCenterError::orchestration(&format!("Agent {} not available", agent_id)));
-            }
+        let agent_info = if let Some((_key, mut agent_info)) = self.available_agents.remove(&agent_id) {
+            agent_info.status = AgentStatus::Busy { active_calls: (agent_info.current_calls + 1) as u32 };
+            agent_info.current_calls += 1;
+            Some(agent_info)
+        } else {
+            return Err(CallCenterError::orchestration(&format!("Agent {} not available", agent_id)));
         };
         
         if let Some(agent_info) = agent_info {
@@ -215,22 +212,16 @@ impl CallCenterEngine {
                     }
                     
                     // Update agent status (keep as busy, increment call count)
-                    {
-                        let mut available_agents = self.available_agents.write().await;
-                        available_agents.insert(agent_id, agent_info);
-                    }
+                    self.available_agents.insert(agent_id, agent_info);
                 },
                 Err(e) => {
                     error!("Failed to bridge sessions: {}", e);
                     
                     // Return agent to available pool with original status
-                    {
-                        let mut available_agents = self.available_agents.write().await;
-                        let mut restored_agent = agent_info;
-                        restored_agent.status = AgentStatus::Available;
-                        restored_agent.current_calls = restored_agent.current_calls.saturating_sub(1);
-                        available_agents.insert(agent_id, restored_agent);
-                    }
+                    let mut restored_agent = agent_info;
+                    restored_agent.status = AgentStatus::Available;
+                    restored_agent.current_calls = restored_agent.current_calls.saturating_sub(1);
+                    self.available_agents.insert(agent_id, restored_agent);
                     
                     return Err(CallCenterError::orchestration(&format!("Bridge failed: {}", e)));
                 }
@@ -266,25 +257,22 @@ impl CallCenterEngine {
                 info!("🔄 Returning agent {} to available pool after call completion", agent_id);
                 
                 // Update agent status
-                {
-                    let mut available_agents = self.available_agents.write().await;
-                    if let Some(agent_info) = available_agents.get_mut(&agent_id) {
-                        agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
-                        agent_info.last_call_end = Some(chrono::Utc::now());
-                        
-                        // If agent has no active calls, mark as available
-                        if agent_info.current_calls == 0 {
-                            agent_info.status = AgentStatus::Available;
-                            info!("✅ Agent {} is now available for new calls", agent_id);
-                        }
-                        
-                        // Update performance score based on call duration (simplified)
-                        if let Some(answered_at) = call_info.answered_at {
-                            let call_duration = chrono::Utc::now().signed_duration_since(answered_at).num_seconds();
-                            // Simple performance scoring: reasonable call duration improves score
-                            if call_duration > 30 && call_duration < 1800 { // 30s to 30min
-                                agent_info.performance_score = (agent_info.performance_score + 0.1).min(1.0);
-                            }
+                if let Some(mut agent_info) = self.available_agents.get_mut(&agent_id) {
+                    agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
+                    agent_info.last_call_end = Some(chrono::Utc::now());
+                    
+                    // If agent has no active calls, mark as available
+                    if agent_info.current_calls == 0 {
+                        agent_info.status = AgentStatus::Available;
+                        info!("✅ Agent {} is now available for new calls", agent_id);
+                    }
+                    
+                    // Update performance score based on call duration (simplified)
+                    if let Some(answered_at) = call_info.answered_at {
+                        let call_duration = chrono::Utc::now().signed_duration_since(answered_at).num_seconds();
+                        // Simple performance scoring: reasonable call duration improves score
+                        if call_duration > 30 && call_duration < 1800 { // 30s to 30min
+                            agent_info.performance_score = (agent_info.performance_score + 0.1).min(1.0);
                         }
                     }
                 }
@@ -309,12 +297,9 @@ impl CallCenterEngine {
         debug!("🔍 Checking queued calls for newly available agent {}", agent_id);
         
         // Get agent skills to find matching queued calls
-        let agent_skills = {
-            let available_agents = self.available_agents.read().await;
-            available_agents.get(&agent_id)
-                .map(|info| info.skills.clone())
-                .unwrap_or_default()
-        };
+        let agent_skills = self.available_agents.get(&agent_id)
+            .map(|entry| entry.skills.clone())
+            .unwrap_or_default();
         
         // Check relevant queues for calls that match agent skills
         let queues_to_check = vec!["general", "sales", "support", "billing", "vip", "premium"];
