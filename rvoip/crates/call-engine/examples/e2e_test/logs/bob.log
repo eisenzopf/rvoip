@@ -1,0 +1,1508 @@
+warning: method `handle_auto_options` is never used
+   --> crates/dialog-core/src/manager/unified.rs:563:14
+    |
+197 | impl UnifiedDialogManager {
+    | ------------------------- method in this implementation
+...
+563 |     async fn handle_auto_options(&self, request: Request, source: SocketAddr) -> ApiResult<()> {
+    |              ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: method `extract_body_string` is never used
+   --> crates/dialog-core/src/protocol/invite_handler.rs:177:8
+    |
+71  | impl DialogManager {
+    | ------------------ method in this implementation
+...
+177 |     fn extract_body_string(&self, request: &Request) -> String {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: `rvoip-dialog-core` (lib) generated 2 warnings
+warning: unused import: `StaticEvent`
+  --> crates/infra-common/src/events/static_path.rs:14:60
+   |
+14 | use crate::events::types::{Event, EventResult, EventError, StaticEvent, EventFilter};
+   |                                                            ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `EventError` and `StaticEvent`
+  --> crates/infra-common/src/events/system.rs:16:48
+   |
+16 | use crate::events::types::{Event, EventResult, EventError, EventFilter, StaticEvent};
+   |                                                ^^^^^^^^^^               ^^^^^^^^^^^
+
+warning: unused imports: `EventSystemBuilder` and `ImplementationType`
+  --> crates/infra-common/src/events/system.rs:21:30
+   |
+21 | use crate::events::builder::{ImplementationType, EventSystemBuilder};
+   |                              ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> crates/infra-common/src/lifecycle/manager.rs:87:13
+   |
+87 |         let mut components = self.components.write().unwrap();
+   |             ----^^^^^^^^^^
+   |             |
+   |             help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` on by default
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:107:13
+    |
+107 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:127:13
+    |
+127 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates/infra-common/src/lifecycle/manager.rs:148:13
+    |
+148 |         let mut components = self.components.write().unwrap();
+    |             ----^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:63:20
+   |
+63 |             config.merge(File::from(base_path.clone()))
+   |                    ^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:69:20
+   |
+69 |             config.merge(File::from(env_path))
+   |                    ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:75:16
+   |
+75 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+  --> crates/infra-common/src/config/loader.rs:97:16
+   |
+97 |         config.merge(Environment::with_prefix(&env_prefix).separator("__"))
+   |                ^^^^^
+
+warning: use of deprecated method `config::Config::merge`: please use 'ConfigBuilder' instead
+   --> crates/infra-common/src/config/loader.rs:115:20
+    |
+115 |             config.merge(File::from(p.clone()))
+    |                    ^^^^^
+
+warning: methods `type_name` and `clone_sender` are never used
+  --> crates/infra-common/src/events/registry.rs:37:8
+   |
+35 | trait AnyBroadcastSender: Send + Sync + 'static {
+   |       ------------------ methods in this trait
+36 |     fn as_any(&self) -> &dyn Any;
+37 |     fn type_name(&self) -> &str;
+   |        ^^^^^^^^^
+38 |     fn clone_sender(&self) -> Box<dyn AnyBroadcastSender>;
+   |        ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: fields `id`, `event_type`, and `priority` are never read
+  --> crates/infra-common/src/events/subscriber.rs:11:16
+   |
+10 | pub struct SubscriberHandle {
+   |            ---------------- fields in this struct
+11 |     pub(crate) id: u64,
+   |                ^^
+12 |     pub(crate) event_type: EventType,
+   |                ^^^^^^^^^^
+13 |     pub(crate) priority: EventPriority,
+   |                ^^^^^^^^
+   |
+   = note: `SubscriberHandle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: `infra-common` (lib) generated 14 warnings (run `cargo fix --lib -p infra-common` to apply 7 suggestions)
+warning: unused import: `SessionManagerConfig`
+  --> crates/client-core/src/client/manager.rs:11:5
+   |
+11 |     SessionManagerConfig,
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused imports: `MediaInfo as SessionMediaInfo`, `QualityMetrics`, `QualityThresholds`, `SessionCoordinator`, and `SessionId`
+  --> crates/client-core/src/client/media.rs:15:5
+   |
+15 |     SessionCoordinator,
+   |     ^^^^^^^^^^^^^^^^^^
+16 |     SessionId,
+   |     ^^^^^^^^^
+17 |     MediaInfo as SessionMediaInfo,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+21 |     QualityMetrics,
+   |     ^^^^^^^^^^^^^^
+22 |     QualityThresholds,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+ --> crates/client-core/src/client/media_builder.rs:5:5
+  |
+5 | use std::collections::HashMap;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+   --> crates/client-core/src/client/mod.rs:238:1
+    |
+238 | pub mod config;
+    | ^^^^^^^^^^^^^^
+    |
+note: the lint level is defined here
+   --> crates/client-core/src/lib.rs:130:9
+    |
+130 | #![warn(missing_docs)]
+    |         ^^^^^^^^^^^^
+
+warning: missing documentation for a module
+   --> crates/client-core/src/client/mod.rs:239:1
+    |
+239 | pub mod controls;
+    | ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a module
+   --> crates/client-core/src/client/mod.rs:241:1
+    |
+241 | pub mod manager;
+    | ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a type alias
+   --> crates/client-core/src/client/mod.rs:289:1
+    |
+289 | pub type Client = ClientManager;
+    | ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/config.rs:13:5
+   |
+13 |     pub echo_cancellation: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/config.rs:14:5
+   |
+14 |     pub noise_suppression: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/config.rs:15:5
+   |
+15 |     pub auto_gain_control: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/config.rs:22:5
+   |
+22 |     pub srtp_profiles: Vec<String>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/config.rs:26:5
+   |
+26 |     pub rtp_port_end: u16,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/events.rs:30:5
+   |
+30 |     pub client_event_handler: Arc<RwLock<Option<Arc<dyn ClientEventHandler>>>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/events.rs:31:5
+   |
+31 |     pub call_mapping: Arc<DashMap<SessionId, CallId>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/events.rs:32:5
+   |
+32 |     pub session_mapping: Arc<DashMap<CallId, SessionId>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/events.rs:33:5
+   |
+33 |     pub call_info: Arc<DashMap<CallId, CallInfo>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/events.rs:34:5
+   |
+34 |     pub incoming_calls: Arc<DashMap<CallId, IncomingCall>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/events.rs:35:5
+   |
+35 |     pub event_tx: Option<tokio::sync::broadcast::Sender<crate::events::ClientEvent>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> crates/client-core/src/client/events.rs:51:5
+   |
+51 | /     pub fn new(
+52 | |         call_mapping: Arc<DashMap<SessionId, CallId>>,
+53 | |         session_mapping: Arc<DashMap<CallId, SessionId>>,
+54 | |         call_info: Arc<DashMap<CallId, CallInfo>>,
+55 | |         incoming_calls: Arc<DashMap<CallId, IncomingCall>>,
+56 | |     ) -> Self {
+   | |_____________^
+
+warning: missing documentation for a method
+  --> crates/client-core/src/client/events.rs:67:5
+   |
+67 |     pub fn with_event_tx(mut self, event_tx: tokio::sync::broadcast::Sender<crate::events::ClientEvent>) -> Sel...
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+  --> crates/client-core/src/client/events.rs:72:5
+   |
+72 |     pub async fn set_event_handler(&self, handler: Arc<dyn ClientEventHandler>) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/client-core/src/client/events.rs:114:5
+    |
+114 |     pub fn extract_display_name_from_header(&self, header: &str) -> Option<String> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates/client-core/src/client/media.rs:205:5
+    |
+205 |     pub async fn get_available_codecs(&self) -> Vec<AudioCodecInfo> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:14:5
+   |
+14 |     pub is_running: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:15:5
+   |
+15 |     pub local_sip_addr: std::net::SocketAddr,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:16:5
+   |
+16 |     pub local_media_addr: std::net::SocketAddr,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:17:5
+   |
+17 |     pub total_calls: usize,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:18:5
+   |
+18 |     pub connected_calls: usize,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:19:5
+   |
+19 |     pub total_registrations: usize,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:20:5
+   |
+20 |     pub active_registrations: usize,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:28:5
+   |
+28 |     pub call_id: CallId,
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:29:5
+   |
+29 |     pub local_sdp: Option<String>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:30:5
+   |
+30 |     pub remote_sdp: Option<String>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:31:5
+   |
+31 |     pub local_rtp_port: Option<u16>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:32:5
+   |
+32 |     pub remote_rtp_port: Option<u16>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:33:5
+   |
+33 |     pub codec: Option<String>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:34:5
+   |
+34 |     pub is_muted: bool,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:35:5
+   |
+35 |     pub is_on_hold: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:36:5
+   |
+36 |     pub audio_direction: AudioDirection,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:37:5
+   |
+37 |     pub quality_metrics: Option<AudioQualityMetrics>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:43:5
+   |
+43 |     pub name: String,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:44:5
+   |
+44 |     pub payload_type: u8,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:45:5
+   |
+45 |     pub clock_rate: u32,
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:46:5
+   |
+46 |     pub channels: u8,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:47:5
+   |
+47 |     pub description: String,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:48:5
+   |
+48 |     pub quality_rating: u8, // 1-5 scale
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/client/types.rs:54:5
+   |
+54 |     SendReceive,
+   |     ^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/client/types.rs:55:5
+   |
+55 |     SendOnly,
+   |     ^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/client/types.rs:56:5
+   |
+56 |     ReceiveOnly,
+   |     ^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/client/types.rs:57:5
+   |
+57 |     Inactive,
+   |     ^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:63:5
+   |
+63 |     pub mos_score: Option<f32>,      // Mean Opinion Score (1.0-5.0)
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:64:5
+   |
+64 |     pub jitter_ms: Option<u32>,      // Jitter in milliseconds
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:65:5
+   |
+65 |     pub packet_loss_percent: Option<f32>, // Packet loss percentage
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:66:5
+   |
+66 |     pub round_trip_time_ms: Option<u32>,  // RTT in milliseconds
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:67:5
+   |
+67 |     pub bitrate_kbps: Option<u32>,   // Current bitrate in kbps
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:73:5
+   |
+73 |     pub supported_codecs: Vec<AudioCodecInfo>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:74:5
+   |
+74 |     pub can_hold: bool,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:75:5
+   |
+75 |     pub can_mute_microphone: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:76:5
+   |
+76 |     pub can_mute_speaker: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:77:5
+   |
+77 |     pub can_send_dtmf: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:78:5
+   |
+78 |     pub can_transfer: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:79:5
+   |
+79 |     pub supports_sdp_offer_answer: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:80:5
+   |
+80 |     pub supports_rtp: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:81:5
+   |
+81 |     pub supports_rtcp: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:82:5
+   |
+82 |     pub max_concurrent_calls: usize,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:83:5
+   |
+83 |     pub supported_media_types: Vec<String>, // "audio", "video"
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:89:5
+   |
+89 |     pub can_hold: bool,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:90:5
+   |
+90 |     pub can_resume: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:91:5
+   |
+91 |     pub can_transfer: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:92:5
+   |
+92 |     pub can_send_dtmf: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:93:5
+   |
+93 |     pub can_mute: bool,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/client/types.rs:94:5
+   |
+94 |     pub can_hangup: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:113:5
+    |
+113 |     pub call_id: CallId,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:114:5
+    |
+114 |     pub session_id: rvoip_session_core::api::types::SessionId,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:115:5
+    |
+115 |     pub media_session_id: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:116:5
+    |
+116 |     pub local_rtp_port: Option<u16>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:117:5
+    |
+117 |     pub remote_rtp_port: Option<u16>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:118:5
+    |
+118 |     pub codec: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:119:5
+    |
+119 |     pub media_direction: AudioDirection,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:120:5
+    |
+120 |     pub quality_metrics: Option<AudioQualityMetrics>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:121:5
+    |
+121 |     pub is_active: bool,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:122:5
+    |
+122 |     pub created_at: DateTime<Utc>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:128:5
+    |
+128 |     pub call_id: CallId,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:129:5
+    |
+129 |     pub negotiated_codec: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:130:5
+    |
+130 |     pub local_rtp_port: Option<u16>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:131:5
+    |
+131 |     pub remote_rtp_port: Option<u16>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:132:5
+    |
+132 |     pub audio_direction: AudioDirection,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:133:5
+    |
+133 |     pub local_sdp: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:134:5
+    |
+134 |     pub remote_sdp: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:135:5
+    |
+135 |     pub negotiated_at: DateTime<Utc>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:136:5
+    |
+136 |     pub supports_dtmf: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:137:5
+    |
+137 |     pub supports_hold: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:138:5
+    |
+138 |     pub bandwidth_kbps: Option<u32>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:139:5
+    |
+139 |     pub encryption_enabled: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:145:5
+    |
+145 |     pub basic_capabilities: MediaCapabilities,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:146:5
+    |
+146 |     pub supports_sdp_offer_answer: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:147:5
+    |
+147 |     pub supports_media_session_lifecycle: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:148:5
+    |
+148 |     pub supports_sdp_renegotiation: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:149:5
+    |
+149 |     pub supports_early_media: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:150:5
+    |
+150 |     pub supports_media_session_updates: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:151:5
+    |
+151 |     pub supports_codec_negotiation: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:152:5
+    |
+152 |     pub supports_bandwidth_management: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:153:5
+    |
+153 |     pub supports_encryption: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:154:5
+    |
+154 |     pub supported_sdp_version: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:155:5
+    |
+155 |     pub max_media_sessions: usize,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:156:5
+    |
+156 |     pub preferred_rtp_port_range: (u16, u16),
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/client/types.rs:157:5
+    |
+157 |     pub supported_transport_protocols: Vec<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/call.rs:106:5
+    |
+106 |     pub total_active_calls: usize,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/call.rs:107:5
+    |
+107 |     pub connected_calls: usize,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/call.rs:108:5
+    |
+108 |     pub incoming_pending_calls: usize,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/registration.rs:138:5
+    |
+138 |     pub total_registrations: usize,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/registration.rs:139:5
+    |
+139 |     pub active_registrations: usize,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/registration.rs:140:5
+    |
+140 |     pub failed_registrations: usize,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:75:5
+   |
+75 |     MicrophoneStateChanged { muted: bool },
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:75:30
+   |
+75 |     MicrophoneStateChanged { muted: bool },
+   |                              ^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:76:5
+   |
+76 |     SpeakerStateChanged { muted: bool },
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:76:27
+   |
+76 |     SpeakerStateChanged { muted: bool },
+   |                           ^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:77:5
+   |
+77 |     AudioStarted,
+   |     ^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:78:5
+   |
+78 |     AudioStopped,
+   |     ^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:79:5
+   |
+79 |     HoldStateChanged { on_hold: bool },
+   |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:79:24
+   |
+79 |     HoldStateChanged { on_hold: bool },
+   |                        ^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:80:5
+   |
+80 |     DtmfSent { digits: String },
+   |     ^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:80:16
+   |
+80 |     DtmfSent { digits: String },
+   |                ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:81:5
+   |
+81 |     TransferInitiated { target: String, transfer_type: String },
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:81:25
+   |
+81 |     TransferInitiated { target: String, transfer_type: String },
+   |                         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:81:41
+   |
+81 |     TransferInitiated { target: String, transfer_type: String },
+   |                                         ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:84:5
+   |
+84 |     SdpOfferGenerated { sdp_size: usize },
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:84:25
+   |
+84 |     SdpOfferGenerated { sdp_size: usize },
+   |                         ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:85:5
+   |
+85 |     SdpAnswerProcessed { sdp_size: usize },
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:85:26
+   |
+85 |     SdpAnswerProcessed { sdp_size: usize },
+   |                          ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:86:5
+   |
+86 |     MediaSessionStarted { media_session_id: String },
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:86:27
+   |
+86 |     MediaSessionStarted { media_session_id: String },
+   |                           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:87:5
+   |
+87 |     MediaSessionStopped,
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:88:5
+   |
+88 |     MediaSessionUpdated { sdp_size: usize },
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:88:27
+   |
+88 |     MediaSessionUpdated { sdp_size: usize },
+   |                           ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:91:5
+   |
+91 |     QualityChanged { mos_score_x100: u32 }, // MOS score * 100 (e.g., 425 = 4.25)
+   |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:91:22
+   |
+91 |     QualityChanged { mos_score_x100: u32 }, // MOS score * 100 (e.g., 425 = 4.25)
+   |                      ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:92:5
+   |
+92 |     PacketLoss { percentage_x100: u32 }, // Percentage * 100 (e.g., 150 = 1.5%)
+   |     ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:92:18
+   |
+92 |     PacketLoss { percentage_x100: u32 }, // Percentage * 100 (e.g., 150 = 1.5%)
+   |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates/client-core/src/events.rs:93:5
+   |
+93 |     JitterChanged { jitter_ms: u32 },
+   |     ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates/client-core/src/events.rs:93:21
+   |
+93 |     JitterChanged { jitter_ms: u32 },
+   |                     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:142:9
+    |
+142 |         info: IncomingCallInfo,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:143:9
+    |
+143 |         priority: EventPriority,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:154:9
+    |
+154 |         info: MediaEventInfo,
+    |         ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:155:9
+    |
+155 |         priority: EventPriority,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:159:9
+    |
+159 |         info: RegistrationStatusInfo,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:160:9
+    |
+160 |         priority: EventPriority,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:164:9
+    |
+164 |         error: crate::ClientError,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:165:9
+    |
+165 |         call_id: Option<CallId>,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:166:9
+    |
+166 |         priority: EventPriority,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:170:9
+    |
+170 |         connected: bool,
+    |         ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:171:9
+    |
+171 |         reason: Option<String>,
+    |         ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/events.rs:172:9
+    |
+172 |         priority: EventPriority,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:263:26
+    |
+263 |     RegistrationFailed { reason: String },
+    |                          ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:266:5
+    |
+266 |     NotRegistered,
+    |     ^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:269:5
+    |
+269 |     RegistrationExpired,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:272:5
+    |
+272 |     AuthenticationFailed { reason: String },
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:272:28
+    |
+272 |     AuthenticationFailed { reason: String },
+    |                            ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:276:20
+    |
+276 |     CallNotFound { call_id: Uuid },
+    |                    ^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:279:5
+    |
+279 |     CallAlreadyExists { call_id: Uuid },
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:279:25
+    |
+279 |     CallAlreadyExists { call_id: Uuid },
+    |                         ^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:282:5
+    |
+282 |     InvalidCallState { 
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:283:9
+    |
+283 |         call_id: Uuid, 
+    |         ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:284:9
+    |
+284 |         current_state: crate::call::CallState 
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:288:5
+    |
+288 |     InvalidCallStateGeneric { expected: String, actual: String },
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:288:31
+    |
+288 |     InvalidCallStateGeneric { expected: String, actual: String },
+    |                               ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:288:49
+    |
+288 |     InvalidCallStateGeneric { expected: String, actual: String },
+    |                                                 ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:291:5
+    |
+291 |     CallSetupFailed { reason: String },
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:291:23
+    |
+291 |     CallSetupFailed { reason: String },
+    |                       ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:294:5
+    |
+294 |     CallTerminated { reason: String },
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:294:22
+    |
+294 |     CallTerminated { reason: String },
+    |                      ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:298:30
+    |
+298 |     MediaNegotiationFailed { reason: String },
+    |                              ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:301:5
+    |
+301 |     MediaError { details: String },
+    |     ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:301:18
+    |
+301 |     MediaError { details: String },
+    |                  ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:304:5
+    |
+304 |     NoCompatibleCodecs,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:307:5
+    |
+307 |     AudioDeviceError { reason: String },
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:307:24
+    |
+307 |     AudioDeviceError { reason: String },
+    |                        ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:311:20
+    |
+311 |     NetworkError { reason: String },
+    |                    ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:314:5
+    |
+314 |     ConnectionTimeout,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:317:5
+    |
+317 |     ServerUnreachable { server: String },
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:317:25
+    |
+317 |     ServerUnreachable { server: String },
+    |                         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:321:21
+    |
+321 |     ProtocolError { reason: String },
+    |                     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:324:5
+    |
+324 |     InvalidSipMessage { reason: String },
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:324:25
+    |
+324 |     InvalidSipMessage { reason: String },
+    |                         ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:327:5
+    |
+327 |     ProtocolVersionMismatch { expected: String, actual: String },
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:327:31
+    |
+327 |     ProtocolVersionMismatch { expected: String, actual: String },
+    |                               ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:327:49
+    |
+327 |     ProtocolVersionMismatch { expected: String, actual: String },
+    |                                                 ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:331:28
+    |
+331 |     InvalidConfiguration { field: String, reason: String },
+    |                            ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:331:43
+    |
+331 |     InvalidConfiguration { field: String, reason: String },
+    |                                           ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:334:5
+    |
+334 |     MissingConfiguration { field: String },
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:334:28
+    |
+334 |     MissingConfiguration { field: String },
+    |                            ^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:338:23
+    |
+338 |     TransportFailed { reason: String },
+    |                       ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:341:5
+    |
+341 |     TransportNotAvailable { transport_type: String },
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:341:29
+    |
+341 |     TransportNotAvailable { transport_type: String },
+    |                             ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:345:27
+    |
+345 |     SessionManagerError { reason: String },
+    |                           ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:348:5
+    |
+348 |     TooManySessions { limit: usize },
+    |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:348:23
+    |
+348 |     TooManySessions { limit: usize },
+    |                       ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:352:21
+    |
+352 |     InternalError { message: String },
+    |                     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:355:5
+    |
+355 |     OperationTimeout { duration_ms: u64 },
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:355:24
+    |
+355 |     OperationTimeout { duration_ms: u64 },
+    |                        ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:358:5
+    |
+358 |     NotImplemented { feature: String, reason: String },
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:358:22
+    |
+358 |     NotImplemented { feature: String, reason: String },
+    |                      ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:358:39
+    |
+358 |     NotImplemented { feature: String, reason: String },
+    |                                       ^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:361:5
+    |
+361 |     PermissionDenied { operation: String },
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:361:24
+    |
+361 |     PermissionDenied { operation: String },
+    |                        ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:364:5
+    |
+364 |     ResourceUnavailable { resource: String },
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:364:27
+    |
+364 |     ResourceUnavailable { resource: String },
+    |                           ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:368:24
+    |
+368 |     UnsupportedCodec { codec: String },
+    |                        ^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates/client-core/src/error.rs:371:5
+    |
+371 |     CodecError { reason: String },
+    |     ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:371:18
+    |
+371 |     CodecError { reason: String },
+    |                  ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:375:28
+    |
+375 |     ExternalServiceError { service: String, reason: String },
+    |                            ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates/client-core/src/error.rs:375:45
+    |
+375 |     ExternalServiceError { service: String, reason: String },
+    |                                             ^^^^^^^^^^^^^^
+
+warning: `rvoip-client-core` (lib) generated 212 warnings (run `cargo fix --lib -p rvoip-client-core` to apply 3 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.23s
+     Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/release/examples/e2e_test_agent --username bob --server '127.0.0.1:5060' --port 5072 --call-duration 15`
+[2m2025-06-24T04:36:36.562643Z[0m [32m INFO[0m 🤖 Starting agent client for bob
+[2m2025-06-24T04:36:36.562823Z[0m [32m INFO[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-06-24T04:36:36.562942Z[0m [32m INFO[0m SIP UDP transport bound to 0.0.0.0:5072
+[2m2025-06-24T04:36:36.563001Z[0m [32m INFO[0m Added UDP transport bound to 0.0.0.0:5072
+[2m2025-06-24T04:36:36.563117Z[0m [32m INFO[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-06-24T04:36:36.563129Z[0m [32m INFO[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 0.0.0.0:5072
+[2m2025-06-24T04:36:36.563136Z[0m [32m INFO[0m Creating new DialogManager with global transaction events and local address 0.0.0.0:5072
+[2m2025-06-24T04:36:36.563182Z[0m [32m INFO[0m 🔄 Starting global transaction event processor for dialog-core
+[2m2025-06-24T04:36:36.563239Z[0m [32m INFO[0m Session event processor started
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+[2m2025-06-24T04:36:36.563256Z[0m [32m INFO[0m SessionCoordinator initialized on port 5072
+[2m2025-06-24T04:36:36.563261Z[0m [32m INFO[0m Starting UnifiedDialogApi
+[2m2025-06-24T04:36:36.563266Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-24T04:36:36.563271Z[0m [32m INFO[0m DialogManager starting
+[2m2025-06-24T04:36:36.563276Z[0m [32m INFO[0m DialogManager started successfully
+🎬 SPAWN: Starting session coordination event loop
+[2m2025-06-24T04:36:36.563284Z[0m [32m INFO[0m Starting main coordinator event loop
+[2m2025-06-24T04:36:36.563280Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:client@0.0.0.0"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-24T04:36:36.563315Z[0m [32m INFO[0m UnifiedDialogManager started successfully
+📡 EVENT LOOP: Session coordination event loop started
+[2m2025-06-24T04:36:36.563323Z[0m [32m INFO[0m Cleanup manager started
+[2m2025-06-24T04:36:36.563344Z[0m [32m INFO[0m SessionCoordinator started
+[2m2025-06-24T04:36:36.563350Z[0m [32m INFO[0m Starting UnifiedDialogApi
+[2m2025-06-24T04:36:36.563355Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-24T04:36:36.563359Z[0m [32m INFO[0m DialogManager starting
+[2m2025-06-24T04:36:36.563363Z[0m [32m INFO[0m DialogManager started successfully
+[2m2025-06-24T04:36:36.563387Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:client@0.0.0.0"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-24T04:36:36.563391Z[0m [32m INFO[0m UnifiedDialogManager started successfully
+[2m2025-06-24T04:36:36.563395Z[0m [32m INFO[0m SessionCoordinator started
+[2m2025-06-24T04:36:36.563399Z[0m [32m INFO[0m ClientManager started on 0.0.0.0:5072
+[2m2025-06-24T04:36:36.563405Z[0m [32m INFO[0m 📝 Registering as sip:bob@callcenter.example.com with server 127.0.0.1:5060
+[2m2025-06-24T04:36:36.563652Z[0m [32m INFO[0m Sending REGISTER to sip:127.0.0.1:5060 (127.0.0.1:5060)
+Request Via headers before transaction creation:
+  Via[0]: SIP/2.0/UDP 0.0.0.0:5072;branch=z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b
+Request Via headers after potential modification:
+  Via[0]: SIP/2.0/UDP 0.0.0.0:5072;branch=z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b
+Transaction loop starting for Key(z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b:REGISTER:client)
+Initial state: Initial
+ClientNonInviteTransaction::initiate called for Key(z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b:REGISTER:client)
+Current state is Initial
+Sending TransitionTo(Trying) command for Key(z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b:REGISTER:client)
+Successfully sent TransitionTo command for Key(z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b:REGISTER:client)
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b:REGISTER:client)
+Processing TransitionTo(Trying) current state: Initial
+Valid state transition: Initial -> Trying
+State successfully changed to: Trying
+Sent StateChanged event result: Success
+[2m2025-06-24T04:36:36.563943Z[0m [32m INFO[0m Sending REGISTER message to 127.0.0.1:5060
+=== PARSING SIP MESSAGE ===
+Input length: 290 bytes
+Input as string: "SIP/2.0 200 OK\r\nFrom: <sip:bob@callcenter.example.com>;tag=tag-11d34fb73d1545f8b22486326574c9da\r\nTo: <sip:bob@callcenter.example.com>\r\nCall-ID: reg-81319-2dd6cc41-f143-4937-8066-74c70543e278\r\nCSeq: 1 REGISTER\r\nVia: SIP/2.0/UDP 0.0.0.0:5072;branch=z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b\r\n\r\n"
+Input as hex: [53, 49, 50, 2f, 32, 2e, 30, 20, 32, 30, 30, 20, 4f, 4b, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 31, 31, 64, 33, 34, 66, 62, 37, 33, 64, 31, 35, 34, 35, 66, 38, 62, 32, 32, 34, 38, 36, 33, 32, 36, 35, 37, 34, 63, 39, 64, 61, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 72, 65, 67, 2d, 38, 31, 33, 31, 39, 2d, 32, 64, 64, 36, 63, 63, 34, 31, 2d, 66, 31, 34, 33, 2d, 34, 39, 33, 37, 2d, 38, 30, 36, 36, 2d, 37, 34, 63, 37, 30, 35, 34, 33, 65, 32, 37, 38, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 52, 45, 47, 49, 53, 54, 45, 52, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 37, 32, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 66, 38, 61, 65, 62, 65, 35, 61, 35, 36, 33, 33, 34, 63, 31, 63, 61, 33, 35, 39, 30, 65, 36, 65, 65, 66, 39, 65, 30, 62, 36, 62, 0d, 0a, 0d, 0a]
+===========================
+=== PARSE SUCCESS ===
+Successfully parsed message
+=====================
+State after sending command: Trying
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [From(From(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-11d34fb73d1545f8b22486326574c9da")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("reg-81319-2dd6cc41-f143-4937-8066-74c70543e278")), CSeq(CSeq { seq: 1, method: Register }), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5072), params: [Branch("z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b")] }]))], body: b"" })) for transaction Key(z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b:REGISTER:client)
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b:REGISTER:client)
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+Sent StateChanged event result: Success
+[2m2025-06-24T04:36:36.679269Z[0m [32m INFO[0m Registered sip:bob@callcenter.example.com with server sip:127.0.0.1:5060
+[2m2025-06-24T04:36:36.679367Z[0m [32m INFO[0m ✅ Successfully registered!
+[2m2025-06-24T04:36:36.679415Z[0m [32m INFO[0m 👂 Agent bob is ready to receive calls...
+[2m2025-06-24T04:36:36.679456Z[0m [32m INFO[0m Press Ctrl+C to stop
+[2m2025-06-24T04:36:36.679364Z[0m [32m INFO[0m ✅ Registration confirmed: sip:bob@callcenter.example.com (server: sip:127.0.0.1:5060)
+Received command: Timer("K") for transaction Key(z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b:REGISTER:client)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b:REGISTER:client)
+Processing TransitionTo(Terminated) current state: Completed
+Valid state transition: Completed -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bKf8aebe5a56334c1ca3590e6eef9e0b6b:REGISTER:client). Final state: Terminated

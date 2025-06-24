@@ -12,9 +12,12 @@ use std::time::Duration;
 use tokio::time::{sleep, timeout};
 use tracing::{info, warn, error};
 use clap::Parser;
+use uuid::Uuid;
 
 use rvoip_client_core::{
-    client::{ClientBuilder, Client},
+    client::{Client, ClientConfig},
+    call::CallState,
+    registration::RegistrationConfig,
     events::ClientEvent,
 };
 
@@ -59,19 +62,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("🤖 Starting agent client for {}", args.username);
     
-    // Build SIP URI
+    // Build SIP URIs
     let agent_uri = format!("sip:{}@{}", args.username, args.domain);
     let server_addr: SocketAddr = args.server.parse()?;
+    let server_uri = format!("sip:{}", server_addr);
     
     // Create client configuration
     let local_addr = format!("0.0.0.0:{}", args.port).parse()?;
     
-    // Build the client
-    let client = ClientBuilder::new()
-        .user_agent("RVoIP-Agent/1.0")
-        .local_address(local_addr)
-        .build()
-        .await?;
+    // Create the client configuration
+    let mut config = ClientConfig::default();
+    config.user_agent = "RVoIP-Agent/1.0".to_string();
+    config.local_sip_addr = local_addr;
+    
+    // Create the client
+    let client = Client::new(config).await?;
     
     // Start the client
     client.start().await?;
@@ -79,20 +84,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start event handler
     let event_client = client.clone();
     let call_duration = args.call_duration;
-    tokio::spawn(async move {
+    let event_handle = tokio::spawn(async move {
         handle_client_events(event_client, call_duration).await;
     });
     
     // Register with the server
     info!("📝 Registering as {} with server {}", agent_uri, server_addr);
     
-    match client.register(&agent_uri, &server_addr, Duration::from_secs(3600)).await {
-        Ok(_) => info!("✅ Successfully registered!"),
+    let reg_config = RegistrationConfig {
+        from_uri: agent_uri.clone(),
+        contact_uri: agent_uri.clone(),
+        server_uri: server_uri.clone(),
+        expires: 3600,
+        username: Some(args.username.clone()),
+        password: None,
+        realm: None,
+    };
+    
+    let reg_id = match client.register(reg_config).await {
+        Ok(id) => {
+            info!("✅ Successfully registered!");
+            id
+        }
         Err(e) => {
             error!("❌ Registration failed: {}", e);
             return Err(e.into());
         }
-    }
+    };
     
     // Keep the client running
     info!("👂 Agent {} is ready to receive calls...", args.username);
@@ -103,7 +121,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Unregister before shutdown
     info!("🔚 Unregistering...");
-    client.unregister(&agent_uri, &server_addr).await?;
+    client.unregister(reg_id).await?;
+    
+    // Stop event handler
+    event_handle.abort();
     
     info!("👋 Agent client shutdown complete");
     Ok(())
@@ -112,77 +133,89 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn handle_client_events(client: Arc<Client>, call_duration: u64) {
     let mut event_rx = client.subscribe_events();
     
-    while let Ok(event) = event_rx.recv().await {
-        match event {
-            ClientEvent::IncomingCall { info, priority } => {
-                info!("📞 Incoming call {} from {}", info.call_id, info.caller_uri);
-                
-                // Auto-answer the call
-                match client.answer_call(&info.call_id).await {
-                    Ok(_) => {
-                        info!("✅ Answered call {}", info.call_id);
-                        
-                        // If call_duration is set, automatically hang up after duration
-                        if call_duration > 0 {
-                            let client_clone = client.clone();
-                            let call_id_clone = info.call_id.clone();
-                            tokio::spawn(async move {
-                                sleep(Duration::from_secs(call_duration)).await;
-                                info!("⏰ Auto-hanging up call {} after {} seconds", 
-                                      call_id_clone, call_duration);
-                                if let Err(e) = client_clone.hangup_call(&call_id_clone).await {
-                                    error!("Failed to hang up call: {}", e);
+    loop {
+        tokio::select! {
+            event = event_rx.recv() => {
+                match event {
+                    Ok(ev) => {
+                        // Process events based on the event type
+                        match ev {
+                            ClientEvent::IncomingCall { info, .. } => {
+                                info!("📞 Incoming call {} from {}", info.call_id, info.caller_uri);
+                                
+                                // Auto-answer the call
+                                match client.answer_call(&info.call_id).await {
+                                    Ok(_) => {
+                                        info!("✅ Answered call {}", info.call_id);
+                                        
+                                        // If call_duration is set, automatically hang up after duration
+                                        if call_duration > 0 {
+                                            let client_clone = client.clone();
+                                            let call_id_clone = info.call_id;
+                                            tokio::spawn(async move {
+                                                sleep(Duration::from_secs(call_duration)).await;
+                                                info!("⏰ Auto-hanging up call {} after {} seconds", 
+                                                      call_id_clone, call_duration);
+                                                if let Err(e) = client_clone.hangup_call(&call_id_clone).await {
+                                                    error!("Failed to hang up call: {}", e);
+                                                }
+                                            });
+                                        }
+                                    }
+                                    Err(e) => error!("❌ Failed to answer call {}: {}", info.call_id, e),
                                 }
-                            });
+                            }
+                            
+                            ClientEvent::CallStateChanged { info, .. } => {
+                                match info.new_state {
+                                    CallState::Connected => {
+                                        info!("🔊 Call {} established - audio should be flowing", info.call_id);
+                                    }
+                                    CallState::Terminated | CallState::Failed | CallState::Cancelled => {
+                                        info!("📴 Call {} ended: {:?} ({})", 
+                                              info.call_id, 
+                                              info.new_state,
+                                              info.reason.as_deref().unwrap_or("no reason"));
+                                    }
+                                    _ => {
+                                        tracing::debug!("Call {} state changed to {:?}", info.call_id, info.new_state);
+                                    }
+                                }
+                            }
+                            
+                            ClientEvent::RegistrationStatusChanged { info, .. } => {
+                                use rvoip_client_core::registration::RegistrationStatus;
+                                match info.status {
+                                    RegistrationStatus::Active => {
+                                        info!("✅ Registration confirmed: {} (server: {})", 
+                                              info.user_uri, info.server_uri);
+                                    }
+                                    RegistrationStatus::Failed => {
+                                        error!("❌ Registration failed: {}", 
+                                               info.reason.as_deref().unwrap_or("unknown reason"));
+                                    }
+                                    _ => {
+                                        tracing::debug!("Registration status: {:?}", info.status);
+                                    }
+                                }
+                            }
+                            
+                            ClientEvent::MediaEvent { info, .. } => {
+                                // Log media events if verbose
+                                tracing::debug!("🎵 Media event for call {}: {:?}", info.call_id, info.event_type);
+                            }
+                            
+                            _ => {
+                                // Handle other events
+                                tracing::debug!("Event: {:?}", ev);
+                            }
                         }
                     }
-                    Err(e) => error!("❌ Failed to answer call {}: {}", info.call_id, e),
-                }
-            }
-            
-            ClientEvent::CallStateChanged { info, priority } => {
-                use rvoip_client_core::call::CallState;
-                match info.new_state {
-                    CallState::Connected => {
-                        info!("🔊 Call {} established - audio should be flowing", info.call_id);
-                    }
-                    CallState::Terminated | CallState::Failed | CallState::Cancelled => {
-                        info!("📴 Call {} ended: {:?} ({})", 
-                              info.call_id, 
-                              info.new_state,
-                              info.reason.as_deref().unwrap_or("no reason"));
-                    }
-                    _ => {
-                        tracing::debug!("Call {} state changed to {:?}", info.call_id, info.new_state);
+                    Err(_) => {
+                        // Channel closed, exit
+                        break;
                     }
                 }
-            }
-            
-            ClientEvent::RegistrationStatusChanged { info, priority } => {
-                use rvoip_client_core::registration::RegistrationStatus;
-                match info.status {
-                    RegistrationStatus::Active => {
-                        info!("✅ Registration confirmed: {} (server: {})", 
-                              info.user_uri, info.server_uri);
-                    }
-                    RegistrationStatus::Failed => {
-                        error!("❌ Registration failed: {}", 
-                               info.reason.as_deref().unwrap_or("unknown reason"));
-                    }
-                    _ => {
-                        tracing::debug!("Registration status: {:?}", info.status);
-                    }
-                }
-            }
-            
-            ClientEvent::MediaEvent { info, priority } => {
-                // Log media events if verbose
-                tracing::debug!("🎵 Media event for call {}: {:?}", info.call_id, info.event_type);
-            }
-            
-            _ => {
-                // Handle other events
-                tracing::debug!("Event: {:?}", event);
             }
         }
     }

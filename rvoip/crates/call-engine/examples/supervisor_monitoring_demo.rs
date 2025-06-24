@@ -7,6 +7,7 @@ use anyhow::Result;
 use rvoip_call_engine::{
     prelude::*,
     api::{CallCenterClient, SupervisorApi, AdminApi},
+    agent::{Agent, AgentId, AgentStatus},
 };
 use std::sync::Arc;
 use tokio::time::{sleep, Duration, interval};
@@ -90,7 +91,7 @@ async fn main() -> Result<()> {
     // 3.3: Queue monitoring
     println!("📋 Queue Status:");
     let queue_stats = supervisor_api.get_all_queue_stats().await?;
-    for (queue_id, stats) in queue_stats {
+    for (queue_id, stats) in &queue_stats {
         if stats.total_calls > 0 {
             println!("  Queue '{}': {} calls (avg wait: {}s)", 
                      queue_id, stats.total_calls, stats.average_wait_time_seconds);

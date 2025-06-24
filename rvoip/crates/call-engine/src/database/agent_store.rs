@@ -294,14 +294,22 @@ impl AgentStore {
         let conn = self.db.connection().await;
         let now = Utc::now();
         
-        let mut stmt = conn.prepare(
+        // First, try to delete any existing skill entry (for update behavior)
+        let mut delete_stmt = conn.prepare(
+            "DELETE FROM agent_skills WHERE agent_id = ?1 AND skill_name = ?2"
+        ).await?;
+        
+        let _ = delete_stmt.execute([agent_id, skill_name]).await;
+        
+        // Then insert the new skill
+        let mut insert_stmt = conn.prepare(
             r#"
-            INSERT OR REPLACE INTO agent_skills (agent_id, skill_name, skill_level, created_at)
+            INSERT INTO agent_skills (agent_id, skill_name, skill_level, created_at)
             VALUES (?1, ?2, ?3, ?4)
             "#
         ).await?;
         
-        stmt.execute([
+        insert_stmt.execute([
             agent_id,
             skill_name,
             &skill_level.to_string(),

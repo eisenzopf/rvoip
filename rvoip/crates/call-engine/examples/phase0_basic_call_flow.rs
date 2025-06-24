@@ -7,6 +7,7 @@ use anyhow::Result;
 use rvoip_call_engine::{
     prelude::*,
     api::{CallCenterClient, SupervisorApi, AdminApi},
+    agent::{Agent, AgentId, AgentStatus},
 };
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};

@@ -6,7 +6,7 @@
 use anyhow::Result;
 use rvoip_call_engine::{
     prelude::*,
-    api::{CallCenterClient, CallCenterClientBuilder},
+    api::CallCenterClient,
     agent::{Agent, AgentId, AgentStatus},
 };
 use std::sync::Arc;
@@ -28,11 +28,8 @@ async fn main() -> Result<()> {
     let config = CallCenterConfig::default();
     
     // Step 2: Build the CallCenterClient
-    let client = CallCenterClientBuilder::new()
-        .with_config(config)
-        .with_database(database)
-        .build()
-        .await?;
+    let engine = CallCenterEngine::new(config, database).await?;
+    let client = CallCenterClient::new(engine.clone());
     
     println!("✅ CallCenterClient created successfully!\n");
 
