@@ -87,7 +87,8 @@ impl CallCenterEngine {
                     stats.calls_routed_directly += 1;
                 }
                 
-                CallDecision::Accept(None)
+                // Return Progress to send 180 Ringing, not Accept which sends 200 OK
+                CallDecision::Progress("Call is being routed to an agent".to_string())
             },
             
             RoutingDecision::Queue { queue_id, priority, reason } => {
@@ -133,7 +134,8 @@ impl CallCenterEngine {
                 // Start monitoring for agent availability
                 self.monitor_queue_for_agents(queue_id.clone()).await;
                 
-                CallDecision::Accept(None)
+                // Return Progress to send 180 Ringing, not Accept which sends 200 OK
+                CallDecision::Progress("Your call is in queue and will be answered by the next available agent".to_string())
             },
             
             RoutingDecision::Overflow { target_queue, reason } => {
@@ -147,7 +149,8 @@ impl CallCenterEngine {
                 };
                 
                 // Process overflow decision (simplified)
-                CallDecision::Accept(None)
+                // Return Progress, not Accept
+                CallDecision::Progress("Your call is being redirected to our overflow queue".to_string())
             },
             
             RoutingDecision::Reject { reason } => {
@@ -194,8 +197,27 @@ impl CallCenterEngine {
         };
         
         if let Some(agent_info) = agent_info {
+            // First, accept the customer's call (this sends 200 OK)
+            let coordinator = self.session_coordinator.as_ref().unwrap();
+            
+            // Get the incoming call info to accept it
+            match coordinator.get_session(&session_id).await {
+                Ok(Some(session)) => {
+                    info!("📞 Accepting customer call {} before bridging", session_id);
+                    // The session is already established, we can proceed with bridging
+                }
+                Ok(None) => {
+                    // Session might be in a provisional state, we need to accept it
+                    // This is handled by dialog-core when we bridge
+                    info!("📞 Session {} is in provisional state, will be accepted during bridge", session_id);
+                }
+                Err(e) => {
+                    error!("Failed to get session {}: {}", session_id, e);
+                }
+            }
+            
             // **REAL**: Bridge customer and agent using session-core API
-            match self.session_coordinator.as_ref().unwrap().bridge_sessions(&session_id, &agent_info.session_id).await {
+            match coordinator.bridge_sessions(&session_id, &agent_info.session_id).await {
                 Ok(bridge_id) => {
                     info!("✅ Successfully bridged customer {} with agent {} (bridge: {})", 
                           session_id, agent_id, bridge_id);

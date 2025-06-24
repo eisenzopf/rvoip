@@ -1,1 +1,46 @@
 Resolving remote host '127.0.0.1'... Done.
+2025-06-24	10:19:03.986158	1750785543.986158: Can't create raw IPv4 socket (need to run as root?): Operation not permitted
+------------------------------ Scenario Screen -------- [1-9]: Change Screen --
+  Call rate (length)   Port   Total-time  Total-calls  Remote-host
+  1.0(0 ms)/1.000s   5080       1.00 s            1  127.0.0.1:5060(UDP)
+
+  0 new calls during 0.005 s period       0 ms scheduler resolution            
+  1 calls (limit 2)                       Peak was 1 calls, after 1 s
+  0 Running, 5 Paused, 4 Woken up
+  0 dead call msg (discarded)             0 out-of-call msg (discarded)
+  3 open sockets                          0/0/0 UDP errors (send/recv/cong)
+  0 Total RTP pckts sent                  0.000 last period RTP rate (kB/s)
+
+                                 Messages  Retrans   Timeout   Unexpected-Msg
+0 :      INVITE ---------->         1         0         0                            
+1 :         100 <----------         0         0         0         0                  
+2 :         180 <----------         0         0         0         0                  
+3 :         200 <----------  E-RTD1 1         0         0         0                  
+4 :         ACK ---------->         1         0                                      
+5 :              [ NOP ]              
+6 :       Pause [    10.0s]         1                             0        
+7 :         BYE ---------->         0         0         0                            
+8 :         200 <----------         0         0         0         0                  
+
+------------------------------ Test Terminated --------------------------------
+----------------------------- Statistics Screen ------- [1-9]: Change Screen --
+  Start Time             | 2025-06-24	10:19:02.976513	1750785542.976513         
+  Last Reset Time        | 2025-06-24	10:19:03.980826	1750785543.980826         
+  Current Time           | 2025-06-24	10:19:03.986428	1750785543.986428         
+-------------------------+---------------------------+--------------------------
+  Counter Name           | Periodic value            | Cumulative value
+-------------------------+---------------------------+--------------------------
+  Elapsed Time           | 00:00:01:009000           | 00:00:01:009000          
+  Call Rate              |    0.000 cps              |    0.991 cps             
+-------------------------+---------------------------+--------------------------
+  Incoming calls created |        0                  |        0                 
+  Outgoing calls created |        0                  |        1                 
+  Total Calls created    |                           |        1                 
+  Current Calls          |        1                  |                          
+-------------------------+---------------------------+--------------------------
+  Successful call        |        0                  |        0                 
+  Failed call            |        0                  |        0                 
+-------------------------+---------------------------+--------------------------
+  Response Time 1        | 00:00:00:005000           | 00:00:00:005000          
+  Call Length            | 00:00:00:000000           | 00:00:00:000000          
+------------------------------ Test Terminated --------------------------------

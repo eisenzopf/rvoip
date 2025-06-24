@@ -18,7 +18,6 @@ warning: method `extract_body_string` is never used
 177 |     fn extract_body_string(&self, request: &Request) -> String {
     |        ^^^^^^^^^^^^^^^^^^^
 
-warning: `rvoip-dialog-core` (lib) generated 2 warnings
 warning: unused import: `StaticEvent`
   --> crates/infra-common/src/events/static_path.rs:14:60
    |
@@ -132,6 +131,7 @@ warning: fields `id`, `event_type`, and `priority` are never read
    |
    = note: `SubscriberHandle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
+warning: `rvoip-dialog-core` (lib) generated 2 warnings
 warning: `infra-common` (lib) generated 14 warnings (run `cargo fix --lib -p infra-common` to apply 7 suggestions)
 warning: unused import: `SessionManagerConfig`
   --> crates/client-core/src/client/manager.rs:11:5
@@ -1428,60 +1428,60 @@ warning: missing documentation for a struct field
     |                                             ^^^^^^^^^^^^^^
 
 warning: `rvoip-client-core` (lib) generated 212 warnings (run `cargo fix --lib -p rvoip-client-core` to apply 3 suggestions)
-    Finished `release` profile [optimized] target(s) in 0.18s
+    Finished `release` profile [optimized] target(s) in 0.17s
      Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/release/examples/e2e_test_server`
-[2m2025-06-24T05:44:55.789305Z[0m [32m INFO[0m 🚀 Starting Basic Call Center Server
-[2m2025-06-24T05:44:55.789387Z[0m [32m INFO[0m 🗄️ Creating in-memory Limbo database
-[2m2025-06-24T05:44:55.791059Z[0m [32m INFO[0m ✅ In-memory database created successfully
-[2m2025-06-24T05:44:55.791070Z[0m [32m INFO[0m ✅ Database initialized
-[2m2025-06-24T05:44:55.791075Z[0m [32m INFO[0m 🚀 Creating CallCenterEngine with session-core CallHandler integration
-[2m2025-06-24T05:44:55.791095Z[0m [32m INFO[0m 🚀 Creating CallCenterEngine with session-core CallHandler integration
-[2m2025-06-24T05:44:55.791160Z[0m [32m INFO[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
-[2m2025-06-24T05:44:55.791330Z[0m [32m INFO[0m SIP UDP transport bound to 0.0.0.0:5060
-[2m2025-06-24T05:44:55.791361Z[0m [32m INFO[0m Added UDP transport bound to 0.0.0.0:5060
-[2m2025-06-24T05:44:55.791442Z[0m [32m INFO[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
-[2m2025-06-24T05:44:55.791448Z[0m [32m INFO[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 0.0.0.0:5060
-[2m2025-06-24T05:44:55.791453Z[0m [32m INFO[0m Creating new DialogManager with global transaction events and local address 0.0.0.0:5060
-[2m2025-06-24T05:44:55.791516Z[0m [32m INFO[0m 🔄 Starting global transaction event processor for dialog-core
-[2m2025-06-24T05:44:55.791615Z[0m [32m INFO[0m Session event processor started
+[2m2025-06-24T17:18:56.268569Z[0m [32m INFO[0m 🚀 Starting Basic Call Center Server
+[2m2025-06-24T17:18:56.268667Z[0m [32m INFO[0m 🗄️ Creating in-memory Limbo database
+[2m2025-06-24T17:18:56.270782Z[0m [32m INFO[0m ✅ In-memory database created successfully
+[2m2025-06-24T17:18:56.270791Z[0m [32m INFO[0m ✅ Database initialized
+[2m2025-06-24T17:18:56.270797Z[0m [32m INFO[0m 🚀 Creating CallCenterEngine with session-core CallHandler integration
+[2m2025-06-24T17:18:56.270817Z[0m [32m INFO[0m 🚀 Creating CallCenterEngine with session-core CallHandler integration
+[2m2025-06-24T17:18:56.270903Z[0m [32m INFO[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-06-24T17:18:56.271010Z[0m [32m INFO[0m SIP UDP transport bound to 0.0.0.0:5060
+[2m2025-06-24T17:18:56.271045Z[0m [32m INFO[0m Added UDP transport bound to 0.0.0.0:5060
+[2m2025-06-24T17:18:56.271190Z[0m [32m INFO[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-06-24T17:18:56.271201Z[0m [32m INFO[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 0.0.0.0:5060
+[2m2025-06-24T17:18:56.271209Z[0m [32m INFO[0m Creating new DialogManager with global transaction events and local address 0.0.0.0:5060
+[2m2025-06-24T17:18:56.271260Z[0m [32m INFO[0m 🔄 Starting global transaction event processor for dialog-core
+[2m2025-06-24T17:18:56.271395Z[0m [32m INFO[0m Session event processor started
 🔗 SETUP: Setting up session coordination with dialog-core
 ✅ SETUP: Session coordination setup complete
-[2m2025-06-24T05:44:55.791626Z[0m [32m INFO[0m SessionCoordinator initialized on port 5060
-[2m2025-06-24T05:44:55.791629Z[0m [32m INFO[0m Starting UnifiedDialogApi
-[2m2025-06-24T05:44:55.791632Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
-[2m2025-06-24T05:44:55.791636Z[0m [32m INFO[0m DialogManager starting
-[2m2025-06-24T05:44:55.791639Z[0m [32m INFO[0m DialogManager started successfully
+[2m2025-06-24T17:18:56.271411Z[0m [32m INFO[0m SessionCoordinator initialized on port 5060
+[2m2025-06-24T17:18:56.271416Z[0m [32m INFO[0m Starting UnifiedDialogApi
+[2m2025-06-24T17:18:56.271419Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-24T17:18:56.271423Z[0m [32m INFO[0m DialogManager starting
+[2m2025-06-24T17:18:56.271427Z[0m [32m INFO[0m DialogManager started successfully
 🎬 SPAWN: Starting session coordination event loop
-[2m2025-06-24T05:44:55.791658Z[0m [32m INFO[0m Starting main coordinator event loop
+[2m2025-06-24T17:18:56.271445Z[0m [32m INFO[0m Starting main coordinator event loop
 📡 EVENT LOOP: Session coordination event loop started
-[2m2025-06-24T05:44:55.791642Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:user@localhost"), domain: None, auto_auth: false, auto_options: false
-[2m2025-06-24T05:44:55.791697Z[0m [32m INFO[0m UnifiedDialogManager started successfully
-[2m2025-06-24T05:44:55.791703Z[0m [32m INFO[0m Cleanup manager started
-[2m2025-06-24T05:44:55.791726Z[0m [32m INFO[0m SessionCoordinator started
-[2m2025-06-24T05:44:55.791729Z[0m [32m INFO[0m ✅ SessionCoordinator created with CallCenterCallHandler
-[2m2025-06-24T05:44:55.791751Z[0m [32m INFO[0m ✅ Call center engine initialized with session-core integration
-[2m2025-06-24T05:44:55.791755Z[0m [32m INFO[0m ✅ Call center engine initialized with session-core integration
-[2m2025-06-24T05:44:55.791757Z[0m [32m INFO[0m ✅ Call center engine started on 0.0.0.0:5060
-[2m2025-06-24T05:44:55.791761Z[0m [32m INFO[0m Starting session event monitoring for REGISTER and other events
-[2m2025-06-24T05:44:55.791765Z[0m [32m INFO[0m ✅ Started monitoring for REGISTER and other events
-[2m2025-06-24T05:44:55.791829Z[0m [32m INFO[0m 👀 Starting event monitor
-[2m2025-06-24T05:44:55.791828Z[0m [32m INFO[0m 👤 Creating new agent: Alice Smith
-[2m2025-06-24T05:44:55.791930Z[0m [32m INFO[0m ✅ Agent created successfully: Alice Smith (fde3cceb-caff-4ace-954b-9d5dea35bd59)
-[2m2025-06-24T05:44:55.792016Z[0m [32m INFO[0m 👤 Registering agent: Alice Smith (sip:alice@callcenter.example.com)
-[2m2025-06-24T05:44:55.792022Z[0m [32m INFO[0m ✅ Agent registered: agent_alice
-[2m2025-06-24T05:44:55.792026Z[0m [32m INFO[0m Created agent: Alice Smith (sip:alice@callcenter.example.com)
-[2m2025-06-24T05:44:55.792030Z[0m [32m INFO[0m 👤 Creating new agent: Bob Johnson
-[2m2025-06-24T05:44:55.792071Z[0m [32m INFO[0m ✅ Agent created successfully: Bob Johnson (f4b95e45-0782-4e6d-a29a-574fce987772)
-[2m2025-06-24T05:44:55.792136Z[0m [32m INFO[0m 👤 Registering agent: Bob Johnson (sip:bob@callcenter.example.com)
-[2m2025-06-24T05:44:55.792140Z[0m [32m INFO[0m ✅ Agent registered: agent_bob
-[2m2025-06-24T05:44:55.792143Z[0m [32m INFO[0m Created agent: Bob Johnson (sip:bob@callcenter.example.com)
-[2m2025-06-24T05:44:55.792147Z[0m [32m INFO[0m 👤 Creating new agent: Charlie Brown
-[2m2025-06-24T05:44:55.792182Z[0m [32m INFO[0m ✅ Agent created successfully: Charlie Brown (d75111a3-40a1-45ff-9bb2-d634708849d5)
-[2m2025-06-24T05:44:55.792242Z[0m [32m INFO[0m 👤 Registering agent: Charlie Brown (sip:charlie@callcenter.example.com)
-[2m2025-06-24T05:44:55.792246Z[0m [32m INFO[0m ✅ Agent registered: agent_charlie
-[2m2025-06-24T05:44:55.792248Z[0m [32m INFO[0m Created agent: Charlie Brown (sip:charlie@callcenter.example.com)
-[2m2025-06-24T05:44:55.792252Z[0m [32m INFO[0m ✅ Default queues created
-[2m2025-06-24T05:44:55.792254Z[0m [32m INFO[0m 📞 Call center server is running
+[2m2025-06-24T17:18:56.271431Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:user@localhost"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-24T17:18:56.271493Z[0m [32m INFO[0m UnifiedDialogManager started successfully
+[2m2025-06-24T17:18:56.271501Z[0m [32m INFO[0m Cleanup manager started
+[2m2025-06-24T17:18:56.271522Z[0m [32m INFO[0m SessionCoordinator started
+[2m2025-06-24T17:18:56.271527Z[0m [32m INFO[0m ✅ SessionCoordinator created with CallCenterCallHandler
+[2m2025-06-24T17:18:56.271533Z[0m [32m INFO[0m ✅ Call center engine initialized with session-core integration
+[2m2025-06-24T17:18:56.271538Z[0m [32m INFO[0m ✅ Call center engine initialized with session-core integration
+[2m2025-06-24T17:18:56.271543Z[0m [32m INFO[0m ✅ Call center engine started on 0.0.0.0:5060
+[2m2025-06-24T17:18:56.271549Z[0m [32m INFO[0m Starting session event monitoring for REGISTER and other events
+[2m2025-06-24T17:18:56.271555Z[0m [32m INFO[0m ✅ Started monitoring for REGISTER and other events
+[2m2025-06-24T17:18:56.271598Z[0m [32m INFO[0m 👀 Starting event monitor
+[2m2025-06-24T17:18:56.271626Z[0m [32m INFO[0m 👤 Creating new agent: Alice Smith
+[2m2025-06-24T17:18:56.271720Z[0m [32m INFO[0m ✅ Agent created successfully: Alice Smith (ab415c84-e36f-41c6-901b-41235410471d)
+[2m2025-06-24T17:18:56.271819Z[0m [32m INFO[0m 👤 Registering agent: Alice Smith (sip:alice@callcenter.example.com)
+[2m2025-06-24T17:18:56.271826Z[0m [32m INFO[0m ✅ Agent registered: agent_alice
+[2m2025-06-24T17:18:56.271830Z[0m [32m INFO[0m Created agent: Alice Smith (sip:alice@callcenter.example.com)
+[2m2025-06-24T17:18:56.271834Z[0m [32m INFO[0m 👤 Creating new agent: Bob Johnson
+[2m2025-06-24T17:18:56.271882Z[0m [32m INFO[0m ✅ Agent created successfully: Bob Johnson (6982b28b-1acd-47d5-8f62-5638b94247a6)
+[2m2025-06-24T17:18:56.271959Z[0m [32m INFO[0m 👤 Registering agent: Bob Johnson (sip:bob@callcenter.example.com)
+[2m2025-06-24T17:18:56.271964Z[0m [32m INFO[0m ✅ Agent registered: agent_bob
+[2m2025-06-24T17:18:56.271968Z[0m [32m INFO[0m Created agent: Bob Johnson (sip:bob@callcenter.example.com)
+[2m2025-06-24T17:18:56.271972Z[0m [32m INFO[0m 👤 Creating new agent: Charlie Brown
+[2m2025-06-24T17:18:56.272015Z[0m [32m INFO[0m ✅ Agent created successfully: Charlie Brown (2f6525c2-e8ec-4f3b-83eb-0c6330acfeb7)
+[2m2025-06-24T17:18:56.272089Z[0m [32m INFO[0m 👤 Registering agent: Charlie Brown (sip:charlie@callcenter.example.com)
+[2m2025-06-24T17:18:56.272094Z[0m [32m INFO[0m ✅ Agent registered: agent_charlie
+[2m2025-06-24T17:18:56.272097Z[0m [32m INFO[0m Created agent: Charlie Brown (sip:charlie@callcenter.example.com)
+[2m2025-06-24T17:18:56.272101Z[0m [32m INFO[0m ✅ Default queues created
+[2m2025-06-24T17:18:56.272105Z[0m [32m INFO[0m 📞 Call center server is running
 
 📞 CALL CENTER IS READY!
 =======================
@@ -1500,173 +1500,187 @@ warning: `rvoip-client-core` (lib) generated 212 warnings (run `cargo fix --lib 
 🛑 Press Ctrl+C to stop the server
 
 === PARSING SIP MESSAGE ===
-Input length: 428 bytes
-Input as string: "REGISTER sip:127.0.0.1:5060 SIP/2.0\r\nFrom: <sip:alice@callcenter.example.com>;tag=tag-0c2da49c71724654a1f3589b927763bb\r\nTo: <sip:alice@callcenter.example.com>\r\nCall-ID: reg-96526-916d6075-2d95-4c3d-8139-d8c8e5cc2946\r\nCSeq: 1 REGISTER\r\nContact: <sip:alice@callcenter.example.com>\r\nExpires: 3600\r\nMax-Forwards: 70\r\nUser-Agent: RVoIP-SessionCore/1.0\r\nVia: SIP/2.0/UDP 0.0.0.0:5071;branch=z9hG4bK04e27b3f09cf453997587c99198e47d8\r\n\r\n"
-Input as hex: [52, 45, 47, 49, 53, 54, 45, 52, 20, 73, 69, 70, 3a, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 30, 63, 32, 64, 61, 34, 39, 63, 37, 31, 37, 32, 34, 36, 35, 34, 61, 31, 66, 33, 35, 38, 39, 62, 39, 32, 37, 37, 36, 33, 62, 62, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 72, 65, 67, 2d, 39, 36, 35, 32, 36, 2d, 39, 31, 36, 64, 36, 30, 37, 35, 2d, 32, 64, 39, 35, 2d, 34, 63, 33, 64, 2d, 38, 31, 33, 39, 2d, 64, 38, 63, 38, 65, 35, 63, 63, 32, 39, 34, 36, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 52, 45, 47, 49, 53, 54, 45, 52, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 45, 78, 70, 69, 72, 65, 73, 3a, 20, 33, 36, 30, 30, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 52, 56, 6f, 49, 50, 2d, 53, 65, 73, 73, 69, 6f, 6e, 43, 6f, 72, 65, 2f, 31, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 37, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 30, 34, 65, 32, 37, 62, 33, 66, 30, 39, 63, 66, 34, 35, 33, 39, 39, 37, 35, 38, 37, 63, 39, 39, 31, 39, 38, 65, 34, 37, 64, 38, 0d, 0a, 0d, 0a]
+Input length: 427 bytes
+Input as string: "REGISTER sip:127.0.0.1:5060 SIP/2.0\r\nFrom: <sip:alice@callcenter.example.com>;tag=tag-d3e14c4bc90f49729e8b69804a9c48bb\r\nTo: <sip:alice@callcenter.example.com>\r\nCall-ID: reg-3535-b45d09d2-8654-4c12-931c-4b6b8e48b58f\r\nCSeq: 1 REGISTER\r\nContact: <sip:alice@callcenter.example.com>\r\nExpires: 3600\r\nMax-Forwards: 70\r\nUser-Agent: RVoIP-SessionCore/1.0\r\nVia: SIP/2.0/UDP 0.0.0.0:5071;branch=z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c\r\n\r\n"
+Input as hex: [52, 45, 47, 49, 53, 54, 45, 52, 20, 73, 69, 70, 3a, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 64, 33, 65, 31, 34, 63, 34, 62, 63, 39, 30, 66, 34, 39, 37, 32, 39, 65, 38, 62, 36, 39, 38, 30, 34, 61, 39, 63, 34, 38, 62, 62, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 72, 65, 67, 2d, 33, 35, 33, 35, 2d, 62, 34, 35, 64, 30, 39, 64, 32, 2d, 38, 36, 35, 34, 2d, 34, 63, 31, 32, 2d, 39, 33, 31, 63, 2d, 34, 62, 36, 62, 38, 65, 34, 38, 62, 35, 38, 66, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 52, 45, 47, 49, 53, 54, 45, 52, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 45, 78, 70, 69, 72, 65, 73, 3a, 20, 33, 36, 30, 30, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 52, 56, 6f, 49, 50, 2d, 53, 65, 73, 73, 69, 6f, 6e, 43, 6f, 72, 65, 2f, 31, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 37, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 35, 66, 61, 30, 31, 64, 30, 30, 31, 66, 65, 31, 34, 63, 66, 32, 61, 66, 36, 31, 37, 66, 61, 37, 35, 65, 30, 65, 61, 37, 33, 63, 0d, 0a, 0d, 0a]
 ===========================
 === PARSE SUCCESS ===
 Successfully parsed message
 =====================
-[2m2025-06-24T05:44:58.672107Z[0m [32m INFO[0m Created new ServerNonInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server) [3mmethod[0m[2m=[0mREGISTER
-Transaction loop starting for Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server)
+[2m2025-06-24T17:18:59.297035Z[0m [32m INFO[0m Created new ServerNonInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:server) [3mmethod[0m[2m=[0mREGISTER
+Transaction loop starting for Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:server)
 Initial state: Trying
-Received command: TransitionTo(Trying) for transaction Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server)
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:server)
 Processing TransitionTo(Trying) current state: Trying
 Already in requested state, no transition needed: Trying
-Received command: ProcessMessage(Request(Request { method: Register, uri: Uri { scheme: Sip, user: None, password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-0c2da49c71724654a1f3589b927763bb")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("reg-96526-916d6075-2d95-4c3d-8139-d8c8e5cc2946")), CSeq(CSeq { seq: 1, method: Register }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), Expires(Expires(3600)), MaxForwards(MaxForwards(70)), UserAgent(["RVoIP-SessionCore/1.0"]), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5071), params: [Branch("z9hG4bK04e27b3f09cf453997587c99198e47d8")] }]))], body: b"" })) for transaction Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server)
+Received command: ProcessMessage(Request(Request { method: Register, uri: Uri { scheme: Sip, user: None, password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-d3e14c4bc90f49729e8b69804a9c48bb")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("reg-3535-b45d09d2-8654-4c12-931c-4b6b8e48b58f")), CSeq(CSeq { seq: 1, method: Register }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), Expires(Expires(3600)), MaxForwards(MaxForwards(70)), UserAgent(["RVoIP-SessionCore/1.0"]), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5071), params: [Branch("z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c")] }]))], body: b"" })) for transaction Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:server)
 📨 EVENT LOOP: Received session coordination event in background task
-🎪 SESSION COORDINATION: Received event: RegistrationRequest { transaction_id: z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server, from_uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, contact_uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, expires: 3600 }
-[2m2025-06-24T05:44:58.672326Z[0m [32m INFO[0m Registration request: sip:alice@callcenter.example.com -> sip:alice@callcenter.example.com (expires: 3600)
-🎯 COORDINATOR: Handling event: RegistrationRequest { transaction_id: "Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server)", from_uri: "sip:alice@callcenter.example.com", contact_uri: "sip:alice@callcenter.example.com", expires: 3600 }
-[2m2025-06-24T05:44:58.672376Z[0m [32m INFO[0m REGISTER request forwarded to application: sip:alice@callcenter.example.com -> sip:alice@callcenter.example.com (expires: 3600)
-[2m2025-06-24T05:44:58.672390Z[0m [32m INFO[0m Received REGISTER request: sip:alice@callcenter.example.com -> sip:alice@callcenter.example.com (expires: 3600)
-[2m2025-06-24T05:44:58.672396Z[0m [32m INFO[0m Processing REGISTER: transaction=Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server), from=sip:alice@callcenter.example.com, contact=sip:alice@callcenter.example.com, expires=3600
-[2m2025-06-24T05:44:58.672403Z[0m [32m INFO[0m ✅ New registration for sip:alice@callcenter.example.com: expires in 3600s
-[2m2025-06-24T05:44:58.672410Z[0m [32m INFO[0m REGISTER processed: Created for sip:alice@callcenter.example.com
-[2m2025-06-24T05:44:58.672414Z[0m [32m INFO[0m Sending 200 OK for successful registration
-[2m2025-06-24T05:44:58.672449Z[0m [32m INFO[0m Sending response message to 127.0.0.1:5071
-[2m2025-06-24T05:44:58.672474Z[0m [32m INFO[0m REGISTER response sent: 200 Registration successful
-[2m2025-06-24T05:44:58.672479Z[0m [32m INFO[0m 📱 Updating agent status by SIP URI: sip:alice@callcenter.example.com -> available
-[2m2025-06-24T05:44:58.672559Z[0m [32m INFO[0m ✅ Updated agent sip:alice@callcenter.example.com status to available in database
-[2m2025-06-24T05:44:58.672641Z[0m [32m INFO[0m ✅ Agent Alice Smith added to available agents pool
-Received command: TransitionTo(Completed) for transaction Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server)
+🎪 SESSION COORDINATION: Received event: RegistrationRequest { transaction_id: z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:server, from_uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, contact_uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, expires: 3600 }
+[2m2025-06-24T17:18:59.297402Z[0m [32m INFO[0m Registration request: sip:alice@callcenter.example.com -> sip:alice@callcenter.example.com (expires: 3600)
+🎯 COORDINATOR: Handling event: RegistrationRequest { transaction_id: "Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:server)", from_uri: "sip:alice@callcenter.example.com", contact_uri: "sip:alice@callcenter.example.com", expires: 3600 }
+[2m2025-06-24T17:18:59.297477Z[0m [32m INFO[0m REGISTER request forwarded to application: sip:alice@callcenter.example.com -> sip:alice@callcenter.example.com (expires: 3600)
+[2m2025-06-24T17:18:59.297504Z[0m [32m INFO[0m Received REGISTER request: sip:alice@callcenter.example.com -> sip:alice@callcenter.example.com (expires: 3600)
+[2m2025-06-24T17:18:59.297511Z[0m [32m INFO[0m Processing REGISTER: transaction=Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:server), from=sip:alice@callcenter.example.com, contact=sip:alice@callcenter.example.com, expires=3600
+[2m2025-06-24T17:18:59.297523Z[0m [32m INFO[0m ✅ New registration for sip:alice@callcenter.example.com: expires in 3600s
+[2m2025-06-24T17:18:59.297529Z[0m [32m INFO[0m REGISTER processed: Created for sip:alice@callcenter.example.com
+[2m2025-06-24T17:18:59.297533Z[0m [32m INFO[0m Sending 200 OK for successful registration
+[2m2025-06-24T17:18:59.297606Z[0m [32m INFO[0m Sending response message to 127.0.0.1:5071
+[2m2025-06-24T17:18:59.297663Z[0m [32m INFO[0m REGISTER response sent: 200 Registration successful
+[2m2025-06-24T17:18:59.297673Z[0m [32m INFO[0m 📱 Updating agent status by SIP URI: sip:alice@callcenter.example.com -> available
+[2m2025-06-24T17:18:59.297792Z[0m [32m INFO[0m ✅ Updated agent sip:alice@callcenter.example.com status to available in database
+[2m2025-06-24T17:18:59.297917Z[0m [32m INFO[0m ✅ Agent Alice Smith added to available agents pool
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:server)
 Processing TransitionTo(Completed) current state: Trying
 Valid state transition: Trying -> Completed
 State successfully changed to: Completed
 Sent StateChanged event result: Success
 === PARSING SIP MESSAGE ===
-Input length: 422 bytes
-Input as string: "REGISTER sip:127.0.0.1:5060 SIP/2.0\r\nFrom: <sip:bob@callcenter.example.com>;tag=tag-d79d567328a84d34a076855930d8210d\r\nTo: <sip:bob@callcenter.example.com>\r\nCall-ID: reg-96536-e1d67eb8-e5dc-48b4-b941-f5d632a4d646\r\nCSeq: 1 REGISTER\r\nContact: <sip:bob@callcenter.example.com>\r\nExpires: 3600\r\nMax-Forwards: 70\r\nUser-Agent: RVoIP-SessionCore/1.0\r\nVia: SIP/2.0/UDP 0.0.0.0:5072;branch=z9hG4bKdab1558eff424f6eb338414a13d7b6bc\r\n\r\n"
-Input as hex: [52, 45, 47, 49, 53, 54, 45, 52, 20, 73, 69, 70, 3a, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 64, 37, 39, 64, 35, 36, 37, 33, 32, 38, 61, 38, 34, 64, 33, 34, 61, 30, 37, 36, 38, 35, 35, 39, 33, 30, 64, 38, 32, 31, 30, 64, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 72, 65, 67, 2d, 39, 36, 35, 33, 36, 2d, 65, 31, 64, 36, 37, 65, 62, 38, 2d, 65, 35, 64, 63, 2d, 34, 38, 62, 34, 2d, 62, 39, 34, 31, 2d, 66, 35, 64, 36, 33, 32, 61, 34, 64, 36, 34, 36, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 52, 45, 47, 49, 53, 54, 45, 52, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 45, 78, 70, 69, 72, 65, 73, 3a, 20, 33, 36, 30, 30, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 52, 56, 6f, 49, 50, 2d, 53, 65, 73, 73, 69, 6f, 6e, 43, 6f, 72, 65, 2f, 31, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 37, 32, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 64, 61, 62, 31, 35, 35, 38, 65, 66, 66, 34, 32, 34, 66, 36, 65, 62, 33, 33, 38, 34, 31, 34, 61, 31, 33, 64, 37, 62, 36, 62, 63, 0d, 0a, 0d, 0a]
+Input length: 421 bytes
+Input as string: "REGISTER sip:127.0.0.1:5060 SIP/2.0\r\nFrom: <sip:bob@callcenter.example.com>;tag=tag-abea3661df9040cc87371479a99016d0\r\nTo: <sip:bob@callcenter.example.com>\r\nCall-ID: reg-3545-fe312ae7-cd9b-4b4c-a193-ffd89cccdb14\r\nCSeq: 1 REGISTER\r\nContact: <sip:bob@callcenter.example.com>\r\nExpires: 3600\r\nMax-Forwards: 70\r\nUser-Agent: RVoIP-SessionCore/1.0\r\nVia: SIP/2.0/UDP 0.0.0.0:5072;branch=z9hG4bK35805ebf7e094d7cae9e8309774d1292\r\n\r\n"
+Input as hex: [52, 45, 47, 49, 53, 54, 45, 52, 20, 73, 69, 70, 3a, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 61, 62, 65, 61, 33, 36, 36, 31, 64, 66, 39, 30, 34, 30, 63, 63, 38, 37, 33, 37, 31, 34, 37, 39, 61, 39, 39, 30, 31, 36, 64, 30, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 72, 65, 67, 2d, 33, 35, 34, 35, 2d, 66, 65, 33, 31, 32, 61, 65, 37, 2d, 63, 64, 39, 62, 2d, 34, 62, 34, 63, 2d, 61, 31, 39, 33, 2d, 66, 66, 64, 38, 39, 63, 63, 63, 64, 62, 31, 34, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 52, 45, 47, 49, 53, 54, 45, 52, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 62, 6f, 62, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 45, 78, 70, 69, 72, 65, 73, 3a, 20, 33, 36, 30, 30, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 52, 56, 6f, 49, 50, 2d, 53, 65, 73, 73, 69, 6f, 6e, 43, 6f, 72, 65, 2f, 31, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 37, 32, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 33, 35, 38, 30, 35, 65, 62, 66, 37, 65, 30, 39, 34, 64, 37, 63, 61, 65, 39, 65, 38, 33, 30, 39, 37, 37, 34, 64, 31, 32, 39, 32, 0d, 0a, 0d, 0a]
 ===========================
 === PARSE SUCCESS ===
 Successfully parsed message
 =====================
-[2m2025-06-24T05:44:59.676251Z[0m [32m INFO[0m Created new ServerNonInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server) [3mmethod[0m[2m=[0mREGISTER
+[2m2025-06-24T17:19:00.299645Z[0m [32m INFO[0m Created new ServerNonInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK35805ebf7e094d7cae9e8309774d1292:REGISTER:server) [3mmethod[0m[2m=[0mREGISTER
 📨 EVENT LOOP: Received session coordination event in background task
-🎪 SESSION COORDINATION: Received event: RegistrationRequest { transaction_id: z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server, from_uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, contact_uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, expires: 3600 }
-[2m2025-06-24T05:44:59.676287Z[0m [32m INFO[0m Registration request: sip:bob@callcenter.example.com -> sip:bob@callcenter.example.com (expires: 3600)
-Transaction loop starting for Key(z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server)
+🎪 SESSION COORDINATION: Received event: RegistrationRequest { transaction_id: z9hG4bK35805ebf7e094d7cae9e8309774d1292:REGISTER:server, from_uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, contact_uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, expires: 3600 }
+[2m2025-06-24T17:19:00.299689Z[0m [32m INFO[0m Registration request: sip:bob@callcenter.example.com -> sip:bob@callcenter.example.com (expires: 3600)
+Transaction loop starting for Key(z9hG4bK35805ebf7e094d7cae9e8309774d1292:REGISTER:server)
 Initial state: Trying
-Received command: TransitionTo(Trying) for transaction Key(z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server)
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK35805ebf7e094d7cae9e8309774d1292:REGISTER:server)
 Processing TransitionTo(Trying) current state: Trying
 Already in requested state, no transition needed: Trying
-Received command: ProcessMessage(Request(Request { method: Register, uri: Uri { scheme: Sip, user: None, password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-d79d567328a84d34a076855930d8210d")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("reg-96536-e1d67eb8-e5dc-48b4-b941-f5d632a4d646")), CSeq(CSeq { seq: 1, method: Register }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), Expires(Expires(3600)), MaxForwards(MaxForwards(70)), UserAgent(["RVoIP-SessionCore/1.0"]), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5072), params: [Branch("z9hG4bKdab1558eff424f6eb338414a13d7b6bc")] }]))], body: b"" })) for transaction Key(z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server)
-🎯 COORDINATOR: Handling event: RegistrationRequest { transaction_id: "Key(z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server)", from_uri: "sip:bob@callcenter.example.com", contact_uri: "sip:bob@callcenter.example.com", expires: 3600 }
-[2m2025-06-24T05:44:59.676335Z[0m [32m INFO[0m REGISTER request forwarded to application: sip:bob@callcenter.example.com -> sip:bob@callcenter.example.com (expires: 3600)
-[2m2025-06-24T05:44:59.676339Z[0m [32m INFO[0m Received REGISTER request: sip:bob@callcenter.example.com -> sip:bob@callcenter.example.com (expires: 3600)
-[2m2025-06-24T05:44:59.676341Z[0m [32m INFO[0m Processing REGISTER: transaction=Key(z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server), from=sip:bob@callcenter.example.com, contact=sip:bob@callcenter.example.com, expires=3600
-[2m2025-06-24T05:44:59.676346Z[0m [32m INFO[0m ✅ New registration for sip:bob@callcenter.example.com: expires in 3600s
-[2m2025-06-24T05:44:59.676348Z[0m [32m INFO[0m REGISTER processed: Created for sip:bob@callcenter.example.com
-[2m2025-06-24T05:44:59.676350Z[0m [32m INFO[0m Sending 200 OK for successful registration
-[2m2025-06-24T05:44:59.676380Z[0m [32m INFO[0m Sending response message to 127.0.0.1:5072
-[2m2025-06-24T05:44:59.676402Z[0m [32m INFO[0m REGISTER response sent: 200 Registration successful
-[2m2025-06-24T05:44:59.676406Z[0m [32m INFO[0m 📱 Updating agent status by SIP URI: sip:bob@callcenter.example.com -> available
-[2m2025-06-24T05:44:59.676473Z[0m [32m INFO[0m ✅ Updated agent sip:bob@callcenter.example.com status to available in database
-[2m2025-06-24T05:44:59.676521Z[0m [32m INFO[0m ✅ Agent Bob Johnson added to available agents pool
-Received command: TransitionTo(Completed) for transaction Key(z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server)
+Received command: ProcessMessage(Request(Request { method: Register, uri: Uri { scheme: Sip, user: None, password: None, host: Address(127.0.0.1), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-abea3661df9040cc87371479a99016d0")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("reg-3545-fe312ae7-cd9b-4b4c-a193-ffd89cccdb14")), CSeq(CSeq { seq: 1, method: Register }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("bob"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), Expires(Expires(3600)), MaxForwards(MaxForwards(70)), UserAgent(["RVoIP-SessionCore/1.0"]), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5072), params: [Branch("z9hG4bK35805ebf7e094d7cae9e8309774d1292")] }]))], body: b"" })) for transaction Key(z9hG4bK35805ebf7e094d7cae9e8309774d1292:REGISTER:server)
+🎯 COORDINATOR: Handling event: RegistrationRequest { transaction_id: "Key(z9hG4bK35805ebf7e094d7cae9e8309774d1292:REGISTER:server)", from_uri: "sip:bob@callcenter.example.com", contact_uri: "sip:bob@callcenter.example.com", expires: 3600 }
+[2m2025-06-24T17:19:00.299778Z[0m [32m INFO[0m REGISTER request forwarded to application: sip:bob@callcenter.example.com -> sip:bob@callcenter.example.com (expires: 3600)
+[2m2025-06-24T17:19:00.299787Z[0m [32m INFO[0m Received REGISTER request: sip:bob@callcenter.example.com -> sip:bob@callcenter.example.com (expires: 3600)
+[2m2025-06-24T17:19:00.299793Z[0m [32m INFO[0m Processing REGISTER: transaction=Key(z9hG4bK35805ebf7e094d7cae9e8309774d1292:REGISTER:server), from=sip:bob@callcenter.example.com, contact=sip:bob@callcenter.example.com, expires=3600
+[2m2025-06-24T17:19:00.299803Z[0m [32m INFO[0m ✅ New registration for sip:bob@callcenter.example.com: expires in 3600s
+[2m2025-06-24T17:19:00.299810Z[0m [32m INFO[0m REGISTER processed: Created for sip:bob@callcenter.example.com
+[2m2025-06-24T17:19:00.299816Z[0m [32m INFO[0m Sending 200 OK for successful registration
+[2m2025-06-24T17:19:00.299872Z[0m [32m INFO[0m Sending response message to 127.0.0.1:5072
+[2m2025-06-24T17:19:00.299923Z[0m [32m INFO[0m REGISTER response sent: 200 Registration successful
+[2m2025-06-24T17:19:00.299931Z[0m [32m INFO[0m 📱 Updating agent status by SIP URI: sip:bob@callcenter.example.com -> available
+[2m2025-06-24T17:19:00.300043Z[0m [32m INFO[0m ✅ Updated agent sip:bob@callcenter.example.com status to available in database
+[2m2025-06-24T17:19:00.300134Z[0m [32m INFO[0m ✅ Agent Bob Johnson added to available agents pool
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK35805ebf7e094d7cae9e8309774d1292:REGISTER:server)
 Processing TransitionTo(Completed) current state: Trying
 Valid state transition: Trying -> Completed
 State successfully changed to: Completed
 Sent StateChanged event result: Success
 === PARSING SIP MESSAGE ===
-Input length: 681 bytes
-Input as string: "INVITE sip:support@callcenter.example.com:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-96557-1-0\r\nFrom: \"Test Customer\" <sip:customer@127.0.0.1:5080>;tag=1\r\nTo: <sip:support@callcenter.example.com:5060>\r\nCall-ID: 1-96557@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: <sip:customer@127.0.0.1:5080>\r\nMax-Forwards: 70\r\nSubject: Test Call to Call Center\r\nUser-Agent: SIPp Customer/1.0\r\nContent-Type: application/sdp\r\nContent-Length:   237\r\n\r\nv=0\r\no=customer 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sendrecv\r\n"
-Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 73, 75, 70, 70, 6f, 72, 74, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 39, 36, 35, 35, 37, 2d, 31, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 22, 54, 65, 73, 74, 20, 43, 75, 73, 74, 6f, 6d, 65, 72, 22, 20, 3c, 73, 69, 70, 3a, 63, 75, 73, 74, 6f, 6d, 65, 72, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3e, 3b, 74, 61, 67, 3d, 31, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 73, 75, 70, 70, 6f, 72, 74, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3a, 35, 30, 36, 30, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 39, 36, 35, 35, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 63, 75, 73, 74, 6f, 6d, 65, 72, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3e, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 54, 65, 73, 74, 20, 43, 61, 6c, 6c, 20, 74, 6f, 20, 43, 61, 6c, 6c, 20, 43, 65, 6e, 74, 65, 72, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 20, 43, 75, 73, 74, 6f, 6d, 65, 72, 2f, 31, 2e, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 32, 33, 37, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 63, 75, 73, 74, 6f, 6d, 65, 72, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 43, 61, 6c, 6c, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 20, 31, 30, 31, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 31, 30, 31, 20, 74, 65, 6c, 65, 70, 68, 6f, 6e, 65, 2d, 65, 76, 65, 6e, 74, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 66, 6d, 74, 70, 3a, 31, 30, 31, 20, 30, 2d, 31, 35, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
+Input length: 679 bytes
+Input as string: "INVITE sip:support@callcenter.example.com:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-3561-1-0\r\nFrom: \"Test Customer\" <sip:customer@127.0.0.1:5080>;tag=1\r\nTo: <sip:support@callcenter.example.com:5060>\r\nCall-ID: 1-3561@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: <sip:customer@127.0.0.1:5080>\r\nMax-Forwards: 70\r\nSubject: Test Call to Call Center\r\nUser-Agent: SIPp Customer/1.0\r\nContent-Type: application/sdp\r\nContent-Length:   237\r\n\r\nv=0\r\no=customer 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sendrecv\r\n"
+Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 73, 75, 70, 70, 6f, 72, 74, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 33, 35, 36, 31, 2d, 31, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 22, 54, 65, 73, 74, 20, 43, 75, 73, 74, 6f, 6d, 65, 72, 22, 20, 3c, 73, 69, 70, 3a, 63, 75, 73, 74, 6f, 6d, 65, 72, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3e, 3b, 74, 61, 67, 3d, 31, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 73, 75, 70, 70, 6f, 72, 74, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3a, 35, 30, 36, 30, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 33, 35, 36, 31, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 63, 75, 73, 74, 6f, 6d, 65, 72, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3e, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 54, 65, 73, 74, 20, 43, 61, 6c, 6c, 20, 74, 6f, 20, 43, 61, 6c, 6c, 20, 43, 65, 6e, 74, 65, 72, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 20, 43, 75, 73, 74, 6f, 6d, 65, 72, 2f, 31, 2e, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 32, 33, 37, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 63, 75, 73, 74, 6f, 6d, 65, 72, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 43, 61, 6c, 6c, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 20, 31, 30, 31, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 31, 30, 31, 20, 74, 65, 6c, 65, 70, 68, 6f, 6e, 65, 2d, 65, 76, 65, 6e, 74, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 66, 6d, 74, 70, 3a, 31, 30, 31, 20, 30, 2d, 31, 35, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
 ===========================
 === PARSE SUCCESS ===
 Successfully parsed message
 =====================
-[2m2025-06-24T05:45:03.323994Z[0m [32m INFO[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-96557-1-0:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+[2m2025-06-24T17:19:03.985369Z[0m [32m INFO[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-3561-1-0:INVITE:server) [3mmethod[0m[2m=[0mINVITE
 🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5080
 🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5080
-[2m2025-06-24T05:45:03.324055Z[0m [32m INFO[0m Created early dialog 2ce01449-3b6c-4d1a-8d6d-670df4596a29 from INVITE request
-🔍 INVITE HANDLER: Created early dialog 2ce01449-3b6c-4d1a-8d6d-670df4596a29
-Transaction loop starting for Key(z9hG4bK-96557-1-0:INVITE:server)
+[2m2025-06-24T17:19:03.985416Z[0m [32m INFO[0m Created early dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9 from INVITE request
+🔍 INVITE HANDLER: Created early dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9
+Transaction loop starting for Key(z9hG4bK-3561-1-0:INVITE:server)
 Initial state: Proceeding
-🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-96557-1-0:INVITE:server) with dialog 2ce01449-3b6c-4d1a-8d6d-670df4596a29
-🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog 2ce01449-3b6c-4d1a-8d6d-670df4596a29
-Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-96557-1-0:INVITE:server)
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-3561-1-0:INVITE:server)
 Processing TransitionTo(Proceeding) current state: Proceeding
 Already in requested state, no transition needed: Proceeding
-🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog 2ce01449-3b6c-4d1a-8d6d-670df4596a29
-[2m2025-06-24T05:45:03.324157Z[0m [32m INFO[0m Initial INVITE processed, created dialog 2ce01449-3b6c-4d1a-8d6d-670df4596a29
+🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-3561-1-0:INVITE:server) with dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9
+🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9
+🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9
 📨 EVENT LOOP: Received session coordination event in background task
-🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(2ce01449-3b6c-4d1a-8d6d-670df4596a29), transaction_id: z9hG4bK-96557-1-0:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("support"), password: None, host: Domain("callcenter.example.com"), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5080), params: [Branch("z9hG4bK-96557-1-0")] }])), From(From(Address { display_name: Some("Test Customer"), uri: Uri { scheme: Sip, user: Some("customer"), password: None, host: Address(127.0.0.1), port: Some(5080), parameters: [], headers: {}, raw_uri: None }, params: [Tag("1")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("support"), password: None, host: Domain("callcenter.example.com"), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-96557@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("customer"), password: None, host: Address(127.0.0.1), port: Some(5080), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Test Call to Call Center")), UserAgent(["SIPp", "Customer/1.0"]), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(237))], body: b"v=0\r\no=customer 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sendrecv\r\n" }, source: 127.0.0.1:5080 }
-[2m2025-06-24T05:45:03.324249Z[0m [32m INFO[0m handle_incoming_call called for dialog 2ce01449-3b6c-4d1a-8d6d-670df4596a29
-[2m2025-06-24T05:45:03.324269Z[0m [32m INFO[0m Incoming call from dialog 2ce01449-3b6c-4d1a-8d6d-670df4596a29: sip:from@127.0.0.1 -> sip:to@local
-[2m2025-06-24T05:45:03.324290Z[0m [32m INFO[0m Created session sess_18b1c7c4-d1bd-4eb1-a0dc-491fdf9d295b for incoming call dialog 2ce01449-3b6c-4d1a-8d6d-670df4596a29
-[2m2025-06-24T05:45:03.324303Z[0m [32m INFO[0m Calling handler.on_incoming_call for session sess_18b1c7c4-d1bd-4eb1-a0dc-491fdf9d295b
-[2m2025-06-24T05:45:03.324337Z[0m [33m WARN[0m Call center engine has been dropped
-[2m2025-06-24T05:45:03.324344Z[0m [32m INFO[0m Handler decision for session sess_18b1c7c4-d1bd-4eb1-a0dc-491fdf9d295b: Reject("Call center not available")
-[2m2025-06-24T05:45:03.324351Z[0m [32m INFO[0m Rejecting incoming call for session sess_18b1c7c4-d1bd-4eb1-a0dc-491fdf9d295b: Call center not available
-[2m2025-06-24T05:45:03.324362Z[0m [32m INFO[0m Rejecting call 2ce01449-3b6c-4d1a-8d6d-670df4596a29 with status 486 Busy Here
-🎯 COORDINATOR: Handling event: SessionCreated { session_id: SessionId("sess_18b1c7c4-d1bd-4eb1-a0dc-491fdf9d295b"), from: "sip:from@127.0.0.1", to: "sip:to@local", call_state: Ringing }
-[2m2025-06-24T05:45:03.324418Z[0m [32m INFO[0m Session sess_18b1c7c4-d1bd-4eb1-a0dc-491fdf9d295b created with state Ringing
-🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_18b1c7c4-d1bd-4eb1-a0dc-491fdf9d295b"), old_state: Ringing, new_state: Failed("Call center not available") }
-[2m2025-06-24T05:45:03.324434Z[0m [32m INFO[0m Session sess_18b1c7c4-d1bd-4eb1-a0dc-491fdf9d295b state changed: Ringing -> Failed("Call center not available")
-[2m2025-06-24T05:45:03.324438Z[0m [33m WARN[0m No media session found for SIP session: sess_18b1c7c4-d1bd-4eb1-a0dc-491fdf9d295b
-Received command: Timer("100") for transaction Key(z9hG4bK-96557-1-0:INVITE:server)
-[2m2025-06-24T05:45:03.526298Z[0m [32m INFO[0m Sending response message to 127.0.0.1:5080
+🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(1a366a05-3a0b-4c45-8756-cbe03d23ceb9), transaction_id: z9hG4bK-3561-1-0:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("support"), password: None, host: Domain("callcenter.example.com"), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5080), params: [Branch("z9hG4bK-3561-1-0")] }])), From(From(Address { display_name: Some("Test Customer"), uri: Uri { scheme: Sip, user: Some("customer"), password: None, host: Address(127.0.0.1), port: Some(5080), parameters: [], headers: {}, raw_uri: None }, params: [Tag("1")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("support"), password: None, host: Domain("callcenter.example.com"), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("1-3561@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("customer"), password: None, host: Address(127.0.0.1), port: Some(5080), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Test Call to Call Center")), UserAgent(["SIPp", "Customer/1.0"]), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(237))], body: b"v=0\r\no=customer 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sendrecv\r\n" }, source: 127.0.0.1:5080 }
+[2m2025-06-24T17:19:03.985542Z[0m [32m INFO[0m handle_incoming_call called for dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9
+[2m2025-06-24T17:19:03.985493Z[0m [32m INFO[0m Initial INVITE processed, created dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9
+[2m2025-06-24T17:19:03.985548Z[0m [32m INFO[0m Incoming call from dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9: sip:from@127.0.0.1 -> sip:to@local
+[2m2025-06-24T17:19:03.985568Z[0m [32m INFO[0m Created session sess_89583652-8d12-4e75-a862-f5be9c2e727f for incoming call dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9
+[2m2025-06-24T17:19:03.985577Z[0m [32m INFO[0m Calling handler.on_incoming_call for session sess_89583652-8d12-4e75-a862-f5be9c2e727f
+[2m2025-06-24T17:19:03.985603Z[0m [32m INFO[0m 📞 Processing incoming call: sess_89583652-8d12-4e75-a862-f5be9c2e727f from sip:from@127.0.0.1
+[2m2025-06-24T17:19:03.985623Z[0m [32m INFO[0m 🎯 Routing decision for call sess_89583652-8d12-4e75-a862-f5be9c2e727f: Queue { queue_id: "general", priority: 50, reason: "Queue selected for standard customer with skills [\"general\"]" }
+[2m2025-06-24T17:19:03.985630Z[0m [32m INFO[0m 📋 Queueing call sess_89583652-8d12-4e75-a862-f5be9c2e727f in queue general with priority 50 (Queue selected for standard customer with skills ["general"])
+[2m2025-06-24T17:19:03.985635Z[0m [32m INFO[0m 📋 Creating queue: General Support (general)
+[2m2025-06-24T17:19:03.985641Z[0m [32m INFO[0m 📞 Enqueuing call sess_89583652-8d12-4e75-a862-f5be9c2e727f to queue general
+[2m2025-06-24T17:19:03.985651Z[0m [32m INFO[0m ✅ Call sess_89583652-8d12-4e75-a862-f5be9c2e727f routing completed in 0ms
+[2m2025-06-24T17:19:03.985685Z[0m [32m INFO[0m Handler decision for session sess_89583652-8d12-4e75-a862-f5be9c2e727f: Accept(None)
+🎯 COORDINATOR: Handling event: SessionCreated { session_id: SessionId("sess_89583652-8d12-4e75-a862-f5be9c2e727f"), from: "sip:from@127.0.0.1", to: "sip:to@local", call_state: Ringing }
+[2m2025-06-24T17:19:03.985726Z[0m [32m INFO[0m Session sess_89583652-8d12-4e75-a862-f5be9c2e727f created with state Ringing
+[2m2025-06-24T17:19:03.985694Z[0m [32m INFO[0m Requesting SDP negotiation for session sess_89583652-8d12-4e75-a862-f5be9c2e727f as UAS
+[2m2025-06-24T17:19:03.985752Z[0m [33m WARN[0m Waiting for SDP negotiation to complete
+[2m2025-06-24T17:19:03.985758Z[0m [32m INFO[0m Answering call 1a366a05-3a0b-4c45-8756-cbe03d23ceb9
+🎯 COORDINATOR: Handling event: SdpNegotiationRequested { session_id: SessionId("sess_89583652-8d12-4e75-a862-f5be9c2e727f"), role: "uas", local_sdp: None, remote_sdp: Some("v=0\r\no=customer 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sendrecv\r\n") }
+[2m2025-06-24T17:19:03.985807Z[0m [32m INFO[0m Sending response message to 127.0.0.1:5080
+[2m2025-06-24T17:19:03.985839Z[0m [32m INFO[0m SDP negotiation requested for session sess_89583652-8d12-4e75-a862-f5be9c2e727f as uas
+[2m2025-06-24T17:19:03.985855Z[0m [32m INFO[0m Negotiating SDP as UAS for session sess_89583652-8d12-4e75-a862-f5be9c2e727f
+[2m2025-06-24T17:19:03.985862Z[0m [32m INFO[0m Starting media session for dialog: media-sess_89583652-8d12-4e75-a862-f5be9c2e727f
+[2m2025-06-24T17:19:03.985875Z[0m [32m INFO[0m Created global port allocator with range 16384-32767
+[2m2025-06-24T17:19:03.985902Z[0m [32m INFO[0m Dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9 local tag set to match response: tag-f17ae27f58974951a2e826e2588d8e51
+[2m2025-06-24T17:19:03.985911Z[0m [32m INFO[0m Dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9 transitioned to Confirmed state
+[2m2025-06-24T17:19:03.985919Z[0m [32m INFO[0m Updated dialog lookup for confirmed dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9
+[2m2025-06-24T17:19:03.985923Z[0m [32m INFO[0m Successfully answered call 1a366a05-3a0b-4c45-8756-cbe03d23ceb9
+Received command: CancelTimer100 for transaction Key(z9hG4bK-3561-1-0:INVITE:server)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-3561-1-0:INVITE:server)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-3561-1-0:INVITE:server). Final state: Terminated
 === PARSING SIP MESSAGE ===
-Input length: 681 bytes
-Input as string: "INVITE sip:support@callcenter.example.com:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-96557-2-0\r\nFrom: \"Test Customer\" <sip:customer@127.0.0.1:5080>;tag=2\r\nTo: <sip:support@callcenter.example.com:5060>\r\nCall-ID: 2-96557@127.0.0.1\r\nCSeq: 1 INVITE\r\nContact: <sip:customer@127.0.0.1:5080>\r\nMax-Forwards: 70\r\nSubject: Test Call to Call Center\r\nUser-Agent: SIPp Customer/1.0\r\nContent-Type: application/sdp\r\nContent-Length:   237\r\n\r\nv=0\r\no=customer 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sendrecv\r\n"
-Input as hex: [49, 4e, 56, 49, 54, 45, 20, 73, 69, 70, 3a, 73, 75, 70, 70, 6f, 72, 74, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 39, 36, 35, 35, 37, 2d, 32, 2d, 30, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 22, 54, 65, 73, 74, 20, 43, 75, 73, 74, 6f, 6d, 65, 72, 22, 20, 3c, 73, 69, 70, 3a, 63, 75, 73, 74, 6f, 6d, 65, 72, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3e, 3b, 74, 61, 67, 3d, 32, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 73, 75, 70, 70, 6f, 72, 74, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3a, 35, 30, 36, 30, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 32, 2d, 39, 36, 35, 35, 37, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 49, 4e, 56, 49, 54, 45, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 63, 75, 73, 74, 6f, 6d, 65, 72, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3e, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 53, 75, 62, 6a, 65, 63, 74, 3a, 20, 54, 65, 73, 74, 20, 43, 61, 6c, 6c, 20, 74, 6f, 20, 43, 61, 6c, 6c, 20, 43, 65, 6e, 74, 65, 72, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 20, 43, 75, 73, 74, 6f, 6d, 65, 72, 2f, 31, 2e, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 54, 79, 70, 65, 3a, 20, 61, 70, 70, 6c, 69, 63, 61, 74, 69, 6f, 6e, 2f, 73, 64, 70, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 20, 20, 32, 33, 37, 0d, 0a, 0d, 0a, 76, 3d, 30, 0d, 0a, 6f, 3d, 63, 75, 73, 74, 6f, 6d, 65, 72, 20, 35, 33, 36, 35, 35, 37, 36, 35, 20, 32, 33, 35, 33, 36, 38, 37, 36, 33, 37, 20, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 73, 3d, 53, 49, 50, 70, 20, 54, 65, 73, 74, 20, 43, 61, 6c, 6c, 0d, 0a, 63, 3d, 49, 4e, 20, 49, 50, 34, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 74, 3d, 30, 20, 30, 0d, 0a, 6d, 3d, 61, 75, 64, 69, 6f, 20, 36, 30, 30, 30, 20, 52, 54, 50, 2f, 41, 56, 50, 20, 30, 20, 38, 20, 31, 30, 31, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 30, 20, 50, 43, 4d, 55, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 38, 20, 50, 43, 4d, 41, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 72, 74, 70, 6d, 61, 70, 3a, 31, 30, 31, 20, 74, 65, 6c, 65, 70, 68, 6f, 6e, 65, 2d, 65, 76, 65, 6e, 74, 2f, 38, 30, 30, 30, 0d, 0a, 61, 3d, 66, 6d, 74, 70, 3a, 31, 30, 31, 20, 30, 2d, 31, 35, 0d, 0a, 61, 3d, 73, 65, 6e, 64, 72, 65, 63, 76, 0d, 0a]
+Input length: 391 bytes
+Input as string: "ACK sip:server@0.0.0.0:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5080;branch=z9hG4bK-3561-1-4\r\nFrom: \"Test Customer\" <sip:customer@127.0.0.1:5080>;tag=1\r\nTo: <sip:support@callcenter.example.com:5060>;tag=tag-f17ae27f58974951a2e826e2588d8e51\r\nCall-ID: 1-3561@127.0.0.1\r\nCSeq: 1 ACK\r\nContact: <sip:customer@127.0.0.1:5080>\r\nMax-Forwards: 70\r\nUser-Agent: SIPp Customer/1.0\r\nContent-Length: 0\r\n\r\n"
+Input as hex: [41, 43, 4b, 20, 73, 69, 70, 3a, 73, 65, 72, 76, 65, 72, 40, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 36, 30, 20, 53, 49, 50, 2f, 32, 2e, 30, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 2d, 33, 35, 36, 31, 2d, 31, 2d, 34, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 22, 54, 65, 73, 74, 20, 43, 75, 73, 74, 6f, 6d, 65, 72, 22, 20, 3c, 73, 69, 70, 3a, 63, 75, 73, 74, 6f, 6d, 65, 72, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3e, 3b, 74, 61, 67, 3d, 31, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 73, 75, 70, 70, 6f, 72, 74, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3a, 35, 30, 36, 30, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 66, 31, 37, 61, 65, 32, 37, 66, 35, 38, 39, 37, 34, 39, 35, 31, 61, 32, 65, 38, 32, 36, 65, 32, 35, 38, 38, 64, 38, 65, 35, 31, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 31, 2d, 33, 35, 36, 31, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 41, 43, 4b, 0d, 0a, 43, 6f, 6e, 74, 61, 63, 74, 3a, 20, 3c, 73, 69, 70, 3a, 63, 75, 73, 74, 6f, 6d, 65, 72, 40, 31, 32, 37, 2e, 30, 2e, 30, 2e, 31, 3a, 35, 30, 38, 30, 3e, 0d, 0a, 4d, 61, 78, 2d, 46, 6f, 72, 77, 61, 72, 64, 73, 3a, 20, 37, 30, 0d, 0a, 55, 73, 65, 72, 2d, 41, 67, 65, 6e, 74, 3a, 20, 53, 49, 50, 70, 20, 43, 75, 73, 74, 6f, 6d, 65, 72, 2f, 31, 2e, 30, 0d, 0a, 43, 6f, 6e, 74, 65, 6e, 74, 2d, 4c, 65, 6e, 67, 74, 68, 3a, 20, 30, 0d, 0a, 0d, 0a]
 ===========================
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 102, 49, 55, 97, 101, 50, 55, 102, 53, 56, 57, 55, 52, 57, 53, 49, 97, 50, 101, 56, 50, 54, 101, 50, 53, 56, 56, 100, 56, 101, 53, 49]
+Successfully parsed tag: tag-f17ae27f58974951a2e826e2588d8e51
 === PARSE SUCCESS ===
 Successfully parsed message
 =====================
-[2m2025-06-24T05:45:04.323038Z[0m [32m INFO[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-96557-2-0:INVITE:server) [3mmethod[0m[2m=[0mINVITE
-🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:5080
-🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:5080
-Transaction loop starting for Key(z9hG4bK-96557-2-0:INVITE:server)
-Initial state: Proceeding
-Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-96557-2-0:INVITE:server)
-Processing TransitionTo(Proceeding) current state: Proceeding
-Already in requested state, no transition needed: Proceeding
-[2m2025-06-24T05:45:04.323092Z[0m [32m INFO[0m Created early dialog 5f139e10-aa86-47fe-892a-840df5072575 from INVITE request
-🔍 INVITE HANDLER: Created early dialog 5f139e10-aa86-47fe-892a-840df5072575
-🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-96557-2-0:INVITE:server) with dialog 5f139e10-aa86-47fe-892a-840df5072575
-🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog 5f139e10-aa86-47fe-892a-840df5072575
-🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog 5f139e10-aa86-47fe-892a-840df5072575
-[2m2025-06-24T05:45:04.323135Z[0m [32m INFO[0m Initial INVITE processed, created dialog 5f139e10-aa86-47fe-892a-840df5072575
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"user": String("customer"), "headers": Object({}), "scheme": String("Sip"), "port": Number(5080.0), "raw_uri": Null, "host": Object({"Address": String("127.0.0.1")}), "password": Null, "parameters": Array([])}), "params": Array([Object({"Tag": String("1")})]), "display_name": String("Test Customer")})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("1")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("1")})
+Final value for path 'headers.From.params[0].Tag': String("1")
+Parsed path: [Field("headers"), Field("From"), Field("params"), Index(0), Field("Tag")] from 'headers.From.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"host": Object({"Address": String("127.0.0.1")}), "parameters": Array([]), "password": Null, "port": Number(5080.0), "raw_uri": Null, "headers": Object({}), "user": String("customer"), "scheme": String("Sip")}), "display_name": String("Test Customer"), "params": Array([Object({"Tag": String("1")})])})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("1")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("1")})
+Final value for path 'headers.From.params[0].Tag': String("1")
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"uri": Object({"headers": Object({}), "scheme": String("Sip"), "password": Null, "host": Object({"Domain": String("callcenter.example.com")}), "raw_uri": Null, "parameters": Array([]), "port": Number(5060.0), "user": String("support")}), "display_name": Null, "params": Array([])})
+Processing segment Index(0) at index 3, current value: Array([])
+Index 0 out of bounds for array of length 0
+Parsed path: [Field("headers"), Field("To"), Field("params"), Index(0), Field("Tag")] from 'headers.To.params[0].Tag'
+Processing segment Field("params") at index 2, current value: Object({"params": Array([Object({"Tag": String("tag-f17ae27f58974951a2e826e2588d8e51")})]), "display_name": Null, "uri": Object({"scheme": String("Sip"), "raw_uri": Null, "user": String("support"), "password": Null, "port": Number(5060.0), "host": Object({"Domain": String("callcenter.example.com")}), "parameters": Array([]), "headers": Object({})})})
+Processing segment Index(0) at index 3, current value: Array([Object({"Tag": String("tag-f17ae27f58974951a2e826e2588d8e51")})])
+Processing segment Field("Tag") at index 4, current value: Object({"Tag": String("tag-f17ae27f58974951a2e826e2588d8e51")})
+Final value for path 'headers.To.params[0].Tag': String("tag-f17ae27f58974951a2e826e2588d8e51")
+[2m2025-06-24T17:19:03.990877Z[0m [32m INFO[0m ✅ RFC 3261: ACK received for transaction Key(z9hG4bK-3561-1-0:INVITE:server) in dialog 1a366a05-3a0b-4c45-8756-cbe03d23ceb9 - time to start media (UAS side)
 📨 EVENT LOOP: Received session coordination event in background task
-🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(5f139e10-aa86-47fe-892a-840df5072575), transaction_id: z9hG4bK-96557-2-0:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("support"), password: None, host: Domain("callcenter.example.com"), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(5080), params: [Branch("z9hG4bK-96557-2-0")] }])), From(From(Address { display_name: Some("Test Customer"), uri: Uri { scheme: Sip, user: Some("customer"), password: None, host: Address(127.0.0.1), port: Some(5080), parameters: [], headers: {}, raw_uri: None }, params: [Tag("2")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("support"), password: None, host: Domain("callcenter.example.com"), port: Some(5060), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("2-96557@127.0.0.1")), CSeq(CSeq { seq: 1, method: Invite }), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("customer"), password: None, host: Address(127.0.0.1), port: Some(5080), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), MaxForwards(MaxForwards(70)), Subject(Subject("Test Call to Call Center")), UserAgent(["SIPp", "Customer/1.0"]), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(237))], body: b"v=0\r\no=customer 53655765 2353687637 IN IP4 127.0.0.1\r\ns=SIPp Test Call\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 6000 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sendrecv\r\n" }, source: 127.0.0.1:5080 }
-[2m2025-06-24T05:45:04.323195Z[0m [32m INFO[0m handle_incoming_call called for dialog 5f139e10-aa86-47fe-892a-840df5072575
-[2m2025-06-24T05:45:04.323203Z[0m [32m INFO[0m Incoming call from dialog 5f139e10-aa86-47fe-892a-840df5072575: sip:from@127.0.0.1 -> sip:to@local
-[2m2025-06-24T05:45:04.323213Z[0m [32m INFO[0m Created session sess_cda70221-c72e-4b47-b004-66a04dded908 for incoming call dialog 5f139e10-aa86-47fe-892a-840df5072575
-[2m2025-06-24T05:45:04.323220Z[0m [32m INFO[0m Calling handler.on_incoming_call for session sess_cda70221-c72e-4b47-b004-66a04dded908
-[2m2025-06-24T05:45:04.323226Z[0m [33m WARN[0m Call center engine has been dropped
-[2m2025-06-24T05:45:04.323229Z[0m [32m INFO[0m Handler decision for session sess_cda70221-c72e-4b47-b004-66a04dded908: Reject("Call center not available")
-[2m2025-06-24T05:45:04.323232Z[0m [32m INFO[0m Rejecting incoming call for session sess_cda70221-c72e-4b47-b004-66a04dded908: Call center not available
-[2m2025-06-24T05:45:04.323238Z[0m [32m INFO[0m Rejecting call 5f139e10-aa86-47fe-892a-840df5072575 with status 486 Busy Here
-🎯 COORDINATOR: Handling event: SessionCreated { session_id: SessionId("sess_cda70221-c72e-4b47-b004-66a04dded908"), from: "sip:from@127.0.0.1", to: "sip:to@local", call_state: Ringing }
-[2m2025-06-24T05:45:04.323257Z[0m [32m INFO[0m Session sess_cda70221-c72e-4b47-b004-66a04dded908 created with state Ringing
-🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_cda70221-c72e-4b47-b004-66a04dded908"), old_state: Ringing, new_state: Failed("Call center not available") }
-[2m2025-06-24T05:45:04.323265Z[0m [32m INFO[0m Session sess_cda70221-c72e-4b47-b004-66a04dded908 state changed: Ringing -> Failed("Call center not available")
-[2m2025-06-24T05:45:04.323269Z[0m [33m WARN[0m No media session found for SIP session: sess_cda70221-c72e-4b47-b004-66a04dded908
-Received command: Timer("100") for transaction Key(z9hG4bK-96557-2-0:INVITE:server)
-[2m2025-06-24T05:45:04.525262Z[0m [32m INFO[0m Sending response message to 127.0.0.1:5080
-[2m2025-06-24T05:45:05.794401Z[0m [32m INFO[0m 👥 Agents - Available: 2, Busy: 0
-[2m2025-06-24T05:45:15.793527Z[0m [32m INFO[0m 👥 Agents - Available: 2, Busy: 0
-[2m2025-06-24T05:45:25.793598Z[0m [32m INFO[0m 👥 Agents - Available: 2, Busy: 0
-Received command: Timer("J") for transaction Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server)
-Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server)
-Processing TransitionTo(Terminated) current state: Completed
-Valid state transition: Completed -> Terminated
-State successfully changed to: Terminated
-Sent StateChanged event result: Success
-Transaction loop ending for Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:server). Final state: Terminated
-Received command: Timer("J") for transaction Key(z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server)
-Received command: TransitionTo(Terminated) for transaction Key(z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server)
-Processing TransitionTo(Terminated) current state: Completed
-Valid state transition: Completed -> Terminated
-State successfully changed to: Terminated
-Sent StateChanged event result: Success
-Transaction loop ending for Key(z9hG4bKdab1558eff424f6eb338414a13d7b6bc:REGISTER:server). Final state: Terminated
-[2m2025-06-24T05:45:35.792829Z[0m [32m INFO[0m 👥 Agents - Available: 2, Busy: 0
-[2m2025-06-24T05:45:45.792845Z[0m [32m INFO[0m 👥 Agents - Available: 2, Busy: 0
-[2m2025-06-24T05:45:55.792958Z[0m [32m INFO[0m 👥 Agents - Available: 2, Busy: 0
-[2m2025-06-24T05:45:55.792958Z[0m [32m INFO[0m 📊 Stats - Active Calls: 0, Queued: 0, Agents Available: 2
-[2m2025-06-24T05:46:05.794133Z[0m [32m INFO[0m 👥 Agents - Available: 2, Busy: 0
-[2m2025-06-24T05:46:15.792784Z[0m [32m INFO[0m 👥 Agents - Available: 2, Busy: 0
+🎪 SESSION COORDINATION: Received event: AckReceived { dialog_id: DialogId(1a366a05-3a0b-4c45-8756-cbe03d23ceb9), transaction_id: z9hG4bK-3561-1-0:INVITE:server, negotiated_sdp: None }
+[2m2025-06-24T17:19:03.990936Z[0m [32m INFO[0m ✅ RFC 3261: ACK RECEIVED for session sess_89583652-8d12-4e75-a862-f5be9c2e727f - creating media session (UAS side)
+[2m2025-06-24T17:19:04.488207Z[0m [32m INFO[0m Started UDP transport receiver tasks
+[2m2025-06-24T17:19:04.488274Z[0m [32m INFO[0m Started RTP session with SSRC=5504f274
+[2m2025-06-24T17:19:04.488285Z[0m [32m INFO[0m ✅ Created media session with REAL RTP session: media-sess_89583652-8d12-4e75-a862-f5be9c2e727f (port: 17844)
+[2m2025-06-24T17:19:04.488295Z[0m [32m INFO[0m ✅ Created media session: media-sess_89583652-8d12-4e75-a862-f5be9c2e727f for SIP session: sess_89583652-8d12-4e75-a862-f5be9c2e727f with real MediaSessionController + zero-copy enabled
+[2m2025-06-24T17:19:04.488338Z[0m [32m INFO[0m Applying negotiated config: codec=PCMU, remote=127.0.0.1:6000
+[2m2025-06-24T17:19:04.488348Z[0m [32m INFO[0m ✅ Updated RTP session remote address for dialog media-sess_89583652-8d12-4e75-a862-f5be9c2e727f: 127.0.0.1:6000
+[2m2025-06-24T17:19:04.488359Z[0m [32m INFO[0m SDP negotiation as UAS successful: codec=PCMU, local=127.0.0.1:17844, remote=127.0.0.1:6000
+[2m2025-06-24T17:19:04.488368Z[0m [32m INFO[0m ✅ Updated media session for SIP session: sess_89583652-8d12-4e75-a862-f5be9c2e727f with remote: 127.0.0.1:6000 and codecs: ["PCMU"]
+[2m2025-06-24T17:19:04.488373Z[0m [32m INFO[0m Updated media session with remote SDP (offer) for session sess_89583652-8d12-4e75-a862-f5be9c2e727f
+🎯 COORDINATOR: Handling event: MediaEvent { session_id: SessionId("sess_89583652-8d12-4e75-a862-f5be9c2e727f"), event: "rfc_compliant_media_creation_uas" }
+[2m2025-06-24T17:19:04.488390Z[0m [32m INFO[0m Media creation event for sess_89583652-8d12-4e75-a862-f5be9c2e727f: rfc_compliant_media_creation_uas
+🎯 COORDINATOR: Handling event: MediaNegotiated { session_id: SessionId("sess_89583652-8d12-4e75-a862-f5be9c2e727f"), local_addr: 127.0.0.1:17844, remote_addr: 127.0.0.1:6000, codec: "PCMU" }
+🎯 COORDINATOR: Handling event: SdpEvent { session_id: SessionId("sess_89583652-8d12-4e75-a862-f5be9c2e727f"), event_type: "generated_sdp_answer", sdp: "v=0\r\no=rvoip 1750785544 1750785544 IN IP4 127.0.0.1\r\ns=RVOIP Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 17844 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n" }
+🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_89583652-8d12-4e75-a862-f5be9c2e727f"), old_state: Ringing, new_state: Active }
+[2m2025-06-24T17:19:04.488417Z[0m [32m INFO[0m Session sess_89583652-8d12-4e75-a862-f5be9c2e727f state changed: Ringing -> Active
+[2m2025-06-24T17:19:04.488425Z[0m [32m INFO[0m Media info available: true
+[2m2025-06-24T17:19:04.488430Z[0m [32m INFO[0m Local SDP length: Some(156)
+[2m2025-06-24T17:19:04.488451Z[0m [32m INFO[0m Remote SDP length: Some(237)
+[2m2025-06-24T17:19:04.488456Z[0m [32m INFO[0m Notifying handler about call sess_89583652-8d12-4e75-a862-f5be9c2e727f establishment
+[2m2025-06-24T17:19:04.488460Z[0m [32m INFO[0m CallCenterCallHandler: Call sess_89583652-8d12-4e75-a862-f5be9c2e727f established
+[2m2025-06-24T17:19:04.488466Z[0m [32m INFO[0m 📞 Call sess_89583652-8d12-4e75-a862-f5be9c2e727f marked as established/bridged
+[2m2025-06-24T17:19:06.272756Z[0m [32m INFO[0m 📊 Queue 'general' - Waiting: 1, Avg Wait: 2s
+[2m2025-06-24T17:19:06.272906Z[0m [32m INFO[0m 👥 Agents - Available: 2, Busy: 0
+[2m2025-06-24T17:19:16.273327Z[0m [32m INFO[0m 📊 Queue 'general' - Waiting: 1, Avg Wait: 12s
+[2m2025-06-24T17:19:16.273748Z[0m [32m INFO[0m 👥 Agents - Available: 2, Busy: 0

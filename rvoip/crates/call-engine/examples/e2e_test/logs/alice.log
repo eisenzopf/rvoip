@@ -1,24 +1,3 @@
-warning: method `handle_auto_options` is never used
-   --> crates/dialog-core/src/manager/unified.rs:563:14
-    |
-197 | impl UnifiedDialogManager {
-    | ------------------------- method in this implementation
-...
-563 |     async fn handle_auto_options(&self, request: Request, source: SocketAddr) -> ApiResult<()> {
-    |              ^^^^^^^^^^^^^^^^^^^
-    |
-    = note: `#[warn(dead_code)]` on by default
-
-warning: method `extract_body_string` is never used
-   --> crates/dialog-core/src/protocol/invite_handler.rs:177:8
-    |
-71  | impl DialogManager {
-    | ------------------ method in this implementation
-...
-177 |     fn extract_body_string(&self, request: &Request) -> String {
-    |        ^^^^^^^^^^^^^^^^^^^
-
-warning: `rvoip-dialog-core` (lib) generated 2 warnings
 warning: unused import: `StaticEvent`
   --> crates/infra-common/src/events/static_path.rs:14:60
    |
@@ -132,7 +111,28 @@ warning: fields `id`, `event_type`, and `priority` are never read
    |
    = note: `SubscriberHandle` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
 
+warning: method `handle_auto_options` is never used
+   --> crates/dialog-core/src/manager/unified.rs:563:14
+    |
+197 | impl UnifiedDialogManager {
+    | ------------------------- method in this implementation
+...
+563 |     async fn handle_auto_options(&self, request: Request, source: SocketAddr) -> ApiResult<()> {
+    |              ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` on by default
+
+warning: method `extract_body_string` is never used
+   --> crates/dialog-core/src/protocol/invite_handler.rs:177:8
+    |
+71  | impl DialogManager {
+    | ------------------ method in this implementation
+...
+177 |     fn extract_body_string(&self, request: &Request) -> String {
+    |        ^^^^^^^^^^^^^^^^^^^
+
 warning: `infra-common` (lib) generated 14 warnings (run `cargo fix --lib -p infra-common` to apply 7 suggestions)
+warning: `rvoip-dialog-core` (lib) generated 2 warnings
 warning: unused import: `SessionManagerConfig`
   --> crates/client-core/src/client/manager.rs:11:5
    |
@@ -1428,81 +1428,81 @@ warning: missing documentation for a struct field
     |                                             ^^^^^^^^^^^^^^
 
 warning: `rvoip-client-core` (lib) generated 212 warnings (run `cargo fix --lib -p rvoip-client-core` to apply 3 suggestions)
-    Finished `release` profile [optimized] target(s) in 0.19s
+    Finished `release` profile [optimized] target(s) in 0.17s
      Running `/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/target/release/examples/e2e_test_agent --username alice --server '127.0.0.1:5060' --port 5071 --call-duration 15`
-[2m2025-06-24T05:44:58.668279Z[0m [32m INFO[0m 🤖 Starting agent client for alice
-[2m2025-06-24T05:44:58.668438Z[0m [32m INFO[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
-[2m2025-06-24T05:44:58.668541Z[0m [32m INFO[0m SIP UDP transport bound to 0.0.0.0:5071
-[2m2025-06-24T05:44:58.668600Z[0m [32m INFO[0m Added UDP transport bound to 0.0.0.0:5071
-[2m2025-06-24T05:44:58.668745Z[0m [32m INFO[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
-[2m2025-06-24T05:44:58.668759Z[0m [32m INFO[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 0.0.0.0:5071
-[2m2025-06-24T05:44:58.668765Z[0m [32m INFO[0m Creating new DialogManager with global transaction events and local address 0.0.0.0:5071
-[2m2025-06-24T05:44:58.668804Z[0m [32m INFO[0m 🔄 Starting global transaction event processor for dialog-core
-[2m2025-06-24T05:44:58.668856Z[0m [32m INFO[0m Session event processor started
+[2m2025-06-24T17:18:59.292444Z[0m [32m INFO[0m 🤖 Starting agent client for alice
+[2m2025-06-24T17:18:59.292557Z[0m [32m INFO[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-06-24T17:18:59.292632Z[0m [32m INFO[0m SIP UDP transport bound to 0.0.0.0:5071
+[2m2025-06-24T17:18:59.292690Z[0m [32m INFO[0m Added UDP transport bound to 0.0.0.0:5071
+[2m2025-06-24T17:18:59.292746Z[0m [32m INFO[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-06-24T17:18:59.292752Z[0m [32m INFO[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 0.0.0.0:5071
+[2m2025-06-24T17:18:59.292755Z[0m [32m INFO[0m Creating new DialogManager with global transaction events and local address 0.0.0.0:5071
+[2m2025-06-24T17:18:59.292781Z[0m [32m INFO[0m 🔄 Starting global transaction event processor for dialog-core
+[2m2025-06-24T17:18:59.292812Z[0m [32m INFO[0m Session event processor started
 🔗 SETUP: Setting up session coordination with dialog-core
 ✅ SETUP: Session coordination setup complete
-[2m2025-06-24T05:44:58.668869Z[0m [32m INFO[0m SessionCoordinator initialized on port 5071
-[2m2025-06-24T05:44:58.668872Z[0m [32m INFO[0m Starting UnifiedDialogApi
-[2m2025-06-24T05:44:58.668875Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
-[2m2025-06-24T05:44:58.668879Z[0m [32m INFO[0m DialogManager starting
-[2m2025-06-24T05:44:58.668882Z[0m [32m INFO[0m DialogManager started successfully
+[2m2025-06-24T17:18:59.292834Z[0m [32m INFO[0m SessionCoordinator initialized on port 5071
+[2m2025-06-24T17:18:59.292838Z[0m [32m INFO[0m Starting UnifiedDialogApi
+[2m2025-06-24T17:18:59.292842Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-24T17:18:59.292846Z[0m [32m INFO[0m DialogManager starting
+[2m2025-06-24T17:18:59.292851Z[0m [32m INFO[0m DialogManager started successfully
+[2m2025-06-24T17:18:59.292846Z[0m [32m INFO[0m Starting main coordinator event loop
+[2m2025-06-24T17:18:59.292856Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:client@0.0.0.0"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-24T17:18:59.292870Z[0m [32m INFO[0m UnifiedDialogManager started successfully
 🎬 SPAWN: Starting session coordination event loop
-[2m2025-06-24T05:44:58.668894Z[0m [32m INFO[0m Starting main coordinator event loop
-[2m2025-06-24T05:44:58.668885Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:client@0.0.0.0"), domain: None, auto_auth: false, auto_options: false
-[2m2025-06-24T05:44:58.668921Z[0m [32m INFO[0m UnifiedDialogManager started successfully
-[2m2025-06-24T05:44:58.668930Z[0m [32m INFO[0m Cleanup manager started
-[2m2025-06-24T05:44:58.668934Z[0m [32m INFO[0m SessionCoordinator started
-[2m2025-06-24T05:44:58.668941Z[0m [32m INFO[0m Starting UnifiedDialogApi
-[2m2025-06-24T05:44:58.668945Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
-[2m2025-06-24T05:44:58.668949Z[0m [32m INFO[0m DialogManager starting
-[2m2025-06-24T05:44:58.668952Z[0m [32m INFO[0m DialogManager started successfully
-[2m2025-06-24T05:44:58.668956Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:client@0.0.0.0"), domain: None, auto_auth: false, auto_options: false
-[2m2025-06-24T05:44:58.668974Z[0m [32m INFO[0m UnifiedDialogManager started successfully
-[2m2025-06-24T05:44:58.668977Z[0m [32m INFO[0m SessionCoordinator started
+[2m2025-06-24T17:18:59.292876Z[0m [32m INFO[0m Cleanup manager started
+[2m2025-06-24T17:18:59.292887Z[0m [32m INFO[0m SessionCoordinator started
+[2m2025-06-24T17:18:59.292892Z[0m [32m INFO[0m Starting UnifiedDialogApi
+[2m2025-06-24T17:18:59.292895Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-06-24T17:18:59.292900Z[0m [32m INFO[0m DialogManager starting
+[2m2025-06-24T17:18:59.292909Z[0m [32m INFO[0m DialogManager started successfully
+[2m2025-06-24T17:18:59.292914Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:client@0.0.0.0"), domain: None, auto_auth: false, auto_options: false
+[2m2025-06-24T17:18:59.292928Z[0m [32m INFO[0m UnifiedDialogManager started successfully
+[2m2025-06-24T17:18:59.292932Z[0m [32m INFO[0m SessionCoordinator started
+[2m2025-06-24T17:18:59.292935Z[0m [32m INFO[0m ClientManager started on 0.0.0.0:5071
 📡 EVENT LOOP: Session coordination event loop started
-[2m2025-06-24T05:44:58.668980Z[0m [32m INFO[0m ClientManager started on 0.0.0.0:5071
-[2m2025-06-24T05:44:58.669003Z[0m [32m INFO[0m 📝 Registering as sip:alice@callcenter.example.com with server 127.0.0.1:5060
-[2m2025-06-24T05:44:58.669223Z[0m [32m INFO[0m Sending REGISTER to sip:127.0.0.1:5060 (127.0.0.1:5060)
+[2m2025-06-24T17:18:59.292940Z[0m [32m INFO[0m 📝 Registering as sip:alice@callcenter.example.com with server 127.0.0.1:5060
+[2m2025-06-24T17:18:59.293099Z[0m [32m INFO[0m Sending REGISTER to sip:127.0.0.1:5060 (127.0.0.1:5060)
 Request Via headers before transaction creation:
-  Via[0]: SIP/2.0/UDP 0.0.0.0:5071;branch=z9hG4bK04e27b3f09cf453997587c99198e47d8
+  Via[0]: SIP/2.0/UDP 0.0.0.0:5071;branch=z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c
 Request Via headers after potential modification:
-  Via[0]: SIP/2.0/UDP 0.0.0.0:5071;branch=z9hG4bK04e27b3f09cf453997587c99198e47d8
-Transaction loop starting for Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:client)
+  Via[0]: SIP/2.0/UDP 0.0.0.0:5071;branch=z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c
+Transaction loop starting for Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:client)
 Initial state: Initial
-ClientNonInviteTransaction::initiate called for Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:client)
+ClientNonInviteTransaction::initiate called for Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:client)
 Current state is Initial
-Sending TransitionTo(Trying) command for Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:client)
-Successfully sent TransitionTo command for Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:client)
-Received command: TransitionTo(Trying) for transaction Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:client)
+Sending TransitionTo(Trying) command for Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:client)
+Successfully sent TransitionTo command for Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:client)
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:client)
 Processing TransitionTo(Trying) current state: Initial
 Valid state transition: Initial -> Trying
 State successfully changed to: Trying
 Sent StateChanged event result: Success
-[2m2025-06-24T05:44:58.669449Z[0m [32m INFO[0m Sending REGISTER message to 127.0.0.1:5060
+[2m2025-06-24T17:18:59.293262Z[0m [32m INFO[0m Sending REGISTER message to 127.0.0.1:5060
 === PARSING SIP MESSAGE ===
-Input length: 294 bytes
-Input as string: "SIP/2.0 200 OK\r\nFrom: <sip:alice@callcenter.example.com>;tag=tag-0c2da49c71724654a1f3589b927763bb\r\nTo: <sip:alice@callcenter.example.com>\r\nCall-ID: reg-96526-916d6075-2d95-4c3d-8139-d8c8e5cc2946\r\nCSeq: 1 REGISTER\r\nVia: SIP/2.0/UDP 0.0.0.0:5071;branch=z9hG4bK04e27b3f09cf453997587c99198e47d8\r\n\r\n"
-Input as hex: [53, 49, 50, 2f, 32, 2e, 30, 20, 32, 30, 30, 20, 4f, 4b, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 30, 63, 32, 64, 61, 34, 39, 63, 37, 31, 37, 32, 34, 36, 35, 34, 61, 31, 66, 33, 35, 38, 39, 62, 39, 32, 37, 37, 36, 33, 62, 62, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 72, 65, 67, 2d, 39, 36, 35, 32, 36, 2d, 39, 31, 36, 64, 36, 30, 37, 35, 2d, 32, 64, 39, 35, 2d, 34, 63, 33, 64, 2d, 38, 31, 33, 39, 2d, 64, 38, 63, 38, 65, 35, 63, 63, 32, 39, 34, 36, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 52, 45, 47, 49, 53, 54, 45, 52, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 37, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 30, 34, 65, 32, 37, 62, 33, 66, 30, 39, 63, 66, 34, 35, 33, 39, 39, 37, 35, 38, 37, 63, 39, 39, 31, 39, 38, 65, 34, 37, 64, 38, 0d, 0a, 0d, 0a]
+Input length: 293 bytes
+Input as string: "SIP/2.0 200 OK\r\nFrom: <sip:alice@callcenter.example.com>;tag=tag-d3e14c4bc90f49729e8b69804a9c48bb\r\nTo: <sip:alice@callcenter.example.com>\r\nCall-ID: reg-3535-b45d09d2-8654-4c12-931c-4b6b8e48b58f\r\nCSeq: 1 REGISTER\r\nVia: SIP/2.0/UDP 0.0.0.0:5071;branch=z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c\r\n\r\n"
+Input as hex: [53, 49, 50, 2f, 32, 2e, 30, 20, 32, 30, 30, 20, 4f, 4b, 0d, 0a, 46, 72, 6f, 6d, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 3b, 74, 61, 67, 3d, 74, 61, 67, 2d, 64, 33, 65, 31, 34, 63, 34, 62, 63, 39, 30, 66, 34, 39, 37, 32, 39, 65, 38, 62, 36, 39, 38, 30, 34, 61, 39, 63, 34, 38, 62, 62, 0d, 0a, 54, 6f, 3a, 20, 3c, 73, 69, 70, 3a, 61, 6c, 69, 63, 65, 40, 63, 61, 6c, 6c, 63, 65, 6e, 74, 65, 72, 2e, 65, 78, 61, 6d, 70, 6c, 65, 2e, 63, 6f, 6d, 3e, 0d, 0a, 43, 61, 6c, 6c, 2d, 49, 44, 3a, 20, 72, 65, 67, 2d, 33, 35, 33, 35, 2d, 62, 34, 35, 64, 30, 39, 64, 32, 2d, 38, 36, 35, 34, 2d, 34, 63, 31, 32, 2d, 39, 33, 31, 63, 2d, 34, 62, 36, 62, 38, 65, 34, 38, 62, 35, 38, 66, 0d, 0a, 43, 53, 65, 71, 3a, 20, 31, 20, 52, 45, 47, 49, 53, 54, 45, 52, 0d, 0a, 56, 69, 61, 3a, 20, 53, 49, 50, 2f, 32, 2e, 30, 2f, 55, 44, 50, 20, 30, 2e, 30, 2e, 30, 2e, 30, 3a, 35, 30, 37, 31, 3b, 62, 72, 61, 6e, 63, 68, 3d, 7a, 39, 68, 47, 34, 62, 4b, 35, 66, 61, 30, 31, 64, 30, 30, 31, 66, 65, 31, 34, 63, 66, 32, 61, 66, 36, 31, 37, 66, 61, 37, 35, 65, 30, 65, 61, 37, 33, 63, 0d, 0a, 0d, 0a]
 ===========================
 === PARSE SUCCESS ===
 Successfully parsed message
 =====================
 State after sending command: Trying
-Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [From(From(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-0c2da49c71724654a1f3589b927763bb")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("reg-96526-916d6075-2d95-4c3d-8139-d8c8e5cc2946")), CSeq(CSeq { seq: 1, method: Register }), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5071), params: [Branch("z9hG4bK04e27b3f09cf453997587c99198e47d8")] }]))], body: b"" })) for transaction Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:client)
-Received command: TransitionTo(Completed) for transaction Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:client)
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [From(From(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-d3e14c4bc90f49729e8b69804a9c48bb")] })), To(To(Address { display_name: None, uri: Uri { scheme: Sip, user: Some("alice"), password: None, host: Domain("callcenter.example.com"), port: None, parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("reg-3535-b45d09d2-8654-4c12-931c-4b6b8e48b58f")), CSeq(CSeq { seq: 1, method: Register }), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5071), params: [Branch("z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c")] }]))], body: b"" })) for transaction Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:client)
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:client)
 Processing TransitionTo(Completed) current state: Trying
 Valid state transition: Trying -> Completed
 State successfully changed to: Completed
 Sent StateChanged event result: Success
-[2m2025-06-24T05:44:58.783003Z[0m [32m INFO[0m Registered sip:alice@callcenter.example.com with server sip:127.0.0.1:5060
-[2m2025-06-24T05:44:58.783035Z[0m [32m INFO[0m ✅ Successfully registered!
-[2m2025-06-24T05:44:58.783047Z[0m [32m INFO[0m 👂 Agent alice is ready to receive calls...
-[2m2025-06-24T05:44:58.783055Z[0m [32m INFO[0m Press Ctrl+C to stop
-[2m2025-06-24T05:44:58.783013Z[0m [32m INFO[0m ✅ Registration confirmed: sip:alice@callcenter.example.com (server: sip:127.0.0.1:5060)
-Received command: Timer("K") for transaction Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:client)
-Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:client)
+[2m2025-06-24T17:18:59.407468Z[0m [32m INFO[0m Registered sip:alice@callcenter.example.com with server sip:127.0.0.1:5060
+[2m2025-06-24T17:18:59.407531Z[0m [32m INFO[0m ✅ Successfully registered!
+[2m2025-06-24T17:18:59.407557Z[0m [32m INFO[0m 👂 Agent alice is ready to receive calls...
+[2m2025-06-24T17:18:59.407578Z[0m [32m INFO[0m Press Ctrl+C to stop
+[2m2025-06-24T17:18:59.407489Z[0m [32m INFO[0m ✅ Registration confirmed: sip:alice@callcenter.example.com (server: sip:127.0.0.1:5060)
+Received command: Timer("K") for transaction Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:client)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:client)
 Processing TransitionTo(Terminated) current state: Completed
 Valid state transition: Completed -> Terminated
 State successfully changed to: Terminated
 Sent StateChanged event result: Success
-Transaction loop ending for Key(z9hG4bK04e27b3f09cf453997587c99198e47d8:REGISTER:client). Final state: Terminated
+Transaction loop ending for Key(z9hG4bK5fa01d001fe14cf2af617fa75e0ea73c:REGISTER:client). Final state: Terminated

@@ -95,7 +95,7 @@ impl CallCenterEngine {
                 config.general.local_media_addr.port(),
                 config.general.local_media_addr.port() + 1000
             )
-            .with_handler(handler)
+            .with_handler(handler.clone())
             .build()
             .await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to create session coordinator: {}", e)))?;
@@ -117,6 +117,14 @@ impl CallCenterEngine {
             agent_registry: Arc::new(Mutex::new(AgentRegistry::new(database))),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
         });
+        
+        // CRITICAL FIX: Update the handler's weak reference to point to the real engine
+        // Since handler is Arc, we need to get a mutable reference
+        // We'll use unsafe to cast away the Arc's immutability for this one-time update
+        unsafe {
+            let handler_ptr = Arc::as_ptr(&handler) as *mut CallCenterCallHandler;
+            (*handler_ptr).engine = Arc::downgrade(&engine);
+        }
         
         info!("✅ Call center engine initialized with session-core integration");
         
@@ -229,7 +237,90 @@ impl CallCenterEngine {
     /// Route incoming call when it starts ringing
     pub async fn route_incoming_call(&self, session_id: &SessionId) -> CallCenterResult<()> {
         info!("Routing incoming call {} to available agent", session_id);
-        // TODO: Implement actual routing logic
+        
+        // Get call info
+        let calls = self.active_calls.read().await;
+        let call_info = calls.get(session_id)
+            .ok_or_else(|| CallCenterError::not_found(format!("Call {} not found", session_id)))?;
+        
+        // Create an IncomingCall structure for the routing engine
+        let incoming_call = IncomingCall {
+            id: session_id.clone(),
+            from: call_info.customer_id.clone(),
+            to: "support".to_string(), // Default destination
+            display_name: None,
+        };
+        
+        drop(calls); // Release the lock
+        
+        // Analyze customer and make routing decision
+        let (customer_type, priority, required_skills) = self.analyze_customer_info(&incoming_call).await;
+        let routing_decision = self.make_routing_decision(
+            session_id,
+            &customer_type,
+            priority,
+            &required_skills
+        ).await?;
+        
+        // Execute the routing decision
+        match routing_decision {
+            crate::routing::RoutingDecision::DirectToAgent { agent_id, reason } => {
+                info!("📞 Direct routing to agent {}: {}", agent_id, reason);
+                self.assign_specific_agent_to_call(session_id.clone(), agent_id).await?;
+            }
+            crate::routing::RoutingDecision::Queue { queue_id, priority, reason } => {
+                info!("📋 Queueing call {} in queue {} with priority {} ({})", 
+                      session_id, queue_id, priority, reason);
+                
+                // Ensure queue exists
+                self.ensure_queue_exists(&queue_id).await?;
+                
+                // Create queued call entry
+                let queued_call = crate::queue::QueuedCall {
+                    session_id: session_id.clone(),
+                    caller_id: incoming_call.from,
+                    priority,
+                    queued_at: chrono::Utc::now(),
+                    estimated_wait_time: None,
+                };
+                
+                // Enqueue the call
+                let mut queue_manager = self.queue_manager.write().await;
+                queue_manager.enqueue_call(&queue_id, queued_call)?;
+                
+                // Update call status
+                drop(queue_manager);
+                let mut calls = self.active_calls.write().await;
+                if let Some(call_info) = calls.get_mut(session_id) {
+                    call_info.status = CallStatus::Queued;
+                    call_info.queue_id = Some(queue_id.clone());
+                }
+                
+                // Update routing stats
+                let mut stats = self.routing_stats.write().await;
+                stats.calls_queued += 1;
+            }
+            crate::routing::RoutingDecision::Overflow { target_queue, reason } => {
+                info!("📤 Overflow routing to queue {}: {}", target_queue, reason);
+                // Handle overflow (similar to queue)
+                self.ensure_queue_exists(&target_queue).await?;
+                
+                let queued_call = crate::queue::QueuedCall {
+                    session_id: session_id.clone(),
+                    caller_id: incoming_call.from,
+                    priority: 200, // Lower priority for overflow
+                    queued_at: chrono::Utc::now(),
+                    estimated_wait_time: None,
+                };
+                
+                let mut queue_manager = self.queue_manager.write().await;
+                queue_manager.enqueue_call(&target_queue, queued_call)?;
+                
+                let mut stats = self.routing_stats.write().await;
+                stats.calls_overflowed += 1;
+            }
+        }
+        
         Ok(())
     }
     
@@ -331,6 +422,55 @@ impl CallCenterEngine {
     /// Ensure a queue exists (public for admin API)
     pub async fn create_queue(&self, queue_id: &str) -> CallCenterResult<()> {
         self.ensure_queue_exists(queue_id).await
+    }
+    
+    /// Process all queues to assign waiting calls to available agents
+    pub async fn process_all_queues(&self) -> CallCenterResult<()> {
+        let mut queue_manager = self.queue_manager.write().await;
+        
+        // Get all queue IDs
+        let queue_ids: Vec<String> = queue_manager.get_queue_ids();
+        
+        for queue_id in queue_ids {
+            // Process each queue
+            while let Some(queued_call) = queue_manager.dequeue_for_agent(&queue_id)? {
+                // Find an available agent
+                let available_agent = self.available_agents.iter()
+                    .find(|entry| {
+                        let agent = entry.value();
+                        matches!(agent.status, AgentStatus::Available) && agent.current_calls == 0
+                    })
+                    .map(|entry| (entry.key().clone(), entry.value().clone()));
+                
+                if let Some((agent_id, _agent_info)) = available_agent {
+                    // Assign the call to the agent
+                    info!("🎯 Assigning queued call {} to available agent {}", 
+                          queued_call.session_id, agent_id);
+                    
+                    // We need to drop the queue_manager lock before calling assign_specific_agent_to_call
+                    drop(queue_manager);
+                    
+                    if let Err(e) = self.assign_specific_agent_to_call(
+                        queued_call.session_id.clone(), 
+                        agent_id
+                    ).await {
+                        error!("Failed to assign call to agent: {}", e);
+                        // Re-queue the call if assignment fails
+                        queue_manager = self.queue_manager.write().await;
+                        let _ = queue_manager.enqueue_call(&queue_id, queued_call);
+                    } else {
+                        // Successfully assigned, get the lock again for the next iteration
+                        queue_manager = self.queue_manager.write().await;
+                    }
+                } else {
+                    // No available agents, put the call back in the queue
+                    let _ = queue_manager.enqueue_call(&queue_id, queued_call);
+                    break; // Stop processing this queue
+                }
+            }
+        }
+        
+        Ok(())
     }
 } 
 

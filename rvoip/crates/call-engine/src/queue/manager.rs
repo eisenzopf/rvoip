@@ -39,6 +39,11 @@ impl QueueManager {
         }
     }
     
+    /// Get all queue IDs
+    pub fn get_queue_ids(&self) -> Vec<String> {
+        self.queues.keys().cloned().collect()
+    }
+    
     /// Create a new queue
     pub fn create_queue(&mut self, queue_id: String, name: String, max_size: usize) -> Result<()> {
         info!("📋 Creating queue: {} ({})", name, queue_id);

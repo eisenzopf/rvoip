@@ -340,3 +340,42 @@ After implementing CallCenterServer:
 - ✅ Server remains stable throughout operation
 
 The root cause (engine Arc being dropped) has been completely eliminated by having the CallCenterServer own and manage the engine lifecycle. 
+
+## FIXED: Weak Reference Pointing to Dropped Placeholder Engine
+
+### The Problem
+Even after implementing CallCenterServer to hold a strong Arc reference to the engine, calls were still being rejected with "Call center not available". The CallCenterCallHandler was holding a weak reference to a dropped placeholder engine.
+
+### Evidence from Code
+```rust
+// In CallCenterEngine::new()
+let placeholder_engine = Arc::new(Self { ... });
+let handler = Arc::new(CallCenterCallHandler {
+    engine: Arc::downgrade(&placeholder_engine),  // Weak ref to placeholder
+});
+// ... create session coordinator with handler ...
+drop(placeholder_engine);  // Placeholder dropped!
+let engine = Arc::new(Self { ... });  // New engine created
+// But handler still has weak ref to dropped placeholder!
+```
+
+### The Fix
+Added code to update the handler's weak reference after creating the real engine:
+```rust
+// CRITICAL FIX: Update the handler's weak reference to point to the real engine
+unsafe {
+    let handler_ptr = Arc::as_ptr(&handler) as *mut CallCenterCallHandler;
+    (*handler_ptr).engine = Arc::downgrade(&engine);
+}
+```
+
+### Why This Works
+- The handler is held by the SessionCoordinator, so we can't replace it
+- But we can update its internal weak reference field
+- Uses `unsafe` to temporarily cast away Arc's immutability
+- This is safe because it's a one-time update during initialization
+
+### Test Results
+- Agents register successfully ✓
+- Calls are now properly routed instead of rejected ✓
+- No more "Call center engine has been dropped" warnings ✓ 

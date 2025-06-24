@@ -35,6 +35,9 @@ pub struct CallCenterServer {
     
     /// Optional handle to the monitoring task
     monitor_handle: Option<JoinHandle<()>>,
+    
+    /// Optional handle to the queue processor task
+    queue_processor_handle: Option<JoinHandle<()>>,
 }
 
 impl CallCenterServer {
@@ -59,6 +62,7 @@ impl CallCenterServer {
             supervisor_api,
             config,
             monitor_handle: None,
+            queue_processor_handle: None,
         })
     }
     
@@ -87,6 +91,15 @@ impl CallCenterServer {
         
         self.monitor_handle = Some(handle);
         
+        // Start queue processor
+        let engine = self.engine.clone();
+        let queue_handle = tokio::spawn(async move {
+            Self::queue_processor_loop(engine).await;
+        });
+        
+        self.queue_processor_handle = Some(queue_handle);
+        info!("✅ Started queue processor for automatic call distribution");
+        
         Ok(())
     }
     
@@ -96,6 +109,12 @@ impl CallCenterServer {
         
         // Cancel monitoring task
         if let Some(handle) = self.monitor_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+        
+        // Cancel queue processor task
+        if let Some(handle) = self.queue_processor_handle.take() {
             handle.abort();
             let _ = handle.await;
         }
@@ -192,6 +211,22 @@ impl CallCenterServer {
             
             if available > 0 || busy > 0 {
                 info!("👥 Agents - Available: {}, Busy: {}", available, busy);
+            }
+        }
+    }
+    
+    /// Internal queue processor loop - assigns waiting calls to available agents
+    async fn queue_processor_loop(engine: Arc<CallCenterEngine>) {
+        info!("🔄 Starting queue processor for automatic call distribution");
+        
+        let mut interval = interval(Duration::from_millis(100)); // Check every 100ms
+        
+        loop {
+            interval.tick().await;
+            
+            // Process all queues
+            if let Err(e) = engine.process_all_queues().await {
+                error!("Error processing queues: {}", e);
             }
         }
     }
