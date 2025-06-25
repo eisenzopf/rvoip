@@ -24,6 +24,8 @@ pub struct CallInfo {
     pub created_at: DateTime<Utc>,
     pub queued_at: Option<DateTime<Utc>>,
     pub answered_at: Option<DateTime<Utc>>,
+    /// The SDP offer from the customer
+    pub customer_sdp: Option<String>,
 }
 
 /// Enhanced agent information for tracking

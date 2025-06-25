@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use dashmap::{DashMap, DashSet};
 use tokio::sync::{mpsc, RwLock, Mutex};
-use tracing::{info, error, warn};
+use tracing::{info, error, warn, debug};
 
 use rvoip_session_core::{
     SessionCoordinator, SessionManagerBuilder, SessionId, BridgeEvent, CallState,
@@ -230,126 +230,26 @@ impl CallCenterEngine {
     /// Update call state tracking
     pub async fn update_call_state(&self, session_id: &SessionId, new_state: &CallState) -> CallCenterResult<()> {
         if let Some(mut call_info) = self.active_calls.get_mut(session_id) {
-            info!("Updating call {} state to {:?}", session_id, new_state);
-            call_info.status = match new_state {
-                CallState::Initiating => CallStatus::Incoming,
-                CallState::Ringing => CallStatus::Ringing,
-                CallState::Active => CallStatus::Bridged,
-                CallState::Terminated => CallStatus::Ended,
-                CallState::Failed(_) => CallStatus::Ended,
-                // For any other states, keep the current status
-                _ => call_info.status.clone(),
-            };
+            match new_state {
+                CallState::Active => call_info.status = CallStatus::Bridged,
+                CallState::Terminated => call_info.status = CallStatus::Ended,
+                CallState::Failed(_) => call_info.status = CallStatus::Ended,
+                _ => {} // Keep existing status for other states
+            }
         }
         Ok(())
     }
     
     /// Route incoming call when it starts ringing
     pub async fn route_incoming_call(&self, session_id: &SessionId) -> CallCenterResult<()> {
-        info!("Routing incoming call {} to available agent", session_id);
-        
-        // Get call info
-        let call_info = self.active_calls.get(session_id)
-            .ok_or_else(|| CallCenterError::not_found(format!("Call {} not found", session_id)))?;
-        
-        // Create an IncomingCall structure for the routing engine
-        let incoming_call = IncomingCall {
-            id: session_id.clone(),
-            from: call_info.caller_id.clone(),
-            to: "support".to_string(), // Default destination
-            sdp: None,
-            headers: std::collections::HashMap::new(),
-            received_at: std::time::Instant::now(),
-        };
-        
-        // Analyze customer and make routing decision
-        let (customer_type, priority, required_skills) = self.analyze_customer_info(&incoming_call).await;
-        let routing_decision = self.make_routing_decision(
-            session_id,
-            &customer_type,
-            priority,
-            &required_skills
-        ).await?;
-        
-        // Execute the routing decision
-        match routing_decision {
-            RoutingDecision::DirectToAgent { agent_id, reason } => {
-                info!("📞 Direct routing to agent {}: {}", agent_id, reason);
-                self.assign_specific_agent_to_call(session_id.clone(), agent_id).await?;
-            }
-            RoutingDecision::Queue { queue_id, priority, reason } => {
-                info!("📋 Queueing call {} in queue {} with priority {} ({})", 
-                      session_id, queue_id, priority, reason);
-                
-                // Ensure queue exists
-                self.ensure_queue_exists(&queue_id).await?;
-                
-                // Create queued call entry
-                let queued_call = crate::queue::QueuedCall {
-                    session_id: session_id.clone(),
-                    caller_id: incoming_call.from,
-                    priority,
-                    queued_at: chrono::Utc::now(),
-                    estimated_wait_time: None,
-                    retry_count: 0,  // New calls start with 0 retries
-                };
-                
-                // Enqueue the call
-                let mut queue_manager = self.queue_manager.write().await;
-                queue_manager.enqueue_call(&queue_id, queued_call)?;
-                
-                // Update call status
-                drop(queue_manager);
-                if let Some(mut call_info) = self.active_calls.get_mut(session_id) {
-                    call_info.status = CallStatus::Queued;
-                    call_info.queue_id = Some(queue_id.clone());
-                }
-                
-                // Update routing stats
-                let mut stats = self.routing_stats.write().await;
-                stats.calls_queued += 1;
-            }
-            RoutingDecision::Overflow { target_queue, reason } => {
-                info!("📤 Overflow routing to queue {}: {}", target_queue, reason);
-                // Handle overflow (similar to queue)
-                self.ensure_queue_exists(&target_queue).await?;
-                
-                let queued_call = crate::queue::QueuedCall {
-                    session_id: session_id.clone(),
-                    caller_id: incoming_call.from,
-                    priority: 200, // Lower priority for overflow
-                    queued_at: chrono::Utc::now(),
-                    estimated_wait_time: None,
-                    retry_count: 0,  // New calls start with 0 retries
-                };
-                
-                let mut queue_manager = self.queue_manager.write().await;
-                queue_manager.enqueue_call(&target_queue, queued_call)?;
-                
-                // Update routing stats - no calls_overflowed field, increment calls_queued instead
-                let mut stats = self.routing_stats.write().await;
-                stats.calls_queued += 1;
-            }
-            RoutingDecision::Reject { reason } => {
-                warn!("❌ Rejecting incoming call {}: {}", session_id, reason);
-                // Update routing stats
-                let mut stats = self.routing_stats.write().await;
-                stats.calls_rejected += 1;
-            }
-            RoutingDecision::Conference { bridge_id: _ } => {
-                info!("🎤 Conference routing not yet implemented for call {}", session_id);
-                // TODO: Implement conference routing
-            }
-        }
-        
+        // This is handled in process_incoming_call
         Ok(())
     }
     
     /// Clean up resources when call terminates
     pub async fn cleanup_call(&self, session_id: &SessionId) -> CallCenterResult<()> {
-        info!("Cleaning up terminated call {}", session_id);
-        self.active_calls.remove(session_id);
-        Ok(())
+        // This is handled in handle_call_termination
+        self.handle_call_termination(session_id.clone()).await
     }
     
     /// Record quality metrics for a call
@@ -359,9 +259,8 @@ impl CallCenterEngine {
         mos_score: f32, 
         packet_loss: f32
     ) -> CallCenterResult<()> {
-        info!("Recording quality metrics for call {}: MOS={}, Loss={}%", 
-              session_id, mos_score, packet_loss);
-        // TODO: Store in database
+        // TODO: Store quality metrics in database
+        debug!("Recording quality metrics for {}: MOS={}, Loss={}%", session_id, mos_score, packet_loss);
         Ok(())
     }
     
@@ -372,9 +271,8 @@ impl CallCenterEngine {
         mos_score: f32, 
         alert_level: MediaQualityAlertLevel
     ) -> CallCenterResult<()> {
-        tracing::warn!("Poor quality alert for call {}: MOS={}, Level={:?}", 
-                      session_id, mos_score, alert_level);
-        // TODO: Send notification to supervisors
+        // TODO: Send alerts to supervisors
+        warn!("Poor quality alert for {}: MOS={}, Level={:?}", session_id, mos_score, alert_level);
         Ok(())
     }
     
@@ -384,8 +282,8 @@ impl CallCenterEngine {
         session_id: &SessionId, 
         digit: char
     ) -> CallCenterResult<()> {
-        info!("Processing DTMF '{}' for call {}", digit, session_id);
-        // TODO: Implement DTMF processing (IVR navigation, agent codes, etc.)
+        // TODO: Implement DTMF handling for IVR
+        info!("DTMF '{}' received for session {}", digit, session_id);
         Ok(())
     }
     
@@ -397,9 +295,8 @@ impl CallCenterEngine {
         active: bool, 
         codec: &str
     ) -> CallCenterResult<()> {
-        info!("Media flow update for call {}: {:?} {} ({})", 
-              session_id, direction, if active { "active" } else { "inactive" }, codec);
-        // TODO: Track media flow state
+        // TODO: Track media flow status
+        debug!("Media flow update for {}: {:?} {} ({})", session_id, direction, if active { "started" } else { "stopped" }, codec);
         Ok(())
     }
     
@@ -410,11 +307,11 @@ impl CallCenterEngine {
         category: WarningCategory, 
         message: &str
     ) -> CallCenterResult<()> {
+        // TODO: Log to monitoring system
         match session_id {
-            Some(id) => tracing::warn!("Warning for call {} ({:?}): {}", id, category, message),
-            None => tracing::warn!("General warning ({:?}): {}", category, message),
+            Some(id) => warn!("[{:?}] Warning for {}: {}", category, id, message),
+            None => warn!("[{:?}] General warning: {}", category, message),
         }
-        // TODO: Store in monitoring system
         Ok(())
     }
     

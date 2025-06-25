@@ -22,6 +22,14 @@ impl CallCenterEngine {
         
         info!("📞 Processing incoming call: {} from {}", session_id, call.from);
         
+        // Extract and log the SDP from the incoming call
+        if let Some(ref sdp) = call.sdp {
+            info!("📄 Incoming call has SDP offer ({} bytes)", sdp.len());
+            debug!("📄 Customer SDP content:\n{}", sdp);
+        } else {
+            warn!("⚠️ Incoming call has no SDP offer");
+        }
+        
         // Analyze customer information and determine routing requirements
         let (customer_type, priority, required_skills) = self.analyze_customer_info(&call).await;
         
@@ -41,6 +49,7 @@ impl CallCenterEngine {
             created_at: chrono::Utc::now(),
             queued_at: None,
             answered_at: None,
+            customer_sdp: call.sdp.clone(),  // Store the customer's SDP
         };
         
         // Store call info
@@ -66,25 +75,22 @@ impl CallCenterEngine {
                 let engine = self.session_coordinator.as_ref()
                     .ok_or_else(|| CallCenterError::orchestration("Session coordinator not initialized"))?
                     .clone();
+                
+                let self_clone = self.clone();
                 let session_id_clone = session_id.clone();
                 let agent_id_clone = agent_id.clone();
-                let self_clone = self.clone();
                 tokio::spawn(async move {
-                    // Wait briefly for the call to be accepted at SIP level
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     if let Err(e) = self_clone.assign_specific_agent_to_call(session_id_clone, agent_id_clone).await {
-                        error!("Failed to assign specific agent to call: {}", e);
+                        error!("Failed to assign agent: {}", e);
                     }
                 });
                 
-                // Update routing stats
-                {
-                    let mut stats = self.routing_stats.write().await;
-                    stats.calls_routed_directly += 1;
-                }
+                let routing_time = routing_start.elapsed().as_millis();
+                info!("✅ Direct-to-agent routing decision made in {}ms", routing_time);
                 
-                // Return Accept to send 200 OK and establish the customer's call
-                CallDecision::Accept(None)
+                // Accept the call immediately but without SDP (B2BUA behavior)
+                // We'll update the customer's media session with agent's SDP after agent answers
+                Ok(CallDecision::Accept(None))
             },
             
             RoutingDecision::Queue { queue_id, priority, reason } => {
@@ -129,7 +135,7 @@ impl CallCenterEngine {
                 self.monitor_queue_for_agents(queue_id.clone()).await;
                 
                 // Return Defer to send 180 Ringing, not Accept which sends 200 OK
-                CallDecision::Defer
+                Ok(CallDecision::Defer)
             },
             
             RoutingDecision::Overflow { target_queue, reason } => {
@@ -144,7 +150,7 @@ impl CallCenterEngine {
                 
                 // Process overflow decision (simplified)
                 // Return Defer, not Accept
-                CallDecision::Defer
+                Ok(CallDecision::Defer)
             },
             
             RoutingDecision::Reject { reason } => {
@@ -156,13 +162,13 @@ impl CallCenterEngine {
                     stats.calls_rejected += 1;
                 }
                 
-                CallDecision::Reject(reason)
+                Ok(CallDecision::Reject(reason))
             },
             
             RoutingDecision::Conference { bridge_id } => {
                 info!("🎤 Routing call {} to conference {}", session_id, bridge_id);
                 // TODO: Implement conference routing
-                CallDecision::Accept(None)
+                Ok(CallDecision::Accept(None))
             }
         };
         
@@ -174,7 +180,7 @@ impl CallCenterEngine {
         }
         
         info!("✅ Call {} routing completed in {}ms", session_id, routing_time);
-        Ok(call_decision)
+        call_decision
     }
     
     /// Assign a specific agent to an incoming call
@@ -216,25 +222,34 @@ impl CallCenterEngine {
             }
             
             // Step 1: Get the customer's media info to pass SDP to the agent
-            let customer_media_info = match coordinator.get_media_info(&session_id).await {
-                Ok(Some(media_info)) => {
-                    info!("📄 Retrieved customer media info for forwarding to agent");
-                    Some(media_info)
-                }
-                Ok(None) => {
-                    warn!("⚠️ No media info found for customer session");
-                    None
-                }
-                Err(e) => {
-                    warn!("⚠️ Failed to get customer media info: {}", e);
+            let customer_sdp = {
+                // First try to get SDP from the call info (stored during incoming call processing)
+                if let Some(call_info) = self.active_calls.get(&session_id) {
+                    if let Some(ref sdp) = call_info.customer_sdp {
+                        info!("📄 Retrieved customer SDP from call info ({} bytes)", sdp.len());
+                        Some(sdp.clone())
+                    } else {
+                        // Fallback to media info if not in call info
+                        match coordinator.get_media_info(&session_id).await {
+                            Ok(Some(media_info)) => {
+                                info!("📄 Retrieved customer media info from session");
+                                media_info.remote_sdp.or(media_info.local_sdp)
+                            }
+                            Ok(None) => {
+                                warn!("⚠️ No media info found for customer session");
+                                None
+                            }
+                            Err(e) => {
+                                warn!("⚠️ Failed to get customer media info: {}", e);
+                                None
+                            }
+                        }
+                    }
+                } else {
+                    warn!("⚠️ No call info found for session {}", session_id);
                     None
                 }
             };
-            
-            // Extract SDP from media info - prioritize remote_sdp (customer's offer)
-            let customer_sdp = customer_media_info.and_then(|info| {
-                info.remote_sdp.or(info.local_sdp)
-            });
             
             if customer_sdp.is_none() {
                 warn!("⚠️ No SDP available from customer session - agent will not receive media info");
@@ -290,6 +305,90 @@ impl CallCenterEngine {
             match coordinator.wait_for_answer(&agent_session_id, std::time::Duration::from_secs(30)).await {
                 Ok(_) => {
                     info!("✅ Agent {} answered the call", agent_id);
+                    
+                    // Get agent's SDP from their 200 OK response
+                    let agent_sdp = match coordinator.get_media_info(&agent_session_id).await {
+                        Ok(Some(media_info)) => {
+                            info!("📄 Retrieved agent's SDP answer");
+                            media_info.remote_sdp.or(media_info.local_sdp)
+                        }
+                        Ok(None) => {
+                            warn!("⚠️ No media info from agent");
+                            None
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to get agent media info: {}", e);
+                            None
+                        }
+                    };
+                    
+                    info!("📞 B2BUA: Accepting customer call {} with agent's SDP", session_id);
+                    
+                    // CRITICAL: Actually accept the customer's call with agent's SDP
+                    // This sends 200 OK to the customer, completing the B2BUA flow
+                    match coordinator.dialog_manager.accept_incoming_call(&session_id, agent_sdp.clone()).await {
+                        Ok(_) => {
+                            info!("✅ Successfully accepted customer call {} with agent's SDP", session_id);
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to accept customer call {}: {}", session_id, e);
+                            // Continue anyway - try to bridge even if accept failed
+                        }
+                    }
+                    
+                    // Update the customer's media session with the agent's SDP answer
+                    // This completes the B2BUA flow - customer gets media info to connect to agent
+                    if let Some(ref agent_sdp_str) = agent_sdp {
+                        match coordinator.media_coordinator.process_sdp_answer(&session_id, agent_sdp_str).await {
+                            Ok(_) => {
+                                info!("✅ Customer's media session updated with agent's SDP");
+                            }
+                            Err(e) => {
+                                error!("❌ Failed to update customer's media session: {}", e);
+                                // Continue anyway - try to bridge even if media update failed
+                            }
+                        }
+                    } else {
+                        warn!("⚠️ No agent SDP available to update customer's media session");
+                    }
+                    
+                    // Now bridge the two sessions for media flow
+                    info!("🌉 Bridging customer {} with agent {} (session {:?})", 
+                          session_id, agent_id, agent_session_id);
+                    
+                    let bridge_start = std::time::Instant::now();
+                    
+                    match coordinator.bridge_sessions(&session_id, &agent_session_id).await {
+                        Ok(bridge_id) => {
+                            let bridge_time = bridge_start.elapsed().as_millis();
+                            info!("✅ Successfully bridged customer {} with agent {} (bridge: {}) in {}ms", 
+                                  session_id, agent_id, bridge_id, bridge_time);
+                            
+                            // Update call info
+                            if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+                                call_info.agent_id = Some(agent_id.clone());
+                                call_info.bridge_id = Some(bridge_id);
+                                call_info.status = CallStatus::Bridged;
+                                call_info.answered_at = Some(chrono::Utc::now());
+                            }
+                            
+                            // Store updated agent info
+                            self.available_agents.insert(agent_id, updated_agent);
+                        },
+                        Err(e) => {
+                            error!("Failed to bridge sessions: {}", e);
+                            
+                            // Hang up the agent call
+                            let _ = coordinator.terminate_session(&agent_session_id).await;
+                            
+                            // Return agent to available pool
+                            updated_agent.status = AgentStatus::Available;
+                            updated_agent.current_calls = updated_agent.current_calls.saturating_sub(1);
+                            self.available_agents.insert(agent_id, updated_agent);
+                            
+                            return Err(CallCenterError::orchestration(&format!("Bridge failed: {}", e)));
+                        }
+                    }
                 }
                 Err(e) => {
                     error!("❌ Agent {} failed to answer: {}", agent_id, e);
@@ -332,44 +431,6 @@ impl CallCenterEngine {
                     }
                     
                     return Err(CallCenterError::orchestration(&format!("Agent failed to answer: {}", e)));
-                }
-            }
-            
-            // Step 4: Bridge the customer and agent calls
-            info!("🌉 Bridging customer {} with agent {} (session {:?})", 
-                  session_id, agent_id, agent_session_id);
-            
-            let bridge_start = std::time::Instant::now();
-            
-            match coordinator.bridge_sessions(&session_id, &agent_session_id).await {
-                Ok(bridge_id) => {
-                    let bridge_time = bridge_start.elapsed().as_millis();
-                    info!("✅ Successfully bridged customer {} with agent {} (bridge: {}) in {}ms", 
-                          session_id, agent_id, bridge_id, bridge_time);
-                    
-                    // Update call info
-                    if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
-                        call_info.agent_id = Some(agent_id.clone());
-                        call_info.bridge_id = Some(bridge_id);
-                        call_info.status = CallStatus::Bridged;
-                        call_info.answered_at = Some(chrono::Utc::now());
-                    }
-                    
-                    // Store updated agent info
-                    self.available_agents.insert(agent_id, updated_agent);
-                },
-                Err(e) => {
-                    error!("Failed to bridge sessions: {}", e);
-                    
-                    // Hang up the agent call
-                    let _ = coordinator.terminate_session(&agent_session_id).await;
-                    
-                    // Return agent to available pool
-                    updated_agent.status = AgentStatus::Available;
-                    updated_agent.current_calls = updated_agent.current_calls.saturating_sub(1);
-                    self.available_agents.insert(agent_id, updated_agent);
-                    
-                    return Err(CallCenterError::orchestration(&format!("Bridge failed: {}", e)));
                 }
             }
         }

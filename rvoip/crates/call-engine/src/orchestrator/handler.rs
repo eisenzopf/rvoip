@@ -13,7 +13,8 @@ use rvoip_session_core::{
 use std::time::Instant;
 
 use super::core::CallCenterEngine;
-use super::types::AgentInfo;
+use super::types::{AgentInfo, CallStatus};
+use crate::agent::AgentStatus;
 use crate::error::CallCenterError;
 
 /// CallHandler implementation for the call center
@@ -44,10 +45,29 @@ impl CallHandler for CallCenterCallHandler {
     }
     
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
-        info!("CallCenterCallHandler: Call {} ended: {}", call.id, reason);
+        info!("📞 Call {} ended: {}", call.id(), reason);
         
         if let Some(engine) = self.engine.upgrade() {
-            if let Err(e) = engine.handle_call_termination(call.id).await {
+            // Handle B2BUA BYE forwarding - check if this is part of a B2BUA dialog
+            if let Some((_, related_session_id)) = engine.dialog_mappings.remove(&call.id().0) {
+                info!("📞 Forwarding BYE to related B2BUA session: {}", related_session_id);
+                
+                // Terminate the related dialog
+                if let Some(coordinator) = &engine.session_coordinator {
+                    let related_sid = SessionId(related_session_id.clone());
+                    match coordinator.terminate_session(&related_sid).await {
+                        Ok(_) => {
+                            info!("✅ Successfully terminated related B2BUA session: {}", related_session_id);
+                        }
+                        Err(e) => {
+                            warn!("Failed to terminate related session {}: {}", related_session_id, e);
+                        }
+                    }
+                }
+            }
+            
+            // Clean up the call info
+            if let Err(e) = engine.handle_call_termination(call.id().clone()).await {
                 error!("Failed to handle call termination: {}", e);
             }
         }
@@ -73,26 +93,17 @@ impl CallHandler for CallCenterCallHandler {
         new_state: &CallState, 
         reason: Option<&str>
     ) {
-        info!("CallCenterCallHandler: Call {} state changed from {:?} to {:?} (reason: {:?})", 
+        info!("📞 Call {} state changed from {:?} to {:?} (reason: {:?})", 
               session_id, old_state, new_state, reason);
         
         if let Some(engine) = self.engine.upgrade() {
-            // Update internal tracking
-            if let Err(e) = engine.update_call_state(session_id, new_state).await {
-                error!("Failed to update call state: {}", e);
-            }
-            
-            // Route calls when ringing
-            if matches!(new_state, CallState::Ringing) {
-                if let Err(e) = engine.route_incoming_call(session_id).await {
-                    error!("Failed to route ringing call: {}", e);
-                }
-            }
-            
-            // Clean up on termination
-            if matches!(new_state, CallState::Terminated) {
-                if let Err(e) = engine.cleanup_call(session_id).await {
-                    error!("Failed to cleanup terminated call: {}", e);
+            // Update call status based on state change
+            if let Some(mut call_info) = engine.active_calls.get_mut(session_id) {
+                match new_state {
+                    CallState::Active => call_info.status = CallStatus::Bridged,
+                    CallState::Terminated => call_info.status = CallStatus::Ended,
+                    CallState::Failed(_) => call_info.status = CallStatus::Ended,
+                    _ => {} // Keep existing status for other states
                 }
             }
         }

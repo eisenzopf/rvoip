@@ -83,8 +83,9 @@ impl ClientEventHandler for AutoAcceptCallHandler {
         info!("📞 Incoming call from {} to {} (call_id: {})", 
             call_info.caller_uri, call_info.callee_uri, call_info.call_id);
         
-        // Phase 0.8 - Always accept immediately without polling
-        info!("Accepting call {} immediately", call_info.call_id);
+        // Phase 0.9 - Accept immediately
+        // The session coordinator will handle SDP negotiation automatically
+        info!("✅ Accepting call {} immediately", call_info.call_id);
         CallAction::Accept
     }
     
