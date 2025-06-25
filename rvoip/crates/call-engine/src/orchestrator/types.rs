@@ -32,11 +32,13 @@ pub struct AgentInfo {
     pub agent_id: AgentId,
     pub session_id: SessionId,
     pub status: AgentStatus,
+    pub sip_uri: String,         // Agent's SIP URI (e.g., sip:alice@domain.com)
+    pub contact_uri: String,     // Agent's contact address from REGISTER
     pub skills: Vec<String>,
     pub current_calls: usize,
     pub max_calls: usize,
     pub last_call_end: Option<DateTime<Utc>>,
-    pub performance_score: f64, // 0.0-1.0 for routing decisions
+    pub performance_score: f64,  // 0.0-1.0 for routing decisions
 }
 
 /// Customer type for priority routing

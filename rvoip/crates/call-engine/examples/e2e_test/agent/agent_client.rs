@@ -37,7 +37,7 @@ struct Args {
     port: u16,
     
     /// Domain name
-    #[arg(short, long, default_value = "callcenter.example.com")]
+    #[arg(short, long, default_value = "127.0.0.1")]
     domain: String,
     
     /// Call duration in seconds (0 for manual hangup)

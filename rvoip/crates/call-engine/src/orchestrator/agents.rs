@@ -35,6 +35,8 @@ impl CallCenterEngine {
             agent_id: agent.id.clone(),
             session_id: session_id.clone(),
             status: AgentStatus::Available,
+            sip_uri: agent.sip_uri.clone(),          // Store the agent's SIP URI
+            contact_uri: agent.sip_uri.clone(),      // For manual registration, use sip_uri as contact
             skills: agent.skills.clone(),
             current_calls: 0,
             max_calls: agent.max_concurrent_calls as usize,

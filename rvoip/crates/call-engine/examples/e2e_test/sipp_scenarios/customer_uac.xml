@@ -7,10 +7,10 @@
   <!-- Send INVITE to call center support line -->
   <send retrans="500">
     <![CDATA[
-      INVITE sip:support@callcenter.example.com:[remote_port] SIP/2.0
+      INVITE sip:support@127.0.0.1:[remote_port] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
       From: "Test Customer" <sip:customer@[local_ip]:[local_port]>;tag=[call_number]
-      To: <sip:support@callcenter.example.com:[remote_port]>
+      To: <sip:support@127.0.0.1:[remote_port]>
       Call-ID: [call_id]
       CSeq: 1 INVITE
       Contact: <sip:customer@[local_ip]:[local_port]>

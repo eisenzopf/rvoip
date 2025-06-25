@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use tracing::{info, debug, warn, error};
-use rvoip_session_core::{IncomingCall, CallDecision, SessionId};
+use rvoip_session_core::{IncomingCall, CallDecision, SessionId, SessionControl};
 
 use crate::agent::{AgentId, AgentStatus};
 use crate::error::{CallCenterError, Result as CallCenterResult};
@@ -76,6 +76,8 @@ impl CallCenterEngine {
                 let agent_id_clone = agent_id.clone();
                 let self_clone = self.clone();
                 tokio::spawn(async move {
+                    // Wait briefly for the call to be accepted at SIP level
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     if let Err(e) = self_clone.assign_specific_agent_to_call(session_id_clone, agent_id_clone).await {
                         error!("Failed to assign specific agent to call: {}", e);
                     }
@@ -87,8 +89,8 @@ impl CallCenterEngine {
                     stats.calls_routed_directly += 1;
                 }
                 
-                // Return Progress to send 180 Ringing, not Accept which sends 200 OK
-                CallDecision::Progress("Call is being routed to an agent".to_string())
+                // Return Accept to send 200 OK and establish the customer's call
+                CallDecision::Accept(None)
             },
             
             RoutingDecision::Queue { queue_id, priority, reason } => {
@@ -134,8 +136,8 @@ impl CallCenterEngine {
                 // Start monitoring for agent availability
                 self.monitor_queue_for_agents(queue_id.clone()).await;
                 
-                // Return Progress to send 180 Ringing, not Accept which sends 200 OK
-                CallDecision::Progress("Your call is in queue and will be answered by the next available agent".to_string())
+                // Return Defer to send 180 Ringing, not Accept which sends 200 OK
+                CallDecision::Defer
             },
             
             RoutingDecision::Overflow { target_queue, reason } => {
@@ -149,8 +151,8 @@ impl CallCenterEngine {
                 };
                 
                 // Process overflow decision (simplified)
-                // Return Progress, not Accept
-                CallDecision::Progress("Your call is being redirected to our overflow queue".to_string())
+                // Return Defer, not Accept
+                CallDecision::Defer
             },
             
             RoutingDecision::Reject { reason } => {
@@ -197,27 +199,55 @@ impl CallCenterEngine {
         };
         
         if let Some(agent_info) = agent_info {
-            // First, accept the customer's call (this sends 200 OK)
             let coordinator = self.session_coordinator.as_ref().unwrap();
             
-            // Get the incoming call info to accept it
-            match coordinator.get_session(&session_id).await {
-                Ok(Some(session)) => {
-                    info!("📞 Accepting customer call {} before bridging", session_id);
-                    // The session is already established, we can proceed with bridging
-                }
-                Ok(None) => {
-                    // Session might be in a provisional state, we need to accept it
-                    // This is handled by dialog-core when we bridge
-                    info!("📞 Session {} is in provisional state, will be accepted during bridge", session_id);
+            // The customer call should already be accepted at this point (200 OK sent)
+            // Now we just need to call the agent and bridge them
+            
+            // Step 1: Create an outgoing call to the agent
+            let agent_uri = agent_info.contact_uri.clone(); // Use the contact URI from REGISTER
+            info!("📞 Creating outgoing call to agent {} at {}", agent_id, agent_uri);
+            
+            // Use the configured domain for the From URI
+            let from_uri = format!("sip:call-center@{}", self.config.general.domain);
+            
+            let agent_call_session = match coordinator.create_outgoing_call(
+                &agent_uri,
+                &from_uri,
+                None, // No specific SDP
+            ).await {
+                Ok(call_session) => {
+                    info!("✅ Created outgoing call {:?} to agent {}", call_session.id, agent_id);
+                    call_session
                 }
                 Err(e) => {
-                    error!("Failed to get session {}: {}", session_id, e);
+                    error!("Failed to create outgoing call to agent {}: {}", agent_id, e);
+                    // TODO: Hang up the customer call or re-queue it
+                    let mut restored_agent = agent_info;
+                    restored_agent.status = AgentStatus::Available;
+                    restored_agent.current_calls = restored_agent.current_calls.saturating_sub(1);
+                    self.available_agents.insert(agent_id, restored_agent);
+                    return Err(CallCenterError::orchestration(&format!("Failed to call agent: {}", e)));
                 }
-            }
+            };
             
-            // **REAL**: Bridge customer and agent using session-core API
-            match coordinator.bridge_sessions(&session_id, &agent_info.session_id).await {
+            // Get the session ID from the CallSession
+            let agent_session_id = agent_call_session.id.clone();
+            
+            // Update agent info with the new session ID
+            let mut updated_agent = agent_info;
+            updated_agent.session_id = agent_session_id.clone();
+            
+            // Step 3: Wait a moment for the agent call to establish
+            // In a real system, we'd wait for the agent to answer (200 OK from agent)
+            // For now, we'll proceed immediately to bridging
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            
+            // Step 4: Bridge the customer and agent calls
+            info!("🌉 Bridging customer {} with agent {} (session {:?})", 
+                  session_id, agent_id, agent_session_id);
+            
+            match coordinator.bridge_sessions(&session_id, &agent_session_id).await {
                 Ok(bridge_id) => {
                     info!("✅ Successfully bridged customer {} with agent {} (bridge: {})", 
                           session_id, agent_id, bridge_id);
@@ -233,17 +263,19 @@ impl CallCenterEngine {
                         }
                     }
                     
-                    // Update agent status (keep as busy, increment call count)
-                    self.available_agents.insert(agent_id, agent_info);
+                    // Store updated agent info
+                    self.available_agents.insert(agent_id, updated_agent);
                 },
                 Err(e) => {
                     error!("Failed to bridge sessions: {}", e);
                     
-                    // Return agent to available pool with original status
-                    let mut restored_agent = agent_info;
-                    restored_agent.status = AgentStatus::Available;
-                    restored_agent.current_calls = restored_agent.current_calls.saturating_sub(1);
-                    self.available_agents.insert(agent_id, restored_agent);
+                    // Hang up the agent call
+                    let _ = coordinator.terminate_session(&agent_session_id).await;
+                    
+                    // Return agent to available pool
+                    updated_agent.status = AgentStatus::Available;
+                    updated_agent.current_calls = updated_agent.current_calls.saturating_sub(1);
+                    self.available_agents.insert(agent_id, updated_agent);
                     
                     return Err(CallCenterError::orchestration(&format!("Bridge failed: {}", e)));
                 }

@@ -37,7 +37,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Update the SIP bind address
     config.general.local_signaling_addr = "0.0.0.0:5060".parse()
         .map_err(|e| format!("Failed to parse address: {}", e))?;
-    config.general.domain = "callcenter.example.com".to_string();
+    // Use IP address for test environment (no DNS resolution needed)
+    config.general.domain = "127.0.0.1".to_string();
     config.agents.default_max_concurrent_calls = 1;
 
     // Step 3: Create the call center server using builder

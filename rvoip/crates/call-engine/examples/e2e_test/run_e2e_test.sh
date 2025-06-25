@@ -101,6 +101,15 @@ main() {
     echo -e "${GREEN}Call Center E2E Test Runner${NC}"
     echo -e "${GREEN}================================${NC}\n"
     
+    # Detect OS and set loopback interface name
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        LOOPBACK_IF="lo0"
+        echo "Detected macOS, using loopback interface: $LOOPBACK_IF"
+    else
+        LOOPBACK_IF="lo"
+        echo "Using loopback interface: $LOOPBACK_IF"
+    fi
+    
     # Check prerequisites
     echo "Checking prerequisites..."
     check_command cargo
@@ -121,7 +130,7 @@ main() {
     
     # Start packet capture
     echo -e "\n${YELLOW}Starting packet capture...${NC}"
-    sudo tcpdump -i lo -w "$PCAP_FILE" \
+    sudo tcpdump -i $LOOPBACK_IF -w "$PCAP_FILE" \
         'port 5060 or portrange 5070-5090 or portrange 10000-20000' \
         -s 0 &
     TCPDUMP_PID=$!
@@ -182,17 +191,13 @@ main() {
     fi
     
     # Generate test audio PCAP if not exists
-    if [ ! -f "$SIPP_DIR/pcap/g711a.pcap" ]; then
+    if [ ! -f "$PCAP_DIR/g711a.pcap" ]; then
         echo -e "\n${YELLOW}Creating test audio PCAP...${NC}"
-        mkdir -p "$SIPP_DIR/pcap"
-        # Create a simple script to generate test tone
-        cat > "$SIPP_DIR/pcap/generate_audio.py" << 'EOF'
-#!/usr/bin/env python3
-# This would generate a G.711 audio PCAP file
-# For now, we'll skip this as it requires complex audio generation
-print("Audio PCAP generation placeholder")
-EOF
-        echo -e "${YELLOW}Note: Using SIPp without audio PCAP for now${NC}"
+        echo -e "${RED}Warning: No g711a.pcap found in $PCAP_DIR${NC}"
+        echo -e "${YELLOW}Running test without audio (signaling only)${NC}"
+    else
+        echo -e "\n${GREEN}Found audio PCAP file: $PCAP_DIR/g711a.pcap${NC}"
+        echo -e "${GREEN}Test will include G.711 audio${NC}"
     fi
     
     # Run SIPp test calls

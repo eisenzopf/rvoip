@@ -322,6 +322,8 @@ impl CallCenterEngine {
                                 agent_id: agent_id.clone(),
                                 session_id: SessionId::new(), // TODO: Get proper session ID from registration
                                 status: crate::agent::AgentStatus::Available,
+                                sip_uri: agent.sip_uri.clone(),  // Store the agent's SIP URI
+                                contact_uri: contact_uri.clone(), // Store the contact URI from REGISTER
                                 skills,
                                 current_calls: 0,
                                 max_calls: agent.max_concurrent_calls as usize,

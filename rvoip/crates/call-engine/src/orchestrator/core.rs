@@ -7,11 +7,12 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use dashmap::DashMap;
 use tokio::sync::{mpsc, RwLock, Mutex};
-use tracing::info;
+use tracing::{info, error, warn};
 
 use rvoip_session_core::{
     SessionCoordinator, SessionManagerBuilder, SessionId, BridgeEvent, CallState,
-    MediaQualityAlertLevel, MediaFlowDirection, WarningCategory
+    MediaQualityAlertLevel, MediaFlowDirection, WarningCategory, IncomingCall,
+    SessionControl
 };
 use rvoip_session_core::prelude::SessionEvent;
 
@@ -22,7 +23,7 @@ use crate::agent::{Agent, AgentId, AgentRegistry, AgentStatus, SipRegistrar};
 use crate::queue::{CallQueue, QueueManager};
 use crate::routing::RoutingEngine;
 
-use super::types::{CallInfo, AgentInfo, RoutingStats, OrchestratorStats, CallStatus};
+use super::types::{CallInfo, AgentInfo, RoutingStats, OrchestratorStats, CallStatus, RoutingDecision};
 use super::handler::CallCenterCallHandler;
 
 /// Call center orchestration engine
@@ -246,9 +247,11 @@ impl CallCenterEngine {
         // Create an IncomingCall structure for the routing engine
         let incoming_call = IncomingCall {
             id: session_id.clone(),
-            from: call_info.customer_id.clone(),
+            from: call_info.caller_id.clone(),
             to: "support".to_string(), // Default destination
-            display_name: None,
+            sdp: None,
+            headers: std::collections::HashMap::new(),
+            received_at: std::time::Instant::now(),
         };
         
         drop(calls); // Release the lock
@@ -264,11 +267,11 @@ impl CallCenterEngine {
         
         // Execute the routing decision
         match routing_decision {
-            crate::routing::RoutingDecision::DirectToAgent { agent_id, reason } => {
+            RoutingDecision::DirectToAgent { agent_id, reason } => {
                 info!("📞 Direct routing to agent {}: {}", agent_id, reason);
                 self.assign_specific_agent_to_call(session_id.clone(), agent_id).await?;
             }
-            crate::routing::RoutingDecision::Queue { queue_id, priority, reason } => {
+            RoutingDecision::Queue { queue_id, priority, reason } => {
                 info!("📋 Queueing call {} in queue {} with priority {} ({})", 
                       session_id, queue_id, priority, reason);
                 
@@ -300,7 +303,7 @@ impl CallCenterEngine {
                 let mut stats = self.routing_stats.write().await;
                 stats.calls_queued += 1;
             }
-            crate::routing::RoutingDecision::Overflow { target_queue, reason } => {
+            RoutingDecision::Overflow { target_queue, reason } => {
                 info!("📤 Overflow routing to queue {}: {}", target_queue, reason);
                 // Handle overflow (similar to queue)
                 self.ensure_queue_exists(&target_queue).await?;
@@ -316,8 +319,19 @@ impl CallCenterEngine {
                 let mut queue_manager = self.queue_manager.write().await;
                 queue_manager.enqueue_call(&target_queue, queued_call)?;
                 
+                // Update routing stats - no calls_overflowed field, increment calls_queued instead
                 let mut stats = self.routing_stats.write().await;
-                stats.calls_overflowed += 1;
+                stats.calls_queued += 1;
+            }
+            RoutingDecision::Reject { reason } => {
+                warn!("❌ Rejecting incoming call {}: {}", session_id, reason);
+                // Update routing stats
+                let mut stats = self.routing_stats.write().await;
+                stats.calls_rejected += 1;
+            }
+            RoutingDecision::Conference { bridge_id: _ } => {
+                info!("🎤 Conference routing not yet implemented for call {}", session_id);
+                // TODO: Implement conference routing
             }
         }
         
