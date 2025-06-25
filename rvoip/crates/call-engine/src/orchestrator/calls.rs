@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use tracing::{info, debug, warn, error};
-use rvoip_session_core::{IncomingCall, CallDecision, SessionId, SessionControl};
+use rvoip_session_core::{IncomingCall, CallDecision, SessionId, SessionControl, CallState};
 
 use crate::agent::{AgentId, AgentStatus};
 use crate::error::{CallCenterError, Result as CallCenterResult};
@@ -196,17 +196,30 @@ impl CallCenterEngine {
             // The customer call should already be accepted at this point (200 OK sent)
             // Now we just need to call the agent and bridge them
             
-            // Step 1: Get the customer's SDP to pass to the agent
-            let customer_sdp = match coordinator.get_media_info(&session_id).await {
-                Ok(Some(media_info)) => {
-                    // Use remote_sdp which is the customer's offer
-                    if let Some(sdp) = media_info.remote_sdp {
-                        info!("📄 Retrieved customer SDP for forwarding to agent");
-                        Some(sdp)
-                    } else {
-                        warn!("⚠️ No remote SDP found for customer session");
-                        None
+            // Verify customer session is ready
+            match coordinator.find_session(&session_id).await {
+                Ok(Some(customer_session)) => {
+                    info!("📞 Customer session {} is in state: {:?}", session_id, customer_session.state);
+                    // Only proceed if customer call is in a suitable state
+                    match customer_session.state {
+                        CallState::Active | CallState::Ringing => {
+                            // Good to proceed
+                        }
+                        _ => {
+                            warn!("⚠️ Customer session is in unexpected state: {:?}", customer_session.state);
+                        }
                     }
+                }
+                _ => {
+                    warn!("⚠️ Could not find customer session {}", session_id);
+                }
+            }
+            
+            // Step 1: Get the customer's media info to pass SDP to the agent
+            let customer_media_info = match coordinator.get_media_info(&session_id).await {
+                Ok(Some(media_info)) => {
+                    info!("📄 Retrieved customer media info for forwarding to agent");
+                    Some(media_info)
                 }
                 Ok(None) => {
                     warn!("⚠️ No media info found for customer session");
@@ -218,9 +231,22 @@ impl CallCenterEngine {
                 }
             };
             
+            // Extract SDP from media info - prioritize remote_sdp (customer's offer)
+            let customer_sdp = customer_media_info.and_then(|info| {
+                info.remote_sdp.or(info.local_sdp)
+            });
+            
+            if customer_sdp.is_none() {
+                warn!("⚠️ No SDP available from customer session - agent will not receive media info");
+            } else {
+                info!("📄 Customer SDP length: {} bytes", customer_sdp.as_ref().unwrap().len());
+                debug!("📄 Customer SDP content:\n{}", customer_sdp.as_ref().unwrap());
+            }
+            
             // Step 2: Create an outgoing call to the agent with customer's SDP
             let agent_contact_uri = agent_info.contact_uri.clone(); // Use the contact URI from REGISTER
-            info!("📞 Creating outgoing call to agent {} at {}", agent_id, agent_contact_uri);
+            info!("📞 Creating outgoing call to agent {} at {} with SDP: {}", 
+                  agent_id, agent_contact_uri, if customer_sdp.is_some() { "yes" } else { "no" });
             
             // Use the configured domain for the call center's From URI
             let call_center_uri = format!("sip:call-center@{}", self.config.general.domain);
@@ -232,6 +258,12 @@ impl CallCenterEngine {
             ).await {
                 Ok(call_session) => {
                     info!("✅ Created outgoing call {:?} to agent {}", call_session.id, agent_id);
+                    
+                    // Track dialog relationship for B2BUA (customer → agent)
+                    self.dialog_mappings.insert(session_id.0.clone(), call_session.id.0.clone());
+                    self.dialog_mappings.insert(call_session.id.0.clone(), session_id.0.clone());
+                    info!("📋 Tracked dialog mapping: {} ↔ {}", session_id, call_session.id);
+                    
                     call_session
                 }
                 Err(e) => {
@@ -357,6 +389,22 @@ impl CallCenterEngine {
     /// Handle call termination cleanup with agent status management
     pub(super) async fn handle_call_termination(&self, session_id: SessionId) -> CallCenterResult<()> {
         info!("🛑 Handling call termination: {}", session_id);
+        
+        // Check if this is part of a B2BUA dialog and terminate the related leg
+        if let Some((_, related_dialog_id)) = self.dialog_mappings.remove(&session_id.0) {
+            info!("📞 Terminating related dialog {} for B2BUA call", related_dialog_id);
+            
+            // Terminate the related dialog
+            if let Some(coordinator) = &self.session_coordinator {
+                let related_session_id = SessionId(related_dialog_id.clone());
+                if let Err(e) = coordinator.terminate_session(&related_session_id).await {
+                    warn!("Failed to terminate related dialog {}: {}", related_dialog_id, e);
+                }
+            }
+            
+            // Also remove the reverse mapping
+            self.dialog_mappings.remove(&related_dialog_id);
+        }
         
         // Get call info and clean up
         let call_info = self.active_calls.remove(&session_id).map(|(_, v)| v);
