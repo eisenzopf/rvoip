@@ -296,6 +296,177 @@ A proper implementation would extract the port from the Via header in the SIP me
 **Estimated Time**: 2-3 days
 **Priority**: CRITICAL - Without this fix, no calls can be completed
 
+### Phase 0.8: Fix Queue Management & Agent Response Issues 🔧 IN PROGRESS
+
+**Critical Issues Found**:
+1. Agent client uses unnecessary polling instead of events
+2. Queue size grows but doesn't decrease when calls are assigned
+3. Continuous queue thrashing with enqueue/dequeue messages
+
+#### Phase 1: Fix Agent Client - Remove Polling 🎯
+**Priority: HIGH** - This will eliminate timing issues
+
+- [x] Update `on_incoming_call` to return `CallAction::Accept` immediately
+- [x] Remove the `handle_incoming_calls` polling function entirely
+- [x] Keep audio transmission start in `on_call_state_changed` event handler
+- [x] Remove 100ms polling delay to prevent timeouts
+
+**Benefits**: Eliminates polling delay, reduces timeouts, simplifies code
+
+#### Phase 2: Fix Queue Management 🔧
+**Priority: CRITICAL** - Core functionality issue
+
+##### Queue Removal on Assignment
+- [x] Ensure call is removed from queue BEFORE attempting agent assignment
+- [x] Add `mark_as_assigned` method to queue manager
+- [x] Confirm removal on success, restore on failure
+
+##### Queue Monitor Improvements
+- [x] Only start monitor when queue has items
+- [x] Stop monitor when queue is empty
+- [x] Add exponential backoff for empty queue checks (2s active, 10s empty)
+- [x] Prevent duplicate monitors for same queue
+
+##### Re-queuing Logic Fixes
+- [x] Check if call is still active before re-queuing
+- [x] Add duplicate detection to prevent same call in queue multiple times
+- [x] Clear queue entries for terminated calls
+- [x] Add queue entry TTL (5 minutes max)
+
+#### Phase 3: Add Queue Debugging & Metrics 📊
+**Priority: MEDIUM** - Visibility into issues
+
+- [ ] Add queue state logging after each operation
+- [ ] Add queue metrics:
+  - [ ] Total enqueued count
+  - [ ] Total dequeued successfully count
+  - [ ] Total failed assignments count
+  - [ ] Current queue depth
+  - [ ] Average wait time
+- [ ] Add call state tracking to detect anomalies
+- [ ] Add queue stats endpoint
+
+#### Phase 4: Timeout & Timing Adjustments ⏱️
+**Priority: LOW** - Fine-tuning
+
+- [ ] Increase agent answer timeout from 30s to 45-60s (make configurable)
+- [ ] Add progressive timeouts (30s → 20s → 10s)
+- [ ] Make timeouts configurable via environment or config
+
+**Estimated Time**: 3-4 hours total
+**Priority**: CRITICAL - These issues prevent successful call completion
+
+### Phase 0.9: Fix SDP Negotiation & Media Bridging 🔧 NEW
+
+**Critical Issues Found During E2E Testing**:
+1. Server receives SDP from customer but doesn't forward it to agents (Content-Length: 0)
+2. No media bridging - server should negotiate media with both sides
+3. Dialog tracking failure - server loses track of dialogs causing BYE errors (481)
+4. RTP "No destination address" errors in agent logs - no media endpoint info
+
+#### Root Cause Analysis
+The call center is attempting to act as a B2BUA (Back-to-Back User Agent) but is missing critical media handling:
+- Not forwarding SDP between call legs
+- Not establishing separate media sessions for bridging
+- Not maintaining proper dialog state for both sides
+
+#### Phase 1: Fix SDP Forwarding in Outgoing Calls 🎯
+**Priority: CRITICAL** - Without SDP, no audio can flow
+
+- [ ] In `assign_specific_agent_to_call()`, get customer's SDP from session
+  - [ ] Use `session_manager.get_media_info()` to retrieve customer SDP
+  - [ ] Extract connection address and media port from SDP
+  - [ ] Log SDP details for debugging
+- [ ] Pass customer SDP when creating outgoing call to agent
+  - [ ] Update `create_outgoing_call()` to accept optional SDP body
+  - [ ] Include Content-Type: application/sdp header
+  - [ ] Set proper Content-Length for SDP body
+- [ ] Ensure SDP answer from agent is processed
+  - [ ] Capture agent's 200 OK SDP response
+  - [ ] Update customer session with agent's SDP
+
+#### Phase 2: Implement Proper B2BUA Media Handling 🔊
+**Priority: CRITICAL** - Core functionality
+
+##### Media Termination (More Control) - RECOMMENDED
+- [ ] Create separate media session with customer
+  - [ ] Negotiate codecs with customer
+  - [ ] Establish RTP endpoint for customer side
+- [ ] Create separate media session with agent
+  - [ ] Negotiate codecs with agent
+  - [ ] Establish RTP endpoint for agent side
+- [ ] Bridge RTP streams between sessions
+  - [ ] Use session-core's bridge API
+  - [ ] Handle codec transcoding if needed
+  - [ ] Monitor packet flow
+
+#### Phase 3: Fix Dialog State Management 🗂️
+**Priority: HIGH** - Prevents proper call teardown
+
+- [ ] Track both legs of B2BUA calls
+  - [ ] Store customer dialog ID → agent dialog ID mapping
+  - [ ] Store agent dialog ID → customer dialog ID mapping
+  - [ ] Update mappings when calls are bridged
+- [ ] Handle BYE for either leg
+  - [ ] When customer sends BYE, forward to agent
+  - [ ] When agent sends BYE, forward to customer
+  - [ ] Clean up both dialogs on termination
+- [ ] Add dialog state logging
+  - [ ] Log dialog creation with IDs
+  - [ ] Log dialog state transitions
+  - [ ] Log dialog termination
+
+#### Phase 4: Add Media Establishment Event Flow 📡
+**Priority: MEDIUM** - Improves debugging and monitoring
+
+- [x] Add media event handling in agent client ✅ (temporary workaround)
+  - [x] Parse remote SDP on call establishment ✅
+  - [x] Extract media endpoint (IP:port) ✅
+  - [x] Call `establish_media()` with remote address ✅
+  - Note: This is a client-side workaround. The server should handle media properly per Phase 1-3
+- [ ] Add media state tracking
+  - [ ] Log when media sessions are created
+  - [ ] Log RTP endpoint addresses
+  - [ ] Monitor for RTP packet flow
+- [ ] Add media debugging endpoints
+  - [ ] GET /calls/{id}/media - show media state
+  - [ ] GET /calls/{id}/sdp - show negotiated SDP
+  - [ ] GET /calls/{id}/rtp - show RTP stats
+
+#### Implementation Notes
+
+1. **SDP Handling**: The current implementation creates INVITEs with no body. We need to:
+   ```rust
+   // Get customer's SDP
+   let customer_media = session_manager.get_media_info(&customer_session_id).await?;
+   let sdp_body = customer_media.local_sdp.or(customer_media.remote_sdp);
+   
+   // Pass to agent
+   let agent_session = session_manager.create_outgoing_call(
+       &agent_contact_uri,
+       Some(sdp_body), // Add SDP parameter
+   ).await?;
+   ```
+
+2. **Dialog Tracking**: Add a DashMap for dialog relationships:
+   ```rust
+   // In CallCenterEngine
+   dialog_mappings: Arc<DashMap<DialogId, DialogId>>, // customer → agent
+   ```
+
+3. **BYE Handling**: Intercept BYE in session event handler:
+   ```rust
+   SessionEvent::CallTerminating { session_id, dialog_id } => {
+       // Find related dialog and terminate it too
+       if let Some(related_dialog) = self.dialog_mappings.get(&dialog_id) {
+           session_manager.terminate_dialog(&related_dialog).await?;
+       }
+   }
+   ```
+
+**Estimated Time**: 1 week
+**Priority**: CRITICAL - Without these fixes, no audio flows between customers and agents
+
 ### Phase 1: IVR System Implementation (Critical) 🎯
 
 #### 1.1 Core IVR Module
@@ -473,6 +644,8 @@ A proper implementation would extract the port from the Via header in the SIP me
 - **Phase 0 (Basic Call Delivery)**: ✅ COMPLETED - Critical foundation
 - **Phase 0.6 (Queue Fixes)**: 1 week - Critical for reliability
 - **Phase 0.7 (Agent Call Establishment)**: 2-3 days - Critical for production reliability
+- **Phase 0.8 (Queue Management & Agent Response Issues)**: 2-3 days - Critical for production reliability
+- **Phase 0.9 (SDP Negotiation & Media Bridging)**: 1 week - Critical for audio flow
 - **Phase 1 (IVR)**: 4-6 weeks - Critical for basic operation
 - **Phase 2 (Routing)**: 3-4 weeks - Enhanced functionality
 - **Phase 3 (Features)**: 6-8 weeks - Production features

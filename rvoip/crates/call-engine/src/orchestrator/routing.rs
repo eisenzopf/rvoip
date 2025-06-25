@@ -5,7 +5,7 @@
 //! and business rules.
 
 use std::sync::Arc;
-use tracing::{debug, info, error};
+use tracing::{debug, info, error, warn};
 use rvoip_session_core::{IncomingCall, SessionId};
 
 use crate::agent::{AgentId, AgentStatus};
@@ -214,6 +214,19 @@ impl CallCenterEngine {
     
     /// Monitor queue for agent availability
     pub(super) async fn monitor_queue_for_agents(&self, queue_id: String) {
+        // Check if queue has calls before starting monitor
+        let initial_queue_size = {
+            let queue_manager = self.queue_manager.read().await;
+            queue_manager.get_queue_stats(&queue_id)
+                .map(|stats| stats.total_calls)
+                .unwrap_or(0)
+        };
+        
+        if initial_queue_size == 0 {
+            debug!("Queue {} is empty, not starting monitor", queue_id);
+            return;
+        }
+        
         // Spawn background task to monitor queue and assign agents when available
         let engine = Arc::new(self.clone());
         tokio::spawn(async move {
@@ -223,36 +236,51 @@ impl CallCenterEngine {
                 return;
             }
             
-            info!("👁️ Starting queue monitor for queue: {}", queue_id);
+            info!("👁️ Starting queue monitor for queue: {} (initial size: {})", queue_id, initial_queue_size);
             
             // Monitor for 5 minutes max (to prevent orphaned tasks)
             let start_time = std::time::Instant::now();
             let max_duration = std::time::Duration::from_secs(300);
             
-            // Check every 2 seconds for available agents
-            let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            // Dynamic check interval - starts at 2s, backs off when no agents available
+            let mut check_interval_secs = 2u64;
+            let mut consecutive_no_agents = 0u32;
             
             loop {
-                check_interval.tick().await;
+                // Wait with current interval
+                tokio::time::sleep(std::time::Duration::from_secs(check_interval_secs)).await;
                 
                 // Check if we've exceeded max monitoring time
                 if start_time.elapsed() > max_duration {
-                    debug!("Queue monitor for {} exceeded max duration, stopping", queue_id);
+                    info!("⏰ Queue monitor for {} exceeded max duration, stopping", queue_id);
                     break;
                 }
                 
-                // Check if there are still calls in the queue
+                // Remove expired calls and check current queue size
                 let queue_size = {
-                    let queue_manager = engine.queue_manager.read().await;
+                    let mut queue_manager = engine.queue_manager.write().await;
+                    let expired = queue_manager.remove_expired_calls();
+                    for expired_session in expired {
+                        info!("⏰ Removed expired call {} from queue", expired_session);
+                        // Remove from active calls
+                        engine.active_calls.remove(&expired_session);
+                        // Terminate the session
+                        if let Some(coordinator) = engine.session_coordinator.as_ref() {
+                            let _ = coordinator.terminate_session(&expired_session).await;
+                        }
+                    }
+                    
                     queue_manager.get_queue_stats(&queue_id)
                         .map(|stats| stats.total_calls)
                         .unwrap_or(0)
                 };
                 
                 if queue_size == 0 {
-                    debug!("Queue {} is empty, stopping monitor", queue_id);
+                    info!("✅ Queue {} is now empty, stopping monitor", queue_id);
                     break;
                 }
+                
+                debug!("📊 Queue {} status: {} calls waiting", queue_id, queue_size);
                 
                 // Find available agents for this queue
                 let available_agents: Vec<AgentId> = engine.available_agents
@@ -266,11 +294,22 @@ impl CallCenterEngine {
                     .collect();
                 
                 if available_agents.is_empty() {
-                    debug!("No available agents for queue {}", queue_id);
+                    consecutive_no_agents += 1;
+                    // Exponential backoff when no agents available (max 30s)
+                    check_interval_secs = (check_interval_secs * 2).min(30);
+                    debug!("⏳ No available agents for queue {}, backing off to {}s interval", 
+                          queue_id, check_interval_secs);
                     continue;
+                } else {
+                    // Reset backoff when agents become available
+                    consecutive_no_agents = 0;
+                    check_interval_secs = 2;
                 }
                 
+                info!("🎯 Found {} available agents for queue {}", available_agents.len(), queue_id);
+                
                 // Try to dequeue and assign calls to available agents
+                let mut assignments_made = 0;
                 for agent_id in available_agents {
                     // Try to dequeue a call
                     let queued_call = {
@@ -279,12 +318,13 @@ impl CallCenterEngine {
                     };
                     
                     if let Some(queued_call) = queued_call {
-                        info!("📤 Dequeued call {} from queue {}", queued_call.session_id, queue_id);
+                        info!("📤 Dequeued call {} from queue {} for agent {}", 
+                              queued_call.session_id, queue_id, agent_id);
                         
                         // Update call status to indicate it's being assigned
                         if let Some(mut call_info) = engine.active_calls.get_mut(&queued_call.session_id) {
                             call_info.status = super::types::CallStatus::Routing;
-                            call_info.queue_id = None;
+                            // Don't clear queue_id yet - we might need to re-queue
                         }
                         
                         // Assign to agent
@@ -297,12 +337,25 @@ impl CallCenterEngine {
                             match engine_clone.assign_specific_agent_to_call(session_id.clone(), agent_id_clone).await {
                                 Ok(()) => {
                                     info!("✅ Successfully assigned queued call {} to agent", session_id);
+                                    // Mark as no longer being assigned
+                                    let mut queue_manager = engine_clone.queue_manager.write().await;
+                                    queue_manager.mark_as_not_assigned(&session_id);
                                 }
                                 Err(e) => {
                                     error!("Failed to assign call {} to agent: {}", session_id, e);
                                     
-                                    // Re-queue the call with higher priority
+                                    // Mark as no longer being assigned
                                     let mut queue_manager = engine_clone.queue_manager.write().await;
+                                    queue_manager.mark_as_not_assigned(&session_id);
+                                    
+                                    // Check if call is still active
+                                    let call_still_active = engine_clone.active_calls.contains_key(&session_id);
+                                    if !call_still_active {
+                                        warn!("Call {} is no longer active, not re-queuing", session_id);
+                                        return;
+                                    }
+                                    
+                                    // Re-queue the call with higher priority
                                     let mut requeued_call = queued_call;
                                     requeued_call.priority = requeued_call.priority.saturating_sub(5); // Increase priority
                                     
@@ -321,11 +374,16 @@ impl CallCenterEngine {
                             }
                         });
                         
-                        // Continue to next iteration to check for more calls
+                        assignments_made += 1;
                     } else {
                         // No more calls in queue
+                        debug!("No more calls to dequeue from {}", queue_id);
                         break;
                     }
+                }
+                
+                if assignments_made > 0 {
+                    info!("📊 Made {} call assignments from queue {}", assignments_made, queue_id);
                 }
             }
             

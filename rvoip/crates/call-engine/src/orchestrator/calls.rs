@@ -434,12 +434,25 @@ impl CallCenterEngine {
                     match engine.assign_specific_agent_to_call(session_id.clone(), agent_id_clone).await {
                         Ok(()) => {
                             info!("✅ Successfully assigned queued call {} to agent", session_id);
+                            // On success, the call is no longer in queue or being assigned
+                            let mut queue_manager = engine.queue_manager.write().await;
+                            queue_manager.mark_as_not_assigned(&session_id);
                         }
                         Err(e) => {
                             error!("Failed to assign queued call {} to agent: {}", session_id, e);
                             
-                            // Re-queue the call with higher priority
+                            // Mark as no longer being assigned before re-queuing
                             let mut queue_manager = engine.queue_manager.write().await;
+                            queue_manager.mark_as_not_assigned(&session_id);
+                            
+                            // Check if the call is still active before re-queuing
+                            let call_still_active = engine.active_calls.contains_key(&session_id);
+                            if !call_still_active {
+                                warn!("Call {} is no longer active, not re-queuing", session_id);
+                                return;
+                            }
+                            
+                            // Re-queue the call with higher priority
                             let mut requeued_call = queued_call;
                             requeued_call.priority = requeued_call.priority.saturating_sub(5); // Increase priority
                             requeued_call.retry_count = requeued_call.retry_count.saturating_add(1);

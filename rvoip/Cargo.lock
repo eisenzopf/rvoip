@@ -3176,6 +3176,8 @@ dependencies = [
  "parking_lot",
  "rvoip-client-core",
  "rvoip-session-core",
+ "rvoip-sip-core",
+ "rvoip-sip-transport",
  "serde",
  "serde_json",
  "serial_test",

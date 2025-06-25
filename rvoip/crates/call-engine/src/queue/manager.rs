@@ -1,5 +1,5 @@
-use std::collections::{HashMap, VecDeque};
-use tracing::{info, debug};
+use std::collections::{HashMap, VecDeque, HashSet};
+use tracing::{info, debug, warn};
 
 use rvoip_session_core::SessionId;
 
@@ -9,6 +9,8 @@ use crate::error::{CallCenterError, Result};
 pub struct QueueManager {
     /// Active queues
     queues: HashMap<String, CallQueue>,
+    /// Calls currently being assigned (to prevent re-queuing)
+    calls_being_assigned: HashSet<SessionId>,
 }
 
 /// Individual call queue
@@ -37,6 +39,7 @@ impl QueueManager {
     pub fn new() -> Self {
         Self {
             queues: HashMap::new(),
+            calls_being_assigned: HashSet::new(),
         }
     }
     
@@ -61,9 +64,36 @@ impl QueueManager {
         Ok(())
     }
     
+    /// Check if a call is already in the queue
+    pub fn is_call_queued(&self, queue_id: &str, session_id: &SessionId) -> bool {
+        if let Some(queue) = self.queues.get(queue_id) {
+            queue.calls.iter().any(|call| &call.session_id == session_id)
+        } else {
+            false
+        }
+    }
+    
+    /// Check if a call is being assigned
+    pub fn is_call_being_assigned(&self, session_id: &SessionId) -> bool {
+        self.calls_being_assigned.contains(session_id)
+    }
+    
     /// Enqueue a call
     pub fn enqueue_call(&mut self, queue_id: &str, call: QueuedCall) -> Result<usize> {
-        info!("📞 Enqueuing call {} to queue {}", call.session_id, queue_id);
+        // Check for duplicates
+        if self.is_call_queued(queue_id, &call.session_id) {
+            warn!("📞 Call {} already in queue {}, not re-queuing", call.session_id, queue_id);
+            return Ok(0);
+        }
+        
+        // Check if call is being assigned
+        if self.is_call_being_assigned(&call.session_id) {
+            warn!("📞 Call {} is being assigned, not re-queuing", call.session_id);
+            return Ok(0);
+        }
+        
+        info!("📞 Enqueuing call {} to queue {} (priority: {}, retry: {})", 
+              call.session_id, queue_id, call.priority, call.retry_count);
         
         if let Some(queue) = self.queues.get_mut(queue_id) {
             if queue.calls.len() >= queue.max_size {
@@ -77,46 +107,107 @@ impl QueueManager {
             
             queue.calls.insert(insert_position, call);
             
-            debug!("📊 Queue {} now has {} calls", queue_id, queue.calls.len());
+            info!("📊 Queue {} size: {} calls", queue_id, queue.calls.len());
             Ok(insert_position)
         } else {
             Err(CallCenterError::not_found(format!("Queue not found: {}", queue_id)))
         }
     }
     
+    /// Mark a call as being assigned (to prevent duplicate processing)
+    pub fn mark_as_assigned(&mut self, session_id: &SessionId) {
+        info!("🔒 Marking call {} as being assigned", session_id);
+        self.calls_being_assigned.insert(session_id.clone());
+    }
+    
+    /// Mark a call as no longer being assigned (on failure)
+    pub fn mark_as_not_assigned(&mut self, session_id: &SessionId) {
+        info!("🔓 Marking call {} as no longer being assigned", session_id);
+        self.calls_being_assigned.remove(session_id);
+    }
+    
     /// Dequeue the next call for an agent
     pub fn dequeue_for_agent(&mut self, queue_id: &str) -> Result<Option<QueuedCall>> {
         if let Some(queue) = self.queues.get_mut(queue_id) {
-            let call = queue.calls.pop_front();
+            // Find the first call that isn't being assigned
+            let mut index_to_remove = None;
             
-            if let Some(ref call) = call {
-                info!("📤 Dequeued call {} from queue {}", call.session_id, queue_id);
+            for (index, call) in queue.calls.iter().enumerate() {
+                if !self.calls_being_assigned.contains(&call.session_id) {
+                    index_to_remove = Some(index);
+                    break;
+                }
             }
             
-            Ok(call)
+            if let Some(index) = index_to_remove {
+                let call = queue.calls.remove(index);
+                if let Some(call) = call {
+                    info!("📤 Dequeued call {} from queue {} (remaining: {})", 
+                          call.session_id, queue_id, queue.calls.len());
+                    // Mark as being assigned to prevent re-queuing during assignment
+                    self.mark_as_assigned(&call.session_id);
+                    return Ok(Some(call));
+                }
+            }
+            
+            Ok(None)
         } else {
             Err(CallCenterError::not_found(format!("Queue not found: {}", queue_id)))
         }
+    }
+    
+    /// Remove expired calls from all queues
+    pub fn remove_expired_calls(&mut self) -> Vec<SessionId> {
+        let mut expired_calls = Vec::new();
+        let now = chrono::Utc::now();
+        
+        for (queue_id, queue) in &mut self.queues {
+            queue.calls.retain(|call| {
+                let wait_time = now.signed_duration_since(call.queued_at).num_seconds();
+                if wait_time > queue.max_wait_time_seconds as i64 {
+                    warn!("⏰ Removing expired call {} from queue {} (waited {} seconds)", 
+                          call.session_id, queue_id, wait_time);
+                    expired_calls.push(call.session_id.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        
+        expired_calls
+    }
+    
+    /// Get total number of queued calls across all queues
+    pub fn total_queued_calls(&self) -> usize {
+        self.queues.values().map(|q| q.calls.len()).sum()
     }
     
     /// Get queue statistics
     pub fn get_queue_stats(&self, queue_id: &str) -> Result<QueueStats> {
         if let Some(queue) = self.queues.get(queue_id) {
             let total_calls = queue.calls.len();
-            let average_wait_time = if total_calls > 0 {
-                let total_wait: i64 = queue.calls.iter()
-                    .map(|call| chrono::Utc::now().signed_duration_since(call.queued_at).num_seconds())
-                    .sum();
-                total_wait / total_calls as i64
+            let now = chrono::Utc::now();
+            
+            let (average_wait_time, longest_wait_time) = if total_calls > 0 {
+                let wait_times: Vec<i64> = queue.calls.iter()
+                    .map(|call| now.signed_duration_since(call.queued_at).num_seconds())
+                    .collect();
+                
+                let total_wait: i64 = wait_times.iter().sum();
+                let average = total_wait / total_calls as i64;
+                let longest = wait_times.iter().max().cloned().unwrap_or(0);
+                
+                (average, longest)
             } else {
-                0
+                (0, 0)
             };
             
             Ok(QueueStats {
                 queue_id: queue_id.to_string(),
                 total_calls,
                 average_wait_time_seconds: average_wait_time as u64,
-                longest_wait_time_seconds: 0, // TODO: Calculate
+                longest_wait_time_seconds: longest_wait_time as u64,
             })
         } else {
             Err(CallCenterError::not_found(format!("Queue not found: {}", queue_id)))

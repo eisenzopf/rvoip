@@ -21,6 +21,8 @@ use rvoip_client_core::{
     EventPriority, CallInfo,
 };
 use async_trait::async_trait;
+use rvoip_sip_core::sdp::parser::parse_sdp;
+use bytes::Bytes;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SIP Agent Client for Call Center Testing", long_about = None)]
@@ -55,46 +57,129 @@ struct Args {
 }
 
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
-const POLLING_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Event handler that defers incoming calls (like UAS example)
-struct DeferCallHandler {
+/// Event handler that immediately accepts incoming calls
+struct AutoAcceptCallHandler {
     rtp_debug: bool,
+    client: Arc<tokio::sync::RwLock<Option<Arc<ClientManager>>>>,
 }
 
-impl DeferCallHandler {
+impl AutoAcceptCallHandler {
     fn new(rtp_debug: bool) -> Self {
-        Self { rtp_debug }
+        Self { 
+            rtp_debug,
+            client: Arc::new(tokio::sync::RwLock::new(None)),
+        }
+    }
+    
+    async fn set_client(&self, client: Arc<ClientManager>) {
+        *self.client.write().await = Some(client);
     }
 }
 
 #[async_trait]
-impl ClientEventHandler for DeferCallHandler {
+impl ClientEventHandler for AutoAcceptCallHandler {
     async fn on_incoming_call(&self, call_info: IncomingCallInfo) -> CallAction {
-        info!("📞 Deferring incoming call from {} for later handling", call_info.caller_uri);
-        CallAction::Ignore // Defer the call - we'll handle it in the polling loop
+        info!("📞 Incoming call from {} to {} (call_id: {})", 
+            call_info.caller_uri, call_info.callee_uri, call_info.call_id);
+        
+        // Phase 0.8 - Always accept immediately without polling
+        info!("Accepting call {} immediately", call_info.call_id);
+        CallAction::Accept
     }
     
     async fn on_call_state_changed(&self, status_info: CallStatusInfo) {
-        let state_icon = match status_info.new_state {
-            CallState::Initiating => "🔄",
-            CallState::Proceeding => "📤",
-            CallState::Ringing => "🔔",
-            CallState::IncomingPending => "📥",
-            CallState::Connected => "📞",
-            CallState::Terminating => "📴",
-            CallState::Terminated => "☎️",
-            CallState::Failed => "❌",
-            CallState::Cancelled => "🚫",
-        };
-        
-        info!("{} Call {} state: {:?} → {:?} ({})",
-            state_icon,
+        info!("📱 Call {} state changed from {:?} to {:?} (reason: {:?})",
             status_info.call_id,
-            status_info.previous_state.as_ref().unwrap_or(&CallState::Initiating),
+            status_info.previous_state,
             status_info.new_state,
-            status_info.reason.as_deref().unwrap_or("no reason")
+            status_info.reason
         );
+        
+        match status_info.new_state {
+            CallState::Connected => {
+                info!("✅ Call {} is now connected", status_info.call_id);
+                
+                // Get the client from the handler to establish media
+                let client_guard = self.client.read().await;
+                if let Some(client) = client_guard.as_ref() {
+                    // Get call info to find remote SDP
+                    match client.get_call(&status_info.call_id).await {
+                        Ok(call_info) => {
+                            // Check if we have remote SDP in metadata
+                            if let Some(remote_sdp) = call_info.metadata.get("remote_sdp") {
+                                info!("Found remote SDP for call {}", status_info.call_id);
+                                
+                                // Clone the SDP to avoid lifetime issues
+                                let remote_sdp = remote_sdp.clone();
+                                
+                                // Parse SDP to extract media endpoint
+                                match parse_sdp(&Bytes::from(remote_sdp)) {
+                                    Ok(sdp_session) => {
+                                        // Extract connection info from SDP
+                                        let mut media_addr = None;
+                                        
+                                        // First check media-level connection
+                                        if let Some(media) = sdp_session.media_descriptions.first() {
+                                            if let Some(conn) = &media.connection_info {
+                                                let addr = format!("{}:{}", conn.connection_address, media.port);
+                                                info!("Found media connection: {}", addr);
+                                                media_addr = Some(addr);
+                                            }
+                                        }
+                                        
+                                        // Fall back to session-level connection
+                                        if media_addr.is_none() {
+                                            if let Some(conn) = &sdp_session.connection_info {
+                                                if let Some(media) = sdp_session.media_descriptions.first() {
+                                                    let addr = format!("{}:{}", conn.connection_address, media.port);
+                                                    info!("Found session connection: {}", addr);
+                                                    media_addr = Some(addr);
+                                                }
+                                            }
+                                        }
+                                        
+                                        // Establish media if we found an address
+                                        if let Some(addr) = media_addr {
+                                            info!("📡 Establishing media flow to {}", addr);
+                                            match client.establish_media(&status_info.call_id, &addr).await {
+                                                Ok(_) => {
+                                                    info!("✅ Media flow established for call {}", status_info.call_id);
+                                                    
+                                                    // Start audio transmission after media is established
+                                                    info!("🔊 Starting audio transmission for call {}", status_info.call_id);
+                                                    if let Err(e) = client.start_audio_transmission(&status_info.call_id).await {
+                                                        error!("Failed to start audio: {}", e);
+                                                    }
+                                                }
+                                                Err(e) => error!("❌ Failed to establish media for call {}: {}", status_info.call_id, e),
+                                            }
+                                        } else {
+                                            error!("❌ No media connection info found in SDP for call {}", status_info.call_id);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("❌ Failed to parse remote SDP for call {}: {}", status_info.call_id, e);
+                                    }
+                                }
+                            } else {
+                                warn!("⚠️ No remote SDP found for connected call {}", status_info.call_id);
+                            }
+                        }
+                        Err(e) => {
+                            error!("❌ Failed to get call info for {}: {}", status_info.call_id, e);
+                        }
+                    }
+                }
+            }
+            CallState::Terminated => {
+                info!("📴 Call {} terminated", status_info.call_id);
+            }
+            CallState::Failed => {
+                error!("❌ Call {} failed", status_info.call_id);
+            }
+            _ => {}
+        }
     }
     
     async fn on_media_event(&self, media_info: MediaEventInfo) {
@@ -186,9 +271,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     let client = ClientManager::new(config).await?;
     
-    // Set up the deferred call event handler (like UAS example)
-    info!("Setting up deferred call handler...");
-    let handler = Arc::new(DeferCallHandler::new(args.rtp_debug));
+    // Set up the auto-accept event handler
+    info!("Setting up auto-accept call handler...");
+    let handler = Arc::new(AutoAcceptCallHandler::new(args.rtp_debug));
+    
+    // Set the client reference in the handler first
+    handler.set_client(client.clone()).await;
+    
+    // Then set it as the event handler
     client.set_event_handler(handler).await;
     
     // Start the client
@@ -210,15 +300,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✅ Successfully registered with ID: {}", registration_id);
     info!("👂 Agent {} is ready to receive calls...", args.username);
     
-    // Start handling incoming calls (like UAS example)
-    let call_client = client.clone();
-    let call_duration = args.call_duration;
-    let incoming_call_handler = tokio::spawn(async move {
-        handle_incoming_calls(call_client, call_duration).await;
-    });
-    
-    // Start general event handler for call state changes
+    // Start event handler for call state changes and auto-hangup
     let event_client = client.clone();
+    let call_duration = args.call_duration;
     let event_handler = tokio::spawn(async move {
         handle_client_events(event_client, call_duration).await;
     });
@@ -236,7 +320,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Stop handlers
-    incoming_call_handler.abort();
     event_handler.abort();
     
     // Stop the client
@@ -246,48 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Handle incoming calls by polling for IncomingPending state (like UAS example)
-async fn handle_incoming_calls(client: Arc<ClientManager>, call_duration: u64) {
-    loop {
-        sleep(POLLING_INTERVAL).await;
-        
-        // Get all active calls
-        let active_calls = client.get_active_calls().await;
-        
-        // Find calls in IncomingPending state
-        for call_info in active_calls {
-            if call_info.state == CallState::IncomingPending {
-                info!("📥 Answering pending call {} from {}", 
-                      call_info.call_id, call_info.remote_uri);
-                
-                match client.answer_call(&call_info.call_id).await {
-                    Ok(_) => {
-                        info!("✅ Successfully answered call {}", call_info.call_id);
-                        
-                        // If call_duration is set, automatically hang up after duration
-                        if call_duration > 0 {
-                            let client_clone = client.clone();
-                            let call_id_clone = call_info.call_id.clone();
-                            tokio::spawn(async move {
-                                sleep(Duration::from_secs(call_duration)).await;
-                                info!("⏰ Auto-hanging up call {} after {} seconds", 
-                                      call_id_clone, call_duration);
-                                if let Err(e) = client_clone.hangup_call(&call_id_clone).await {
-                                    error!("Failed to hang up call: {}", e);
-                                }
-                            });
-                        }
-                    }
-                    Err(e) => {
-                        error!("❌ Failed to answer call {}: {}", call_info.call_id, e);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Handle client events (focusing on call state changes and media)
+/// Handle client events for auto-hangup
 async fn handle_client_events(client: Arc<ClientManager>, call_duration: u64) {
     let mut event_rx = client.subscribe_events();
     
@@ -299,12 +341,18 @@ async fn handle_client_events(client: Arc<ClientManager>, call_duration: u64) {
                         use rvoip_client_core::ClientEvent;
                         match ev {
                             ClientEvent::CallStateChanged { info, .. } => {
-                                // Check if we should start transmitting audio
-                                if info.new_state == CallState::Connected {
-                                    info!("🔊 Call {} connected - starting audio transmission", info.call_id);
-                                    if let Err(e) = client.start_audio_transmission(&info.call_id).await {
-                                        error!("Failed to start audio: {}", e);
-                                    }
+                                // If call_duration is set, automatically hang up after duration
+                                if info.new_state == CallState::Connected && call_duration > 0 {
+                                    let client_clone = client.clone();
+                                    let call_id_clone = info.call_id.clone();
+                                    tokio::spawn(async move {
+                                        sleep(Duration::from_secs(call_duration)).await;
+                                        info!("⏰ Auto-hanging up call {} after {} seconds", 
+                                              call_id_clone, call_duration);
+                                        if let Err(e) = client_clone.hangup_call(&call_id_clone).await {
+                                            error!("Failed to hang up call: {}", e);
+                                        }
+                                    });
                                 }
                             }
                             
