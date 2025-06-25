@@ -29,6 +29,7 @@ pub struct QueuedCall {
     pub priority: u8,
     pub queued_at: chrono::DateTime<chrono::Utc>,
     pub estimated_wait_time: Option<u64>,
+    pub retry_count: u8,  // Number of times this call has been retried
 }
 
 impl QueueManager {

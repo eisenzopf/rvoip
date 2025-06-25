@@ -97,6 +97,7 @@ impl CallCenterEngine {
                     priority,
                     queued_at: chrono::Utc::now(),
                     estimated_wait_time: None,
+                    retry_count: 0,  // New calls start with 0 retries
                 };
                 
                 // Ensure queue exists
@@ -195,7 +196,29 @@ impl CallCenterEngine {
             // The customer call should already be accepted at this point (200 OK sent)
             // Now we just need to call the agent and bridge them
             
-            // Step 1: Create an outgoing call to the agent
+            // Step 1: Get the customer's SDP to pass to the agent
+            let customer_sdp = match coordinator.get_media_info(&session_id).await {
+                Ok(Some(media_info)) => {
+                    // Use remote_sdp which is the customer's offer
+                    if let Some(sdp) = media_info.remote_sdp {
+                        info!("📄 Retrieved customer SDP for forwarding to agent");
+                        Some(sdp)
+                    } else {
+                        warn!("⚠️ No remote SDP found for customer session");
+                        None
+                    }
+                }
+                Ok(None) => {
+                    warn!("⚠️ No media info found for customer session");
+                    None
+                }
+                Err(e) => {
+                    warn!("⚠️ Failed to get customer media info: {}", e);
+                    None
+                }
+            };
+            
+            // Step 2: Create an outgoing call to the agent with customer's SDP
             let agent_contact_uri = agent_info.contact_uri.clone(); // Use the contact URI from REGISTER
             info!("📞 Creating outgoing call to agent {} at {}", agent_id, agent_contact_uri);
             
@@ -205,7 +228,7 @@ impl CallCenterEngine {
             let agent_call_session = match coordinator.create_outgoing_call(
                 &call_center_uri,    // FROM: The call center is making the call
                 &agent_contact_uri,  // TO: The agent is receiving the call
-                None,                // No specific SDP
+                customer_sdp,        // Pass customer's SDP as the offer
             ).await {
                 Ok(call_session) => {
                     info!("✅ Created outgoing call {:?} to agent {}", call_session.id, agent_id);
@@ -229,19 +252,68 @@ impl CallCenterEngine {
             let mut updated_agent = agent_info;
             updated_agent.session_id = agent_session_id.clone();
             
-            // Step 3: Wait a moment for the agent call to establish
-            // In a real system, we'd wait for the agent to answer (200 OK from agent)
-            // For now, we'll proceed immediately to bridging
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            // Step 3: Wait for the agent to answer the call
+            info!("⏳ Waiting for agent {} to answer...", agent_id);
+            
+            match coordinator.wait_for_answer(&agent_session_id, std::time::Duration::from_secs(30)).await {
+                Ok(_) => {
+                    info!("✅ Agent {} answered the call", agent_id);
+                }
+                Err(e) => {
+                    error!("❌ Agent {} failed to answer: {}", agent_id, e);
+                    
+                    // Hang up the attempted agent call
+                    if let Err(term_err) = coordinator.terminate_session(&agent_session_id).await {
+                        warn!("Failed to terminate unanswered agent call: {}", term_err);
+                    }
+                    
+                    // Return agent to available pool
+                    updated_agent.status = AgentStatus::Available;
+                    updated_agent.current_calls = updated_agent.current_calls.saturating_sub(1);
+                    self.available_agents.insert(agent_id.clone(), updated_agent);
+                    
+                    // Update call info to mark as queued again
+                    if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+                        call_info.status = CallStatus::Queued;
+                        call_info.agent_id = None;
+                        
+                        // Re-queue the customer call with higher priority
+                        if let Some(queue_id) = &call_info.queue_id {
+                            let mut queue_manager = self.queue_manager.write().await;
+                            let mut requeued_call = QueuedCall {
+                                session_id: session_id.clone(),
+                                caller_id: call_info.caller_id.clone(),
+                                priority: call_info.priority.saturating_sub(5), // Higher priority
+                                queued_at: call_info.queued_at.unwrap_or_else(chrono::Utc::now),
+                                estimated_wait_time: None,
+                                retry_count: 0,  // Reset retry count when re-queuing from failed agent assignment
+                            };
+                            
+                            if let Err(queue_err) = queue_manager.enqueue_call(queue_id, requeued_call) {
+                                error!("Failed to re-queue call {}: {}", session_id, queue_err);
+                                // Last resort: terminate the customer call
+                                let _ = coordinator.terminate_session(&session_id).await;
+                            } else {
+                                info!("📞 Re-queued call {} with higher priority", session_id);
+                            }
+                        }
+                    }
+                    
+                    return Err(CallCenterError::orchestration(&format!("Agent failed to answer: {}", e)));
+                }
+            }
             
             // Step 4: Bridge the customer and agent calls
             info!("🌉 Bridging customer {} with agent {} (session {:?})", 
                   session_id, agent_id, agent_session_id);
             
+            let bridge_start = std::time::Instant::now();
+            
             match coordinator.bridge_sessions(&session_id, &agent_session_id).await {
                 Ok(bridge_id) => {
-                    info!("✅ Successfully bridged customer {} with agent {} (bridge: {})", 
-                          session_id, agent_id, bridge_id);
+                    let bridge_time = bridge_start.elapsed().as_millis();
+                    info!("✅ Successfully bridged customer {} with agent {} (bridge: {}) in {}ms", 
+                          session_id, agent_id, bridge_id, bridge_time);
                     
                     // Update call info
                     if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
@@ -370,6 +442,26 @@ impl CallCenterEngine {
                             let mut queue_manager = engine.queue_manager.write().await;
                             let mut requeued_call = queued_call;
                             requeued_call.priority = requeued_call.priority.saturating_sub(5); // Increase priority
+                            requeued_call.retry_count = requeued_call.retry_count.saturating_add(1);
+                            
+                            // Check retry limit (max 3 attempts)
+                            if requeued_call.retry_count >= 3 {
+                                error!("⚠️ Call {} exceeded maximum retry attempts, terminating", session_id);
+                                // Remove from active calls
+                                engine.active_calls.remove(&session_id);
+                                
+                                // Terminate the customer call
+                                if let Some(coordinator) = engine.session_coordinator.as_ref() {
+                                    let _ = coordinator.terminate_session(&session_id).await;
+                                }
+                                return;
+                            }
+                            
+                            // Apply exponential backoff based on retry count
+                            let backoff_ms = 500u64 * (2u64.pow(requeued_call.retry_count as u32 - 1));
+                            info!("⏳ Waiting {}ms before re-queuing call {} (retry #{})", 
+                                  backoff_ms, session_id, requeued_call.retry_count);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
                             
                             if let Err(e) = queue_manager.enqueue_call(queue_id, requeued_call) {
                                 error!("Failed to re-queue call {}: {}", session_id, e);

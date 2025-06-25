@@ -10,16 +10,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
-use tracing::{info, warn, error};
+use tracing::{info, warn, error, debug};
 use clap::Parser;
 use uuid::Uuid;
 
 use rvoip_client_core::{
-    client::{Client, ClientConfig},
-    call::CallState,
-    registration::RegistrationConfig,
-    events::ClientEvent,
+    ClientConfig, ClientEventHandler, ClientError, ClientManager,
+    IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
+    CallAction, CallId, CallState, MediaEventType, MediaConfig,
+    EventPriority, CallInfo,
 };
+use async_trait::async_trait;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "SIP Agent Client for Call Center Testing", long_about = None)]
@@ -47,6 +48,105 @@ struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+    
+    /// Enable RTP debug logging
+    #[arg(long)]
+    rtp_debug: bool,
+}
+
+const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
+const POLLING_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Event handler that defers incoming calls (like UAS example)
+struct DeferCallHandler {
+    rtp_debug: bool,
+}
+
+impl DeferCallHandler {
+    fn new(rtp_debug: bool) -> Self {
+        Self { rtp_debug }
+    }
+}
+
+#[async_trait]
+impl ClientEventHandler for DeferCallHandler {
+    async fn on_incoming_call(&self, call_info: IncomingCallInfo) -> CallAction {
+        info!("📞 Deferring incoming call from {} for later handling", call_info.caller_uri);
+        CallAction::Ignore // Defer the call - we'll handle it in the polling loop
+    }
+    
+    async fn on_call_state_changed(&self, status_info: CallStatusInfo) {
+        let state_icon = match status_info.new_state {
+            CallState::Initiating => "🔄",
+            CallState::Proceeding => "📤",
+            CallState::Ringing => "🔔",
+            CallState::IncomingPending => "📥",
+            CallState::Connected => "📞",
+            CallState::Terminating => "📴",
+            CallState::Terminated => "☎️",
+            CallState::Failed => "❌",
+            CallState::Cancelled => "🚫",
+        };
+        
+        info!("{} Call {} state: {:?} → {:?} ({})",
+            state_icon,
+            status_info.call_id,
+            status_info.previous_state.as_ref().unwrap_or(&CallState::Initiating),
+            status_info.new_state,
+            status_info.reason.as_deref().unwrap_or("no reason")
+        );
+    }
+    
+    async fn on_media_event(&self, media_info: MediaEventInfo) {
+        match &media_info.event_type {
+            MediaEventType::MediaSessionStarted { media_session_id } => {
+                info!("🎵 Media session started for call {}: {}", media_info.call_id, media_session_id);
+            }
+            MediaEventType::MediaSessionStopped => {
+                info!("🛑 Media session stopped for call {}", media_info.call_id);
+            }
+            MediaEventType::AudioStarted => {
+                info!("🎵 Audio transmission started for call {}", media_info.call_id);
+            }
+            MediaEventType::AudioStopped => {
+                info!("🛑 Audio transmission stopped for call {}", media_info.call_id);
+            }
+            MediaEventType::SdpOfferGenerated { sdp_size } => {
+                if self.rtp_debug {
+                    info!("📋 SDP offer generated for call {} ({} bytes)", media_info.call_id, sdp_size);
+                }
+            }
+            MediaEventType::SdpAnswerProcessed { sdp_size } => {
+                if self.rtp_debug {
+                    info!("📋 SDP answer processed for call {} ({} bytes)", media_info.call_id, sdp_size);
+                }
+            }
+            _ => {
+                if self.rtp_debug {
+                    debug!("🎵 Media event for call {}: {:?}", media_info.call_id, media_info.event_type);
+                }
+            }
+        }
+    }
+    
+    async fn on_registration_status_changed(&self, reg_info: RegistrationStatusInfo) {
+        use rvoip_client_core::registration::RegistrationStatus;
+        
+        match reg_info.status {
+            RegistrationStatus::Active => {
+                info!("✅ Registration active: {}", reg_info.user_uri);
+            }
+            RegistrationStatus::Failed => {
+                error!("❌ Registration failed: {}", reg_info.reason.as_deref().unwrap_or("unknown reason"));
+            }
+            RegistrationStatus::Expired => {
+                warn!("⏰ Registration expired for {}", reg_info.user_uri);
+            }
+            _ => {
+                debug!("Registration status: {:?}", reg_info.status);
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -65,55 +165,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build SIP URIs
     let agent_uri = format!("sip:{}@{}", args.username, args.domain);
     let server_addr: SocketAddr = args.server.parse()?;
-    let server_uri = format!("sip:{}", server_addr);
     
     // Create client configuration
-    let local_addr = format!("0.0.0.0:{}", args.port).parse()?;
+    let local_sip_addr = format!("0.0.0.0:{}", args.port).parse()?;
+    let local_media_addr = format!("0.0.0.0:{}", args.port + 100).parse()?; // Media port offset
     
-    // Create the client configuration
-    let mut config = ClientConfig::default();
-    config.user_agent = "RVoIP-Agent/1.0".to_string();
-    config.local_sip_addr = local_addr;
+    info!("Creating SIP client...");
+    let config = ClientConfig::new()
+        .with_sip_addr(local_sip_addr)
+        .with_media_addr(local_media_addr)
+        .with_user_agent("RVoIP-Agent/1.0".to_string())
+        .with_media(MediaConfig {
+            preferred_codecs: vec!["PCMU".to_string(), "PCMA".to_string()],
+            dtmf_enabled: true,
+            echo_cancellation: false,
+            noise_suppression: false,
+            auto_gain_control: false,
+            ..Default::default()
+        });
     
-    // Create the client
-    let client = Client::new(config).await?;
+    let client = ClientManager::new(config).await?;
+    
+    // Set up the deferred call event handler (like UAS example)
+    info!("Setting up deferred call handler...");
+    let handler = Arc::new(DeferCallHandler::new(args.rtp_debug));
+    client.set_event_handler(handler).await;
     
     // Start the client
     client.start().await?;
     
-    // Start event handler
-    let event_client = client.clone();
+    // Register with the server using client-core registration API
+    info!("📝 Registering as {} with server {}", agent_uri, server_addr);
+    
+    use rvoip_client_core::registration::RegistrationConfig;
+    let reg_config = RegistrationConfig::new(
+        format!("sip:{}", server_addr),  // registrar
+        agent_uri.clone(),                // from_uri
+        agent_uri.clone(),                // contact_uri
+    )
+    .with_expires(120); // 120 second expiry to prevent timeout during testing
+    
+    let registration_id = client.register(reg_config).await?;
+    
+    info!("✅ Successfully registered with ID: {}", registration_id);
+    info!("👂 Agent {} is ready to receive calls...", args.username);
+    
+    // Start handling incoming calls (like UAS example)
+    let call_client = client.clone();
     let call_duration = args.call_duration;
-    let event_handle = tokio::spawn(async move {
+    let incoming_call_handler = tokio::spawn(async move {
+        handle_incoming_calls(call_client, call_duration).await;
+    });
+    
+    // Start general event handler for call state changes
+    let event_client = client.clone();
+    let event_handler = tokio::spawn(async move {
         handle_client_events(event_client, call_duration).await;
     });
     
-    // Register with the server
-    info!("📝 Registering as {} with server {}", agent_uri, server_addr);
-    
-    let reg_config = RegistrationConfig {
-        from_uri: agent_uri.clone(),
-        contact_uri: agent_uri.clone(),
-        server_uri: server_uri.clone(),
-        expires: 3600,
-        username: Some(args.username.clone()),
-        password: None,
-        realm: None,
-    };
-    
-    let reg_id = match client.register(reg_config).await {
-        Ok(id) => {
-            info!("✅ Successfully registered!");
-            id
-        }
-        Err(e) => {
-            error!("❌ Registration failed: {}", e);
-            return Err(e.into());
-        }
-    };
-    
     // Keep the client running
-    info!("👂 Agent {} is ready to receive calls...", args.username);
     info!("Press Ctrl+C to stop");
     
     // Wait for shutdown signal
@@ -121,16 +231,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Unregister before shutdown
     info!("🔚 Unregistering...");
-    client.unregister(reg_id).await?;
+    if let Err(e) = client.unregister(registration_id).await {
+        warn!("Failed to unregister: {}", e);
+    }
     
-    // Stop event handler
-    event_handle.abort();
+    // Stop handlers
+    incoming_call_handler.abort();
+    event_handler.abort();
+    
+    // Stop the client
+    client.stop().await?;
     
     info!("👋 Agent client shutdown complete");
     Ok(())
 }
 
-async fn handle_client_events(client: Arc<Client>, call_duration: u64) {
+/// Handle incoming calls by polling for IncomingPending state (like UAS example)
+async fn handle_incoming_calls(client: Arc<ClientManager>, call_duration: u64) {
+    loop {
+        sleep(POLLING_INTERVAL).await;
+        
+        // Get all active calls
+        let active_calls = client.get_active_calls().await;
+        
+        // Find calls in IncomingPending state
+        for call_info in active_calls {
+            if call_info.state == CallState::IncomingPending {
+                info!("📥 Answering pending call {} from {}", 
+                      call_info.call_id, call_info.remote_uri);
+                
+                match client.answer_call(&call_info.call_id).await {
+                    Ok(_) => {
+                        info!("✅ Successfully answered call {}", call_info.call_id);
+                        
+                        // If call_duration is set, automatically hang up after duration
+                        if call_duration > 0 {
+                            let client_clone = client.clone();
+                            let call_id_clone = call_info.call_id.clone();
+                            tokio::spawn(async move {
+                                sleep(Duration::from_secs(call_duration)).await;
+                                info!("⏰ Auto-hanging up call {} after {} seconds", 
+                                      call_id_clone, call_duration);
+                                if let Err(e) = client_clone.hangup_call(&call_id_clone).await {
+                                    error!("Failed to hang up call: {}", e);
+                                }
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        error!("❌ Failed to answer call {}: {}", call_info.call_id, e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Handle client events (focusing on call state changes and media)
+async fn handle_client_events(client: Arc<ClientManager>, call_duration: u64) {
     let mut event_rx = client.subscribe_events();
     
     loop {
@@ -138,77 +296,20 @@ async fn handle_client_events(client: Arc<Client>, call_duration: u64) {
             event = event_rx.recv() => {
                 match event {
                     Ok(ev) => {
-                        // Process events based on the event type
+                        use rvoip_client_core::ClientEvent;
                         match ev {
-                            ClientEvent::IncomingCall { info, .. } => {
-                                info!("📞 Incoming call {} from {}", info.call_id, info.caller_uri);
-                                
-                                // Auto-answer the call
-                                match client.answer_call(&info.call_id).await {
-                                    Ok(_) => {
-                                        info!("✅ Answered call {}", info.call_id);
-                                        
-                                        // If call_duration is set, automatically hang up after duration
-                                        if call_duration > 0 {
-                                            let client_clone = client.clone();
-                                            let call_id_clone = info.call_id;
-                                            tokio::spawn(async move {
-                                                sleep(Duration::from_secs(call_duration)).await;
-                                                info!("⏰ Auto-hanging up call {} after {} seconds", 
-                                                      call_id_clone, call_duration);
-                                                if let Err(e) = client_clone.hangup_call(&call_id_clone).await {
-                                                    error!("Failed to hang up call: {}", e);
-                                                }
-                                            });
-                                        }
-                                    }
-                                    Err(e) => error!("❌ Failed to answer call {}: {}", info.call_id, e),
-                                }
-                            }
-                            
                             ClientEvent::CallStateChanged { info, .. } => {
-                                match info.new_state {
-                                    CallState::Connected => {
-                                        info!("🔊 Call {} established - audio should be flowing", info.call_id);
-                                    }
-                                    CallState::Terminated | CallState::Failed | CallState::Cancelled => {
-                                        info!("📴 Call {} ended: {:?} ({})", 
-                                              info.call_id, 
-                                              info.new_state,
-                                              info.reason.as_deref().unwrap_or("no reason"));
-                                    }
-                                    _ => {
-                                        tracing::debug!("Call {} state changed to {:?}", info.call_id, info.new_state);
+                                // Check if we should start transmitting audio
+                                if info.new_state == CallState::Connected {
+                                    info!("🔊 Call {} connected - starting audio transmission", info.call_id);
+                                    if let Err(e) = client.start_audio_transmission(&info.call_id).await {
+                                        error!("Failed to start audio: {}", e);
                                     }
                                 }
                             }
                             
-                            ClientEvent::RegistrationStatusChanged { info, .. } => {
-                                use rvoip_client_core::registration::RegistrationStatus;
-                                match info.status {
-                                    RegistrationStatus::Active => {
-                                        info!("✅ Registration confirmed: {} (server: {})", 
-                                              info.user_uri, info.server_uri);
-                                    }
-                                    RegistrationStatus::Failed => {
-                                        error!("❌ Registration failed: {}", 
-                                               info.reason.as_deref().unwrap_or("unknown reason"));
-                                    }
-                                    _ => {
-                                        tracing::debug!("Registration status: {:?}", info.status);
-                                    }
-                                }
-                            }
-                            
-                            ClientEvent::MediaEvent { info, .. } => {
-                                // Log media events if verbose
-                                tracing::debug!("🎵 Media event for call {}: {:?}", info.call_id, info.event_type);
-                            }
-                            
-                            _ => {
-                                // Handle other events
-                                tracing::debug!("Event: {:?}", ev);
-                            }
+                            // Other events are handled by the event handler
+                            _ => {}
                         }
                     }
                     Err(_) => {

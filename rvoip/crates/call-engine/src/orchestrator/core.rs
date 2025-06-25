@@ -286,6 +286,7 @@ impl CallCenterEngine {
                     priority,
                     queued_at: chrono::Utc::now(),
                     estimated_wait_time: None,
+                    retry_count: 0,  // New calls start with 0 retries
                 };
                 
                 // Enqueue the call
@@ -314,6 +315,7 @@ impl CallCenterEngine {
                     priority: 200, // Lower priority for overflow
                     queued_at: chrono::Utc::now(),
                     estimated_wait_time: None,
+                    retry_count: 0,  // New calls start with 0 retries
                 };
                 
                 let mut queue_manager = self.queue_manager.write().await;

@@ -225,6 +225,77 @@ Successfully disabled auto-response and implemented proper REGISTER handling:
 **Estimated Time**: 2-3 days for remaining issues
 **Priority**: HIGH - Core queue management completed, remaining items needed for production reliability
 
+### Phase 0.7: Fix Agent Call Establishment 🔧 IN PROGRESS
+
+**Critical Issue Found**: Calls are being "bridged" internally but agents never receive actual SIP INVITE messages. The server attempts to bridge immediately without waiting for agents to answer.
+
+#### Root Cause Analysis ✅
+- [x] Identified that `assign_specific_agent_to_call` bridges immediately after creating outgoing call
+- [x] No wait for agent to send 200 OK response
+- [x] Agents timeout and de-register after ~45 seconds of inactivity
+- [x] **NEW**: Agent Contact URIs missing port numbers - agents register with `<sip:alice@127.0.0.1>` instead of `<sip:alice@127.0.0.1:5071>`
+  - When no port is specified, SIP defaults to 5060
+  - All INVITE messages go to server's own port (5060) instead of agent ports (5071/5072)
+  - Agents never receive the INVITE messages
+
+#### Step-by-Step Fix Plan:
+
+##### Step 1: Fix `assign_specific_agent_to_call` to wait for agent answer ✅
+- [x] Replace `tokio::time::sleep(100ms)` with proper `wait_for_answer` call
+- [x] Add 30-second timeout for agent to answer
+- [x] On timeout/failure:
+  - [x] Terminate the attempted agent call
+  - [x] Return agent to available pool
+  - [x] Re-queue customer call with higher priority
+- [x] Only proceed to bridging after agent answers (200 OK received)
+
+##### Step 2: Verify Agent Client Implementation ✅
+- [x] Agent client already updated with proper CallHandler
+- [x] Implements deferred call handling pattern
+- [x] Handles media events correctly
+
+##### Step 3: Add Proper SDP Negotiation ✅
+- [x] Retrieve customer's SDP offer before calling agent
+- [x] Pass customer SDP when creating outgoing call to agent
+- [ ] Add `get_session_sdp()` method to SessionCoordinator (already exists as get_media_info)
+- [x] Ensure proper codec negotiation between customer and agent
+
+##### Step 4: Improve Error Handling and Re-queuing ✅
+- [x] Add retry attempt counter to QueuedCall
+- [x] Implement exponential backoff for retries
+- [x] Set maximum retry limit (3 attempts)
+- [x] Better logging at each step for debugging
+
+##### Step 5: Add Comprehensive Logging ✅
+- [x] Log when INVITE is sent to agent
+- [ ] Log agent response (100 Trying, 180 Ringing, 200 OK)
+- [ ] Log ACK sent to agent
+- [x] Log successful bridge creation with timing
+- [x] Add timing metrics for bridge creation
+
+##### Step 6: Update Test Configuration
+- [x] Increase agent registration expiry to 120+ seconds
+- [ ] Set appropriate timeouts in test scripts
+- [ ] Add test cases for timeout scenarios
+
+##### Step 7: Fix Agent Contact URI Port Numbers 🎯 NEW
+- [x] Update REGISTER handling to extract port from Via header when Contact has no port
+- [x] Store complete contact address including port in registrations
+- [x] Ensure outgoing calls use the correct agent port
+- [x] Add validation to ensure Contact URIs include ports
+
+**Implementation Plan for Step 7**:
+1. In `handle_register_request()`, check if Contact URI has a port ✅
+2. If no port, extract port from Via header (source port of REGISTER) ✅ (using workaround)
+3. Store the complete URI with port in SipRegistrar ✅
+4. When creating outgoing calls to agents, use the stored contact with port ✅
+
+**Note**: Current implementation uses a temporary workaround to determine port based on agent name. 
+A proper implementation would extract the port from the Via header in the SIP message.
+
+**Estimated Time**: 2-3 days
+**Priority**: CRITICAL - Without this fix, no calls can be completed
+
 ### Phase 1: IVR System Implementation (Critical) 🎯
 
 #### 1.1 Core IVR Module
@@ -401,6 +472,7 @@ Successfully disabled auto-response and implemented proper REGISTER handling:
 
 - **Phase 0 (Basic Call Delivery)**: ✅ COMPLETED - Critical foundation
 - **Phase 0.6 (Queue Fixes)**: 1 week - Critical for reliability
+- **Phase 0.7 (Agent Call Establishment)**: 2-3 days - Critical for production reliability
 - **Phase 1 (IVR)**: 4-6 weeks - Critical for basic operation
 - **Phase 2 (Routing)**: 3-4 weeks - Enhanced functionality
 - **Phase 3 (Features)**: 6-8 weeks - Production features

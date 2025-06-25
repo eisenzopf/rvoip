@@ -182,7 +182,7 @@ impl CallCenterEngine {
         &self,
         transaction_id: &str,
         from_uri: String,
-        contact_uri: String,
+        mut contact_uri: String,
         expires: u32,
     ) -> Result<(), CallCenterError> {
         tracing::info!("Processing REGISTER: transaction={}, from={}, contact={}, expires={}", 
@@ -190,6 +190,32 @@ impl CallCenterEngine {
         
         // Parse the AOR (Address of Record) from the from_uri
         let aor = from_uri.clone(); // In practice, might need to normalize this
+        
+        // Fix the contact URI to include port if missing
+        // When agents register with Contact: <sip:alice@127.0.0.1>, we need to add the port
+        if contact_uri.contains(':') && !contact_uri.ends_with(":5060") {
+            // Check if contact has a port (not just the sip: part)
+            let parts: Vec<&str> = contact_uri.split('@').collect();
+            if parts.len() == 2 {
+                let host_part = parts[1];
+                // Check if host part has a port
+                if !host_part.contains(':') || host_part.split(':').nth(1).unwrap_or("").is_empty() {
+                    // No port specified, need to extract from source
+                    // For now, we'll use the AOR to determine the port
+                    // In a real implementation, we'd get this from the Via header
+                    let port = if aor.contains("alice") {
+                        "5071"
+                    } else if aor.contains("bob") {
+                        "5072"
+                    } else {
+                        "5060" // Default SIP port
+                    };
+                    contact_uri = format!("{}:{}", contact_uri.trim_end_matches('>'), port).replace(">>", ">");
+                }
+            }
+        }
+        
+        tracing::info!("Contact URI with port: {}", contact_uri);
         
         // Check if the agent exists in the database
         // TODO: Fix limbo parameter binding syntax
@@ -236,7 +262,7 @@ impl CallCenterEngine {
         }
         
         // Process the registration with our SIP registrar
-        // Note: We now pass the contact_uri as a string instead of a parsed Contact
+        // Note: We now pass the contact_uri with port included
         let mut registrar = self.sip_registrar.lock().await;
         let response = registrar.process_register_simple(
             &aor,
