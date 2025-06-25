@@ -205,16 +205,16 @@ impl CallCenterEngine {
             // Now we just need to call the agent and bridge them
             
             // Step 1: Create an outgoing call to the agent
-            let agent_uri = agent_info.contact_uri.clone(); // Use the contact URI from REGISTER
-            info!("📞 Creating outgoing call to agent {} at {}", agent_id, agent_uri);
+            let agent_contact_uri = agent_info.contact_uri.clone(); // Use the contact URI from REGISTER
+            info!("📞 Creating outgoing call to agent {} at {}", agent_id, agent_contact_uri);
             
-            // Use the configured domain for the From URI
-            let from_uri = format!("sip:call-center@{}", self.config.general.domain);
+            // Use the configured domain for the call center's From URI
+            let call_center_uri = format!("sip:call-center@{}", self.config.general.domain);
             
             let agent_call_session = match coordinator.create_outgoing_call(
-                &agent_uri,
-                &from_uri,
-                None, // No specific SDP
+                &call_center_uri,    // FROM: The call center is making the call
+                &agent_contact_uri,  // TO: The agent is receiving the call
+                None,                // No specific SDP
             ).await {
                 Ok(call_session) => {
                     info!("✅ Created outgoing call {:?} to agent {}", call_session.id, agent_id);

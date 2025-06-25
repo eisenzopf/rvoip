@@ -1,5 +1,17 @@
 # Call Engine TODO
 
+## 🎉 Current Status: Basic Call Delivery Working!
+
+**Great News**: Phase 0 is complete! The call engine can now:
+- Accept agent registrations via SIP REGISTER
+- Receive incoming customer calls
+- Route calls to available agents
+- Create outgoing calls to agents
+- Bridge customer and agent audio
+- Handle call teardown properly
+
+**Next Priority**: Phase 0.6 - Fix queue management issues discovered during testing
+
 ## Overview
 The Call Engine is responsible for managing call center operations, including agent management, call queuing, routing, and session management. It builds on top of session-core to provide call center-specific functionality.
 
@@ -28,7 +40,7 @@ The integration with session-core has been successfully completed:
 
 ## Current Status
 
-### Phase 0: Basic Call Delivery (Prerequisite) ✅ 90% COMPLETE
+### Phase 0: Basic Call Delivery (Prerequisite) ✅ COMPLETE
 
 **Critical**: Without this foundation, agents cannot receive calls and the system is non-functional.
 
@@ -55,7 +67,7 @@ The integration with session-core has been successfully completed:
 
 **Completed**: CallCenterEngine now properly creates SessionCoordinator with our CallHandler. Created example `phase0_basic_call_flow` to demonstrate.
 
-#### 0.4 Agent Registration & Call Delivery ✅ 95% COMPLETE
+#### 0.4 Agent Registration & Call Delivery ✅ COMPLETE
 - [x] Design how agents register their SIP endpoints (store in database)
 - [x] Create SipRegistrar module for handling SIP REGISTER requests
 - [x] Discovered dialog-core already handles REGISTER and forwards to session-core
@@ -93,29 +105,30 @@ Successfully disabled auto-response and implemented proper REGISTER handling:
 - Proper SIP responses sent back with correct status and headers
 - No more auto-response race condition!
 
-**Remaining Tasks:**
-- [ ] Add Contact headers in responses
-- [ ] Handle authentication (401 challenges)
-- [ ] Support multiple registrations per agent
+**Remaining Tasks (Not Critical for Basic Operation):**
+- [x] Add Contact headers in responses ✅
+- [ ] Handle authentication (401 challenges) - for production security
+- [ ] Support multiple registrations per agent - for multi-device support
 - [ ] Add timeout handling for abandoned registrations
-- [ ] Link REGISTER authentication with agent database:
-  - [ ] Parse AOR and match with agent records
+- [x] Link REGISTER authentication with agent database:
+  - [x] Parse AOR and match with agent records ✅
   - [ ] Validate agent credentials (digest auth)
-  - [ ] Update agent status when registration succeeds
-- [ ] When routing decision selects an agent:
-  - [ ] Look up agent's current contact URI from registrations
-  - [ ] Create outbound INVITE to agent's registered contact
-  - [ ] Use session-core's bridge functionality to connect customer and agent
+  - [x] Update agent status when registration succeeds ✅
+- [x] When routing decision selects an agent:
+  - [x] Look up agent's current contact URI from registrations
+  - [x] Create outbound INVITE to agent's registered contact
+  - [x] Use session-core's bridge functionality to connect customer and agent
+  - [x] Fixed parameter order bug in create_outgoing_call (FROM/TO were swapped)
 - [ ] Handle registration scenarios:
   - [ ] Initial registration with authentication
   - [ ] Registration refresh (before expiry)
   - [ ] De-registration (expires=0)
   - [ ] Multiple registrations per agent (multiple devices)
   - [ ] Registration expiry and cleanup
-- [ ] Handle agent availability:
-  - [ ] Agent offline (no active registration)
-  - [ ] Agent busy (active but on calls)
-  - [ ] Agent available (registered and ready)
+- [x] Handle agent availability:
+  - [x] Agent offline (no active registration)
+  - [x] Agent busy (active but on calls)
+  - [x] Agent available (registered and ready)
 
 **In Progress**: Discovered that dialog-core/session-core already have REGISTER support. Need to:
 1. Configure dialog-core to forward REGISTER (not auto-respond)
@@ -131,10 +144,12 @@ Successfully disabled auto-response and implemented proper REGISTER handling:
 
 **Completed**: Created comprehensive E2E test suite with:
 - Call center server example
-- Agent client application
+- Agent client application  
 - SIPp test scenarios
 - Automated test runner with PCAP capture
 - Full documentation in examples/e2e_test/
+- ✅ Successfully tested: Customer → Server → Agent call flow works!
+- ✅ Fixed critical bug in agent call creation (parameter order)
 
 **Estimated Time**: 1 week (much simpler than original estimate)
 **Priority**: MUST COMPLETE before any other phases
@@ -143,19 +158,68 @@ Successfully disabled auto-response and implemented proper REGISTER handling:
 
 **Progress Summary**: 
 - ✅ Core integration completed (0.1, 0.2, 0.3)
-- ✅ Agent delivery integration 98% done (0.4)
+- ✅ Agent delivery integration completed (0.4)
   - SIP REGISTER events flow correctly without auto-response
   - SipRegistrar processes registrations
   - Proper SIP responses sent back through the stack
   - Contact headers added to responses
   - Database validation of agents implemented
-  - Only missing: Authentication (401 challenges) and multiple registrations per agent
+  - ✅ Fixed critical bug: create_outgoing_call parameter order (FROM/TO were swapped)
+  - Agent calls now successfully created and bridged
+  - Only missing for production: Authentication (401 challenges) and multiple registrations per agent
 - ✅ End-to-end testing completed (0.5)
   - Comprehensive test suite with automated testing
   - Agent client application for testing
   - SIPp scenarios for customer calls
   - PCAP capture and analysis
-- **Overall**: ~99% complete (only missing authentication for production use)
+- **Overall**: Phase 0 COMPLETE! Basic call delivery works end-to-end
+
+**What's Working Now**:
+- ✅ Agents can register via SIP REGISTER
+- ✅ Incoming customer calls are properly received
+- ✅ Calls are routed to available agents
+- ✅ Outgoing calls to agents work correctly
+- ✅ Customer-agent audio is bridged successfully
+- ✅ End-to-end call flow: Customer → Server → Agent → Bridge
+
+### Phase 0.6: Queue Management Fixes 🔧 NEW
+
+**Critical Issues Found During E2E Testing**:
+
+✅ **Fixed**: Parameter order bug in `create_outgoing_call` - FROM and TO were swapped, causing the call center to try to create calls FROM agents TO itself. This has been corrected and calls now flow properly.
+
+**Remaining Issues**:
+
+#### Queue Monitoring Implementation
+- [ ] Implement proper `monitor_queue_for_agents()` functionality
+  - Currently just a stub that logs but doesn't actually monitor
+  - Should periodically check for available agents
+  - Should dequeue calls when agents become available
+  - Add configurable polling interval
+
+#### Failed Assignment Handling
+- [ ] Add re-queuing logic for failed agent assignments
+  - Currently calls are lost if assignment fails
+  - Should re-queue with increased priority
+  - Add retry counter to prevent infinite loops
+  - Implement exponential backoff for retries
+  - Log assignment failures for monitoring
+
+#### Queue Processing Improvements
+- [ ] Add proper error handling in `try_assign_queued_calls_to_agent()`
+  - Don't lose calls on assignment failure
+  - Track assignment attempts per call
+  - Consider agent skills when dequeuing
+- [ ] Implement queue overflow handling
+  - Monitor queue sizes and wait times
+  - Automatic overflow to backup queues
+  - Configurable overflow thresholds
+- [ ] Add queue priority rebalancing
+  - Aging mechanism for long-waiting calls
+  - Dynamic priority adjustment based on wait time
+
+**Estimated Time**: 1 week
+**Priority**: HIGH - Required for reliable production operation
 
 ### Phase 1: IVR System Implementation (Critical) 🎯
 
@@ -331,7 +395,8 @@ Successfully disabled auto-response and implemented proper REGISTER handling:
 
 ### 📅 Estimated Timeline
 
-- **Phase 0 (Basic Call Delivery)**: 1 week - Critical for basic operation
+- **Phase 0 (Basic Call Delivery)**: ✅ COMPLETED - Critical foundation
+- **Phase 0.6 (Queue Fixes)**: 1 week - Critical for reliability
 - **Phase 1 (IVR)**: 4-6 weeks - Critical for basic operation
 - **Phase 2 (Routing)**: 3-4 weeks - Enhanced functionality
 - **Phase 3 (Features)**: 6-8 weeks - Production features
@@ -424,7 +489,7 @@ The `orchestrator/core.rs` file has grown to over 1000 lines and needs to be spl
    - `ensure_queue_exists()`
    - `monitor_queue_for_agents()`
 
-4. **`calls.rs`** (~200 lines) ⚠️ **347 lines - needs further splitting**
+4. **`calls.rs`** (~200 lines) ⚠️ **387 lines - needs further splitting**
    - `process_incoming_call()`
    - `assign_specific_agent_to_call()`
    - `update_call_established()`

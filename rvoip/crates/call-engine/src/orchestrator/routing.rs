@@ -5,7 +5,7 @@
 //! and business rules.
 
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, error};
 use rvoip_session_core::{IncomingCall, SessionId};
 
 use crate::agent::{AgentId, AgentStatus};
@@ -217,12 +217,117 @@ impl CallCenterEngine {
         // Spawn background task to monitor queue and assign agents when available
         let engine = Arc::new(self.clone());
         tokio::spawn(async move {
-            // **FUTURE**: Implement intelligent queue monitoring
-            // For now, just log that we're monitoring
-            debug!("👁️ Monitoring queue {} for agent availability", queue_id);
+            info!("👁️ Starting queue monitor for queue: {}", queue_id);
             
-            // This would periodically check for available agents and dequeue calls
-            // Implementation would go here...
+            // Monitor for 5 minutes max (to prevent orphaned tasks)
+            let start_time = std::time::Instant::now();
+            let max_duration = std::time::Duration::from_secs(300);
+            
+            // Check every 2 seconds for available agents
+            let mut check_interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            
+            loop {
+                check_interval.tick().await;
+                
+                // Check if we've exceeded max monitoring time
+                if start_time.elapsed() > max_duration {
+                    debug!("Queue monitor for {} exceeded max duration, stopping", queue_id);
+                    break;
+                }
+                
+                // Check if there are still calls in the queue
+                let queue_size = {
+                    let queue_manager = engine.queue_manager.read().await;
+                    queue_manager.get_queue_stats(&queue_id)
+                        .map(|stats| stats.current_size)
+                        .unwrap_or(0)
+                };
+                
+                if queue_size == 0 {
+                    debug!("Queue {} is empty, stopping monitor", queue_id);
+                    break;
+                }
+                
+                // Find available agents for this queue
+                let available_agents: Vec<AgentId> = engine.available_agents
+                    .iter()
+                    .filter(|entry| {
+                        let agent_info = entry.value();
+                        matches!(agent_info.status, AgentStatus::Available) &&
+                        agent_info.current_calls < agent_info.max_calls
+                    })
+                    .map(|entry| entry.key().clone())
+                    .collect();
+                
+                if available_agents.is_empty() {
+                    debug!("No available agents for queue {}", queue_id);
+                    continue;
+                }
+                
+                // Try to dequeue and assign calls to available agents
+                for agent_id in available_agents {
+                    // Try to dequeue a call
+                    let queued_call = {
+                        let mut queue_manager = engine.queue_manager.write().await;
+                        queue_manager.dequeue_for_agent(&queue_id).unwrap_or(None)
+                    };
+                    
+                    if let Some(queued_call) = queued_call {
+                        info!("📤 Dequeued call {} from queue {}", queued_call.session_id, queue_id);
+                        
+                        // Update call status to indicate it's being assigned
+                        {
+                            let mut active_calls = engine.active_calls.write().await;
+                            if let Some(call_info) = active_calls.get_mut(&queued_call.session_id) {
+                                call_info.status = super::types::CallStatus::Routing;
+                                call_info.queue_id = None;
+                            }
+                        }
+                        
+                        // Assign to agent
+                        let session_id = queued_call.session_id.clone();
+                        let agent_id_clone = agent_id.clone();
+                        let engine_clone = engine.clone();
+                        let queue_id_clone = queue_id.clone();
+                        
+                        tokio::spawn(async move {
+                            match engine_clone.assign_specific_agent_to_call(session_id.clone(), agent_id_clone).await {
+                                Ok(()) => {
+                                    info!("✅ Successfully assigned queued call {} to agent", session_id);
+                                }
+                                Err(e) => {
+                                    error!("Failed to assign call {} to agent: {}", session_id, e);
+                                    
+                                    // Re-queue the call with higher priority
+                                    let mut queue_manager = engine_clone.queue_manager.write().await;
+                                    let mut requeued_call = queued_call;
+                                    requeued_call.priority = requeued_call.priority.saturating_sub(5); // Increase priority
+                                    
+                                    if let Err(e) = queue_manager.enqueue_call(&queue_id_clone, requeued_call) {
+                                        error!("Failed to re-queue call {}: {}", session_id, e);
+                                    } else {
+                                        info!("📞 Re-queued call {} with higher priority", session_id);
+                                        
+                                        // Update call status back to queued
+                                        let mut active_calls = engine_clone.active_calls.write().await;
+                                        if let Some(call_info) = active_calls.get_mut(&session_id) {
+                                            call_info.status = super::types::CallStatus::Queued;
+                                            call_info.queue_id = Some(queue_id_clone);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                        
+                        // Continue to next iteration to check for more calls
+                    } else {
+                        // No more calls in queue
+                        break;
+                    }
+                }
+            }
+            
+            info!("👁️ Queue monitor for {} stopped", queue_id);
         });
     }
 } 
