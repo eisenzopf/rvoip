@@ -182,44 +182,48 @@ Successfully disabled auto-response and implemented proper REGISTER handling:
 - ✅ Customer-agent audio is bridged successfully
 - ✅ End-to-end call flow: Customer → Server → Agent → Bridge
 
-### Phase 0.6: Queue Management Fixes 🔧 NEW
+### Phase 0.6: Queue Management Fixes 🔧 MOSTLY COMPLETE
 
 **Critical Issues Found During E2E Testing**:
 
 ✅ **Fixed**: Parameter order bug in `create_outgoing_call` - FROM and TO were swapped, causing the call center to try to create calls FROM agents TO itself. This has been corrected and calls now flow properly.
 
-**Remaining Issues**:
+**Queue Implementation Progress**:
 
-#### Queue Monitoring Implementation
-- [ ] Implement proper `monitor_queue_for_agents()` functionality
-  - Currently just a stub that logs but doesn't actually monitor
-  - Should periodically check for available agents
-  - Should dequeue calls when agents become available
-  - Add configurable polling interval
+#### Queue Monitoring Implementation ✅ COMPLETED
+- [x] Implemented proper `monitor_queue_for_agents()` functionality
+  - [x] Monitors queues for waiting calls every 2 seconds
+  - [x] Checks for available agents periodically
+  - [x] Dequeues calls when agents become available
+  - [x] Prevents duplicate monitors using DashSet
+  - [x] 5-minute maximum monitor lifetime
 
-#### Failed Assignment Handling
-- [ ] Add re-queuing logic for failed agent assignments
-  - Currently calls are lost if assignment fails
-  - Should re-queue with increased priority
-  - Add retry counter to prevent infinite loops
-  - Implement exponential backoff for retries
-  - Log assignment failures for monitoring
+#### Failed Assignment Handling ✅ COMPLETED
+- [x] Added re-queuing logic for failed agent assignments
+  - [x] Calls are re-queued with increased priority on failure
+  - [x] Priority reduced by 5 for each retry (higher priority)
+  - [x] Proper error logging for debugging
+  - [x] Call status updated during transitions
 
-#### Queue Processing Improvements
-- [ ] Add proper error handling in `try_assign_queued_calls_to_agent()`
-  - Don't lose calls on assignment failure
-  - Track assignment attempts per call
-  - Consider agent skills when dequeuing
-- [ ] Implement queue overflow handling
-  - Monitor queue sizes and wait times
-  - Automatic overflow to backup queues
-  - Configurable overflow thresholds
-- [ ] Add queue priority rebalancing
-  - Aging mechanism for long-waiting calls
-  - Dynamic priority adjustment based on wait time
+#### Performance Improvements ✅ COMPLETED
+- [x] Converted active_calls from RwLock<HashMap> to DashMap
+- [x] Converted active_queue_monitors from RwLock<HashSet> to DashSet
+- [x] Better concurrent access patterns
 
-**Estimated Time**: 1 week
-**Priority**: HIGH - Required for reliable production operation
+#### Remaining Issues to Investigate:
+- [ ] Agent call establishment issues (might be media-related)
+- [ ] Add configurable retry limits to prevent infinite loops
+- [ ] Implement exponential backoff for retries
+- [ ] Queue overflow handling
+  - [ ] Monitor queue sizes and wait times
+  - [ ] Automatic overflow to backup queues
+  - [ ] Configurable overflow thresholds
+- [ ] Queue priority rebalancing
+  - [ ] Aging mechanism for long-waiting calls
+  - [ ] Dynamic priority adjustment based on wait time
+
+**Estimated Time**: 2-3 days for remaining issues
+**Priority**: HIGH - Core queue management completed, remaining items needed for production reliability
 
 ### Phase 1: IVR System Implementation (Critical) 🎯
 

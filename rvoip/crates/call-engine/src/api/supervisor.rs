@@ -63,22 +63,25 @@ impl SupervisorApi {
     /// 
     /// Returns information about all calls currently in the system
     pub async fn list_active_calls(&self) -> Vec<CallInfo> {
-        let calls = self.engine.active_calls().read().await;
-        calls.values().cloned().collect()
+        self.engine.active_calls()
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
     }
     
     /// Get detailed information about a specific call
     pub async fn get_call_details(&self, session_id: &SessionId) -> Option<CallInfo> {
-        let calls = self.engine.active_calls().read().await;
-        calls.get(session_id).cloned()
+        self.engine.active_calls()
+            .get(session_id)
+            .map(|entry| entry.clone())
     }
     
     /// Monitor calls assigned to a specific agent
     pub async fn monitor_agent_calls(&self, agent_id: &AgentId) -> Vec<CallInfo> {
-        let calls = self.engine.active_calls().read().await;
-        calls.values()
-            .filter(|call| call.agent_id.as_ref() == Some(agent_id))
-            .cloned()
+        self.engine.active_calls()
+            .iter()
+            .filter(|entry| entry.value().agent_id.as_ref() == Some(agent_id))
+            .map(|entry| entry.value().clone())
             .collect()
     }
     
@@ -89,13 +92,14 @@ impl SupervisorApi {
     
     /// Get calls in a specific queue
     pub async fn get_queued_calls(&self, queue_id: &str) -> Vec<CallInfo> {
-        let calls = self.engine.active_calls().read().await;
-        calls.values()
-            .filter(|call| {
+        self.engine.active_calls()
+            .iter()
+            .filter(|entry| {
+                let call = entry.value();
                 call.queue_id.as_ref().map(|q| q == queue_id).unwrap_or(false) &&
                 matches!(call.status, crate::orchestrator::types::CallStatus::Queued)
             })
-            .cloned()
+            .map(|entry| entry.value().clone())
             .collect()
     }
     
@@ -142,8 +146,9 @@ impl SupervisorApi {
     /// Returns the bridge ID that can be used to join the call in listen-only mode
     /// Note: Actual implementation would require additional session-core support
     pub async fn listen_to_call(&self, session_id: &SessionId) -> CallCenterResult<Option<BridgeId>> {
-        let calls = self.engine.active_calls().read().await;
-        Ok(calls.get(session_id).and_then(|call| call.bridge_id.clone()))
+        Ok(self.engine.active_calls()
+            .get(session_id)
+            .and_then(|entry| entry.bridge_id.clone()))
     }
     
     /// Send a message to an agent during a call (coaching)

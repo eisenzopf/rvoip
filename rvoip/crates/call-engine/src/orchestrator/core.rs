@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tokio::sync::{mpsc, RwLock, Mutex};
 use tracing::{info, error, warn};
 
@@ -47,7 +47,7 @@ pub struct CallCenterEngine {
     pub(super) bridge_events: Option<mpsc::UnboundedReceiver<BridgeEvent>>,
     
     /// Call tracking and routing with detailed info
-    pub(super) active_calls: Arc<RwLock<HashMap<SessionId, CallInfo>>>,
+    pub(super) active_calls: Arc<DashMap<SessionId, CallInfo>>,
     
     /// Agent availability and skill tracking
     pub(super) available_agents: Arc<DashMap<AgentId, AgentInfo>>,
@@ -60,6 +60,9 @@ pub struct CallCenterEngine {
     
     /// SIP Registrar for handling agent registrations
     pub(crate) sip_registrar: Arc<Mutex<SipRegistrar>>,
+    
+    /// Track active queue monitors to prevent duplicates
+    pub(super) active_queue_monitors: Arc<DashSet<String>>,
 }
 
 impl CallCenterEngine {
@@ -77,11 +80,12 @@ impl CallCenterEngine {
             session_coordinator: None,
             queue_manager: Arc::new(RwLock::new(QueueManager::new())),
             bridge_events: None,
-            active_calls: Arc::new(RwLock::new(HashMap::new())),
+            active_calls: Arc::new(DashMap::new()),
             available_agents: Arc::new(DashMap::new()),
             routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
             agent_registry: Arc::new(Mutex::new(AgentRegistry::new(database.clone()))),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
+            active_queue_monitors: Arc::new(DashSet::new()),
         });
         
         // Create CallHandler with weak reference to placeholder
@@ -112,11 +116,12 @@ impl CallCenterEngine {
             session_coordinator: Some(session_coordinator),
             queue_manager: Arc::new(RwLock::new(QueueManager::new())),
             bridge_events: None,
-            active_calls: Arc::new(RwLock::new(HashMap::new())),
+            active_calls: Arc::new(DashMap::new()),
             available_agents: Arc::new(DashMap::new()),
             routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
             agent_registry: Arc::new(Mutex::new(AgentRegistry::new(database))),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
+            active_queue_monitors: Arc::new(DashSet::new()),
         });
         
         // CRITICAL FIX: Update the handler's weak reference to point to the real engine
@@ -134,11 +139,11 @@ impl CallCenterEngine {
     
     /// Get orchestrator statistics with Phase 2 details
     pub async fn get_stats(&self) -> OrchestratorStats {
-        let active_calls = self.active_calls.read().await;
         let bridges = self.list_active_bridges().await;
         
-        let queued_calls = active_calls.values()
-            .filter(|call| matches!(call.status, CallStatus::Queued))
+        let queued_calls = self.active_calls
+            .iter()
+            .filter(|entry| matches!(entry.value().status, CallStatus::Queued))
             .count();
             
         // Count available vs busy agents
@@ -155,7 +160,7 @@ impl CallCenterEngine {
         let routing_stats = self.routing_stats.read().await;
         
         OrchestratorStats {
-            active_calls: active_calls.len(),
+            active_calls: self.active_calls.len(),
             active_bridges: bridges.len(),
             total_calls_handled: routing_stats.calls_routed_directly + routing_stats.calls_queued,
             available_agents: available_count,
@@ -219,8 +224,7 @@ impl CallCenterEngine {
     
     /// Update call state tracking
     pub async fn update_call_state(&self, session_id: &SessionId, new_state: &CallState) -> CallCenterResult<()> {
-        let mut calls = self.active_calls.write().await;
-        if let Some(call_info) = calls.get_mut(session_id) {
+        if let Some(mut call_info) = self.active_calls.get_mut(session_id) {
             info!("Updating call {} state to {:?}", session_id, new_state);
             call_info.status = match new_state {
                 CallState::Initiating => CallStatus::Incoming,
@@ -240,8 +244,7 @@ impl CallCenterEngine {
         info!("Routing incoming call {} to available agent", session_id);
         
         // Get call info
-        let calls = self.active_calls.read().await;
-        let call_info = calls.get(session_id)
+        let call_info = self.active_calls.get(session_id)
             .ok_or_else(|| CallCenterError::not_found(format!("Call {} not found", session_id)))?;
         
         // Create an IncomingCall structure for the routing engine
@@ -253,8 +256,6 @@ impl CallCenterEngine {
             headers: std::collections::HashMap::new(),
             received_at: std::time::Instant::now(),
         };
-        
-        drop(calls); // Release the lock
         
         // Analyze customer and make routing decision
         let (customer_type, priority, required_skills) = self.analyze_customer_info(&incoming_call).await;
@@ -293,8 +294,7 @@ impl CallCenterEngine {
                 
                 // Update call status
                 drop(queue_manager);
-                let mut calls = self.active_calls.write().await;
-                if let Some(call_info) = calls.get_mut(session_id) {
+                if let Some(mut call_info) = self.active_calls.get_mut(session_id) {
                     call_info.status = CallStatus::Queued;
                     call_info.queue_id = Some(queue_id.clone());
                 }
@@ -341,7 +341,7 @@ impl CallCenterEngine {
     /// Clean up resources when call terminates
     pub async fn cleanup_call(&self, session_id: &SessionId) -> CallCenterResult<()> {
         info!("Cleaning up terminated call {}", session_id);
-        self.active_calls.write().await.remove(session_id);
+        self.active_calls.remove(session_id);
         Ok(())
     }
     
@@ -414,7 +414,7 @@ impl CallCenterEngine {
     // === Public accessor methods for APIs ===
     
     /// Get read access to active calls
-    pub fn active_calls(&self) -> &Arc<RwLock<HashMap<SessionId, CallInfo>>> {
+    pub fn active_calls(&self) -> &Arc<DashMap<SessionId, CallInfo>> {
         &self.active_calls
     }
     
@@ -502,6 +502,7 @@ impl Clone for CallCenterEngine {
             routing_stats: self.routing_stats.clone(),
             agent_registry: self.agent_registry.clone(),
             sip_registrar: self.sip_registrar.clone(),
+            active_queue_monitors: self.active_queue_monitors.clone(),
         }
     }
 } 

@@ -217,6 +217,12 @@ impl CallCenterEngine {
         // Spawn background task to monitor queue and assign agents when available
         let engine = Arc::new(self.clone());
         tokio::spawn(async move {
+            // Check if already monitoring this queue
+            if !engine.active_queue_monitors.insert(queue_id.clone()) {
+                info!("🔄 Queue monitor already active for {}, skipping duplicate", queue_id);
+                return;
+            }
+            
             info!("👁️ Starting queue monitor for queue: {}", queue_id);
             
             // Monitor for 5 minutes max (to prevent orphaned tasks)
@@ -239,7 +245,7 @@ impl CallCenterEngine {
                 let queue_size = {
                     let queue_manager = engine.queue_manager.read().await;
                     queue_manager.get_queue_stats(&queue_id)
-                        .map(|stats| stats.current_size)
+                        .map(|stats| stats.total_calls)
                         .unwrap_or(0)
                 };
                 
@@ -276,12 +282,9 @@ impl CallCenterEngine {
                         info!("📤 Dequeued call {} from queue {}", queued_call.session_id, queue_id);
                         
                         // Update call status to indicate it's being assigned
-                        {
-                            let mut active_calls = engine.active_calls.write().await;
-                            if let Some(call_info) = active_calls.get_mut(&queued_call.session_id) {
-                                call_info.status = super::types::CallStatus::Routing;
-                                call_info.queue_id = None;
-                            }
+                        if let Some(mut call_info) = engine.active_calls.get_mut(&queued_call.session_id) {
+                            call_info.status = super::types::CallStatus::Routing;
+                            call_info.queue_id = None;
                         }
                         
                         // Assign to agent
@@ -309,8 +312,7 @@ impl CallCenterEngine {
                                         info!("📞 Re-queued call {} with higher priority", session_id);
                                         
                                         // Update call status back to queued
-                                        let mut active_calls = engine_clone.active_calls.write().await;
-                                        if let Some(call_info) = active_calls.get_mut(&session_id) {
+                                        if let Some(mut call_info) = engine_clone.active_calls.get_mut(&session_id) {
                                             call_info.status = super::types::CallStatus::Queued;
                                             call_info.queue_id = Some(queue_id_clone);
                                         }
@@ -327,6 +329,8 @@ impl CallCenterEngine {
                 }
             }
             
+            // Remove from active monitors
+            engine.active_queue_monitors.remove(&queue_id);
             info!("👁️ Queue monitor for {} stopped", queue_id);
         });
     }

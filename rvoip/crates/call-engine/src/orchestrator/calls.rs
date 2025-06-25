@@ -44,10 +44,7 @@ impl CallCenterEngine {
         };
         
         // Store call info
-        {
-            let mut active_calls = self.active_calls.write().await;
-            active_calls.insert(session_id.clone(), call_info);
-        }
+        self.active_calls.insert(session_id.clone(), call_info);
         
         // Make intelligent routing decision based on multiple factors
         let routing_decision = self.make_routing_decision(&session_id, &customer_type, priority, &required_skills).await?;
@@ -60,12 +57,9 @@ impl CallCenterEngine {
                 info!("📞 Routing call {} directly to agent {} ({})", session_id, agent_id, reason);
                 
                 // Update call status and assign agent
-                {
-                    let mut active_calls = self.active_calls.write().await;
-                    if let Some(call_info) = active_calls.get_mut(&session_id) {
-                        call_info.status = CallStatus::Ringing;
-                        call_info.agent_id = Some(agent_id.clone());
-                    }
+                if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+                    call_info.status = CallStatus::Ringing;
+                    call_info.agent_id = Some(agent_id.clone());
                 }
                 
                 // Schedule immediate agent assignment
@@ -118,13 +112,10 @@ impl CallCenterEngine {
                 }
                 
                 // Update call status
-                {
-                    let mut active_calls = self.active_calls.write().await;
-                    if let Some(call_info) = active_calls.get_mut(&session_id) {
-                        call_info.status = CallStatus::Queued;
-                        call_info.queue_id = Some(queue_id.clone());
-                        call_info.queued_at = Some(chrono::Utc::now());
-                    }
+                if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+                    call_info.status = CallStatus::Queued;
+                    call_info.queue_id = Some(queue_id.clone());
+                    call_info.queued_at = Some(chrono::Utc::now());
                 }
                 
                 // Update routing stats
@@ -253,14 +244,11 @@ impl CallCenterEngine {
                           session_id, agent_id, bridge_id);
                     
                     // Update call info
-                    {
-                        let mut active_calls = self.active_calls.write().await;
-                        if let Some(call_info) = active_calls.get_mut(&session_id) {
-                            call_info.agent_id = Some(agent_id.clone());
-                            call_info.bridge_id = Some(bridge_id);
-                            call_info.status = CallStatus::Bridged;
-                            call_info.answered_at = Some(chrono::Utc::now());
-                        }
+                    if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+                        call_info.agent_id = Some(agent_id.clone());
+                        call_info.bridge_id = Some(bridge_id);
+                        call_info.status = CallStatus::Bridged;
+                        call_info.answered_at = Some(chrono::Utc::now());
                     }
                     
                     // Store updated agent info
@@ -287,8 +275,7 @@ impl CallCenterEngine {
     
     /// Update call state when call is established
     pub(super) async fn update_call_established(&self, session_id: SessionId) {
-        let mut active_calls = self.active_calls.write().await;
-        if let Some(call_info) = active_calls.get_mut(&session_id) {
+        if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
             call_info.status = CallStatus::Bridged;
             call_info.answered_at = Some(chrono::Utc::now());
             info!("📞 Call {} marked as established/bridged", session_id);
@@ -300,10 +287,7 @@ impl CallCenterEngine {
         info!("🛑 Handling call termination: {}", session_id);
         
         // Get call info and clean up
-        let call_info = {
-            let mut active_calls = self.active_calls.write().await;
-            active_calls.remove(&session_id)
-        };
+        let call_info = self.active_calls.remove(&session_id).map(|(_, v)| v);
         
         if let Some(call_info) = call_info {
             // If call was bridged, return agent to available pool
@@ -375,8 +359,35 @@ impl CallCenterEngine {
                 let engine = Arc::new(self.clone());
                 
                 tokio::spawn(async move {
-                    if let Err(e) = engine.assign_specific_agent_to_call(session_id, agent_id_clone).await {
-                        error!("Failed to assign queued call to agent: {}", e);
+                    match engine.assign_specific_agent_to_call(session_id.clone(), agent_id_clone).await {
+                        Ok(()) => {
+                            info!("✅ Successfully assigned queued call {} to agent", session_id);
+                        }
+                        Err(e) => {
+                            error!("Failed to assign queued call {} to agent: {}", session_id, e);
+                            
+                            // Re-queue the call with higher priority
+                            let mut queue_manager = engine.queue_manager.write().await;
+                            let mut requeued_call = queued_call;
+                            requeued_call.priority = requeued_call.priority.saturating_sub(5); // Increase priority
+                            
+                            if let Err(e) = queue_manager.enqueue_call(queue_id, requeued_call) {
+                                error!("Failed to re-queue call {}: {}", session_id, e);
+                                
+                                // Last resort: terminate the call if we can't re-queue
+                                if let Some(coordinator) = engine.session_coordinator.as_ref() {
+                                    let _ = coordinator.terminate_session(&session_id).await;
+                                }
+                            } else {
+                                info!("📞 Re-queued call {} to {} with higher priority", session_id, queue_id);
+                                
+                                // Update call status back to queued
+                                if let Some(mut call_info) = engine.active_calls.get_mut(&session_id) {
+                                    call_info.status = CallStatus::Queued;
+                                    call_info.queue_id = Some(queue_id.to_string());
+                                }
+                            }
+                        }
                     }
                 });
                 
