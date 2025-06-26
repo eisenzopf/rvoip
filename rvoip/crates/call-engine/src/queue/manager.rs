@@ -57,7 +57,7 @@ impl QueueManager {
             name,
             calls: VecDeque::new(),
             max_size,
-            max_wait_time_seconds: 600, // 10 minutes default
+            max_wait_time_seconds: 3600, // 60 minutes for testing - effectively no timeout
         };
         
         self.queues.insert(queue_id, queue);

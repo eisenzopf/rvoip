@@ -218,9 +218,9 @@ main() {
         127.0.0.1:5060 \
         > "$SIPP_LOG" 2>&1 || true
     
-    # Wait for calls to complete
-    echo "Waiting for calls to complete..."
-    sleep 20
+    # Wait for calls to complete (extended for queue testing)
+    echo "Waiting for calls to complete (90s to ensure all calls go through queue)..."
+    sleep 90
     
     # Stop packet capture
     echo -e "\n${YELLOW}Stopping packet capture...${NC}"

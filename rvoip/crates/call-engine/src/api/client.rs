@@ -117,7 +117,7 @@ impl CallCenterClient {
 /// Builder for creating a CallCenterClient
 pub struct CallCenterClientBuilder {
     config: Option<crate::config::CallCenterConfig>,
-    database: Option<crate::database::CallCenterDatabase>,
+    db_path: Option<String>,
 }
 
 impl CallCenterClientBuilder {
@@ -125,7 +125,7 @@ impl CallCenterClientBuilder {
     pub fn new() -> Self {
         Self {
             config: None,
-            database: None,
+            db_path: None,
         }
     }
     
@@ -135,9 +135,9 @@ impl CallCenterClientBuilder {
         self
     }
     
-    /// Set the database
-    pub fn with_database(mut self, database: crate::database::CallCenterDatabase) -> Self {
-        self.database = Some(database);
+    /// Set the database path
+    pub fn with_database_path(mut self, path: String) -> Self {
+        self.db_path = Some(path);
         self
     }
     
@@ -145,10 +145,8 @@ impl CallCenterClientBuilder {
     pub async fn build(self) -> CallCenterResult<CallCenterClient> {
         let config = self.config
             .ok_or_else(|| CallCenterError::configuration("Configuration required"))?;
-        let database = self.database
-            .ok_or_else(|| CallCenterError::configuration("Database required"))?;
             
-        let engine = CallCenterEngine::new(config, database).await?;
+        let engine = CallCenterEngine::new(config, self.db_path).await?;
         Ok(CallCenterClient::new(engine))
     }
 }

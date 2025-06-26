@@ -157,8 +157,7 @@ impl CallCenterEngine {
                     },
                     
                     RoutingDecision::Queue { queue_id, priority, reason } => {
-                        info!("📥 Queueing call {} to {} (priority: {}, reason: {})", 
-                              session_id, queue_id, priority, reason);
+                        info!("📥 Queueing call {} to {} (reason: {})", session_id, queue_id, reason);
                         
                         // Ensure the queue exists before trying to enqueue
                         if let Err(e) = self.ensure_queue_exists(&queue_id).await {
@@ -171,6 +170,14 @@ impl CallCenterEngine {
                         }
                         
                         // Create queued call entry
+                        let call_id = uuid::Uuid::new_v4().to_string();
+                        let customer_info = self.active_calls.get(&session_id)
+                            .map(|c| serde_json::json!({
+                                "caller_id": c.caller_id.clone(),
+                                "customer_type": format!("{:?}", c.customer_type),
+                            }));
+                        
+                        // Create the QueuedCall struct
                         let queued_call = QueuedCall {
                             session_id: session_id.clone(),
                             caller_id: self.active_calls.get(&session_id)
@@ -182,24 +189,55 @@ impl CallCenterEngine {
                             retry_count: 0,
                         };
                         
-                        // Add to queue
-                        {
-                            let mut queue_manager = self.queue_manager.write().await;
-                            if let Err(e) = queue_manager.enqueue_call(&queue_id, queued_call) {
-                                error!("Failed to enqueue call {}: {}", session_id, e);
-                                
-                                // Terminate the call if we can't queue it
-                                if let Some(coordinator) = &self.session_coordinator {
-                                    let _ = coordinator.terminate_session(&session_id).await;
+                        // Add to database queue
+                        let mut enqueue_success = false;
+                        if let Some(db_manager) = &self.db_manager {
+                            match db_manager.enqueue_call(&queue_id, &queued_call).await {
+                                Ok(_) => {
+                                    info!("✅ Call {} enqueued to database queue '{}'", session_id, queue_id);
+                                    
+                                    // Log queue depth after enqueue
+                                    if let Ok(depth) = db_manager.get_queue_depth(&queue_id).await {
+                                        info!("📊 Queue '{}' status after enqueue: {} calls waiting", 
+                                              queue_id, depth);
+                                    }
+                                    enqueue_success = true;
                                 }
-                                return;
+                                Err(e) => {
+                                    error!("Failed to enqueue call {} to database: {}", session_id, e);
+                                }
                             }
-                            
-                            // PHASE 0.10: Log queue depth after enqueue
-                            if let Ok(stats) = queue_manager.get_queue_stats(&queue_id) {
-                                info!("📊 Queue '{}' status after enqueue: {} calls waiting", 
-                                      queue_id, stats.total_calls);
+                        }
+                        
+                        // Always add to in-memory queue as well (database is just for persistence)
+                        if !enqueue_success {
+                            // Only use in-memory queue if database enqueue failed
+                            let mut queue_manager = self.queue_manager.write().await;
+                            match queue_manager.enqueue_call(&queue_id, queued_call) {
+                                Ok(_) => {
+                                    // Log queue depth after enqueue
+                                    if let Ok(stats) = queue_manager.get_queue_stats(&queue_id) {
+                                        info!("📊 Queue '{}' status after enqueue: {} calls waiting", 
+                                              queue_id, stats.total_calls);
+                                    }
+                                    enqueue_success = true;
+                                }
+                                Err(e) => {
+                                    error!("Failed to enqueue call {}: {}", session_id, e);
+                                }
                             }
+                        } else {
+                            // Also add to in-memory queue
+                            let mut queue_manager = self.queue_manager.write().await;
+                            let _ = queue_manager.enqueue_call(&queue_id, queued_call);
+                        }
+                        
+                        if !enqueue_success {
+                            // Terminate the call if we can't queue it
+                            if let Some(coordinator) = &self.session_coordinator {
+                                let _ = coordinator.terminate_session(&session_id).await;
+                            }
+                            return;
                         }
                         
                         // Update call status
@@ -270,7 +308,7 @@ impl CallCenterEngine {
             info!("🔄 Agent {} status change: Available → Busy (current_calls: {} → {})", 
                   agent_id, agent_info.current_calls, agent_info.current_calls + 1);
             
-            agent_info.status = AgentStatus::Busy { active_calls: (agent_info.current_calls + 1) as u32 };
+            agent_info.status = AgentStatus::Busy(vec![session_id.clone()]);
             agent_info.current_calls += 1;
             Some(agent_info)
         } else {

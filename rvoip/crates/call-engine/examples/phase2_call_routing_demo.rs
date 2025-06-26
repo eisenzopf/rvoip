@@ -14,10 +14,14 @@
 //! - **Queue Monitoring**: Automatic assignment of queued calls to available agents
 
 use anyhow::Result;
-use rvoip_call_engine::prelude::*;
+use rvoip_call_engine::{
+    prelude::*,
+    agent::{Agent, AgentId, AgentStatus},
+};
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 use tracing_subscriber;
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,69 +32,53 @@ async fn main() -> Result<()> {
 
     println!("🚀 Phase 2 Call Routing Demonstration\n");
 
-    // Step 1: Initialize database
-    println!("📊 Initializing database...");
-    let database = CallCenterDatabase::new_in_memory().await?;
-    println!("✅ Database initialized\n");
+    info!("🚀 Starting Phase 2: Call Routing Demo");
 
-    // Step 2: Create call center configuration
-    println!("⚙️ Creating call center configuration...");
-    let config = CallCenterConfig::default();
-    println!("✅ Configuration ready\n");
+    // Step 1: Create database and engine
+    let mut config = CallCenterConfig::default();
+    config.general.local_signaling_addr = "127.0.0.1:5060".parse()?;
+    
+    let engine = CallCenterEngine::new(config, Some(":memory:".to_string())).await?;
+    info!("✅ Call center engine created");
 
-    // Step 3: Create CallCenterEngine with Phase 2 capabilities
-    println!("🎯 Creating CallCenterEngine with Phase 2 routing capabilities...");
-    let call_center = CallCenterEngine::new(config, database).await?;
-    println!("✅ CallCenterEngine created with sophisticated routing!\n");
-
-    // Step 4: Register agents with different skills
+    // Step 2: Register agents with different skills
     println!("👥 Registering agents with different skills...");
     
     let agents = vec![
         Agent {
-            id: "alice-001".to_string(),
-            sip_uri: "sip:alice@callcenter.local".to_string(),
-            display_name: "Alice Johnson".to_string(),
-            skills: vec!["english".to_string(), "sales".to_string()],
+            id: format!("{}-001", "alice"),
+            sip_uri: format!("sip:alice@127.0.0.1:5071"),
+            display_name: "Alice Smith".to_string(),
+            skills: vec!["english".to_string(), "support".to_string()],
             max_concurrent_calls: 2,
-            status: AgentStatus::Available,
-            department: Some("sales".to_string()),
-            extension: Some("1001".to_string()),
-        },
-        Agent {
-            id: "bob-002".to_string(),
-            sip_uri: "sip:bob@callcenter.local".to_string(),
-            display_name: "Bob Smith".to_string(),
-            skills: vec!["english".to_string(), "technical_support".to_string()],
-            max_concurrent_calls: 3,
             status: AgentStatus::Available,
             department: Some("support".to_string()),
-            extension: Some("1002".to_string()),
+            extension: Some("101".to_string()),
         },
         Agent {
-            id: "carol-003".to_string(),
-            sip_uri: "sip:carol@callcenter.local".to_string(),
-            display_name: "Carol Davis".to_string(),
-            skills: vec!["spanish".to_string(), "general".to_string()],
-            max_concurrent_calls: 2,
+            id: format!("{}-002", "bob"),
+            sip_uri: format!("sip:bob@127.0.0.1:5072"),
+            display_name: "Bob Johnson".to_string(),
+            skills: vec!["english".to_string(), "sales".to_string()],
+            max_concurrent_calls: 1,
             status: AgentStatus::Available,
-            department: Some("general".to_string()),
-            extension: Some("1003".to_string()),
+            department: Some("sales".to_string()),
+            extension: Some("102".to_string()),
         },
         Agent {
-            id: "david-004".to_string(),
-            sip_uri: "sip:david@callcenter.local".to_string(),
-            display_name: "David Wilson".to_string(),
-            skills: vec!["english".to_string(), "billing".to_string()],
-            max_concurrent_calls: 2,
-            status: AgentStatus::Away { reason: "Lunch".to_string() },
-            department: Some("billing".to_string()),
-            extension: Some("1004".to_string()),
+            id: format!("{}-003", "charlie"),
+            sip_uri: format!("sip:charlie@127.0.0.1:5073"),
+            display_name: "Charlie Brown".to_string(),
+            skills: vec!["spanish".to_string(), "support".to_string()],
+            max_concurrent_calls: 3,
+            status: AgentStatus::Offline,  // Charlie is offline
+            department: Some("support".to_string()),
+            extension: Some("103".to_string()),
         },
     ];
     
     for agent in &agents {
-        let session_id = call_center.register_agent(agent).await?;
+        let session_id = engine.register_agent(agent).await?;
         println!("  ✅ Registered {} with skills: {:?} (session: {})", 
                  agent.display_name, agent.skills, session_id);
     }
@@ -98,7 +86,7 @@ async fn main() -> Result<()> {
 
     // Step 5: Display initial statistics
     println!("📊 Initial Call Center Statistics:");
-    display_statistics(&call_center).await;
+    display_statistics(&engine).await;
     println!();
 
     // Step 6: Simulate incoming calls with different characteristics
@@ -106,53 +94,53 @@ async fn main() -> Result<()> {
     
     // Scenario 1: VIP customer call (should get priority routing)
     println!("🌟 Scenario 1: VIP Customer Call");
-    simulate_incoming_call(&call_center, "+1800-VIP-CUSTOMER", "VIP customer needing assistance").await;
+    simulate_incoming_call(&engine, "+1800-VIP-CUSTOMER", "VIP customer needing assistance").await;
     sleep(Duration::from_millis(500)).await;
     
     // Scenario 2: Technical support call (should route to Bob)
     println!("🔧 Scenario 2: Technical Support Call");
-    simulate_incoming_call(&call_center, "+1555-support-line", "Customer needs technical help").await;
+    simulate_incoming_call(&engine, "+1555-support-line", "Customer needs technical help").await;
     sleep(Duration::from_millis(500)).await;
     
     // Scenario 3: Sales call (should route to Alice)
     println!("💼 Scenario 3: Sales Inquiry Call");
-    simulate_incoming_call(&call_center, "+1555-sales-inquiry", "Customer interested in purchasing").await;
+    simulate_incoming_call(&engine, "+1555-sales-inquiry", "Customer interested in purchasing").await;
     sleep(Duration::from_millis(500)).await;
     
     // Scenario 4: Billing call (should route to Carol)
     println!("💰 Scenario 4: Billing Support Call");
-    simulate_incoming_call(&call_center, "+1555-billing-help", "Customer has billing question").await;
+    simulate_incoming_call(&engine, "+1555-billing-help", "Customer has billing question").await;
     sleep(Duration::from_millis(500)).await;
     
     // Scenario 5: Standard call when all agents busy (should queue)
     println!("📋 Scenario 5: Standard Call (agents busy - should queue)");
     // First, make some agents busy
-    call_center.update_agent_status(&"alice-001".to_string(), AgentStatus::Busy { active_calls: 1 }).await?;
-    call_center.update_agent_status(&"bob-002".to_string(), AgentStatus::Busy { active_calls: 1 }).await?;
+    engine.update_agent_status(&AgentId("alice-001".to_string()), AgentStatus::Busy(vec![])).await?;
+    engine.update_agent_status(&AgentId("bob-002".to_string()), AgentStatus::Busy(vec![])).await?;
     
-    simulate_incoming_call(&call_center, "+1555-standard-call", "Standard customer call").await;
+    simulate_incoming_call(&engine, "+1555-standard-call", "Standard customer call").await;
     sleep(Duration::from_millis(500)).await;
 
     // Step 7: Display updated statistics
     println!("\n📊 Updated Call Center Statistics (after routing):");
-    display_statistics(&call_center).await;
+    display_statistics(&engine).await;
     
     // Step 8: Display queue statistics
     println!("\n📋 Queue Statistics:");
-    display_queue_statistics(&call_center).await;
+    display_queue_statistics(&engine).await;
     
     // Step 9: Display agent information
     println!("\n👥 Agent Status and Performance:");
-    display_agent_information(&call_center).await;
+    display_agent_information(&engine).await;
     
     // Step 10: Simulate agent becoming available (should trigger queue processing)
     println!("\n🔄 Making agent available - should process queued calls...");
-    call_center.update_agent_status(&"alice-001".to_string(), AgentStatus::Available).await?;
+    engine.update_agent_status(&AgentId("alice-001".to_string()), AgentStatus::Available).await?;
     sleep(Duration::from_secs(1)).await; // Give time for queue processing
     
     // Step 11: Final statistics
     println!("\n📊 Final Call Center Statistics:");
-    display_statistics(&call_center).await;
+    display_statistics(&engine).await;
     
     println!("\n🎯 Phase 2 Demonstration Summary:");
     println!("  ✅ Intelligent call routing based on customer type and skills");

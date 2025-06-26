@@ -13,8 +13,14 @@
 //! - **Event Monitoring**: Bridge event notifications and call tracking
 
 use anyhow::Result;
-use rvoip_call_engine::prelude::*;
+use rvoip_call_engine::{
+    prelude::*,
+    agent::{Agent, AgentStatus},
+    CallCenterServerBuilder,
+};
 use std::sync::Arc;
+use tokio::time::{sleep, Duration};
+use tracing::info;
 use tracing_subscriber;
 
 #[tokio::main]
@@ -24,71 +30,21 @@ async fn main() -> Result<()> {
         .with_env_filter("debug,rvoip_call_engine=trace,rvoip_session_core=debug")
         .init();
 
-    println!("🚀 Starting Call Center with REAL Session-Core API Integration\n");
+    info!("🚀 Starting Call Center with Database Demo");
 
-    // Step 1: Initialize database with real Limbo integration
-    println!("📊 Initializing Limbo database...");
-    let database = CallCenterDatabase::new_in_memory().await?;
-    println!("✅ Database initialized\n");
+    // Create configuration
+    let mut config = CallCenterConfig::default();
+    config.general.local_signaling_addr = "127.0.0.1:5060".parse()?;
 
-    // Step 2: Create call center configuration
-    println!("⚙️ Creating call center configuration...");
-    let config = CallCenterConfig {
-        general: GeneralConfig {
-            max_concurrent_calls: 100,
-            max_agents: 50,
-            default_call_timeout: 300,
-            cleanup_interval: std::time::Duration::from_secs(60),
-            local_signaling_addr: "127.0.0.1:5060".parse()?,
-            local_media_addr: "127.0.0.1:0".parse()?,
-            user_agent: "RVOIP-CallCenter/1.0".to_string(),
-            domain: "callcenter.local".to_string(),
-        },
-        agents: AgentConfig {
-            default_max_concurrent_calls: 2,
-            availability_timeout: 300,
-            auto_logout_timeout: 3600,
-            enable_skill_based_routing: true,
-            default_skills: vec!["general".to_string()],
-        },
-        queues: QueueConfig {
-            default_max_wait_time: 300,
-            max_queue_size: 100,
-            enable_priorities: true,
-            enable_overflow: true,
-            announcement_interval: 30,
-        },
-        routing: RoutingConfig {
-            default_strategy: RoutingStrategy::SkillBased,
-            enable_load_balancing: true,
-            load_balance_strategy: LoadBalanceStrategy::LeastBusy,
-            ..Default::default()
-        },
-        monitoring: MonitoringConfig {
-            enable_realtime_monitoring: true,
-            enable_call_recording: false,
-            enable_quality_monitoring: true,
-            dashboard_update_interval: 60,
-            metrics_interval: 30,
-        },
-        database: DatabaseConfig {
-            database_path: ":memory:".to_string(),
-            max_connections: 10,
-            enable_connection_pooling: true,
-            query_timeout: 30,
-            enable_auto_backup: false,
-            backup_interval: 3600,
-        },
-    };
-    println!("✅ Configuration ready\n");
+    // Create server with database
+    info!("Creating call center server with database...");
+    let mut server = CallCenterServerBuilder::new()
+        .with_config(config)
+        .with_database_path(":memory:".to_string())
+        .build()
+        .await?;
 
-    // Step 3: Create CallCenterEngine with REAL session-core integration
-    println!("🎯 Creating CallCenterEngine with session-core API integration...");
-    let call_center = CallCenterEngine::new(
-        config.clone(),
-        database.clone()
-    ).await?;
-    println!("✅ CallCenterEngine created with REAL session-core integration!\n");
+    info!("✅ Server created with in-memory database");
 
     // Step 4: Register sample agents with session-core
     println!("👥 Registering agents with session-core...");
@@ -126,47 +82,28 @@ async fn main() -> Result<()> {
         },
     ];
 
-    // Register agents with session-core and database
-    let agent_store = AgentStore::new(database.clone());
+    // Instead of using AgentStore, use the admin API to add agents
+    let admin_api = server.admin_api();
+    
+    // Add agents via admin API
     for agent in &agents {
-        // Register with session-core (creates a real session)
-        let session_id = call_center.register_agent(agent).await?;
-        println!("  ✅ Agent {} registered with session-core (session: {})", agent.display_name, session_id);
-        
-        // Also store in database for persistence
-        let _db_agent = agent_store.create_agent(CreateAgentRequest {
-            sip_uri: agent.sip_uri.to_string(),
-            display_name: agent.display_name.clone(),
-            max_concurrent_calls: agent.max_concurrent_calls,
-            department: agent.department.clone(),
-            extension: agent.extension.clone(),
-            phone_number: None,
-        }).await?;
+        info!("Adding agent {} to database", agent.id);
+        admin_api.add_agent(agent.clone()).await?;
     }
-    println!("✅ All agents registered with session-core\n");
+    
+    info!("✅ All agents added to database");
 
     // Step 5: Display call center statistics
     println!("📊 Call Center Statistics:");
-    let stats = call_center.get_stats().await;
+    let stats = admin_api.get_statistics().await;
     println!("  🏢 Active Calls: {}", stats.active_calls);
-    println!("  🌉 Active Bridges: {}", stats.active_bridges);
     println!("  👥 Available Agents: {}", stats.available_agents);
     println!("  📋 Queued Calls: {}", stats.queued_calls);
-    println!("  📈 Total Calls Handled: {}", stats.total_calls_handled);
 
     // Step 6: Demonstrate bridge management capabilities
     println!("\n🌉 Bridge Management Capabilities:");
-    let bridges = call_center.list_active_bridges().await;
-    println!("  📊 Currently active bridges: {}", bridges.len());
-    
-    // Show bridge configuration
-    if bridges.is_empty() {
-        println!("  💡 Ready to create bridges when calls are received");
-    } else {
-        for bridge in bridges {
-            println!("  🌉 Bridge {}: {} sessions", bridge.id, bridge.sessions.len());
-        }
-    }
+    println!("  💡 Ready to create bridges when calls are received");
+    println!("  🔗 Bridge management through session-core API");
 
     // Step 7: Show database and session-core integration
     println!("\n🔗 Integration Summary:");
@@ -206,13 +143,13 @@ mod tests {
     
     #[tokio::test]
     async fn test_call_center_integration() -> Result<()> {
-        let database = CallCenterDatabase::new_in_memory().await?;
-        let config = CallCenterConfig::default();
+        let mut config = CallCenterConfig::default();
+        config.general.local_signaling_addr = "127.0.0.1:5060".parse()?;
         
         // Test call center creation
         let call_center = CallCenterEngine::new(
             config,
-            database
+            Some(":memory:".to_string())
         ).await?;
         
         // Test agent registration

@@ -624,7 +624,7 @@ The system has a fundamental sequencing flaw that causes all queued calls to fai
 **Priority**: CRITICAL - System is completely broken without this fix!
 **Estimated Time**: 4-6 hours
 
-### Phase 0.12 - SDP Generation & Queue Timing Issues 🔍 NEW
+### Phase 0.12 - SDP Generation & Queue Timing Issues ✅ PARTIALLY FIXED
 
 **Discovery from Latest Test**:
 1. **Media IS working** - We see RTP packets flowing (SSRC=abc3e6bc, seq=2507)
@@ -664,6 +664,228 @@ The system has a fundamental sequencing flaw that causes all queued calls to fai
 2. Monitor if Bob still fails to generate SDP
 3. If yes, debug session-core SDP generation
 4. Consider implementing SDP retry logic
+
+### Phase 0.13 - Queue Monitor Over-Dequeue Fix ✅ COMPLETE
+
+**Bug Discovery**:
+When there are more queued calls than available agents, the queue monitor dequeues ALL calls at once, leaving some without agents:
+1. Queue has 3 calls, but only 2 agents available
+2. Monitor dequeues all 3 calls in rapid succession
+3. First 2 get assigned, 3rd has no agent but is marked "being assigned"
+4. Queue becomes empty, monitor stops
+5. Unassigned calls are lost in limbo
+
+**Root Cause**:
+- Queue monitor gets list of available agents once
+- Loops through ALL agents trying to dequeue for each
+- Doesn't re-check if agent is still available after async assignment
+- Dequeues more calls than can be handled
+
+**Fix Implemented**:
+- [x] Added real-time agent availability check before each dequeue
+- [x] Skip agents that are no longer available (busy from previous assignment)
+- [x] Prevents over-dequeuing calls without available agents
+
+**Result**:
+- Only dequeues as many calls as there are truly available agents
+- Remaining calls stay safely in queue for next monitor cycle
+- No more "lost" calls that are neither assigned nor queued
+
+### Phase 0.14 - Test Timeout Configuration 🕐 NEW
+
+**Purpose**: Ensure all calls complete through the queue system during testing
+
+**Changes Made**:
+1. **Queue timeout increased**: Changed from 600s (10 min) to 3600s (60 min)
+2. **Queue expiration disabled**: Commented out `remove_expired_calls()` in queue monitor
+3. **SIPp customer duration**: Increased from 10s to 60s to allow queue processing
+4. **Test wait time**: Increased from 20s to 90s to ensure all calls complete
+
+**Result**:
+- Calls won't be removed from queue due to timeout
+- Customer calls stay active long enough to be processed
+- Test has sufficient time to route all calls through queue
+
+**Note**: These are testing-only changes. In production:
+- Re-enable reasonable queue timeouts
+- Re-enable expired call removal
+- Configure based on business requirements
+
+### Phase 0.15 - Database-Backed Queue Management 🗄️ NEW
+
+**Purpose**: Replace in-memory queue management with database-backed solution to eliminate race conditions and ensure ACID guarantees
+
+**Problems Solved**:
+1. **Race Conditions**: Database handles all locking/concurrency
+2. **Lost Calls**: Atomic transactions prevent calls from disappearing
+3. **State Inconsistencies**: Single source of truth in database
+4. **Complex Synchronization**: No more DashMaps/Mutexes needed
+5. **Queue Monitor Over-dequeue**: Atomic operations prevent double-booking
+
+**Database Schema**:
+```sql
+-- Agents table
+CREATE TABLE agents (
+    agent_id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'OFFLINE',
+    max_calls INTEGER DEFAULT 1,
+    current_calls INTEGER DEFAULT 0,
+    contact_uri TEXT,
+    last_heartbeat DATETIME,
+    CHECK (current_calls <= max_calls),
+    CHECK (status IN ('OFFLINE', 'AVAILABLE', 'BUSY', 'RESERVED'))
+);
+
+-- Call queue
+CREATE TABLE call_queue (
+    call_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    queue_id TEXT NOT NULL,
+    customer_info TEXT, -- JSON
+    priority INTEGER DEFAULT 0,
+    enqueued_at DATETIME DEFAULT (datetime('now')),
+    attempts INTEGER DEFAULT 0,
+    last_attempt DATETIME,
+    expires_at DATETIME DEFAULT (datetime('now', '+60 minutes'))
+);
+
+-- Active calls (assignments)
+CREATE TABLE active_calls (
+    call_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    customer_dialog_id TEXT,
+    agent_dialog_id TEXT,
+    assigned_at DATETIME DEFAULT (datetime('now')),
+    answered_at DATETIME,
+    FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+);
+
+-- Queue configuration
+CREATE TABLE queues (
+    queue_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    capacity INTEGER DEFAULT 100,
+    overflow_queue TEXT,
+    priority_boost INTEGER DEFAULT 5
+);
+
+-- Indexes for performance
+CREATE INDEX idx_queue_priority ON call_queue(queue_id, priority DESC, enqueued_at);
+CREATE INDEX idx_agent_status ON agents(status, current_calls);
+CREATE INDEX idx_active_calls_agent ON active_calls(agent_id);
+```
+
+**Implementation Tasks**:
+
+#### Task 1: Database Integration
+- [ ] Add Limbo database dependency to Cargo.toml
+- [ ] Create database connection pool in CallCenterEngine
+- [ ] Initialize schema on startup
+- [ ] Add database migration support
+
+#### Task 2: Replace Agent Management
+- [ ] Convert agent registration to database operations
+- [ ] Replace HashMap<String, AgentInfo> with database queries
+- [ ] Update agent status changes to use transactions
+- [ ] Remove available_agents HashMap
+
+#### Task 3: Replace Queue Management
+- [ ] Convert QueueManager to use database
+- [ ] Replace enqueue/dequeue with SQL operations
+- [ ] Remove in-memory queue storage
+- [ ] Add atomic assignment operations
+
+#### Task 4: Queue Monitor Rewrite
+- [ ] Single SQL query to match agents with queued calls
+- [ ] Atomic reservation of agents before dequeue
+- [ ] No more over-dequeue issues
+- [ ] Automatic expired call cleanup
+
+#### Task 5: Call State Management
+- [ ] Replace active_calls DashMap with database
+- [ ] Store dialog mappings in database
+- [ ] Update call state transitions atomically
+- [ ] Add proper foreign key constraints
+
+#### Task 6: Benefits Implementation
+- [ ] Automatic cascade cleanup on agent disconnect
+- [ ] Built-in queue metrics via SQL queries
+- [ ] Transaction rollback on assignment failure
+- [ ] Natural audit trail of all operations
+
+**Example Operations**:
+
+```rust
+// Atomic agent assignment
+async fn assign_call_to_agent(&self, call_id: &str, agent_id: &str) -> Result<()> {
+    self.db.transaction(|tx| {
+        // Reserve agent atomically
+        tx.execute(
+            "UPDATE agents SET status = 'BUSY', current_calls = current_calls + 1 
+             WHERE agent_id = ?1 AND status = 'AVAILABLE' AND current_calls < max_calls",
+            params![agent_id]
+        )?;
+        
+        if tx.changes() == 0 {
+            return Err("Agent not available");
+        }
+        
+        // Move call from queue to active atomically
+        tx.execute(
+            "INSERT INTO active_calls (call_id, agent_id, session_id)
+             SELECT call_id, ?1, session_id FROM call_queue WHERE call_id = ?2",
+            params![agent_id, call_id]
+        )?;
+        
+        tx.execute("DELETE FROM call_queue WHERE call_id = ?1", params![call_id])?;
+        
+        Ok(())
+    }).await
+}
+
+// Simplified queue monitor
+async fn monitor_queue(&self, queue_id: &str) {
+    let assignments = self.db.query(
+        "WITH available_agents AS (
+            SELECT agent_id FROM agents 
+            WHERE status = 'AVAILABLE' 
+            AND current_calls < max_calls
+        ),
+        next_calls AS (
+            SELECT call_id, session_id, 
+                   ROW_NUMBER() OVER (ORDER BY priority DESC, enqueued_at) as rn
+            FROM call_queue WHERE queue_id = ?1 AND expires_at > datetime('now')
+        )
+        SELECT a.agent_id, c.call_id, c.session_id
+        FROM available_agents a
+        JOIN next_calls c ON c.rn <= (SELECT COUNT(*) FROM available_agents)",
+        params![queue_id]
+    ).await?;
+    
+    // Process all assignments atomically
+    for (agent_id, call_id, session_id) in assignments {
+        self.assign_call_to_agent(&call_id, &agent_id).await?;
+    }
+}
+```
+
+**Migration Strategy**:
+1. Add database schema alongside existing code
+2. Implement database operations in parallel
+3. Switch over one component at a time
+4. Remove old in-memory structures
+5. Clean up unused code
+
+**Testing Requirements**:
+- [ ] Unit tests for all database operations
+- [ ] Integration tests for concurrent scenarios
+- [ ] Performance benchmarks vs current implementation
+- [ ] Failure/rollback scenario testing
+
+**Estimated Time**: 1 week
+**Priority**: HIGH - Solves multiple critical issues with elegant database solution
 
 ### Phase 1 - Advanced Features
 

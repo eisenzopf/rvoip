@@ -13,7 +13,6 @@ use crate::{
     prelude::*,
     api::{AdminApi, SupervisorApi, CallCenterClient},
     config::CallCenterConfig,
-    database::CallCenterDatabase,
     orchestrator::CallCenterEngine,
     error::CallCenterError,
     agent::{AgentStatus, Agent},
@@ -41,15 +40,15 @@ pub struct CallCenterServer {
 }
 
 impl CallCenterServer {
-    /// Create a new CallCenterServer with the given configuration and database
+    /// Create a new CallCenterServer with the given configuration and database path
     pub async fn new(
         config: CallCenterConfig, 
-        database: CallCenterDatabase
+        db_path: Option<String>
     ) -> Result<Self> {
         info!("🚀 Creating CallCenterEngine with session-core CallHandler integration");
         
         // Create the engine
-        let engine = CallCenterEngine::new(config.clone(), database).await?;
+        let engine = CallCenterEngine::new(config.clone(), db_path).await?;
         info!("✅ Call center engine initialized with session-core integration");
         
         // Create APIs
@@ -68,11 +67,7 @@ impl CallCenterServer {
     
     /// Create a new CallCenterServer with an in-memory database
     pub async fn new_in_memory(config: CallCenterConfig) -> Result<Self> {
-        let database = CallCenterDatabase::new_in_memory().await
-            .map_err(|e| CallCenterError::Configuration(
-                format!("Failed to create in-memory database: {}", e)
-            ))?;
-        Self::new(config, database).await
+        Self::new(config, None).await
     }
     
     /// Start the server and begin accepting calls
@@ -214,7 +209,7 @@ impl CallCenterServer {
             // Get agent status with detailed breakdown
             let agents = supervisor_api.list_agents().await;
             let available = agents.iter().filter(|a| matches!(a.status, AgentStatus::Available)).count();
-            let busy = agents.iter().filter(|a| matches!(a.status, AgentStatus::Busy { .. })).count();
+            let busy = agents.iter().filter(|a| matches!(a.status, AgentStatus::Busy(..))).count();
             let offline = agents.iter().filter(|a| matches!(a.status, AgentStatus::Offline)).count();
             
             info!("👥 Agent Status Summary:");
@@ -229,9 +224,7 @@ impl CallCenterServer {
                 for agent in &agents {
                     let status_str = match &agent.status {
                         AgentStatus::Available => "Available ✅".to_string(),
-                        AgentStatus::Busy { active_calls } => format!("Busy ({} calls) 🔴", active_calls),
-                        AgentStatus::Away { reason } => format!("Away 🟡 ({})", reason),
-                        AgentStatus::Break { duration_minutes } => format!("Break ☕ ({}min)", duration_minutes),
+                        AgentStatus::Busy(calls) => format!("Busy ({} calls) 🔴", calls.len()),
                         AgentStatus::Offline => "Offline ⚫".to_string(),
                     };
                     info!("  - {} ({}): {}", agent.sip_uri, agent.agent_id, status_str);
@@ -265,7 +258,7 @@ impl CallCenterServer {
     pub async fn create_test_agents(&self, agents: Vec<(&str, &str, &str)>) -> Result<()> {
         for (username, name, department) in agents {
             let agent = Agent {
-                id: crate::agent::AgentId::from(format!("agent_{}", username)),
+                id: format!("agent_{}", username),
                 sip_uri: format!("sip:{}@{}", username, self.config.general.domain),
                 display_name: name.to_string(),
                 skills: vec!["english".to_string(), department.to_string()],
@@ -314,7 +307,7 @@ impl CallCenterServer {
 /// Builder for CallCenterServer with fluent API
 pub struct CallCenterServerBuilder {
     config: Option<CallCenterConfig>,
-    database: Option<CallCenterDatabase>,
+    db_path: Option<String>,
 }
 
 impl CallCenterServerBuilder {
@@ -322,7 +315,7 @@ impl CallCenterServerBuilder {
     pub fn new() -> Self {
         Self {
             config: None,
-            database: None,
+            db_path: None,
         }
     }
     
@@ -332,19 +325,16 @@ impl CallCenterServerBuilder {
         self
     }
     
-    /// Set the database
-    pub fn with_database(mut self, database: CallCenterDatabase) -> Self {
-        self.database = Some(database);
+    /// Set the database path
+    pub fn with_database_path(mut self, path: String) -> Self {
+        self.db_path = Some(path);
         self
     }
     
     /// Use an in-memory database
-    pub async fn with_in_memory_database(mut self) -> Result<Self> {
-        self.database = Some(CallCenterDatabase::new_in_memory().await
-            .map_err(|e| CallCenterError::Configuration(
-                format!("Failed to create in-memory database: {}", e)
-            ))?);
-        Ok(self)
+    pub fn with_in_memory_database(mut self) -> Self {
+        self.db_path = None;
+        self
     }
     
     /// Build the server
@@ -353,11 +343,7 @@ impl CallCenterServerBuilder {
             "Configuration not provided".to_string()
         ))?;
         
-        let database = self.database.ok_or_else(|| CallCenterError::Configuration(
-            "Database not provided".to_string()
-        ))?;
-        
-        CallCenterServer::new(config, database).await
+        CallCenterServer::new(config, self.db_path).await
     }
 }
 

@@ -20,57 +20,56 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    info!("🚀 Starting Phase 0 Basic Call Flow Demo");
+    info!("🚀 Starting Basic Call Flow Demo");
 
-    // Create database and configuration
-    let database = CallCenterDatabase::new_in_memory().await
-        .map_err(|e| format!("Failed to create database: {}", e))?;
+    // Configure the call center
     let mut config = CallCenterConfig::default();
-    config.general.domain = "example.com".to_string();
+    config.general.local_signaling_addr = "127.0.0.1:5060".parse()?;
 
-    // Create server using builder pattern
+    // Create the call center server
+    info!("Creating call center server...");
     let mut server = CallCenterServerBuilder::new()
         .with_config(config)
-        .with_database(database)
+        .with_database_path(":memory:".to_string())  // Use in-memory database
         .build()
-        .await
-        .map_err(|e| format!("Failed to build server: {}", e))?;
+        .await?;
 
-    // Start the server
-    server.start().await
-        .map_err(|e| format!("Failed to start server: {}", e))?;
+    info!("✅ Server created");
+
+    // Step 1: Start the server
+    server.start().await?;
+    info!("🎯 Server listening on 127.0.0.1:5060");
+
+    // Step 2: Create test agents
+    let alice = Agent {
+        id: "alice".to_string(),
+        sip_uri: "sip:alice@127.0.0.1:5071".to_string(),
+        display_name: "Alice Smith".to_string(),
+        skills: vec!["english".to_string(), "sales".to_string()],
+        max_concurrent_calls: 1,
+        status: AgentStatus::Available,
+        department: Some("sales".to_string()),
+        extension: Some("101".to_string()),
+    };
 
     // Example 1: Admin API - Add agents
     info!("\n📋 Example 1: Adding agents using AdminApi");
     let admin_api = server.admin_api();
     
-    let alice = Agent {
-        id: AgentId::from("alice"),
-        sip_uri: "sip:alice@example.com".to_string(),
-        display_name: "Alice Smith".to_string(),
-        skills: vec!["english".to_string(), "support".to_string()],
-        max_concurrent_calls: 2,
-        status: AgentStatus::Offline,
-        department: Some("support".to_string()),
-        extension: Some("1001".to_string()),
-    };
-    
     admin_api.add_agent(alice.clone()).await
         .map_err(|e| format!("Failed to add agent: {}", e))?;
     info!("✅ Agent Alice added");
 
-    // Example 2: CallCenterClient - Agent registration
-    info!("\n📞 Example 2: Agent registration using CallCenterClient");
+    // Example 2: CallCenterClient API - Agent operations
+    info!("\n📞 Example 2: Using CallCenterClient for agent operations");
     let alice_client = server.create_client("alice".to_string());
     
-    // First register the agent
     alice_client.register_agent(&alice).await
-        .map_err(|e| format!("Failed to register agent: {}", e))?;
-    info!("✅ Alice registered");
+        .expect("Failed to register Alice");
+    info!("✅ Alice registered successfully");
     
-    // Update status to available
-    alice_client.update_agent_status(&alice.id, AgentStatus::Available).await
-        .map_err(|e| format!("Failed to update status: {}", e))?;
+    alice_client.update_agent_status(&AgentId(alice.id.clone()), AgentStatus::Available).await
+        .expect("Failed to update Alice status");
     info!("✅ Alice is now available");
 
     // Example 3: SupervisorApi - Monitor system

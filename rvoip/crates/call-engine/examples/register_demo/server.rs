@@ -5,7 +5,6 @@
 
 use anyhow::Result;
 use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
-use rvoip_call_engine::database::CallCenterDatabase;
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -18,15 +17,13 @@ async fn main() -> Result<()> {
 
     println!("🚀 SIP REGISTER Without Auto-Response Demo\n");
 
-    // Create database
-    let database = CallCenterDatabase::new_in_memory().await?;
-    
     // Create configuration
-    let config = CallCenterConfig::default();
+    let mut config = CallCenterConfig::default();
+    config.general.local_signaling_addr = "127.0.0.1:5060".parse()?;
     
-    // Create CallCenterEngine
+    // Create CallCenterEngine with in-memory database
     println!("🔧 Creating CallCenterEngine...");
-    let engine = CallCenterEngine::new(config, database).await?;
+    let engine = CallCenterEngine::new(config, Some(":memory:".to_string())).await?;
     
     // Start event monitoring to handle REGISTER requests
     println!("📡 Starting event monitoring for REGISTER requests...");

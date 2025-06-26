@@ -21,6 +21,9 @@ infra-common = { path = "../infra-common", features = ["no-global-allocator"] }
 # Database
 limbo = "0.0.20"
 
+# Web framework
+axum = "0.7"
+
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
 async-trait = "0.1"

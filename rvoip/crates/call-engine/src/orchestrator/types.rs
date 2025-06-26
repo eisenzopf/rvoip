@@ -95,6 +95,15 @@ pub enum RoutingDecision {
     Overflow { target_queue: String, reason: String },
 }
 
+/// Bridge information for tracking active bridges
+#[derive(Debug, Clone)]
+pub struct BridgeInfo {
+    pub bridge_id: BridgeId,
+    pub customer_session_id: SessionId,
+    pub agent_session_id: SessionId,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Routing statistics for monitoring
 #[derive(Debug, Clone)]
 pub struct RoutingStats {

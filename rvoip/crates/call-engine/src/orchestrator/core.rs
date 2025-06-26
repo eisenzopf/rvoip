@@ -18,13 +18,30 @@ use rvoip_session_core::prelude::SessionEvent;
 
 use crate::error::{CallCenterError, Result as CallCenterResult};
 use crate::config::CallCenterConfig;
-use crate::database::CallCenterDatabase;
 use crate::agent::{Agent, AgentId, AgentRegistry, AgentStatus, SipRegistrar};
 use crate::queue::{CallQueue, QueueManager};
 use crate::routing::RoutingEngine;
+use crate::monitoring::MetricsCollector;
+use crate::database::DatabaseManager;
 
-use super::types::{CallInfo, AgentInfo, RoutingStats, OrchestratorStats, CallStatus, RoutingDecision};
+use super::types::{CallInfo, AgentInfo, RoutingStats, OrchestratorStats, CallStatus, RoutingDecision, CustomerType, BridgeInfo};
 use super::handler::CallCenterCallHandler;
+
+/// Core call center engine state
+pub(super) struct CallCenterState {
+    pub(super) config: CallCenterConfig,
+    pub(super) session_coordinator: Arc<SessionCoordinator>,
+    pub(super) active_calls: Arc<DashMap<SessionId, CallInfo>>,
+    pub(super) active_bridges: Arc<DashMap<String, BridgeInfo>>,
+    pub(super) dialog_mappings: Arc<DashMap<String, String>>,
+    pub(super) queue_manager: Arc<RwLock<QueueManager>>,
+    pub(super) available_agents: Arc<DashMap<AgentId, AgentInfo>>,
+    pub(super) routing_stats: Arc<RwLock<RoutingStats>>,
+    pub(super) agent_registry: Arc<Mutex<AgentRegistry>>,
+    pub(super) sip_registrar: Arc<Mutex<SipRegistrar>>,
+    pub(super) active_queue_monitors: Arc<DashSet<String>>,
+    pub(super) db_manager: Option<Arc<DatabaseManager>>,
+}
 
 /// Call center orchestration engine
 /// 
@@ -34,8 +51,8 @@ pub struct CallCenterEngine {
     /// Configuration for the call center
     pub(super) config: CallCenterConfig,
     
-    /// Database layer for persistence
-    pub(super) database: CallCenterDatabase,
+    /// New database manager for queue management
+    pub(super) db_manager: Option<Arc<DatabaseManager>>,
     
     /// Session-core coordinator integration
     pub(super) session_coordinator: Option<Arc<SessionCoordinator>>,
@@ -72,24 +89,40 @@ pub struct CallCenterEngine {
 }
 
 impl CallCenterEngine {
-    /// Create call center engine with session-core integration
+    /// Create a new call center engine
     pub async fn new(
         config: CallCenterConfig,
-        database: CallCenterDatabase,
+        db_path: Option<String>,
     ) -> CallCenterResult<Arc<Self>> {
         info!("🚀 Creating CallCenterEngine with session-core CallHandler integration");
+        
+        // Initialize the database manager
+        let db_manager = if let Some(path) = db_path.as_ref() {
+            match DatabaseManager::new(path).await {
+                Ok(mgr) => {
+                    info!("✅ Initialized database at: {}", path);
+                    Some(Arc::new(mgr))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize database manager: {}. Continuing with in-memory operations.", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         
         // First, create a placeholder engine that will be updated
         let placeholder_engine = Arc::new(Self {
             config: config.clone(),
-            database: database.clone(),
+            db_manager: db_manager.clone(),
             session_coordinator: None,
             queue_manager: Arc::new(RwLock::new(QueueManager::new())),
             bridge_events: None,
             active_calls: Arc::new(DashMap::new()),
             available_agents: Arc::new(DashMap::new()),
             routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
-            agent_registry: Arc::new(Mutex::new(AgentRegistry::new(database.clone()))),
+            agent_registry: Arc::new(Mutex::new(AgentRegistry::new())),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
             active_queue_monitors: Arc::new(DashSet::new()),
             dialog_mappings: Arc::new(DashMap::new()),
@@ -120,14 +153,14 @@ impl CallCenterEngine {
         
         let engine = Arc::new(Self {
             config,
-            database: database.clone(),
+            db_manager,
             session_coordinator: Some(session_coordinator),
             queue_manager: Arc::new(RwLock::new(QueueManager::new())),
             bridge_events: None,
             active_calls: Arc::new(DashMap::new()),
             available_agents: Arc::new(DashMap::new()),
             routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
-            agent_registry: Arc::new(Mutex::new(AgentRegistry::new(database))),
+            agent_registry: Arc::new(Mutex::new(AgentRegistry::new())),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
             active_queue_monitors: Arc::new(DashSet::new()),
             dialog_mappings: Arc::new(DashMap::new()),
@@ -190,9 +223,9 @@ impl CallCenterEngine {
         &self.config
     }
     
-    /// Get database handle
-    pub fn database(&self) -> &CallCenterDatabase {
-        &self.database
+    /// Get database manager reference
+    pub fn database_manager(&self) -> Option<&Arc<DatabaseManager>> {
+        self.db_manager.as_ref()
     }
     
     /// Start monitoring session events (including REGISTER requests)
@@ -402,7 +435,7 @@ impl Clone for CallCenterEngine {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
-            database: self.database.clone(),
+            db_manager: self.db_manager.clone(),
             session_coordinator: self.session_coordinator.clone(),
             queue_manager: self.queue_manager.clone(),
             bridge_events: None, // Don't clone the receiver

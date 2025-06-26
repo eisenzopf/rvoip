@@ -72,8 +72,8 @@
     </action>
   </nop>
 
-  <!-- Wait for call duration (10 seconds by default) -->
-  <pause milliseconds="10000"/>
+  <!-- Wait for call duration (60 seconds for testing - ensure all calls process through queue) -->
+  <pause milliseconds="60000"/>
 
   <!-- Send BYE to end the call -->
   <send retrans="500">

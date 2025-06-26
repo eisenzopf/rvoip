@@ -22,56 +22,55 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     info!("🚀 Starting Agent Registration Demo");
 
-    // Create configuration and database
+    // Configure the call center
     let mut config = CallCenterConfig::default();
-    config.general.domain = "callcenter.example.com".to_string();
-    config.general.local_signaling_addr = "0.0.0.0:5060".parse()
-        .map_err(|e| format!("Failed to parse address: {}", e))?;
-    
-    let database = CallCenterDatabase::new_in_memory().await
-        .map_err(|e| format!("Failed to create database: {}", e))?;
+    config.general.local_signaling_addr = "127.0.0.1:5060".parse()?;
 
-    // Create and start server
+    // Create server with in-memory database
     let mut server = CallCenterServerBuilder::new()
         .with_config(config)
-        .with_database(database)
+        .with_database_path(":memory:".to_string())
         .build()
-        .await
-        .map_err(|e| format!("Failed to build server: {}", e))?;
-    
-    server.start().await
-        .map_err(|e| format!("Failed to start server: {}", e))?;
-    info!("✅ Call center server started");
+        .await?;
+
+    info!("✅ Call center server created");
+
+    // Start the server
+    server.start().await?;
+    info!("🎯 Server listening on 127.0.0.1:5060");
+
+    // Create test agents
+    let alice = Agent {
+        id: "agent_alice".to_string(),
+        sip_uri: "sip:alice@127.0.0.1:5071".to_string(),
+        display_name: "Alice Johnson".to_string(),
+        skills: vec!["english".to_string(), "support".to_string()],
+        max_concurrent_calls: 2,
+        status: AgentStatus::Offline,
+        department: Some("support".to_string()),
+        extension: Some("101".to_string()),
+    };
+
+    let bob = Agent {
+        id: "agent_bob".to_string(),
+        sip_uri: "sip:bob@127.0.0.1:5072".to_string(),
+        display_name: "Bob Smith".to_string(),
+        skills: vec!["english".to_string(), "sales".to_string()],
+        max_concurrent_calls: 3,
+        status: AgentStatus::Offline,
+        department: Some("sales".to_string()),
+        extension: Some("102".to_string()),
+    };
 
     // Create test agents using admin API
     let admin_api = server.admin_api();
     
     // Add Alice
-    let alice = Agent {
-        id: AgentId::from("agent_alice"),
-        sip_uri: "sip:alice@callcenter.example.com".to_string(),
-        display_name: "Alice Smith".to_string(),
-        skills: vec!["english".to_string(), "support".to_string()],
-        max_concurrent_calls: 2,
-        status: AgentStatus::Offline,
-        department: Some("support".to_string()),
-        extension: Some("1001".to_string()),
-    };
     admin_api.add_agent(alice.clone()).await
         .map_err(|e| format!("Failed to add Alice: {}", e))?;
     info!("✅ Agent Alice added to system");
 
     // Add Bob
-    let bob = Agent {
-        id: AgentId::from("agent_bob"),
-        sip_uri: "sip:bob@callcenter.example.com".to_string(),
-        display_name: "Bob Johnson".to_string(),
-        skills: vec!["english".to_string(), "sales".to_string()],
-        max_concurrent_calls: 1,
-        status: AgentStatus::Offline,
-        department: Some("sales".to_string()),
-        extension: Some("1002".to_string()),
-    };
     admin_api.add_agent(bob.clone()).await
         .map_err(|e| format!("Failed to add Bob: {}", e))?;
     info!("✅ Agent Bob added to system");
@@ -93,16 +92,45 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Failed to register Alice: {}", e))?;
     info!("✅ Alice registered with the system");
     
-    alice_client.update_agent_status(&alice.id, AgentStatus::Available).await
-        .map_err(|e| format!("Failed to update Alice status: {}", e))?;
-    info!("✅ Alice is now available for calls");
+    // Update agent status
+    info!("\n📱 Updating agent status");
+    alice_client.update_agent_status(&AgentId(alice.id.clone()), AgentStatus::Available).await
+        .expect("Failed to update Alice status");
+    info!("✅ Alice is now available");
+    
+    // Check agent info
+    if let Some(alice_info) = alice_client.get_agent_info(&AgentId(alice.id.clone())).await {
+        info!("Alice info: {:?}", alice_info);
+    }
 
-    // Bob registers but stays offline initially
+    // Demonstrate different agent statuses
+    info!("\n🔄 Demonstrating agent status changes");
+    
+    // Bob goes available
     let bob_client = server.create_client("agent_bob".to_string());
     
     bob_client.register_agent(&bob).await
         .map_err(|e| format!("Failed to register Bob: {}", e))?;
     info!("✅ Bob registered with the system");
+    
+    // Bob goes available
+    bob_client.update_agent_status(&AgentId(bob.id.clone()), AgentStatus::Available).await
+        .expect("Failed to update Bob status");
+    info!("✅ Bob is now available");
+    
+    sleep(Duration::from_secs(2)).await;
+    
+    // Alice goes busy (simulating a call)
+    alice_client.update_agent_status(&AgentId(alice.id.clone()), AgentStatus::Busy(vec![])).await
+        .expect("Failed to update Alice status");
+    info!("☎️ Alice is now busy");
+    
+    sleep(Duration::from_secs(2)).await;
+    
+    // Bob goes offline
+    bob_client.update_agent_status(&AgentId(bob.id.clone()), AgentStatus::Offline).await
+        .expect("Failed to update Bob status");
+    info!("🚪 Bob is now offline");
 
     // Check system status
     let supervisor_api = server.supervisor_api();
@@ -112,46 +140,16 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("  - Offline agents: {}", stats.busy_agents + (2 - stats.available_agents - stats.busy_agents));
     info!("  - Active calls: {}", stats.active_calls);
 
-    // Simulate Bob becoming available
-    sleep(Duration::from_secs(2)).await;
-    bob_client.update_agent_status(&bob.id, AgentStatus::Available).await
-        .map_err(|e| format!("Failed to update Bob status: {}", e))?;
-    info!("\n✅ Bob is now available for calls");
-
-    // Check updated status
-    let stats = supervisor_api.get_stats().await;
-    info!("\n📊 Updated System Status:");
-    info!("  - Available agents: {}", stats.available_agents);
-
-    // List all agents
-    let agents = supervisor_api.list_agents().await;
-    info!("\n👥 Registered Agents:");
+    // List agents with different statuses
+    info!("\n📊 Current agent statuses:");
+    let agents = admin_api.list_agents().await.expect("Failed to list agents");
     for agent in agents {
         let status = match agent.status {
             AgentStatus::Available => "Available ✅",
-            AgentStatus::Offline => "Offline ⭕",
-            AgentStatus::Busy { .. } => "Busy 🔴",
-            AgentStatus::Break { .. } => "On Break ☕",
-            AgentStatus::Away { .. } => "Away 🚪",
+            AgentStatus::Busy(_) => "Busy 📞",
+            AgentStatus::Offline => "Offline 🚪",
         };
-        info!("  - {} ({}): {}", agent.agent_id, agent.agent_id, status);
-    }
-
-    // Demonstrate agent going on break
-    sleep(Duration::from_secs(2)).await;
-    alice_client.update_agent_status(&alice.id, AgentStatus::Break { duration_minutes: 15 }).await
-        .map_err(|e| format!("Failed to update Alice to break: {}", e))?;
-    info!("\n☕ Alice is taking a 15-minute break");
-
-    // Check queue stats
-    let all_queue_stats = supervisor_api.get_all_queue_stats().await
-        .map_err(|e| format!("Failed to get queue stats: {}", e))?;
-    info!("\n📊 Queue Stats:");
-    for (queue_id, stats) in all_queue_stats {
-        if queue_id == "support_queue" {
-            info!("  Support Queue - Calls waiting: {}, Avg wait time: {}s",
-                  stats.total_calls, stats.average_wait_time_seconds);
-        }
+        info!("  {} ({}): {}", agent.display_name, agent.id, status);
     }
 
     info!("\n✅ Agent registration demo completed!");

@@ -221,15 +221,160 @@ impl CallCenterEngine {
         Ok(())
     }
     
+    /// Get the current depth of a queue
+    async fn get_queue_depth(&self, queue_id: &str) -> usize {
+        if let Some(db_manager) = &self.db_manager {
+            match db_manager.get_queue_depth(queue_id).await {
+                Ok(depth) => depth,
+                Err(e) => {
+                    error!("Failed to get queue depth from database: {}", e);
+                    // Fallback to in-memory
+                    self.get_in_memory_queue_depth(queue_id).await
+                }
+            }
+        } else {
+            self.get_in_memory_queue_depth(queue_id).await
+        }
+    }
+    
+    /// Get queue depth from in-memory manager
+    async fn get_in_memory_queue_depth(&self, queue_id: &str) -> usize {
+        let queue_manager = self.queue_manager.read().await;
+        queue_manager.get_queue_stats(queue_id)
+            .map(|stats| stats.total_calls)
+            .unwrap_or(0)
+    }
+    
+    /// Get list of available agents
+    async fn get_available_agents(&self) -> Vec<AgentId> {
+        self.available_agents
+            .iter()
+            .filter(|entry| {
+                let agent_info = entry.value();
+                matches!(agent_info.status, AgentStatus::Available) &&
+                agent_info.current_calls < agent_info.max_calls
+            })
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+    
+    /// Process database assignments
+    async fn process_database_assignments(&self, queue_id: &str) -> CallCenterResult<()> {
+        if let Some(db_manager) = &self.db_manager {
+            match db_manager.get_available_assignments(queue_id).await {
+                Ok(assignments) => {
+                    info!("📋 Database found {} optimal assignments for queue {}", 
+                          assignments.len(), queue_id);
+                    
+                    for (agent_id_str, call_id, session_id_str) in assignments {
+                        let agent_id = AgentId::from(agent_id_str);
+                        let session_id = SessionId(session_id_str);
+                        
+                        // Process assignment asynchronously
+                        let engine = Arc::new(self.clone());
+                        tokio::spawn(async move {
+                            match engine.assign_specific_agent_to_call(session_id.clone(), agent_id.clone()).await {
+                                Ok(()) => {
+                                    info!("✅ Successfully assigned call {} to agent {}", session_id, agent_id);
+                                }
+                                Err(e) => {
+                                    error!("Failed to assign call {} to agent {}: {}", session_id, agent_id, e);
+                                    // Database will handle re-queuing if needed
+                                }
+                            }
+                        });
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to get assignments from database: {}", e);
+                    return Err(crate::error::CallCenterError::internal(
+                        format!("Database assignment error: {}", e)
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    /// Process a single in-memory assignment
+    async fn process_in_memory_assignment(
+        &self,
+        queue_id: &str,
+        agent_id: &AgentId,
+    ) -> Option<QueuedCall> {
+        // Check if this agent is still actually available
+        let agent_still_available = self.available_agents
+            .get(agent_id)
+            .map(|entry| {
+                let agent_info = entry.value();
+                matches!(agent_info.status, AgentStatus::Available) &&
+                agent_info.current_calls < agent_info.max_calls
+            })
+            .unwrap_or(false);
+        
+        if !agent_still_available {
+            debug!("Agent {} no longer available, skipping", agent_id);
+            return None;
+        }
+        
+        // Try to dequeue a call
+        let mut queue_manager = self.queue_manager.write().await;
+        queue_manager.dequeue_for_agent(queue_id).unwrap_or(None)
+    }
+    
+    /// Handle assignment of a queued call to an agent
+    async fn handle_call_assignment(
+        engine: Arc<CallCenterEngine>,
+        queue_id: String,
+        queued_call: QueuedCall,
+        agent_id: AgentId,
+    ) {
+        let session_id = queued_call.session_id.clone();
+        
+        match engine.assign_specific_agent_to_call(session_id.clone(), agent_id.clone()).await {
+            Ok(()) => {
+                info!("✅ Successfully assigned queued call {} to agent {}", session_id, agent_id);
+                // Mark as no longer being assigned
+                let mut queue_manager = engine.queue_manager.write().await;
+                queue_manager.mark_as_not_assigned(&session_id);
+            }
+            Err(e) => {
+                error!("Failed to assign call {} to agent {}: {}", session_id, agent_id, e);
+                
+                // Mark as no longer being assigned
+                let mut queue_manager = engine.queue_manager.write().await;
+                queue_manager.mark_as_not_assigned(&session_id);
+                
+                // Check if call is still active
+                let call_still_active = engine.active_calls.contains_key(&session_id);
+                if !call_still_active {
+                    warn!("Call {} is no longer active, not re-queuing", session_id);
+                    return;
+                }
+                
+                // Re-queue the call with higher priority
+                let mut requeued_call = queued_call;
+                requeued_call.priority = requeued_call.priority.saturating_sub(5); // Increase priority
+                
+                if let Err(e) = queue_manager.enqueue_call(&queue_id, requeued_call) {
+                    error!("Failed to re-queue call {}: {}", session_id, e);
+                } else {
+                    info!("📞 Re-queued call {} with higher priority", session_id);
+                    
+                    // Update call status back to queued
+                    if let Some(mut call_info) = engine.active_calls.get_mut(&session_id) {
+                        call_info.status = super::types::CallStatus::Queued;
+                        call_info.queue_id = Some(queue_id);
+                    }
+                }
+            }
+        }
+    }
+    
     /// Monitor queue for agent availability
     pub(super) async fn monitor_queue_for_agents(&self, queue_id: String) {
         // Check if queue has calls before starting monitor
-        let initial_queue_size = {
-            let queue_manager = self.queue_manager.read().await;
-            queue_manager.get_queue_stats(&queue_id)
-                .map(|stats| stats.total_calls)
-                .unwrap_or(0)
-        };
+        let initial_queue_size = self.get_queue_depth(&queue_id).await;
         
         if initial_queue_size == 0 {
             debug!("Queue {} is empty, not starting monitor", queue_id);
@@ -251,8 +396,8 @@ impl CallCenterEngine {
             let start_time = std::time::Instant::now();
             let max_duration = std::time::Duration::from_secs(300);
             
-            // Dynamic check interval - starts at 0.5s, backs off when no agents available
-            let mut check_interval_secs = 1u64;  // Start with 1s for faster initial assignment
+            // Dynamic check interval - starts at 1s, backs off when no agents available
+            let mut check_interval_secs = 1u64;
             let mut consecutive_no_agents = 0u32;
             
             loop {
@@ -265,24 +410,8 @@ impl CallCenterEngine {
                     break;
                 }
                 
-                // Remove expired calls and check current queue size
-                let queue_size = {
-                    let mut queue_manager = engine.queue_manager.write().await;
-                    let expired = queue_manager.remove_expired_calls();
-                    for expired_session in expired {
-                        info!("⏰ Removed expired call {} from queue", expired_session);
-                        // Remove from active calls
-                        engine.active_calls.remove(&expired_session);
-                        // Terminate the session
-                        if let Some(coordinator) = engine.session_coordinator.as_ref() {
-                            let _ = coordinator.terminate_session(&expired_session).await;
-                        }
-                    }
-                    
-                    queue_manager.get_queue_stats(&queue_id)
-                        .map(|stats| stats.total_calls)
-                        .unwrap_or(0)
-                };
+                // Check current queue size
+                let queue_size = engine.get_queue_depth(&queue_id).await;
                 
                 if queue_size == 0 {
                     info!("✅ Queue {} is now empty, stopping monitor", queue_id);
@@ -292,15 +421,7 @@ impl CallCenterEngine {
                 debug!("📊 Queue {} status: {} calls waiting", queue_id, queue_size);
                 
                 // Find available agents for this queue
-                let available_agents: Vec<AgentId> = engine.available_agents
-                    .iter()
-                    .filter(|entry| {
-                        let agent_info = entry.value();
-                        matches!(agent_info.status, AgentStatus::Available) &&
-                        agent_info.current_calls < agent_info.max_calls
-                    })
-                    .map(|entry| entry.key().clone())
-                    .collect();
+                let available_agents = engine.get_available_agents().await;
                 
                 if available_agents.is_empty() {
                     consecutive_no_agents += 1;
@@ -317,27 +438,27 @@ impl CallCenterEngine {
                 
                 info!("🎯 Found {} available agents for queue {}", available_agents.len(), queue_id);
                 
-                // Try to dequeue and assign calls to available agents
+                // Try to atomically assign calls to agents using database if available
+                if engine.db_manager.is_some() {
+                    match engine.process_database_assignments(&queue_id).await {
+                        Ok(()) => continue,  // Database handled assignments
+                        Err(_) => {
+                            // Fall through to in-memory logic
+                        }
+                    }
+                }
+                
+                // Fallback to in-memory assignment
                 let mut assignments_made = 0;
-                for agent_id in available_agents {
-                    // Try to dequeue a call
-                    let queued_call = {
-                        let mut queue_manager = engine.queue_manager.write().await;
-                        queue_manager.dequeue_for_agent(&queue_id).unwrap_or(None)
-                    };
-                    
-                    if let Some(queued_call) = queued_call {
+                for agent_id in &available_agents {
+                    if let Some(queued_call) = engine.process_in_memory_assignment(&queue_id, agent_id).await {
                         info!("📤 Dequeued call {} from queue {} for agent {}", 
                               queued_call.session_id, queue_id, agent_id);
                         
-                        // PHASE 0.10: Log queue depth after dequeue
-                        {
-                            let queue_manager = engine.queue_manager.read().await;
-                            if let Ok(stats) = queue_manager.get_queue_stats(&queue_id) {
-                                info!("📊 Queue '{}' status after dequeue: {} calls remaining", 
-                                      queue_id, stats.total_calls);
-                            }
-                        }
+                        // Log queue depth after dequeue
+                        let remaining_calls = engine.get_in_memory_queue_depth(&queue_id).await;
+                        info!("📊 Queue '{}' status after dequeue: {} calls remaining", 
+                              queue_id, remaining_calls);
                         
                         // Update call status to indicate it's being assigned
                         if let Some(mut call_info) = engine.active_calls.get_mut(&queued_call.session_id) {
@@ -345,51 +466,17 @@ impl CallCenterEngine {
                             // Don't clear queue_id yet - we might need to re-queue
                         }
                         
-                        // Assign to agent
-                        let session_id = queued_call.session_id.clone();
-                        let agent_id_clone = agent_id.clone();
+                        // Spawn task to handle the assignment
                         let engine_clone = engine.clone();
                         let queue_id_clone = queue_id.clone();
-                        
+                        let agent_id_clone = agent_id.clone();
                         tokio::spawn(async move {
-                            match engine_clone.assign_specific_agent_to_call(session_id.clone(), agent_id_clone).await {
-                                Ok(()) => {
-                                    info!("✅ Successfully assigned queued call {} to agent", session_id);
-                                    // Mark as no longer being assigned
-                                    let mut queue_manager = engine_clone.queue_manager.write().await;
-                                    queue_manager.mark_as_not_assigned(&session_id);
-                                }
-                                Err(e) => {
-                                    error!("Failed to assign call {} to agent: {}", session_id, e);
-                                    
-                                    // Mark as no longer being assigned
-                                    let mut queue_manager = engine_clone.queue_manager.write().await;
-                                    queue_manager.mark_as_not_assigned(&session_id);
-                                    
-                                    // Check if call is still active
-                                    let call_still_active = engine_clone.active_calls.contains_key(&session_id);
-                                    if !call_still_active {
-                                        warn!("Call {} is no longer active, not re-queuing", session_id);
-                                        return;
-                                    }
-                                    
-                                    // Re-queue the call with higher priority
-                                    let mut requeued_call = queued_call;
-                                    requeued_call.priority = requeued_call.priority.saturating_sub(5); // Increase priority
-                                    
-                                    if let Err(e) = queue_manager.enqueue_call(&queue_id_clone, requeued_call) {
-                                        error!("Failed to re-queue call {}: {}", session_id, e);
-                                    } else {
-                                        info!("📞 Re-queued call {} with higher priority", session_id);
-                                        
-                                        // Update call status back to queued
-                                        if let Some(mut call_info) = engine_clone.active_calls.get_mut(&session_id) {
-                                            call_info.status = super::types::CallStatus::Queued;
-                                            call_info.queue_id = Some(queue_id_clone);
-                                        }
-                                    }
-                                }
-                            }
+                            Self::handle_call_assignment(
+                                engine_clone,
+                                queue_id_clone,
+                                queued_call,
+                                agent_id_clone,
+                            ).await;
                         });
                         
                         assignments_made += 1;
@@ -400,8 +487,8 @@ impl CallCenterEngine {
                     }
                 }
                 
-                if assignments_made > 0 {
-                    info!("📊 Made {} call assignments from queue {}", assignments_made, queue_id);
+                if assignments_made == 0 && !available_agents.is_empty() {
+                    debug!("No calls in queue {} despite having available agents", queue_id);
                 }
             }
             

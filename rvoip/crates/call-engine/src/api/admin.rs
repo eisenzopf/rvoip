@@ -3,15 +3,22 @@
 //! This module provides APIs for administrators to configure and manage
 //! the call center system.
 
+use axum::{
+    Router,
+    routing::{get, post, put, delete},
+    extract::{State, Path},
+    response::Json,
+    http::StatusCode,
+};
 use std::sync::Arc;
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    agent::{Agent, AgentId},
-    database::agent_store::AgentSkill,
+    CallCenterEngine,
+    agent::{Agent, AgentStatus, AgentId},
     config::{CallCenterConfig, QueueConfig, RoutingConfig},
     error::{CallCenterError, Result as CallCenterResult},
-    orchestrator::CallCenterEngine,
     queue::QueueStats,
 };
 
@@ -34,53 +41,108 @@ impl AdminApi {
         Self { engine }
     }
     
-    /// Add a new agent to the system
-    /// 
-    /// This registers the agent in the database and makes them available
-    /// for call routing once they connect
-    pub async fn add_agent(&self, agent: Agent) -> CallCenterResult<()> {
+    /// Add a new agent
+    pub async fn add_agent(&self, agent: Agent) -> Result<(), CallCenterError> {
+        // Register with the registry
         let mut registry = self.engine.agent_registry.lock().await;
-        registry.add_agent(agent).await
-    }
-    
-    /// Update an existing agent's configuration
-    pub async fn update_agent(&self, agent: Agent) -> CallCenterResult<()> {
-        let mut registry = self.engine.agent_registry.lock().await;
-        registry.update_agent(agent).await
-    }
-    
-    /// Remove an agent from the system
-    /// 
-    /// This will disconnect any active sessions and remove them from routing
-    pub async fn remove_agent(&self, agent_id: &AgentId) -> CallCenterResult<()> {
-        // First check if agent has active calls
-        let agent_info = self.engine.get_agent_info(agent_id).await;
-        if let Some(info) = agent_info {
-            if info.current_calls > 0 {
-                return Err(CallCenterError::validation(
-                    "Cannot remove agent with active calls"
-                ));
-            }
+        registry.register_agent(agent.clone()).await?;
+        
+        // Also add to database if available
+        if let Some(db) = self.engine.database_manager() {
+            // For now, just register with basic info - we'd need to extend the database schema
+            // to store all agent fields
+            db.upsert_agent(
+                &agent.id,
+                &agent.display_name,
+                Some(&agent.sip_uri)
+            ).await.map_err(|e| CallCenterError::database(&format!("Failed to upsert agent: {}", e)))?;
+            
+            // Update status separately
+            db.update_agent_status(&agent.id, agent.status.clone())
+                .await.map_err(|e| CallCenterError::database(&format!("Failed to update status: {}", e)))?;
         }
         
-        let mut registry = self.engine.agent_registry.lock().await;
-        registry.remove_agent(agent_id.as_str()).await
+        Ok(())
     }
     
-    /// List all agents in the system
-    pub async fn list_all_agents(&self) -> CallCenterResult<Vec<Agent>> {
-        let registry = self.engine.agent_registry.lock().await;
-        registry.list_agents().await
+    /// Update an existing agent
+    pub async fn update_agent(&self, agent: Agent) -> Result<(), CallCenterError> {
+        // Update in database if available
+        if let Some(db) = self.engine.database_manager() {
+            db.upsert_agent(
+                &agent.id,
+                &agent.display_name,
+                Some(&agent.sip_uri)
+            ).await.map_err(|e| CallCenterError::database(&format!("Failed to upsert agent: {}", e)))?;
+            
+            // Update status separately
+            db.update_agent_status(&agent.id, agent.status.clone())
+                .await.map_err(|e| CallCenterError::database(&format!("Failed to update status: {}", e)))?;
+        } else {
+            return Err(CallCenterError::internal("Database not configured"));
+        }
+        
+        Ok(())
+    }
+    
+    /// Remove an agent
+    pub async fn remove_agent(&self, agent_id: &AgentId) -> Result<(), CallCenterError> {
+        // Remove from registry
+        let mut registry = self.engine.agent_registry.lock().await;
+        registry.remove_agent_session(&agent_id.0)?;
+        
+        // Also mark as offline in database if available
+        if let Some(db) = self.engine.database_manager() {
+            db.mark_agent_offline(&agent_id.0)
+                .await.map_err(|e| CallCenterError::database(&format!("Failed to mark agent offline: {}", e)))?;
+        }
+        
+        Ok(())
+    }
+    
+    /// List all agents
+    pub async fn list_agents(&self) -> Result<Vec<Agent>, CallCenterError> {
+        if let Some(db) = self.engine.database_manager() {
+            // Get DB agents and convert to API agents
+            let db_agents = db.list_agents()
+                .await.map_err(|e| CallCenterError::database(&format!("Failed to list agents: {}", e)))?;
+            
+            // Convert DB agents to API agents
+            let agents = db_agents.into_iter().map(|db_agent| {
+                Agent {
+                    id: db_agent.agent_id,
+                    sip_uri: db_agent.contact_uri.unwrap_or_else(|| format!("sip:{}@localhost", db_agent.username)),
+                    display_name: db_agent.username,
+                    skills: vec![], // TODO: Load from database when skill table is implemented
+                    max_concurrent_calls: db_agent.max_calls as u32,
+                    status: match db_agent.status {
+                        crate::database::DbAgentStatus::Available => AgentStatus::Available,
+                        crate::database::DbAgentStatus::Busy => AgentStatus::Busy(vec![]),
+                        crate::database::DbAgentStatus::Offline => AgentStatus::Offline,
+                        crate::database::DbAgentStatus::Reserved => AgentStatus::Available, // Treat as available
+                    },
+                    department: None,
+                    extension: None,
+                }
+            }).collect();
+            
+            Ok(agents)
+        } else {
+            // Return empty list if no database
+            Ok(Vec::new())
+        }
     }
     
     /// Update agent skills
-    pub async fn update_agent_skills(
-        &self, 
-        agent_id: &AgentId, 
-        skills: Vec<AgentSkill>
-    ) -> CallCenterResult<()> {
-        let mut registry = self.engine.agent_registry.lock().await;
-        registry.update_agent_skills(agent_id, skills).await
+    pub async fn update_agent_skills(&self, agent_id: &AgentId, skills: Vec<String>) -> Result<(), CallCenterError> {
+        if let Some(_db) = self.engine.database_manager() {
+            // TODO: Implement skill storage in database
+            // For now, just log the request
+            tracing::info!("Updating skills for agent {}: {:?}", agent_id.0, skills);
+            Ok(())
+        } else {
+            return Err(CallCenterError::internal("Database not configured"));
+        }
     }
     
     /// Create a new queue
@@ -191,14 +253,43 @@ impl AdminApi {
     
     /// Check database health
     async fn check_database_health(&self) -> bool {
-        // Try to query the database with a simple query
-        let conn = self.engine.database().connection().await;
-        match conn.query("SELECT 1", ()).await {
-            Ok(_) => true,
-            Err(e) => {
-                tracing::error!("Database health check failed: {}", e);
-                false
+        if let Some(db) = self.engine.database_manager() {
+            // Try to query the database with a simple query
+            match db.query("SELECT 1", ()).await {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::error!("Database health check failed: {}", e);
+                    false
+                }
             }
+        } else {
+            // No database configured
+            false
+        }
+    }
+
+    /// Get statistics
+    pub async fn get_statistics(&self) -> CallCenterStats {
+        let total_agents = if let Some(db) = self.engine.database_manager() {
+            db.list_agents().await.unwrap_or_default().len()
+        } else {
+            0
+        };
+        
+        let active_calls = if let Some(db) = self.engine.database_manager() {
+            db.get_active_calls_count().await.unwrap_or(0)
+        } else {
+            0
+        };
+        
+        let queued_calls = 0; // TODO: get from queue manager
+        let available_agents = 0; // TODO: get from database
+        
+        CallCenterStats {
+            total_agents,
+            available_agents,
+            active_calls,
+            queued_calls,
         }
     }
 }
@@ -227,4 +318,19 @@ impl Default for AdminApi {
     fn default() -> Self {
         panic!("AdminApi requires an engine instance")
     }
+}
+
+/// Call center statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallCenterStats {
+    pub total_agents: usize,
+    pub available_agents: usize,
+    pub active_calls: usize,
+    pub queued_calls: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSkill {
+    pub skill_name: String,
+    pub skill_level: u8,
 } 

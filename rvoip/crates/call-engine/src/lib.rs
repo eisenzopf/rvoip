@@ -149,11 +149,11 @@ pub mod prelude {
     
     // Database types
     pub use crate::database::{
-        CallCenterDatabase,
-        agent_store::{Agent as DbAgent, AgentStore, CreateAgentRequest, AgentSkill},
-        call_records::{CallRecord, CallDirection, CallStatus as DbCallStatus},
-        queue_store::{CallQueue as DbQueue, QueueStore},
-        routing_store::{RoutingPolicy, RoutingPolicyType, RoutingStore},
+        DatabaseManager,
+        DbAgent,
+        DbAgentStatus,
+        DbQueuedCall,
+        DbActiveCall,
     };
     
     // Session-core integration types

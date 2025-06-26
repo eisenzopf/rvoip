@@ -31,8 +31,9 @@ impl CallCenterEngine {
         let session_id = session.id;
         
         // Add agent to available pool with enhanced information
-        self.available_agents.insert(agent.id.clone(), AgentInfo {
-            agent_id: agent.id.clone(),
+        let agent_id = AgentId(agent.id.clone());
+        self.available_agents.insert(agent_id.clone(), AgentInfo {
+            agent_id: agent_id.clone(),
             session_id: session_id.clone(),
             status: AgentStatus::Available,
             sip_uri: agent.sip_uri.clone(),          // Store the agent's SIP URI

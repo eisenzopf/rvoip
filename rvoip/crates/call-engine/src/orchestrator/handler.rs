@@ -297,22 +297,23 @@ impl CallCenterEngine {
         tracing::info!("Contact URI with port: {}", contact_uri);
         
         // Check if the agent exists in the database
-        // TODO: Fix limbo parameter binding syntax
-        let agent_exists = {
-            /*
-            let conn = self.database.connection().await;
-            match conn.query(
-                "SELECT id FROM agents WHERE sip_uri = :aor",
-                (("aor", aor.as_str()),)
-            ).await {
-                Ok(mut rows) => rows.next().await.is_ok(),
+        let agent_exists = if let Some(db_manager) = &self.db_manager {
+            // Try to find the agent by username (extract from SIP URI)
+            let username = aor.split('@').next()
+                .unwrap_or(&aor)
+                .trim_start_matches("sip:")
+                .trim_start_matches('<');
+            
+            match db_manager.get_agent(&username).await {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
                 Err(e) => {
                     tracing::error!("Database error checking agent: {}", e);
                     false
                 }
             }
-            */
-            // Temporarily return true to allow compilation
+        } else {
+            // No database, allow all registrations
             true
         };
         
@@ -396,99 +397,67 @@ impl CallCenterEngine {
         
         // Update agent status in database if registration was successful
         if status_code == 200 && expires > 0 {
-            // Fix for Limbo: use positional parameters instead of named parameters
-            let now = chrono::Utc::now();
-            
-            // Create agent store instance
-            let agent_store = crate::database::agent_store::AgentStore::new(self.database.clone());
-            
-            // First update the database status
-            match agent_store.update_agent_status_by_sip_uri(&aor, "available", &now).await {
-                Ok(_) => {
-                    tracing::info!("✅ Updated agent {} status to available in database", aor);
-                    
-                    // Now fetch the agent and add to available_agents HashMap
-                    match agent_store.get_agent_by_sip_uri(&aor).await {
-                        Ok(Some(agent)) => {
-                            // Fetch agent skills from database
-                            let skills = match agent_store.get_agent_skills(&agent.id).await {
-                                Ok(skills) => skills.into_iter().map(|s| s.skill_name).collect(),
-                                Err(e) => {
-                                    tracing::warn!("Failed to fetch agent skills: {}", e);
-                                    Vec::new()
-                                }
-                            };
-                            
-                            // Convert database Agent to internal AgentId
-                            let agent_id = crate::agent::AgentId::from(agent.id.clone());
-                            
-                            // Add to available agents DashMap
-                            // For registered agents, we use a special session ID format that indicates they're registered but not on a call
-                            // This will be replaced with the actual call session ID when they receive a call
-                            let agent_session_id = SessionId(format!("agent-{}-registered", agent_id));
-                            
-                            self.available_agents.insert(agent_id.clone(), AgentInfo {
-                                agent_id: agent_id.clone(),
-                                session_id: agent_session_id,
-                                status: crate::agent::AgentStatus::Available,
-                                sip_uri: agent.sip_uri.clone(),  // Store the agent's SIP URI
-                                contact_uri: contact_uri.clone(), // Store the contact URI from REGISTER
-                                skills,
-                                current_calls: 0,
-                                max_calls: agent.max_concurrent_calls as usize,
-                                last_call_end: None,
-                                performance_score: 0.5, // Default performance score
-                            });
-                            
-                            tracing::info!("✅ Agent {} added to available agents pool", agent.display_name);
-                            
-                            // Update available agent count in stats
-                            let available_count = self.available_agents.len();
-                            
-                            // TODO: Update routing stats with available agent count
-                            // let mut routing_stats = self.routing_stats.write().await;
-                            // routing_stats.agents_online = available_count;
-                        }
-                        Ok(None) => {
-                            tracing::warn!("⚠️ Agent with SIP URI {} not found in database after registration", aor);
-                        }
-                        Err(e) => {
-                            tracing::error!("❌ Failed to fetch agent after registration: {}", e);
-                        }
+            if let Some(db_manager) = &self.db_manager {
+                // Extract username from AOR
+                let username = aor.split('@').next()
+                    .unwrap_or(&aor)
+                    .trim_start_matches("sip:")
+                    .trim_start_matches('<');
+                
+                // Update or insert agent in database
+                match db_manager.upsert_agent(&username, &username, Some(&contact_uri)).await {
+                    Ok(_) => {
+                        tracing::info!("✅ Agent {} registered in database with contact {}", username, contact_uri);
+                        
+                        // Create agent ID
+                        let agent_id = crate::agent::AgentId::from(username.to_string());
+                        
+                        // Add to available agents DashMap
+                        let agent_session_id = SessionId(format!("agent-{}-registered", agent_id));
+                        
+                        self.available_agents.insert(agent_id.clone(), AgentInfo {
+                            agent_id: agent_id.clone(),
+                            session_id: agent_session_id,
+                            status: crate::agent::AgentStatus::Available,
+                            sip_uri: aor.clone(),
+                            contact_uri: contact_uri.clone(),
+                            skills: vec!["general".to_string()], // Default skills
+                            current_calls: 0,
+                            max_calls: 1, // Default max calls
+                            last_call_end: None,
+                            performance_score: 0.5,
+                        });
+                        
+                        tracing::info!("✅ Agent {} added to available agents pool", username);
                     }
-                }
-                Err(e) => {
-                    tracing::error!("❌ Failed to update agent status: {}", e);
+                    Err(e) => {
+                        tracing::error!("❌ Failed to update agent in database: {}", e);
+                    }
                 }
             }
         } else if status_code == 200 && expires == 0 {
             // Handle de-registration - remove from available agents
-            let agent_store = crate::database::agent_store::AgentStore::new(self.database.clone());
-            match agent_store.get_agent_by_sip_uri(&aor).await {
-                Ok(Some(agent)) => {
-                    let agent_id = crate::agent::AgentId::from(agent.id);
-                    
-                    // Remove from available agents DashMap
-                    if self.available_agents.remove(&agent_id).is_some() {
-                        tracing::info!("✅ Agent {} removed from available agents pool", agent.display_name);
+            if let Some(db_manager) = &self.db_manager {
+                let username = aor.split('@').next()
+                    .unwrap_or(&aor)
+                    .trim_start_matches("sip:")
+                    .trim_start_matches('<');
+                
+                let agent_id = crate::agent::AgentId::from(username.to_string());
+                
+                // Remove from available agents DashMap
+                if self.available_agents.remove(&agent_id).is_some() {
+                    tracing::info!("✅ Agent {} removed from available agents pool", username);
+                }
+                
+                // Update database status to offline
+                match db_manager.mark_agent_offline(&username).await {
+                    Ok(_) => {
+                        tracing::info!("✅ Agent {} marked offline in database", username);
                     }
-                    
-                    // Update available agent count in stats
-                    let available_count = self.available_agents.len();
-                    
-                    // TODO: Update routing stats with available agent count
-                    // let mut routing_stats = self.routing_stats.write().await;
-                    // routing_stats.agents_online = available_count;
-                    
-                    // Update database status to offline
-                    let now = chrono::Utc::now();
-                    let _ = agent_store.update_agent_status_by_sip_uri(&aor, "offline", &now).await;
-                }
-                Ok(None) => {
-                    tracing::warn!("⚠️ Agent with SIP URI {} not found for de-registration", aor);
-                }
-                Err(e) => {
-                    tracing::error!("❌ Failed to fetch agent for de-registration: {}", e);
+                    Err(e) => {
+                        tracing::error!("❌ Failed to mark agent offline: {}", e);
+                    }
                 }
             }
         }

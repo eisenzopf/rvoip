@@ -24,9 +24,9 @@ async fn main() -> Result<()> {
 
     // Step 1: Set up the call center
     println!("🏢 Setting up call center...");
-    let database = CallCenterDatabase::new_in_memory().await?;
-    let config = CallCenterConfig::default();
-    let engine = CallCenterEngine::new(config, database).await?;
+    let mut config = CallCenterConfig::default();
+    config.general.local_signaling_addr = "127.0.0.1:5060".parse()?;
+    let engine = CallCenterEngine::new(config, Some(":memory:".to_string())).await?;
     
     // Create APIs
     let admin_api = AdminApi::new(engine.clone());
@@ -47,8 +47,8 @@ async fn main() -> Result<()> {
     
     for (id, name, skills, dept) in agents {
         let agent = Agent {
-            id: AgentId::from(format!("{}-001", id)),
-            sip_uri: format!("sip:{}@callcenter.local", id),
+            id: format!("{}-001", id),
+            sip_uri: format!("sip:{}@127.0.0.1", id),
             display_name: name.to_string(),
             skills: skills.into_iter().map(|s| s.to_string()).collect(),
             max_concurrent_calls: 2,
@@ -107,17 +107,17 @@ async fn main() -> Result<()> {
     
     // Bob takes a call
     agent_client.update_agent_status(
-        &AgentId::from("bob-001"),
-        AgentStatus::Busy { active_calls: 1 }
+        &AgentId("bob-001".to_string()),
+        AgentStatus::Busy(vec![])
     ).await?;
     println!("  📞 Bob is now on a call");
     
-    // Alice goes on break
+    // Alice goes offline (instead of break)
     agent_client.update_agent_status(
-        &AgentId::from("alice-001"),
-        AgentStatus::Break { duration_minutes: 15 }
+        &AgentId("alice-001".to_string()),
+        AgentStatus::Offline
     ).await?;
-    println!("  ☕ Alice is on a 15-minute break");
+    println!("  🚪 Alice is now offline");
     
     // Check updated stats
     sleep(Duration::from_millis(100)).await;
@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
     println!("🎯 Supervisor Interventions:\n");
     
     // 6.1: View specific agent's calls
-    let bob_id = AgentId::from("bob-001");
+    let bob_id = AgentId("bob-001".to_string());
     let bob_calls = supervisor_api.monitor_agent_calls(&bob_id).await;
     println!("  📞 Bob's Active Calls: {}", bob_calls.len());
     
@@ -188,19 +188,19 @@ async fn main() -> Result<()> {
         if iterations == 2 {
             // Bob finishes his call
             agent_client.update_agent_status(
-                &AgentId::from("bob-001"),
+                &AgentId("bob-001".to_string()),
                 AgentStatus::Available
             ).await?;
             println!("         ✅ Bob finished his call and is available");
         }
         
         if iterations == 3 {
-            // Alice returns from break
+            // Alice returns from being offline
             agent_client.update_agent_status(
-                &AgentId::from("alice-001"),
+                &AgentId("alice-001".to_string()),
                 AgentStatus::Available
             ).await?;
-            println!("         ✅ Alice returned from break");
+            println!("         ✅ Alice is back online and available");
         }
         
         if iterations >= 4 {
