@@ -159,9 +159,14 @@ impl SessionDialogCoordinator {
     ) -> DialogResult<()> {
         tracing::info!("handle_incoming_call called for dialog {}", dialog_id);
         
-        // Extract From and To headers - simplified for now
-        let from_uri = format!("sip:from@{}", source.ip());
-        let to_uri = "sip:to@local".to_string();
+        // Extract From and To headers properly from the SIP request
+        let from_uri = request.from()
+            .map(|h| h.address().uri.to_string())
+            .unwrap_or_else(|| format!("sip:unknown@{}", source.ip()));
+            
+        let to_uri = request.to()
+            .map(|h| h.address().uri.to_string())
+            .unwrap_or_else(|| "sip:unknown@local".to_string());
         
         tracing::info!("Incoming call from dialog {}: {} -> {}", 
             dialog_id, from_uri, to_uri
@@ -233,45 +238,48 @@ impl SessionDialogCoordinator {
             CallDecision::Accept(sdp_answer) => {
                 // Get the call handle for this dialog
                 if let Ok(call_handle) = self.dialog_api.get_call_handle(&dialog_id).await {
-                    // If no SDP answer provided, request negotiation
-                    if sdp_answer.is_none() {
+                    // If no SDP answer provided, generate one
+                    let final_sdp_answer = if sdp_answer.is_none() {
                         // Get the stored incoming SDP offer
                         if let Some(their_offer) = self.incoming_sdp_offers.get(&session_id) {
-                            tracing::info!("Requesting SDP negotiation for session {} as UAS", session_id);
+                            tracing::info!("Generating SDP answer for session {} as UAS", session_id);
                             
-                            // Send negotiation request event
-                            self.send_session_event(SessionEvent::SdpNegotiationRequested {
+                            // Use the parent coordinator to generate SDP answer
+                            // The coordinator has the media manager and negotiator
+                            match self.send_session_event(SessionEvent::SdpNegotiationRequested {
                                 session_id: session_id.clone(),
                                 role: "uas".to_string(),
                                 local_sdp: None,
                                 remote_sdp: Some(their_offer.value().clone()),
-                            }).await?;
-                            
-                            // The negotiation will generate a "generated_sdp_answer" event
-                            // For now, we need to wait for that or use a placeholder
-                            tracing::warn!("Waiting for SDP negotiation to complete");
-                            
-                            // TODO: This is still async - we need a way to wait for the result
-                            // For now, just accept without SDP
-                            if let Err(e) = call_handle.answer(None).await {
-                                tracing::error!("Failed to answer incoming call for session {}: {}", session_id, e);
-                                self.update_session_state(session_id, CallState::Failed(format!("Answer failed: {}", e))).await?;
+                            }).await {
+                                Ok(_) => {
+                                    // The negotiation happens asynchronously
+                                    // For now we have to accept without SDP and let the coordinator handle it
+                                    tracing::warn!("SDP negotiation requested, accepting without SDP for now");
+                                    None
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to request SDP negotiation: {}", e);
+                                    None
+                                }
                             }
                         } else {
-                            // No offer stored, proceed with empty answer
-                            if let Err(e) = call_handle.answer(sdp_answer).await {
-                                tracing::error!("Failed to answer incoming call for session {}: {}", session_id, e);
-                                self.update_session_state(session_id, CallState::Failed(format!("Answer failed: {}", e))).await?;
-                            }
+                            tracing::warn!("No incoming SDP offer stored for session {}, accepting without SDP", session_id);
+                            None
                         }
                     } else {
-                        // SDP answer provided, use it directly
-                        if let Err(e) = call_handle.answer(sdp_answer).await {
-                            tracing::error!("Failed to answer incoming call for session {}: {}", session_id, e);
-                            self.update_session_state(session_id, CallState::Failed(format!("Answer failed: {}", e))).await?;
-                        } else {
-                            tracing::info!("Successfully answered incoming call for session {}", session_id);
-                        }
+                        sdp_answer
+                    };
+                    
+                    // Clean up the stored SDP offer
+                    self.incoming_sdp_offers.remove(&session_id);
+                    
+                    // Now answer with the SDP (or None if generation failed)
+                    if let Err(e) = call_handle.answer(final_sdp_answer.clone()).await {
+                        tracing::error!("Failed to answer incoming call for session {}: {}", session_id, e);
+                    } else {
+                        tracing::info!("Answered incoming call for session {} with SDP: {}", 
+                                     session_id, final_sdp_answer.is_some());
                     }
                 } else {
                     tracing::error!("Failed to get call handle for dialog {} to answer call", dialog_id);

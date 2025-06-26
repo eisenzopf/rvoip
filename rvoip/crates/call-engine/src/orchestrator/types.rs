@@ -24,8 +24,20 @@ pub struct CallInfo {
     pub created_at: DateTime<Utc>,
     pub queued_at: Option<DateTime<Utc>>,
     pub answered_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
     /// The SDP offer from the customer
     pub customer_sdp: Option<String>,
+    
+    // Call timing metrics
+    pub duration_seconds: u64,        // Total call duration (end - start)
+    pub wait_time_seconds: u64,       // Time waiting for agent (answered - created)
+    pub talk_time_seconds: u64,       // Time talking with agent (ended - answered)
+    pub hold_time_seconds: u64,       // Time spent on hold
+    pub queue_time_seconds: u64,      // Time spent in queue (if queued)
+    
+    // Additional metrics
+    pub transfer_count: u32,          // Number of times call was transferred
+    pub hold_count: u32,              // Number of times call was put on hold
 }
 
 /// Enhanced agent information for tracking
@@ -52,18 +64,18 @@ pub enum CustomerType {
     Trial,
 }
 
-/// Call status enumeration
-#[derive(Debug, Clone)]
+/// Call status tracking
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallStatus {
     Incoming,
-    Routing,     // Being processed by routing engine
+    Ringing,
     Queued,
-    Ringing,     // Ringing at agent
     Connecting,
     Bridged,
     OnHold,
     Transferring,
-    Ended,
+    Disconnected,
+    Failed,
 }
 
 /// Routing decision enumeration  

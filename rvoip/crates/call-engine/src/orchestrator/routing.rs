@@ -323,7 +323,7 @@ impl CallCenterEngine {
                         
                         // Update call status to indicate it's being assigned
                         if let Some(mut call_info) = engine.active_calls.get_mut(&queued_call.session_id) {
-                            call_info.status = super::types::CallStatus::Routing;
+                            call_info.status = super::types::CallStatus::Connecting;
                             // Don't clear queue_id yet - we might need to re-queue
                         }
                         

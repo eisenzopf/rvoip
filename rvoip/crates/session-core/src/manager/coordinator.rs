@@ -373,8 +373,27 @@ impl SessionCoordinator {
     ) -> Result<(), SessionError> {
         tracing::debug!("Coordinating media event for {}: {}", session_id, event);
         
-        // Forward media events to appropriate handlers
-        // This could include quality updates, codec changes, etc.
+        match event.as_str() {
+            "create_media_session" => {
+                // Create media session immediately for SDP generation
+                tracing::info!("Creating media session for {} on request", session_id);
+                self.media_coordinator.on_session_created(&session_id).await
+                    .map_err(|e| SessionError::internal(&format!("Failed to create media session: {}", e)))?;
+            }
+            "rfc_compliant_media_creation_uac" => {
+                // RFC 3261: Create media after ACK sent (UAC)
+                tracing::info!("RFC 3261: Creating media session for {} after ACK sent", session_id);
+                self.start_media_session(&session_id).await?;
+            }
+            "rfc_compliant_media_creation_uas" => {
+                // RFC 3261: Create media after ACK received (UAS)
+                tracing::info!("RFC 3261: Creating media session for {} after ACK received", session_id);
+                self.start_media_session(&session_id).await?;
+            }
+            _ => {
+                tracing::debug!("Unhandled media event '{}' for session {}", event, session_id);
+            }
+        }
         
         Ok(())
     }

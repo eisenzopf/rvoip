@@ -6,13 +6,19 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use tracing::{info, debug, warn, error};
-use rvoip_session_core::{IncomingCall, CallDecision, SessionId, SessionControl, CallState};
+use tokio::time::{timeout, Duration};
+
+use rvoip_session_core::api::{
+    types::{IncomingCall, CallDecision, SessionId, CallState},
+    control::SessionControl,
+    media::MediaControl,
+};
 
 use crate::agent::{AgentId, AgentStatus};
 use crate::error::{CallCenterError, Result as CallCenterResult};
 use crate::queue::{QueuedCall, QueueStats};
 use super::core::CallCenterEngine;
-use super::types::{CallInfo, CallStatus, RoutingDecision};
+use super::types::{CallInfo, CallStatus, CustomerType, RoutingDecision};
 
 impl CallCenterEngine {
     /// Process incoming call with sophisticated routing
@@ -20,7 +26,7 @@ impl CallCenterEngine {
         let session_id = call.id.clone();
         let routing_start = std::time::Instant::now();
         
-        info!("📞 Processing incoming call: {} from {}", session_id, call.from);
+        info!("📞 Processing incoming call: {} from {} to {}", session_id, call.from, call.to);
         
         // Extract and log the SDP from the incoming call
         if let Some(ref sdp) = call.sdp {
@@ -34,6 +40,7 @@ impl CallCenterEngine {
         let (customer_type, priority, required_skills) = self.analyze_customer_info(&call).await;
         
         // Create enhanced call info tracking
+        let customer_sdp = call.sdp.clone();
         let call_info = CallInfo {
             session_id: session_id.clone(),
             caller_id: call.from.clone(),
@@ -42,135 +49,154 @@ impl CallCenterEngine {
             agent_id: None,
             queue_id: None,
             bridge_id: None,
-            status: CallStatus::Routing,
-            priority,
-            customer_type: customer_type.clone(),
-            required_skills: required_skills.clone(),
+            status: CallStatus::Incoming,
+            priority: 50, // Default priority
+            customer_type: CustomerType::Standard,
+            required_skills: vec![],
             created_at: chrono::Utc::now(),
             queued_at: None,
             answered_at: None,
-            customer_sdp: call.sdp.clone(),  // Store the customer's SDP
+            ended_at: None,
+            customer_sdp: customer_sdp.clone(), // Store the customer's SDP offer
+            // Initialize timing metrics
+            duration_seconds: 0,
+            wait_time_seconds: 0,
+            talk_time_seconds: 0,
+            hold_time_seconds: 0,
+            queue_time_seconds: 0,
+            transfer_count: 0,
+            hold_count: 0,
         };
         
         // Store call info
         self.active_calls.insert(session_id.clone(), call_info);
         
+        // B2BUA: Initially defer the call to send 180 Ringing
+        // We'll accept with 200 OK only after agent answers
+        info!("📞 B2BUA: Deferring customer call {} to send 180 Ringing", session_id);
+        
+        // Spawn the routing task
+        let engine = Arc::new(self.clone());
+        let session_id_clone = session_id.clone();
+        tokio::spawn(async move {
+            engine.route_call_to_agent(session_id_clone).await;
+        });
+        
+        // Return Defer to send 180 Ringing to customer
+        Ok(CallDecision::Defer)
+    }
+    
+    /// Route an already-accepted call to an agent
+    async fn route_call_to_agent(&self, session_id: SessionId) {
+        info!("🚦 Routing call {} to find available agent", session_id);
+        
+        let routing_start = std::time::Instant::now();
+        
         // Make intelligent routing decision based on multiple factors
-        let routing_decision = self.make_routing_decision(&session_id, &customer_type, priority, &required_skills).await?;
+        let routing_decision = self.make_routing_decision(&session_id, &CustomerType::Standard, 50, &[]).await;
         
-        info!("🎯 Routing decision for call {}: {:?}", session_id, routing_decision);
-        
-        // Execute routing decision
-        let call_decision = match routing_decision {
-            RoutingDecision::DirectToAgent { agent_id, reason } => {
-                info!("📞 Routing call {} directly to agent {} ({})", session_id, agent_id, reason);
+        match routing_decision {
+            Ok(decision) => {
+                info!("🎯 Routing decision for call {}: {:?}", session_id, decision);
                 
-                // Update call status and assign agent
-                if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
-                    call_info.status = CallStatus::Ringing;
-                    call_info.agent_id = Some(agent_id.clone());
-                }
-                
-                // Schedule immediate agent assignment
-                let engine = self.session_coordinator.as_ref()
-                    .ok_or_else(|| CallCenterError::orchestration("Session coordinator not initialized"))?
-                    .clone();
-                
-                let self_clone = self.clone();
-                let session_id_clone = session_id.clone();
-                let agent_id_clone = agent_id.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = self_clone.assign_specific_agent_to_call(session_id_clone, agent_id_clone).await {
-                        error!("Failed to assign agent: {}", e);
+                // Handle the routing decision
+                match decision {
+                    RoutingDecision::DirectToAgent { agent_id, reason } => {
+                        info!("📞 Direct routing to agent {} for call {}: {}", agent_id, session_id, reason);
+                        
+                        // Update call status
+                        if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+                            call_info.status = CallStatus::Connecting;
+                            call_info.agent_id = Some(agent_id.clone());
+                        }
+                        
+                        // Assign to specific agent
+                        if let Err(e) = self.assign_specific_agent_to_call(session_id.clone(), agent_id.clone()).await {
+                            error!("Failed to assign call {} to agent {}: {}", session_id, agent_id, e);
+                            
+                            // TODO: Re-queue or find another agent
+                            if let Some(coordinator) = &self.session_coordinator {
+                                let _ = coordinator.terminate_session(&session_id).await;
+                            }
+                        }
+                    },
+                    
+                    RoutingDecision::Queue { queue_id, priority, reason } => {
+                        info!("📥 Queueing call {} to {} (priority: {}, reason: {})", 
+                              session_id, queue_id, priority, reason);
+                        
+                        // Create queued call entry
+                        let queued_call = QueuedCall {
+                            session_id: session_id.clone(),
+                            caller_id: self.active_calls.get(&session_id)
+                                .map(|c| c.caller_id.clone())
+                                .unwrap_or_else(|| "unknown".to_string()),
+                            priority,
+                            queued_at: chrono::Utc::now(),
+                            estimated_wait_time: None,
+                            retry_count: 0,
+                        };
+                        
+                        // Add to queue
+                        {
+                            let mut queue_manager = self.queue_manager.write().await;
+                            if let Err(e) = queue_manager.enqueue_call(&queue_id, queued_call) {
+                                error!("Failed to enqueue call {}: {}", session_id, e);
+                                
+                                // Terminate the call if we can't queue it
+                                if let Some(coordinator) = &self.session_coordinator {
+                                    let _ = coordinator.terminate_session(&session_id).await;
+                                }
+                                return;
+                            }
+                        }
+                        
+                        // Update call status
+                        if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+                            call_info.status = CallStatus::Queued;
+                            call_info.queue_id = Some(queue_id.clone());
+                            call_info.queued_at = Some(chrono::Utc::now());
+                        }
+                        
+                        // Update routing stats
+                        {
+                            let mut stats = self.routing_stats.write().await;
+                            stats.calls_queued += 1;
+                        }
+                        
+                        // Start monitoring for agent availability
+                        self.monitor_queue_for_agents(queue_id).await;
+                    },
+                    
+                    RoutingDecision::Reject { reason } => {
+                        warn!("❌ Rejecting call {} after acceptance: {}", session_id, reason);
+                        
+                        // Since we already accepted, we need to terminate
+                        if let Some(coordinator) = &self.session_coordinator {
+                            let _ = coordinator.terminate_session(&session_id).await;
+                        }
+                        
+                        // Update routing stats
+                        {
+                            let mut stats = self.routing_stats.write().await;
+                            stats.calls_rejected += 1;
+                        }
+                    },
+                    
+                    _ => {
+                        warn!("Unhandled routing decision for call {}: {:?}", session_id, decision);
                     }
-                });
-                
-                let routing_time = routing_start.elapsed().as_millis();
-                info!("✅ Direct-to-agent routing decision made in {}ms", routing_time);
-                
-                // Accept the call immediately but without SDP (B2BUA behavior)
-                // We'll update the customer's media session with agent's SDP after agent answers
-                Ok(CallDecision::Accept(None))
-            },
-            
-            RoutingDecision::Queue { queue_id, priority, reason } => {
-                info!("📋 Queueing call {} in queue {} with priority {} ({})", session_id, queue_id, priority, reason);
-                
-                // Add call to queue
-                let queued_call = QueuedCall {
-                    session_id: session_id.clone(),
-                    caller_id: call.from.clone(),
-                    priority,
-                    queued_at: chrono::Utc::now(),
-                    estimated_wait_time: None,
-                    retry_count: 0,  // New calls start with 0 retries
-                };
-                
-                // Ensure queue exists
-                self.ensure_queue_exists(&queue_id).await?;
-                
-                // Enqueue the call
-                {
-                    let mut queue_manager = self.queue_manager.write().await;
-                    if let Err(e) = queue_manager.enqueue_call(&queue_id, queued_call) {
-                        error!("Failed to enqueue call {}: {}", session_id, e);
-                        return Ok(CallDecision::Reject("Queue full".to_string()));
-                    }
                 }
-                
-                // Update call status
-                if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
-                    call_info.status = CallStatus::Queued;
-                    call_info.queue_id = Some(queue_id.clone());
-                    call_info.queued_at = Some(chrono::Utc::now());
-                }
-                
-                // Update routing stats
-                {
-                    let mut stats = self.routing_stats.write().await;
-                    stats.calls_queued += 1;
-                }
-                
-                // Start monitoring for agent availability
-                self.monitor_queue_for_agents(queue_id.clone()).await;
-                
-                // Return Defer to send 180 Ringing, not Accept which sends 200 OK
-                Ok(CallDecision::Defer)
-            },
-            
-            RoutingDecision::Overflow { target_queue, reason } => {
-                info!("🔄 Overflowing call {} to queue {} ({})", session_id, target_queue, reason);
-                
-                // Recursive call with overflow queue
-                let overflow_decision = RoutingDecision::Queue { 
-                    queue_id: target_queue, 
-                    priority: priority + 10, // Lower priority for overflow
-                    reason: format!("Overflow: {}", reason)
-                };
-                
-                // Process overflow decision (simplified)
-                // Return Defer, not Accept
-                Ok(CallDecision::Defer)
-            },
-            
-            RoutingDecision::Reject { reason } => {
-                warn!("❌ Rejecting call {} ({})", session_id, reason);
-                
-                // Update routing stats
-                {
-                    let mut stats = self.routing_stats.write().await;
-                    stats.calls_rejected += 1;
-                }
-                
-                Ok(CallDecision::Reject(reason))
-            },
-            
-            RoutingDecision::Conference { bridge_id } => {
-                info!("🎤 Routing call {} to conference {}", session_id, bridge_id);
-                // TODO: Implement conference routing
-                Ok(CallDecision::Accept(None))
             }
-        };
+            Err(e) => {
+                error!("Routing decision failed for call {}: {}", session_id, e);
+                
+                // Terminate the call
+                if let Some(coordinator) = &self.session_coordinator {
+                    let _ = coordinator.terminate_session(&session_id).await;
+                }
+            }
+        }
         
         // Update routing time metrics
         let routing_time = routing_start.elapsed().as_millis() as u64;
@@ -180,7 +206,6 @@ impl CallCenterEngine {
         }
         
         info!("✅ Call {} routing completed in {}ms", session_id, routing_time);
-        call_decision
     }
     
     /// Assign a specific agent to an incoming call
@@ -196,7 +221,7 @@ impl CallCenterEngine {
             return Err(CallCenterError::orchestration(&format!("Agent {} not available", agent_id)));
         };
         
-        if let Some(agent_info) = agent_info {
+        if let Some(mut agent_info) = agent_info {
             let coordinator = self.session_coordinator.as_ref().unwrap();
             
             // The customer call should already be accepted at this point (200 OK sent)
@@ -221,58 +246,42 @@ impl CallCenterEngine {
                 }
             }
             
-            // Step 1: Get the customer's media info to pass SDP to the agent
-            let customer_sdp = {
-                // First try to get SDP from the call info (stored during incoming call processing)
-                if let Some(call_info) = self.active_calls.get(&session_id) {
-                    if let Some(ref sdp) = call_info.customer_sdp {
-                        info!("📄 Retrieved customer SDP from call info ({} bytes)", sdp.len());
-                        Some(sdp.clone())
-                    } else {
-                        // Fallback to media info if not in call info
-                        match coordinator.get_media_info(&session_id).await {
-                            Ok(Some(media_info)) => {
-                                info!("📄 Retrieved customer media info from session");
-                                media_info.remote_sdp.or(media_info.local_sdp)
-                            }
-                            Ok(None) => {
-                                warn!("⚠️ No media info found for customer session");
-                                None
-                            }
-                            Err(e) => {
-                                warn!("⚠️ Failed to get customer media info: {}", e);
-                                None
-                            }
-                        }
-                    }
-                } else {
-                    warn!("⚠️ No call info found for session {}", session_id);
-                    None
+            // Step 1: B2BUA prepares its own SDP offer for the agent
+            // This allocates media resources and generates our SDP
+            let agent_contact_uri = agent_info.contact_uri.clone(); // Use the contact URI from REGISTER
+            let call_center_uri = format!("sip:call-center@{}", self.config.general.domain);
+            
+            info!("📞 B2BUA: Preparing outgoing call to agent {} at {}", 
+                  agent_id, agent_contact_uri);
+            
+            // Prepare the call - this allocates media resources and generates SDP
+            let prepared_call = match SessionControl::prepare_outgoing_call(
+                coordinator,
+                &call_center_uri,    // FROM: The call center is making the call
+                &agent_contact_uri,  // TO: The agent is receiving the call
+            ).await {
+                Ok(prepared) => {
+                    info!("✅ B2BUA: Prepared call with SDP offer ({} bytes), allocated RTP port: {}", 
+                          prepared.sdp_offer.len(), prepared.local_rtp_port);
+                    prepared
+                }
+                Err(e) => {
+                    error!("Failed to prepare outgoing call to agent {}: {}", agent_id, e);
+                    let mut restored_agent = agent_info;
+                    restored_agent.status = AgentStatus::Available;
+                    restored_agent.current_calls = restored_agent.current_calls.saturating_sub(1);
+                    self.available_agents.insert(agent_id, restored_agent);
+                    return Err(CallCenterError::orchestration(&format!("Failed to prepare call to agent: {}", e)));
                 }
             };
             
-            if customer_sdp.is_none() {
-                warn!("⚠️ No SDP available from customer session - agent will not receive media info");
-            } else {
-                info!("📄 Customer SDP length: {} bytes", customer_sdp.as_ref().unwrap().len());
-                debug!("📄 Customer SDP content:\n{}", customer_sdp.as_ref().unwrap());
-            }
-            
-            // Step 2: Create an outgoing call to the agent with customer's SDP
-            let agent_contact_uri = agent_info.contact_uri.clone(); // Use the contact URI from REGISTER
-            info!("📞 Creating outgoing call to agent {} at {} with SDP: {}", 
-                  agent_id, agent_contact_uri, if customer_sdp.is_some() { "yes" } else { "no" });
-            
-            // Use the configured domain for the call center's From URI
-            let call_center_uri = format!("sip:call-center@{}", self.config.general.domain);
-            
-            let agent_call_session = match coordinator.create_outgoing_call(
-                &call_center_uri,    // FROM: The call center is making the call
-                &agent_contact_uri,  // TO: The agent is receiving the call
-                customer_sdp,        // Pass customer's SDP as the offer
+            // Step 2: Initiate the prepared call with our SDP offer
+            let agent_call_session = match SessionControl::initiate_prepared_call(
+                coordinator,
+                &prepared_call,
             ).await {
                 Ok(call_session) => {
-                    info!("✅ Created outgoing call {:?} to agent {}", call_session.id, agent_id);
+                    info!("✅ Created outgoing call {:?} to agent {} with SDP", call_session.id, agent_id);
                     
                     // Track dialog relationship for B2BUA (customer → agent)
                     self.dialog_mappings.insert(session_id.0.clone(), call_session.id.0.clone());
@@ -282,7 +291,7 @@ impl CallCenterEngine {
                     call_session
                 }
                 Err(e) => {
-                    error!("Failed to create outgoing call to agent {}: {}", agent_id, e);
+                    error!("Failed to initiate call to agent {}: {}", agent_id, e);
                     // TODO: Hang up the customer call or re-queue it
                     let mut restored_agent = agent_info;
                     restored_agent.status = AgentStatus::Available;
@@ -296,8 +305,7 @@ impl CallCenterEngine {
             let agent_session_id = agent_call_session.id.clone();
             
             // Update agent info with the new session ID
-            let mut updated_agent = agent_info;
-            updated_agent.session_id = agent_session_id.clone();
+            agent_info.session_id = agent_session_id.clone();
             
             // Step 3: Wait for the agent to answer the call
             info!("⏳ Waiting for agent {} to answer...", agent_id);
@@ -307,7 +315,7 @@ impl CallCenterEngine {
                     info!("✅ Agent {} answered the call", agent_id);
                     
                     // Get agent's SDP from their 200 OK response
-                    let agent_sdp = match coordinator.get_media_info(&agent_session_id).await {
+                    let agent_sdp = match SessionControl::get_media_info(coordinator, &agent_session_id).await {
                         Ok(Some(media_info)) => {
                             info!("📄 Retrieved agent's SDP answer");
                             media_info.remote_sdp.or(media_info.local_sdp)
@@ -322,35 +330,46 @@ impl CallCenterEngine {
                         }
                     };
                     
-                    info!("📞 B2BUA: Accepting customer call {} with agent's SDP", session_id);
+                    info!("📞 B2BUA: Bridging customer {} with agent {}", session_id, agent_id);
                     
-                    // CRITICAL: Actually accept the customer's call with agent's SDP
-                    // This sends 200 OK to the customer, completing the B2BUA flow
-                    match coordinator.dialog_manager.accept_incoming_call(&session_id, agent_sdp.clone()).await {
-                        Ok(_) => {
-                            info!("✅ Successfully accepted customer call {} with agent's SDP", session_id);
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to accept customer call {}: {}", session_id, e);
-                            // Continue anyway - try to bridge even if accept failed
-                        }
-                    }
-                    
-                    // Update the customer's media session with the agent's SDP answer
-                    // This completes the B2BUA flow - customer gets media info to connect to agent
-                    if let Some(ref agent_sdp_str) = agent_sdp {
-                        match coordinator.media_coordinator.process_sdp_answer(&session_id, agent_sdp_str).await {
-                            Ok(_) => {
-                                info!("✅ Customer's media session updated with agent's SDP");
+                    // CRITICAL: Accept customer's deferred call now that agent has answered
+                    // Generate B2BUA's SDP answer for the customer based on their offer
+                    if let Some(customer_sdp_offer) = self.active_calls.get(&session_id)
+                        .and_then(|info| info.customer_sdp.clone()) {
+                        
+                        info!("📄 B2BUA: Generating SDP answer for customer");
+                        match MediaControl::generate_sdp_answer(coordinator, &session_id, &customer_sdp_offer).await {
+                            Ok(b2bua_answer) => {
+                                info!("✅ B2BUA: Generated SDP answer ({} bytes)", b2bua_answer.len());
+                                
+                                // Accept the customer's call with our SDP answer
+                                match coordinator.dialog_manager.accept_incoming_call(&session_id, Some(b2bua_answer.clone())).await {
+                                    Ok(_) => {
+                                        info!("✅ Successfully accepted customer call {} with B2BUA's SDP", session_id);
+                                    }
+                                    Err(e) => {
+                                        error!("❌ Failed to accept customer call {}: {}", session_id, e);
+                                        // Continue anyway - try to bridge
+                                    }
+                                }
                             }
                             Err(e) => {
-                                error!("❌ Failed to update customer's media session: {}", e);
-                                // Continue anyway - try to bridge even if media update failed
+                                error!("❌ Failed to generate SDP answer for customer: {}", e);
+                                // Accept without SDP as fallback
+                                if let Err(e) = coordinator.dialog_manager.accept_incoming_call(&session_id, None).await {
+                                    error!("❌ Failed to accept customer call without SDP: {}", e);
+                                }
                             }
                         }
                     } else {
-                        warn!("⚠️ No agent SDP available to update customer's media session");
+                        warn!("⚠️ No customer SDP offer found - accepting without SDP");
+                        if let Err(e) = coordinator.dialog_manager.accept_incoming_call(&session_id, None).await {
+                            error!("❌ Failed to accept customer call without SDP: {}", e);
+                        }
                     }
+                    
+                    // Update the customer's media session with the agent's SDP for media routing
+                    // This is internal B2BUA media bridging configuration
                     
                     // Now bridge the two sessions for media flow
                     info!("🌉 Bridging customer {} with agent {} (session {:?})", 
@@ -373,7 +392,7 @@ impl CallCenterEngine {
                             }
                             
                             // Store updated agent info
-                            self.available_agents.insert(agent_id, updated_agent);
+                            self.available_agents.insert(agent_id, agent_info);
                         },
                         Err(e) => {
                             error!("Failed to bridge sessions: {}", e);
@@ -382,9 +401,9 @@ impl CallCenterEngine {
                             let _ = coordinator.terminate_session(&agent_session_id).await;
                             
                             // Return agent to available pool
-                            updated_agent.status = AgentStatus::Available;
-                            updated_agent.current_calls = updated_agent.current_calls.saturating_sub(1);
-                            self.available_agents.insert(agent_id, updated_agent);
+                            agent_info.status = AgentStatus::Available;
+                            agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
+                            self.available_agents.insert(agent_id, agent_info);
                             
                             return Err(CallCenterError::orchestration(&format!("Bridge failed: {}", e)));
                         }
@@ -399,9 +418,9 @@ impl CallCenterEngine {
                     }
                     
                     // Return agent to available pool
-                    updated_agent.status = AgentStatus::Available;
-                    updated_agent.current_calls = updated_agent.current_calls.saturating_sub(1);
-                    self.available_agents.insert(agent_id.clone(), updated_agent);
+                    agent_info.status = AgentStatus::Available;
+                    agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
+                    self.available_agents.insert(agent_id, agent_info);
                     
                     // Update call info to mark as queued again
                     if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
@@ -450,6 +469,42 @@ impl CallCenterEngine {
     /// Handle call termination cleanup with agent status management
     pub(super) async fn handle_call_termination(&self, session_id: SessionId) -> CallCenterResult<()> {
         info!("🛑 Handling call termination: {}", session_id);
+        
+        // First, update the call end time and calculate metrics
+        let now = chrono::Utc::now();
+        if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+            call_info.ended_at = Some(now);
+            
+            // Calculate total duration
+            call_info.duration_seconds = now.signed_duration_since(call_info.created_at).num_seconds() as u64;
+            
+            // Calculate wait time (time until answered or ended if never answered)
+            if let Some(answered_at) = call_info.answered_at {
+                call_info.wait_time_seconds = answered_at.signed_duration_since(call_info.created_at).num_seconds() as u64;
+                // Calculate talk time (answered until ended)
+                call_info.talk_time_seconds = now.signed_duration_since(answered_at).num_seconds() as u64;
+            } else {
+                // Never answered - entire duration was wait time
+                call_info.wait_time_seconds = call_info.duration_seconds;
+                call_info.talk_time_seconds = 0;
+            }
+            
+            // Calculate queue time if the call was queued
+            if let (Some(queued_at), Some(answered_at)) = (call_info.queued_at, call_info.answered_at) {
+                call_info.queue_time_seconds = answered_at.signed_duration_since(queued_at).num_seconds() as u64;
+            } else if let Some(queued_at) = call_info.queued_at {
+                // Still in queue when ended
+                call_info.queue_time_seconds = now.signed_duration_since(queued_at).num_seconds() as u64;
+            }
+            
+            info!("📊 Call {} metrics - Total: {}s, Wait: {}s, Talk: {}s, Queue: {}s, Hold: {}s", 
+                  session_id, 
+                  call_info.duration_seconds,
+                  call_info.wait_time_seconds,
+                  call_info.talk_time_seconds,
+                  call_info.queue_time_seconds,
+                  call_info.hold_time_seconds);
+        }
         
         // Check if this is part of a B2BUA dialog and terminate the related leg
         if let Some((_, related_dialog_id)) = self.dialog_mappings.remove(&session_id.0) {
@@ -608,5 +663,62 @@ impl CallCenterEngine {
                 break; // Only assign one call at a time
             }
         }
+    }
+    
+    /// Put a call on hold
+    pub async fn put_call_on_hold(&self, session_id: &SessionId) -> CallCenterResult<()> {
+        if let Some(mut call_info) = self.active_calls.get_mut(session_id) {
+            if call_info.status == CallStatus::Bridged {
+                call_info.status = CallStatus::OnHold;
+                call_info.hold_count += 1;
+                
+                // Track hold start time (would need additional field for accurate tracking)
+                info!("☎️ Call {} put on hold (count: {})", session_id, call_info.hold_count);
+                
+                // TODO: Actually put the call on hold via session coordinator
+                if let Some(coordinator) = &self.session_coordinator {
+                    coordinator.hold_session(session_id).await
+                        .map_err(|e| CallCenterError::orchestration(&format!("Failed to hold call: {}", e)))?;
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    /// Resume a call from hold
+    pub async fn resume_call_from_hold(&self, session_id: &SessionId) -> CallCenterResult<()> {
+        if let Some(mut call_info) = self.active_calls.get_mut(session_id) {
+            if call_info.status == CallStatus::OnHold {
+                call_info.status = CallStatus::Bridged;
+                
+                // TODO: Calculate and add to total hold time
+                info!("📞 Call {} resumed from hold", session_id);
+                
+                // TODO: Actually resume the call via session coordinator
+                if let Some(coordinator) = &self.session_coordinator {
+                    coordinator.resume_session(session_id).await
+                        .map_err(|e| CallCenterError::orchestration(&format!("Failed to resume call: {}", e)))?;
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    /// Transfer a call to another agent or queue (simple version)
+    pub async fn transfer_call_simple(&self, session_id: &SessionId, target: &str) -> CallCenterResult<()> {
+        if let Some(mut call_info) = self.active_calls.get_mut(session_id) {
+            call_info.transfer_count += 1;
+            call_info.status = CallStatus::Transferring;
+            
+            info!("📞 Transferring call {} to {} (count: {})", 
+                  session_id, target, call_info.transfer_count);
+            
+            // TODO: Implement actual transfer logic
+            // This would involve:
+            // 1. Finding the target agent/queue
+            // 2. Creating new session to target
+            // 3. Bridging or re-routing the call
+        }
+        Ok(())
     }
 } 

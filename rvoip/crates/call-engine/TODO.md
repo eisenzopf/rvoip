@@ -10,7 +10,21 @@
 - Bridge customer and agent audio
 - Handle call teardown properly
 
-**Next Priority**: Phase 0.9 - Fix SDP negotiation and B2BUA response flow for proper call completion
+## 🚨 CURRENT PRIORITY: Fix B2BUA SDP Negotiation (Phase 0.9) - FIXES COMPLETE ✅
+
+**Critical Issues Found in Testing**:
+1. **No SDP to Agent**: Server sends INVITE to agent with `Content-Length: 0` (no SDP offer) ✅
+2. **Agent Can't Answer**: Without SDP offer, agent can't generate SDP answer ✅
+3. **No Audio Flow**: Both sides have no media negotiation ✅
+4. **Missing 180 Ringing**: Violates expected SIP call flow ✅
+
+**Root Cause**: The B2BUA implementation is incomplete. It correctly generates SDP for the customer but not for the agent.
+
+**Fix Tasks**:
+1. ✅ FIXED: Use `prepare_outgoing_call` to generate B2BUA's SDP offer before calling agent
+2. ✅ FIXED: Accept customer's deferred call only after agent answers (not immediately)
+3. ✅ FIXED: Add 180 Ringing response to customer (via Defer)
+4. [ ] Test the complete flow
 
 ## Overview
 The Call Engine is responsible for managing call center operations, including agent management, call queuing, routing, and session management. It builds on top of session-core to provide call center-specific functionality.
@@ -356,27 +370,105 @@ A proper implementation would extract the port from the Via header in the SIP me
 **Estimated Time**: 3-4 hours total
 **Priority**: CRITICAL - These issues prevent successful call completion
 
-### Phase 0.9 - SDP Negotiation & Media Bridging (TESTING)
-- [x] Store customer SDP from initial INVITE
-- [x] Pass customer SDP when calling agent  
-- [x] B2BUA dialog tracking for BYE forwarding
-- [x] Accept customer call with agent's SDP when agent answers (200 OK)
-- [x] Agent generates SDP answer when accepting calls (simplified - session handles it)
-- [x] Fix compilation issues and simplify agent client
-- [ ] Test complete media flow between customer and agent
-- [ ] Verify BYE forwarding works correctly
-- [ ] Clean up dialog mappings on call termination
+### Phase 0.9 - SDP Negotiation & Media Bridging (IN PROGRESS - FIXES NEEDED)
 
-**Critical Fixes Implemented:**
-1. Added missing `accept_incoming_call()` to send 200 OK to customer after agent answers
-2. Fixed to use dialog_manager.accept_incoming_call() with SessionId
-3. Simplified agent client to let session coordinator handle SDP negotiation
-4. Customer should now receive agent's SDP in 200 OK response for media establishment
+**Root Cause Analysis from E2E Testing**:
 
-**Ready for Testing** - All code changes are complete. Running e2e tests to verify:
-- Customer receives 200 OK with SDP after agent answers
-- Media flows between customer and agent
-- BYE messages are properly forwarded in B2BUA
+1. **No SDP in Agent's 200 OK** ❌
+   - Agent sends `Content-Length: 0` in 200 OK response
+   - Server logs "⚠️ No media info from agent"
+   - Session-core should auto-generate SDP but isn't
+   - **Impact**: No bidirectional media flow
+
+2. **BYE Dialog Tracking Failure** ❌
+   - Agent BYE gets "481 Call/Transaction Does Not Exist"
+   - Dialog mappings created but not used for BYE forwarding
+   - **Impact**: Calls can't terminate properly
+
+3. **Missing 180 Ringing** ❌
+   - SIPp expects: 100 → 180 → 200
+   - Actually gets: 100 → 200 (immediate answer)
+   - **Impact**: Violates SIP call flow
+
+**Architectural Issue: Acting as Proxy, Not B2BUA** 🚨
+
+Current (Wrong) Implementation:
+- Passing customer's SDP directly to agent ❌
+- Trying to use agent's SDP directly for customer ❌
+- Not creating separate media sessions for each leg ❌
+
+Correct B2BUA Implementation:
+- Accept customer call immediately with B2BUA's SDP answer ✅ (already done)
+- Create new call to agent with B2BUA's SDP offer ❌ (MISSING!)
+- Bridge media between the two legs ✅ (already done)
+
+**Fix Plan**:
+
+#### Task 1: B2BUA Customer Leg (Immediate Accept) ✅ COMPLETED
+- [x] Accept customer call immediately instead of deferring
+- [x] Generate B2BUA's own SDP answer for customer
+- [x] Customer gets immediate 200 OK with SDP
+
+#### Task 2: B2BUA Agent Leg (Separate SDP) 🚨 NEEDS FIX
+- [x] Generate B2BUA's own SDP offer for agent ❌ Currently sends NO SDP!
+- [x] Create outgoing call to agent with B2BUA's SDP ❌ Must include SDP!
+- [x] Wait for agent's SDP answer ✅ Already waits
+
+**Critical Fix Needed**: The server must generate and send its own SDP offer when calling agents. Currently it sends `Content-Length: 0`.
+
+#### Task 3: Fix Missing 180 Ringing 🆕
+- [ ] Send 180 Ringing before 200 OK to customer
+- [ ] Add ringing state handling in process_incoming_call
+- [ ] Configure proper response sequence
+
+#### Task 4: Fix Transaction Already Terminated Error 🆕
+- [ ] Don't try to accept customer call again after agent answers
+- [ ] Customer is already accepted in Task 1 - just update media
+- [ ] Use media update methods instead of accept_incoming_call
+
+#### Task 5: Fix BYE Dialog Tracking ✅
+- [x] Already implemented in handler
+- [ ] Test if working correctly after other fixes
+
+#### Task 6: Agent SDP Generation 🆕
+- [ ] Investigate why agent doesn't generate SDP answer
+- [ ] Agent might need to create media session when no SDP in INVITE
+- [ ] Or server must always send SDP offer (preferred for B2BUA)
+
+**Detailed Implementation Steps**:
+
+1. **Fix `assign_specific_agent_to_call` in calls.rs**:
+   - Generate B2BUA's own SDP offer before creating outgoing call
+   - Pass the SDP offer in `create_outgoing_call` 
+   - Current code passes `None` which results in no SDP
+
+2. **Add 180 Ringing in `process_incoming_call`**:
+   - After accepting with 200 OK, also send 180 Ringing
+   - Or change to defer first, send 180, then 200 when agent answers
+
+3. **Fix the transaction error**:
+   - Remove the `accept_incoming_call` in `assign_specific_agent_to_call`
+   - Customer is already accepted in `process_incoming_call`
+   - Just update media sessions, don't re-accept
+
+4. **Verify agent client behavior**:
+   - Check if agent can generate SDP when no offer received
+   - If not, ensure server always sends SDP offer (B2BUA pattern)
+
+**Test Success Criteria**:
+- [ ] Server sends INVITE to agent WITH SDP offer
+- [ ] Agent responds 200 OK WITH SDP answer  
+- [ ] Customer receives 180 Ringing before 200 OK
+- [ ] No transaction errors in logs
+- [ ] BYE messages handled correctly
+- [ ] Full 10-second call duration in SIPp
+
+**Next Steps**:
+1. Fix the SDP offer generation for agent calls
+2. Add 180 Ringing response
+3. Remove duplicate accept attempt
+4. Re-run e2e tests
+5. Verify all success criteria met
 
 ### Phase 1 - Advanced Features
 

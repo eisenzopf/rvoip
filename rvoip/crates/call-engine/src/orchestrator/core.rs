@@ -232,8 +232,8 @@ impl CallCenterEngine {
         if let Some(mut call_info) = self.active_calls.get_mut(session_id) {
             match new_state {
                 CallState::Active => call_info.status = CallStatus::Bridged,
-                CallState::Terminated => call_info.status = CallStatus::Ended,
-                CallState::Failed(_) => call_info.status = CallStatus::Ended,
+                CallState::Terminated => call_info.status = CallStatus::Disconnected,
+                CallState::Failed(_) => call_info.status = CallStatus::Failed,
                 _ => {} // Keep existing status for other states
             }
         }
