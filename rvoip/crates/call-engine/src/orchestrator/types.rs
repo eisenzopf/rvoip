@@ -150,4 +150,42 @@ impl Default for RoutingStats {
             skill_match_success_rate: 0.0,
         }
     }
+}
+
+impl OrchestratorStats {
+    pub fn agent_utilization(&self) -> f32 {
+        let total = self.available_agents + self.busy_agents;
+        if total > 0 {
+            self.busy_agents as f32 / total as f32
+        } else {
+            0.0
+        }
+    }
+}
+
+// Conversion from database agent to internal representation
+impl AgentInfo {
+    /// Create AgentInfo from database agent
+    pub fn from_db_agent(db_agent: &crate::database::DbAgent, contact_uri: String) -> Self {
+        let status = match db_agent.status {
+            crate::database::DbAgentStatus::Available => crate::agent::AgentStatus::Available,
+            crate::database::DbAgentStatus::Busy => crate::agent::AgentStatus::Busy(vec![]),
+            crate::database::DbAgentStatus::PostCallWrapUp => crate::agent::AgentStatus::PostCallWrapUp,
+            crate::database::DbAgentStatus::Offline => crate::agent::AgentStatus::Offline,
+            crate::database::DbAgentStatus::Reserved => crate::agent::AgentStatus::Available, // Treat reserved as available
+        };
+        
+        Self {
+            agent_id: crate::agent::AgentId::from(db_agent.agent_id.clone()),
+            session_id: SessionId(format!("agent-{}-session", db_agent.agent_id)),
+            status,
+            sip_uri: format!("sip:{}@127.0.0.1", db_agent.username),
+            contact_uri: db_agent.contact_uri.clone().unwrap_or(contact_uri),
+            skills: vec!["general".to_string()], // Default skills - could be loaded from separate table
+            current_calls: db_agent.current_calls as usize,
+            max_calls: db_agent.max_calls as usize,
+            performance_score: 0.8, // Default performance score
+            last_call_end: None,
+        }
+    }
 } 

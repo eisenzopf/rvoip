@@ -296,7 +296,18 @@ impl AdminApi {
         };
         
         let queued_calls = 0; // TODO: get from queue manager
-        let available_agents = 0; // TODO: get from database
+        
+        let available_agents = if let Some(db) = self.engine.database_manager() {
+            match db.get_agent_stats().await {
+                Ok(stats) => stats.available_agents,
+                Err(e) => {
+                    tracing::error!("Failed to get agent stats from database: {}", e);
+                    0
+                }
+            }
+        } else {
+            0
+        };
         
         CallCenterStats {
             total_agents,

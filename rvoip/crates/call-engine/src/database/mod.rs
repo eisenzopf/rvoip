@@ -1,6 +1,6 @@
 //! Database-backed queue management module
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use limbo::{Builder, Connection, Database, Value};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use tracing::{info, error, warn, debug};
 use std::pin::Pin;
 use std::future::Future;
+use crate::agent::AgentStatus;
 
 mod schema;
 mod agents;
@@ -95,7 +96,8 @@ impl DatabaseManager {
     /// Begin a transaction
     pub async fn transaction<F, R>(&self, f: F) -> Result<R>
     where
-        F: for<'a> FnOnce(&'a mut Transaction) -> Pin<Box<dyn Future<Output = Result<R>> + 'a>>,
+        F: for<'a> FnOnce(&'a mut Transaction) -> Pin<Box<dyn Future<Output = Result<R>> + Send + 'a>>,
+        R: Send,
     {
         let mut conn = self.connect()?;
         
@@ -117,6 +119,120 @@ impl DatabaseManager {
             }
         }
     }
+    
+    /// Helper function to retry database operations with exponential backoff
+    async fn retry_operation<F, T, Fut>(&self, operation_name: &str, mut operation: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let mut attempts = 0;
+        let max_attempts = 3;
+        let mut backoff_ms = 100;
+        
+        loop {
+            attempts += 1;
+            
+            match operation().await {
+                Ok(result) => return Ok(result),
+                Err(e) if attempts < max_attempts => {
+                    warn!("Database operation '{}' failed (attempt {}/{}): {}", 
+                          operation_name, attempts, max_attempts, e);
+                    
+                    // Check if it's a known recoverable error
+                    let error_msg = e.to_string();
+                    if error_msg.contains("current_page") || 
+                       error_msg.contains("btree") ||
+                       error_msg.contains("locked") ||
+                       error_msg.contains("busy") {
+                        // These are potentially recoverable errors
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        backoff_ms *= 2; // Exponential backoff
+                        continue;
+                    }
+                    
+                    // Non-recoverable error
+                    return Err(e);
+                }
+                Err(e) => {
+                    error!("Database operation '{}' failed after {} attempts: {}", 
+                           operation_name, attempts, e);
+                    return Err(e);
+                }
+            }
+        }
+    }
+    
+    /// Atomically assign a call to an agent with retry logic
+    pub async fn atomic_assign_call_to_agent(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        customer_sdp: Option<String>,
+    ) -> Result<()> {
+        let operation = || async {
+            // Use a transaction to ensure atomicity
+            self.transaction(|txn| {
+                let session_id = session_id.to_string();
+                let agent_id = agent_id.to_string();
+                let customer_sdp = customer_sdp.clone();
+                
+                Box::pin(async move {
+                    // 1. Reserve the agent (mark as busy)
+                    let reserve_query = "UPDATE agents SET status = 'Busy', current_calls = current_calls + 1 
+                                       WHERE agent_id = ? AND status = 'Available' AND current_calls = 0";
+                    let rows_updated = txn.execute(reserve_query, vec![
+                        limbo::Value::Text(agent_id.clone())
+                    ]).await?;
+                    
+                    if rows_updated == 0 {
+                        return Err(anyhow!(
+                            "Agent is not available or already busy"
+                        ));
+                    }
+                    
+                    // 2. Remove call from queue
+                    let dequeue_query = "DELETE FROM call_queue WHERE session_id = ?";
+                    txn.execute(dequeue_query, vec![
+                        limbo::Value::Text(session_id.clone())
+                    ]).await?;
+                    
+                    // 3. Add to active calls
+                    let add_active_query = "INSERT INTO active_calls 
+                        (customer_session_id, agent_session_id, agent_id, bridge_id, customer_sdp, started_at) 
+                        VALUES (?, NULL, ?, NULL, ?, datetime('now'))";
+                    txn.execute(add_active_query, vec![
+                        limbo::Value::Text(session_id.clone()),
+                        limbo::Value::Text(agent_id.clone()),
+                        customer_sdp.map(limbo::Value::Text).unwrap_or(limbo::Value::Null),
+                    ]).await?;
+                    
+                    Ok(())
+                })
+            }).await
+        };
+        
+        self.retry_operation("atomic_assign_call_to_agent", operation).await
+    }
+    
+    /// Update agent status with retry logic
+    pub async fn update_agent_status_with_retry(&self, agent_id: &str, status: AgentStatus) -> Result<()> {
+        let operation = || async {
+            self.update_agent_status(agent_id, status.clone()).await
+        };
+        
+        self.retry_operation("update_agent_status", operation).await
+    }
+    
+    /// Update agent call count with retry logic
+    pub async fn update_agent_call_count_with_retry(&self, agent_id: &str, delta: i32) -> Result<()> {
+        let operation = || async {
+            self.update_agent_call_count(agent_id, delta).await
+        };
+        
+        self.retry_operation("update_agent_call_count", operation).await
+    }
+
 }
 
 /// Transaction wrapper for atomic operations

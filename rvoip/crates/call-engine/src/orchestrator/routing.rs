@@ -97,45 +97,33 @@ impl CallCenterEngine {
     
     /// Find the best available agent based on skills and performance
     pub(super) async fn find_best_available_agent(&self, required_skills: &[String], priority: u8) -> Option<AgentId> {
-        // Find agents with matching skills and availability
-        let mut suitable_agents: Vec<(AgentId, AgentInfo)> = self.available_agents
-            .iter()
-            .filter(|entry| {
-                let agent_info = entry.value();
-                // Check if agent is available (not busy or in post-call wrap-up)
-                matches!(agent_info.status, AgentStatus::Available) &&
-                // Check if agent has capacity
-                agent_info.current_calls < agent_info.max_calls &&
-                // Check skill match (if no specific skills required, any agent works)
-                (required_skills.is_empty() || 
-                 required_skills.iter().any(|skill| agent_info.skills.contains(skill)))
-            })
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect();
+        // Get available agents from database
+        let db_manager = self.db_manager.as_ref()?;
+        
+        let mut suitable_agents = match db_manager.get_available_agents(None).await {
+            Ok(agents) => agents
+                .into_iter()
+                .filter(|agent| {
+                    // Filter by skills if specific skills are required
+                    // TODO: Add skills table and filtering in database
+                    required_skills.is_empty() || required_skills.contains(&"general".to_string())
+                })
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                error!("Failed to get available agents from database: {}", e);
+                return None;
+            }
+        };
         
         if suitable_agents.is_empty() {
             debug!("❌ No suitable agents found for skills: {:?}", required_skills);
             return None;
         }
         
-        // Sort by performance score and last call end time (round-robin effect)
-        suitable_agents.sort_by(|(_, a), (_, b)| {
-            // Primary: performance score (higher is better)
-            let score_cmp = b.performance_score.partial_cmp(&a.performance_score).unwrap_or(std::cmp::Ordering::Equal);
-            if score_cmp != std::cmp::Ordering::Equal {
-                return score_cmp;
-            }
-            
-            // Secondary: longest idle time (for round-robin)
-            match (&a.last_call_end, &b.last_call_end) {
-                (Some(a_end), Some(b_end)) => a_end.cmp(b_end), // Earlier end time first
-                (None, Some(_)) => std::cmp::Ordering::Less,     // Never handled call first
-                (Some(_), None) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
-        });
+        // Sort by current_calls (ascending) for load balancing
+        suitable_agents.sort_by_key(|agent| agent.current_calls);
         
-        let best_agent = suitable_agents.first().map(|(agent_id, _)| agent_id.clone());
+        let best_agent = suitable_agents.first().map(|agent| AgentId::from(agent.agent_id.clone()));
         
         if let Some(ref agent_id) = best_agent {
             info!("🎯 Selected agent {} for skills {:?} (priority {})", agent_id, required_skills, priority);
@@ -247,16 +235,20 @@ impl CallCenterEngine {
     
     /// Get list of available agents (excludes agents in post-call wrap-up)
     async fn get_available_agents(&self) -> Vec<AgentId> {
-        self.available_agents
-            .iter()
-            .filter(|entry| {
-                let agent_info = entry.value();
-                // Only consider agents with Available status (not Busy or PostCallWrapUp)
-                matches!(agent_info.status, AgentStatus::Available) &&
-                agent_info.current_calls < agent_info.max_calls
-            })
-            .map(|entry| entry.key().clone())
-            .collect()
+        if let Some(db_manager) = &self.db_manager {
+            match db_manager.get_available_agents(None).await {
+                Ok(agents) => agents
+                    .into_iter()
+                    .map(|agent| AgentId::from(agent.agent_id))
+                    .collect(),
+                Err(e) => {
+                    error!("Failed to get available agents from database: {}", e);
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        }
     }
     
     /// Process database assignments
@@ -303,16 +295,19 @@ impl CallCenterEngine {
         queue_id: &str,
         agent_id: &AgentId,
     ) -> Option<QueuedCall> {
-        // Check if this agent is still actually available (not busy or in post-call wrap-up)
-        let agent_still_available = self.available_agents
-            .get(agent_id)
-            .map(|entry| {
-                let agent_info = entry.value();
-                // Only consider agents with Available status (not Busy or PostCallWrapUp)
-                matches!(agent_info.status, AgentStatus::Available) &&
-                agent_info.current_calls < agent_info.max_calls
-            })
-            .unwrap_or(false);
+        // Check if this agent is still actually available from database
+        let agent_still_available = if let Some(db_manager) = &self.db_manager {
+            match db_manager.get_agent(&agent_id.0).await {
+                Ok(Some(agent)) => {
+                    // Only consider agents with Available status (not Busy or PostCallWrapUp)
+                    matches!(agent.status, crate::database::DbAgentStatus::Available) &&
+                    agent.current_calls < agent.max_calls
+                }
+                _ => false
+            }
+        } else {
+            false
+        };
         
         if !agent_still_available {
             debug!("Agent {} no longer available, skipping", agent_id);
@@ -331,27 +326,26 @@ impl CallCenterEngine {
         queue_id: &str,
         agent_id: &AgentId,
     ) -> Option<QueuedCall> {
-        // First, try to atomically reserve the agent
-        let agent_reserved = self.available_agents
-            .get_mut(agent_id)
-            .map(|mut entry| {
-                let agent_info = entry.value_mut();
-                // Only reserve if agent is truly available
-                if matches!(agent_info.status, AgentStatus::Available) && 
-                   agent_info.current_calls < agent_info.max_calls {
-                    // Mark agent as busy immediately
-                    agent_info.status = AgentStatus::Busy(vec![]);
-                    agent_info.current_calls += 1;
+        let db_manager = self.db_manager.as_ref()?;
+        
+        // First, try to atomically reserve the agent in the database
+        let agent_reserved = match db_manager.reserve_agent(&agent_id.0).await {
+            Ok(reserved) => {
+                if reserved {
                     info!("🔒 Reserved agent {} for assignment", agent_id);
                     true
                 } else {
+                    debug!("Could not reserve agent {} - already busy or unavailable", agent_id);
                     false
                 }
-            })
-            .unwrap_or(false);
+            }
+            Err(e) => {
+                error!("Failed to reserve agent {} in database: {}", agent_id, e);
+                false
+            }
+        };
         
         if !agent_reserved {
-            debug!("Could not reserve agent {} - already busy or unavailable", agent_id);
             return None;
         }
         
@@ -360,6 +354,15 @@ impl CallCenterEngine {
         match queue_manager.dequeue_for_agent(queue_id) {
             Ok(Some(call)) => {
                 info!("✅ Dequeued call {} for reserved agent {}", call.session_id, agent_id);
+                
+                // Update agent status to BUSY and increment call count
+                if let Err(e) = db_manager.update_agent_status(&agent_id.0, AgentStatus::Busy(vec![])).await {
+                    error!("Failed to update agent status to BUSY: {}", e);
+                }
+                if let Err(e) = db_manager.update_agent_call_count(&agent_id.0, 1).await {
+                    error!("Failed to increment agent call count: {}", e);
+                }
+                
                 Some(call)
             }
             Ok(None) => {
@@ -367,13 +370,11 @@ impl CallCenterEngine {
                 warn!("No calls in queue {} despite monitor check, releasing agent {}", queue_id, agent_id);
                 drop(queue_manager); // Release lock before updating agent
                 
-                // Release the agent reservation
-                if let Some(mut entry) = self.available_agents.get_mut(agent_id) {
-                    let agent_info = entry.value_mut();
-                    agent_info.status = AgentStatus::Available;
-                    agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
-                    info!("🔓 Released agent {} reservation (no calls to assign)", agent_id);
+                // Release the agent reservation in database
+                if let Err(e) = db_manager.release_agent_reservation(&agent_id.0).await {
+                    error!("Failed to release agent reservation in database: {}", e);
                 }
+                info!("🔓 Released agent {} reservation (no calls to assign)", agent_id);
                 None
             }
             Err(e) => {
@@ -381,12 +382,10 @@ impl CallCenterEngine {
                 drop(queue_manager); // Release lock before updating agent
                 
                 // Release the agent reservation on error
-                if let Some(mut entry) = self.available_agents.get_mut(agent_id) {
-                    let agent_info = entry.value_mut();
-                    agent_info.status = AgentStatus::Available;
-                    agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
-                    info!("🔓 Released agent {} reservation (dequeue error)", agent_id);
+                if let Err(e) = db_manager.release_agent_reservation(&agent_id.0).await {
+                    error!("Failed to release agent reservation in database: {}", e);
                 }
+                info!("🔓 Released agent {} reservation (dequeue error)", agent_id);
                 None
             }
         }
@@ -502,6 +501,16 @@ impl CallCenterEngine {
                     check_interval_secs = (check_interval_secs * 2).min(30);
                     debug!("⏳ No available agents for queue {}, backing off to {}s interval", 
                           queue_id, check_interval_secs);
+                    
+                    // Clean up stuck assignments periodically
+                    if consecutive_no_agents % 5 == 0 {  // Every 5 checks
+                        let mut queue_manager = engine.queue_manager.write().await;
+                        let stuck_calls = queue_manager.cleanup_stuck_assignments(30);  // 30 second timeout
+                        if !stuck_calls.is_empty() {
+                            info!("🧹 Cleaned up {} stuck assignments in queue {}", stuck_calls.len(), queue_id);
+                        }
+                    }
+                    
                     continue;
                 } else {
                     // Reset backoff when agents become available
@@ -514,8 +523,18 @@ impl CallCenterEngine {
                 // Try to atomically assign calls to agents using database if available
                 if engine.db_manager.is_some() {
                     match engine.process_database_assignments(&queue_id).await {
-                        Ok(()) => continue,  // Database handled assignments
-                        Err(_) => {
+                        Ok(()) => {
+                            // Check if assignments were made
+                            let queue_size_after = engine.get_queue_depth(&queue_id).await;
+                            if queue_size_after < queue_size {
+                                info!("✅ Database assignments successful, queue {} reduced from {} to {} calls", 
+                                      queue_id, queue_size, queue_size_after);
+                            }
+                            continue;  // Database handled assignments
+                        }
+                        Err(e) => {
+                            // Log the error but continue with in-memory logic
+                            warn!("Database assignment failed for queue {}: {}, falling back to in-memory", queue_id, e);
                             // Fall through to in-memory logic
                         }
                     }

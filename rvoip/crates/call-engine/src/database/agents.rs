@@ -241,6 +241,19 @@ impl DatabaseManager {
             last_heartbeat,
         })
     }
+    
+    /// Count total number of agents in the system
+    pub async fn count_total_agents(&self) -> Result<usize> {
+        let query = "SELECT COUNT(*) as count FROM agents";
+        let rows = self.query(query, ()).await?;
+        
+        if let Some(row) = rows.into_iter().next() {
+            let count = value_to_i64(&row.get_value(0)?)?;
+            Ok(count as usize)
+        } else {
+            Ok(0)
+        }
+    }
 }
 
 /// Agent statistics

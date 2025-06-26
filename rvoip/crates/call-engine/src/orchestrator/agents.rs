@@ -3,7 +3,7 @@
 //! This module handles agent registration, status updates, and monitoring.
 
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, error};
 use rvoip_session_core::{SessionId, SessionControl};
 
 use crate::agent::{Agent, AgentId, AgentStatus};
@@ -29,21 +29,22 @@ impl CallCenterEngine {
         .map_err(|e| CallCenterError::orchestration(&format!("Failed to create agent session: {}", e)))?;
         
         let session_id = session.id;
-        
-        // Add agent to available pool with enhanced information
         let agent_id = AgentId(agent.id.clone());
-        self.available_agents.insert(agent_id.clone(), AgentInfo {
-            agent_id: agent_id.clone(),
-            session_id: session_id.clone(),
-            status: AgentStatus::Available,
-            sip_uri: agent.sip_uri.clone(),          // Store the agent's SIP URI
-            contact_uri: agent.sip_uri.clone(),      // For manual registration, use sip_uri as contact
-            skills: agent.skills.clone(),
-            current_calls: 0,
-            max_calls: agent.max_concurrent_calls as usize,
-            last_call_end: None,
-            performance_score: 0.5, // Start with neutral performance
-        });
+        
+        // Register agent in database
+        if let Some(db_manager) = &self.db_manager {
+            // Extract username from SIP URI
+            let username = agent.sip_uri
+                .strip_prefix("sip:")
+                .and_then(|s| s.split('@').next())
+                .unwrap_or(&agent.id)
+                .to_string();
+            
+            db_manager.upsert_agent(&agent_id.0, &username, Some(&agent.sip_uri)).await
+                .map_err(|e| CallCenterError::database(&format!("Failed to register agent in database: {}", e)))?;
+            
+            info!("✅ Agent {} registered in database", agent_id);
+        }
         
         info!("✅ Agent {} registered with session-core (session: {}, max calls: {})", 
               agent.id, session_id, agent.max_concurrent_calls);
@@ -54,40 +55,82 @@ impl CallCenterEngine {
     pub async fn update_agent_status(&self, agent_id: &AgentId, new_status: AgentStatus) -> CallCenterResult<()> {
         info!("🔄 Updating agent {} status to {:?}", agent_id, new_status);
         
-        if let Some(mut agent_info) = self.available_agents.get_mut(agent_id) {
-            let old_status = agent_info.status.clone();
-            agent_info.status = new_status.clone();
-            
-            info!("✅ Agent {} status updated from {:?} to {:?}", agent_id, old_status, new_status);
-            
-            // If agent became available, check for queued calls
-            let should_check_queue = matches!(new_status, AgentStatus::Available) && agent_info.current_calls == 0;
-            drop(agent_info); // Release the mutable reference
-            
-            if should_check_queue {
-                let agent_id_clone = agent_id.clone();
-                let engine = Arc::new(self.clone());
-                tokio::spawn(async move {
-                    engine.try_assign_queued_calls_to_agent(agent_id_clone).await;
-                });
+        // Get current agent info from database
+        let old_status = if let Some(db_manager) = &self.db_manager {
+            match db_manager.get_agent(&agent_id.0).await {
+                Ok(Some(db_agent)) => {
+                    // Update status in database
+                    db_manager.update_agent_status(&agent_id.0, new_status.clone()).await
+                        .map_err(|e| CallCenterError::database(&format!("Failed to update agent status: {}", e)))?;
+                    
+                    // Return old status for logging
+                    match db_agent.status {
+                        crate::database::DbAgentStatus::Available => AgentStatus::Available,
+                        crate::database::DbAgentStatus::Busy => AgentStatus::Busy(vec![]),
+                        crate::database::DbAgentStatus::PostCallWrapUp => AgentStatus::PostCallWrapUp,
+                        _ => AgentStatus::Offline,
+                    }
+                }
+                Ok(None) => {
+                    return Err(CallCenterError::not_found(format!("Agent not found: {}", agent_id)));
+                }
+                Err(e) => {
+                    return Err(CallCenterError::database(&format!("Failed to get agent: {}", e)));
+                }
             }
-            
-            Ok(())
         } else {
-            Err(CallCenterError::not_found(format!("Agent not found: {}", agent_id)))
+            return Err(CallCenterError::database("Database not configured"));
+        };
+        
+        info!("✅ Agent {} status updated from {:?} to {:?}", agent_id, old_status, new_status);
+        
+        // If agent became available, check for queued calls
+        if matches!(new_status, AgentStatus::Available) {
+            let agent_id_clone = agent_id.clone();
+            let engine = Arc::new(self.clone());
+            tokio::spawn(async move {
+                engine.try_assign_queued_calls_to_agent(agent_id_clone).await;
+            });
         }
+        
+        Ok(())
     }
     
     /// Get detailed agent information
     pub async fn get_agent_info(&self, agent_id: &AgentId) -> Option<AgentInfo> {
-        self.available_agents.get(agent_id).map(|entry| entry.clone())
+        if let Some(db_manager) = &self.db_manager {
+            match db_manager.get_agent(&agent_id.0).await {
+                Ok(Some(db_agent)) => {
+                    Some(AgentInfo::from_db_agent(&db_agent, format!("sip:{}@127.0.0.1", db_agent.username)))
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    error!("Failed to get agent {} from database: {}", agent_id, e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
     }
     
     /// List all agents with their current status
     pub async fn list_agents(&self) -> Vec<AgentInfo> {
-        self.available_agents.iter()
-            .map(|entry| entry.value().clone())
-            .collect()
+        if let Some(db_manager) = &self.db_manager {
+            match db_manager.list_agents().await {
+                Ok(db_agents) => {
+                    db_agents.into_iter()
+                        .map(|db_agent| AgentInfo::from_db_agent(&db_agent, format!("sip:{}@127.0.0.1", db_agent.username)))
+                        .collect()
+                }
+                Err(e) => {
+                    error!("Failed to list agents from database: {}", e);
+                    vec![]
+                }
+            }
+        } else {
+            vec![]
+        }
     }
     
     /// Get queue statistics for monitoring

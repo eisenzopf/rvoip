@@ -48,12 +48,42 @@ impl CallHandler for CallCenterCallHandler {
         info!("📞 Call {} ended: {}", call.id(), reason);
         
         if let Some(engine) = self.engine.upgrade() {
+            // CRITICAL: Clean up from database queue first to prevent re-queueing
+            if let Some(db_manager) = &engine.db_manager {
+                // Remove from queue and active calls (this method handles both tables)
+                if let Err(e) = db_manager.remove_call_from_queue(&call.id().to_string()).await {
+                    debug!("Call {} not in queue or already removed: {}", call.id(), e);
+                } else {
+                    debug!("🧹 Cleaned up call {} from database", call.id());
+                }
+            }
+            
+            // First, check if this is a pending assignment that needs cleanup
+            if let Some((_, pending_assignment)) = engine.pending_assignments.remove(&call.id()) {
+                info!("🧹 Cleaning up pending assignment for call {} (agent {} never answered)", 
+                      call.id(), pending_assignment.agent_id);
+                
+                // Return agent to available in database since they never actually took the call
+                if let Some(db_manager) = &engine.db_manager {
+                    let _ = db_manager.update_agent_call_count(&pending_assignment.agent_id.0, -1).await;
+                    let _ = db_manager.update_agent_status(&pending_assignment.agent_id.0, AgentStatus::Available).await;
+                }
+                
+                // Don't re-queue - the customer hung up
+                info!("❌ Not re-queuing call {} - customer ended the call", pending_assignment.customer_session_id);
+            }
+            
             // Get the call info to find the related session
             let related_session_id = engine.active_calls.get(&call.id())
                 .and_then(|call_info| call_info.related_session_id.clone());
             
             if let Some(related_id) = related_session_id {
                 info!("📞 Forwarding BYE to related B2BUA session: {}", related_id);
+                
+                // Clean up related session from database too
+                if let Some(db_manager) = &engine.db_manager {
+                    let _ = db_manager.remove_call_from_queue(&related_id.to_string()).await;
+                }
                 
                 // Terminate the related dialog
                 if let Some(coordinator) = &engine.session_coordinator {
@@ -62,15 +92,20 @@ impl CallHandler for CallCenterCallHandler {
                             info!("✅ Successfully terminated related B2BUA session: {}", related_id);
                         }
                         Err(e) => {
-                            warn!("Failed to terminate related session {}: {}", related_id, e);
+                            // This is expected if the other side already hung up
+                            if e.to_string().contains("not found") || e.to_string().contains("No dialog found") {
+                                info!("ℹ️ Related session {} already terminated (this is normal)", related_id);
+                            } else {
+                                warn!("Failed to terminate related session {}: {}", related_id, e);
+                            }
                         }
                     }
                 }
             } else {
-                warn!("⚠️ No related B2BUA session found for {}", call.id());
+                debug!("No related B2BUA session found for {} (may be a pending call)", call.id());
             }
             
-            // Clean up the call info
+            // Clean up the call info - this will handle agent wrap-up
             if let Err(e) = engine.handle_call_termination(call.id().clone()).await {
                 error!("Failed to handle call termination: {}", e);
             }
@@ -125,13 +160,7 @@ impl CallHandler for CallCenterCallHandler {
                         let _ = coordinator.terminate_session(&pending_assignment.agent_session_id).await;
                         let _ = coordinator.terminate_session(&pending_assignment.customer_session_id).await;
                         
-                        // Return agent to available pool
-                        if let Some(mut agent_info) = engine.available_agents.get_mut(&pending_assignment.agent_id) {
-                            agent_info.status = AgentStatus::Available;
-                            agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
-                        }
-                        
-                        // Update database
+                        // Return agent to available in database
                         if let Some(db_manager) = &engine.db_manager {
                             let _ = db_manager.update_agent_call_count(&pending_assignment.agent_id.0, -1).await;
                             let _ = db_manager.update_agent_status(&pending_assignment.agent_id.0, AgentStatus::Available).await;
@@ -401,28 +430,6 @@ impl CallCenterEngine {
                 match db_manager.upsert_agent(&username, &username, Some(&contact_uri)).await {
                     Ok(_) => {
                         tracing::info!("✅ Agent {} registered in database with contact {}", username, contact_uri);
-                        
-                        // Create agent ID
-                        let agent_id = crate::agent::AgentId::from(username.to_string());
-                        
-                        // Add to available agents DashMap
-                        // NOTE: Use a placeholder session ID - it will be replaced when an actual call is made
-                        let agent_session_id = SessionId(format!("agent-{}-placeholder", agent_id));
-                        
-                        self.available_agents.insert(agent_id.clone(), AgentInfo {
-                            agent_id: agent_id.clone(),
-                            session_id: agent_session_id,
-                            status: crate::agent::AgentStatus::Available,
-                            sip_uri: aor.clone(),
-                            contact_uri: contact_uri.clone(),
-                            skills: vec!["general".to_string()], // Default skills
-                            current_calls: 0,
-                            max_calls: 1, // Default max calls
-                            last_call_end: None,
-                            performance_score: 0.5,
-                        });
-                        
-                        tracing::info!("✅ Agent {} added to available agents pool", username);
                     }
                     Err(e) => {
                         tracing::error!("❌ Failed to update agent in database: {}", e);
@@ -430,19 +437,12 @@ impl CallCenterEngine {
                 }
             }
         } else if status_code == 200 && expires == 0 {
-            // Handle de-registration - remove from available agents
+            // Handle de-registration - mark agent as offline
             if let Some(db_manager) = &self.db_manager {
                 let username = aor.split('@').next()
                     .unwrap_or(&aor)
                     .trim_start_matches("sip:")
                     .trim_start_matches('<');
-                
-                let agent_id = crate::agent::AgentId::from(username.to_string());
-                
-                // Remove from available agents DashMap
-                if self.available_agents.remove(&agent_id).is_some() {
-                    tracing::info!("✅ Agent {} removed from available agents pool", username);
-                }
                 
                 // Update database status to offline
                 match db_manager.mark_agent_offline(&username).await {

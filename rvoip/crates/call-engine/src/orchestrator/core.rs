@@ -66,8 +66,6 @@ pub struct CallCenterEngine {
     /// Call tracking and routing with detailed info
     pub(super) active_calls: Arc<DashMap<SessionId, CallInfo>>,
     
-    // Removed: available_agents - now using database as single source of truth
-    
     /// Call routing statistics and metrics
     pub(super) routing_stats: Arc<RwLock<RoutingStats>>,
     
@@ -119,7 +117,6 @@ impl CallCenterEngine {
             queue_manager: Arc::new(RwLock::new(QueueManager::new())),
             bridge_events: None,
             active_calls: Arc::new(DashMap::new()),
-            available_agents: Arc::new(DashMap::new()),
             routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
             agent_registry: Arc::new(Mutex::new(AgentRegistry::new())),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
@@ -157,7 +154,6 @@ impl CallCenterEngine {
             queue_manager: Arc::new(RwLock::new(QueueManager::new())),
             bridge_events: None,
             active_calls: Arc::new(DashMap::new()),
-            available_agents: Arc::new(DashMap::new()),
             routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
             agent_registry: Arc::new(Mutex::new(AgentRegistry::new())),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
@@ -188,16 +184,18 @@ impl CallCenterEngine {
             .filter(|entry| matches!(entry.value().status, CallStatus::Queued))
             .count();
             
-        // Count available vs busy agents
-        let (available_count, busy_count) = self.available_agents
-            .iter()
-            .fold((0, 0), |(avail, busy), entry| {
-                let agent = entry.value();
-                match agent.status {
-                    AgentStatus::Available if agent.current_calls == 0 => (avail + 1, busy),
-                    _ => (avail, busy + 1),
+        // Count available vs busy agents from database
+        let (available_count, busy_count) = if let Some(db_manager) = &self.db_manager {
+            match db_manager.get_agent_stats().await {
+                Ok(stats) => (stats.available_agents, stats.busy_agents + stats.post_call_wrap_up_agents),
+                Err(e) => {
+                    error!("Failed to get agent stats from database: {}", e);
+                    (0, 0)
                 }
-            });
+            }
+        } else {
+            (0, 0)
+        };
         
         let routing_stats = self.routing_stats.read().await;
         
@@ -389,15 +387,21 @@ impl CallCenterEngine {
         for queue_id in queue_ids {
             // Process each queue
             while let Some(queued_call) = queue_manager.dequeue_for_agent(&queue_id)? {
-                // Find an available agent
-                let available_agent = self.available_agents.iter()
-                    .find(|entry| {
-                        let agent = entry.value();
-                        matches!(agent.status, AgentStatus::Available) && agent.current_calls == 0
-                    })
-                    .map(|entry| (entry.key().clone(), entry.value().clone()));
+                // Find an available agent from database
+                let available_agents = if let Some(db_manager) = &self.db_manager {
+                    match db_manager.get_available_agents(Some(&queue_id)).await {
+                        Ok(agents) => agents,
+                        Err(e) => {
+                            error!("Failed to get available agents from database: {}", e);
+                            vec![]
+                        }
+                    }
+                } else {
+                    vec![]
+                };
                 
-                if let Some((agent_id, _agent_info)) = available_agent {
+                if let Some(agent) = available_agents.first() {
+                    let agent_id = AgentId::from(agent.agent_id.clone());
                     // Assign the call to the agent
                     info!("🎯 Assigning queued call {} to available agent {}", 
                           queued_call.session_id, agent_id);
@@ -439,7 +443,6 @@ impl Clone for CallCenterEngine {
             queue_manager: self.queue_manager.clone(),
             bridge_events: None, // Don't clone the receiver
             active_calls: self.active_calls.clone(),
-            available_agents: self.available_agents.clone(),
             routing_stats: self.routing_stats.clone(),
             agent_registry: self.agent_registry.clone(),
             sip_registrar: self.sip_registrar.clone(),

@@ -44,29 +44,44 @@ impl CallCenterEngine {
     ) -> CallCenterResult<BridgeId> {
         info!("🔄 Transferring call from agent {} to agent {}", from_agent, to_agent);
         
-        // Find sessions for agents
-        let to_agent_session = self.available_agents.get(&to_agent)
-            .ok_or_else(|| CallCenterError::orchestration(&format!("Agent {} not available", to_agent)))?
-            .session_id.clone();
-        
-        // Get current bridge if any
-        if let Ok(Some(current_bridge)) = self.session_coordinator.as_ref().unwrap()
-            .get_session_bridge(&customer_session).await {
-            // **REAL**: Remove customer from current bridge
-            if let Err(e) = self.session_coordinator.as_ref().unwrap()
-                .remove_session_from_bridge(&current_bridge, &customer_session).await {
-                warn!("Failed to remove customer from current bridge: {}", e);
+        // Check if agent is available in database
+        let to_agent_available = if let Some(db_manager) = &self.db_manager {
+            match db_manager.get_agent(&to_agent.0).await {
+                Ok(Some(agent)) => matches!(agent.status, crate::database::DbAgentStatus::Available),
+                _ => false,
             }
+        } else {
+            false
+        };
+        
+        if !to_agent_available {
+            return Err(CallCenterError::orchestration(&format!("Agent {} not available", to_agent)));
         }
         
-        // **REAL**: Create new bridge with customer and new agent
-        let new_bridge = self.session_coordinator.as_ref().unwrap()
-            .bridge_sessions(&customer_session, &to_agent_session)
-            .await
-            .map_err(|e| CallCenterError::orchestration(&format!("Failed to create transfer bridge: {}", e)))?;
+        // TODO: Create a new session for the to_agent and establish the transfer
+        // For now, return an error as we need the session ID
+        return Err(CallCenterError::orchestration("Call transfer not yet implemented without agent session tracking"));
         
-        info!("✅ Call transferred successfully to bridge: {}", new_bridge);
-        Ok(new_bridge)
+        // The code below is unreachable but kept for future implementation reference:
+        // 
+        // // Get current bridge if any
+        // if let Ok(Some(current_bridge)) = self.session_coordinator.as_ref().unwrap()
+        //     .get_session_bridge(&customer_session).await {
+        //     // **REAL**: Remove customer from current bridge
+        //     if let Err(e) = self.session_coordinator.as_ref().unwrap()
+        //         .remove_session_from_bridge(&current_bridge, &customer_session).await {
+        //         warn!("Failed to remove customer from current bridge: {}", e);
+        //     }
+        // }
+        // 
+        // // **REAL**: Create new bridge with customer and new agent
+        // let new_bridge = self.session_coordinator.as_ref().unwrap()
+        //     .bridge_sessions(&customer_session, &to_agent_session)
+        //     .await
+        //     .map_err(|e| CallCenterError::orchestration(&format!("Failed to create transfer bridge: {}", e)))?;
+        // 
+        // info!("✅ Call transferred successfully to bridge: {}", new_bridge);
+        // Ok(new_bridge)
     }
     
     /// Get real-time bridge information for monitoring

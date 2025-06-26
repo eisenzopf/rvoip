@@ -34,6 +34,13 @@ pub struct QueuedCall {
     pub retry_count: u8,  // Number of times this call has been retried
 }
 
+/// Track when calls were marked as being assigned
+#[derive(Debug)]
+struct AssignmentTracker {
+    session_id: SessionId,
+    marked_at: std::time::Instant,
+}
+
 impl QueueManager {
     /// Create a new queue manager
     pub fn new() -> Self {
@@ -211,6 +218,30 @@ impl QueueManager {
             })
         } else {
             Err(CallCenterError::not_found(format!("Queue not found: {}", queue_id)))
+        }
+    }
+    
+    /// Clean up calls that have been stuck in "being assigned" state
+    pub fn cleanup_stuck_assignments(&mut self, timeout_seconds: u64) -> Vec<SessionId> {
+        // For now, we'll clear all assignments older than timeout
+        // In a real implementation, we'd track timestamps
+        let stuck_calls: Vec<SessionId> = self.calls_being_assigned.iter().cloned().collect();
+        
+        if !stuck_calls.is_empty() {
+            warn!("🧹 Clearing {} stuck 'being assigned' calls", stuck_calls.len());
+            self.calls_being_assigned.clear();
+        }
+        
+        stuck_calls
+    }
+    
+    /// Force remove a call from being assigned state
+    pub fn force_unmark_assigned(&mut self, session_id: &SessionId) -> bool {
+        if self.calls_being_assigned.remove(session_id) {
+            warn!("🔓 Force unmarked call {} from being assigned", session_id);
+            true
+        } else {
+            false
         }
     }
 }
