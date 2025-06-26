@@ -80,19 +80,45 @@ impl CallCenterEngine {
         // Store call info
         self.active_calls.insert(session_id.clone(), call_info);
         
-        // B2BUA: Initially defer the call to send 180 Ringing
-        // We'll accept with 200 OK only after agent answers
-        info!("📞 B2BUA: Deferring customer call {} to send 180 Ringing", session_id);
+        // B2BUA: Accept customer call immediately with our SDP answer
+        // Customer will wait (with hold music) until an agent is available
+        info!("📞 B2BUA: Accepting customer call {} immediately", session_id);
         
-        // Spawn the routing task
+        // Generate B2BUA's SDP answer for the customer
+        let sdp_answer = if let Some(ref customer_sdp) = call.sdp {
+            // Generate our SDP answer based on customer's offer
+            match self.session_coordinator.as_ref().unwrap()
+                .generate_sdp_answer(&session_id, customer_sdp).await {
+                Ok(answer) => {
+                    info!("✅ Generated SDP answer for customer ({} bytes)", answer.len());
+                    Some(answer)
+                }
+                Err(e) => {
+                    error!("Failed to generate SDP answer: {}", e);
+                    None
+                }
+            }
+        } else {
+            warn!("⚠️ No SDP from customer, accepting without SDP");
+            None
+        };
+        
+        // Update call status to Connecting since we're accepting
+        if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+            call_info.status = CallStatus::Connecting;
+            call_info.answered_at = Some(chrono::Utc::now());
+        }
+        
+        // Spawn the routing task to find an agent
         let engine = Arc::new(self.clone());
         let session_id_clone = session_id.clone();
         tokio::spawn(async move {
+            // Route immediately - call is already accepted
             engine.route_call_to_agent(session_id_clone).await;
         });
         
-        // Return Defer to send 180 Ringing to customer
-        Ok(CallDecision::Defer)
+        // Return Accept with SDP to immediately answer the customer
+        Ok(CallDecision::Accept(sdp_answer))
     }
     
     /// Route an already-accepted call to an agent
@@ -134,6 +160,16 @@ impl CallCenterEngine {
                         info!("📥 Queueing call {} to {} (priority: {}, reason: {})", 
                               session_id, queue_id, priority, reason);
                         
+                        // Ensure the queue exists before trying to enqueue
+                        if let Err(e) = self.ensure_queue_exists(&queue_id).await {
+                            error!("Failed to ensure queue {} exists: {}", queue_id, e);
+                            // Terminate the call if we can't create the queue
+                            if let Some(coordinator) = &self.session_coordinator {
+                                let _ = coordinator.terminate_session(&session_id).await;
+                            }
+                            return;
+                        }
+                        
                         // Create queued call entry
                         let queued_call = QueuedCall {
                             session_id: session_id.clone(),
@@ -158,6 +194,12 @@ impl CallCenterEngine {
                                 }
                                 return;
                             }
+                            
+                            // PHASE 0.10: Log queue depth after enqueue
+                            if let Ok(stats) = queue_manager.get_queue_stats(&queue_id) {
+                                info!("📊 Queue '{}' status after enqueue: {} calls waiting", 
+                                      queue_id, stats.total_calls);
+                            }
                         }
                         
                         // Update call status
@@ -173,7 +215,8 @@ impl CallCenterEngine {
                             stats.calls_queued += 1;
                         }
                         
-                        // Start monitoring for agent availability
+                        // PHASE 0.10: Start monitoring for agent availability immediately
+                        info!("🔄 Starting queue monitor for '{}' immediately", queue_id);
                         self.monitor_queue_for_agents(queue_id).await;
                     },
                     
@@ -223,6 +266,10 @@ impl CallCenterEngine {
         
         // Get agent information and update status
         let agent_info = if let Some((_key, mut agent_info)) = self.available_agents.remove(&agent_id) {
+            // PHASE 0.10: Log agent status transition
+            info!("🔄 Agent {} status change: Available → Busy (current_calls: {} → {})", 
+                  agent_id, agent_info.current_calls, agent_info.current_calls + 1);
+            
             agent_info.status = AgentStatus::Busy { active_calls: (agent_info.current_calls + 1) as u32 };
             agent_info.current_calls += 1;
             Some(agent_info)
@@ -358,44 +405,8 @@ impl CallCenterEngine {
                     
                     info!("📞 B2BUA: Bridging customer {} with agent {}", session_id, agent_id);
                     
-                    // CRITICAL: Accept customer's deferred call now that agent has answered
-                    // Generate B2BUA's SDP answer for the customer based on their offer
-                    if let Some(customer_sdp_offer) = self.active_calls.get(&session_id)
-                        .and_then(|info| info.customer_sdp.clone()) {
-                        
-                        info!("📄 B2BUA: Generating SDP answer for customer");
-                        match MediaControl::generate_sdp_answer(coordinator, &session_id, &customer_sdp_offer).await {
-                            Ok(b2bua_answer) => {
-                                info!("✅ B2BUA: Generated SDP answer ({} bytes)", b2bua_answer.len());
-                                
-                                // Accept the customer's call with our SDP answer
-                                match coordinator.dialog_manager.accept_incoming_call(&session_id, Some(b2bua_answer.clone())).await {
-                                    Ok(_) => {
-                                        info!("✅ Successfully accepted customer call {} with B2BUA's SDP", session_id);
-                                    }
-                                    Err(e) => {
-                                        error!("❌ Failed to accept customer call {}: {}", session_id, e);
-                                        // Continue anyway - try to bridge
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!("❌ Failed to generate SDP answer for customer: {}", e);
-                                // Accept without SDP as fallback
-                                if let Err(e) = coordinator.dialog_manager.accept_incoming_call(&session_id, None).await {
-                                    error!("❌ Failed to accept customer call without SDP: {}", e);
-                                }
-                            }
-                        }
-                    } else {
-                        warn!("⚠️ No customer SDP offer found - accepting without SDP");
-                        if let Err(e) = coordinator.dialog_manager.accept_incoming_call(&session_id, None).await {
-                            error!("❌ Failed to accept customer call without SDP: {}", e);
-                        }
-                    }
-                    
-                    // Update the customer's media session with the agent's SDP for media routing
-                    // This is internal B2BUA media bridging configuration
+                    // Customer is already accepted with 200 OK in process_incoming_call
+                    // No need to accept again - just bridge the sessions
                     
                     // Now bridge the two sessions for media flow
                     info!("🌉 Bridging customer {} with agent {} (session {:?})", 
@@ -417,7 +428,7 @@ impl CallCenterEngine {
                                 call_info.answered_at = Some(chrono::Utc::now());
                             }
                             
-                            // Store updated agent info
+                            // Store updated agent info (they're busy but we track all agents here)
                             self.available_agents.insert(agent_id, agent_info);
                         },
                         Err(e) => {
@@ -563,8 +574,12 @@ impl CallCenterEngine {
                     
                     // If agent has no active calls, mark as available
                     if agent_info.current_calls == 0 {
+                        // PHASE 0.10: Log agent status transition
+                        info!("🔄 Agent {} status change: Busy → Available (no active calls)", agent_id);
                         agent_info.status = AgentStatus::Available;
                         info!("✅ Agent {} is now available for new calls", agent_id);
+                    } else {
+                        info!("📞 Agent {} still busy with {} active calls", agent_id, agent_info.current_calls);
                     }
                     
                     // Update performance score based on call duration (simplified)

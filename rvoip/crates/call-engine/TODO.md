@@ -441,10 +441,12 @@ Correct B2BUA Implementation:
 - [x] Already implemented in handler
 - [ ] Test if working correctly after other fixes
 
-#### Task 6: Agent SDP Generation 🆕
-- [ ] Investigate why agent doesn't generate SDP answer
-- [ ] Agent might need to create media session when no SDP in INVITE
-- [ ] Or server must always send SDP offer (preferred for B2BUA)
+#### Task 6: Fix Agent Registration to Available Pool
+- [x] When agents REGISTER, they update database but not available_agents HashMap
+- [x] Need to add registered agents to available_agents collection
+- [x] Fix SessionId::new() to use proper session ID format
+- [x] **FIXED**: Now using format "agent-{id}-registered" for session ID
+- [ ] Test that registered agents appear in monitoring stats
 
 **Detailed Implementation Steps**:
 
@@ -480,6 +482,188 @@ Correct B2BUA Implementation:
 3. Remove duplicate accept attempt
 4. Re-run e2e tests
 5. Verify all success criteria met
+
+### Phase 0.10 - Queue-First Routing & Agent Status Management 🔧 NEW
+
+**Requirements from User**:
+1. SIPp should place 5 calls all at once (not rate-limited)
+2. Server should ALWAYS queue calls first (never direct to agent)
+3. Agents must be marked as busy when on a call
+4. Agents must be marked as available when call ends to get next queued call
+
+**Current Problems**:
+1. **SIPp Test Configuration**:
+   - Has `-l 2` limiting concurrent calls to 2
+   - Has `-r 1` making calls at 1 per second
+   - Need to remove `-l` and increase `-r` for burst testing
+
+2. **Direct-to-Agent Routing**:
+   - `make_routing_decision()` tries `find_best_available_agent()` FIRST
+   - Only queues if no agents available
+   - Need to reverse this logic for queue-first behavior
+
+3. **Agent Status Management**:
+   - Agents correctly marked as Busy but stay in `available_agents` collection
+   - Routing correctly checks for `AgentStatus::Available`
+   - This is actually working correctly, not a bug
+
+4. **Queue Name Mismatch** (DISCOVERED DURING TESTING):
+   - `create_default_queues()` was creating queues with "_queue" suffix
+   - Routing logic expected queue names without suffix
+   - Caused all calls to fail with "Queue not found: general"
+
+**Fix Tasks**:
+
+#### Task 1: Update SIPp Test Configuration
+- [x] Remove `-l 2` parameter to allow unlimited concurrent calls
+- [x] Change `-r 1` to `-r 10` for burst of 5 calls quickly
+- [ ] Or use `-r 5 -m 5` to send all 5 calls in 1 second
+
+#### Task 2: Implement Queue-First Routing
+- [x] Modify `make_routing_decision()` to ALWAYS return Queue decision
+- [x] Remove or comment out the `find_best_available_agent()` check
+- [x] Let queue monitors handle agent assignment
+- [ ] Add configuration option for routing mode (queue-first vs direct-when-available)
+
+#### Task 3: Enhance Queue Monitoring
+- [x] Ensure queue monitor starts immediately when calls are queued
+- [x] Add logging to show queue depth after each enqueue/dequeue
+- [x] Verify agents are properly assigned from queue
+- [x] Add queue stats to server status output
+
+#### Task 4: Verify Agent Status Transitions
+- [x] Add comprehensive logging for agent status changes
+- [x] Log when agent goes from Available → Busy
+- [x] Log when agent goes from Busy → Available
+- [x] Show agent status in periodic stats output
+
+#### Task 5: Add Queue Metrics & Debugging
+- [x] Add endpoint or periodic log showing:
+  - Current queue depths by queue name
+  - Number of available agents
+  - Number of busy agents
+  - Active queue monitors
+- [x] Add detailed trace logging for queue operations
+
+#### Task 6: Fix Queue Name Mismatch (NEW - COMPLETED)
+- [x] Updated `create_default_queues()` to create queues without "_queue" suffix
+- [x] Added all required queues: general, support, sales, billing, vip, premium
+- [x] Added `ensure_queue_exists()` call before enqueuing to auto-create missing queues
+- [x] Fixed queue creation to use proper names and capacities
+
+**Test Scenario**:
+1. Start server with 2 agents (Alice & Bob)
+2. Send 5 calls simultaneously
+3. Expected: First 2 calls assigned to agents, 3 queued
+4. When first 2 calls complete, next 2 from queue assigned
+5. Final call assigned when an agent frees up
+
+**Estimated Time**: 1 day
+**Priority**: HIGH - Required for proper call center queue behavior
+
+### Phase 0.11 - Critical Queue Timing Fix 🚨 URGENT
+
+**Root Cause Discovery**:
+The system has a fundamental sequencing flaw that causes all queued calls to fail:
+
+1. **Customer calls arrive** → Server returns `CallDecision::Defer` (180 Ringing)
+2. **Calls are immediately queued** while still in "Initiating" state
+3. **Queue monitor assigns to agents** within ~100ms 
+4. **Customer's INVITE times out** because it was never accepted (still deferred!)
+5. **Everything fails** with "INVITE transaction cancelled"
+
+**Evidence**:
+- Calls queued at 04:44:50.560Z in "Initiating" state
+- Assigned to agent at 04:44:50.654Z (94ms later!)
+- Error: "Customer session is in unexpected state: Initiating"
+- Call fails at 04:45:06.690Z with "INVITE transaction cancelled"
+
+**Fix Options**:
+
+#### Option A: Accept-First Architecture (Recommended) ⭐
+- Change `process_incoming_call` to return `Accept(Some(sdp))`
+- Customer gets immediate 200 OK
+- Then queue the accepted call
+- Then assign to agents normally
+- **Pros**: Simple, reliable, proven pattern
+- **Cons**: Customer hears silence until agent found
+
+#### Option B: Deferred Queue Architecture
+- Keep returning `Defer`
+- Add call state tracking for deferred vs accepted
+- Only assign agents after accepting customer call
+- **Pros**: Better UX (ringback tone)
+- **Cons**: Complex state management
+
+#### Option C: Two-Phase Queue
+- Accept customer call when dequeued
+- Wait for ACK before assigning to agent
+- Re-queue if accept fails
+- **Pros**: Balanced approach
+- **Cons**: Timing complexities
+
+**Implementation Tasks**:
+
+#### Task 1: Implement Accept-First (Option A) ✅
+- [x] Change `process_incoming_call` to return `Accept(Some(sdp))`
+- [x] Generate B2BUA's SDP answer immediately
+- [x] Remove the `Defer` logic
+- [x] Update call state to "Active" on accept
+- [x] Remove duplicate accept attempt when agent answers
+
+#### Task 2: Fix Queue Monitor Timing
+- [ ] Ensure calls are only assigned when in proper state
+- [ ] Add state validation before assignment
+- [ ] Handle edge cases for failed accepts
+
+#### Task 3: Update Tests
+- [ ] Verify SIPp receives immediate 200 OK
+- [ ] Check all 5 calls complete successfully
+- [ ] Confirm proper agent assignment flow
+
+**Priority**: CRITICAL - System is completely broken without this fix!
+**Estimated Time**: 4-6 hours
+
+### Phase 0.12 - SDP Generation & Queue Timing Issues 🔍 NEW
+
+**Discovery from Latest Test**:
+1. **Media IS working** - We see RTP packets flowing (SSRC=abc3e6bc, seq=2507)
+2. **Alice works perfectly** - Generates SDP, establishes media, completes calls
+3. **Bob fails consistently** - "accepting without SDP for now" warning
+4. **16-second timeout pattern** - SIPp's default INVITE timeout
+
+**Root Cause Analysis**:
+1. **Queue Monitor Timing**: 
+   - Checks every 2 seconds (now reduced to 1s)
+   - Adds delay before agents can be assigned
+   - Causes SIPp to timeout after 16 seconds
+
+2. **SDP Generation Inconsistency**:
+   - Alice: Generates SDP properly → Media flows
+   - Bob: Fails to generate SDP → No media → Timeout
+   - Same code, different behavior suggests timing/state issue
+
+3. **Agent Status Tracking Works**:
+   - Agents properly marked Busy/Available
+   - current_calls counter maintained correctly
+   - Issue was timing, not status management
+
+**Fixes Implemented**:
+- [x] Reduced queue check interval from 2s to 1s
+- [x] Removed 100ms delay in route_call_to_agent
+- [x] Reset interval to 1s when agents available
+
+**Remaining Issues**:
+- [ ] Investigate why Bob's SDP generation fails
+- [ ] Consider increasing SIPp timeout
+- [ ] Add retry logic for SDP generation
+- [ ] Profile session-core SDP generation performance
+
+**Next Steps**:
+1. Run test with faster queue timing
+2. Monitor if Bob still fails to generate SDP
+3. If yes, debug session-core SDP generation
+4. Consider implementing SDP retry logic
 
 ### Phase 1 - Advanced Features
 

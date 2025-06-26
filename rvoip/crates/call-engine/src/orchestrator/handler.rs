@@ -423,9 +423,13 @@ impl CallCenterEngine {
                             let agent_id = crate::agent::AgentId::from(agent.id.clone());
                             
                             // Add to available agents DashMap
+                            // For registered agents, we use a special session ID format that indicates they're registered but not on a call
+                            // This will be replaced with the actual call session ID when they receive a call
+                            let agent_session_id = SessionId(format!("agent-{}-registered", agent_id));
+                            
                             self.available_agents.insert(agent_id.clone(), AgentInfo {
                                 agent_id: agent_id.clone(),
-                                session_id: SessionId::new(), // TODO: Get proper session ID from registration
+                                session_id: agent_session_id,
                                 status: crate::agent::AgentStatus::Available,
                                 sip_uri: agent.sip_uri.clone(),  // Store the agent's SIP URI
                                 contact_uri: contact_uri.clone(), // Store the contact URI from REGISTER

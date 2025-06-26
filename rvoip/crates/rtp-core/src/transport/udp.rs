@@ -240,8 +240,8 @@ impl UdpRtpTransport {
                             // Try to parse as RTP
                             match RtpPacket::parse(&buffer[0..size]) {
                                 Ok(packet) => {
-                                    // Log packet reception at transport level
-                                    info!("Transport received packet with SSRC={:08x}, seq={}, ts={}",
+                                    // Log packet reception at transport level (debug only)
+                                    debug!("Transport received packet with SSRC={:08x}, seq={}, ts={}",
                                            packet.header.ssrc, 
                                            packet.header.sequence_number,
                                            packet.header.timestamp);

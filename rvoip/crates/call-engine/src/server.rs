@@ -191,27 +191,57 @@ impl CallCenterServer {
         loop {
             interval.tick().await;
             
+            // PHASE 0.10: Enhanced queue monitoring with detailed stats
+            info!("📊 === Call Center Status Update ===");
+            
             // Get current queue stats
             match supervisor_api.get_all_queue_stats().await {
                 Ok(queue_stats) => {
+                    let total_queued: usize = queue_stats.iter().map(|(_, s)| s.total_calls).sum();
+                    info!("📥 Total calls in all queues: {}", total_queued);
+                    
                     for (queue_id, stats) in queue_stats {
-                        if stats.total_calls > 0 {
-                            info!("📊 Queue '{}' - Waiting: {}, Avg Wait: {}s", 
-                                  queue_id, stats.total_calls, stats.average_wait_time_seconds);
+                        if stats.total_calls > 0 || queue_id == "general" || queue_id == "support" {
+                            info!("  📋 Queue '{}': {} waiting, avg wait: {}s", 
+                                  queue_id, stats.total_calls, 
+                                  stats.average_wait_time_seconds);
                         }
                     }
                 }
                 Err(e) => error!("Failed to get queue stats: {}", e),
             }
             
-            // Get agent status
+            // Get agent status with detailed breakdown
             let agents = supervisor_api.list_agents().await;
             let available = agents.iter().filter(|a| matches!(a.status, AgentStatus::Available)).count();
             let busy = agents.iter().filter(|a| matches!(a.status, AgentStatus::Busy { .. })).count();
+            let offline = agents.iter().filter(|a| matches!(a.status, AgentStatus::Offline)).count();
             
-            if available > 0 || busy > 0 {
-                info!("👥 Agents - Available: {}, Busy: {}", available, busy);
+            info!("👥 Agent Status Summary:");
+            info!("  ✅ Available: {}", available);
+            info!("  🔴 Busy: {}", busy);
+            info!("  ⚫ Offline: {}", offline);
+            info!("  📋 Total: {}", agents.len());
+            
+            // PHASE 0.10: Show individual agent status for debugging
+            if agents.len() > 0 && agents.len() <= 5 {  // Only show individual status for small teams
+                info!("👤 Individual Agent Status:");
+                for agent in &agents {
+                    let status_str = match &agent.status {
+                        AgentStatus::Available => "Available ✅".to_string(),
+                        AgentStatus::Busy { active_calls } => format!("Busy ({} calls) 🔴", active_calls),
+                        AgentStatus::Away { reason } => format!("Away 🟡 ({})", reason),
+                        AgentStatus::Break { duration_minutes } => format!("Break ☕ ({}min)", duration_minutes),
+                        AgentStatus::Offline => "Offline ⚫".to_string(),
+                    };
+                    info!("  - {} ({}): {}", agent.sip_uri, agent.agent_id, status_str);
+                }
             }
+            
+            // Get overall stats
+            let stats = supervisor_api.get_stats().await;
+            info!("📞 Active bridges: {}", stats.active_bridges);
+            info!("================================");
         }
     }
     
@@ -257,14 +287,24 @@ impl CallCenterServer {
     
     /// Helper to create default queues (for examples/testing)
     pub async fn create_default_queues(&self) -> Result<()> {
-        self.admin_api.create_queue("support_queue").await
-            .map_err(|e| CallCenterError::Configuration(
-                format!("Failed to create support queue: {}", e)
-            ))?;
-        self.admin_api.create_queue("sales_queue").await
-            .map_err(|e| CallCenterError::Configuration(
-                format!("Failed to create sales queue: {}", e)
-            ))?;
+        // Create queues that match the names expected by the routing logic
+        let queues = vec![
+            ("general", "General Support"),
+            ("support", "Technical Support"),
+            ("sales", "Sales"),
+            ("billing", "Billing"),
+            ("vip", "VIP Support"),
+            ("premium", "Premium Support"),
+        ];
+        
+        for (queue_id, queue_name) in queues {
+            self.admin_api.create_queue(queue_id).await
+                .map_err(|e| CallCenterError::Configuration(
+                    format!("Failed to create {} queue: {}", queue_name, e)
+                ))?;
+            info!("✅ Created queue: {} ({})", queue_id, queue_name);
+        }
+        
         info!("✅ Default queues created");
         
         Ok(())

@@ -67,13 +67,18 @@ impl CallCenterEngine {
         required_skills: &[String],
     ) -> CallCenterResult<RoutingDecision> {
         
-        // **STEP 1**: Try to find available agents with matching skills
-        if let Some(agent_id) = self.find_best_available_agent(required_skills, priority).await {
-            return Ok(RoutingDecision::DirectToAgent {
-                agent_id,
-                reason: "Skilled agent available".to_string(),
-            });
-        }
+        // PHASE 0.10: Queue-First Routing - Always queue calls instead of direct-to-agent
+        // This ensures all calls go through the queue for fair distribution
+        
+        // **DISABLED FOR QUEUE-FIRST**: Try to find available agents with matching skills
+        // if let Some(agent_id) = self.find_best_available_agent(required_skills, priority).await {
+        //     return Ok(RoutingDecision::DirectToAgent {
+        //         agent_id,
+        //         reason: "Skilled agent available".to_string(),
+        //     });
+        // }
+        
+        info!("🚦 Queue-First Routing: Sending call {} to queue (priority: {})", session_id, priority);
         
         // **STEP 2**: Check if we should queue based on customer type and current load
         let queue_decision = self.determine_queue_strategy(customer_type, priority, required_skills).await;
@@ -187,8 +192,11 @@ impl CallCenterEngine {
     pub(super) async fn ensure_queue_exists(&self, queue_id: &str) -> CallCenterResult<()> {
         let mut queue_manager = self.queue_manager.write().await;
         
-        // Check if queue exists (this is a simplified check)
-        // In production, we'd have better queue existence checking
+        // Try to get queue stats to see if it exists
+        if queue_manager.get_queue_stats(queue_id).is_ok() {
+            // Queue already exists
+            return Ok(());
+        }
         
         // Create standard queues if they don't exist
         let standard_queues = vec![
@@ -203,8 +211,9 @@ impl CallCenterEngine {
         
         for (id, name, max_size) in standard_queues {
             if id == queue_id {
-                // Try to create queue (will succeed if doesn't exist)
-                let _ = queue_manager.create_queue(id.to_string(), name.to_string(), max_size);
+                // Create the queue
+                queue_manager.create_queue(id.to_string(), name.to_string(), max_size)?;
+                info!("📋 Auto-created queue '{}' ({})", id, name);
                 break;
             }
         }
@@ -242,8 +251,8 @@ impl CallCenterEngine {
             let start_time = std::time::Instant::now();
             let max_duration = std::time::Duration::from_secs(300);
             
-            // Dynamic check interval - starts at 2s, backs off when no agents available
-            let mut check_interval_secs = 2u64;
+            // Dynamic check interval - starts at 0.5s, backs off when no agents available
+            let mut check_interval_secs = 1u64;  // Start with 1s for faster initial assignment
             let mut consecutive_no_agents = 0u32;
             
             loop {
@@ -303,7 +312,7 @@ impl CallCenterEngine {
                 } else {
                     // Reset backoff when agents become available
                     consecutive_no_agents = 0;
-                    check_interval_secs = 2;
+                    check_interval_secs = 1;  // Fast check when agents available
                 }
                 
                 info!("🎯 Found {} available agents for queue {}", available_agents.len(), queue_id);
@@ -320,6 +329,15 @@ impl CallCenterEngine {
                     if let Some(queued_call) = queued_call {
                         info!("📤 Dequeued call {} from queue {} for agent {}", 
                               queued_call.session_id, queue_id, agent_id);
+                        
+                        // PHASE 0.10: Log queue depth after dequeue
+                        {
+                            let queue_manager = engine.queue_manager.read().await;
+                            if let Ok(stats) = queue_manager.get_queue_stats(&queue_id) {
+                                info!("📊 Queue '{}' status after dequeue: {} calls remaining", 
+                                      queue_id, stats.total_calls);
+                            }
+                        }
                         
                         // Update call status to indicate it's being assigned
                         if let Some(mut call_info) = engine.active_calls.get_mut(&queued_call.session_id) {

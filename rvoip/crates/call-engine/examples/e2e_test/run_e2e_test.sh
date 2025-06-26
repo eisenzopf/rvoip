@@ -202,7 +202,7 @@ main() {
     
     # Run SIPp test calls
     echo -e "\n${YELLOW}Running SIPp test calls...${NC}"
-    echo "Making 5 calls, 1 call per second..."
+    echo "Making 5 calls in a burst..."
     
     cd "$SIPP_DIR"
     sipp -sf customer_uac.xml \
@@ -210,8 +210,7 @@ main() {
         -i 127.0.0.1 \
         -p 5080 \
         -m 5 \
-        -r 1 \
-        -l 2 \
+        -r 10 \
         -trace_msg \
         -trace_err \
         -trace_screen \
