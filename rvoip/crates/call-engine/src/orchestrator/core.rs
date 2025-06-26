@@ -33,7 +33,6 @@ pub(super) struct CallCenterState {
     pub(super) session_coordinator: Arc<SessionCoordinator>,
     pub(super) active_calls: Arc<DashMap<SessionId, CallInfo>>,
     pub(super) active_bridges: Arc<DashMap<String, BridgeInfo>>,
-    pub(super) dialog_mappings: Arc<DashMap<String, String>>,
     pub(super) queue_manager: Arc<RwLock<QueueManager>>,
     pub(super) available_agents: Arc<DashMap<AgentId, AgentInfo>>,
     pub(super) routing_stats: Arc<RwLock<RoutingStats>>,
@@ -81,9 +80,6 @@ pub struct CallCenterEngine {
     /// Track active queue monitors to prevent duplicates
     pub(super) active_queue_monitors: Arc<DashSet<String>>,
     
-    /// Track dialog relationships for B2BUA (customer dialog ID → agent dialog ID)
-    pub(super) dialog_mappings: Arc<DashMap<String, String>>,
-    
     /// Session ID to Dialog ID mappings for robust lookup
     pub session_to_dialog: Arc<DashMap<String, String>>,
 }
@@ -125,7 +121,6 @@ impl CallCenterEngine {
             agent_registry: Arc::new(Mutex::new(AgentRegistry::new())),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
             active_queue_monitors: Arc::new(DashSet::new()),
-            dialog_mappings: Arc::new(DashMap::new()),
             session_to_dialog: Arc::new(DashMap::new()),
         });
         
@@ -163,7 +158,6 @@ impl CallCenterEngine {
             agent_registry: Arc::new(Mutex::new(AgentRegistry::new())),
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
             active_queue_monitors: Arc::new(DashSet::new()),
-            dialog_mappings: Arc::new(DashMap::new()),
             session_to_dialog: Arc::new(DashMap::new()),
         });
         
@@ -445,7 +439,6 @@ impl Clone for CallCenterEngine {
             agent_registry: self.agent_registry.clone(),
             sip_registrar: self.sip_registrar.clone(),
             active_queue_monitors: self.active_queue_monitors.clone(),
-            dialog_mappings: self.dialog_mappings.clone(),
             session_to_dialog: self.session_to_dialog.clone(),
         }
     }

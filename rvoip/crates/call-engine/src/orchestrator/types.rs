@@ -45,6 +45,10 @@ pub struct CallInfo {
     
     /// Agent's dialog ID (from dialog-core)  
     pub agent_dialog_id: Option<String>,
+    
+    // B2BUA tracking
+    /// The related session ID (customer session for agent leg, agent session for customer leg)
+    pub related_session_id: Option<SessionId>,
 }
 
 /// Enhanced agent information for tracking

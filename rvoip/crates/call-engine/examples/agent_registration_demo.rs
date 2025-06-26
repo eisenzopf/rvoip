@@ -41,9 +41,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Create test agents
     let alice = Agent {
-        id: "agent_alice".to_string(),
+        id: "alice".to_string(),
         sip_uri: "sip:alice@127.0.0.1:5071".to_string(),
-        display_name: "Alice Johnson".to_string(),
+        display_name: "Alice Smith".to_string(),
         skills: vec!["english".to_string(), "support".to_string()],
         max_concurrent_calls: 2,
         status: AgentStatus::Offline,
@@ -52,11 +52,11 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     };
 
     let bob = Agent {
-        id: "agent_bob".to_string(),
+        id: "bob".to_string(),
         sip_uri: "sip:bob@127.0.0.1:5072".to_string(),
-        display_name: "Bob Smith".to_string(),
+        display_name: "Bob Johnson".to_string(),
         skills: vec!["english".to_string(), "sales".to_string()],
-        max_concurrent_calls: 3,
+        max_concurrent_calls: 1,
         status: AgentStatus::Offline,
         department: Some("sales".to_string()),
         extension: Some("102".to_string()),
@@ -85,29 +85,21 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Demonstrate agent registration using client API
     info!("\n📱 Starting agent registration process...");
 
-    // Alice registers and becomes available
-    let alice_client = server.create_client("agent_alice".to_string());
+    // Example 2: CallCenterClient API - Agent operations
+    info!("\n📞 Example 2: Using CallCenterClient for agent operations");
+    let alice_client = server.create_client("alice".to_string());
     
     alice_client.register_agent(&alice).await
-        .map_err(|e| format!("Failed to register Alice: {}", e))?;
-    info!("✅ Alice registered with the system");
+        .expect("Failed to register Alice");
+    info!("✅ Alice registered successfully");
     
-    // Update agent status
-    info!("\n📱 Updating agent status");
     alice_client.update_agent_status(&AgentId(alice.id.clone()), AgentStatus::Available).await
         .expect("Failed to update Alice status");
     info!("✅ Alice is now available");
     
-    // Check agent info
-    if let Some(alice_info) = alice_client.get_agent_info(&AgentId(alice.id.clone())).await {
-        info!("Alice info: {:?}", alice_info);
-    }
-
-    // Demonstrate different agent statuses
-    info!("\n🔄 Demonstrating agent status changes");
-    
-    // Bob goes available
-    let bob_client = server.create_client("agent_bob".to_string());
+    // Example 3: Registering multiple agents
+    info!("\n👥 Example 3: Registering multiple agents");
+    let bob_client = server.create_client("bob".to_string());
     
     bob_client.register_agent(&bob).await
         .map_err(|e| format!("Failed to register Bob: {}", e))?;

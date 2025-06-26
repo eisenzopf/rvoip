@@ -146,31 +146,58 @@ impl DatabaseManager {
     
     /// Get available assignments (returns agent_id, call_id, session_id tuples)
     pub async fn get_available_assignments(&self, queue_id: &str) -> Result<Vec<(String, String, String)>> {
-        let params: Vec<limbo::Value> = vec![queue_id.into()];
-        let rows = self.query(
-            "SELECT a.agent_id, c.call_id, c.session_id
-             FROM agents a
-             CROSS JOIN (
-                 SELECT call_id, session_id 
-                 FROM call_queue 
-                 WHERE queue_id = ?1 AND expires_at > datetime('now')
-                 ORDER BY priority ASC, enqueued_at ASC
-             ) c
-             WHERE a.status = 'AVAILABLE' 
-             AND a.current_calls < a.max_calls
-             AND NOT EXISTS (
-                 SELECT 1 FROM active_calls ac WHERE ac.call_id = c.call_id
-             )
+        // Limbo doesn't support complex queries, so we'll do this in steps
+        
+        // Step 1: Get available agents
+        let agent_rows = self.query(
+            "SELECT agent_id FROM agents 
+             WHERE status = 'AVAILABLE' 
+             AND current_calls < max_calls
              LIMIT 10",
-            params
+            ()
         ).await?;
         
+        if agent_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Step 2: Get queued calls
+        let call_rows = self.query(
+            "SELECT call_id, session_id 
+             FROM call_queue 
+             WHERE queue_id = ?1 AND expires_at > datetime('now')
+             ORDER BY priority ASC, enqueued_at ASC
+             LIMIT 10",
+            vec![queue_id.into()] as Vec<limbo::Value>
+        ).await?;
+        
+        if call_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Step 3: Check which calls are not already active
         let mut assignments = Vec::new();
-        for row in rows {
-            let agent_id = value_to_string(&row.get_value(0)?)?;
-            let call_id = value_to_string(&row.get_value(1)?)?;
-            let session_id = value_to_string(&row.get_value(2)?)?;
-            assignments.push((agent_id, call_id, session_id));
+        
+        for (agent_idx, agent_row) in agent_rows.iter().enumerate() {
+            if agent_idx >= call_rows.len() {
+                break; // No more calls to assign
+            }
+            
+            let agent_id = value_to_string(&agent_row.get_value(0)?)?;
+            let call_row = &call_rows[agent_idx];
+            let call_id = value_to_string(&call_row.get_value(0)?)?;
+            let session_id = value_to_string(&call_row.get_value(1)?)?;
+            
+            // Check if this call is already active
+            let active_check = self.query(
+                "SELECT 1 FROM active_calls WHERE call_id = ?1",
+                vec![call_id.clone().into()] as Vec<limbo::Value>
+            ).await?;
+            
+            if active_check.is_empty() {
+                // Call is not active, can be assigned
+                assignments.push((agent_id, call_id, session_id));
+            }
         }
         
         Ok(assignments)

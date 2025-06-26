@@ -49,11 +49,16 @@ impl AdminApi {
         
         // Also add to database if available
         if let Some(db) = self.engine.database_manager() {
-            // For now, just register with basic info - we'd need to extend the database schema
-            // to store all agent fields
+            // Extract username from SIP URI (e.g., "alice" from "sip:alice@127.0.0.1")
+            let username = agent.sip_uri
+                .trim_start_matches("sip:")
+                .split('@')
+                .next()
+                .unwrap_or(&agent.id);
+            
             db.upsert_agent(
                 &agent.id,
-                &agent.display_name,
+                username,  // Use the SIP username, not display_name
                 Some(&agent.sip_uri)
             ).await.map_err(|e| CallCenterError::database(&format!("Failed to upsert agent: {}", e)))?;
             
@@ -69,9 +74,16 @@ impl AdminApi {
     pub async fn update_agent(&self, agent: Agent) -> Result<(), CallCenterError> {
         // Update in database if available
         if let Some(db) = self.engine.database_manager() {
+            // Extract username from SIP URI (e.g., "alice" from "sip:alice@127.0.0.1")
+            let username = agent.sip_uri
+                .trim_start_matches("sip:")
+                .split('@')
+                .next()
+                .unwrap_or(&agent.id);
+                
             db.upsert_agent(
                 &agent.id,
-                &agent.display_name,
+                username,  // Use the SIP username, not display_name
                 Some(&agent.sip_uri)
             ).await.map_err(|e| CallCenterError::database(&format!("Failed to upsert agent: {}", e)))?;
             

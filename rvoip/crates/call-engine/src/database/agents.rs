@@ -12,22 +12,49 @@ impl DatabaseManager {
     pub async fn upsert_agent(&self, agent_id: &str, username: &str, contact_uri: Option<&str>) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         
-        let params = vec![
-            agent_id.into(),
-            username.into(),
-            contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
-            now.into(),
-        ];
+        // First, check if agent exists
+        let exists = self.query_row(
+            "SELECT 1 FROM agents WHERE agent_id = ?1",
+            vec![agent_id.into()] as Vec<limbo::Value>
+        ).await?.is_some();
         
-        self.execute(
-            "INSERT INTO agents (agent_id, username, contact_uri, last_heartbeat)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(agent_id) DO UPDATE SET
-             username = ?2, contact_uri = ?3, last_heartbeat = ?4",
-            params
-        ).await?;
+        if exists {
+            // UPDATE existing agent
+            let rows = self.execute(
+                "UPDATE agents 
+                 SET username = ?1, 
+                     contact_uri = ?2, 
+                     last_heartbeat = ?3,
+                     status = CASE 
+                         WHEN status = 'OFFLINE' THEN 'AVAILABLE' 
+                         ELSE status 
+                     END
+                 WHERE agent_id = ?4",
+                vec![
+                    username.into(),
+                    contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
+                    now.into(),
+                    agent_id.into(),
+                ] as Vec<limbo::Value>
+            ).await?;
+            
+            debug!("Updated agent {}: {} rows affected", agent_id, rows);
+        } else {
+            // INSERT new agent
+            self.execute(
+                "INSERT INTO agents (agent_id, username, contact_uri, status, last_heartbeat)
+                 VALUES (?1, ?2, ?3, 'AVAILABLE', ?4)",
+                vec![
+                    agent_id.into(),
+                    username.into(),
+                    contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
+                    now.into(),
+                ] as Vec<limbo::Value>
+            ).await?;
+            
+            debug!("Inserted new agent {}", agent_id);
+        }
         
-        info!("Agent {} registered/updated with contact URI: {:?}", agent_id, contact_uri);
         Ok(())
     }
     

@@ -258,7 +258,7 @@ impl CallCenterServer {
     pub async fn create_test_agents(&self, agents: Vec<(&str, &str, &str)>) -> Result<()> {
         for (username, name, department) in agents {
             let agent = Agent {
-                id: format!("agent_{}", username),
+                id: username.to_string(),  // Use just the username as ID
                 sip_uri: format!("sip:{}@{}", username, self.config.general.domain),
                 display_name: name.to_string(),
                 skills: vec!["english".to_string(), department.to_string()],

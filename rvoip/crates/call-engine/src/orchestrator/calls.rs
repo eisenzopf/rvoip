@@ -75,6 +75,7 @@ impl CallCenterEngine {
             customer_sdp: call.sdp.clone(), // Store the customer's SDP for later use
             customer_dialog_id: incoming_dialog_id, // PHASE 17.3: Store the dialog ID
             agent_dialog_id: None,
+            related_session_id: None, // Will be set when agent is assigned
         };
         
         // Store call info
@@ -316,6 +317,21 @@ impl CallCenterEngine {
         };
         
         if let Some(mut agent_info) = agent_info {
+            // Update database with agent's new BUSY status and incremented call count
+            if let Some(db_manager) = &self.db_manager {
+                // Update call count in database
+                if let Err(e) = db_manager.update_agent_call_count(&agent_id.0, 1).await {
+                    error!("Failed to update agent call count in database: {}", e);
+                }
+                
+                // Update agent status to BUSY in database
+                if let Err(e) = db_manager.update_agent_status(&agent_id.0, AgentStatus::Busy(vec![])).await {
+                    error!("Failed to update agent status to BUSY in database: {}", e);
+                } else {
+                    info!("✅ Updated agent {} status to BUSY in database", agent_id);
+                }
+            }
+            
             let coordinator = self.session_coordinator.as_ref().unwrap();
             
             // The customer call should already be accepted at this point (200 OK sent)
@@ -364,7 +380,18 @@ impl CallCenterEngine {
                     let mut restored_agent = agent_info;
                     restored_agent.status = AgentStatus::Available;
                     restored_agent.current_calls = restored_agent.current_calls.saturating_sub(1);
-                    self.available_agents.insert(agent_id, restored_agent);
+                    self.available_agents.insert(agent_id.clone(), restored_agent);
+                    
+                    // Update database to reflect agent is available again
+                    if let Some(db_manager) = &self.db_manager {
+                        if let Err(e) = db_manager.update_agent_call_count(&agent_id.0, -1).await {
+                            error!("Failed to decrement agent call count in database: {}", e);
+                        }
+                        if let Err(e) = db_manager.update_agent_status(&agent_id.0, AgentStatus::Available).await {
+                            error!("Failed to restore agent status to Available in database: {}", e);
+                        }
+                    }
+                    
                     return Err(CallCenterError::orchestration(&format!("Failed to prepare call to agent: {}", e)));
                 }
             };
@@ -382,22 +409,45 @@ impl CallCenterEngine {
                     let agent_dialog_id: Option<String> = None; // Will be populated when we get dialog events
                     info!("🔍 Agent call created - dialog ID will be set from events");
                     
-                    // Store the agent's dialog ID in the call info
-                    if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
-                        // For now, we can't set agent_dialog_id since we don't have it yet
-                        // The proper dialog tracking will happen through session-core events
+                    // Create CallInfo for the agent's session with proper tracking
+                    let agent_call_info = CallInfo {
+                        session_id: call_session.id.clone(),
+                        caller_id: "Call Center".to_string(),
+                        from: "sip:call-center@127.0.0.1".to_string(),
+                        to: agent_info.sip_uri.clone(),
+                        agent_id: Some(agent_id.clone()), // Important: Set agent_id for agent's session
+                        queue_id: None,
+                        bridge_id: None,
+                        status: CallStatus::Connecting,
+                        priority: 0, // Highest priority for agent calls
+                        customer_type: CustomerType::Standard,
+                        required_skills: vec![],
+                        created_at: chrono::Utc::now(),
+                        queued_at: None,
+                        answered_at: None,
+                        ended_at: None,
+                        customer_sdp: None,
+                        duration_seconds: 0,
+                        wait_time_seconds: 0,
+                        talk_time_seconds: 0,
+                        hold_time_seconds: 0,
+                        queue_time_seconds: 0,
+                        transfer_count: 0,
+                        hold_count: 0,
+                        customer_dialog_id: None,
+                        agent_dialog_id: None,
+                        related_session_id: Some(session_id.clone()), // Link to customer session
+                    };
+                    
+                    // Store the agent's call info
+                    self.active_calls.insert(call_session.id.clone(), agent_call_info);
+                    info!("📋 Created CallInfo for agent session {} with agent_id={}", call_session.id, agent_id);
+                    
+                    // Update the customer's call info with the agent session ID
+                    if let Some(mut customer_call_info) = self.active_calls.get_mut(&session_id) {
+                        customer_call_info.related_session_id = Some(call_session.id.clone());
+                        info!("📋 Updated customer session {} with related agent session {}", session_id, call_session.id);
                     }
-                    
-                    // Track session-to-session mappings for call center operations
-                    self.dialog_mappings.insert(session_id.0.clone(), call_session.id.0.clone());
-                    self.dialog_mappings.insert(call_session.id.0.clone(), session_id.0.clone());
-                    info!("📋 Tracked SESSION mapping: {} ↔ {}", session_id, call_session.id);
-                    
-                    // PHASE 17.1: Add detailed dialog ID logging for debugging
-                    info!("🔍 B2BUA Session Mapping Details:");
-                    info!("  Customer Session ID: {}", session_id);
-                    info!("  Agent Session ID: {}", call_session.id);
-                    info!("  Stored mappings: {} entries total", self.dialog_mappings.len());
                     
                     call_session
                 }
@@ -407,7 +457,18 @@ impl CallCenterEngine {
                     let mut restored_agent = agent_info;
                     restored_agent.status = AgentStatus::Available;
                     restored_agent.current_calls = restored_agent.current_calls.saturating_sub(1);
-                    self.available_agents.insert(agent_id, restored_agent);
+                    self.available_agents.insert(agent_id.clone(), restored_agent);
+                    
+                    // Update database to reflect agent is available again
+                    if let Some(db_manager) = &self.db_manager {
+                        if let Err(e) = db_manager.update_agent_call_count(&agent_id.0, -1).await {
+                            error!("Failed to decrement agent call count in database: {}", e);
+                        }
+                        if let Err(e) = db_manager.update_agent_status(&agent_id.0, AgentStatus::Available).await {
+                            error!("Failed to restore agent status to Available in database: {}", e);
+                        }
+                    }
+                    
                     return Err(CallCenterError::orchestration(&format!("Failed to call agent: {}", e)));
                 }
             };
@@ -467,7 +528,7 @@ impl CallCenterEngine {
                             }
                             
                             // Store updated agent info (they're busy but we track all agents here)
-                            self.available_agents.insert(agent_id, agent_info);
+                            self.available_agents.insert(agent_id.clone(), agent_info);
                         },
                         Err(e) => {
                             error!("Failed to bridge sessions: {}", e);
@@ -478,7 +539,17 @@ impl CallCenterEngine {
                             // Return agent to available pool
                             agent_info.status = AgentStatus::Available;
                             agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
-                            self.available_agents.insert(agent_id, agent_info);
+                            self.available_agents.insert(agent_id.clone(), agent_info);
+                            
+                            // Update database to reflect agent is available again
+                            if let Some(db_manager) = &self.db_manager {
+                                if let Err(e) = db_manager.update_agent_call_count(&agent_id.0, -1).await {
+                                    error!("Failed to decrement agent call count in database: {}", e);
+                                }
+                                if let Err(e) = db_manager.update_agent_status(&agent_id.0, AgentStatus::Available).await {
+                                    error!("Failed to restore agent status to Available in database: {}", e);
+                                }
+                            }
                             
                             return Err(CallCenterError::orchestration(&format!("Bridge failed: {}", e)));
                         }
@@ -495,7 +566,17 @@ impl CallCenterEngine {
                     // Return agent to available pool
                     agent_info.status = AgentStatus::Available;
                     agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
-                    self.available_agents.insert(agent_id, agent_info);
+                    self.available_agents.insert(agent_id.clone(), agent_info);
+                    
+                    // Update database to reflect agent is available again
+                    if let Some(db_manager) = &self.db_manager {
+                        if let Err(e) = db_manager.update_agent_call_count(&agent_id.0, -1).await {
+                            error!("Failed to decrement agent call count in database: {}", e);
+                        }
+                        if let Err(e) = db_manager.update_agent_status(&agent_id.0, AgentStatus::Available).await {
+                            error!("Failed to restore agent status to Available in database: {}", e);
+                        }
+                    }
                     
                     // Update call info to mark as queued again
                     if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
@@ -517,7 +598,9 @@ impl CallCenterEngine {
                             if let Err(queue_err) = queue_manager.enqueue_call(queue_id, requeued_call) {
                                 error!("Failed to re-queue call {}: {}", session_id, queue_err);
                                 // Last resort: terminate the customer call
-                                let _ = coordinator.terminate_session(&session_id).await;
+                                if let Some(coordinator) = &self.session_coordinator {
+                                    let _ = coordinator.terminate_session(&session_id).await;
+                                }
                             } else {
                                 info!("📞 Re-queued call {} with higher priority", session_id);
                             }
@@ -581,32 +664,16 @@ impl CallCenterEngine {
                   call_info.hold_time_seconds);
         }
         
-        // Check if this is part of a B2BUA dialog and terminate the related leg
-        if let Some((_, related_dialog_id)) = self.dialog_mappings.remove(&session_id.0) {
-            info!("📞 Terminating related dialog {} for B2BUA call", related_dialog_id);
-            
-            // Terminate the related dialog
-            if let Some(coordinator) = &self.session_coordinator {
-                let related_session_id = SessionId(related_dialog_id.clone());
-                if let Err(e) = coordinator.terminate_session(&related_session_id).await {
-                    warn!("Failed to terminate related dialog {}: {}", related_dialog_id, e);
-                }
-            }
-            
-            // Also remove the reverse mapping
-            self.dialog_mappings.remove(&related_dialog_id);
-        }
-        
         // Get call info and clean up
         let call_info = self.active_calls.remove(&session_id).map(|(_, v)| v);
         
-        if let Some(call_info) = call_info {
-            // If call was bridged, return agent to available pool
-            if let Some(agent_id) = call_info.agent_id {
-                info!("🔄 Returning agent {} to available pool after call completion", agent_id);
+        // Update agent status if this call had an agent assigned
+        if let Some(call_info) = &call_info {
+            if let Some(agent_id) = &call_info.agent_id {
+                info!("🔄 Updating agent {} status after call termination", agent_id);
                 
                 // Update agent status
-                if let Some(mut agent_info) = self.available_agents.get_mut(&agent_id) {
+                if let Some(mut agent_info) = self.available_agents.get_mut(agent_id) {
                     agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
                     agent_info.last_call_end = Some(chrono::Utc::now());
                     
@@ -630,12 +697,33 @@ impl CallCenterEngine {
                     }
                 }
                 
+                // Update database with new agent status
+                if let Some(db_manager) = &self.db_manager {
+                    // Update call count in database
+                    if let Err(e) = db_manager.update_agent_call_count(&agent_id.0, -1).await {
+                        error!("Failed to update agent call count in database: {}", e);
+                    }
+                    
+                    // Update agent status in database if they're now available
+                    if let Some(agent_info) = self.available_agents.get(agent_id) {
+                        if matches!(agent_info.status, AgentStatus::Available) {
+                            if let Err(e) = db_manager.update_agent_status(&agent_id.0, AgentStatus::Available).await {
+                                error!("Failed to update agent status to Available in database: {}", e);
+                            } else {
+                                info!("✅ Updated agent {} status to Available in database", agent_id);
+                            }
+                        }
+                    }
+                }
+                
                 // Check if there are queued calls that can be assigned to this agent
-                self.try_assign_queued_calls_to_agent(agent_id).await;
+                self.try_assign_queued_calls_to_agent(agent_id.clone()).await;
             }
-            
-            // If call had a bridge, clean it up
-            if let Some(bridge_id) = call_info.bridge_id {
+        }
+        
+        // Clean up bridge if call had one
+        if let Some(call_info) = &call_info {
+            if let Some(bridge_id) = &call_info.bridge_id {
                 if let Err(e) = self.session_coordinator.as_ref().unwrap().destroy_bridge(&bridge_id).await {
                     warn!("Failed to destroy bridge {}: {}", bridge_id, e);
                 }

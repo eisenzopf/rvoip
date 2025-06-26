@@ -374,18 +374,28 @@ impl DatabaseManager {
         ];
         
         for (id, name, capacity, priority_boost) in default_queues {
-            let params: Vec<limbo::Value> = vec![
-                id.into(),
-                name.into(),
-                (capacity as i64).into(),
-                (priority_boost as i64).into(),
-            ];
+            // Check if queue already exists
+            let check_params: Vec<limbo::Value> = vec![id.into()];
+            let exists = self.query_row(
+                "SELECT 1 FROM queues WHERE queue_id = ?1",
+                check_params
+            ).await?.is_some();
             
-            self.execute(
-                "INSERT OR IGNORE INTO queues (queue_id, name, capacity, priority_boost) 
-                 VALUES (?1, ?2, ?3, ?4)",
-                params
-            ).await?;
+            // Only insert if it doesn't exist
+            if !exists {
+                let params: Vec<limbo::Value> = vec![
+                    id.into(),
+                    name.into(),
+                    (capacity as i64).into(),
+                    (priority_boost as i64).into(),
+                ];
+                
+                self.execute(
+                    "INSERT INTO queues (queue_id, name, capacity, priority_boost) 
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params
+                ).await?;
+            }
         }
         
         Ok(())
