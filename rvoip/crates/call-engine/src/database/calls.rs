@@ -234,6 +234,32 @@ impl DatabaseManager {
             answered_at,
         }))
     }
+    
+    /// Remove a call from queue and active calls tables when it ends
+    pub async fn remove_call_from_queue(&self, session_id: &str) -> Result<()> {
+        // Delete from call_queue table using session_id
+        let queue_result = self.execute(
+            "DELETE FROM call_queue WHERE session_id = ?1",
+            vec![session_id.into()] as Vec<limbo::Value>
+        ).await;
+        
+        // Delete from active_calls table as well
+        let active_result = self.execute(
+            "DELETE FROM active_calls WHERE session_id = ?1", 
+            vec![session_id.into()] as Vec<limbo::Value>
+        ).await;
+        
+        // Log results
+        if let Err(e) = queue_result {
+            debug!("Call {} was not in call_queue: {}", session_id, e);
+        }
+        
+        if let Err(e) = active_result {
+            debug!("Call {} was not in active_calls: {}", session_id, e);
+        }
+        
+        Ok(())
+    }
 }
 
 /// Active call statistics

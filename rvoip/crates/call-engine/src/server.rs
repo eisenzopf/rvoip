@@ -210,11 +210,13 @@ impl CallCenterServer {
             let agents = supervisor_api.list_agents().await;
             let available = agents.iter().filter(|a| matches!(a.status, AgentStatus::Available)).count();
             let busy = agents.iter().filter(|a| matches!(a.status, AgentStatus::Busy(..))).count();
+            let wrap_up = agents.iter().filter(|a| matches!(a.status, AgentStatus::PostCallWrapUp)).count();
             let offline = agents.iter().filter(|a| matches!(a.status, AgentStatus::Offline)).count();
             
             info!("👥 Agent Status Summary:");
             info!("  ✅ Available: {}", available);
             info!("  🔴 Busy: {}", busy);
+            info!("  ⏰ Wrap-up: {}", wrap_up);
             info!("  ⚫ Offline: {}", offline);
             info!("  📋 Total: {}", agents.len());
             
@@ -225,6 +227,7 @@ impl CallCenterServer {
                     let status_str = match &agent.status {
                         AgentStatus::Available => "Available ✅".to_string(),
                         AgentStatus::Busy(calls) => format!("Busy ({} calls) 🔴", calls.len()),
+                        AgentStatus::PostCallWrapUp => "Wrap-up ⏰".to_string(),
                         AgentStatus::Offline => "Offline ⚫".to_string(),
                     };
                     info!("  - {} ({}): {}", agent.sip_uri, agent.agent_id, status_str);

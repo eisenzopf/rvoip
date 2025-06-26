@@ -38,6 +38,9 @@ pub enum AgentStatus {
     /// Agent is busy with calls
     Busy(Vec<SessionId>),
     
+    /// Agent is in post-call wrap-up time
+    PostCallWrapUp,
+    
     /// Agent is offline
     Offline,
 }
@@ -49,6 +52,9 @@ impl FromStr for AgentStatus {
         match s {
             "available" | "Available" | "AVAILABLE" => Ok(AgentStatus::Available),
             "offline" | "Offline" | "OFFLINE" => Ok(AgentStatus::Offline),
+            "postcallwrapup" | "PostCallWrapUp" | "POSTCALLWRAPUP" | "post_call_wrap_up" => {
+                Ok(AgentStatus::PostCallWrapUp)
+            },
             s if s.starts_with("busy") || s.starts_with("Busy") || s.starts_with("BUSY") => {
                 Ok(AgentStatus::Busy(Vec::new()))
             },
@@ -62,6 +68,7 @@ impl ToString for AgentStatus {
         match self {
             AgentStatus::Available => "available".to_string(),
             AgentStatus::Busy(calls) => format!("busy({})", calls.len()),
+            AgentStatus::PostCallWrapUp => "postcallwrapup".to_string(),
             AgentStatus::Offline => "offline".to_string(),
         }
     }
@@ -141,7 +148,7 @@ impl AgentRegistry {
         self.active_sessions.get(agent_id)
     }
     
-    /// Find available agents
+    /// Find available agents (excludes agents in post-call wrap-up)
     pub fn find_available_agents(&self) -> Vec<String> {
         self.agent_status.iter()
             .filter(|(_, status)| matches!(status, AgentStatus::Available))
@@ -165,11 +172,14 @@ impl AgentRegistry {
         let busy = self.agent_status.values()
             .filter(|a| matches!(a, AgentStatus::Busy(_)))
             .count();
+        let post_call_wrap_up = self.agent_status.values()
+            .filter(|a| matches!(a, AgentStatus::PostCallWrapUp))
+            .count();
         let offline = self.agent_status.values()
             .filter(|a| matches!(a, AgentStatus::Offline))
             .count();
         
-        AgentStats { total, available, busy, offline }
+        AgentStats { total, available, busy, post_call_wrap_up, offline }
     }
 }
 
@@ -185,5 +195,6 @@ pub struct AgentStats {
     pub total: usize,
     pub available: usize,
     pub busy: usize,
+    pub post_call_wrap_up: usize,
     pub offline: usize,
 } 

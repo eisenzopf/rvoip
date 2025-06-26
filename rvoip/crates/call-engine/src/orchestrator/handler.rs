@@ -82,9 +82,66 @@ impl CallHandler for CallCenterCallHandler {
         debug!("Local SDP available: {}, Remote SDP available: {}", 
                local_sdp.is_some(), remote_sdp.is_some());
         
-        // Update call state to active/bridged
         if let Some(engine) = self.engine.upgrade() {
-            engine.update_call_established(call.id).await;
+            // Check if this is a pending agent assignment
+            if let Some((_, pending_assignment)) = engine.pending_assignments.remove(&call.id) {
+                info!("🔔 Agent {} answered for pending assignment", pending_assignment.agent_id);
+                
+                // This is an agent answering - complete the bridge
+                let coordinator = engine.session_coordinator.as_ref().unwrap();
+                let bridge_start = Instant::now();
+                
+                match coordinator.bridge_sessions(
+                    &pending_assignment.customer_session_id, 
+                    &pending_assignment.agent_session_id
+                ).await {
+                    Ok(bridge_id) => {
+                        let bridge_time = bridge_start.elapsed().as_millis();
+                        info!("✅ Successfully bridged customer {} with agent {} (bridge: {}) in {}ms", 
+                              pending_assignment.customer_session_id, 
+                              pending_assignment.agent_id, 
+                              bridge_id, 
+                              bridge_time);
+                        
+                        // Update customer call info
+                        if let Some(mut call_info) = engine.active_calls.get_mut(&pending_assignment.customer_session_id) {
+                            call_info.agent_id = Some(pending_assignment.agent_id.clone());
+                            call_info.bridge_id = Some(bridge_id.clone());
+                            call_info.status = CallStatus::Bridged;
+                            call_info.answered_at = Some(chrono::Utc::now());
+                        }
+                        
+                        // Update agent call info
+                        if let Some(mut call_info) = engine.active_calls.get_mut(&pending_assignment.agent_session_id) {
+                            call_info.bridge_id = Some(bridge_id);
+                            call_info.status = CallStatus::Bridged;
+                            call_info.answered_at = Some(chrono::Utc::now());
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to bridge sessions after agent answered: {}", e);
+                        
+                        // Hang up both calls on bridge failure
+                        let _ = coordinator.terminate_session(&pending_assignment.agent_session_id).await;
+                        let _ = coordinator.terminate_session(&pending_assignment.customer_session_id).await;
+                        
+                        // Return agent to available pool
+                        if let Some(mut agent_info) = engine.available_agents.get_mut(&pending_assignment.agent_id) {
+                            agent_info.status = AgentStatus::Available;
+                            agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
+                        }
+                        
+                        // Update database
+                        if let Some(db_manager) = &engine.db_manager {
+                            let _ = db_manager.update_agent_call_count(&pending_assignment.agent_id.0, -1).await;
+                            let _ = db_manager.update_agent_status(&pending_assignment.agent_id.0, AgentStatus::Available).await;
+                        }
+                    }
+                }
+            } else {
+                // Regular call established (not a pending assignment)
+                engine.update_call_established(call.id).await;
+            }
         }
     }
     
@@ -349,7 +406,8 @@ impl CallCenterEngine {
                         let agent_id = crate::agent::AgentId::from(username.to_string());
                         
                         // Add to available agents DashMap
-                        let agent_session_id = SessionId(format!("agent-{}-registered", agent_id));
+                        // NOTE: Use a placeholder session ID - it will be replaced when an actual call is made
+                        let agent_session_id = SessionId(format!("agent-{}-placeholder", agent_id));
                         
                         self.available_agents.insert(agent_id.clone(), AgentInfo {
                             agent_id: agent_id.clone(),

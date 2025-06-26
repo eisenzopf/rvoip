@@ -128,10 +128,11 @@ impl AdminApi {
                     skills: vec![], // TODO: Load from database when skill table is implemented
                     max_concurrent_calls: db_agent.max_calls as u32,
                     status: match db_agent.status {
-                        crate::database::DbAgentStatus::Available => AgentStatus::Available,
-                        crate::database::DbAgentStatus::Busy => AgentStatus::Busy(vec![]),
-                        crate::database::DbAgentStatus::Offline => AgentStatus::Offline,
-                        crate::database::DbAgentStatus::Reserved => AgentStatus::Available, // Treat as available
+                                            crate::database::DbAgentStatus::Available => AgentStatus::Available,
+                    crate::database::DbAgentStatus::Busy => AgentStatus::Busy(vec![]),
+                    crate::database::DbAgentStatus::PostCallWrapUp => AgentStatus::PostCallWrapUp,
+                    crate::database::DbAgentStatus::Offline => AgentStatus::Offline,
+                    crate::database::DbAgentStatus::Reserved => AgentStatus::Available, // Treat as available
                     },
                     department: None,
                     extension: None,

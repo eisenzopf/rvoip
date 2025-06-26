@@ -102,7 +102,7 @@ impl CallCenterEngine {
             .iter()
             .filter(|entry| {
                 let agent_info = entry.value();
-                // Check if agent is available
+                // Check if agent is available (not busy or in post-call wrap-up)
                 matches!(agent_info.status, AgentStatus::Available) &&
                 // Check if agent has capacity
                 agent_info.current_calls < agent_info.max_calls &&
@@ -245,12 +245,13 @@ impl CallCenterEngine {
             .unwrap_or(0)
     }
     
-    /// Get list of available agents
+    /// Get list of available agents (excludes agents in post-call wrap-up)
     async fn get_available_agents(&self) -> Vec<AgentId> {
         self.available_agents
             .iter()
             .filter(|entry| {
                 let agent_info = entry.value();
+                // Only consider agents with Available status (not Busy or PostCallWrapUp)
                 matches!(agent_info.status, AgentStatus::Available) &&
                 agent_info.current_calls < agent_info.max_calls
             })
@@ -302,11 +303,12 @@ impl CallCenterEngine {
         queue_id: &str,
         agent_id: &AgentId,
     ) -> Option<QueuedCall> {
-        // Check if this agent is still actually available
+        // Check if this agent is still actually available (not busy or in post-call wrap-up)
         let agent_still_available = self.available_agents
             .get(agent_id)
             .map(|entry| {
                 let agent_info = entry.value();
+                // Only consider agents with Available status (not Busy or PostCallWrapUp)
                 matches!(agent_info.status, AgentStatus::Available) &&
                 agent_info.current_calls < agent_info.max_calls
             })
@@ -320,6 +322,74 @@ impl CallCenterEngine {
         // Try to dequeue a call
         let mut queue_manager = self.queue_manager.write().await;
         queue_manager.dequeue_for_agent(queue_id).unwrap_or(None)
+    }
+    
+    /// Atomically try to assign a call to a specific agent
+    /// Returns the dequeued call only if the agent was successfully reserved
+    async fn try_assign_to_specific_agent(
+        &self,
+        queue_id: &str,
+        agent_id: &AgentId,
+    ) -> Option<QueuedCall> {
+        // First, try to atomically reserve the agent
+        let agent_reserved = self.available_agents
+            .get_mut(agent_id)
+            .map(|mut entry| {
+                let agent_info = entry.value_mut();
+                // Only reserve if agent is truly available
+                if matches!(agent_info.status, AgentStatus::Available) && 
+                   agent_info.current_calls < agent_info.max_calls {
+                    // Mark agent as busy immediately
+                    agent_info.status = AgentStatus::Busy(vec![]);
+                    agent_info.current_calls += 1;
+                    info!("🔒 Reserved agent {} for assignment", agent_id);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false);
+        
+        if !agent_reserved {
+            debug!("Could not reserve agent {} - already busy or unavailable", agent_id);
+            return None;
+        }
+        
+        // Agent is reserved, now try to dequeue a call
+        let mut queue_manager = self.queue_manager.write().await;
+        match queue_manager.dequeue_for_agent(queue_id) {
+            Ok(Some(call)) => {
+                info!("✅ Dequeued call {} for reserved agent {}", call.session_id, agent_id);
+                Some(call)
+            }
+            Ok(None) => {
+                // No calls in queue, release the agent
+                warn!("No calls in queue {} despite monitor check, releasing agent {}", queue_id, agent_id);
+                drop(queue_manager); // Release lock before updating agent
+                
+                // Release the agent reservation
+                if let Some(mut entry) = self.available_agents.get_mut(agent_id) {
+                    let agent_info = entry.value_mut();
+                    agent_info.status = AgentStatus::Available;
+                    agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
+                    info!("🔓 Released agent {} reservation (no calls to assign)", agent_id);
+                }
+                None
+            }
+            Err(e) => {
+                error!("Failed to dequeue for agent {}: {}", agent_id, e);
+                drop(queue_manager); // Release lock before updating agent
+                
+                // Release the agent reservation on error
+                if let Some(mut entry) = self.available_agents.get_mut(agent_id) {
+                    let agent_info = entry.value_mut();
+                    agent_info.status = AgentStatus::Available;
+                    agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
+                    info!("🔓 Released agent {} reservation (dequeue error)", agent_id);
+                }
+                None
+            }
+        }
     }
     
     /// Handle assignment of a queued call to an agent
@@ -340,6 +410,9 @@ impl CallCenterEngine {
             }
             Err(e) => {
                 error!("Failed to assign call {} to agent {}: {}", session_id, agent_id, e);
+                
+                // The agent was already restored by assign_specific_agent_to_call on failure
+                // We just need to handle the call re-queuing
                 
                 // Mark as no longer being assigned
                 let mut queue_manager = engine.queue_manager.write().await;
@@ -448,11 +521,12 @@ impl CallCenterEngine {
                     }
                 }
                 
-                // Fallback to in-memory assignment
+                // Fallback to in-memory assignment with atomic agent reservation
                 let mut assignments_made = 0;
                 for agent_id in &available_agents {
-                    if let Some(queued_call) = engine.process_in_memory_assignment(&queue_id, agent_id).await {
-                        info!("📤 Dequeued call {} from queue {} for agent {}", 
+                    // Use atomic assignment to prevent race conditions
+                    if let Some(queued_call) = engine.try_assign_to_specific_agent(&queue_id, agent_id).await {
+                        info!("📤 Atomically assigned call {} from queue {} to agent {}", 
                               queued_call.session_id, queue_id, agent_id);
                         
                         // Log queue depth after dequeue
@@ -466,7 +540,9 @@ impl CallCenterEngine {
                             // Don't clear queue_id yet - we might need to re-queue
                         }
                         
-                        // Spawn task to handle the assignment
+                        // Note: Agent is already marked as busy by try_assign_to_specific_agent
+                        
+                        // Spawn task to handle the actual call setup
                         let engine_clone = engine.clone();
                         let queue_id_clone = queue_id.clone();
                         let agent_id_clone = agent_id.clone();
@@ -481,9 +557,9 @@ impl CallCenterEngine {
                         
                         assignments_made += 1;
                     } else {
-                        // No more calls in queue
-                        debug!("No more calls to dequeue from {}", queue_id);
-                        break;
+                        // Agent was not available or no more calls in queue
+                        debug!("Could not assign to agent {} (already taken or no calls)", agent_id);
+                        // Continue trying with next agent
                     }
                 }
                 

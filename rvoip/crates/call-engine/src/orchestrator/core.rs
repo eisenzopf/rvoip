@@ -24,7 +24,7 @@ use crate::routing::RoutingEngine;
 use crate::monitoring::MetricsCollector;
 use crate::database::DatabaseManager;
 
-use super::types::{CallInfo, AgentInfo, RoutingStats, OrchestratorStats, CallStatus, RoutingDecision, CustomerType, BridgeInfo};
+use super::types::{CallInfo, AgentInfo, RoutingStats, OrchestratorStats, CallStatus, RoutingDecision, CustomerType, BridgeInfo, PendingAssignment};
 use super::handler::CallCenterCallHandler;
 
 /// Core call center engine state
@@ -34,12 +34,13 @@ pub(super) struct CallCenterState {
     pub(super) active_calls: Arc<DashMap<SessionId, CallInfo>>,
     pub(super) active_bridges: Arc<DashMap<String, BridgeInfo>>,
     pub(super) queue_manager: Arc<RwLock<QueueManager>>,
-    pub(super) available_agents: Arc<DashMap<AgentId, AgentInfo>>,
+
     pub(super) routing_stats: Arc<RwLock<RoutingStats>>,
     pub(super) agent_registry: Arc<Mutex<AgentRegistry>>,
     pub(super) sip_registrar: Arc<Mutex<SipRegistrar>>,
     pub(super) active_queue_monitors: Arc<DashSet<String>>,
     pub(super) db_manager: Option<Arc<DatabaseManager>>,
+    pub(super) pending_assignments: Arc<DashMap<SessionId, PendingAssignment>>,
 }
 
 /// Call center orchestration engine
@@ -65,8 +66,7 @@ pub struct CallCenterEngine {
     /// Call tracking and routing with detailed info
     pub(super) active_calls: Arc<DashMap<SessionId, CallInfo>>,
     
-    /// Agent availability and skill tracking
-    pub(super) available_agents: Arc<DashMap<AgentId, AgentInfo>>,
+    // Removed: available_agents - now using database as single source of truth
     
     /// Call routing statistics and metrics
     pub(super) routing_stats: Arc<RwLock<RoutingStats>>,
@@ -82,6 +82,9 @@ pub struct CallCenterEngine {
     
     /// Session ID to Dialog ID mappings for robust lookup
     pub session_to_dialog: Arc<DashMap<String, String>>,
+    
+    /// Pending agent assignments waiting for answer
+    pub(super) pending_assignments: Arc<DashMap<SessionId, PendingAssignment>>,
 }
 
 impl CallCenterEngine {
@@ -122,6 +125,7 @@ impl CallCenterEngine {
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
             active_queue_monitors: Arc::new(DashSet::new()),
             session_to_dialog: Arc::new(DashMap::new()),
+            pending_assignments: Arc::new(DashMap::new()),
         });
         
         // Create CallHandler with weak reference to placeholder
@@ -159,6 +163,7 @@ impl CallCenterEngine {
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
             active_queue_monitors: Arc::new(DashSet::new()),
             session_to_dialog: Arc::new(DashMap::new()),
+            pending_assignments: Arc::new(DashMap::new()),
         });
         
         // CRITICAL FIX: Update the handler's weak reference to point to the real engine
@@ -440,6 +445,7 @@ impl Clone for CallCenterEngine {
             sip_registrar: self.sip_registrar.clone(),
             active_queue_monitors: self.active_queue_monitors.clone(),
             session_to_dialog: self.session_to_dialog.clone(),
+            pending_assignments: self.pending_assignments.clone(),
         }
     }
 } 

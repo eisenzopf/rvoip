@@ -225,6 +225,7 @@ pub enum DbAgentStatus {
     Offline,
     Available,
     Busy,  // Changed from Busy(Vec<SessionId>) to just Busy
+    PostCallWrapUp,
     Reserved,
 }
 
@@ -234,6 +235,7 @@ impl DbAgentStatus {
             DbAgentStatus::Offline => "OFFLINE",
             DbAgentStatus::Available => "AVAILABLE",
             DbAgentStatus::Busy => "BUSY",
+            DbAgentStatus::PostCallWrapUp => "POSTCALLWRAPUP",
             DbAgentStatus::Reserved => "RESERVED",
         }
     }
@@ -243,6 +245,7 @@ impl DbAgentStatus {
             "OFFLINE" => Some(DbAgentStatus::Offline),
             "AVAILABLE" => Some(DbAgentStatus::Available),
             "BUSY" => Some(DbAgentStatus::Busy),
+            "POSTCALLWRAPUP" => Some(DbAgentStatus::PostCallWrapUp),
             "RESERVED" => Some(DbAgentStatus::Reserved),
             _ => None,
         }

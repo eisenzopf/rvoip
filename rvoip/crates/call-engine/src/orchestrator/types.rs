@@ -7,6 +7,16 @@ use chrono::{DateTime, Utc};
 use rvoip_session_core::{SessionId, BridgeId};
 use crate::agent::{AgentId, AgentStatus};
 
+/// Tracks a call assignment that's waiting for an agent to answer
+#[derive(Debug, Clone)]
+pub struct PendingAssignment {
+    pub customer_session_id: SessionId,
+    pub agent_session_id: SessionId,
+    pub agent_id: AgentId,
+    pub timestamp: DateTime<Utc>,
+    pub customer_sdp: Option<String>,
+}
+
 /// Enhanced call information for tracking
 #[derive(Debug, Clone)]
 pub struct CallInfo {

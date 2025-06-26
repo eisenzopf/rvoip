@@ -18,7 +18,7 @@ use crate::agent::{AgentId, AgentStatus};
 use crate::error::{CallCenterError, Result as CallCenterResult};
 use crate::queue::{QueuedCall, QueueStats};
 use super::core::CallCenterEngine;
-use super::types::{CallInfo, CallStatus, CustomerType, RoutingDecision};
+use super::types::{CallInfo, CallStatus, CustomerType, RoutingDecision, PendingAssignment};
 
 impl CallCenterEngine {
     /// Process incoming call with sophisticated routing
@@ -303,20 +303,20 @@ impl CallCenterEngine {
     pub(super) async fn assign_specific_agent_to_call(&self, session_id: SessionId, agent_id: AgentId) -> CallCenterResult<()> {
         info!("🎯 Assigning specific agent {} to call: {}", agent_id, session_id);
         
-        // Get agent information and update status
-        let agent_info = if let Some((_key, mut agent_info)) = self.available_agents.remove(&agent_id) {
-            // PHASE 0.10: Log agent status transition
-            info!("🔄 Agent {} status change: Available → Busy (current_calls: {} → {})", 
-                  agent_id, agent_info.current_calls, agent_info.current_calls + 1);
-            
-            agent_info.status = AgentStatus::Busy(vec![session_id.clone()]);
-            agent_info.current_calls += 1;
-            Some(agent_info)
-        } else {
-            return Err(CallCenterError::orchestration(&format!("Agent {} not available", agent_id)));
+        // Get agent information - agent should already be marked as busy by the atomic assignment
+        let mut agent_info = match self.available_agents.get(&agent_id) {
+            Some(entry) => entry.value().clone(),
+            None => {
+                error!("Agent {} not found in available agents", agent_id);
+                return Err(CallCenterError::orchestration(&format!("Agent {} not found", agent_id)));
+            }
         };
         
-        if let Some(mut agent_info) = agent_info {
+        // Verify agent is marked as busy (should have been done by try_assign_to_specific_agent)
+        if !matches!(agent_info.status, AgentStatus::Busy(_)) {
+            warn!("Agent {} is not marked as busy - possible race condition", agent_id);
+            // Still proceed but log the warning
+        }
             // Update database with agent's new BUSY status and incremented call count
             if let Some(db_manager) = &self.db_manager {
                 // Update call count in database
@@ -377,10 +377,14 @@ impl CallCenterEngine {
                 }
                 Err(e) => {
                     error!("Failed to prepare outgoing call to agent {}: {}", agent_id, e);
-                    let mut restored_agent = agent_info;
-                    restored_agent.status = AgentStatus::Available;
-                    restored_agent.current_calls = restored_agent.current_calls.saturating_sub(1);
-                    self.available_agents.insert(agent_id.clone(), restored_agent);
+                    
+                    // Restore agent to available state
+                    if let Some(mut entry) = self.available_agents.get_mut(&agent_id) {
+                        let agent_info = entry.value_mut();
+                        agent_info.status = AgentStatus::Available;
+                        agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
+                        info!("🔓 Restored agent {} to available after prepare failure", agent_id);
+                    }
                     
                     // Update database to reflect agent is available again
                     if let Some(db_manager) = &self.db_manager {
@@ -453,11 +457,14 @@ impl CallCenterEngine {
                 }
                 Err(e) => {
                     error!("Failed to initiate call to agent {}: {}", agent_id, e);
-                    // TODO: Hang up the customer call or re-queue it
-                    let mut restored_agent = agent_info;
-                    restored_agent.status = AgentStatus::Available;
-                    restored_agent.current_calls = restored_agent.current_calls.saturating_sub(1);
-                    self.available_agents.insert(agent_id.clone(), restored_agent);
+                    
+                    // Restore agent to available state
+                    if let Some(mut entry) = self.available_agents.get_mut(&agent_id) {
+                        let agent_info = entry.value_mut();
+                        agent_info.status = AgentStatus::Available;
+                        agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
+                        info!("🔓 Restored agent {} to available after initiate failure", agent_id);
+                    }
                     
                     // Update database to reflect agent is available again
                     if let Some(db_manager) = &self.db_manager {
@@ -479,138 +486,91 @@ impl CallCenterEngine {
             // Update agent info with the new session ID
             agent_info.session_id = agent_session_id.clone();
             
-            // Step 3: Wait for the agent to answer the call
-            info!("⏳ Waiting for agent {} to answer...", agent_id);
+            // Step 3: Store pending assignment instead of waiting
+            info!("📝 Storing pending assignment for agent {} to answer", agent_id);
             
-            match coordinator.wait_for_answer(&agent_session_id, std::time::Duration::from_secs(30)).await {
-                Ok(_) => {
-                    info!("✅ Agent {} answered the call", agent_id);
+            // Get customer's SDP from the call info
+            let customer_sdp = self.active_calls.get(&session_id)
+                .and_then(|call_info| call_info.customer_sdp.clone());
+            
+            let pending_assignment = PendingAssignment {
+                customer_session_id: session_id.clone(),
+                agent_session_id: agent_session_id.clone(),
+                agent_id: agent_id.clone(),
+                timestamp: chrono::Utc::now(),
+                customer_sdp: customer_sdp,
+            };
+            
+            // Store in pending assignments collection using agent session ID as key
+            self.pending_assignments.insert(agent_session_id.clone(), pending_assignment);
+            
+            // Update agent info with the new session ID
+            if let Some(mut entry) = self.available_agents.get_mut(&agent_id) {
+                entry.session_id = agent_session_id.clone();
+            }
+            
+            info!("✅ Agent {} call initiated - waiting for answer event", agent_id);
+            
+            // Start timeout task for agent answer (30 seconds)
+            let engine = Arc::new(self.clone());
+            let timeout_agent_id = agent_id.clone();
+            let timeout_agent_session_id = agent_session_id.clone();
+            let timeout_customer_session_id = session_id.clone();
+            
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                
+                // Check if assignment is still pending
+                if engine.pending_assignments.contains_key(&timeout_agent_session_id) {
+                    warn!("⏰ Agent {} failed to answer within 30 seconds", timeout_agent_id);
                     
-                    // Get agent's SDP from their 200 OK response
-                    let agent_sdp = match SessionControl::get_media_info(coordinator, &agent_session_id).await {
-                        Ok(Some(media_info)) => {
-                            info!("📄 Retrieved agent's SDP answer");
-                            media_info.remote_sdp.or(media_info.local_sdp)
-                        }
-                        Ok(None) => {
-                            warn!("⚠️ No media info from agent");
-                            None
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to get agent media info: {}", e);
-                            None
-                        }
-                    };
+                    // Remove from pending
+                    engine.pending_assignments.remove(&timeout_agent_session_id);
                     
-                    info!("📞 B2BUA: Bridging customer {} with agent {}", session_id, agent_id);
-                    
-                    // Customer is already accepted with 200 OK in process_incoming_call
-                    // No need to accept again - just bridge the sessions
-                    
-                    // Now bridge the two sessions for media flow
-                    info!("🌉 Bridging customer {} with agent {} (session {:?})", 
-                          session_id, agent_id, agent_session_id);
-                    
-                    let bridge_start = std::time::Instant::now();
-                    
-                    match coordinator.bridge_sessions(&session_id, &agent_session_id).await {
-                        Ok(bridge_id) => {
-                            let bridge_time = bridge_start.elapsed().as_millis();
-                            info!("✅ Successfully bridged customer {} with agent {} (bridge: {}) in {}ms", 
-                                  session_id, agent_id, bridge_id, bridge_time);
-                            
-                            // Update call info
-                            if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
-                                call_info.agent_id = Some(agent_id.clone());
-                                call_info.bridge_id = Some(bridge_id);
-                                call_info.status = CallStatus::Bridged;
-                                call_info.answered_at = Some(chrono::Utc::now());
-                            }
-                            
-                            // Store updated agent info (they're busy but we track all agents here)
-                            self.available_agents.insert(agent_id.clone(), agent_info);
-                        },
-                        Err(e) => {
-                            error!("Failed to bridge sessions: {}", e);
-                            
-                            // Hang up the agent call
-                            let _ = coordinator.terminate_session(&agent_session_id).await;
-                            
-                            // Return agent to available pool
-                            agent_info.status = AgentStatus::Available;
-                            agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
-                            self.available_agents.insert(agent_id.clone(), agent_info);
-                            
-                            // Update database to reflect agent is available again
-                            if let Some(db_manager) = &self.db_manager {
-                                if let Err(e) = db_manager.update_agent_call_count(&agent_id.0, -1).await {
-                                    error!("Failed to decrement agent call count in database: {}", e);
-                                }
-                                if let Err(e) = db_manager.update_agent_status(&agent_id.0, AgentStatus::Available).await {
-                                    error!("Failed to restore agent status to Available in database: {}", e);
-                                }
-                            }
-                            
-                            return Err(CallCenterError::orchestration(&format!("Bridge failed: {}", e)));
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("❌ Agent {} failed to answer: {}", agent_id, e);
-                    
-                    // Hang up the attempted agent call
-                    if let Err(term_err) = coordinator.terminate_session(&agent_session_id).await {
-                        warn!("Failed to terminate unanswered agent call: {}", term_err);
+                    // Terminate the agent call
+                    if let Some(coordinator) = &engine.session_coordinator {
+                        let _ = coordinator.terminate_session(&timeout_agent_session_id).await;
                     }
                     
                     // Return agent to available pool
-                    agent_info.status = AgentStatus::Available;
-                    agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
-                    self.available_agents.insert(agent_id.clone(), agent_info);
-                    
-                    // Update database to reflect agent is available again
-                    if let Some(db_manager) = &self.db_manager {
-                        if let Err(e) = db_manager.update_agent_call_count(&agent_id.0, -1).await {
-                            error!("Failed to decrement agent call count in database: {}", e);
-                        }
-                        if let Err(e) = db_manager.update_agent_status(&agent_id.0, AgentStatus::Available).await {
-                            error!("Failed to restore agent status to Available in database: {}", e);
-                        }
+                    if let Some(mut agent_info) = engine.available_agents.get_mut(&timeout_agent_id) {
+                        agent_info.status = AgentStatus::Available;
+                        agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
                     }
                     
-                    // Update call info to mark as queued again
-                    if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+                    // Update database
+                    if let Some(db_manager) = &engine.db_manager {
+                        let _ = db_manager.update_agent_call_count(&timeout_agent_id.0, -1).await;
+                        let _ = db_manager.update_agent_status(&timeout_agent_id.0, AgentStatus::Available).await;
+                    }
+                    
+                    // Re-queue the customer call
+                    if let Some(mut call_info) = engine.active_calls.get_mut(&timeout_customer_session_id) {
                         call_info.status = CallStatus::Queued;
                         call_info.agent_id = None;
                         
-                        // Re-queue the customer call with higher priority
                         if let Some(queue_id) = &call_info.queue_id {
-                            let mut queue_manager = self.queue_manager.write().await;
-                            let mut requeued_call = QueuedCall {
-                                session_id: session_id.clone(),
+                            let mut queue_manager = engine.queue_manager.write().await;
+                            let requeued_call = QueuedCall {
+                                session_id: timeout_customer_session_id.clone(),
                                 caller_id: call_info.caller_id.clone(),
                                 priority: call_info.priority.saturating_sub(5), // Higher priority
                                 queued_at: call_info.queued_at.unwrap_or_else(chrono::Utc::now),
                                 estimated_wait_time: None,
-                                retry_count: 0,  // Reset retry count when re-queuing from failed agent assignment
+                                retry_count: 0,
                             };
                             
-                            if let Err(queue_err) = queue_manager.enqueue_call(queue_id, requeued_call) {
-                                error!("Failed to re-queue call {}: {}", session_id, queue_err);
-                                // Last resort: terminate the customer call
-                                if let Some(coordinator) = &self.session_coordinator {
-                                    let _ = coordinator.terminate_session(&session_id).await;
-                                }
+                            if let Err(e) = queue_manager.enqueue_call(queue_id, requeued_call) {
+                                error!("Failed to re-queue call after timeout: {}", e);
                             } else {
-                                info!("📞 Re-queued call {} with higher priority", session_id);
+                                info!("📞 Re-queued call {} after agent timeout", timeout_customer_session_id);
                             }
                         }
                     }
-                    
-                    return Err(CallCenterError::orchestration(&format!("Agent failed to answer: {}", e)));
                 }
-            }
-        }
+            });
+            
+            // Return immediately - the event handler will complete the bridge when agent answers
         
         Ok(())
     }
@@ -667,6 +627,16 @@ impl CallCenterEngine {
         // Get call info and clean up
         let call_info = self.active_calls.remove(&session_id).map(|(_, v)| v);
         
+        // Remove from database queue if the call was queued
+        if let Some(db_manager) = &self.db_manager {
+            // Create a cleanup method that removes the call from both tables
+            if let Err(e) = db_manager.remove_call_from_queue(&session_id.0).await {
+                debug!("Failed to remove call {} from queue: {}", session_id, e);
+            } else {
+                debug!("🧹 Cleaned up call {} from database", session_id);
+            }
+        }
+        
         // Update agent status if this call had an agent assigned
         if let Some(call_info) = &call_info {
             if let Some(agent_id) = &call_info.agent_id {
@@ -677,12 +647,43 @@ impl CallCenterEngine {
                     agent_info.current_calls = agent_info.current_calls.saturating_sub(1);
                     agent_info.last_call_end = Some(chrono::Utc::now());
                     
-                    // If agent has no active calls, mark as available
+                    // If agent has no active calls, mark as post-call wrap-up
                     if agent_info.current_calls == 0 {
                         // PHASE 0.10: Log agent status transition
-                        info!("🔄 Agent {} status change: Busy → Available (no active calls)", agent_id);
-                        agent_info.status = AgentStatus::Available;
-                        info!("✅ Agent {} is now available for new calls", agent_id);
+                        info!("🔄 Agent {} status change: Busy → PostCallWrapUp (entering wrap-up time)", agent_id);
+                        agent_info.status = AgentStatus::PostCallWrapUp;
+                        info!("⏰ Agent {} entering 10-second post-call wrap-up", agent_id);
+                        
+                        // Schedule transition to Available after 10 seconds
+                        let engine = Arc::new(self.clone());
+                        let wrap_up_agent_id = agent_id.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                            
+                            // Transition from PostCallWrapUp to Available
+                            if let Some(mut agent_info) = engine.available_agents.get_mut(&wrap_up_agent_id) {
+                                if matches!(agent_info.status, AgentStatus::PostCallWrapUp) {
+                                    info!("🔄 Agent {} status change: PostCallWrapUp → Available (wrap-up complete)", wrap_up_agent_id);
+                                    agent_info.status = AgentStatus::Available;
+                                    info!("✅ Agent {} is now available for new calls", wrap_up_agent_id);
+                                    
+                                    // Update database
+                                    if let Some(db_manager) = &engine.db_manager {
+                                        if let Err(e) = db_manager.update_agent_status(&wrap_up_agent_id.0, AgentStatus::Available).await {
+                                            error!("Failed to update agent status to Available in database: {}", e);
+                                        } else {
+                                            info!("✅ Updated agent {} status to Available in database", wrap_up_agent_id);
+                                        }
+                                    }
+                                    
+                                    // Check for stuck assignments and queued calls
+                                    engine.check_stuck_assignments().await;
+                                    
+                                    // Check if there are queued calls that can be assigned to this agent
+                                    engine.try_assign_queued_calls_to_agent(wrap_up_agent_id.clone()).await;
+                                }
+                            }
+                        });
                     } else {
                         info!("📞 Agent {} still busy with {} active calls", agent_id, agent_info.current_calls);
                     }
@@ -704,13 +705,22 @@ impl CallCenterEngine {
                         error!("Failed to update agent call count in database: {}", e);
                     }
                     
-                    // Update agent status in database if they're now available
+                    // Update agent status in database based on current status
                     if let Some(agent_info) = self.available_agents.get(agent_id) {
-                        if matches!(agent_info.status, AgentStatus::Available) {
-                            if let Err(e) = db_manager.update_agent_status(&agent_id.0, AgentStatus::Available).await {
-                                error!("Failed to update agent status to Available in database: {}", e);
-                            } else {
-                                info!("✅ Updated agent {} status to Available in database", agent_id);
+                        // Use the actual status (which might be PostCallWrapUp)
+                        if let Err(e) = db_manager.update_agent_status(&agent_id.0, agent_info.status.clone()).await {
+                            error!("Failed to update agent status in database: {}", e);
+                        } else {
+                            match &agent_info.status {
+                                AgentStatus::PostCallWrapUp => {
+                                    info!("✅ Updated agent {} status to PostCallWrapUp in database", agent_id);
+                                }
+                                AgentStatus::Available => {
+                                    info!("✅ Updated agent {} status to Available in database", agent_id);
+                                }
+                                status => {
+                                    info!("✅ Updated agent {} status to {:?} in database", agent_id, status);
+                                }
                             }
                         }
                     }
@@ -829,6 +839,84 @@ impl CallCenterEngine {
                 
                 break; // Only assign one call at a time
             }
+        }
+    }
+    
+    /// Check for calls stuck in "being assigned" state and re-queue them
+    pub(super) async fn check_stuck_assignments(&self) {
+        debug!("🔍 Checking for stuck assignments");
+        
+        // Get list of calls that might be stuck
+        let mut stuck_calls = Vec::new();
+        
+        // Check active calls for those in Connecting state without an agent actively handling them
+        for entry in self.active_calls.iter() {
+            let (session_id, call_info) = (entry.key(), entry.value());
+            
+            // A call is stuck if:
+            // 1. It's in Connecting state (being assigned)
+            // 2. It has a queue_id (was queued)
+            // 3. It's not in pending_assignments (no agent is handling it)
+            if matches!(call_info.status, super::types::CallStatus::Connecting) &&
+               call_info.queue_id.is_some() &&
+               !self.pending_assignments.contains_key(session_id) {
+                
+                // Check how long it's been in this state
+                let duration = chrono::Utc::now().signed_duration_since(call_info.created_at);
+                if duration.num_seconds() > 5 {  // Stuck for more than 5 seconds
+                    warn!("⚠️ Found stuck call {} in Connecting state for {}s", 
+                          session_id, duration.num_seconds());
+                    stuck_calls.push((session_id.clone(), call_info.queue_id.clone().unwrap()));
+                }
+            }
+        }
+        
+        // Re-queue stuck calls
+        let stuck_count = stuck_calls.len();
+        for (session_id, queue_id) in stuck_calls {
+            info!("🔄 Re-queuing stuck call {} to queue {}", session_id, queue_id);
+            
+            // Update call status back to Queued
+            if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+                call_info.status = super::types::CallStatus::Queued;
+                
+                // Create a QueuedCall to re-enqueue
+                let queued_call = QueuedCall {
+                    session_id: session_id.clone(),
+                    caller_id: call_info.caller_id.clone(),
+                    priority: call_info.priority.saturating_sub(10), // Higher priority for stuck calls
+                    queued_at: call_info.queued_at.unwrap_or_else(chrono::Utc::now),
+                    estimated_wait_time: None,
+                    retry_count: 1,  // Mark as retry
+                };
+                
+                // Re-enqueue the call
+                let mut queue_manager = self.queue_manager.write().await;
+                
+                // First, clear any "being assigned" flag
+                queue_manager.mark_as_not_assigned(&session_id);
+                
+                // Then re-queue
+                match queue_manager.enqueue_call(&queue_id, queued_call) {
+                    Ok(position) => {
+                        info!("✅ Successfully re-queued stuck call {} with higher priority at position {}", session_id, position);
+                        
+                        // Start queue monitor if needed
+                        self.monitor_queue_for_agents(queue_id).await;
+                    }
+                    Err(e) => {
+                        error!("Failed to re-queue stuck call {}: {}", session_id, e);
+                        // As a last resort, terminate the call
+                        if let Some(coordinator) = &self.session_coordinator {
+                            let _ = coordinator.terminate_session(&session_id).await;
+                        }
+                    }
+                }
+            }
+        }
+        
+        if stuck_count > 0 {
+            info!("🔄 Re-queued {} stuck calls", stuck_count);
         }
     }
     

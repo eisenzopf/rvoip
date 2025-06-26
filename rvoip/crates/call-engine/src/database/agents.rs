@@ -63,6 +63,7 @@ impl DatabaseManager {
         let status_str = match status {
             AgentStatus::Available => "AVAILABLE",
             AgentStatus::Busy(_) => "BUSY",
+            AgentStatus::PostCallWrapUp => "POSTCALLWRAPUP",
             AgentStatus::Offline => "OFFLINE",
         };
         
@@ -248,6 +249,7 @@ pub struct AgentStats {
     pub total_agents: usize,
     pub available_agents: usize,
     pub busy_agents: usize,
+    pub post_call_wrap_up_agents: usize,
     pub offline_agents: usize,
     pub reserved_agents: usize,
 }
@@ -264,6 +266,7 @@ impl DatabaseManager {
             total_agents: 0,
             available_agents: 0,
             busy_agents: 0,
+            post_call_wrap_up_agents: 0,
             offline_agents: 0,
             reserved_agents: 0,
         };
@@ -278,6 +281,7 @@ impl DatabaseManager {
             match status.as_str() {
                 "AVAILABLE" => stats.available_agents = count,
                 "BUSY" => stats.busy_agents = count,
+                "POSTCALLWRAPUP" => stats.post_call_wrap_up_agents = count,
                 "OFFLINE" => stats.offline_agents = count,
                 "RESERVED" => stats.reserved_agents = count,
                 _ => warn!("Unknown agent status in database: {}", status),

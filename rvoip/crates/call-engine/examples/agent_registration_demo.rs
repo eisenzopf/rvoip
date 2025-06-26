@@ -139,6 +139,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let status = match agent.status {
             AgentStatus::Available => "Available ✅",
             AgentStatus::Busy(_) => "Busy 📞",
+            AgentStatus::PostCallWrapUp => "Wrap-up ⏰",
             AgentStatus::Offline => "Offline 🚪",
         };
         info!("  {} ({}): {}", agent.display_name, agent.id, status);

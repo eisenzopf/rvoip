@@ -965,6 +965,153 @@ async fn monitor_queue(&self, queue_id: &str) {
 
 **Result**: Clean, maintainable B2BUA implementation with proper bidirectional session tracking.
 
+### Phase 0.18 - Fix Event-Driven Agent Answer Handling ✅ COMPLETE
+
+**Problem Discovered**: The orchestrator uses a blocking `wait_for_answer()` call instead of the event-driven architecture, causing agent answers to not be recognized.
+
+**Root Cause**:
+1. `assign_specific_agent_to_call()` calls `wait_for_answer()` which polls for state changes
+2. The server's outgoing call session never transitions to Active state
+3. Agent sends 200 OK but the server-side session doesn't update
+4. After 30s timeout, assignment fails even though agent answered
+5. This violates the event-driven design principle of the system
+
+**Current (Wrong) Implementation**:
+```rust
+// Blocking wait that doesn't work
+match coordinator.wait_for_answer(&agent_session_id, Duration::from_secs(30)).await {
+    Ok(()) => { /* proceed */ }
+    Err(e) => { /* timeout */ }
+}
+```
+
+**Correct Event-Driven Implementation**:
+```rust
+// Should listen for events instead:
+// 1. Create outgoing call to agent
+// 2. Store pending assignment state
+// 3. Return immediately
+// 4. Handle CallEstablished event when agent answers
+// 5. Complete the bridge in event handler
+```
+
+**Implementation Completed**:
+
+#### Task 1: Understand Current Event Flow ✅
+- [x] Traced where `on_call_established` events are fired (coordinator/event_handler.rs)
+- [x] Verified events are sent for both legs of B2BUA calls
+- [x] Confirmed server's outgoing call generates events
+- [x] Documented the complete event flow
+
+#### Task 2: Create Pending Assignment State ✅
+- [x] Added `PendingAssignment` struct to track calls awaiting agent answer
+- [x] Stores: customer_session_id, agent_session_id, agent_id, timestamp, customer_sdp
+- [x] Added `pending_assignments` collection to CallCenterEngine
+- [x] Implemented timeout mechanism (30s) for abandoned assignments
+- [x] Clean up on call termination handled in timeout task
+
+#### Task 3: Refactor assign_specific_agent_to_call ✅
+- [x] Removed the blocking `wait_for_answer()` call
+- [x] After creating outgoing call, stores in pending_assignments
+- [x] Returns immediately (async but non-blocking)
+- [x] Event handler completes the flow
+
+#### Task 4: Implement Event-Based Bridge Completion ✅
+- [x] In `on_call_established` handler:
+  - Checks if this is an agent answering (check pending_assignments)
+  - If yes, retrieves customer session info
+  - Creates bridge between customer and agent
+  - Removes from pending_assignments
+  - Updates database state
+- [x] Handle edge cases:
+  - Customer hangs up while waiting (handled via termination)
+  - Agent rejects call (handled via timeout)
+  - Timeout scenarios (30s timeout with re-queue)
+
+#### Task 5: Add Comprehensive Event Logging ✅
+- [x] Log all events with session IDs
+- [x] Track event flow for debugging
+- [x] Monitor pending assignment queue depth
+- [x] Added detailed logging throughout
+
+#### Task 6: Clean Up Obsolete Code ✅
+- [x] Removed wait_for_answer usage
+- [x] Ensured all flows are event-driven
+- [x] Updated documentation
+
+**Benefits Achieved**:
+1. **Non-blocking**: Server can handle other calls while waiting
+2. **Scalable**: No threads blocked on waits
+3. **Reliable**: Events ensure state consistency
+4. **Debuggable**: Clear event trail for each call
+5. **Flexible**: Easy to add new event handlers
+
+**Test Success Criteria**:
+- [x] No more "Agent failed to answer" when agent actually answered
+- [ ] All 5 test calls complete successfully (needs E2E testing)
+- [x] Event logs show proper flow
+- [x] No blocking operations in hot path
+- [x] Pending assignments cleaned up properly
+
+**Estimated Time**: 1-2 days ✅ COMPLETED
+**Priority**: CRITICAL - Core architectural issue blocking successful calls
+
+### Phase 0.19 - Fix Queue Assignment Race Conditions 🚨 NEW
+
+**Problem Discovered from E2E Testing**: Only 2 out of 5 calls completed successfully. The other 3 calls got stuck in "being assigned" state.
+
+**Root Cause Analysis**:
+1. Queue monitor dequeues calls and marks them as "being assigned" without verifying agent availability
+2. When no agents are available, these calls are lost - neither in queue nor assigned
+3. No re-queue logic when assignment fails
+4. When agents exit wrap-up state, system doesn't check for stuck assignments
+
+**Fix Tasks**:
+
+#### Task 1: Fix Queue Assignment Logic ⚠️ CRITICAL
+- [x] Only dequeue calls when an agent is confirmed available
+- [x] Check agent availability atomically with dequeue operation
+- [x] Prevent marking calls as "being assigned" without an actual agent
+
+#### Task 2: Add Re-queue on Assignment Failure
+- [x] If `assign_specific_agent_to_call` fails, re-queue the call
+- [x] Clear "being assigned" flag before re-queuing
+- [x] Increment retry counter and apply priority boost
+- [ ] Add exponential backoff for retries
+
+#### Task 3: Fix Post-Wrap-Up Assignment Check
+- [x] When agents exit PostCallWrapUp state, check for:
+  - Calls stuck in "being assigned" state
+  - Calls waiting in queue
+- [x] Implement `check_stuck_assignments()` method
+- [x] Call it after wrap-up timer completes
+
+#### Task 4: Add Assignment Timeout Recovery
+- [x] Add timeout for "being assigned" state (e.g., 5 seconds)
+- [x] If assignment hasn't completed within timeout, re-queue
+- [x] Log warnings for stuck assignments
+- [ ] Track metrics on assignment failures
+
+#### Task 5: Fix SIPp Test Configuration
+- [ ] Increase test duration to allow wrap-up testing
+- [ ] Ensure customer calls stay active for full test duration
+- [ ] Add proper call completion verification
+
+**Implementation Order**:
+1. Fix queue assignment logic (prevents new occurrences)
+2. Add re-queue on failure (handles current failures)
+3. Add timeout recovery (catches edge cases)
+4. Fix post-wrap-up checks (utilizes freed agents)
+5. Update tests (verify fixes work)
+
+**Test Scenario**:
+- 5 simultaneous calls
+- 2 agents
+- Expected: All 5 calls complete (2 immediate, 3 after wrap-up)
+
+**Estimated Time**: 1-2 days
+**Priority**: CRITICAL - 60% of calls currently fail
+
 ### Phase 1 - Advanced Features
 
 #### 1.1 Core IVR Module
