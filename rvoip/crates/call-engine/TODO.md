@@ -887,6 +887,84 @@ async fn monitor_queue(&self, queue_id: &str) {
 **Estimated Time**: 1 week
 **Priority**: HIGH - Solves multiple critical issues with elegant database solution
 
+### Phase 0.16 - Database Synchronization for Agent Status ✅ COMPLETE
+
+**Problem Discovered**: Agents remained stuck as "Busy" in the database even after calls ended, preventing them from receiving new calls.
+
+**Root Cause**:
+1. Only in-memory agent status was updated when calls ended
+2. Database remained out of sync with actual agent state
+3. Queue assignment logic reads from database, not memory
+4. Agents appeared busy forever, even with no active calls
+
+**Fixes Implemented**:
+
+#### 1. Call Termination Cleanup
+- [x] Added database updates in `handle_call_termination()` to:
+  - Decrement agent's `current_calls` counter
+  - Update agent status to AVAILABLE when `current_calls == 0`
+  - Log all agent status transitions
+
+#### 2. Agent Assignment Updates
+- [x] When agent is assigned to a call:
+  - Update database to BUSY status
+  - Increment `current_calls` in database
+  - Keep database in sync with memory
+
+#### 3. Failure Recovery
+- [x] When call preparation fails:
+  - Restore agent to AVAILABLE in database
+  - Decrement `current_calls` back
+- [x] When agent fails to answer:
+  - Same recovery process
+- [x] When bridge creation fails:
+  - Same recovery process
+
+#### 4. Handle Both Call Legs
+- [x] Fixed termination to find agent by their session ID
+- [x] Whether customer or agent hangs up first, agent status is properly updated
+- [x] Database stays synchronized in all scenarios
+
+**Result**: Agents now properly transition between Available/Busy states in the database, allowing continuous call processing.
+
+### Phase 0.17 - B2BUA Architecture Improvements ✅ COMPLETE
+
+**Problem**: Complex session tracking and difficulty forwarding BYE messages between call legs.
+
+**Solution Implemented**: Added `related_session_id` field to link B2BUA call legs bidirectionally.
+
+#### Architecture Improvements:
+
+1. **Added `related_session_id` to CallInfo**
+   - Links customer and agent sessions
+   - Enables direct lookup of related leg
+   - No more complex mappings or searching
+
+2. **Both Call Legs Have Complete Information**:
+   - Customer Session: Has `agent_id` and `related_session_id` (→ agent)
+   - Agent Session: Has `agent_id` and `related_session_id` (→ customer)
+   - Symmetric design for easy navigation
+
+3. **Simplified Code**:
+   - Direct lookup via `related_session_id` for BYE forwarding
+   - Simple agent lookup via `agent_id` (present on both legs)
+   - Removed complex `dialog_mappings` collection
+   - Cleaner termination handling
+
+4. **Benefits**:
+   - Faster lookups (O(1) instead of searching)
+   - Less memory usage (no duplicate mappings)
+   - Simpler code maintenance
+   - Better debugging with clear relationships
+
+**Implementation Details**:
+- Set `related_session_id` when creating agent call
+- Both legs can find each other directly
+- BYE forwarding uses simple lookup
+- Agent cleanup works from either leg
+
+**Result**: Clean, maintainable B2BUA implementation with proper bidirectional session tracking.
+
 ### Phase 1 - Advanced Features
 
 #### 1.1 Core IVR Module

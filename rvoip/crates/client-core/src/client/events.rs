@@ -267,7 +267,26 @@ impl CallHandler for ClientCallHandler {
         if let Some(handler) = self.client_event_handler.read().await.as_ref() {
             let action = handler.on_incoming_call(incoming_call_info).await;
             match action {
-                crate::events::CallAction::Accept => CallDecision::Accept(None),
+                crate::events::CallAction::Accept => {
+                    // When Accept is returned, we need to generate SDP answer and accept the call
+                    tracing::info!("Handler returned Accept for call {}, generating SDP answer", call_id);
+                    
+                    // Generate SDP answer if the incoming call has an offer
+                    let sdp_answer = if let Some(offer) = &call.sdp {
+                        // Use session-core's media control to generate answer
+                        // Note: We need access to the coordinator here, which we don't have directly
+                        // So we'll let session-core handle SDP generation by passing None
+                        // and marking that we need SDP generation
+                        tracing::info!("Incoming call has SDP offer, will generate answer in session-core");
+                        None // Let session-core generate the answer
+                    } else {
+                        tracing::info!("No SDP offer in incoming call, accepting without SDP");
+                        None
+                    };
+                    
+                    // Return Accept with the SDP (or None to let session-core generate it)
+                    CallDecision::Accept(sdp_answer)
+                }
                 crate::events::CallAction::Reject => CallDecision::Reject("Call rejected by user".to_string()),
                 crate::events::CallAction::Ignore => CallDecision::Defer,
             }

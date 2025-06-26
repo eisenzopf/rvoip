@@ -54,7 +54,6 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let agents = vec![
         ("alice", "Alice Smith", "support"),
         ("bob", "Bob Johnson", "support"),
-        ("charlie", "Charlie Brown", "sales"),
     ];
     server.create_test_agents(agents).await?;
 

@@ -178,13 +178,13 @@ main() {
     
     # Check agent status in server log
     echo -e "\n${YELLOW}Checking agent registration status...${NC}"
-    if grep -q "Updated agent.*alice.*status to available" "$SERVER_LOG"; then
+    if grep -q "Agent alice added to available agents pool" "$SERVER_LOG"; then
         echo -e "Alice: ${GREEN}Registered${NC}"
     else
         echo -e "Alice: ${RED}Not registered${NC}"
     fi
     
-    if grep -q "Updated agent.*bob.*status to available" "$SERVER_LOG"; then
+    if grep -q "Agent bob added to available agents pool" "$SERVER_LOG"; then
         echo -e "Bob: ${GREEN}Registered${NC}"
     else
         echo -e "Bob: ${RED}Not registered${NC}"
