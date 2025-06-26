@@ -26,7 +26,16 @@ impl CallCenterEngine {
         let session_id = call.id.clone();
         let routing_start = std::time::Instant::now();
         
-        info!("📞 Processing incoming call: {} from {} to {}", session_id, call.from, call.to);
+        info!("📞 Processing incoming call: {} from {} to {}", 
+              call.id, call.from, call.to);
+        
+        // PHASE 17.3: IncomingCall doesn't have dialog_id, we'll get it from events
+        // For now, just track that we don't have the dialog ID yet
+        let incoming_dialog_id = None; // Will be populated when we get dialog events
+        info!("🔍 Incoming call - dialog ID will be set from events");
+        
+        // Create a session ID for internal tracking - IncomingCall.id is already a SessionId
+        let session_id = call.id.clone();
         
         // Extract and log the SDP from the incoming call
         if let Some(ref sdp) = call.sdp {
@@ -39,33 +48,33 @@ impl CallCenterEngine {
         // Analyze customer information and determine routing requirements
         let (customer_type, priority, required_skills) = self.analyze_customer_info(&call).await;
         
-        // Create enhanced call info tracking
-        let customer_sdp = call.sdp.clone();
-        let call_info = CallInfo {
+        // Store the call information
+        let mut call_info = CallInfo {
             session_id: session_id.clone(),
             caller_id: call.from.clone(),
             from: call.from.clone(),
             to: call.to.clone(),
             agent_id: None,
             queue_id: None,
-            bridge_id: None,
-            status: CallStatus::Incoming,
-            priority: 50, // Default priority
-            customer_type: CustomerType::Standard,
-            required_skills: vec![],
+            status: CallStatus::Ringing,
+            priority,
+            customer_type,
+            required_skills,
             created_at: chrono::Utc::now(),
-            queued_at: None,
             answered_at: None,
             ended_at: None,
-            customer_sdp: customer_sdp.clone(), // Store the customer's SDP offer
-            // Initialize timing metrics
+            bridge_id: None,
             duration_seconds: 0,
             wait_time_seconds: 0,
             talk_time_seconds: 0,
-            hold_time_seconds: 0,
             queue_time_seconds: 0,
+            hold_time_seconds: 0,
+            queued_at: None,
             transfer_count: 0,
             hold_count: 0,
+            customer_sdp: call.sdp.clone(), // Store the customer's SDP for later use
+            customer_dialog_id: incoming_dialog_id, // PHASE 17.3: Store the dialog ID
+            agent_dialog_id: None,
         };
         
         // Store call info
@@ -283,10 +292,27 @@ impl CallCenterEngine {
                 Ok(call_session) => {
                     info!("✅ Created outgoing call {:?} to agent {} with SDP", call_session.id, agent_id);
                     
-                    // Track dialog relationship for B2BUA (customer → agent)
+                    // PHASE 17.3: CallSession doesn't have dialog_id field
+                    // We need to get the dialog ID from the dialog events instead
+                    let agent_dialog_id: Option<String> = None; // Will be populated when we get dialog events
+                    info!("🔍 Agent call created - dialog ID will be set from events");
+                    
+                    // Store the agent's dialog ID in the call info
+                    if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {
+                        // For now, we can't set agent_dialog_id since we don't have it yet
+                        // The proper dialog tracking will happen through session-core events
+                    }
+                    
+                    // Track session-to-session mappings for call center operations
                     self.dialog_mappings.insert(session_id.0.clone(), call_session.id.0.clone());
                     self.dialog_mappings.insert(call_session.id.0.clone(), session_id.0.clone());
-                    info!("📋 Tracked dialog mapping: {} ↔ {}", session_id, call_session.id);
+                    info!("📋 Tracked SESSION mapping: {} ↔ {}", session_id, call_session.id);
+                    
+                    // PHASE 17.1: Add detailed dialog ID logging for debugging
+                    info!("🔍 B2BUA Session Mapping Details:");
+                    info!("  Customer Session ID: {}", session_id);
+                    info!("  Agent Session ID: {}", call_session.id);
+                    info!("  Stored mappings: {} entries total", self.dialog_mappings.len());
                     
                     call_session
                 }

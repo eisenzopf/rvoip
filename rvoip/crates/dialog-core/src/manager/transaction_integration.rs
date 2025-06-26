@@ -517,6 +517,14 @@ impl DialogManager {
                 200 => {
                     if dialog.state == crate::dialog::DialogState::Early {
                         dialog.state = crate::dialog::DialogState::Confirmed;
+                        
+                        // CRITICAL FIX: Update dialog lookup now that we have both tags
+                        if let Some(tuple) = dialog.dialog_id_tuple() {
+                            let key = crate::manager::utils::DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
+                            self.dialog_lookup.insert(key, dialog_id.clone());
+                            info!("Updated dialog lookup for confirmed dialog {}", dialog_id);
+                        }
+                        
                         true
                     } else {
                         false

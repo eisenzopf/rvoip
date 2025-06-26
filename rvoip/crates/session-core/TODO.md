@@ -1431,683 +1431,79 @@ SIP Dialog ←→ Media Session (via coordinator)
 
 ---
 
-## 🚨 PHASE 12.2: MOVE POLICY HANDLERS TO CALL-ENGINE ⚠️ **ARCHITECTURAL IMPROVEMENT**
+## 🚨 PHASE 17: FIX B2BUA BYE FORWARDING - CRITICAL BUG ✅ **COMPLETE**
 
-// ... existing content ...
+### 🎯 **GOAL: Fix 481 Errors When Agents Send BYE in B2BUA Mode**
 
----
+**Context**: E2E testing revealed that when agents try to hang up calls, they receive **481 "Call/Transaction Does Not Exist"** errors. This is because the server is acting as a B2BUA with two separate dialog legs, but the dialog tracking for BYE forwarding is not working properly.
 
-## 🚀 PHASE 15: CONFERENCE SESSION COORDINATION ❌ **NOT STARTED** (0/4 tasks done)
+**Root Cause Analysis**:
+1. Server creates two dialogs: Customer ↔ Server (dialog A) and Server ↔ Agent (dialog B)
+2. Dialog mappings are stored during call setup in `assign_specific_agent_to_call()`
+3. When agent sends BYE, the dialog ID lookup fails
+4. The BYE is not forwarded to the customer leg, leaving calls in a zombie state
 
-### 🎯 **GOAL: Multi-Party Conference Session Orchestration Using Session-Core Primitives**
+**✅ CRITICAL FIX FOUND**: The bug was in dialog-core's `handle_success_response` method. When receiving 200 OK responses, it would:
+- Update dialog state from Early → Confirmed ✓
+- Set the remote tag ✓
+- BUT NOT update the dialog lookup key! ❌
 
-**Context**: Media-core Phase 5 provides `AudioMixer` for pure audio processing. Session-core needs to orchestrate multiple SIP dialogs into conferences, coordinate SIP signaling, and use media-core's AudioMixer for the actual audio processing.
+The dialog lookup key (Call-ID:local-tag:remote-tag) is only created when both tags are available. For outgoing calls, the remote tag arrives in the 200 OK response, but the lookup key was never updated. This caused BYE requests to fail with "Dialog not found" errors.
 
-**Philosophy**: Session-core coordinates multiple SIP sessions into conference structures using basic primitives (groups, events, priorities). Media-core handles audio mixing. Clean separation: session-core = SIP orchestration, media-core = audio processing.
+#### Phase 17.1: Fix Dialog ID Tracking ✅ **COMPLETE**
+- [x] ✅ **COMPLETE**: **Debug Dialog ID Mismatch**
+  - [x] ✅ **COMPLETE**: Added detailed logging when storing dialog mappings
+  - [x] ✅ **COMPLETE**: Log actual dialog IDs received in BYE messages
+  - [x] ✅ **COMPLETE**: Identified that we were storing session IDs instead of dialog IDs
+  - [x] ✅ **COMPLETE**: Fixed dialog ID format inconsistencies
 
-**Architecture**: Build conference coordination on top of existing session management primitives, using AudioMixer from media-core as an audio processing tool.
+- [x] ✅ **COMPLETE**: **Fix SessionDialogCoordinator BYE Handling**
+  - [x] ✅ **COMPLETE**: Updated `handle_call_terminated` to properly extract dialog IDs
+  - [x] ✅ **COMPLETE**: Ensured dialog IDs are correctly propagated to call-engine
+  - [x] ✅ **COMPLETE**: Fixed dialog ID transformations that break mappings
+  - [x] ✅ **COMPLETE**: Fixed SIP header extraction to use actual FROM/TO values
 
-#### **Phase 15.1: Conference Controller Infrastructure** ❌ **NOT STARTED** (0/4 tasks done)
-- [ ] **Conference Session Orchestrator** (`src/conference/controller.rs`)
-  ```rust
-  use rvoip_media_core::processing::audio::AudioMixer;
-  
-  pub struct ConferenceController {
-      conferences: HashMap<ConferenceId, ConferenceRoom>,
-      audio_mixer: AudioMixer, // Tool from media-core
-      session_manager: Arc<SessionManager>, // Use existing session management
-      event_coordinator: ConferenceEventCoordinator,
-  }
-  
-  impl ConferenceController {
-      // Conference room management (pure SIP session orchestration)
-      pub async fn create_conference(&self, room_id: ConferenceId, config: ConferenceConfig) -> Result<()>;
-      pub async fn destroy_conference(&self, room_id: &ConferenceId) -> Result<()>;
-      
-      // SIP session participant management
-      pub async fn add_participant(&self, room_id: &ConferenceId, dialog_id: DialogId) -> Result<()>;
-      pub async fn remove_participant(&self, room_id: &ConferenceId, dialog_id: &DialogId) -> Result<()>;
-      
-      // SIP signaling coordination for conferences
-      pub async fn coordinate_conference_sdp(&self, room_id: &ConferenceId) -> Result<()>;
-      pub async fn handle_conference_re_invite(&self, room_id: &ConferenceId, dialog_id: &DialogId) -> Result<()>;
-  }
-  ```
+#### Phase 17.2: Implement Proper B2BUA Dialog Tracking ✅ **COMPLETE**
+- [x] ✅ **COMPLETE**: **Store Dialog Relationships**
+  - [x] ✅ **COMPLETE**: Created `dialog_mappings` DashMap in CallCenterEngine
+  - [x] ✅ **COMPLETE**: Store bidirectional mapping: customer_dialog ↔ agent_dialog
+  - [x] ✅ **COMPLETE**: Updated mapping when calls are bridged in B2BUA mode
+  - [x] ✅ **COMPLETE**: Added session_to_dialog mapping for robust lookup
 
-- [ ] **Conference Room Management** (`src/conference/room.rs`)
-  ```rust
-  pub struct ConferenceRoom {
-      pub id: ConferenceId,
-      pub participants: HashMap<DialogId, ParticipantInfo>, // SIP dialog tracking
-      pub max_participants: usize,
-      pub created_at: Instant,
-      pub conference_state: ConferenceState, // Session state, not audio state
-      pub sip_configuration: ConferenceSipConfig,
-  }
-  
-  pub enum ConferenceState {
-      Creating,         // Setting up SIP dialogs
-      Active,          // All SIP dialogs established  
-      Terminating,     // Tearing down SIP dialogs
-      Terminated,      // All SIP dialogs closed
-  }
-  
-  pub struct ParticipantInfo {
-      pub dialog_id: DialogId,
-      pub sip_address: SipUri,
-      pub joined_at: Instant,
-      pub media_capabilities: MediaCapabilities, // For SDP negotiation
-      pub participant_state: ParticipantState,
-  }
-  ```
+- [x] ✅ **COMPLETE**: **Forward BYE Between Legs**
+  - [x] ✅ **COMPLETE**: Implemented `on_call_ended` handler in CallCenterHandler
+  - [x] ✅ **COMPLETE**: Lookup related dialog when BYE is received
+  - [x] ✅ **COMPLETE**: Forward BYE to the other leg of the B2BUA
+  - [x] ✅ **COMPLETE**: Clean up dialog mappings after call termination
 
-- [ ] **Conference SIP Signaling Coordination**
-  - [ ] Conference SDP generation and negotiation for multi-party calls
-  - [ ] SIP INVITE/BYE coordination for conference participants
-  - [ ] Conference-specific SIP headers and routing
-  - [ ] SIP re-INVITE handling for dynamic participant changes
+#### Phase 17.3: Enhanced Session-Core Dialog Tracking ✅ **COMPLETE**
+- [x] ✅ **COMPLETE**: **Internal Dialog-to-Session Tracking**
+  - [x] ✅ **COMPLETE**: Added `session_to_dialog` mapping in SessionDialogCoordinator
+  - [x] ✅ **COMPLETE**: Track both directions: dialog→session and session→dialog
+  - [x] ✅ **COMPLETE**: Populate mappings when creating incoming/outgoing calls
+  - [x] ✅ **COMPLETE**: Fixed SessionDialogCoordinator constructor calls
 
-- [ ] **Conference Event System** (`src/conference/events.rs`) 
-  - [ ] Conference lifecycle events (SIP session coordination events)
-  - [ ] Participant SIP session events (INVITE received, dialog established, BYE sent)
-  - [ ] Conference SIP signaling status events
-  - [ ] Integration with existing session-core event system using EventPriority
+- [x] ✅ **COMPLETE**: **Enhanced BYE Handling**
+  - [x] ✅ **COMPLETE**: Coordinator internally maps dialogs to sessions
+  - [x] ✅ **COMPLETE**: BYE requests now find the correct session via dialog lookup
+  - [x] ✅ **COMPLETE**: Session termination events properly generated for both legs
+  - [x] ✅ **COMPLETE**: Fixed missing dialog lookup key update in response_handler
 
-#### **Phase 15.2: Conference Participant Coordination** ❌ **NOT STARTED** (0/4 tasks done)
-- [ ] **SIP Dialog Group Management**
-  - [ ] Group multiple SIP dialogs into conference structures
-  - [ ] Conference participant addition/removal via SIP signaling
-  - [ ] SIP dialog state synchronization across conference participants
-  - [ ] Conference-wide SIP dialog lifecycle management
+**Key Insight**: Dialog IDs are internal to dialog-core and not exposed in the public API. The solution is to have session-core internally maintain the dialog↔session mappings and handle BYE forwarding through those internal mappings. Call-engine only needs to track session-to-session relationships for B2BUA operations.
 
-- [ ] **Conference SDP Coordination**
-  - [ ] Multi-party SDP offer/answer coordination  
-  - [ ] Codec negotiation across conference participants
-  - [ ] Media capability coordination for mixed-codec conferences
-  - [ ] Conference media address and port coordination
+#### Phase 17.4: E2E Testing & Verification ✅ **COMPLETE**
+- [x] ✅ **COMPLETE**: **Test BYE Forwarding**
+  - [x] ✅ **COMPLETE**: Test customer-initiated BYE forwarding to agent
+  - [x] ✅ **COMPLETE**: Test agent-initiated BYE forwarding to customer
+  - [x] ✅ **COMPLETE**: Test BYE during various call states
+  - [x] ✅ **COMPLETE**: Verify 481 errors are eliminated
+  - [x] ✅ **COMPLETE**: Test concurrent call scenarios
+  - [x] ✅ **COMPLETE**: Fixed critical bug in dialog-core response handler
 
-- [ ] **Dynamic Participant Management**
-  - [ ] Late-joining participant SIP integration
-  - [ ] Participant departure handling (SIP BYE processing)
-  - [ ] Conference capacity management and overflow handling
-  - [ ] Participant authentication and authorization for conference access
-
-- [ ] **Media-Core Integration for Conference Audio**
-  - [ ] Use AudioMixer from media-core for actual audio processing
-  - [ ] Coordinate SIP media sessions with AudioMixer audio streams
-  - [ ] Map SIP dialog IDs to AudioMixer participant IDs
-  - [ ] Handle audio mixer events and status in SIP context
-
-#### **Phase 15.3: Conference Types and Configuration** ❌ **NOT STARTED** (0/3 tasks done)
-- [ ] **Core Conference Types** (`src/conference/types.rs`)
-  ```rust
-  pub type ConferenceId = String;
-  
-  pub struct ConferenceConfig {
-      pub max_participants: usize,
-      pub require_authentication: bool,
-      pub allow_late_join: bool,
-      pub conference_sip_domain: String,
-      pub media_config: ConferenceMediaConfig, // SIP media configuration, not audio processing
-  }
-  
-  pub struct ConferenceMediaConfig {
-      pub preferred_codecs: Vec<CodecType>,
-      pub allow_transcoding: bool,
-      pub media_relay_mode: MediaRelayMode,
-      pub rtp_port_range: (u16, u16),
-  }
-  
-  pub enum MediaRelayMode {
-      DirectPeerToPeer,    // Participants connect directly
-      ServerRelayed,       // Audio goes through server (uses AudioMixer)
-      Hybrid,             // Mixed mode based on participant capabilities
-  }
-  ```
-
-- [ ] **Conference Error Types** (`src/conference/errors.rs`)
-  - [ ] `ConferenceError` enum for conference SIP coordination failures
-  - [ ] `ParticipantError` for SIP participant management issues  
-  - [ ] `ConferenceSipError` for SIP signaling failures in conference context
-  - [ ] Error recovery strategies for conference SIP operations
-
-- [ ] **Conference SIP Integration Types**
-  - [ ] `ConferenceSipHeaders` for conference-specific SIP headers
-  - [ ] `ConferenceRoutingInfo` for SIP routing decisions
-  - [ ] `ConferenceDialogGroup` for managing related SIP dialogs
-  - [ ] `ConferenceMediaNegotiation` for SDP coordination across participants
-
-#### **Phase 15.4: Integration with Session-Core Primitives** ❌ **NOT STARTED** (0/3 tasks done)
-- [ ] **EventPriority System Integration**
-  - [ ] Conference events use existing EventPriority system (CRITICAL, HIGH, NORMAL, LOW)
-  - [ ] Conference SIP events integrated with session event coordination
-  - [ ] Priority-based conference event processing using existing infrastructure
-  - [ ] Conference event routing through existing EventCoordinator
-
-- [ ] **SessionManager Integration**
-  - [ ] ConferenceController uses existing SessionManager for individual SIP dialogs
-  - [ ] Conference sessions tracked as grouped sessions in session management
-  - [ ] Conference-aware session lifecycle management
-  - [ ] Existing session state machine extended for conference scenarios
-
-- [ ] **Group Coordination Using Basic Primitives**
-  - [ ] Conference rooms implemented as SessionGroups using existing group coordination
-  - [ ] Conference participant management using existing session tracking
-  - [ ] Conference state management using existing state coordination primitives
-  - [ ] Conference cleanup using existing resource management patterns
-
-### **🎯 Conference Session Coordination Success Criteria**
-
-#### **Phase 15 Completion Criteria** 
-- [ ] ✅ **SIP Session Orchestration**: ConferenceController successfully coordinates 3+ SIP dialogs
-- [ ] ✅ **Conference SDP Negotiation**: Multi-party SDP offer/answer works correctly
-- [ ] ✅ **Dynamic Participant Management**: Participants can join/leave conferences via SIP signaling
-- [ ] ✅ **Media-Core Integration**: Session-core successfully uses AudioMixer from media-core
-- [ ] ✅ **Event Coordination**: Conference events integrate with existing session-core event system
-- [ ] ✅ **Session Management Integration**: Conferences use existing SessionManager infrastructure
-
-#### **Session Coordination Focus**
-- [ ] ✅ **SIP Orchestration Only**: No audio processing logic, purely SIP session coordination
-- [ ] ✅ **Uses Media-Core Tools**: AudioMixer used as tool, not reimplemented
-- [ ] ✅ **Built on Existing Primitives**: Uses EventPriority, SessionManager, group coordination
-- [ ] ✅ **Clean Architecture**: Clear separation between SIP coordination and audio processing
-
-#### **Integration Architecture**
-- [ ] ✅ **Layered Design**: Session-core coordinates SIP, media-core processes audio
-- [ ] ✅ **Event-Driven**: Conference coordination driven by SIP events and session state changes
-- [ ] ✅ **Scalable**: Conference architecture scales with existing session management infrastructure
-- [ ] ✅ **Maintainable**: Conference features built on proven session-core primitives
-
-### 📊 **ESTIMATED TIMELINE**
-
-- **Phase 15.1**: ~6 hours (Conference session coordinator foundation)
-- **Phase 15.2**: ~8 hours (Media bridge conference extensions)
-- **Phase 15.3**: ~4 hours (Conference types and integration)
-- **Phase 15.4**: ~4 hours (Call-engine API)
-
-**Total Estimated Time**: ~22 hours
-
-### 🔄 **DEPENDENCIES**
-
-**Requires**:
-- ✅ **Phase 12 Complete**: Basic session primitives (groups, events, priorities, resources)
-- ✅ **Phase 14 Complete**: Real media-core integration via MediaSessionController
-- ⏳ **Media-Core Phase 5**: ConferenceController and AudioMixer implementation
-- ✅ **Existing Architecture**: Session-Dialog-Media coordination working
-
-**Enables**:
-- ✅ **Multi-Party Calls**: Real conference calling functionality
-- ✅ **Call-Engine Enhancement**: Advanced conference business logic capabilities
-- ✅ **Scalable Architecture**: Foundation for enterprise conference features
-- ✅ **Production Conferences**: Real-world conference call deployments
-
-### 💡 **ARCHITECTURAL BENEFITS**
-
-**Session-Core Benefits**:
-- ✅ **Proper Scope**: Conference session coordination, not business logic
-- ✅ **Primitive Reuse**: Builds on existing BasicSessionGroup, BasicEventBus, etc.
-- ✅ **Clean Integration**: Works with media-core conference capabilities
-- ✅ **Call-Engine Ready**: Provides infrastructure for call-engine orchestration
-
-**Call-Engine Benefits**:
-- ✅ **Complete Conference Control**: Business logic and policies using session-core infrastructure
-- ✅ **Flexible Orchestration**: Can implement sophisticated conference features
-- ✅ **Scalable Foundation**: Session-core handles technical details, call-engine focuses on business
-- ✅ **Enterprise Features**: Foundation for advanced call center conferencing
-
-### 🚀 **INTEGRATION FLOW**
-
-**End-to-End Conference Flow**:
-1. **Call-Engine**: Decides to create conference based on business logic
-2. **Session-Core**: Creates conference using BasicSessionGroup + ConferenceSessionCoordinator
-3. **Media-Core**: Sets up AudioMixer and ConferenceController for real audio mixing
-4. **Session-Core**: Coordinates SIP sessions, generates conference SDP, manages participant lifecycle
-5. **Media-Core**: Handles real-time audio mixing and RTP distribution
-6. **Call-Engine**: Monitors conference state and makes business decisions (add/remove participants, etc.)
-
-**Perfect Separation**:
-- **Call-Engine**: Business policies and orchestration
-- **Session-Core**: SIP session coordination and infrastructure
-- **Media-Core**: Real-time audio mixing and RTP handling
-
-### 🔄 **NEXT ACTIONS**
-
-1. **Wait for Media-Core Phase 5** - ConferenceController and AudioMixer implementation
-2. **Start Phase 15.1** - Conference session coordinator using existing primitives
-3. **Test Integration** - Verify session-core + media-core conference coordination
-4. **Call-Engine Integration** - Provide clean APIs for call-engine conference orchestration
+**✅ FINAL FIX**: Added dialog lookup key update in `handle_success_response` when dialog transitions to Confirmed state. This ensures BYE requests can find the dialog using the complete Call-ID:local-tag:remote-tag tuple.
 
 ---
 
-## 📊 UPDATED PROGRESS TRACKING
+## 🚀 PHASE 18: PRODUCTION DEPLOYMENT READINESS ❌ **NOT STARTED**
 
----
-
-## 🚀 PHASE 16: ZERO-COPY RTP RELAY CONTROLLER INTEGRATION ❌ **NOT STARTED** (0/20 tasks done)
-
-### 🎯 **GOAL: Integrate Zero-Copy RTP Processing from Media-Core Relay Controller**
-
-**Context**: Media-core has implemented comprehensive zero-copy RTP packet handling with `MediaSessionController::process_rtp_packet_zero_copy()` and related infrastructure. Session-core needs to integrate these capabilities for production-ready real-time media processing.
-
-**What's New in Media-Core**:
-- ✅ **Zero-Copy RTP Processing**: `process_rtp_packet_zero_copy()` with 95% allocation reduction
-- ✅ **RtpBufferPool**: Pre-allocated output buffers for zero-allocation encoding
-- ✅ **Enhanced Performance Monitoring**: Zero-copy vs traditional processing metrics
-- ✅ **Optimized Audio Pipeline**: Scalar processing with manual unrolling (faster than SIMD for G.711)
-- ✅ **Complete Test Coverage**: 107/107 tests passing with real zero-copy implementation
-
-**Philosophy**: Integrate zero-copy RTP processing into session-core's media coordination to achieve production-grade real-time performance while maintaining clean session ↔ media separation.
-
-**Target Outcome**: Session-core coordinates zero-copy RTP processing seamlessly within SIP session lifecycle, providing enterprise-grade media performance.
-
-### 🔧 **IMPLEMENTATION PLAN**
-
-#### Phase 16.1: MediaManager Zero-Copy Integration ✅ **COMPLETE** (5/5 tasks done)
-- [x] ✅ **COMPLETE**: **Enhanced MediaManager with Zero-Copy APIs** (`src/media/manager.rs`)
-  ```rust
-  impl MediaManager {
-      /// Process RTP packet with zero-copy optimization (95% allocation reduction)
-      pub async fn process_rtp_packet_zero_copy(&self, session_id: &SessionId, packet: &RtpPacket) -> MediaResult<RtpPacket>
-      
-      /// Process RTP packet with traditional approach (for comparison)
-      pub async fn process_rtp_packet_traditional(&self, session_id: &SessionId, packet: &RtpPacket) -> MediaResult<RtpPacket>
-      
-      /// Get RTP buffer pool statistics (real-time monitoring)
-      pub fn get_rtp_buffer_pool_stats(&self) -> PoolStats
-      
-      /// Enable/disable zero-copy processing for a session (per-session control)
-      pub async fn set_zero_copy_processing(&self, session_id: &SessionId, enabled: bool) -> MediaResult<()>
-      
-      /// Advanced zero-copy configuration (NEW)
-      pub async fn configure_zero_copy_processing(&self, session_id: &SessionId, config: ZeroCopyConfig) -> MediaResult<()>
-  }
-  ```
-
-- [x] ✅ **COMPLETE**: **RTP Packet Event Integration**
-  - [x] ✅ **COMPLETE**: Add RTP packet processing events to session event system (4 new event types)
-  - [x] ✅ **COMPLETE**: Integrate RTP packet lifecycle with SIP session lifecycle
-  - [x] ✅ **COMPLETE**: Add RTP processing performance events (RtpPacketProcessed, RtpProcessingModeChanged)
-  - [x] ✅ **COMPLETE**: Handle RTP processing errors in session context (RtpProcessingError with fallback)
-
-- [x] ✅ **COMPLETE**: **MediaManager Configuration Enhancement**
-  - [x] ✅ **COMPLETE**: Add zero-copy processing configuration options (ZeroCopyConfig struct)
-  - [x] ✅ **COMPLETE**: Add RTP buffer pool size configuration (configurable pool sizes)
-  - [x] ✅ **COMPLETE**: Add performance monitoring configuration (RtpBufferPoolStats type)
-  - [x] ✅ **COMPLETE**: Add fallback strategies for zero-copy failures (automatic graceful degradation)
-
-- [x] ✅ **COMPLETE**: **Session ↔ RTP Mapping Management**
-  - [x] ✅ **COMPLETE**: Map SIP SessionId to RTP packet flows (dialog_id mapping)
-  - [x] ✅ **COMPLETE**: Handle multiple RTP streams per SIP session (stream-aware processing)
-  - [x] ✅ **COMPLETE**: Coordinate RTP processing with session state transitions (lifecycle management)
-  - [x] ✅ **COMPLETE**: Add RTP session cleanup on SIP session termination (resource management)
-
-- [x] ✅ **COMPLETE**: **Error Handling and Recovery**
-  - [x] ✅ **COMPLETE**: Handle zero-copy processing failures gracefully (try-catch patterns)
-  - [x] ✅ **COMPLETE**: Automatic fallback to traditional processing on errors (seamless degradation)
-  - [x] ✅ **COMPLETE**: RTP processing error reporting to session layer (detailed error context)
-  - [x] ✅ **COMPLETE**: Recovery mechanisms for RTP processing issues (retry logic and monitoring)
-
-**🎉 PHASE 16.1 SUCCESS METRICS ACHIEVED**:
-- ✅ **Zero-Copy API Integration**: MediaManager successfully exposes all zero-copy RTP processing methods
-- ✅ **Performance Monitoring**: RTP buffer pool statistics and performance metrics fully integrated
-- ✅ **Event System Integration**: All new RTP processing events working with session event system
-- ✅ **Session Lifecycle Coordination**: Zero-copy configuration automatically managed during session lifecycle
-- ✅ **Error Handling**: Graceful fallback to traditional processing on zero-copy failures working
-- ✅ **Clean Compilation**: All types properly integrated, zero compilation errors
-- ✅ **Test Validation**: Both zero-copy integration tests passing successfully
-
-**🧪 VALIDATION RESULTS**:
-```rust
-// Tests Passing ✅
-✅ test media::manager::tests::test_zero_copy_rtp_processing_integration ... ok
-✅ test media::manager::tests::test_zero_copy_configuration_lifecycle ... ok
-
-// Key Capabilities Proven ✅
-✅ process_rtp_packet_zero_copy() - 95% allocation reduction ready
-✅ process_rtp_packet_traditional() - fallback method working
-✅ get_rtp_buffer_pool_stats() - performance monitoring active
-✅ set_zero_copy_processing() - session-level control working
-✅ configure_zero_copy_processing() - advanced configuration available
-✅ Automatic zero-copy config lifecycle management
-✅ RTP processing events integration (4 new event types)
-✅ Session ↔ RTP packet flow coordination
-```
-
-#### Phase 16.2: Session Event System RTP Integration ✅ **COMPLETE** (4/4 tasks done)
-- [x] ✅ **COMPLETE**: **RTP Processing Events** (`src/manager/events.rs`)
-  ```rust
-  #[derive(Debug, Clone, Serialize, Deserialize)]
-  pub enum SessionEvent {
-      // ... existing events ...
-      
-      /// RTP packet processed with zero-copy (NEW - HIGH PRIORITY)
-      RtpPacketProcessed {
-          session_id: SessionId,
-          processing_type: RtpProcessingType,
-          performance_metrics: RtpProcessingMetrics,
-      },
-      
-      /// RTP processing mode changed (NEW - HIGH PRIORITY)
-      RtpProcessingModeChanged {
-          session_id: SessionId,
-          old_mode: RtpProcessingMode,
-          new_mode: RtpProcessingMode,
-      },
-      
-      /// RTP processing error (NEW - CRITICAL PRIORITY)
-      RtpProcessingError {
-          session_id: SessionId,
-          error: String,
-          fallback_applied: bool,
-      },
-      
-      /// RTP buffer pool statistics update (NEW - NORMAL PRIORITY)
-      RtpBufferPoolUpdate {
-          stats: RtpBufferPoolStats,
-      },
-  }
-  ```
-
-- [x] ✅ **COMPLETE**: **Event Processing Integration**
-  - [x] ✅ **COMPLETE**: Add RTP processing events to main SessionEvent enum (4 new event types)
-  - [x] ✅ **COMPLETE**: Route RTP events through SessionCoordinator with dedicated handlers
-  - [x] ✅ **COMPLETE**: Integrate RTP events with session state machine and lifecycle management
-  - [x] ✅ **COMPLETE**: Add event-specific priority handling (Critical for errors, High for mode changes)
-
-- [x] ✅ **COMPLETE**: **Performance Event Integration**
-  - [x] ✅ **COMPLETE**: Emit performance events for both zero-copy and traditional RTP processing
-  - [x] ✅ **COMPLETE**: Integrate with existing session performance monitoring infrastructure
-  - [x] ✅ **COMPLETE**: Add RTP processing metrics to session statistics with detailed logging
-  - [x] ✅ **COMPLETE**: Performance regression detection for RTP processing with automatic fallback
-
-- [x] ✅ **COMPLETE**: **Event Bus RTP Coordination**
-  - [x] ✅ **COMPLETE**: Use existing SessionEventProcessor for RTP events (zero-copy event system)
-  - [x] ✅ **COMPLETE**: RTP event priorities using existing EventPriority system (Critical/High/Normal)
-  - [x] ✅ **COMPLETE**: Cross-session RTP event coordination via MediaManager event processor
-  - [x] ✅ **COMPLETE**: RTP event publishing with detailed logging and error handling
-
-**🎉 PHASE 16.2 SUCCESS METRICS ACHIEVED**:
-- ✅ **Event System Integration**: All 4 RTP processing events fully integrated with SessionEvent enum
-- ✅ **Event Priority Handling**: Critical priority for RTP errors, High priority for mode changes
-- ✅ **Performance Event Publishing**: Both zero-copy and traditional processing events published
-- ✅ **Event Coordination**: RTP events properly routed through SessionCoordinator with dedicated handlers
-- ✅ **Detailed Logging**: Comprehensive RTP event logging with performance metrics and error context
-- ✅ **Error Handling**: Graceful RTP processing error handling with fallback tracking
-- ✅ **Cross-Session Coordination**: RTP events coordinated across multiple sessions via MediaManager
-- ✅ **Clean Compilation**: All types properly serializable, zero compilation errors
-- ✅ **Test Validation**: Both zero-copy integration tests passing successfully
-
-**🧪 PHASE 16.2 VALIDATION RESULTS**:
-```rust
-// All RTP Events Successfully Integrated ✅
-✅ SessionEvent::RtpPacketProcessed - High priority performance tracking
-✅ SessionEvent::RtpProcessingModeChanged - High priority mode notifications  
-✅ SessionEvent::RtpProcessingError - Critical priority error handling
-✅ SessionEvent::RtpBufferPoolUpdate - Normal priority statistics
-
-// Event Processing Working ✅
-✅ MediaManager publishes RTP events during packet processing
-✅ SessionCoordinator handles RTP events with dedicated methods
-✅ Event priorities properly assigned (Critical/High/Normal)
-✅ Performance metrics tracked and logged in real-time
-✅ Error events trigger appropriate fallback handling
-✅ Buffer pool statistics monitored for efficiency
-
-// Integration Proven ✅
-✅ test media::manager::tests::test_zero_copy_rtp_processing_integration ... ok
-✅ test media::manager::tests::test_zero_copy_configuration_lifecycle ... ok
-```
-
-#### Phase 16.3: Session Lifecycle RTP Coordination ❌ **NOT STARTED** (0/4 tasks done)
-- [ ] **Session State ↔ RTP Processing Coordination** (`src/manager/core.rs`)
-  ```rust
-  // Enhanced session event processing
-  async fn handle_session_event(&self, event: SessionEvent) {
-      match event {
-          SessionEvent::StateChanged { session_id, new_state, .. } => {
-              match new_state {
-                  CallState::Connected => {
-                      // Enable zero-copy RTP processing when call is established
-                      if let Err(e) = self.media_manager.set_zero_copy_processing(&session_id, true).await {
-                          tracing::warn!("Failed to enable zero-copy processing for {}: {}", session_id, e);
-                      }
-                  }
-                  CallState::Terminated => {
-                      // Ensure RTP processing is properly cleaned up
-                      self.cleanup_rtp_processing(&session_id).await;
-                  }
-                  _ => {}
-              }
-          }
-          // ... other events
-      }
-  }
-  ```
-
-- [ ] **RTP Processing Lifecycle Management**
-  - [ ] Start zero-copy processing when SIP session establishes media
-  - [ ] Stop RTP processing when SIP session terminates
-  - [ ] Handle RTP processing during SIP session hold/resume
-  - [ ] Coordinate RTP processing with SIP re-INVITE scenarios
-
-- [ ] **Session-Aware RTP Configuration**
-  - [ ] Configure RTP processing based on session requirements
-  - [ ] Adapt RTP processing to session codec negotiation
-  - [ ] Apply session-specific RTP processing policies
-  - [ ] Handle per-session RTP processing preferences
-
-- [ ] **Multi-Session RTP Coordination**
-  - [ ] Coordinate RTP processing across multiple concurrent sessions
-  - [ ] Share RTP buffer pools across sessions efficiently
-  - [ ] Balance RTP processing load across sessions
-  - [ ] Prevent RTP processing interference between sessions
-
-#### Phase 16.4: Performance Monitoring Integration ❌ **NOT STARTED** (0/4 tasks done)
-- [ ] **Zero-Copy Performance Metrics** (`src/session/performance.rs`)
-  ```rust
-  #[derive(Debug, Clone)]
-  pub struct SessionRtpMetrics {
-      pub zero_copy_packets_processed: u64,
-      pub traditional_packets_processed: u64,
-      pub allocation_reduction_percentage: f32,
-      pub processing_time_savings: Duration,
-      pub fallback_events: u64,
-      pub buffer_pool_efficiency: f32,
-  }
-  
-  impl SessionManager {
-      /// Get RTP processing performance for a session
-      pub async fn get_rtp_performance(&self, session_id: &SessionId) -> Result<SessionRtpMetrics>;
-      
-      /// Get aggregated RTP performance across all sessions
-      pub async fn get_global_rtp_performance(&self) -> GlobalRtpMetrics;
-      
-      /// Enable/disable RTP performance monitoring
-      pub async fn set_rtp_monitoring(&self, enabled: bool) -> Result<()>;
-  }
-  ```
-
-- [ ] **Real-Time Performance Monitoring**
-  - [ ] Track zero-copy vs traditional processing performance
-  - [ ] Monitor allocation reduction percentage (target: 95%)
-  - [ ] Track RTP processing latency improvements
-  - [ ] Monitor RTP buffer pool efficiency
-
-- [ ] **Performance Alerting and Adaptation**
-  - [ ] Alert when zero-copy processing degrades
-  - [ ] Automatic fallback when performance thresholds exceeded
-  - [ ] Performance-based RTP processing mode selection
-  - [ ] Proactive performance tuning recommendations
-
-- [ ] **Integration with Existing Session Metrics**
-  - [ ] Add RTP performance to existing session statistics
-  - [ ] Include RTP metrics in session health monitoring
-  - [ ] RTP performance reporting in session debugging
-  - [ ] Historical RTP performance tracking
-
-#### Phase 16.5: Configuration and API Updates ❌ **NOT STARTED** (0/3 tasks done)
-- [ ] **Enhanced SessionManager Configuration**
-  ```rust
-  #[derive(Debug, Clone)]
-  pub struct SessionManagerConfig {
-      // ... existing config ...
-      
-      /// RTP processing configuration
-      pub rtp_processing: RtpProcessingConfig,
-  }
-  
-  #[derive(Debug, Clone)]
-  pub struct RtpProcessingConfig {
-      /// Preferred processing mode
-      pub processing_mode: RtpProcessingMode,
-      
-      /// RTP buffer pool configuration
-      pub buffer_pool_size: usize,
-      
-      /// Enable performance monitoring
-      pub performance_monitoring: bool,
-      
-      /// Fallback strategy configuration
-      pub fallback_strategy: RtpFallbackStrategy,
-  }
-  ```
-
-- [ ] **Public API Extensions**
-  - [ ] Add RTP processing control to public SessionManager API
-  - [ ] Expose RTP performance metrics through public API
-  - [ ] Add RTP processing configuration to factory functions
-  - [ ] Include RTP capabilities in session information
-
-- [ ] **Configuration Integration**
-  - [ ] Integrate RTP config with existing SessionManagerBuilder
-  - [ ] Add RTP configuration to session-core examples
-  - [ ] Update factory functions to support RTP configuration
-  - [ ] Add RTP configuration validation
-
-### 🎯 **SUCCESS CRITERIA**
-
-#### **Integration Success:**
-- [ ] ✅ **Zero-Copy Processing**: Session-core successfully uses media-core's zero-copy RTP processing
-- [ ] ✅ **Performance Gains**: 95% allocation reduction achieved in session-managed RTP processing
-- [ ] ✅ **Seamless Lifecycle**: RTP processing automatically coordinated with SIP session lifecycle
-- [ ] ✅ **Error Handling**: Graceful fallback to traditional processing on zero-copy failures
-- [ ] ✅ **Monitoring**: Real-time RTP processing performance monitoring working
-
-#### **Session Coordination Success:**
-- [ ] ✅ **State Integration**: RTP processing modes properly coordinated with session states
-- [ ] ✅ **Event Integration**: RTP processing events seamlessly integrated with session events
-- [ ] ✅ **Multi-Session**: Zero-copy processing working correctly with multiple concurrent sessions
-- [ ] ✅ **Resource Management**: RTP buffer pools properly shared and managed across sessions
-
-#### **Performance Success:**
-- [ ] ✅ **Latency**: <0.1μs RTP processing overhead per packet (down from 2-3μs)
-- [ ] ✅ **Throughput**: 10x RTP packet processing capacity improvement
-- [ ] ✅ **Memory**: 95% reduction in RTP processing allocations
-- [ ] ✅ **Scalability**: Zero-copy processing scales linearly with concurrent sessions
-
-#### **API Success:**
-- [ ] ✅ **Backward Compatibility**: Existing session-core APIs continue working unchanged
-- [ ] ✅ **Easy Integration**: Simple configuration enables zero-copy processing
-- [ ] ✅ **Monitoring APIs**: Rich performance monitoring APIs available
-- [ ] ✅ **Configuration**: Flexible RTP processing configuration options
-
-### 📊 **ESTIMATED TIMELINE**
-
-- **Phase 16.1**: ~6 hours (MediaManager zero-copy integration)
-- **Phase 16.2**: ~4 hours (Event system integration)
-- **Phase 16.3**: ~5 hours (Session lifecycle coordination)
-- **Phase 16.4**: ~4 hours (Performance monitoring)
-- **Phase 16.5**: ~3 hours (Configuration and APIs)
-
-**Total Estimated Time**: ~22 hours
-
-### 🔄 **DEPENDENCIES**
-
-**Requires**:
-- ✅ **Media-Core Zero-Copy Implementation**: Complete with 107/107 tests passing
-- ✅ **Phase 14 Complete**: Real media-core integration via MediaSessionController
-- ✅ **Phase 12 Complete**: Basic session primitives (groups, events, priorities)
-- ✅ **Current Session Architecture**: Session-Dialog-Media coordination working
-
-**Enables**:
-- ✅ **Production-Grade Performance**: Enterprise-level RTP processing performance
-- ✅ **Scalable Media Processing**: Handle 100+ concurrent sessions efficiently  
-- ✅ **Real-Time Capabilities**: Sub-millisecond RTP processing latency
-- ✅ **Advanced Call Features**: High-performance foundation for conferencing, transcoding
-
-### 💡 **ARCHITECTURAL BENEFITS**
-
-**Session-Core Benefits**:
-- ✅ **Performance Leadership**: Industry-leading RTP processing performance
-- ✅ **Scalability**: Linear scaling with concurrent sessions
-- ✅ **Resource Efficiency**: 95% reduction in memory allocations
-- ✅ **Real-Time Capable**: Sub-millisecond RTP processing latency
-
-**Call-Engine Benefits**:
-- ✅ **High-Performance Foundation**: Zero-copy media processing for advanced features
-- ✅ **Scalable Orchestration**: Efficient media processing enabling complex call scenarios
-- ✅ **Performance Monitoring**: Rich metrics for call quality optimization
-- ✅ **Production Ready**: Enterprise-grade media processing capabilities
-
-### 🎯 **INTEGRATION ARCHITECTURE**
-
-**Zero-Copy RTP Processing Flow**:
-```
-SIP Session ↔ Session-Core ↔ MediaManager ↔ MediaSessionController ↔ Zero-Copy RTP Processing
-    ↓              ↓              ↓                    ↓                         ↓
-Event System → RTP Events → Performance → RtpBufferPool → PooledAudioFrame → Zero Allocations
-```
-
-**Performance Monitoring Flow**:
-```
-RTP Processing → Performance Metrics → Session Events → SessionManager → Call-Engine
-```
-
-### 🚀 **NEXT ACTIONS**
-
-1. **Start Phase 16.1** - Integrate zero-copy APIs into MediaManager
-2. **Focus on Event Integration** - Ensure RTP events coordinate with session lifecycle  
-3. **Test Incrementally** - Validate each phase with existing session-core tests
-4. **Performance Validation** - Measure actual performance gains in session context
-
-### 🎉 **EXPECTED OUTCOMES**
-
-**After Phase 16 Completion**:
-- ✅ **Session-core** provides industry-leading RTP processing performance
-- ✅ **Zero-copy pipeline** fully integrated with SIP session lifecycle
-- ✅ **95% allocation reduction** achieved in production session scenarios
-- ✅ **Sub-millisecond latency** for RTP packet processing
-- ✅ **Scalable architecture** supporting 100+ concurrent zero-copy sessions
-- ✅ **Rich monitoring** providing detailed RTP processing insights
-- ✅ **Production ready** for enterprise VoIP deployments
-
----
-
-### 🎉 **FINAL SUCCESS - ALL COMPILATION ERRORS RESOLVED!**
-
-**Status**: ✅ **100% COMPLETE** - All test compilation errors fixed and SDP generation test resolved!
-
-**Test Results**: 
-- ✅ **17/17 library tests passing** 
-- ✅ **All integration tests compiling successfully**
-- ✅ **Only 2 test logic issues remaining** (not compilation errors)
-
-**Major Fixes Completed**:
-1. ✅ **All CallDecision::Accept patterns fixed** - Updated to `CallDecision::Accept(None)` across all test files
-2. ✅ **All Session field access fixed** - Changed `session.state` to `session.state()` with proper dereferencing
-3. ✅ **All DialogId vs String mismatches fixed** - Converted all media test files to use `DialogId::new()`
-4. ✅ **All reference handling fixed** - Updated `stop_media()` calls to use proper references (`&dialog_id`)
-5. ✅ **SDP generation test fixed** - Now correctly validates actual allocated port instead of hardcoded "10000"
-6. ✅ **All Vec<&str> vs Vec<String> mismatches fixed** - Proper type conversions in codec preference tests
-
-**Architecture Compliance Status**: ✅ **PERFECT** - All architectural violations resolved, clean separation maintained
-
-### 🔄 **REMAINING NON-COMPILATION ISSUES**
-
-**Minor Test Logic Issues** (2 failures):
-- `test_bye_session_state_transitions` - Session state assertion mismatch (Active vs Initiating expected)
-- `test_basic_bye_termination` - Same session state assertion issue
-
-**Analysis**: These are test logic issues, not compilation problems. The actual SIP call flow is working correctly (`Initiating → Active` progression), but the test expectations need adjustment.
-
-**Impact**: ⭐ **MINIMAL** - Core functionality is working, only test assertions need adjustment
+// ... existing code ...

@@ -66,6 +66,9 @@ pub struct CallCenterEngine {
     
     /// Track dialog relationships for B2BUA (customer dialog ID → agent dialog ID)
     pub(super) dialog_mappings: Arc<DashMap<String, String>>,
+    
+    /// Session ID to Dialog ID mappings for robust lookup
+    pub session_to_dialog: Arc<DashMap<String, String>>,
 }
 
 impl CallCenterEngine {
@@ -90,6 +93,7 @@ impl CallCenterEngine {
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
             active_queue_monitors: Arc::new(DashSet::new()),
             dialog_mappings: Arc::new(DashMap::new()),
+            session_to_dialog: Arc::new(DashMap::new()),
         });
         
         // Create CallHandler with weak reference to placeholder
@@ -127,6 +131,7 @@ impl CallCenterEngine {
             sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
             active_queue_monitors: Arc::new(DashSet::new()),
             dialog_mappings: Arc::new(DashMap::new()),
+            session_to_dialog: Arc::new(DashMap::new()),
         });
         
         // CRITICAL FIX: Update the handler's weak reference to point to the real engine
@@ -408,6 +413,7 @@ impl Clone for CallCenterEngine {
             sip_registrar: self.sip_registrar.clone(),
             active_queue_monitors: self.active_queue_monitors.clone(),
             dialog_mappings: self.dialog_mappings.clone(),
+            session_to_dialog: self.session_to_dialog.clone(),
         }
     }
 } 

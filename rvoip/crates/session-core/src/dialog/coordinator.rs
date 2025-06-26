@@ -28,6 +28,7 @@ pub struct SessionDialogCoordinator {
     handler: Option<Arc<dyn CallHandler>>,
     session_events_tx: mpsc::Sender<SessionEvent>,
     dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
+    session_to_dialog: Arc<dashmap::DashMap<SessionId, DialogId>>,
     // Store incoming SDP offers for negotiation
     incoming_sdp_offers: Arc<DashMap<SessionId, String>>,
 }
@@ -40,6 +41,7 @@ impl SessionDialogCoordinator {
         handler: Option<Arc<dyn CallHandler>>,
         session_events_tx: mpsc::Sender<SessionEvent>,
         dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
+        session_to_dialog: Arc<dashmap::DashMap<SessionId, DialogId>>,
         incoming_sdp_offers: Arc<DashMap<SessionId, String>>,
     ) -> Self {
         Self {
@@ -48,6 +50,7 @@ impl SessionDialogCoordinator {
             handler,
             session_events_tx,
             dialog_to_session,
+            session_to_dialog,
             incoming_sdp_offers,
         }
     }
@@ -172,21 +175,25 @@ impl SessionDialogCoordinator {
             dialog_id, from_uri, to_uri
         );
         
-        // Create a new session for the incoming call
+        // Create session for the dialog
         let session_id = SessionId::new();
-        self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
-        
-        tracing::info!("Created session {} for incoming call dialog {}", session_id, dialog_id);
-        
-        let call_session = CallSession {
+        let session = CallSession {
             id: session_id.clone(),
             from: from_uri.clone(),
             to: to_uri.clone(),
-            state: CallState::Ringing,
-            started_at: Some(std::time::Instant::now()),
+            state: CallState::Initiating,
+            started_at: None,
         };
         
-        self.registry.register_session(session_id.clone(), call_session.clone()).await
+        // Track dialog to session mapping
+        self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
+        
+        // PHASE 17.4: Also track session to dialog mapping for BYE lookups
+        self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
+        
+        tracing::info!("Created session {} for incoming call dialog {}", session_id, dialog_id);
+        
+        self.registry.register_session(session_id.clone(), session.clone()).await
             .map_err(|e| DialogError::Coordination {
                 message: format!("Failed to register session: {}", e),
             })?;
@@ -194,9 +201,9 @@ impl SessionDialogCoordinator {
         // Send session created event
         self.send_session_event(SessionEvent::SessionCreated {
             session_id: session_id.clone(),
-            from: call_session.from.clone(),
-            to: call_session.to.clone(),
-            call_state: call_session.state.clone(),
+            from: session.from.clone(),
+            to: session.to.clone(),
+            call_state: session.state.clone(),
         }).await?;
         
         // Handle the call with the configured handler
@@ -1033,6 +1040,7 @@ impl Clone for SessionDialogCoordinator {
             handler: self.handler.clone(),
             session_events_tx: self.session_events_tx.clone(),
             dialog_to_session: Arc::clone(&self.dialog_to_session),
+            session_to_dialog: Arc::clone(&self.session_to_dialog),
             incoming_sdp_offers: Arc::clone(&self.incoming_sdp_offers),
         }
     }

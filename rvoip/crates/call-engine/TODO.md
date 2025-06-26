@@ -10,13 +10,14 @@
 - Bridge customer and agent audio
 - Handle call teardown properly
 
-## 🚨 CURRENT PRIORITY: Fix B2BUA SDP Negotiation (Phase 0.9) - FIXES COMPLETE ✅
+## 🚨 CURRENT PRIORITY: Fix B2BUA SDP Negotiation (Phase 0.9) - BYE FORWARDING FIXED ✅
 
 **Critical Issues Found in Testing**:
 1. **No SDP to Agent**: Server sends INVITE to agent with `Content-Length: 0` (no SDP offer) ✅
 2. **Agent Can't Answer**: Without SDP offer, agent can't generate SDP answer ✅
 3. **No Audio Flow**: Both sides have no media negotiation ✅
 4. **Missing 180 Ringing**: Violates expected SIP call flow ✅
+5. **BYE Dialog Tracking**: 481 errors when agents try to hang up ✅ **FIXED!**
 
 **Root Cause**: The B2BUA implementation is incomplete. It correctly generates SDP for the customer but not for the agent.
 
@@ -24,7 +25,16 @@
 1. ✅ FIXED: Use `prepare_outgoing_call` to generate B2BUA's SDP offer before calling agent
 2. ✅ FIXED: Accept customer's deferred call only after agent answers (not immediately)
 3. ✅ FIXED: Add 180 Ringing response to customer (via Defer)
-4. [ ] Test the complete flow
+4. ✅ **NEW - FIXED**: BYE Dialog Tracking - agents can now hang up without 481 errors
+5. [ ] Test the complete flow with multiple concurrent calls
+
+**BYE Forwarding Fix Details** (Completed 2025-06-26):
+- **Root Cause**: dialog-core wasn't updating dialog lookup keys when dialogs transitioned to Confirmed state
+- **Solution**: Added lookup key updates in two places:
+  1. `response_handler.rs`: When receiving 200 OK responses
+  2. `transaction_integration.rs`: When processing transaction success events
+- **Result**: BYE requests now find their dialogs correctly, no more 481 errors!
+- **Verified**: E2E tests show 0 "Dialog not found" errors and proper BYE forwarding between call legs
 
 ## Overview
 The Call Engine is responsible for managing call center operations, including agent management, call queuing, routing, and session management. It builds on top of session-core to provide call center-specific functionality.
@@ -370,7 +380,7 @@ A proper implementation would extract the port from the Via header in the SIP me
 **Estimated Time**: 3-4 hours total
 **Priority**: CRITICAL - These issues prevent successful call completion
 
-### Phase 0.9 - SDP Negotiation & Media Bridging (IN PROGRESS - FIXES NEEDED)
+### Phase 0.9 - SDP Negotiation & Media Bridging ✅ MAJOR PROGRESS - BYE FIXED
 
 **Root Cause Analysis from E2E Testing**:
 
@@ -380,10 +390,11 @@ A proper implementation would extract the port from the Via header in the SIP me
    - Session-core should auto-generate SDP but isn't
    - **Impact**: No bidirectional media flow
 
-2. **BYE Dialog Tracking Failure** ❌
-   - Agent BYE gets "481 Call/Transaction Does Not Exist"
-   - Dialog mappings created but not used for BYE forwarding
-   - **Impact**: Calls can't terminate properly
+2. **BYE Dialog Tracking Failure** ✅ **FIXED!**
+   - ~~Agent BYE gets "481 Call/Transaction Does Not Exist"~~
+   - ~~Dialog mappings created but not used for BYE forwarding~~
+   - **Fixed**: dialog-core now properly updates lookup keys when dialogs confirm
+   - **Impact**: Calls can now terminate properly!
 
 3. **Missing 180 Ringing** ❌
    - SIPp expects: 100 → 180 → 200

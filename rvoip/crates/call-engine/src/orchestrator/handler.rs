@@ -47,23 +47,91 @@ impl CallHandler for CallCenterCallHandler {
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
         info!("📞 Call {} ended: {}", call.id(), reason);
         
+        // PHASE 17.1: Add detailed dialog ID logging for debugging
+        info!("🔍 B2BUA BYE Debug Info:");
+        info!("  Received Session ID: {}", call.id());
+        info!("  Received Dialog ID: {}", call.id().0);
+        
         if let Some(engine) = self.engine.upgrade() {
-            // Handle B2BUA BYE forwarding - check if this is part of a B2BUA dialog
-            if let Some((_, related_session_id)) = engine.dialog_mappings.remove(&call.id().0) {
-                info!("📞 Forwarding BYE to related B2BUA session: {}", related_session_id);
-                
-                // Terminate the related dialog
-                if let Some(coordinator) = &engine.session_coordinator {
-                    let related_sid = SessionId(related_session_id.clone());
-                    match coordinator.terminate_session(&related_sid).await {
-                        Ok(_) => {
-                            info!("✅ Successfully terminated related B2BUA session: {}", related_session_id);
+            info!("  Current dialog mappings: {} entries", engine.dialog_mappings.len());
+            
+            // Log all current mappings for debugging
+            for entry in engine.dialog_mappings.iter() {
+                info!("    Mapping: {} → {}", entry.key(), entry.value());
+            }
+            
+            // PHASE 17.2: Improved B2BUA BYE forwarding
+            // First try to find by exact session ID match
+            let session_id_str = call.id().0.clone();
+            let mut related_session_id = None;
+            
+            // Check if this session ID is in our mappings
+            if let Some((_, related)) = engine.dialog_mappings.remove(&session_id_str) {
+                info!("📞 Found related session by direct lookup! Forwarding BYE to: {}", related);
+                related_session_id = Some(related);
+            } else {
+                // Try to find in active calls to get the related session
+                if let Some(call_info) = engine.active_calls.get(&call.id()) {
+                    info!("  Found call info for session {}", call.id());
+                    
+                    // If this is a customer call, find the agent session
+                    if call_info.agent_id.is_some() {
+                        // This is a customer session, find agent sessions
+                        for active_call in engine.active_calls.iter() {
+                            if active_call.value().agent_id == call_info.agent_id && 
+                               active_call.key() != call.id() {
+                                info!("📞 Found agent session {} for same agent", active_call.key());
+                                related_session_id = Some(active_call.key().0.clone());
+                                break;
+                            }
                         }
-                        Err(e) => {
-                            warn!("Failed to terminate related session {}: {}", related_session_id, e);
+                    } else {
+                        // This might be an agent session, find the customer session
+                        for active_call in engine.active_calls.iter() {
+                            if let Some(call_agent_id) = &active_call.value().agent_id {
+                                // Check if this agent session corresponds to a customer session
+                                for agent_info in engine.available_agents.iter() {
+                                    if agent_info.value().session_id == *call.id() &&
+                                       agent_info.key() == call_agent_id {
+                                        // Found the agent, now find their customer session
+                                        for customer_call in engine.active_calls.iter() {
+                                            if customer_call.value().agent_id.as_ref() == Some(agent_info.key()) &&
+                                               customer_call.key() != call.id() {
+                                                info!("📞 Found customer session {} for agent", customer_call.key());
+                                                related_session_id = Some(customer_call.key().0.clone());
+                                                break;
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+            }
+            
+            // Forward BYE to related session if found
+            if let Some(related_id) = related_session_id {
+                info!("📞 Forwarding BYE to related B2BUA session: {}", related_id);
+                
+                // Also remove the reverse mapping
+                engine.dialog_mappings.remove(&related_id);
+                
+                // Terminate the related dialog
+                if let Some(coordinator) = &engine.session_coordinator {
+                    let related_sid = SessionId(related_id);
+                    match coordinator.terminate_session(&related_sid).await {
+                        Ok(_) => {
+                            info!("✅ Successfully terminated related B2BUA session: {}", related_sid);
+                        }
+                        Err(e) => {
+                            warn!("Failed to terminate related session {}: {}", related_sid, e);
+                        }
+                    }
+                }
+            } else {
+                warn!("⚠️ No related B2BUA session found for {}", call.id());
             }
             
             // Clean up the call info

@@ -115,12 +115,14 @@ impl SessionCoordinator {
         let (dialog_coord_tx, dialog_coord_rx) = mpsc::channel(1000);
         
         // Create subsystem coordinators
+        let session_to_dialog = Arc::new(DashMap::new());
         let dialog_coordinator = Arc::new(SessionDialogCoordinator::new(
             dialog_api,
             registry.clone(),
             handler.clone(),
             event_tx.clone(),
             dialog_to_session,
+            session_to_dialog,
             Arc::new(DashMap::new()),
         ));
 

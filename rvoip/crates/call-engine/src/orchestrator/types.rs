@@ -38,6 +38,13 @@ pub struct CallInfo {
     // Additional metrics
     pub transfer_count: u32,          // Number of times call was transferred
     pub hold_count: u32,              // Number of times call was put on hold
+    
+    // PHASE 17.1: Add dialog ID tracking for B2BUA
+    /// Customer's dialog ID (from dialog-core)
+    pub customer_dialog_id: Option<String>,
+    
+    /// Agent's dialog ID (from dialog-core)  
+    pub agent_dialog_id: Option<String>,
 }
 
 /// Enhanced agent information for tracking
