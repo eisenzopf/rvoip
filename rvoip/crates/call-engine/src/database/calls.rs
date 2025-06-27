@@ -73,7 +73,7 @@ impl DatabaseManager {
     pub async fn get_active_call(&self, call_id: &str) -> Result<Option<DbActiveCall>> {
         let params: Vec<limbo::Value> = vec![call_id.into()];
         let row = self.query_row(
-            "SELECT * FROM active_calls WHERE call_id = ?1",
+            "SELECT call_id, agent_id, session_id, customer_dialog_id, agent_dialog_id, assigned_at, answered_at FROM active_calls WHERE call_id = ?1",
             params
         ).await?;
         
@@ -88,7 +88,7 @@ impl DatabaseManager {
     pub async fn get_agent_active_calls(&self, agent_id: &str) -> Result<Vec<DbActiveCall>> {
         let params: Vec<limbo::Value> = vec![agent_id.into()];
         let rows = self.query(
-            "SELECT * FROM active_calls WHERE agent_id = ?1",
+            "SELECT call_id, agent_id, session_id, customer_dialog_id, agent_dialog_id, assigned_at, answered_at FROM active_calls WHERE agent_id = ?1",
             params
         ).await?;
         

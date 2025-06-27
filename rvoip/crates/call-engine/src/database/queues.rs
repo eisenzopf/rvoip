@@ -69,7 +69,7 @@ impl DatabaseManager {
                 
                 // Find highest priority call in the queue
                 let rows = tx.query(
-                    "SELECT * FROM call_queue 
+                    "SELECT call_id, session_id, queue_id, customer_info, priority, enqueued_at, attempts, last_attempt, expires_at FROM call_queue 
                      WHERE queue_id = ?1 
                      AND expires_at > datetime('now')
                      ORDER BY priority ASC, enqueued_at ASC 

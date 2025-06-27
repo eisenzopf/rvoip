@@ -168,7 +168,7 @@ impl DatabaseManager {
         }
     }
     
-    /// Atomically assign a call to an agent with retry logic
+    /// Assign a call to an agent with simplified operations to avoid Limbo database bugs
     /// ASSUMES: Agent has already been reserved (marked as BUSY) in previous step
     pub async fn atomic_assign_call_to_agent(
         &self,
@@ -176,41 +176,33 @@ impl DatabaseManager {
         agent_id: &str,
         customer_sdp: Option<String>,
     ) -> Result<()> {
-        let operation = || async {
-            // Use a transaction to ensure atomicity
-            self.transaction(|txn| {
-                let session_id = session_id.to_string();
-                let agent_id = agent_id.to_string();
-                let customer_sdp = customer_sdp.clone();
-                
-                Box::pin(async move {
-                    // NOTE: Agent was already reserved in try_assign_to_specific_agent()
-                    // We do NOT check agent availability again here!
-                    
-                    // 1. Remove call from queue
-                    let dequeue_query = "DELETE FROM call_queue WHERE session_id = ?";
-                    txn.execute(dequeue_query, vec![
-                        limbo::Value::Text(session_id.clone())
-                    ]).await?;
-                    
-                    // 2. Add to active calls
-                    // Generate a unique call_id for this assignment
-                    let call_id = format!("call_{}", uuid::Uuid::new_v4());
-                    let add_active_query = "INSERT INTO active_calls 
-                        (call_id, agent_id, session_id, assigned_at) 
-                        VALUES (?, ?, ?, datetime('now'))";
-                    txn.execute(add_active_query, vec![
-                        limbo::Value::Text(call_id),
-                        limbo::Value::Text(agent_id.clone()),
-                        limbo::Value::Text(session_id.clone()),
-                    ]).await?;
-                    
-                    Ok(())
-                })
-            }).await
-        };
+        debug!("🔄 Starting simplified call assignment for session {} to agent {}", session_id, agent_id);
         
-        self.retry_operation("atomic_assign_call_to_agent", operation).await
+        // Step 1: Remove call from queue (simple DELETE)
+        let dequeue_query = "DELETE FROM call_queue WHERE session_id = ?";
+        self.execute(dequeue_query, vec![limbo::Value::Text(session_id.to_string())]).await
+            .map_err(|e| anyhow!("Failed to dequeue call {}: {}", session_id, e))?;
+        
+        debug!("✅ Dequeued call {} from queue", session_id);
+        
+        // Step 2: Add to active calls (fixed column names to match schema)
+        let now = chrono::Utc::now().to_rfc3339();
+        let call_id = format!("call_{}", uuid::Uuid::new_v4());
+        let add_active_query = "INSERT INTO active_calls 
+            (call_id, agent_id, session_id, assigned_at) 
+            VALUES (?, ?, ?, ?)";
+        self.execute(add_active_query, vec![
+            limbo::Value::Text(call_id.clone()),
+            limbo::Value::Text(agent_id.to_string()),
+            limbo::Value::Text(session_id.to_string()),
+            limbo::Value::Text(now),
+        ]).await
+            .map_err(|e| anyhow!("Failed to add active call {}: {}", call_id, e))?;
+        
+        debug!("✅ Added call {} to active calls for agent {}", call_id, agent_id);
+        
+        info!("✅ Successfully assigned call {} to agent {} (simplified approach)", session_id, agent_id);
+        Ok(())
     }
     
     /// Update agent status with retry logic

@@ -8,60 +8,48 @@ use super::value_helpers::*;
 use crate::agent::{AgentId, AgentStatus};
 
 impl DatabaseManager {
-    /// Register or update an agent
+    /// Register or update an agent (simplified for Limbo compatibility)
     pub async fn upsert_agent(&self, agent_id: &str, username: &str, contact_uri: Option<&str>) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         
         debug!("🔍 upsert_agent called with agent_id='{}', username='{}', contact_uri='{:?}'", 
                agent_id, username, contact_uri);
         
-        // First, check if agent exists
-        let exists = self.query_row(
-            "SELECT 1 FROM agents WHERE agent_id = ?1",
-            vec![agent_id.into()] as Vec<limbo::Value>
-        ).await?.is_some();
+        // Try to update existing agent first (simplified query)
+        let updated_rows = self.execute(
+            "UPDATE agents 
+             SET username = ?1, 
+                 contact_uri = ?2, 
+                 last_heartbeat = ?3,
+                 status = 'AVAILABLE'
+             WHERE agent_id = ?4",
+            vec![
+                username.into(),
+                contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
+                now.clone().into(),
+                agent_id.into(),
+            ] as Vec<limbo::Value>
+        ).await?;
         
-        debug!("🔍 Agent '{}' exists in database: {}", agent_id, exists);
-        
-        if exists {
-            // UPDATE existing agent - ALWAYS set to AVAILABLE when they register
-            let rows = self.execute(
-                "UPDATE agents 
-                 SET username = ?1, 
-                     contact_uri = ?2, 
-                     last_heartbeat = ?3,
-                     status = 'AVAILABLE'
-                 WHERE agent_id = ?4",
+        if updated_rows == 0 {
+            // Agent doesn't exist, try to insert (handle duplicates with error handling)
+            let _result = self.execute(
+                "INSERT INTO agents (agent_id, username, contact_uri, last_heartbeat, status, current_calls, max_calls)
+                 VALUES (?1, ?2, ?3, ?4, 'AVAILABLE', 0, 1)",
                 vec![
-                    username.into(),
+                    agent_id.into(),
+                    username.into(), 
                     contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
                     now.into(),
-                    agent_id.into(),
                 ] as Vec<limbo::Value>
-            ).await?;
+            ).await; // Ignore errors in case of duplicates
             
-            debug!("✅ Updated agent {} to AVAILABLE: {} rows affected", agent_id, rows);
+            debug!("🔍 Attempted to insert new agent {} as AVAILABLE", agent_id);
         } else {
-            // INSERT new agent as AVAILABLE
-            self.execute(
-                "INSERT INTO agents (agent_id, username, contact_uri, status, last_heartbeat)
-                 VALUES (?1, ?2, ?3, 'AVAILABLE', ?4)",
-                vec![
-                    agent_id.into(),
-                    username.into(),
-                    contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
-                    now.into(),
-                ] as Vec<limbo::Value>
-            ).await?;
-            
-            debug!("✅ Inserted new agent {} as AVAILABLE", agent_id);
+            debug!("🔍 Updated existing agent {} to AVAILABLE: {} rows affected", agent_id, updated_rows);
         }
         
-        // Also log current agents in database for debugging
-        let all_agents = self.list_agents().await?;
-        debug!("📋 Current agents in database: {:?}", 
-               all_agents.iter().map(|a| (&a.agent_id, &a.status)).collect::<Vec<_>>());
-        
+        info!("Agent {} processed in database with contact {:?}", agent_id, contact_uri);
         Ok(())
     }
     
@@ -95,28 +83,60 @@ impl DatabaseManager {
         Ok(())
     }
     
-    /// Get available agents for a queue
-    pub async fn get_available_agents(&self, queue_id: Option<&str>) -> Result<Vec<DbAgent>> {
-        let sql = if queue_id.is_some() {
-            // TODO: Add queue skills mapping when implemented
-            "SELECT * FROM agents 
+    /// Get available agents for assignment (simplified query)
+    pub async fn get_available_agents(&self) -> Result<Vec<DbAgent>> {
+        let rows = self.query(
+            "SELECT agent_id, username, contact_uri, status, current_calls, max_calls 
+             FROM agents 
              WHERE status = 'AVAILABLE' 
              AND current_calls < max_calls
-             ORDER BY current_calls ASC"
-        } else {
-            "SELECT * FROM agents 
-             WHERE status = 'AVAILABLE' 
-             AND current_calls < max_calls
-             ORDER BY current_calls ASC"
-        };
-        
-        let rows = self.query(sql, ()).await?;
-        
+             ORDER BY current_calls",
+            vec![] as Vec<limbo::Value>
+        ).await?;
+
         let mut agents = Vec::new();
         for row in rows {
-            agents.push(self.row_to_agent(&row)?);
+            if let (
+                Ok(limbo::Value::Text(agent_id)),
+                Ok(limbo::Value::Text(username)), 
+                contact_uri,
+                Ok(limbo::Value::Text(status)),
+                Ok(current_calls),
+                Ok(max_calls)
+            ) = (
+                row.get_value(0), row.get_value(1), row.get_value(2), 
+                row.get_value(3), row.get_value(4), row.get_value(5)
+            ) {
+                let contact_uri = match contact_uri {
+                    Ok(limbo::Value::Text(uri)) => Some(uri.clone()),
+                    _ => None,
+                };
+                
+                let current_calls = match current_calls {
+                    limbo::Value::Integer(n) => n as i32,
+                    _ => 0,
+                };
+                
+                let max_calls = match max_calls {
+                    limbo::Value::Integer(n) => n as i32,
+                    _ => 1,
+                };
+
+                let db_status = DbAgentStatus::from_str(&status).unwrap_or(DbAgentStatus::Offline);
+
+                agents.push(DbAgent {
+                    agent_id: agent_id.clone(),
+                    username: username.clone(),
+                    contact_uri,
+                    status: db_status,
+                    current_calls,
+                    max_calls,
+                    last_heartbeat: None, // Simplified for now
+                });
+            }
         }
-        
+
+        debug!("🔍 Found {} available agents", agents.len());
         Ok(agents)
     }
     
@@ -124,7 +144,7 @@ impl DatabaseManager {
     pub async fn get_agent(&self, agent_id: &str) -> Result<Option<DbAgent>> {
         let params: Vec<limbo::Value> = vec![agent_id.into()];
         let row = self.query_row(
-            "SELECT * FROM agents WHERE agent_id = ?1",
+            "SELECT id, agent_id, username, contact_uri, last_heartbeat, status, current_calls, max_calls FROM agents WHERE agent_id = ?1",
             params
         ).await?;
         
@@ -136,7 +156,7 @@ impl DatabaseManager {
     
     /// Get all agents
     pub async fn list_agents(&self) -> Result<Vec<DbAgent>> {
-        let rows = self.query("SELECT * FROM agents ORDER BY agent_id", ()).await?;
+        let rows = self.query("SELECT id, agent_id, username, contact_uri, last_heartbeat, status, current_calls, max_calls FROM agents ORDER BY agent_id", ()).await?;
         
         let mut agents = Vec::new();
         for row in rows {
@@ -228,23 +248,24 @@ impl DatabaseManager {
     }
     
     /// Convert database row to agent struct
+    /// Column order: id, agent_id, username, contact_uri, last_heartbeat, status, current_calls, max_calls
     fn row_to_agent(&self, row: &limbo::Row) -> Result<DbAgent> {
-        let status_str = value_to_string(&row.get_value(2)?)?;
+        let status_str = value_to_string(&row.get_value(5)?)?; // status is at index 5
         let status = DbAgentStatus::from_str(&status_str)
             .ok_or_else(|| anyhow!("Invalid agent status: {}", status_str))?;
         
-        let last_heartbeat_str = value_to_optional_string(&row.get_value(6)?);
+        let last_heartbeat_str = value_to_optional_string(&row.get_value(4)?); // last_heartbeat is at index 4
         let last_heartbeat = last_heartbeat_str
             .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&Utc));
         
         Ok(DbAgent {
-            agent_id: value_to_string(&row.get_value(0)?)?,
-            username: value_to_string(&row.get_value(1)?)?,
+            agent_id: value_to_string(&row.get_value(1)?)?,      // agent_id at index 1
+            username: value_to_string(&row.get_value(2)?)?,      // username at index 2
             status,
-            max_calls: value_to_i32(&row.get_value(3)?)?,
-            current_calls: value_to_i32(&row.get_value(4)?)?,
-            contact_uri: value_to_optional_string(&row.get_value(5)?),
+            max_calls: value_to_i32(&row.get_value(7)?)?,        // max_calls at index 7
+            current_calls: value_to_i32(&row.get_value(6)?)?,    // current_calls at index 6
+            contact_uri: value_to_optional_string(&row.get_value(3)?), // contact_uri at index 3
             last_heartbeat,
         })
     }

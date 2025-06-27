@@ -19,7 +19,7 @@ rvoip-session-core = { path = "../session-core" }
 infra-common = { path = "../infra-common", features = ["no-global-allocator"] }
 
 # Database
-limbo = "0.0.20"
+limbo = { version = "0.0.22", features = ["index_experimental"] }
 
 # Web framework
 axum = "0.7"

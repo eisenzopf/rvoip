@@ -2000,9 +2000,9 @@ dependencies = [
 
 [[package]]
 name = "limbo"
-version = "0.0.20"
+version = "0.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2307e618006ed9d330812121edf0688cc6b8c772835558b1531942a5275b80b4"
+checksum = "0435c6e2fe54bea14760122804827b8b5731ebeaaa824d1e3ad8c5f21ba0db5b"
 dependencies = [
  "limbo_core",
  "thiserror 2.0.12",
@@ -2010,9 +2010,9 @@ dependencies = [
 
 [[package]]
 name = "limbo_core"
-version = "0.0.20"
+version = "0.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dced6d553c4c7b5057a63b57603fc36675325a96ed16e325273959934f298696"
+checksum = "51a673b6f446e433495003f9763d945455d4fe9fcb1f1f8088ed210ef31d8f30"
 dependencies = [
  "bitflags 2.9.0",
  "built",
@@ -2042,15 +2042,17 @@ dependencies = [
  "rustix",
  "ryu",
  "strum",
+ "strum_macros",
  "thiserror 1.0.69",
  "tracing",
+ "uncased",
 ]
 
 [[package]]
 name = "limbo_ext"
-version = "0.0.20"
+version = "0.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd0df43c237bbcf05771d7bd371c9ef7ad03fc2bb6ff8ccf2c5785b682343962"
+checksum = "65d246e7a5535250159f534149d4661b99dcb40672d25be4f06e64c1efcc2ff7"
 dependencies = [
  "chrono",
  "getrandom 0.3.2",
@@ -2059,9 +2061,9 @@ dependencies = [
 
 [[package]]
 name = "limbo_macros"
-version = "0.0.20"
+version = "0.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "558f73b9a70b7d5f8bd34101dd7fadbf1a5886e74597c181b4d33bbc0e579eb4"
+checksum = "35eaf95f67607f78486459327a8e8396171ea7f272b194ca86a755dafc8b845a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2070,9 +2072,9 @@ dependencies = [
 
 [[package]]
 name = "limbo_sqlite3_parser"
-version = "0.0.20"
+version = "0.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e980e2336d74845cf1eee237de6713f0cff858467df9a05cd77f6794282f705f"
+checksum = "b4a7f1a23ff2356b76ff5ed8703f2af971c71d64e19066c9c8e29185b0d5a49c"
 dependencies = [
  "bitflags 2.9.0",
  "cc",
@@ -2091,9 +2093,9 @@ dependencies = [
 
 [[package]]
 name = "limbo_time"
-version = "0.0.20"
+version = "0.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a576c50a932220bfdc2571fef13bca1f340f0bdacb5972fc69142088f59234f"
+checksum = "ade284f0f1b485e51ec0d8931ff9c32804ddbe5600d83cd9f68ba4522d7a1c76"
 dependencies = [
  "chrono",
  "limbo_ext",
@@ -2105,9 +2107,9 @@ dependencies = [
 
 [[package]]
 name = "limbo_uuid"
-version = "0.0.20"
+version = "0.0.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f6f823fa77ceec59f58a38c33865bff0fb91e604b1ab65ba4b71f673cb94f5a"
+checksum = "98bcc063c0709e8b4483a5e2af007f1a97f22e7720de3b33c608d955511f4407"
 dependencies = [
  "limbo_ext",
  "mimalloc",

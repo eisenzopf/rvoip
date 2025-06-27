@@ -389,7 +389,7 @@ impl CallCenterEngine {
             while let Some(queued_call) = queue_manager.dequeue_for_agent(&queue_id)? {
                 // Find an available agent from database
                 let available_agents = if let Some(db_manager) = &self.db_manager {
-                    match db_manager.get_available_agents(Some(&queue_id)).await {
+                    match db_manager.get_available_agents().await {
                         Ok(agents) => agents,
                         Err(e) => {
                             error!("Failed to get available agents from database: {}", e);

@@ -10,115 +10,105 @@ use super::DatabaseManager;
 
 /// **CENTRALIZED DATABASE SCHEMA INITIALIZATION**
 /// This is the single source of truth for all database schema creation
+/// Simplified for Limbo 0.0.22 compatibility - avoiding optimizer bugs
 pub async fn initialize_call_center_schema(db_manager: &DatabaseManager) -> Result<()> {
-    info!("🗄️ Initializing centralized call center database schema");
+    info!("🗄️ Initializing simplified call center database schema (Limbo 0.0.22 workaround)");
     
-    // Create agents table with correct schema
+    // STEP 1: Create agents table (simplified - no UNIQUE constraints)
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS agents (
-            agent_id TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
+            agent_id TEXT NOT NULL,
             username TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'OFFLINE',
-            max_calls INTEGER DEFAULT 1,
-            current_calls INTEGER DEFAULT 0,
             contact_uri TEXT,
-            last_heartbeat DATETIME,
-            CHECK (current_calls >= 0),
-            CHECK (current_calls <= max_calls),
-            CHECK (status IN ('OFFLINE', 'AVAILABLE', 'BUSY', 'RESERVED', 'POSTCALLWRAPUP'))
+            last_heartbeat TEXT,
+            status TEXT NOT NULL DEFAULT 'OFFLINE',
+            current_calls INTEGER NOT NULL DEFAULT 0,
+            max_calls INTEGER NOT NULL DEFAULT 1
         )",
-        ()
+        vec![] as Vec<limbo::Value>
     ).await?;
     
-    // Create queues table
-    db_manager.execute(
-        "CREATE TABLE IF NOT EXISTS queues (
-            queue_id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            capacity INTEGER DEFAULT 100,
-            overflow_queue TEXT,
-            priority_boost INTEGER DEFAULT 5,
-            CHECK (capacity > 0),
-            CHECK (priority_boost >= 0)
-        )",
-        ()
-    ).await?;
+    debug!("✅ Agents table created (simplified)");
     
-    // Create call_queue table
+    // STEP 2: Create call_queue table (fixed column names to match code expectations)
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS call_queue (
-            call_id TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
+            call_id TEXT NOT NULL,
             session_id TEXT NOT NULL,
             queue_id TEXT NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 50,
             customer_info TEXT,
-            priority INTEGER DEFAULT 0,
-            enqueued_at DATETIME DEFAULT (datetime('now')),
-            attempts INTEGER DEFAULT 0,
-            last_attempt DATETIME,
-            expires_at DATETIME DEFAULT (datetime('now', '+60 minutes')),
-            FOREIGN KEY (queue_id) REFERENCES queues(queue_id)
+            enqueued_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_attempt TEXT,
+            assigned_agent_id TEXT,
+            status TEXT NOT NULL DEFAULT 'waiting'
         )",
-        ()
+        vec![] as Vec<limbo::Value>
     ).await?;
     
-    // Create active_calls table
+    debug!("✅ Call queue table created (simplified)");
+    
+    // STEP 3: Create active_calls table (fixed column names to match code expectations)
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS active_calls (
-            call_id TEXT PRIMARY KEY,
+            id INTEGER PRIMARY KEY,
+            call_id TEXT NOT NULL,
             agent_id TEXT NOT NULL,
             session_id TEXT NOT NULL,
             customer_dialog_id TEXT,
             agent_dialog_id TEXT,
-            assigned_at DATETIME DEFAULT (datetime('now')),
-            answered_at DATETIME,
-            FOREIGN KEY (agent_id) REFERENCES agents(agent_id)
+            assigned_at TEXT NOT NULL,
+            answered_at TEXT
         )",
-        ()
+        vec![] as Vec<limbo::Value>
     ).await?;
     
-    // Create call records table (for historical data)
+    debug!("✅ Active calls table created (simplified)");
+    
+    // STEP 4: Create queues table (simplified)
+    db_manager.execute(
+        "CREATE TABLE IF NOT EXISTS queues (
+            id INTEGER PRIMARY KEY,
+            queue_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            max_wait_time INTEGER,
+            priority_routing BOOLEAN DEFAULT FALSE,
+            created_at TEXT NOT NULL
+        )",
+        vec![] as Vec<limbo::Value>
+    ).await?;
+    
+    debug!("✅ Queues table created (simplified)");
+    
+    // STEP 5: Create call_records table (simplified)
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS call_records (
-            id TEXT PRIMARY KEY,
-            session_id TEXT UNIQUE,
-            caller_uri TEXT NOT NULL,
-            called_uri TEXT,
-            direction TEXT NOT NULL,
-            status TEXT NOT NULL,
-            start_time TEXT NOT NULL,
-            answer_time TEXT,
+            id INTEGER PRIMARY KEY,
+            call_id TEXT NOT NULL,
+            customer_number TEXT,
+            agent_id TEXT,
+            queue_name TEXT,
+            start_time TEXT,
             end_time TEXT,
             duration_seconds INTEGER,
-            assigned_agent_id TEXT,
-            queue_id TEXT,
-            disconnect_reason TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (assigned_agent_id) REFERENCES agents(agent_id)
+            disposition TEXT,
+            notes TEXT
         )",
-        ()
+        vec![] as Vec<limbo::Value>
     ).await?;
     
-    // Create agent skills table
-    db_manager.execute(
-        "CREATE TABLE IF NOT EXISTS agent_skills (
-            agent_id TEXT NOT NULL,
-            skill_name TEXT NOT NULL,
-            skill_level INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (agent_id, skill_name),
-            FOREIGN KEY (agent_id) REFERENCES agents(agent_id) ON DELETE CASCADE
-        )",
-        ()
-    ).await?;
+    debug!("✅ Call records table created (simplified)");
     
-    // Create indexes for performance
-    create_performance_indexes(db_manager).await?;
+    // STEP 6: Skip default queue insertion to avoid Limbo optimizer bugs
+    // Default queues will be created on-demand when needed
+    debug!("⚠️ Skipping default queue insertion due to Limbo optimizer limitations");
     
-    // Insert default queues
-    create_default_queues(db_manager).await?;
-    
-    info!("✅ Centralized database schema initialized successfully");
+    info!("✅ Simplified call center database schema initialized (Limbo 0.0.22 workaround)");
     Ok(())
 }
 

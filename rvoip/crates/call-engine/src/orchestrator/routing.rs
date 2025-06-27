@@ -100,7 +100,7 @@ impl CallCenterEngine {
         // Get available agents from database
         let db_manager = self.db_manager.as_ref()?;
         
-        let mut suitable_agents = match db_manager.get_available_agents(None).await {
+        let mut suitable_agents = match db_manager.get_available_agents().await {
             Ok(agents) => agents
                 .into_iter()
                 .filter(|agent| {
@@ -236,7 +236,7 @@ impl CallCenterEngine {
     /// Get list of available agents (excludes agents in post-call wrap-up)
     async fn get_available_agents(&self) -> Vec<AgentId> {
         if let Some(db_manager) = &self.db_manager {
-            match db_manager.get_available_agents(None).await {
+            match db_manager.get_available_agents().await {
                 Ok(agents) => agents
                     .into_iter()
                     .map(|agent| AgentId::from(agent.agent_id))
