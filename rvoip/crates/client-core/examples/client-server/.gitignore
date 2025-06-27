@@ -9,7 +9,7 @@
 ## File system
 .DS_Store
 desktop.ini
-
+target/
 ## Editor
 *.swp
 *.swo
