@@ -10,15 +10,15 @@ use super::DatabaseManager;
 
 /// **CENTRALIZED DATABASE SCHEMA INITIALIZATION**
 /// This is the single source of truth for all database schema creation
-/// Simplified for Limbo 0.0.22 compatibility - avoiding optimizer bugs
+/// Simplified for Limbo compatibility - NO UNIQUE constraints or indexes (Limbo limitation)
 pub async fn initialize_call_center_schema(db_manager: &DatabaseManager) -> Result<()> {
-    info!("🗄️ Initializing simplified call center database schema (Limbo 0.0.22 workaround)");
+    info!("🗄️ Initializing Limbo-compatible call center database schema (NO UNIQUE constraints)");
     
-    // STEP 1: Create agents table (with availability timestamp for fair round robin)
+    // STEP 1: Create agents table (NO UNIQUE constraints for Limbo compatibility)
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS agents (
             id INTEGER PRIMARY KEY,
-            agent_id TEXT NOT NULL UNIQUE,
+            agent_id TEXT NOT NULL,
             username TEXT NOT NULL,
             contact_uri TEXT,
             last_heartbeat TEXT,
@@ -30,9 +30,9 @@ pub async fn initialize_call_center_schema(db_manager: &DatabaseManager) -> Resu
         vec![] as Vec<limbo::Value>
     ).await?;
     
-    debug!("✅ Agents table created (simplified)");
+    info!("✅ Agents table created (Limbo compatible - no UNIQUE constraints)");
     
-    // STEP 2: Create call_queue table (fixed column names to match code expectations)
+    // STEP 2: Create call_queue table (NO UNIQUE constraints)
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS call_queue (
             id INTEGER PRIMARY KEY,
@@ -51,9 +51,9 @@ pub async fn initialize_call_center_schema(db_manager: &DatabaseManager) -> Resu
         vec![] as Vec<limbo::Value>
     ).await?;
     
-    debug!("✅ Call queue table created (simplified)");
+    info!("✅ Call queue table created (Limbo compatible)");
     
-    // STEP 3: Create active_calls table (fixed column names to match code expectations)
+    // STEP 3: Create active_calls table (NO UNIQUE constraints)
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS active_calls (
             id INTEGER PRIMARY KEY,
@@ -68,9 +68,9 @@ pub async fn initialize_call_center_schema(db_manager: &DatabaseManager) -> Resu
         vec![] as Vec<limbo::Value>
     ).await?;
     
-    debug!("✅ Active calls table created (simplified)");
+    info!("✅ Active calls table created (Limbo compatible)");
     
-    // STEP 4: Create queues table (simplified)
+    // STEP 4: Create queues table (NO UNIQUE constraints)
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS queues (
             id INTEGER PRIMARY KEY,
@@ -84,9 +84,9 @@ pub async fn initialize_call_center_schema(db_manager: &DatabaseManager) -> Resu
         vec![] as Vec<limbo::Value>
     ).await?;
     
-    debug!("✅ Queues table created (simplified)");
+    info!("✅ Queues table created (Limbo compatible)");
     
-    // STEP 5: Create call_records table (simplified)
+    // STEP 5: Create call_records table (NO UNIQUE constraints)
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS call_records (
             id INTEGER PRIMARY KEY,
@@ -103,18 +103,23 @@ pub async fn initialize_call_center_schema(db_manager: &DatabaseManager) -> Resu
         vec![] as Vec<limbo::Value>
     ).await?;
     
-    debug!("✅ Call records table created (simplified)");
+    info!("✅ Call records table created (Limbo compatible)");
     
-    // STEP 6: Skip default queue insertion to avoid Limbo optimizer bugs
-    // Default queues will be created on-demand when needed
-    debug!("⚠️ Skipping default queue insertion due to Limbo optimizer limitations");
+    // SKIP: Index creation - Limbo doesn't support indexes
+    info!("⚠️ Skipping index creation - Limbo limitation: 'No indexing'");
     
-    info!("✅ Simplified call center database schema initialized (Limbo 0.0.22 workaround)");
+    // SKIP: Default queue insertion - Let's avoid complex operations for now
+    info!("⚠️ Skipping default queue insertion - will create on-demand");
+    
+    info!("✅ Limbo-compatible call center database schema initialized successfully");
     Ok(())
 }
 
-/// Create performance indexes
+/// Create performance indexes - DISABLED for Limbo compatibility
 async fn create_performance_indexes(db_manager: &DatabaseManager) -> Result<()> {
+    warn!("⚠️ Index creation disabled - Limbo limitation: 'No indexing'");
+    // All index creation is commented out since Limbo doesn't support indexes
+    /*
     debug!("📋 Creating performance indexes");
     
     // Agents indexes
@@ -175,8 +180,9 @@ async fn create_performance_indexes(db_manager: &DatabaseManager) -> Result<()> 
         "CREATE INDEX IF NOT EXISTS idx_call_records_start_time ON call_records(start_time)",
         ()
     ).await?;
+    */
     
-    debug!("✅ Performance indexes created");
+    info!("✅ Index creation skipped (Limbo doesn't support indexes)");
     Ok(())
 }
 
