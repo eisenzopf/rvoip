@@ -52,20 +52,63 @@ impl DatabaseManager {
         
         self.transaction(|tx| {
             Box::pin(async move {
-                // First, reserve the agent
-                let reserved = tx.execute(
-                    "UPDATE agents 
-                     SET status = 'BUSY', current_calls = current_calls + 1
-                     WHERE agent_id = ?1 
-                     AND status = 'AVAILABLE' 
-                     AND current_calls < max_calls",
+                // First, check agent status for debugging
+                let agent_status_rows = tx.query(
+                    "SELECT agent_id, status, current_calls, max_calls FROM agents WHERE agent_id = ?1",
                     vec![agent_id.clone().into()] as Vec<limbo::Value>
                 ).await?;
                 
-                if reserved == 0 {
-                    // Agent not available
+                if let Some(status_row) = agent_status_rows.into_iter().next() {
+                    let status = value_to_string(&status_row.get_value(1)?)?;
+                    let current_calls = value_to_i32(&status_row.get_value(2)?)?;
+                    let max_calls = value_to_i32(&status_row.get_value(3)?)?;
+                    tracing::info!("📋 DB ASSIGNMENT: Agent {} has status='{}', current_calls={}, max_calls={}", 
+                                  agent_id, status, current_calls, max_calls);
+                }
+                
+                // LIMBO FIX: Use atomic UPDATE with WHERE conditions (no separate SELECT)
+                // This avoids transaction isolation issues by doing everything in one operation
+                tracing::info!("📋 DB ASSIGNMENT: Attempting atomic reservation for agent {} with WHERE conditions", agent_id);
+                
+                // Execute the atomic UPDATE (Limbo always reports 0 rows, so we ignore the return value)
+                match tx.execute(
+                    "UPDATE agents SET status = 'BUSY', current_calls = current_calls + 1 WHERE agent_id = ?1 AND (status = 'AVAILABLE' OR status = 'RESERVED') AND current_calls < max_calls",
+                    vec![agent_id.clone().into()] as Vec<limbo::Value>
+                ).await {
+                    Ok(count) => {
+                        tracing::info!("📋 DB ASSIGNMENT: Atomic UPDATE executed for agent {} (Limbo reported {} rows, will verify with SELECT)", agent_id, count);
+                    }
+                    Err(e) => {
+                        tracing::error!("📋 DB ASSIGNMENT: Atomic UPDATE failed for agent {}: {:?}", agent_id, e);
+                        return Ok(None);
+                    }
+                };
+                
+                // LIMBO QUIRK FIX: Verify the UPDATE worked by checking the agent's current status
+                // Since Limbo reports 0 rows even on successful UPDATEs, we must confirm with SELECT
+                let verify_rows = tx.query(
+                    "SELECT status, current_calls FROM agents WHERE agent_id = ?1",
+                    vec![agent_id.clone().into()] as Vec<limbo::Value>
+                ).await?;
+                
+                if let Some(verify_row) = verify_rows.into_iter().next() {
+                    let current_status = value_to_string(&verify_row.get_value(0)?)?;
+                    let current_calls = value_to_i32(&verify_row.get_value(1)?)?;
+                    
+                    if current_status == "BUSY" {
+                        tracing::info!("✅ DB ASSIGNMENT: CONFIRMED - Agent {} successfully reserved (status='{}', current_calls={})", 
+                                     agent_id, current_status, current_calls);
+                    } else {
+                        tracing::warn!("📋 DB ASSIGNMENT: Agent {} still has status='{}' after UPDATE - reservation failed (conditions not met)", 
+                                     agent_id, current_status);
+                        return Ok(None);
+                    }
+                } else {
+                    tracing::error!("📋 DB ASSIGNMENT: Cannot find agent {} to verify UPDATE result", agent_id);
                     return Ok(None);
                 }
+                
+                // Agent successfully reserved - proceed to find calls in queue
                 
                 // Find highest priority call in the queue
                 let rows = tx.query(
@@ -74,8 +117,10 @@ impl DatabaseManager {
                      AND expires_at > datetime('now')
                      ORDER BY priority ASC, enqueued_at ASC 
                      LIMIT 1",
-                    vec![queue_id.into()] as Vec<limbo::Value>
+                    vec![queue_id.clone().into()] as Vec<limbo::Value>
                 ).await?;
+                
+                tracing::info!("📋 DB ASSIGNMENT: Found {} calls in queue '{}' for agent {}", rows.len(), queue_id, agent_id);
                 
                 if let Some(row) = rows.into_iter().next() {
                     let db_call = Self::parse_db_queued_call_row(&row)?;
@@ -105,6 +150,7 @@ impl DatabaseManager {
                         Ok(Some(call))
                     } else {
                         // Failed to parse call, unreserve agent
+                        tracing::warn!("📋 DB ASSIGNMENT: Failed to parse call, unreserving agent {}", agent_id);
                         tx.execute(
                             "UPDATE agents 
                              SET status = 'AVAILABLE', current_calls = current_calls - 1
@@ -115,12 +161,14 @@ impl DatabaseManager {
                     }
                 } else {
                     // No calls in queue, unreserve agent
-                    tx.execute(
+                    tracing::warn!("📋 DB ASSIGNMENT: No calls found in queue '{}' for agent {}, unreserving agent", queue_id, agent_id);
+                    let unreserved = tx.execute(
                         "UPDATE agents 
                          SET status = 'AVAILABLE', current_calls = current_calls - 1
                          WHERE agent_id = ?1",
-                        vec![agent_id.into()] as Vec<limbo::Value>
+                        vec![agent_id.clone().into()] as Vec<limbo::Value>
                     ).await?;
+                    tracing::info!("📋 DB ASSIGNMENT: Unreserved agent {} (updated {} rows)", agent_id, unreserved);
                     Ok(None)
                 }
             })

@@ -5,11 +5,13 @@
 //! and business rules.
 
 use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{debug, info, error, warn};
 use rvoip_session_core::{IncomingCall, SessionId};
+use uuid::Uuid;
 
 use crate::agent::{AgentId, AgentStatus};
-use crate::error::Result as CallCenterResult;
+use crate::error::{Result as CallCenterResult, CallCenterError};
 use crate::queue::QueuedCall;
 use super::core::CallCenterEngine;
 use super::types::{CustomerType, RoutingDecision, AgentInfo};
@@ -251,41 +253,110 @@ impl CallCenterEngine {
         }
     }
     
-    /// Process database assignments
+    /// Process database assignments (DISABLED - using FULL ROUTING instead)
     async fn process_database_assignments(&self, queue_id: &str) -> CallCenterResult<()> {
-        if let Some(db_manager) = &self.db_manager {
-            match db_manager.get_available_assignments(queue_id).await {
-                Ok(assignments) => {
-                    info!("📋 Database found {} optimal assignments for queue {}", 
-                          assignments.len(), queue_id);
-                    
-                    for (agent_id_str, call_id, session_id_str) in assignments {
-                        let agent_id = AgentId::from(agent_id_str);
-                        let session_id = SessionId(session_id_str);
-                        
-                        // Process assignment asynchronously
-                        let engine = Arc::new(self.clone());
-                        tokio::spawn(async move {
-                            match engine.assign_specific_agent_to_call(session_id.clone(), agent_id.clone()).await {
-                                Ok(()) => {
-                                    info!("✅ Successfully assigned call {} to agent {}", session_id, agent_id);
-                                }
-                                Err(e) => {
-                                    error!("Failed to assign call {} to agent {}: {}", session_id, agent_id, e);
-                                    // Database will handle re-queuing if needed
-                                }
-                            }
-                        });
-                    }
+        // LIMBO CONCURRENCY FIX: Use mutex to serialize database operations
+        // Limbo doesn't support multi-threading, so we must prevent concurrent access
+        static DB_ASSIGNMENT_MUTEX: Mutex<()> = Mutex::const_new(());
+        let _lock = DB_ASSIGNMENT_MUTEX.lock().await;
+        
+        let db_manager = match &self.db_manager {
+            Some(db) => db,
+            None => {
+                return Err(CallCenterError::Internal("Database not available".to_string()));
+            }
+        };
+
+        info!("📋 DATABASE ASSIGNMENT: Processing queue '{}' using database as system of record (SERIALIZED)", queue_id);
+
+        // Get available agents from database
+        let available_agents = match db_manager.get_available_agents().await {
+            Ok(agents) => {
+                let agent_ids: Vec<AgentId> = agents.into_iter()
+                    .map(|agent| AgentId(agent.agent_id))
+                    .collect();
+                
+                if agent_ids.is_empty() {
+                    debug!("📋 DATABASE ASSIGNMENT: No available agents in database for queue '{}'", queue_id);
+                    return Ok(()); // No assignments made, but not an error
+                }
+                
+                info!("📋 DATABASE ASSIGNMENT: Found {} available agents: {:?}", 
+                      agent_ids.len(), 
+                      agent_ids.iter().map(|a| &a.0).collect::<Vec<_>>());
+                agent_ids
+            }
+            Err(e) => {
+                error!("📋 DATABASE ASSIGNMENT: Failed to get available agents: {}", e);
+                return Err(CallCenterError::Database(format!("Failed to get available agents: {}", e)));
+            }
+        };
+
+        // Get queue depth to determine how many assignments to attempt
+        let queue_depth = match db_manager.get_queue_depth(queue_id).await {
+            Ok(depth) => {
+                if depth == 0 {
+                    debug!("📋 DATABASE ASSIGNMENT: No calls in database queue '{}'", queue_id);
+                    return Ok(()); // No assignments made, but not an error
+                }
+                info!("📋 DATABASE ASSIGNMENT: Found {} calls in queue '{}'", depth, queue_id);
+                depth
+            }
+            Err(e) => {
+                error!("📋 DATABASE ASSIGNMENT: Failed to get queue depth: {}", e);
+                return Err(CallCenterError::Database(format!("Failed to get queue depth: {}", e)));
+            }
+        };
+
+        // Make assignments using atomic database operations with round-robin
+        let mut assignments_made = 0;
+        let max_assignments = std::cmp::min(available_agents.len(), queue_depth);
+
+        for i in 0..max_assignments {
+            let agent_id = &available_agents[i % available_agents.len()];
+
+            // Use atomic database operation to dequeue and assign
+            match db_manager.dequeue_call_for_agent(queue_id, &agent_id.0).await {
+                Ok(Some(queued_call)) => {
+                    info!("📋 DATABASE ASSIGNMENT: Atomic assignment of call {} to agent {}", 
+                          queued_call.session_id, agent_id);
+
+                    // Spawn the full routing assignment task
+                    let engine = Arc::new(self.clone());
+                    let queue_id_clone = queue_id.to_string();
+                    let agent_id_clone = agent_id.clone();
+
+                    tokio::spawn(async move {
+                        Self::handle_call_assignment(
+                            engine,
+                            queue_id_clone,
+                            queued_call,
+                            agent_id_clone,
+                        ).await;
+                    });
+
+                    assignments_made += 1;
+                    info!("📋 DATABASE ASSIGNMENT: Successfully assigned call to agent {} (assignment #{}/{})", 
+                          agent_id, assignments_made, max_assignments);
+                }
+                Ok(None) => {
+                    debug!("📋 DATABASE ASSIGNMENT: Agent {} not available or no calls for agent", agent_id);
+                    continue;
                 }
                 Err(e) => {
-                    error!("Failed to get assignments from database: {}", e);
-                    return Err(crate::error::CallCenterError::internal(
-                        format!("Database assignment error: {}", e)
-                    ));
+                    error!("📋 DATABASE ASSIGNMENT: Failed atomic assignment for agent {}: {}", agent_id, e);
+                    continue;
                 }
             }
         }
+
+        if assignments_made > 0 {
+            info!("✅ DATABASE ASSIGNMENT: Successfully made {} assignments in queue '{}'", assignments_made, queue_id);
+        } else {
+            info!("📋 DATABASE ASSIGNMENT: No assignments made in queue '{}' (agents: {}, calls: {})", 
+                  queue_id, available_agents.len(), queue_depth);
+        }
+
         Ok(())
     }
     
@@ -391,7 +462,7 @@ impl CallCenterEngine {
         }
     }
     
-    /// Handle assignment of a queued call to an agent
+    /// Handle assignment of a queued call to an agent with FULL ROUTING LOGIC
     async fn handle_call_assignment(
         engine: Arc<CallCenterEngine>,
         queue_id: String,
@@ -400,47 +471,278 @@ impl CallCenterEngine {
     ) {
         let session_id = queued_call.session_id.clone();
         
-        match engine.assign_specific_agent_to_call(session_id.clone(), agent_id.clone()).await {
-            Ok(()) => {
-                info!("✅ Successfully assigned queued call {} to agent {}", session_id, agent_id);
-                // Mark as no longer being assigned
-                let mut queue_manager = engine.queue_manager.write().await;
-                queue_manager.mark_as_not_assigned(&session_id);
+        info!("🎯 FULL ROUTING: Starting complete assignment of call {} to agent {}", session_id, agent_id);
+        
+        // Get database manager
+        let db_manager = match &engine.db_manager {
+            Some(db) => db,
+            None => {
+                error!("❌ Database not available for full routing assignment");
+                return;
+            }
+        };
+        
+        // Get agent information
+        let agent_info = match db_manager.get_agent(&agent_id.0).await {
+            Ok(Some(db_agent)) => {
+                super::types::AgentInfo::from_db_agent(&db_agent, db_agent.contact_uri.clone().unwrap_or_else(|| format!("sip:{}@127.0.0.1", db_agent.username)))
+            }
+            Ok(None) => {
+                error!("❌ Agent {} not found in database", agent_id);
+                Self::requeue_call_on_failure(engine, queue_id, queued_call).await;
+                return;
             }
             Err(e) => {
-                error!("Failed to assign call {} to agent {}: {}", session_id, agent_id, e);
-                
-                // The agent was already restored by assign_specific_agent_to_call on failure
-                // We just need to handle the call re-queuing
-                
-                // Mark as no longer being assigned
-                let mut queue_manager = engine.queue_manager.write().await;
-                queue_manager.mark_as_not_assigned(&session_id);
-                
-                // Check if call is still active
-                let call_still_active = engine.active_calls.contains_key(&session_id);
-                if !call_still_active {
-                    warn!("Call {} is no longer active, not re-queuing", session_id);
-                    return;
-                }
-                
-                // Re-queue the call with higher priority
-                let mut requeued_call = queued_call;
-                requeued_call.priority = requeued_call.priority.saturating_sub(5); // Increase priority
-                
-                if let Err(e) = queue_manager.enqueue_call(&queue_id, requeued_call) {
-                    error!("Failed to re-queue call {}: {}", session_id, e);
-                } else {
-                    info!("📞 Re-queued call {} with higher priority", session_id);
-                    
-                    // Update call status back to queued
-                    if let Some(mut call_info) = engine.active_calls.get_mut(&session_id) {
-                        call_info.status = super::types::CallStatus::Queued;
-                        call_info.queue_id = Some(queue_id);
-                    }
-                }
+                error!("❌ Failed to get agent from database: {}", e);
+                Self::requeue_call_on_failure(engine, queue_id, queued_call).await;
+                return;
+            }
+        };
+        
+        // **STEP 1: FULL DATABASE ASSIGNMENT** (not simplified!)
+        // Remove call from queue
+        match db_manager.remove_call_from_queue(&session_id.0).await {
+            Ok(()) => info!("✅ FULL ROUTING: Dequeued call {} from database queue", session_id),
+            Err(e) => {
+                error!("❌ Failed to dequeue call from database: {}", e);
+                Self::requeue_call_on_failure(engine, queue_id, queued_call).await;
+                return;
             }
         }
+        
+        // Add to active calls with proper tracking
+        let now = chrono::Utc::now().to_rfc3339();
+        let call_id = format!("call_{}", uuid::Uuid::new_v4());
+        match db_manager.execute(
+            "INSERT INTO active_calls (call_id, agent_id, session_id, assigned_at) VALUES (?, ?, ?, ?)",
+            vec![
+                limbo::Value::Text(call_id.clone()),
+                limbo::Value::Text(agent_id.0.clone()),
+                limbo::Value::Text(session_id.0.clone()),
+                limbo::Value::Text(now),
+            ]
+        ).await {
+            Ok(_) => info!("✅ FULL ROUTING: Added call {} to active calls for agent {}", call_id, agent_id),
+            Err(e) => {
+                error!("❌ Failed to add active call to database: {}", e);
+                Self::requeue_call_on_failure(engine, queue_id, queued_call).await;
+                return;
+            }
+        }
+        
+        // **STEP 2: B2BUA CALL SETUP** (from calls.rs logic)
+        let coordinator = match engine.session_coordinator.as_ref() {
+            Some(coord) => coord,
+            None => {
+                error!("❌ Session coordinator not available");
+                Self::rollback_full_assignment(&engine, &session_id, &agent_id, &queue_id, queued_call).await;
+                return;
+            }
+        };
+        
+        // Get customer's SDP from active calls
+        let customer_sdp = engine.active_calls.get(&session_id)
+            .and_then(|call_info| call_info.customer_sdp.clone());
+        
+        // Prepare B2BUA call to agent
+        let agent_contact_uri = agent_info.contact_uri.clone();
+        let call_center_uri = format!("sip:call-center@{}", engine.config.general.domain);
+        
+        info!("📞 FULL ROUTING: B2BUA preparing outgoing call to agent {} at {}", agent_id, agent_contact_uri);
+        
+        // Prepare the call - allocates media resources and generates SDP
+        let prepared_call = match rvoip_session_core::api::SessionControl::prepare_outgoing_call(
+            coordinator,
+            &call_center_uri,
+            &agent_contact_uri,
+        ).await {
+            Ok(prepared) => {
+                info!("✅ FULL ROUTING: B2BUA prepared call with SDP offer ({} bytes), RTP port: {}", 
+                      prepared.sdp_offer.len(), prepared.local_rtp_port);
+                prepared
+            }
+            Err(e) => {
+                error!("❌ Failed to prepare outgoing call to agent {}: {}", agent_id, e);
+                Self::rollback_full_assignment(&engine, &session_id, &agent_id, &queue_id, queued_call).await;
+                return;
+            }
+        };
+        
+        // Initiate the prepared call
+        let agent_call_session = match rvoip_session_core::api::SessionControl::initiate_prepared_call(
+            coordinator,
+            &prepared_call,
+        ).await {
+            Ok(call_session) => {
+                info!("✅ FULL ROUTING: Created outgoing call {:?} to agent {} with SDP", call_session.id, agent_id);
+                call_session
+            }
+            Err(e) => {
+                error!("❌ Failed to initiate call to agent {}: {}", agent_id, e);
+                Self::rollback_full_assignment(&engine, &session_id, &agent_id, &queue_id, queued_call).await;
+                return;
+            }
+        };
+        
+        // **STEP 3: TRACK CALL INFO** 
+        let agent_session_id = agent_call_session.id.clone();
+        
+        // Create CallInfo for the agent's session
+        let agent_call_info = super::types::CallInfo {
+            session_id: agent_session_id.clone(),
+            caller_id: "Call Center".to_string(),
+            from: "sip:call-center@127.0.0.1".to_string(),
+            to: agent_info.sip_uri.clone(),
+            agent_id: Some(agent_id.clone()),
+            queue_id: None,
+            bridge_id: None,
+            status: super::types::CallStatus::Connecting,
+            priority: 0,
+            customer_type: super::types::CustomerType::Standard,
+            required_skills: vec![],
+            created_at: chrono::Utc::now(),
+            queued_at: None,
+            answered_at: None,
+            ended_at: None,
+            customer_sdp: None,
+            duration_seconds: 0,
+            wait_time_seconds: 0,
+            talk_time_seconds: 0,
+            hold_time_seconds: 0,
+            queue_time_seconds: 0,
+            transfer_count: 0,
+            hold_count: 0,
+            customer_dialog_id: None,
+            agent_dialog_id: None,
+            related_session_id: Some(session_id.clone()),
+        };
+        
+        // Store the agent's call info
+        engine.active_calls.insert(agent_session_id.clone(), agent_call_info);
+        info!("📋 FULL ROUTING: Created CallInfo for agent session {} with agent_id={}", agent_session_id, agent_id);
+        
+        // Update the customer's call info with the agent session ID
+        if let Some(mut customer_call_info) = engine.active_calls.get_mut(&session_id) {
+            customer_call_info.related_session_id = Some(agent_session_id.clone());
+            customer_call_info.status = super::types::CallStatus::Connecting;
+            customer_call_info.agent_id = Some(agent_id.clone());
+            info!("📋 FULL ROUTING: Updated customer session {} with related agent session {}", session_id, agent_session_id);
+        }
+        
+        // **STEP 4: PENDING ASSIGNMENT TRACKING**
+        let pending_assignment = super::types::PendingAssignment {
+            customer_session_id: session_id.clone(),
+            agent_session_id: agent_session_id.clone(),
+            agent_id: agent_id.clone(),
+            timestamp: chrono::Utc::now(),
+            customer_sdp: customer_sdp,
+        };
+        
+        engine.pending_assignments.insert(agent_session_id.clone(), pending_assignment);
+        info!("📝 FULL ROUTING: Stored pending assignment for agent {} to answer", agent_id);
+        
+        // **STEP 5: TIMEOUT HANDLING**
+        let timeout_engine = engine.clone();
+        let timeout_agent_id = agent_id.clone();
+        let timeout_agent_session_id = agent_session_id.clone();
+        let timeout_customer_session_id = session_id.clone();
+        
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            
+            // Check if assignment is still pending
+            if timeout_engine.pending_assignments.contains_key(&timeout_agent_session_id) {
+                warn!("⏰ FULL ROUTING: Agent {} failed to answer within 30 seconds", timeout_agent_id);
+                
+                // Remove from pending
+                timeout_engine.pending_assignments.remove(&timeout_agent_session_id);
+                
+                // Terminate the agent call
+                if let Some(coordinator) = &timeout_engine.session_coordinator {
+                    let _ = coordinator.terminate_session(&timeout_agent_session_id).await;
+                }
+                
+                // Full rollback
+                Self::rollback_full_assignment(&timeout_engine, &timeout_customer_session_id, &timeout_agent_id, &queue_id, queued_call).await;
+            }
+        });
+        
+        info!("✅ FULL ROUTING: Successfully assigned queued call {} to agent {} (COMPLETE ROUTING)", session_id, agent_id);
+        
+        // Mark as no longer being assigned in queue manager
+        let mut queue_manager = engine.queue_manager.write().await;
+        queue_manager.mark_as_not_assigned(&session_id);
+    }
+    
+    /// Requeue a call when assignment fails (helper function)
+    async fn requeue_call_on_failure(
+        engine: Arc<CallCenterEngine>,
+        queue_id: String,
+        mut queued_call: QueuedCall,
+    ) {
+        // Mark as no longer being assigned
+        let mut queue_manager = engine.queue_manager.write().await;
+        queue_manager.mark_as_not_assigned(&queued_call.session_id);
+        
+        // Check if call is still active
+        let call_still_active = engine.active_calls.contains_key(&queued_call.session_id);
+        if !call_still_active {
+            warn!("Call {} is no longer active, not re-queuing", queued_call.session_id);
+            return;
+        }
+        
+        // Re-queue the call with higher priority
+        queued_call.priority = queued_call.priority.saturating_sub(5); // Increase priority
+        
+        if let Err(e) = queue_manager.enqueue_call(&queue_id, queued_call.clone()) {
+            error!("Failed to re-queue call {}: {}", queued_call.session_id, e);
+        } else {
+            info!("📞 FULL ROUTING: Re-queued call {} with higher priority", queued_call.session_id);
+            
+            // Update call status back to queued
+            if let Some(mut call_info) = engine.active_calls.get_mut(&queued_call.session_id) {
+                call_info.status = super::types::CallStatus::Queued;
+                call_info.queue_id = Some(queue_id);
+            }
+        }
+    }
+    
+    /// Full rollback for failed assignment (includes database cleanup)
+    async fn rollback_full_assignment(
+        engine: &Arc<CallCenterEngine>,
+        session_id: &SessionId,
+        agent_id: &AgentId,
+        queue_id: &str,
+        queued_call: QueuedCall,
+    ) {
+        info!("🔄 FULL ROUTING: Rolling back failed assignment for call {} and agent {}", session_id, agent_id);
+        
+        if let Some(db_manager) = &engine.db_manager {
+            // Remove from active calls
+            if let Err(e) = db_manager.execute(
+                "DELETE FROM active_calls WHERE session_id = ?",
+                vec![limbo::Value::Text(session_id.0.clone())]
+            ).await {
+                error!("Failed to remove active call during rollback: {}", e);
+            }
+            
+            // Restore agent to available (this will update available_since timestamp for fairness)
+            if let Err(e) = db_manager.update_agent_status_with_retry(&agent_id.0, crate::agent::AgentStatus::Available).await {
+                error!("Failed to restore agent status during rollback: {}", e);
+            } else {
+                info!("🔄 FULL ROUTING: Agent {} restored to AVAILABLE with new timestamp", agent_id);
+            }
+            
+            // Decrement agent call count
+            if let Err(e) = db_manager.update_agent_call_count_with_retry(&agent_id.0, -1).await {
+                error!("Failed to decrement agent call count during rollback: {}", e);
+            }
+        }
+        
+        // Re-queue the call
+        Self::requeue_call_on_failure(engine.clone(), queue_id.to_string(), queued_call).await;
+        
+        info!("✅ FULL ROUTING: Rollback completed for call {} and agent {}", session_id, agent_id);
     }
     
     /// Monitor queue for agent availability
@@ -483,9 +785,6 @@ impl CallCenterEngine {
             let mut consecutive_no_agents = 0u32;
             
             loop {
-                // Wait with current interval
-                tokio::time::sleep(std::time::Duration::from_secs(check_interval_secs)).await;
-                
                 // Check if we've exceeded max monitoring time
                 if start_time.elapsed() > max_duration {
                     info!("⏰ Queue monitor for {} exceeded max duration, stopping", queue_id);
@@ -530,108 +829,34 @@ impl CallCenterEngine {
                 
                 info!("🎯 Found {} available agents for queue {}", available_agents.len(), queue_id);
                 
-                // Try to atomically assign calls to agents using database if available
-                if engine.db_manager.is_some() {
+                // Use DATABASE as the SYSTEM OF RECORD - no in-memory fallback
+                if let Some(_) = &engine.db_manager {
                     match engine.process_database_assignments(&queue_id).await {
                         Ok(()) => {
                             // Check if assignments were made
                             let queue_size_after = engine.get_queue_depth(&queue_id).await;
                             if queue_size_after < queue_size {
-                                info!("✅ Database assignments successful, queue {} reduced from {} to {} calls", 
+                                info!("✅ DATABASE ASSIGNMENT: Queue {} reduced from {} to {} calls", 
                                       queue_id, queue_size, queue_size_after);
+                            } else {
+                                debug!("📋 DATABASE ASSIGNMENT: No assignments made in queue {} (agents: {}, calls: {})", 
+                                      queue_id, available_agents.len(), queue_size);
                             }
-                            continue;  // Database handled assignments
+                            // Continue monitoring - database is the authoritative source
                         }
                         Err(e) => {
-                            // Log the error but continue with in-memory logic
-                            warn!("Database assignment failed for queue {}: {}, falling back to in-memory", queue_id, e);
-                            // Fall through to in-memory logic
+                            error!("❌ DATABASE ASSIGNMENT: Failed for queue {}: {}", queue_id, e);
+                            // Don't fall back to in-memory - database is system of record
+                            // Continue monitoring and try again next cycle
                         }
                     }
+                } else {
+                    error!("❌ No database manager available - cannot process assignments");
+                    break; // Stop monitoring if no database
                 }
                 
-                // FIXED: Sequential assignment with last agent exclusion
-                let mut assignments_made = 0;
-                let mut last_assigned_agent: Option<String> = None;
-                
-                // Process calls one at a time to ensure fair round robin
-                while assignments_made < queue_size && assignments_made < available_agents.len() {
-                    // Get available agents excluding the last one assigned
-                    let available_agents_ordered = if assignments_made == 0 {
-                        // First assignment - use normal order
-                        available_agents.clone()
-                    } else {
-                        // Subsequent assignments - exclude last assigned agent by moving to end
-                        let mut filtered_agents = available_agents.clone();
-                        if let Some(ref last_agent_id) = last_assigned_agent {
-                            if let Some(pos) = filtered_agents.iter().position(|agent| agent.0 == *last_agent_id) {
-                                let excluded_agent = filtered_agents.remove(pos);
-                                filtered_agents.push(excluded_agent);
-                                info!("🚫 Moved last assigned agent '{}' to end for fairness", last_agent_id);
-                            }
-                        }
-                        filtered_agents
-                    };
-                    
-                    // Log current assignment order for debugging
-                    info!("🔄 ASSIGNMENT ORDER for call #{}: {:?}", 
-                          assignments_made + 1, 
-                          available_agents_ordered.iter().map(|a| &a.0).collect::<Vec<_>>());
-                    
-                    // Try to assign to the FIRST available agent in ordered list
-                    let mut call_assigned = false;
-                    for agent_id in &available_agents_ordered {
-                        if let Some(queued_call) = engine.try_assign_to_specific_agent(&queue_id, agent_id).await {
-                            info!("📤 SEQUENTIAL ASSIGNMENT #{}: call {} → agent {}", 
-                                  assignments_made + 1, queued_call.session_id, agent_id);
-                            
-                            // Log queue depth after dequeue
-                            let remaining_calls = engine.get_in_memory_queue_depth(&queue_id).await;
-                            info!("📊 Queue '{}' status after assignment: {} calls remaining", 
-                                  queue_id, remaining_calls);
-                            
-                            // Update call status to indicate it's being assigned
-                            if let Some(mut call_info) = engine.active_calls.get_mut(&queued_call.session_id) {
-                                call_info.status = super::types::CallStatus::Connecting;
-                            }
-                            
-                            // Spawn task to handle the actual call setup
-                            let engine_clone = engine.clone();
-                            let queue_id_clone = queue_id.clone();
-                            let agent_id_clone = agent_id.clone();
-                            tokio::spawn(async move {
-                                Self::handle_call_assignment(
-                                    engine_clone,
-                                    queue_id_clone,
-                                    queued_call,
-                                    agent_id_clone,
-                                ).await;
-                            });
-                            
-                            // Track this agent as last assigned for next iteration
-                            last_assigned_agent = Some(agent_id.0.clone());
-                            assignments_made += 1;
-                            call_assigned = true;
-                            
-                            // Small delay to ensure status updates propagate
-                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                            
-                            break; // Move to next call
-                        }
-                    }
-                    
-                    if !call_assigned {
-                        // No more agents available for assignment
-                        debug!("No more agents available for assignment in queue {}", queue_id);
-                        break;
-                    }
-                }
-                
-                info!("🎯 FINAL RESULT: Made {} sequential assignments in queue {}", assignments_made, queue_id);
-                
-                if assignments_made == 0 && !available_agents.is_empty() {
-                    debug!("No calls in queue {} despite having available agents", queue_id);
-                }
+                // Wait before next iteration (moved to end so first iteration starts immediately)
+                tokio::time::sleep(std::time::Duration::from_secs(check_interval_secs)).await;
             }
             
             // Remove from active monitors
