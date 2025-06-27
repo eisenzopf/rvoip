@@ -16,7 +16,6 @@ pub mod agents;
 pub mod queues;
 pub mod calls;
 pub mod schema;
-pub mod agent_store;
 pub mod routing_store;
 pub mod queue_store;
 pub mod call_records;
@@ -131,15 +130,20 @@ impl DatabaseManager {
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T>>,
     {
+        info!("🔧 retry_operation started for '{}'", operation_name);
         let mut attempts = 0;
         let max_attempts = 3;
         let mut backoff_ms = 100;
         
         loop {
             attempts += 1;
+            info!("🔧 retry_operation attempt {}/{} for '{}'", attempts, max_attempts, operation_name);
             
             match operation().await {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    info!("🔧 retry_operation SUCCESS on attempt {}/{} for '{}'", attempts, max_attempts, operation_name);
+                    return Ok(result);
+                },
                 Err(e) if attempts < max_attempts => {
                     warn!("Database operation '{}' failed (attempt {}/{}): {}", 
                           operation_name, attempts, max_attempts, e);
@@ -157,11 +161,13 @@ impl DatabaseManager {
                     }
                     
                     // Non-recoverable error
+                    info!("🔧 retry_operation FAILED (non-recoverable) on attempt {}/{} for '{}': {}", attempts, max_attempts, operation_name, e);
                     return Err(e);
                 }
                 Err(e) => {
                     error!("Database operation '{}' failed after {} attempts: {}", 
                            operation_name, attempts, e);
+                    info!("🔧 retry_operation FAILED (max attempts) after {}/{} for '{}': {}", attempts, max_attempts, operation_name, e);
                     return Err(e);
                 }
             }
@@ -176,14 +182,14 @@ impl DatabaseManager {
         agent_id: &str,
         customer_sdp: Option<String>,
     ) -> Result<()> {
-        debug!("🔄 Starting simplified call assignment for session {} to agent {}", session_id, agent_id);
+        info!("🔄 Starting simplified call assignment for session {} to agent {}", session_id, agent_id);
         
         // Step 1: Remove call from queue (simple DELETE)
         let dequeue_query = "DELETE FROM call_queue WHERE session_id = ?";
         self.execute(dequeue_query, vec![limbo::Value::Text(session_id.to_string())]).await
             .map_err(|e| anyhow!("Failed to dequeue call {}: {}", session_id, e))?;
         
-        debug!("✅ Dequeued call {} from queue", session_id);
+        info!("✅ Dequeued call {} from queue", session_id);
         
         // Step 2: Add to active calls (fixed column names to match schema)
         let now = chrono::Utc::now().to_rfc3339();
@@ -199,7 +205,7 @@ impl DatabaseManager {
         ]).await
             .map_err(|e| anyhow!("Failed to add active call {}: {}", call_id, e))?;
         
-        debug!("✅ Added call {} to active calls for agent {}", call_id, agent_id);
+        info!("✅ Added call {} to active calls for agent {}", call_id, agent_id);
         
         info!("✅ Successfully assigned call {} to agent {} (simplified approach)", session_id, agent_id);
         Ok(())
@@ -207,11 +213,17 @@ impl DatabaseManager {
     
     /// Update agent status with retry logic
     pub async fn update_agent_status_with_retry(&self, agent_id: &str, status: AgentStatus) -> Result<()> {
+        info!("🔧 update_agent_status_with_retry called: agent_id='{}', status='{:?}'", agent_id, status);
+        
         let operation = || async {
+            info!("🔧 Retry operation calling update_agent_status for agent '{}'", agent_id);
+            // Use simple method call since duplicates are removed
             self.update_agent_status(agent_id, status.clone()).await
         };
         
-        self.retry_operation("update_agent_status", operation).await
+        let result = self.retry_operation("update_agent_status", operation).await;
+        info!("🔧 update_agent_status_with_retry result for agent '{}': {:?}", agent_id, result);
+        result
     }
     
     /// Update agent call count with retry logic
@@ -457,7 +469,7 @@ impl CallCenterDatabase {
     
     /// Initialize database schema
     async fn initialize_schema(&self) -> Result<()> {
-        debug!("📋 Creating call center database schema");
+        info!("📋 Creating call center database schema");
         
         // Use the new centralized schema initialization by creating a temporary DatabaseManager
         // and delegating to it (this ensures consistency)
@@ -469,7 +481,7 @@ impl CallCenterDatabase {
         // Use the centralized schema initialization
         schema::initialize_call_center_schema(&temp_db_manager).await?;
         
-        debug!("✅ Database schema created successfully using centralized initialization");
+        info!("✅ Database schema created successfully using centralized initialization");
         Ok(())
     }
     
