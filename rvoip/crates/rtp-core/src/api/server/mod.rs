@@ -12,8 +12,8 @@ pub use security::{ServerSecurityContext, ServerSecurityConfig};
 pub use config::{ServerConfig, ServerConfigBuilder};
 
 // Re-export implementation files
-pub use transport::server_transport_impl::DefaultMediaTransportServer;
-pub use security::server_security_impl::DefaultServerSecurityContext;
+pub use transport::DefaultMediaTransportServer;
+pub use security::DefaultServerSecurityContext;
 
 // Import errors
 use crate::api::common::error::MediaTransportError;
@@ -87,9 +87,10 @@ impl ServerConfigBuilder {
                     security_mode: crate::api::common::config::SecurityMode::Srtp,
                     fingerprint_algorithm: security_config.fingerprint_algorithm,
                     srtp_profiles: security_config.srtp_profiles,
-                    certificate_path: None, // Not used for SRTP mode 
+                    certificate_path: None, // Not used for SRTP mode
                     private_key_path: None, // Not used for SRTP mode
-                    require_client_certificate: false, // Not used for SRTP mode
+                    require_client_certificate: false,
+                    srtp_key: security_config.srtp_key.clone(),
                 };
                 
                 self = self.security_config(server_security_config);
@@ -110,9 +111,17 @@ impl ServerConfigBuilder {
                     certificate_path: security_config.certificate_path,
                     private_key_path: security_config.private_key_path,
                     require_client_certificate: security_config.require_client_certificate,
+                    srtp_key: None, // Not used for DTLS-SRTP
                 };
                 
                 self = self.security_config(server_security_config);
+            },
+            crate::api::common::config::SecurityMode::SdesSrtp 
+            | crate::api::common::config::SecurityMode::MikeySrtp 
+            | crate::api::common::config::SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                // For now, these are handled through SecurityContextManager
+                // TODO: Implement direct server config support for these methods
             }
         }
         

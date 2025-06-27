@@ -253,6 +253,13 @@ pub fn parse_message(input: &[u8]) -> Result<Message> {
 
 /// Parse a SIP message from bytes with specific parsing mode
 pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message> {
+    // Add detailed debug logging to capture exact messages being parsed
+    eprintln!("=== PARSING SIP MESSAGE ===");
+    eprintln!("Input length: {} bytes", input.len());
+    eprintln!("Input as string: {:?}", String::from_utf8_lossy(input));
+    eprintln!("Input as hex: {:02x?}", input);
+    eprintln!("===========================");
+    
     // In strict mode, use all_consuming to ensure the entire input is consumed
     // In lenient mode, don't use all_consuming to allow for excess input after valid message
     let parser_result = if mode == ParseMode::Strict {
@@ -260,18 +267,34 @@ pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message>
     } else {
         full_message_parser(input, mode)
     };
-    
+
     match parser_result {
-        Ok((_, message)) => Ok(message),
+        Ok((_, message)) => {
+            eprintln!("=== PARSE SUCCESS ===");
+            eprintln!("Successfully parsed message");
+            eprintln!("=====================");
+            Ok(message)
+        },
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
-             let offset = input.len() - e.input.len();
-            Err(Error::ParseError( 
+            let offset = input.len() - e.input.len();
+            eprintln!("=== PARSE ERROR ===");
+            eprintln!("Error at offset: {}", offset);
+            eprintln!("Error code: {:?}", e.code);
+            eprintln!("Remaining input: {:?}", String::from_utf8_lossy(e.input));
+            eprintln!("Remaining input as hex: {:02x?}", e.input);
+            eprintln!("==================");
+            Err(Error::ParseError(
                 format!("Failed to parse message near offset {}: {:?}", offset, e.code)
             ))
-        },
-        Err(nom::Err::Incomplete(needed)) => {
-            Err(Error::ParseError(format!("Incomplete message: Needed {:?}", needed)))
-        },
+        }
+        Err(nom::Err::Incomplete(_)) => {
+            eprintln!("=== PARSE INCOMPLETE ===");
+            eprintln!("Incomplete message");
+            eprintln!("========================");
+            Err(Error::ParseError(
+                "Incomplete message".to_string()
+            ))
+        }
     }
 }
 

@@ -1,12 +1,13 @@
-//! Server transport API
+//! Server transport module
 //!
-//! This module provides the server-specific transport interface for media transport.
+//! This module contains the implementation of server-side transport logic.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use async_trait::async_trait;
 use std::time::Duration;
 use std::collections::HashMap;
+use tokio::sync::broadcast;
 
 use crate::api::common::frame::MediaFrame;
 use crate::api::common::error::MediaTransportError;
@@ -20,10 +21,19 @@ use crate::api::client::transport::VoipMetrics;
 use crate::{CsrcMapping, RtpSsrc, RtpCsrc};
 use crate::buffer::{PacketPriority, TransmitBufferConfig, TransmitBufferStats};
 
-pub mod server_transport_impl;
+pub mod default;
+mod core;
+mod media;
+mod rtcp;
+mod security;
+mod ssrc;
+mod stats;
+mod util;
+#[cfg(test)]
+mod tests;
 
-// Re-export the implementation
-pub use server_transport_impl::DefaultMediaTransportServer;
+// Export implementations
+pub use default::DefaultMediaTransportServer;
 
 /// Client information
 #[derive(Debug, Clone)]
@@ -55,7 +65,7 @@ pub struct HeaderExtension {
 
 /// Server implementation of the media transport interface
 #[async_trait]
-pub trait MediaTransportServer: Send + Sync {
+pub trait MediaTransportServer: Send + Sync + Clone {
     /// Start the server
     ///
     /// This binds to the configured address and starts listening for
@@ -90,6 +100,13 @@ pub trait MediaTransportServer: Send + Sync {
     ///
     /// This returns the client ID and the frame received.
     async fn receive_frame(&self) -> Result<(String, MediaFrame), MediaTransportError>;
+    
+    /// Get a persistent frame receiver for receiving multiple frames
+    ///
+    /// This returns a receiver that can be used multiple times without creating
+    /// new broadcast subscribers. This is more efficient than calling receive_frame()
+    /// repeatedly.
+    fn get_frame_receiver(&self) -> broadcast::Receiver<(String, MediaFrame)>;
     
     /// Get a list of connected clients
     async fn get_clients(&self) -> Result<Vec<ClientInfo>, MediaTransportError>;
@@ -400,4 +417,22 @@ pub trait MediaTransportServer: Send + Sync {
     /// Returns the transport-wide sequence number if the extension is found
     async fn get_received_transport_cc(&self, client_id: &str)
         -> Result<Option<u16>, MediaTransportError>;
+    
+    /// Check if SSRC demultiplexing is enabled
+    async fn is_ssrc_demultiplexing_enabled(&self) -> Result<bool, MediaTransportError>;
+    
+    /// Enable SSRC demultiplexing
+    async fn enable_ssrc_demultiplexing(&self) -> Result<bool, MediaTransportError>;
+    
+    /// Register a client SSRC
+    async fn register_client_ssrc(&self, client_id: &str, ssrc: u32) -> Result<bool, MediaTransportError>;
+    
+    /// Get all SSRCs for a client
+    async fn get_client_ssrcs(&self, client_id: &str) -> Result<Vec<u32>, MediaTransportError>;
+    
+    /// Update the CNAME for a source
+    async fn update_csrc_cname(&self, original_ssrc: RtpSsrc, cname: String) -> Result<bool, MediaTransportError>;
+    
+    /// Update the display name for a source
+    async fn update_csrc_display_name(&self, original_ssrc: RtpSsrc, name: String) -> Result<bool, MediaTransportError>;
 } 

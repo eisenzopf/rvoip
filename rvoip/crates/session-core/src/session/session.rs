@@ -1,226 +1,136 @@
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::collections::HashMap;
-use std::time::SystemTime;
-use tracing::{debug, info, error, warn};
+//! Session Implementation
+//!
+//! Core session handling logic with consolidated ID mappings.
 
-use rvoip_transaction_core::{
-    TransactionManager, 
-    TransactionEvent, 
-    TransactionState, 
-    TransactionKey,
-    TransactionKind
-};
+use crate::api::types::{SessionId, CallState, CallSession};
+use crate::errors::Result;
 
-use crate::dialog::{Dialog, DialogId};
-use crate::dialog::DialogState;
-use crate::events::{EventBus, SessionEvent};
-use crate::errors::{Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction};
-use super::session_id::SessionId;
-use super::session_types::{SessionState, SessionDirection, SessionTransactionType};
-use super::session_config::SessionConfig;
-
-/// Represents a SIP session (call)
-#[derive(Clone)]
+/// Internal session implementation that consolidates all related IDs and state
+/// This is the single source of truth for session data, containing all mappings.
+#[derive(Debug, Clone)]
 pub struct Session {
-    /// Unique session identifier
-    pub id: SessionId,
+    /// Unique session identifier (primary key)
+    pub session_id: SessionId,
     
-    /// Current session state
-    state: Arc<Mutex<SessionState>>,
+    /// Associated SIP dialog ID (if any)
+    pub dialog_id: Option<rvoip_dialog_core::DialogId>,
     
-    /// Direction of the session (incoming or outgoing)
-    direction: SessionDirection,
+    /// Associated media session ID (if any)  
+    pub media_session_id: Option<crate::media::types::MediaSessionId>,
     
-    /// Session configuration
-    config: SessionConfig,
+    /// Core call session data (public API compatible)
+    pub call_session: CallSession,
     
-    /// Transaction manager reference
-    transaction_manager: Arc<TransactionManager>,
+    /// When this session was created
+    pub created_at: std::time::Instant,
     
-    /// Active dialog (if any)
-    dialog: Arc<Mutex<Option<Dialog>>>,
-    
-    /// Active transactions for this session
-    transactions: Arc<Mutex<HashMap<TransactionKey, SessionTransactionType>>>,
-    
-    /// Event bus for publishing session events
-    event_bus: EventBus,
+    /// When this session was last updated
+    pub updated_at: std::time::Instant,
 }
 
 impl Session {
-    /// Create a new session
-    pub fn new(
-        direction: SessionDirection,
-        config: SessionConfig,
-        transaction_manager: Arc<TransactionManager>,
-        event_bus: EventBus
-    ) -> Self {
-        let id = SessionId::new();
-        let session = Self {
-            id: id.clone(),
-            state: Arc::new(Mutex::new(SessionState::Initializing)),
-            direction,
-            config,
-            transaction_manager,
-            dialog: Arc::new(Mutex::new(None)),
-            transactions: Arc::new(Mutex::new(HashMap::new())),
-            event_bus: event_bus.clone(),
+    /// Create a new session from a CallSession
+    pub fn from_call_session(call_session: CallSession) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            session_id: call_session.id.clone(),
+            dialog_id: None,
+            media_session_id: None,
+            call_session,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+    
+    /// Create a new session with just a session ID (for internal use)
+    pub fn new(session_id: SessionId) -> Self {
+        let call_session = CallSession {
+            id: session_id.clone(),
+            from: String::new(),
+            to: String::new(),
+            state: CallState::Initiating,
+            started_at: Some(std::time::Instant::now()),
         };
-        
-        // Publish session creation event
-        event_bus.publish(SessionEvent::Created { session_id: id });
-        
-        session
+        Self::from_call_session(call_session)
     }
     
-    /// Get the current session state
-    pub async fn state(&self) -> SessionState {
-        *self.state.lock().await
+    /// Associate a dialog ID with this session
+    pub fn set_dialog_id(&mut self, dialog_id: rvoip_dialog_core::DialogId) {
+        tracing::debug!("Associated dialog {} with session {}", dialog_id, self.session_id);
+        self.dialog_id = Some(dialog_id);
+        self.updated_at = std::time::Instant::now();
     }
     
-    /// Set a new session state
-    pub async fn set_state(&self, new_state: SessionState) -> Result<(), Error> {
-        let mut state_guard = self.state.lock().await;
-        let old_state = state_guard.clone();
-        
-        // Validate state transition
-        if !Self::is_valid_transition(&old_state, &new_state) {
-            return Err(Error::InvalidSessionStateTransition {
-                from: old_state.to_string(),
-                to: new_state.to_string(),
-                context: ErrorContext {
-                    category: ErrorCategory::Session,
-                    severity: ErrorSeverity::Error,
-                    recovery: RecoveryAction::None,
-                    retryable: false,
-                    session_id: Some(self.id.to_string()),
-                    timestamp: SystemTime::now(),
-                    details: Some(format!("Invalid state transition attempted from {} to {}", old_state, new_state)),
-                    ..Default::default()
-                }
-            });
-        }
-        
-        // Update state and emit event
-        *state_guard = new_state.clone();
-        
-        // Drop lock before emitting event
-        drop(state_guard);
-        
-        // Emit state changed event
-        self.event_bus.publish(SessionEvent::StateChanged { 
-            session_id: self.id.clone(),
-            old_state,
-            new_state,
-        });
-        
+    /// Associate a media session ID with this session
+    pub fn set_media_session_id(&mut self, media_session_id: crate::media::types::MediaSessionId) {
+        tracing::debug!("Associated media session {} with session {}", media_session_id, self.session_id);
+        self.media_session_id = Some(media_session_id);
+        self.updated_at = std::time::Instant::now();
+    }
+    
+    /// Update the call state
+    pub fn update_call_state(&mut self, new_state: CallState) -> Result<()> {
+        let old_state = self.call_session.state.clone();
+        self.call_session.state = new_state.clone();
+        self.updated_at = std::time::Instant::now();
+        tracing::debug!("Session {} state: {:?} -> {:?}", self.session_id, old_state, new_state);
         Ok(())
     }
     
-    /// Check if a state transition is valid
-    fn is_valid_transition(from: &SessionState, to: &SessionState) -> bool {
-        use SessionState::*;
-        
-        match (from, to) {
-            // Valid transitions from Initializing
-            (Initializing, Dialing) => true,
-            (Initializing, Ringing) => true,
-            (Initializing, Terminating) => true,
-            (Initializing, Terminated) => true,
-            
-            // Valid transitions from Dialing
-            (Dialing, Ringing) => true,
-            (Dialing, Connected) => true,
-            (Dialing, Terminating) => true,
-            (Dialing, Terminated) => true,
-            
-            // Valid transitions from Ringing
-            (Ringing, Connected) => true,
-            (Ringing, Terminating) => true,
-            (Ringing, Terminated) => true,
-            
-            // Valid transitions from Connected
-            (Connected, OnHold) => true,
-            (Connected, Transferring) => true,
-            (Connected, Terminating) => true,
-            (Connected, Terminated) => true,
-            
-            // Valid transitions from OnHold
-            (OnHold, Connected) => true,
-            (OnHold, Transferring) => true,
-            (OnHold, Terminating) => true,
-            (OnHold, Terminated) => true,
-            
-            // Valid transitions from Transferring
-            (Transferring, Connected) => true,
-            (Transferring, OnHold) => true,
-            (Transferring, Terminating) => true,
-            (Transferring, Terminated) => true,
-            
-            // Valid transitions from Terminating
-            (Terminating, Terminated) => true,
-            
-            // No transitions from Terminated
-            (Terminated, _) => false,
-            
-            // Any other transition is invalid
-            _ => false,
-        }
+    /// Update call details (from and to)
+    pub fn update_call_details(&mut self, from: String, to: String) {
+        self.call_session.from = from;
+        self.call_session.to = to;
+        self.updated_at = std::time::Instant::now();
     }
     
-    /// Check if the session is active
-    pub async fn is_active(&self) -> bool {
-        let state = self.state.lock().await;
-        *state != SessionState::Terminated
+    /// Check if session has all required IDs for a complete call
+    pub fn is_fully_established(&self) -> bool {
+        self.dialog_id.is_some() && 
+        self.media_session_id.is_some() && 
+        matches!(self.call_session.state, CallState::Active)
     }
     
-    /// Check if the session is terminated
-    pub async fn is_terminated(&self) -> bool {
-        let state = self.state.lock().await;
-        *state == SessionState::Terminated
+    /// Check if session has dialog mapping
+    pub fn has_dialog(&self) -> bool {
+        self.dialog_id.is_some()
     }
     
-    /// Get the active dialog for this session (if any)
-    pub async fn dialog(&self) -> Option<Dialog> {
-        self.dialog.lock().await.clone()
+    /// Check if session has media mapping
+    pub fn has_media_session(&self) -> bool {
+        self.media_session_id.is_some()
     }
     
-    /// Set the active dialog for this session
-    pub async fn set_dialog(&self, dialog: Option<Dialog>) {
-        let mut dialog_guard = self.dialog.lock().await;
-        *dialog_guard = dialog;
+    /// Get session duration
+    pub fn duration(&self) -> std::time::Duration {
+        self.updated_at.duration_since(self.created_at)
     }
     
-    /// Track a transaction associated with this session
-    pub async fn track_transaction(&self, transaction_id: TransactionKey, tx_type: SessionTransactionType) {
-        let mut txs = self.transactions.lock().await;
-        txs.insert(transaction_id, tx_type);
+    /// Get the call session for public API consumption
+    pub fn as_call_session(&self) -> &CallSession {
+        &self.call_session
     }
     
-    /// Get the type of a tracked transaction
-    pub async fn get_transaction_type(&self, transaction_id: &TransactionKey) -> Option<SessionTransactionType> {
-        let txs = self.transactions.lock().await;
-        txs.get(transaction_id).cloned()
+    /// Convert to call session (for API compatibility)
+    pub fn into_call_session(self) -> CallSession {
+        self.call_session
     }
     
-    /// Remove a transaction from tracking
-    pub async fn remove_transaction(&self, transaction_id: &TransactionKey) -> Option<SessionTransactionType> {
-        let mut txs = self.transactions.lock().await;
-        txs.remove(transaction_id)
+    /// Get current state
+    pub fn state(&self) -> &CallState {
+        &self.call_session.state
     }
     
-    /// Start media for this session (basic implementation for tests)
-    pub async fn start_media(&self) -> Result<(), Error> {
-        // This is a mock implementation for tests
-        debug!("Starting media for session {}", self.id);
-        Ok(())
+    /// Get dialog ID if present
+    pub fn dialog_id(&self) -> Option<&rvoip_dialog_core::DialogId> {
+        self.dialog_id.as_ref()
     }
     
-    /// Stop media for this session (basic implementation for tests)
-    pub async fn stop_media(&self) -> Result<(), Error> {
-        // This is a mock implementation for tests
-        debug!("Stopping media for session {}", self.id);
-        Ok(())
+    /// Get media session ID if present
+    pub fn media_session_id(&self) -> Option<&crate::media::types::MediaSessionId> {
+        self.media_session_id.as_ref()
     }
-} 
+}
+
+// Backward compatibility alias
+pub type SessionImpl = Session; 

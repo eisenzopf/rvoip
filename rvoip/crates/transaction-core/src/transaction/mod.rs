@@ -173,6 +173,11 @@ pub enum InternalTransactionCommand {
     /// Instructs the transaction to terminate immediately, cleaning up its resources.
     /// This might be used for forceful shutdown or after a critical error.
     Terminate,
+    /// Cancels the automatic 100 Trying timer (Timer 100) for INVITE server transactions.
+    /// This is sent when the TU sends any provisional response, making the automatic 100 Trying unnecessary.
+    /// RFC 3261 Section 17.2.1: "If the TU does not send a provisional response within 200ms,
+    /// the server transaction MUST send a 100 Trying response."
+    CancelTimer100,
 }
 
 /// A common, object-safe trait providing synchronous access to core properties of a SIP transaction.
@@ -353,6 +358,7 @@ mod tests {
         let _cmd3 = InternalTransactionCommand::Timer("Timer_A".to_string());
         let _cmd4 = InternalTransactionCommand::TransportError;
         let _cmd5 = InternalTransactionCommand::Terminate;
+        let _cmd6 = InternalTransactionCommand::CancelTimer100;
     }
 
     #[test]

@@ -1,216 +1,69 @@
 // RVOIP Session Core Library
 //
-// This crate provides the core functionality for SIP session management, 
-// including dialog handling, media setup, and call flow management.
-//
-// # Architecture
-//
-// The library follows a layered architecture:
-//
-// - **Session Layer**: Manages SIP sessions (calls) with state transitions and media integration
-// - **Dialog Layer**: Implements SIP dialogs according to RFC 3261
-// - **Transaction Layer**: Handles SIP transactions via the transaction-core crate
-// - **Transport Layer**: Abstracts the underlying transport via the sip-transport crate
-//
-// For production use, the recommended usage pattern is to create a SessionManager instance,
-// which will manage dialog creation and transaction handling internally.
+// This library provides Session Initiation Protocol (SIP) session and dialog management 
+// for the RVOIP stack. It serves as the middle layer between low-level SIP transaction 
+// processing and high-level application logic.
 
-pub mod dialog;
+pub mod api;
 pub mod session;
-pub mod events;
-pub mod errors;
-pub mod media;
-pub mod sdp;
-pub mod helpers;
-pub mod metrics;
+pub mod dialog;        // NEW - dialog-core integration
+pub mod media;         // EXISTING - media-core integration
+pub mod sdp;           // NEW - SDP negotiation engine
+pub mod manager;       // SIMPLIFIED - orchestration only
+pub mod coordination;
+pub mod bridge;
+pub mod conference;    // NEW - Conference functionality
+pub mod coordinator;
 
-// Re-export important types for convenience
-pub use dialog::{Dialog, DialogId, DialogState};
-// Session implementation is now complete
-pub use session::{Session, SessionId, SessionState, SessionConfig, SessionDirection, SessionManager};
-pub use events::{EventBus, SessionEvent};
-pub use errors::{
-    Error, ErrorCategory, ErrorContext, ErrorSeverity, RecoveryAction
-};
-pub use metrics::MetricsCollector;
+// Core error types
+mod errors;
+pub use errors::{SessionError, Result};
 
-// Re-export helper functions for internal use
-pub(crate) use helpers::{dialog_not_found_error, network_unreachable_error, transaction_creation_error, transaction_send_error};
+// Re-export the main API for convenience
+pub use api::*;
 
-// Re-export dialog helper functions
-pub use helpers::{
-    // Basic dialog operations
-    create_dialog,
-    create_dialog_from_invite,
-    send_dialog_request,
-    terminate_dialog,
-    
-    // Dialog management and updates
-    update_dialog_media,
-    refresh_dialog,
-    accept_refresh_request,
-    
-    // Recovery
-    attempt_dialog_recovery,
-    
-    // UPDATE method support
-    send_update_request,
-    accept_update_request,
-};
+// Re-export SessionManager for direct access
+pub use manager::SessionManager;
 
-/// Production-ready client implementation
-pub mod client {
-    //! Client-specific components and factories
-
-    use crate::{
-        session::{SessionManager, SessionConfig, SessionDirection},
-        events::{EventBus, SessionEvent},
-        Error
-    };
-    use std::sync::Arc;
-    use rvoip_transaction_core::TransactionManager;
-
-    /// Client configuration
-    #[derive(Debug, Clone)]
-    pub struct ClientConfig {
-        /// Display name for outgoing calls
-        pub display_name: String,
-        
-        /// Default SIP URI
-        pub uri: String,
-        
-        /// Default contact address
-        pub contact: String,
-        
-        /// Authentication username
-        pub auth_user: Option<String>,
-        
-        /// Authentication password
-        pub auth_password: Option<String>,
-        
-        /// Registration interval (in seconds)
-        pub registration_interval: Option<u32>,
-        
-        /// Session configuration
-        pub session_config: SessionConfig,
-    }
-
-    impl Default for ClientConfig {
-        fn default() -> Self {
-            Self {
-                display_name: "RVOIP Client".to_string(),
-                uri: "sip:user@example.com".to_string(),
-                contact: "sip:user@127.0.0.1:5060".to_string(),
-                auth_user: None,
-                auth_password: None,
-                registration_interval: Some(3600),
-                session_config: SessionConfig::default(),
-            }
-        }
-    }
-
-    /// Create a session manager configured for client use
-    pub fn create_client_session_manager(
-        transaction_manager: Arc<TransactionManager>,
-        config: ClientConfig
-    ) -> Arc<SessionManager> {
-        let event_bus = EventBus::new(100);
-        
-        Arc::new(SessionManager::new(
-            transaction_manager,
-            config.session_config,
-            event_bus
-        ))
-    }
-}
-
-/// Production-ready server implementation
-pub mod server {
-    //! Server-specific components and factories
-
-    use crate::{
-        session::{SessionManager, SessionConfig, SessionDirection},
-        events::{EventBus, SessionEvent},
-        Error
-    };
-    use std::sync::Arc;
-    use rvoip_transaction_core::TransactionManager;
-
-    /// Server configuration
-    #[derive(Debug, Clone)]
-    pub struct ServerConfig {
-        /// Server name
-        pub server_name: String,
-        
-        /// Domain name
-        pub domain: String,
-        
-        /// Maximum sessions allowed
-        pub max_sessions: usize,
-        
-        /// Session timeout (in seconds)
-        pub session_timeout: u32,
-        
-        /// Session configuration
-        pub session_config: SessionConfig,
-    }
-
-    impl Default for ServerConfig {
-        fn default() -> Self {
-            Self {
-                server_name: "RVOIP Server".to_string(),
-                domain: "example.com".to_string(),
-                max_sessions: 10000,
-                session_timeout: 3600,
-                session_config: SessionConfig::default(),
-            }
-        }
-    }
-
-    /// Create a session manager configured for server use
-    pub fn create_server_session_manager(
-        transaction_manager: Arc<TransactionManager>,
-        config: ServerConfig
-    ) -> Arc<SessionManager> {
-        let event_bus = EventBus::new(1000);
-        
-        Arc::new(SessionManager::new(
-            transaction_manager,
-            config.session_config,
-            event_bus
-        ))
-    }
-}
-
-/// Re-export types from dependent crates that are used in our public API
+// Prelude module for common imports
 pub mod prelude {
-    // From sip-core
-    pub use rvoip_sip_core::prelude::*;
-    
-    // From transaction-core
-    pub use rvoip_transaction_core::{
-        TransactionManager, 
-        TransactionEvent, 
-        TransactionState, 
-        TransactionKey,
-        TransactionKind
-    };
-    
-    // From media libraries
-    pub use rvoip_rtp_core::{RtpSession, RtpPacket};
-    pub use rvoip_media_core::{AudioBuffer, Codec};
-    
-    // From our own crate - only include currently implemented types
-    pub use crate::{
-        Dialog, DialogState, DialogId,
-        Session, SessionManager, // Now fully implemented
-        SessionId, SessionState, SessionConfig, SessionDirection,
-        Error, ErrorCategory, ErrorSeverity, RecoveryAction, ErrorContext,
-        SessionEvent, EventBus,
-        MetricsCollector,
-        // Convenience modules
-        client, server,
-        // Following SDPs are not fully implemented yet or need to be imported differently
-        // SessionDescription, MediaDescription, MediaFormat, MediaDirection,
-    };
+    pub use crate::api::*;
+    pub use crate::errors::{SessionError, Result};
+    pub use crate::manager::events::{SessionEvent, SessionEventProcessor};
+    pub use crate::manager::SessionManager;
+    pub use crate::dialog::DialogManager;  // NEW
+    pub use crate::conference::prelude::*; // NEW - Conference functionality
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_library_compiles() {
+        // Basic smoke test to ensure the library structure compiles
+        assert!(true);
+    }
+}
+
+// Feature flags
+#[cfg(feature = "testing")]
+pub mod testing {
+    //! Testing utilities and mocks
+    pub use crate::manager::testing::*;
+}
+
+// Version information
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Initialize the session core library
+/// 
+/// This should be called once at application startup to initialize
+/// any global state or resources.
+pub fn init() {
+    // Initialize logging if not already done
+    let _ = tracing_subscriber::fmt::try_init();
+    
+    // Any other global initialization
+    tracing::info!("RVoIP Session Core v{} initialized", VERSION);
+} 

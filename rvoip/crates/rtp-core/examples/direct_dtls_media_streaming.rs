@@ -322,6 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 payload_type: 8,
                 marker: false,
                 ssrc: 12345,
+                csrcs: Vec::new(),
             };
             
             // Send frame

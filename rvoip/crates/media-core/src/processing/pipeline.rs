@@ -1,445 +1,260 @@
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use bytes::Bytes;
+//! Processing Pipeline - Orchestrates all media processing
+//!
+//! This module contains the ProcessingPipeline which coordinates audio processing,
+//! format conversion, and other media processing operations.
 
-use tracing::{debug, trace};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::{debug, info, warn};
 
-use crate::AudioBuffer;
-use crate::error::{Error, Result};
-use crate::processing::audio::AudioProcessor;
-use crate::codec::audio::common::AudioFormat;
-use crate::processing::audio::vad::{VoiceActivityDetector, VadState};
+use crate::error::{Result, AudioProcessingError};
+use crate::types::{AudioFrame, SampleRate};
+use super::audio::{AudioProcessor, AudioProcessingConfig, AudioProcessingResult};
+use super::format::{FormatConverter, ConversionParams};
 
-/// A pipeline of audio processors that can be applied in sequence
-pub struct AudioProcessingPipeline {
-    /// Audio processors in the pipeline
-    processors: Vec<Arc<Mutex<dyn AudioProcessor>>>,
-    /// Enabled state of each processor
-    enabled: Vec<bool>,
-    /// Name of each processor for configuration
-    names: Vec<String>,
-}
-
-impl AudioProcessingPipeline {
-    /// Create a new empty audio processing pipeline
-    pub fn new() -> Self {
-        Self {
-            processors: Vec::new(),
-            enabled: Vec::new(),
-            names: Vec::new(),
-        }
-    }
-    
-    /// Add a processor to the pipeline
-    pub fn add<T: AudioProcessor + 'static>(&mut self, name: &str, processor: T) {
-        self.processors.push(Arc::new(Mutex::new(processor)));
-        self.enabled.push(true);
-        self.names.push(name.to_string());
-    }
-    
-    /// Process an audio buffer through the pipeline
-    pub fn process(&self, buffer: &mut AudioBuffer) -> Result<bool> {
-        let mut modified = false;
-        
-        for (i, processor) in self.processors.iter().enumerate() {
-            if !self.enabled[i] {
-                continue;
-            }
-            
-            let processor = processor.lock().unwrap();
-            if processor.process(buffer)? {
-                modified = true;
-            }
-        }
-        
-        Ok(modified)
-    }
-    
-    /// Enable or disable a processor by name
-    pub fn set_enabled(&mut self, name: &str, enabled: bool) {
-        for (i, processor_name) in self.names.iter().enumerate() {
-            if processor_name == name {
-                self.enabled[i] = enabled;
-                break;
-            }
-        }
-    }
-    
-    /// Check if a processor is enabled
-    pub fn is_enabled(&self, name: &str) -> bool {
-        for (i, processor_name) in self.names.iter().enumerate() {
-            if processor_name == name {
-                return self.enabled[i];
-            }
-        }
-        false
-    }
-    
-    /// Reset all processors in the pipeline
-    pub fn reset(&mut self) {
-        for processor in &self.processors {
-            let mut processor = processor.lock().unwrap();
-            processor.reset();
-        }
-    }
-    
-    /// Configure a processor by name
-    pub fn configure(&mut self, name: &str, config: &HashMap<String, String>) -> Result<()> {
-        for (i, processor_name) in self.names.iter().enumerate() {
-            if processor_name == name {
-                let mut processor = self.processors[i].lock().unwrap();
-                return processor.configure(config);
-            }
-        }
-        
-        Ok(()) // Processor not found, no-op
-    }
-    
-    /// Get the names of all processors in the pipeline
-    pub fn processor_names(&self) -> Vec<String> {
-        self.names.clone()
-    }
-    
-    /// Get the number of processors in the pipeline
-    pub fn len(&self) -> usize {
-        self.processors.len()
-    }
-    
-    /// Check if the pipeline is empty
-    pub fn is_empty(&self) -> bool {
-        self.processors.is_empty()
-    }
-}
-
-impl Default for AudioProcessingPipeline {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Create a standard voice processing pipeline for telephony
-pub fn create_telephony_pipeline() -> AudioProcessingPipeline {
-    use crate::processing::audio::{
-        aec::EchoCanceller,
-        agc::GainControl,
-        vad::VoiceActivityDetector,
-        ns::NoiseSupressor,
-        plc::PacketLossConcealor,
-    };
-    
-    let mut pipeline = AudioProcessingPipeline::new();
-    
-    // Add standard processors for VoIP
-    pipeline.add("echo_canceller", EchoCanceller::new());
-    pipeline.add("noise_suppression", NoiseSupressor::new());
-    pipeline.add("gain_control", GainControl::new());
-    pipeline.add("voice_activity", VoiceActivityDetector::new());
-    pipeline.add("packet_loss", PacketLossConcealor::new());
-    
-    pipeline
-}
-
-/// An audio processing unit that can be inserted into a processing pipeline
-pub trait AudioProcessor: Send + Sync {
-    /// Process audio data
-    fn process(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize>;
-    
-    /// Get the output format
-    fn output_format(&self) -> AudioFormat;
-    
-    /// Get the input format
-    fn input_format(&self) -> AudioFormat;
-    
-    /// Reset the processor state
-    fn reset(&mut self) -> Result<()>;
-    
-    /// Check if the processor modifies audio data
-    fn modifies_audio(&self) -> bool;
-    
-    /// Get processor name/type
-    fn name(&self) -> &'static str;
-}
-
-/// Audio pipeline configuration
+/// Configuration for the processing pipeline
 #[derive(Debug, Clone)]
-pub struct PipelineConfig {
-    /// Input audio format
-    pub input_format: AudioFormat,
-    /// Output audio format
-    pub output_format: AudioFormat,
-    /// Whether to use VAD-based processing
-    pub use_vad: bool,
-    /// Whether to apply noise reduction
-    pub noise_reduction: bool,
-    /// Whether to apply automatic gain control
-    pub auto_gain: bool,
-    /// Whether to apply echo cancellation
-    pub echo_cancellation: bool,
-    /// Whether to enable packet loss concealment
-    pub packet_loss_concealment: bool,
+pub struct ProcessingConfig {
+    /// Audio processing configuration
+    pub audio_config: AudioProcessingConfig,
+    /// Enable format conversion
+    pub enable_format_conversion: bool,
+    /// Target format for processed audio
+    pub target_format: TargetFormat,
+    /// Maximum processing latency in milliseconds
+    pub max_latency_ms: u32,
 }
 
-impl Default for PipelineConfig {
+/// Target format specification
+#[derive(Debug, Clone)]
+pub struct TargetFormat {
+    /// Target sample rate
+    pub sample_rate: SampleRate,
+    /// Target number of channels
+    pub channels: u8,
+}
+
+impl Default for ProcessingConfig {
     fn default() -> Self {
         Self {
-            input_format: AudioFormat::pcm_telephony(),
-            output_format: AudioFormat::pcm_telephony(),
-            use_vad: true,
-            noise_reduction: true,
-            auto_gain: true,
-            echo_cancellation: false,
-            packet_loss_concealment: true,
+            audio_config: AudioProcessingConfig::default(),
+            enable_format_conversion: true,
+            target_format: TargetFormat {
+                sample_rate: SampleRate::Rate8000,
+                channels: 1,
+            },
+            max_latency_ms: 50, // 50ms max latency
         }
     }
 }
 
-/// Callback for pipeline events
-pub type PipelineEventCallback = Arc<dyn Fn(PipelineEvent) + Send + Sync>;
-
-/// Pipeline events
+/// Result of pipeline processing
 #[derive(Debug, Clone)]
-pub enum PipelineEvent {
-    /// Voice activity state changed
-    VoiceActivityChanged(VadState),
-    /// Audio level changed
-    LevelChanged(f32),
-    /// Clipping detected
-    ClippingDetected,
-    /// Frame processed
-    FrameProcessed {
-        /// Frame number
-        frame: u64,
-        /// Processing duration in milliseconds
-        processing_ms: f32,
-    },
+pub struct PipelineResult {
+    /// Processed audio frame
+    pub frame: AudioFrame,
+    /// Audio processing result (if audio processing was applied)
+    pub audio_result: Option<AudioProcessingResult>,
+    /// Whether format conversion was applied
+    pub format_converted: bool,
+    /// Total processing time in microseconds
+    pub total_processing_time_us: u64,
 }
 
-/// Audio processing pipeline that combines multiple processors
-pub struct AudioPipeline {
-    /// Processing units in the pipeline
-    processors: Vec<Box<dyn AudioProcessor>>,
-    /// Input audio format
-    input_format: AudioFormat,
-    /// Output audio format
-    output_format: AudioFormat,
-    /// Intermediate buffers for processing
-    buffers: Vec<Bytes>,
-    /// Voice activity detector (if enabled)
-    vad: Option<VoiceActivityDetector>,
-    /// Event callback
-    event_callback: Option<PipelineEventCallback>,
-    /// Frame counter
-    frame_counter: u64,
-    /// Whether the pipeline is enabled
-    enabled: bool,
+/// Media processing pipeline
+pub struct ProcessingPipeline {
+    /// Pipeline configuration
+    config: ProcessingConfig,
+    /// Audio processor
+    audio_processor: Option<Arc<RwLock<AudioProcessor>>>,
+    /// Format converter
+    format_converter: Arc<RwLock<FormatConverter>>,
+    /// Pipeline statistics
+    stats: RwLock<PipelineStats>,
 }
 
-impl AudioPipeline {
-    /// Create a new audio processing pipeline
-    pub fn new(config: PipelineConfig) -> Self {
-        let vad = if config.use_vad {
-            Some(VoiceActivityDetector::new_default())
+/// Pipeline processing statistics
+#[derive(Debug, Default)]
+pub struct PipelineStats {
+    /// Total frames processed
+    pub frames_processed: u64,
+    /// Total processing time
+    pub total_processing_time_us: u64,
+    /// Frames that required format conversion
+    pub format_conversions: u64,
+    /// Audio processing operations
+    pub audio_processing_operations: u64,
+}
+
+impl ProcessingPipeline {
+    /// Create a new processing pipeline
+    pub async fn new(config: ProcessingConfig) -> Result<Self> {
+        info!("Creating ProcessingPipeline with config: {:?}", config);
+        
+        // Create audio processor if audio processing is enabled
+        let audio_processor = if config.audio_config.enable_vad {
+            let processor = AudioProcessor::new(config.audio_config.clone())?;
+            Some(Arc::new(RwLock::new(processor)))
         } else {
             None
         };
         
-        let mut processors = Vec::new();
+        // Create format converter
+        let format_converter = Arc::new(RwLock::new(FormatConverter::new()));
         
-        // Here we would normally create and add processors based on config
-        // For stub purposes, we'll just create an empty pipeline
-        
-        Self {
-            processors,
-            input_format: config.input_format,
-            output_format: config.output_format,
-            buffers: Vec::new(),
-            vad,
-            event_callback: None,
-            frame_counter: 0,
-            enabled: true,
-        }
+        Ok(Self {
+            config,
+            audio_processor,
+            format_converter,
+            stats: RwLock::new(PipelineStats::default()),
+        })
     }
     
-    /// Add a processor to the pipeline
-    pub fn add_processor(&mut self, processor: Box<dyn AudioProcessor>) -> Result<()> {
-        // Check format compatibility
-        if !self.processors.is_empty() {
-            let last_processor = self.processors.last().unwrap();
-            if last_processor.output_format() != processor.input_format() {
-                return Err(Error::FormatMismatch(
-                    format!("Format mismatch between processors: {} outputs {:?}, but {} expects {:?}",
-                            last_processor.name(), 
-                            last_processor.output_format(),
-                            processor.name(),
-                            processor.input_format())
-                ));
-            }
-        } else {
-            // First processor should match pipeline input format
-            if self.input_format != processor.input_format() {
-                return Err(Error::FormatMismatch(
-                    format!("Format mismatch: pipeline input is {:?}, but processor expects {:?}",
-                            self.input_format, 
-                            processor.input_format())
-                ));
-            }
-        }
-        
-        // Add to the pipeline
-        self.processors.push(processor);
-        
-        // Resize intermediate buffers
-        self.resize_buffers();
-        
-        Ok(())
-    }
-    
-    /// Process audio data through the pipeline
-    pub fn process(&mut self, input: &[u8]) -> Result<Bytes> {
-        if !self.enabled {
-            // If pipeline is disabled, pass through the audio
-            return Ok(Bytes::copy_from_slice(input));
-        }
-        
+    /// Process capture audio (from microphone/input)
+    pub async fn process_capture(&self, input: &AudioFrame) -> Result<PipelineResult> {
         let start_time = std::time::Instant::now();
         
-        // Update VAD if enabled
-        if let Some(vad) = &mut self.vad {
-            let prev_state = vad.state();
-            let new_state = vad.process(input)?;
+        debug!("Processing capture audio: {}Hz, {}ch, {} samples", 
+               input.sample_rate, input.channels, input.samples.len());
+        
+        let mut current_frame = input.clone();
+        let mut audio_result = None;
+        let mut format_converted = false;
+        
+        // Step 1: Audio processing (VAD, etc.)
+        if let Some(audio_processor) = &self.audio_processor {
+            let processor = audio_processor.read().await;
+            let result = processor.process_capture_audio(&current_frame).await?;
+            current_frame = result.frame.clone();
+            audio_result = Some(result);
             
-            if prev_state != new_state {
-                if let Some(callback) = &self.event_callback {
-                    callback(PipelineEvent::VoiceActivityChanged(new_state));
-                }
+            // Update stats
+            let mut stats = self.stats.write().await;
+            stats.audio_processing_operations += 1;
+        }
+        
+        // Step 2: Format conversion (if needed and enabled)
+        if self.config.enable_format_conversion {
+            current_frame = self.apply_format_conversion(&current_frame, &mut format_converted).await?;
+        }
+        
+        let total_time = start_time.elapsed();
+        
+        // Update general stats
+        {
+            let mut stats = self.stats.write().await;
+            stats.frames_processed += 1;
+            stats.total_processing_time_us += total_time.as_micros() as u64;
+            if format_converted {
+                stats.format_conversions += 1;
             }
-            
-            // If VAD is inactive, we might want to skip processing
-            // For now, we'll continue processing anyway
         }
         
-        // If we have no processors, just return the input
-        if self.processors.is_empty() {
-            self.frame_counter += 1;
-            let elapsed = start_time.elapsed();
-            
-            if let Some(callback) = &self.event_callback {
-                callback(PipelineEvent::FrameProcessed {
-                    frame: self.frame_counter,
-                    processing_ms: elapsed.as_secs_f32() * 1000.0,
-                });
+        // Check latency constraint
+        if total_time.as_millis() > self.config.max_latency_ms as u128 {
+            warn!("Processing latency exceeded limit: {}ms > {}ms", 
+                  total_time.as_millis(), self.config.max_latency_ms);
+        }
+        
+        Ok(PipelineResult {
+            frame: current_frame,
+            audio_result,
+            format_converted,
+            total_processing_time_us: total_time.as_micros() as u64,
+        })
+    }
+    
+    /// Process playback audio (to speaker/output)
+    pub async fn process_playback(&self, input: &AudioFrame) -> Result<PipelineResult> {
+        let start_time = std::time::Instant::now();
+        
+        debug!("Processing playback audio: {}Hz, {}ch, {} samples", 
+               input.sample_rate, input.channels, input.samples.len());
+        
+        let mut current_frame = input.clone();
+        let mut audio_result = None;
+        let mut format_converted = false;
+        
+        // Step 1: Format conversion (if needed and enabled)
+        if self.config.enable_format_conversion {
+            current_frame = self.apply_format_conversion(&current_frame, &mut format_converted).await?;
+        }
+        
+        // Step 2: Audio processing for playback
+        if let Some(audio_processor) = &self.audio_processor {
+            let processor = audio_processor.read().await;
+            let result = processor.process_playback_audio(&current_frame).await?;
+            current_frame = result.frame.clone();
+            audio_result = Some(result);
+        }
+        
+        let total_time = start_time.elapsed();
+        
+        // Update stats
+        {
+            let mut stats = self.stats.write().await;
+            stats.frames_processed += 1;
+            stats.total_processing_time_us += total_time.as_micros() as u64;
+            if format_converted {
+                stats.format_conversions += 1;
             }
-            
-            return Ok(Bytes::copy_from_slice(input));
         }
         
-        // Process through pipeline
-        let mut input_data = Bytes::copy_from_slice(input);
+        Ok(PipelineResult {
+            frame: current_frame,
+            audio_result,
+            format_converted,
+            total_processing_time_us: total_time.as_micros() as u64,
+        })
+    }
+    
+    /// Get pipeline statistics
+    pub async fn get_stats(&self) -> PipelineStats {
+        self.stats.read().await.clone()
+    }
+    
+    /// Reset pipeline statistics
+    pub async fn reset_stats(&self) {
+        let mut stats = self.stats.write().await;
+        *stats = PipelineStats::default();
+        debug!("Pipeline statistics reset");
+    }
+    
+    /// Apply format conversion if needed
+    async fn apply_format_conversion(
+        &self, 
+        input: &AudioFrame, 
+        was_converted: &mut bool
+    ) -> Result<AudioFrame> {
+        let target_sample_rate = self.config.target_format.sample_rate.as_hz();
+        let target_channels = self.config.target_format.channels;
         
-        for i in 0..self.processors.len() {
-            let processor = &mut self.processors[i];
-            let output_buf = &mut self.buffers[i];
-            
-            // Get mutable access to buffer
-            let output_slice = unsafe {
-                std::slice::from_raw_parts_mut(
-                    output_buf.as_ptr() as *mut u8,
-                    output_buf.len()
-                )
-            };
-            
-            // Process data
-            let bytes_written = processor.process(&input_data, output_slice)?;
-            
-            // Use this buffer as input for next stage
-            input_data = Bytes::copy_from_slice(&output_slice[..bytes_written]);
+        // Check if conversion is needed
+        if input.sample_rate == target_sample_rate && input.channels == target_channels {
+            return Ok(input.clone());
         }
         
-        // Update frame counter and elapsed time
-        self.frame_counter += 1;
-        let elapsed = start_time.elapsed();
+        // Apply format conversion
+        let conversion_params = ConversionParams::new(
+            self.config.target_format.sample_rate,
+            target_channels,
+        );
         
-        if let Some(callback) = &self.event_callback {
-            callback(PipelineEvent::FrameProcessed {
-                frame: self.frame_counter,
-                processing_ms: elapsed.as_secs_f32() * 1000.0,
-            });
+        let mut converter = self.format_converter.write().await;
+        let result = converter.convert_frame(input, &conversion_params)?;
+        
+        *was_converted = result.was_converted;
+        Ok(result.frame)
+    }
+}
+
+impl Clone for PipelineStats {
+    fn clone(&self) -> Self {
+        Self {
+            frames_processed: self.frames_processed,
+            total_processing_time_us: self.total_processing_time_us,
+            format_conversions: self.format_conversions,
+            audio_processing_operations: self.audio_processing_operations,
         }
-        
-        trace!("Processed frame {} in {:.3}ms", 
-              self.frame_counter, elapsed.as_secs_f32() * 1000.0);
-        
-        Ok(input_data)
-    }
-    
-    /// Set event callback
-    pub fn set_event_callback(&mut self, callback: PipelineEventCallback) {
-        self.event_callback = Some(callback);
-    }
-    
-    /// Reset all processors
-    pub fn reset(&mut self) -> Result<()> {
-        for processor in &mut self.processors {
-            processor.reset()?;
-        }
-        
-        if let Some(vad) = &mut self.vad {
-            vad.reset();
-        }
-        
-        self.frame_counter = 0;
-        
-        Ok(())
-    }
-    
-    /// Enable or disable the pipeline
-    pub fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-    
-    /// Check if the pipeline is enabled
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-    
-    /// Get the VAD state (if VAD is enabled)
-    pub fn vad_state(&self) -> Option<VadState> {
-        self.vad.as_ref().map(|vad| vad.state())
-    }
-    
-    /// Resize intermediate buffers
-    fn resize_buffers(&mut self) {
-        // Create intermediate buffers for each processor
-        self.buffers.clear();
-        
-        for processor in &self.processors {
-            // Allocate a generous buffer size based on format
-            let format = processor.output_format();
-            let buffer_size = format.bytes_per_frame(100); // 100ms buffer
-            self.buffers.push(Bytes::from(vec![0u8; buffer_size]));
-            
-            debug!("Created {}KB buffer for {} processor",
-                  buffer_size / 1024,
-                  processor.name());
-        }
-    }
-    
-    /// Get input format
-    pub fn input_format(&self) -> AudioFormat {
-        self.input_format
-    }
-    
-    /// Get output format
-    pub fn output_format(&self) -> AudioFormat {
-        if let Some(processor) = self.processors.last() {
-            processor.output_format()
-        } else {
-            self.input_format
-        }
-    }
-    
-    /// Get the number of processors in the pipeline
-    pub fn processor_count(&self) -> usize {
-        self.processors.len()
     }
 } 

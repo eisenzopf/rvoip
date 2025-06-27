@@ -197,6 +197,7 @@ impl UdpRtpTransport {
         
         let rtp_receiver = tokio::spawn(async move {
             let mut buffer = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
+            debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
             
             loop {
                 // Check if we should continue running
@@ -207,6 +208,8 @@ impl UdpRtpTransport {
                 // Receive packet
                 match rtp_socket.recv_from(&mut buffer).await {
                     Ok((size, addr)) => {
+                        debug!("UDP recv_from returned {} bytes from {}", size, addr);
+                        
                         // Check if it looks like an RTP or RTCP packet
                         if size < 8 {
                             // Too small to be either RTP or RTCP
@@ -237,8 +240,8 @@ impl UdpRtpTransport {
                             // Try to parse as RTP
                             match RtpPacket::parse(&buffer[0..size]) {
                                 Ok(packet) => {
-                                    // Log packet reception at transport level
-                                    info!("Transport received packet with SSRC={:08x}, seq={}, ts={}",
+                                    // Log packet reception at transport level (debug only)
+                                    debug!("Transport received packet with SSRC={:08x}, seq={}, ts={}",
                                            packet.header.ssrc, 
                                            packet.header.sequence_number,
                                            packet.header.timestamp);
@@ -252,8 +255,9 @@ impl UdpRtpTransport {
                                         payload_type: packet.header.payload_type,
                                         timestamp: packet.header.timestamp,
                                         marker: packet.header.marker,
-                                        payload: Bytes::copy_from_slice(&buffer[0..size]), // Use original buffer to preserve SSRC
+                                        payload: packet.payload.clone(), // Use the parsed payload
                                         source: addr,
+                                        ssrc: packet.header.ssrc, // Include the SSRC from the parsed packet
                                     };
                                     
                                     // Only log errors if there are receivers
@@ -300,6 +304,7 @@ impl UdpRtpTransport {
                                         marker: fallback_marker,
                                         payload: raw_payload,
                                         source: addr,
+                                        ssrc: 0, // Use 0 for non-RTP packets as we can't extract SSRC
                                     };
                                     
                                     // Send the event
@@ -394,7 +399,7 @@ impl UdpRtpTransport {
     }
     
     /// Stop the receiver task
-    async fn stop_receiver(&self) -> Result<()> {
+    pub async fn stop_receiver(&self) -> Result<()> {
         // Set inactive state
         let mut active = self.active.lock().await;
         *active = false;
@@ -472,9 +477,10 @@ impl RtpTransport for UdpRtpTransport {
         }
         
         // Send the data
-        self.rtp_socket.send_to(bytes, dest).await
+        let sent_bytes = self.rtp_socket.send_to(bytes, dest).await
             .map_err(|e| Error::Transport(format!("Failed to send RTP packet: {}", e)))?;
             
+        debug!("UDP send_to sent {} bytes to {}", sent_bytes, dest);
         Ok(())
     }
     
@@ -785,7 +791,7 @@ mod tests {
         match tokio::time::timeout(tokio::time::Duration::from_millis(500), events.recv()).await {
             Ok(Ok(event)) => {
                 match event {
-                    RtpEvent::MediaReceived { payload_type, timestamp, marker, payload: received_payload, source } => {
+                    RtpEvent::MediaReceived { payload_type, timestamp, marker, payload: received_payload, source, .. } => {
                         assert_eq!(payload_type, 96);
                         assert_eq!(timestamp, 12345);
                         assert_eq!(marker, false);

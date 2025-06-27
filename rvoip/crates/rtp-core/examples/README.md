@@ -1,135 +1,427 @@
-# RTP Core Examples
+# RTP-Core Examples
 
-This directory contains examples demonstrating the functionality of the `rtp-core` crate.
+This directory contains comprehensive examples demonstrating the functionality of the `rtp-core` crate. Examples are organized into two main categories:
 
-## Available Examples
+- **🏗️ API Examples** - Use the high-level API layer for common use cases
+- **⚙️ Core Examples** - Use low-level core libraries directly for maximum control
 
-### 1. Basic Media Transport (`media_transport.rs`)
+## 🏗️ API Examples (High-Level API Layer)
 
-This example demonstrates bidirectional RTP packet exchange between two RTP sessions.
+*These examples use the simplified API layer and are recommended for most applications.*
 
+### 📱 Basic API Usage
+
+#### [`api_basic.rs`](api_basic.rs)
+Basic client/server setup demonstrating fundamental RTP communication.
+```bash
+cargo run --example api_basic
 ```
+
+#### [`media_api_usage.rs`](media_api_usage.rs)
+Integration between media-core and rtp-core using the new API with broadcast channels.
+```bash
+cargo run --example media_api_usage
+```
+
+### 🔐 Security API Features
+
+#### [`api_srtp.rs`](api_srtp.rs)
+SRTP encryption with pre-shared keys (most common SRTP deployment scenario).
+```bash
+cargo run --example api_srtp
+```
+
+#### [`api_srtp_simple.rs`](api_srtp_simple.rs)
+Simplified SRTP usage for quick setup.
+```bash
+cargo run --example api_srtp_simple
+```
+
+#### [`api_sdes_srtp.rs`](api_sdes_srtp.rs)
+SDES-based SRTP key exchange mechanism.
+```bash
+cargo run --example api_sdes_srtp
+```
+
+#### [`api_mikey_pke.rs`](api_mikey_pke.rs)
+MIKEY (Multimedia Internet KEYing) with Public Key Exchange.
+```bash
+cargo run --example api_mikey_pke
+```
+
+#### [`api_mikey_srtp.rs`](api_mikey_srtp.rs)
+MIKEY protocol integration with SRTP.
+```bash
+cargo run --example api_mikey_srtp
+```
+
+#### [`api_unified_security.rs`](api_unified_security.rs)
+Unified security framework demonstrating multiple security protocols.
+```bash
+cargo run --example api_unified_security
+```
+
+#### [`api_zrtp_p2p.rs`](api_zrtp_p2p.rs)
+ZRTP (Z Real-time Transport Protocol) for peer-to-peer key agreement.
+```bash
+cargo run --example api_zrtp_p2p
+```
+
+#### [`api_advanced_security.rs`](api_advanced_security.rs)
+Advanced security features including key rotation and multi-stream syndication.
+```bash
+cargo run --example api_advanced_security
+```
+
+#### [`api_complete_security_showcase.rs`](api_complete_security_showcase.rs)
+Comprehensive demonstration of all security capabilities.
+```bash
+cargo run --example api_complete_security_showcase
+```
+
+### ⚡ Advanced API Features
+
+#### [`api_ssrc_demultiplexing.rs`](api_ssrc_demultiplexing.rs)
+SSRC-based stream separation for handling multiple concurrent streams.
+```bash
+cargo run --example api_ssrc_demultiplexing
+```
+
+#### [`api_ssrc_demux_test.rs`](api_ssrc_demux_test.rs)
+Testing and validation of SSRC demultiplexing functionality.
+```bash
+cargo run --example api_ssrc_demux_test
+```
+
+#### [`api_media_sync.rs`](api_media_sync.rs)
+Media synchronization API for precise timing control.
+```bash
+cargo run --example api_media_sync
+```
+
+#### [`api_high_performance_buffers.rs`](api_high_performance_buffers.rs)
+High-performance buffer management for large-scale deployments.
+```bash
+cargo run --example api_high_performance_buffers
+```
+
+#### [`api_header_extensions.rs`](api_header_extensions.rs)
+RTP header extensions (RFC 8285) for carrying additional metadata.
+```bash
+cargo run --example api_header_extensions
+```
+
+#### [`api_header_extensions_simple.rs`](api_header_extensions_simple.rs)
+Simplified header extensions usage.
+```bash
+cargo run --example api_header_extensions_simple
+```
+
+#### [`api_csrc_management_test.rs`](api_csrc_management_test.rs)
+CSRC management for mixed streams in conferencing scenarios.
+```bash
+cargo run --example api_csrc_management_test
+```
+
+### 📡 RTCP API Features
+
+#### [`api_rtcp_mux.rs`](api_rtcp_mux.rs)
+RFC 5761 RTCP multiplexing on a single port.
+```bash
+cargo run --example api_rtcp_mux
+```
+
+#### [`api_rtcp_reports.rs`](api_rtcp_reports.rs)
+RTCP report generation and handling.
+```bash
+cargo run --example api_rtcp_reports
+```
+
+#### [`api_rtcp_app_bye_xr.rs`](api_rtcp_app_bye_xr.rs)
+RTCP APP, BYE, and Extended Reports functionality.
+```bash
+cargo run --example api_rtcp_app_bye_xr
+```
+
+## ⚙️ Core Examples (Low-Level Libraries)
+
+*These examples use core libraries directly and are suitable for advanced use cases requiring fine-grained control.*
+
+### 🔧 Basic Core Usage
+
+#### [`minimal_connection_test.rs`](minimal_connection_test.rs)
+Minimal UDP connection test for diagnosing frame reception issues.
+```bash
+cargo run --example minimal_connection_test
+```
+
+#### [`media_transport.rs`](media_transport.rs)
+Bidirectional RTP packet exchange between two RTP sessions.
+```bash
 cargo run --example media_transport
 ```
 
-### 2. Payload Format Handling (`payload_format.rs`)
-
-Shows how different payload formats are handled for various codecs, focusing on G.711.
-
-```
-cargo run --example payload_format
+#### [`media_sync.rs`](media_sync.rs)
+Core media synchronization implementation.
+```bash
+cargo run --example media_sync
 ```
 
-### 3. G.722 Payload Format (`g722_payload.rs`)
+### 📡 Protocol Implementation
 
-Demonstrates G.722's special timestamp handling with 16kHz sampling but 8kHz RTP timestamps.
-
-```
-cargo run --example g722_payload
-```
-
-### 4. Opus Payload Format (`opus_payload.rs`)
-
-Shows Opus codec configuration with different bandwidth modes, channels, and framerates.
-
-```
-cargo run --example opus_payload
+#### [`rtcp_mux.rs`](rtcp_mux.rs)
+RFC 5761 RTCP multiplexing implementation at the core level.
+```bash
+cargo run --example rtcp_mux
 ```
 
-### 5. Video Payload Formats (`video_payload.rs`)
-
-Demonstrates VP8 and VP9 video payload formats with scalability and multiple resolutions.
-
-```
-cargo run --example video_payload
-```
-
-### 6. SSRC Demultiplexing (`ssrc_demultiplexing.rs`)
-
-Shows packet demultiplexing based on SSRC, handling multiple streams in a single session.
-
-```
-cargo run --example ssrc_demultiplexing
-```
-
-### 7. High-Performance Buffer Management (`high_performance_buffers.rs`)
-
-Demonstrates the high-performance buffer management system designed for large-scale 
-deployments with tens of thousands of concurrent connections. Features include:
-
-- Memory pooling to reduce allocations and GC pressure
-- Adaptive jitter buffering that responds to network conditions
-- Priority-based transmit buffering with congestion control
-- Global memory management to prevent OOM errors
-- Stream prioritization and bandwidth management
-
-```
-cargo run --example high_performance_buffers
-```
-
-### 8. RTCP BYE Packet Handling (`rtcp_bye.rs`)
-
-Demonstrates RTCP BYE packet sending and receiving when RTP sessions are closed.
-
-```
+#### [`rtcp_bye.rs`](rtcp_bye.rs)
+RTCP BYE packet sending and receiving when RTP sessions are closed.
+```bash
 cargo run --example rtcp_bye
 ```
 
-### 9. RTCP APP Packet Handling (`rtcp_app.rs`)
-
-Shows how to use RTCP APP packets for application-specific functions.
-
-```
+#### [`rtcp_app.rs`](rtcp_app.rs)
+RTCP APP packets for application-specific functions.
+```bash
 cargo run --example rtcp_app
 ```
 
-### 10. RTCP Extended Reports (`rtcp_xr_example.rs`)
-
-Demonstrates RTCP XR (Extended Reports) for detailed media quality metrics.
-
+#### [`rtcp_reports.rs`](rtcp_reports.rs)
+RTCP report generation and processing.
+```bash
+cargo run --example rtcp_reports
 ```
+
+#### [`rtcp_xr_example.rs`](rtcp_xr_example.rs)
+RTCP XR (Extended Reports) for detailed media quality metrics.
+```bash
 cargo run --example rtcp_xr_example
 ```
 
-### 11. RFC 3551 Compatibility (`rfc3551_compatibility.rs`)
-
-Tests compatibility with RFC 3551 (RTP A/V Profile) including payload types.
-
-```
-cargo run --example rfc3551_compatibility
+#### [`rtcp_rate_limiting.rs`](rtcp_rate_limiting.rs)
+RTCP rate limiting and bandwidth management.
+```bash
+cargo run --example rtcp_rate_limiting
 ```
 
-### 12. Header Extensions (`header_extensions.rs`)
-
-Demonstrates RTP header extensions (RFC 8285) for carrying additional metadata.
-
+#### [`rtp_broadcast_fix.rs`](rtp_broadcast_fix.rs)
+RTP broadcast functionality fixes and improvements.
+```bash
+cargo run --example rtp_broadcast_fix
 ```
+
+### 🎵 Payload Format Handling
+
+#### [`payload_format.rs`](payload_format.rs)
+Different payload formats for various codecs, focusing on G.711.
+```bash
+cargo run --example payload_format
+```
+
+#### [`payload_type_demo.rs`](payload_type_demo.rs)
+Comprehensive demonstration of RFC 3551-compliant payload type handling.
+```bash
+cargo run --example payload_type_demo
+```
+
+#### [`g722_payload.rs`](g722_payload.rs)
+G.722's special timestamp handling with 16kHz sampling but 8kHz RTP timestamps.
+```bash
+cargo run --example g722_payload
+```
+
+#### [`opus_payload.rs`](opus_payload.rs)
+Opus codec configuration with different bandwidth modes and channels.
+```bash
+cargo run --example opus_payload
+```
+
+#### [`video_payload.rs`](video_payload.rs)
+VP8 and VP9 video payload formats with scalability features.
+```bash
+cargo run --example video_payload
+```
+
+### 🔒 Core Security Examples
+
+#### [`srtp_crypto.rs`](srtp_crypto.rs)
+Core SRTP cryptographic operations and key management.
+```bash
+cargo run --example srtp_crypto
+```
+
+#### [`srtp_protected.rs`](srtp_protected.rs)
+SRTP-protected RTP session implementation.
+```bash
+cargo run --example srtp_protected
+```
+
+#### [`debug_srtp.rs`](debug_srtp.rs)
+SRTP debugging utilities and diagnostics.
+```bash
+cargo run --example debug_srtp
+```
+
+#### [`dtls_test.rs`](dtls_test.rs)
+DTLS (Datagram Transport Layer Security) testing.
+```bash
+cargo run --example dtls_test
+```
+
+#### [`direct_dtls_media_streaming.rs`](direct_dtls_media_streaming.rs)
+Direct DTLS media streaming implementation.
+```bash
+cargo run --example direct_dtls_media_streaming
+```
+
+#### [`generate_certificates.rs`](generate_certificates.rs)
+Certificate generation for security testing.
+```bash
+cargo run --example generate_certificates
+```
+
+### 🏗️ Core Advanced Features
+
+#### [`ssrc_demultiplexing.rs`](ssrc_demultiplexing.rs)
+Core packet demultiplexing based on SSRC for multiple streams.
+```bash
+cargo run --example ssrc_demultiplexing
+```
+
+#### [`high_performance_buffers.rs`](high_performance_buffers.rs)
+Core high-performance buffer management with memory pooling.
+```bash
+cargo run --example high_performance_buffers
+```
+
+#### [`header_extensions.rs`](header_extensions.rs)
+Core RTP header extensions (RFC 8285) implementation.
+```bash
 cargo run --example header_extensions
 ```
 
-### 13. CSRC Management for Mixed Streams (`csrc_management.rs`)
-
-Demonstrates how to use CSRC management capabilities in mixed RTP streams for conferencing.
-This example shows:
-
-- Creating and managing mappings between SSRCs and CSRCs
-- Adding contributing sources to RTP headers
-- Generating RTCP SDES packets that describe all sources
-- Simulating a conferencing mixer that combines multiple audio sources
-- Properly attributing media to active participants using CSRCs
-
-```
+#### [`csrc_management.rs`](csrc_management.rs)
+Core CSRC management for mixed streams in conferencing.
+```bash
 cargo run --example csrc_management
 ```
 
-## Running with Logging
-
-You can control the log level using the `RUST_LOG` environment variable:
-
-```
-RUST_LOG=debug cargo run --example high_performance_buffers
+#### [`port_allocation.rs`](port_allocation.rs)
+Port allocation and management for RTP sessions.
+```bash
+cargo run --example port_allocation
 ```
 
-## Known Issues
+#### [`port_allocation_demo.rs`](port_allocation_demo.rs)
+Port allocation demonstration and testing.
+```bash
+cargo run --example port_allocation_demo
+```
 
-- RTCP compound packets are not yet fully supported. 
+### 🧪 Testing & Debugging
+
+#### [`udp_test.rs`](udp_test.rs)
+Basic UDP transport testing.
+```bash
+cargo run --example udp_test
+```
+
+#### [`udp_raw_test.rs`](udp_raw_test.rs)
+Raw UDP packet testing and validation.
+```bash
+cargo run --example udp_raw_test
+```
+
+#### [`udp_to_broadcast_test.rs`](udp_to_broadcast_test.rs)
+UDP to broadcast channel testing.
+```bash
+cargo run --example udp_to_broadcast_test
+```
+
+#### [`non_rtp_packet_test.rs`](non_rtp_packet_test.rs)
+Testing handling of non-RTP packets.
+```bash
+cargo run --example non_rtp_packet_test
+```
+
+#### [`socket_validation.rs`](socket_validation.rs)
+Socket validation and connection testing.
+```bash
+cargo run --example socket_validation.rs
+```
+
+#### [`broadcast_channel_test.rs`](broadcast_channel_test.rs)
+Broadcast channel functionality testing.
+```bash
+cargo run --example broadcast_channel_test
+```
+
+#### [`rfc3551_compatibility.rs`](rfc3551_compatibility.rs)
+RFC 3551 (RTP A/V Profile) compatibility testing.
+```bash
+cargo run --example rfc3551_compatibility
+```
+
+## 🚀 Quick Start
+
+For new users, we recommend starting with these examples:
+
+1. **[`api_basic.rs`](api_basic.rs)** - Learn the fundamental API
+2. **[`api_srtp.rs`](api_srtp.rs)** - Add security to your application  
+3. **[`api_ssrc_demultiplexing.rs`](api_ssrc_demultiplexing.rs)** - Handle multiple streams
+4. **[`payload_type_demo.rs`](payload_type_demo.rs)** - Understand payload types
+
+## 🔧 Running Examples
+
+### Basic Usage
+```bash
+cargo run --example api_basic
+```
+
+### With Logging
+Control the log level using the `RUST_LOG` environment variable:
+```bash
+RUST_LOG=debug cargo run --example api_srtp
+RUST_LOG=trace cargo run --example rtcp_mux
+```
+
+### Running All Examples
+Test all examples to ensure functionality:
+```bash
+# API examples
+for example in api_*; do cargo run --example ${example%.rs}; done
+
+# Core examples  
+for example in !(api_)*; do cargo run --example ${example%.rs}; done
+```
+
+## 📋 Troubleshooting
+
+### Common Issues
+
+**Connection Timeouts**: Some examples may show connection timeouts - this is often expected behavior for demonstration purposes.
+
+**Security Warnings**: Security examples may show intentional warnings to demonstrate error recovery mechanisms.
+
+**Port Conflicts**: If you encounter port binding errors, ensure no other RTP applications are running.
+
+### Getting Help
+
+1. Check the example's source code for detailed comments
+2. Run with `RUST_LOG=debug` for detailed logging
+3. Review the main [rtp-core documentation](../README.md)
+4. Check [TODO.md](TODO.md) for known issues and planned improvements
+
+## 📚 Documentation
+
+Each example includes detailed inline documentation explaining:
+- Purpose and use case
+- Key concepts demonstrated  
+- Expected output and behavior
+- Configuration options and variations
+
+For API reference documentation, run:
+```bash
+cargo doc --open
+``` 

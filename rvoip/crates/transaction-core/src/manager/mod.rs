@@ -1392,11 +1392,15 @@ impl TransactionManager {
             TransactionEvent::TimerTriggered { transaction_id, .. } => Some(transaction_id),
             TransactionEvent::AckReceived { transaction_id, .. } => Some(transaction_id),
             TransactionEvent::CancelReceived { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::InviteRequest { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::NonInviteRequest { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::AckRequest { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::CancelRequest { transaction_id, .. } => Some(transaction_id),
             // These events don't have a specific transaction ID
-            TransactionEvent::NewRequest { .. } => None,
             TransactionEvent::StrayResponse { .. } => None,
             TransactionEvent::StrayAck { .. } => None,
             TransactionEvent::StrayCancel { .. } => None,
+            TransactionEvent::StrayAckRequest { .. } => None,
             // Add other event types for completeness
             _ => None,
         };
@@ -1489,6 +1493,34 @@ impl TransactionManager {
             }
         }
         
+        // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
+        {
+            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
+            if let Some(subscriber_ids) = tx_to_subs.remove(transaction_id) {
+                debug!(%transaction_id, subscriber_count = subscriber_ids.len(), "Removed transaction from subscriber mappings");
+                
+                // Also clean up reverse mappings
+                drop(tx_to_subs); // Release lock before acquiring another
+                let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
+                
+                for subscriber_id in subscriber_ids {
+                    if let Some(tx_list) = sub_to_txs.get_mut(&subscriber_id) {
+                        tx_list.retain(|tx_id| tx_id != transaction_id);
+                        
+                        // If subscriber has no more transactions, remove it entirely
+                        if tx_list.is_empty() {
+                            sub_to_txs.remove(&subscriber_id);
+                            debug!(%transaction_id, subscriber_id, "Removed empty subscriber mapping");
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Unregister from timer manager (defensive - it should auto-unregister)
+        self.timer_manager.unregister_transaction(transaction_id).await;
+        debug!(%transaction_id, "Unregistered transaction from timer manager");
+        
         if terminated {
             debug!(%transaction_id, "Successfully cleaned up terminated transaction");
         } else {
@@ -1552,15 +1584,7 @@ impl TransactionManager {
                 // Use tokio::select to wait for a message from either the transport or internal channel
                 tokio::select! {
                     Some(message_event) = receiver.recv() => {
-                        if let Err(e) = handle_transport_message(
-                            message_event,
-                            &transport_arc,
-                            &client_transactions,
-                            &server_transactions,
-                            &events_tx,
-                            &event_subscribers,
-                            &manager_arc,
-                        ).await {
+                        if let Err(e) = manager_arc.handle_transport_event(message_event).await {
                             error!("Error handling transport message: {}", e);
                         }
                     }

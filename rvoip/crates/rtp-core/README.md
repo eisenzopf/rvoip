@@ -1,6 +1,12 @@
-# RVOIP RTP Core Library
+# RVOIP RTP Core
 
-A cross-platform RTP/RTCP implementation with SRTP support for secure real-time communications.
+This crate provides core RTP functionality for the RVOIP project:
+
+- RTP/RTCP packet parsing and serialization
+- RTP session management
+- SRTP encryption/decryption
+- DTLS handshake for key exchange
+- High-level API for media transport
 
 ## Features
 
@@ -56,6 +62,29 @@ The library has been extensively tested and most SRTP functionality is working c
 
 These issues are not related to the core SRTP functionality and can be addressed separately.
 
+## Examples
+
+### Basic RTP API Usage
+
+The basic RTP API example demonstrates how to use the high-level API to create a server and client, and exchange RTP packets:
+
+```bash
+cargo run --example api_basic
+```
+
+### High-Performance Buffer Configuration
+
+The high-performance buffer example demonstrates how to configure and use the tunable buffer options:
+
+```bash
+cargo run --example api_high_performance_buffers
+```
+
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details. 
+This project is dual-licensed under either:
+
+* MIT License
+* Apache License, Version 2.0
+
+at your option. 

@@ -1,11 +1,11 @@
 use crate::lifecycle::component::{Component, ComponentState};
 use crate::lifecycle::dependency::DependencyGraph;
 use crate::errors::types::{Error, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::{Arc, RwLock, Mutex};
 use thiserror::Error;
-use async_trait::async_trait;
+
 
 /// Errors related to lifecycle management
 #[derive(Error, Debug)]

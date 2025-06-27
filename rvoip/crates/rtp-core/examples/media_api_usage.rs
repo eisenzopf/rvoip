@@ -14,12 +14,12 @@ use rvoip_rtp_core::api::common::stats::QualityLevel;
 use rvoip_rtp_core::api::common::config::SecurityMode;
 
 use rvoip_rtp_core::api::client::transport::{MediaTransportClient};
-use rvoip_rtp_core::api::client::transport::client_transport_impl::DefaultMediaTransportClient;
+use rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient;
 use rvoip_rtp_core::api::client::config::{ClientConfig, ClientConfigBuilder};
 use rvoip_rtp_core::api::client::security::ClientSecurityConfig;
 
 use rvoip_rtp_core::api::server::transport::{MediaTransportServer};
-use rvoip_rtp_core::api::server::transport::server_transport_impl::DefaultMediaTransportServer;
+use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
 use rvoip_rtp_core::api::server::config::{ServerConfig, ServerConfigBuilder};
 use rvoip_rtp_core::api::server::security::ServerSecurityConfig;
 
@@ -151,12 +151,13 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     // Create test audio frame (very small data for testing)
     let audio_frame = MediaFrame {
         frame_type: MediaFrameType::Audio,
-        data: vec![1, 2, 3, 4, 5],
+        data: vec![1, 2, 3, 4, 5, 6, 7, 8],
         timestamp: 1000,
         sequence: 1,
         marker: false,
-        payload_type: 8, // G.711 µ-law
+        payload_type: 8, // PCMA
         ssrc: 12345,
+        csrcs: Vec::new(),
     };
     
     // Send frames
@@ -185,22 +186,29 @@ async fn run_example() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Try to receive frames on server
-    println!("\n[DEBUG] Testing server.receive_frame()...");
+    println!("\n[DEBUG] Testing server.get_frame_receiver()...");
     println!("[DEBUG] Attempting to receive frames on server (this should get frames from the broadcast channel)...");
     
     let mut frames_received = 0;
     let start_time = std::time::Instant::now();
     
+    // Get a persistent frame receiver instead of calling receive_frame() repeatedly
+    let mut frame_receiver = server.get_frame_receiver();
+    
     while frames_received < 3 && start_time.elapsed() < Duration::from_secs(1) {
-        match server.receive_frame().await {
-            Ok((client_id, frame)) => {
+        match tokio::time::timeout(Duration::from_millis(200), frame_receiver.recv()).await {
+            Ok(Ok((client_id, frame))) => {
                 frames_received += 1;
                 println!("[SUCCESS] Server received frame #{} from client {}: seq={}, ts={}",
                          frames_received, client_id, frame.sequence, frame.timestamp);
             },
-            Err(e) => {
-                println!("[DEBUG] receive_frame() returned error: {}", e);
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(Err(e)) => {
+                println!("[DEBUG] Broadcast channel error: {}", e);
+                break;
+            },
+            Err(_) => {
+                // Timeout - continue waiting
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
         }
     }

@@ -8,28 +8,23 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn, error};
 
 use rvoip_rtp_core::{RtpPacket, RtpSession, RtpSessionConfig, RtpTimestamp};
-use rvoip_media_core::codec::{Codec, G711Codec, G711Variant};
-use rvoip_media_core::{AudioBuffer, AudioFormat, SampleRate};
+use rvoip_media_core::codec::AudioCodec;
+use rvoip_media_core::prelude::{G711Codec, G711Variant, G711Config};
+use rvoip_media_core::{AudioBuffer, AudioFormat, SampleRate, AudioFrame};
 
 /// Generate a simple tone as a PCM audio buffer
-fn generate_tone(frequency: f32, duration_ms: u32, sample_rate: u32) -> AudioBuffer {
+fn generate_tone(frequency: f32, duration_ms: u32, sample_rate: u32) -> Vec<i16> {
     let num_samples = (duration_ms as f32 * sample_rate as f32 / 1000.0) as usize;
-    let mut pcm_data = BytesMut::with_capacity(num_samples * 2); // 16-bit samples
+    let mut samples = Vec::with_capacity(num_samples);
     
     for i in 0..num_samples {
         // Generate sine wave
         let t = i as f32 / sample_rate as f32;
         let sample = (std::f32::consts::PI * 2.0 * frequency * t).sin() * 16384.0; // 50% amplitude
-        let sample = sample as i16;
-        
-        // Add sample in little-endian order
-        pcm_data.extend_from_slice(&[(sample & 0xFF) as u8, ((sample >> 8) & 0xFF) as u8]);
+        samples.push(sample as i16);
     }
     
-    AudioBuffer::new(
-        pcm_data.freeze(),
-        AudioFormat::mono_16bit(SampleRate::from_hz(sample_rate))
-    )
+    samples
 }
 
 /// Demo application that sends a tone via RTP with G.711 encoding
@@ -63,11 +58,27 @@ async fn main() -> Result<()> {
     // Initialize the RTP session
     let mut session = RtpSession::new(session_config).await?;
     
-    // Create G.711 codec
-    let codec = G711Codec::new(G711Variant::PCMU);
+    // Create G.711 codec configuration
+    let config = G711Config {
+        variant: G711Variant::MuLaw,
+        sample_rate: 8000,
+        channels: 1,
+        frame_size_ms: 20.0,
+    };
     
-    // Start a task to listen for incoming packets
-    let decoder = codec.clone();
+    // Create G.711 codec
+    let mut codec = G711Codec::new(
+        SampleRate::from_hz(8000).unwrap(),
+        1, // channels
+        config.clone()
+    )?;
+    
+    // Create decoder for receiving
+    let mut decoder = G711Codec::new(
+        SampleRate::from_hz(8000).unwrap(),
+        1, // channels
+        config
+    )?;
     
     // Create socket for receiving
     let recv_socket = UdpSocket::bind("127.0.0.1:5001").await?;
@@ -83,8 +94,8 @@ async fn main() -> Result<()> {
                             match decoder.decode(&packet.payload) {
                                 Ok(decoded) => {
                                     info!("Received {} samples ({} ms) of audio",
-                                          decoded.samples(),
-                                          decoded.duration_ms());
+                                          decoded.samples.len(),
+                                          decoded.samples.len() as f32 * 1000.0 / 8000.0);
                                 },
                                 Err(e) => {
                                     warn!("Failed to decode G.711 audio: {}", e);
@@ -108,35 +119,40 @@ async fn main() -> Result<()> {
     println!("Generating and sending a 1000 Hz tone...");
     
     // Generate several packets worth of audio
-    let audio_buffer = generate_tone(1000.0, 1000, 8000); // 1 second of 1000 Hz tone
-    info!("Generated {} ms of 1000 Hz tone", audio_buffer.duration_ms());
+    let tone_samples = generate_tone(1000.0, 1000, 8000); // 1 second of 1000 Hz tone
+    info!("Generated {} samples ({} ms) of 1000 Hz tone", 
+          tone_samples.len(), 
+          tone_samples.len() as f32 * 1000.0 / 8000.0);
     
     // Split into 20ms packets and send
     let samples_per_packet = (20.0 * 8000.0 / 1000.0) as usize; // 20ms at 8kHz = 160 samples
-    let bytes_per_sample = 2; // 16-bit PCM
-    let bytes_per_packet = samples_per_packet * bytes_per_sample;
     
-    let total_packets = (audio_buffer.data.len() + bytes_per_packet - 1) / bytes_per_packet;
+    let total_packets = (tone_samples.len() + samples_per_packet - 1) / samples_per_packet;
     info!("Sending {} packets of 20ms each", total_packets);
     
     // Initialize RTP timestamp (8kHz clock rate)
     let mut timestamp: RtpTimestamp = 0;
     
     for i in 0..total_packets {
-        let start = i * bytes_per_packet;
-        let end = std::cmp::min(start + bytes_per_packet, audio_buffer.data.len());
+        let start = i * samples_per_packet;
+        let end = std::cmp::min(start + samples_per_packet, tone_samples.len());
         
         // Extract 20ms chunk
-        let chunk = AudioBuffer::new(
-            audio_buffer.data.slice(start..end),
-            audio_buffer.format
+        let chunk_samples = &tone_samples[start..end];
+        
+        // Create AudioFrame for encoding
+        let audio_frame = AudioFrame::new(
+            chunk_samples.to_vec(),
+            8000, // sample rate
+            1,    // channels
+            timestamp
         );
         
         // Encode with G.711
-        match codec.encode(&chunk) {
+        match codec.encode(&audio_frame) {
             Ok(encoded) => {
                 // Send via RTP
-                if let Err(e) = session.send_packet(timestamp, encoded, false).await {
+                if let Err(e) = session.send_packet(timestamp, encoded.into(), false).await {
                     warn!("Failed to send RTP packet: {}", e);
                 } else {
                     debug!("Sent packet {} with timestamp {}", i + 1, timestamp);

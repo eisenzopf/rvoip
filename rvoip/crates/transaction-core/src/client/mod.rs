@@ -42,6 +42,7 @@ mod common;
 mod invite;
 mod non_invite;
 mod data;
+pub mod builders;
 
 pub use common::*;
 pub use invite::ClientInviteTransaction;

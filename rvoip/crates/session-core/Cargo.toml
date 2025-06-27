@@ -13,9 +13,11 @@ warnings = "allow"
 # Our own crates
 rvoip-sip-core = { path = "../sip-core" }
 rvoip-transaction-core = { path = "../transaction-core" }
+rvoip-dialog-core = { path = "../dialog-core" }
 rvoip-rtp-core = { path = "../rtp-core" }
-rvoip-media-core = { path = "../media-core" }
 rvoip-sip-transport = { path = "../sip-transport" }
+rvoip-media-core = { path = "../media-core" }
+infra-common = { path = "../infra-common" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
@@ -28,7 +30,8 @@ anyhow = { workspace = true }
 
 # Utilities
 bytes = { workspace = true }
-uuid = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["serde", "v4"] }
+chrono = { version = "0.4", features = ["serde"] }
 dashmap = "5.5"
 parking_lot = "0.12"
 rand = { version = "0.8", features = ["small_rng"] }
@@ -39,7 +42,33 @@ serde_json = "1.0"
 
 # Logging
 tracing = { workspace = true }
+tracing-subscriber.workspace = true
+
+# CLI
+clap = { version = "4.0", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
-tracing-subscriber.workspace = true
+tracing-appender = "0.2"
+fastrand = "2.0"
+serial_test = "3.1"
+
+[[bin]]
+name = "uas_server"
+path = "examples/client-server/uas_server.rs"
+
+[[bin]]
+name = "uac_client"
+path = "examples/client-server/uac_client.rs"
+
+[[bin]]
+name = "simple_peer_to_peer"
+path = "examples/peer-to-peer/simple_peer_to_peer.rs"
+
+[[bin]]
+name = "uac_client_clean"
+path = "examples/api_best_practices/uac_client_clean.rs"
+
+[[bin]]
+name = "uas_server_clean"
+path = "examples/api_best_practices/uas_server_clean.rs"

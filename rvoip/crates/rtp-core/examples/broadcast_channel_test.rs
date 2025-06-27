@@ -30,6 +30,7 @@ async fn main() {
         marker: false,
         payload_type: 8,
         ssrc: 12345,
+        csrcs: Vec::new(),
     };
     
     // Spawn task to send messages to the channel

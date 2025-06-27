@@ -1,11 +1,14 @@
-//! Media processing engines for audio and video capture/playback
+//! Media Engine - Central orchestrator for media processing
 //!
-//! This module provides components for managing media device access,
-//! capture pipelines, playback systems, and mixing for both audio and video.
+//! This module contains the MediaEngine which coordinates all media processing
+//! activities including codec management, session management, and integration
+//! with other crates.
 
-pub mod audio;
-pub mod video;
+pub mod media_engine;
+pub mod config;
+pub mod lifecycle;
 
-// Re-export key components
-pub use audio::{AudioDevice, AudioEngine};
-pub use video::{VideoDevice, VideoRenderer}; 
+// Re-export main types for convenience
+pub use media_engine::{MediaEngine, MediaSessionParams, MediaSessionHandle};
+pub use config::{MediaEngineConfig, EngineCapabilities};
+pub use lifecycle::{EngineState, LifecycleManager}; 

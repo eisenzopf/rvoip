@@ -246,14 +246,15 @@ impl RtpSession {
             rng.gen::<u32>()
         });
         
-        // Create transport config
+        // Create transport config - respect provided ports!
         let transport_config = RtpTransportConfig {
             local_rtp_addr: config.local_addr,
             local_rtcp_addr: None, // RTCP on same port for now
             symmetric_rtp: true,
             rtcp_mux: true, // Enable RTCP multiplexing by default
             session_id: Some(format!("rtp-session-{}", ssrc)),
-            use_port_allocator: true,
+            // Don't allocate a new port - use the one provided in config
+            use_port_allocator: false,
         };
         
         // Create UDP transport
@@ -355,20 +356,30 @@ impl RtpSession {
             let mut last_remote_addr = remote_addr;
             
             while let Some(packet) = sender_rx.recv().await {
-                // Try to get the remote address from different sources
-                let dest = if let Some(addr) = last_remote_addr {
-                    addr
-                } else {
-                    // Try to get from transport if available
-                    if let Some(t) = send_transport.as_any().downcast_ref::<UdpRtpTransport>() {
-                        match t.remote_rtp_addr().await {
-                            Some(addr) => addr,
-                            None => {
-                    // No destination address, can't send
-                    warn!("No destination address for RTP packet, dropping");
-                    continue;
+                // Always try to get the current remote address from transport first
+                let dest = if let Some(t) = send_transport.as_any().downcast_ref::<UdpRtpTransport>() {
+                    // Check transport for current remote address
+                    match t.remote_rtp_addr().await {
+                        Some(addr) => {
+                            // Update our cached value
+                            last_remote_addr = Some(addr);
+                            addr
+                        }
+                        None => {
+                            // Fall back to cached value if transport doesn't have one
+                            if let Some(addr) = last_remote_addr {
+                                addr
+                            } else {
+                                // No destination address, can't send
+                                warn!("No destination address for RTP packet, dropping");
+                                continue;
                             }
                         }
+                    }
+                } else {
+                    // Not a UDP transport, use cached value
+                    if let Some(addr) = last_remote_addr {
+                        addr
                     } else {
                         // No destination address, can't send
                         warn!("No destination address for RTP packet, dropping");
@@ -377,6 +388,9 @@ impl RtpSession {
                 };
                 
                 // Send the packet
+                debug!("Sending RTP packet to {} (seq={}, timestamp={})", 
+                       dest, packet.header.sequence_number, packet.header.timestamp);
+                       
                 if let Err(e) = send_transport.send_rtp(&packet, dest).await {
                     error!("Failed to send RTP packet: {}", e);
                     
@@ -385,8 +399,7 @@ impl RtpSession {
                     continue;
                 }
                 
-                // Update local copy of remote address
-                last_remote_addr = Some(dest);
+                debug!("Successfully sent RTP packet to {}", dest);
                 
                 // Update stats
                 if let Ok(mut session_stats) = stats_send.lock() {
@@ -1102,6 +1115,16 @@ impl RtpSession {
                 
                 // Add the block to the SR
                 sr.add_report_block(block);
+            }
+        }
+        
+        // **FIX: Update our own MediaSync context with the SR data we're sending**
+        // This ensures our own timing data flows into MediaSync for API access
+        if let Some(media_sync) = &self.media_sync {
+            if let Ok(mut sync) = media_sync.write() {
+                sync.update_from_sr(self.ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
+                debug!("Updated MediaSync with our own SR: SSRC={:08x}, NTP={:?}, RTP={}", 
+                       self.ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
             }
         }
         

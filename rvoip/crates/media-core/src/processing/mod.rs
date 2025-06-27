@@ -1,25 +1,20 @@
-//! Media signal processing module for the media-core library
+//! Media Processing Pipeline
 //!
-//! This module contains implementations of various audio and video processing
-//! algorithms used for enhancing call quality, such as echo cancellation,
-//! noise suppression, and voice activity detection.
+//! This module contains all media processing capabilities including audio processing,
+//! format conversion, and processing pipeline orchestration.
 
-// Audio processing components
+pub mod pipeline;
 pub mod audio;
-
-// Format conversion (resampling, etc.)
 pub mod format;
 
-// Re-export commonly used types
+// Re-export main processing types
+pub use pipeline::{ProcessingPipeline, ProcessingConfig};
 pub use audio::{
-    aec::EchoCanceller,
-    agc::GainControl,
-    vad::VoiceActivityDetector,
-    ns::NoiseSupressor,
-    plc::PacketLossConcealor,
-    dtmf::DtmfDetector,
+    AudioProcessor, AudioProcessingConfig, AudioProcessingResult,
+    VoiceActivityDetector, VadConfig, VadResult,
+    AutomaticGainControl, AgcConfig, AgcResult,
+    AcousticEchoCanceller, AecConfig, AecResult,
+    AudioStreamManager, AudioStreamConfig,
+    AudioMixer,
 };
-
-/// A pipeline of audio processing components
-pub mod pipeline;
-pub use pipeline::*; 
+pub use format::{FormatConverter, ConversionParams}; 

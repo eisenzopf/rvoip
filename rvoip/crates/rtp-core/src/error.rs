@@ -91,6 +91,18 @@ pub enum Error {
     #[error("Cryptographic error: {0}")]
     CryptoError(String),
     
+    /// Invalid message format or content
+    #[error("Invalid message: {0}")]
+    InvalidMessage(String),
+    
+    /// Authentication failed
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
+    
+    /// Negotiation failed
+    #[error("Negotiation failed: {0}")]
+    NegotiationFailed(String),
+    
     /// Packet too short
     #[error("Packet too short")]
     PacketTooShort,

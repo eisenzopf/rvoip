@@ -326,11 +326,34 @@ impl SimpleResponseBuilder {
         // Copy all Via headers in same order (must be copied unchanged)
         for via in request.via_headers() {
             for via_header in via.headers() {
-                let host = via_header.sent_by_host.to_string();
+                // Reconstruct the full host:port string to preserve port information
+                let host = if let Some(port) = via_header.sent_by_port {
+                    format!("{}:{}", via_header.sent_by_host, port)
+                } else {
+                    via_header.sent_by_host.to_string()
+                };
                 let transport = via_header.sent_protocol.transport.clone();
-                let branch = via_header.branch();
                 
-                builder = builder.via(&host, &transport, branch);
+                // RFC 3261 requires preserving ALL Via header parameters, not just branch
+                // So instead of using the simplified via() method, we need to copy the complete header
+                let mut params = Vec::new();
+                
+                // Copy all parameters from the original Via header
+                for param in &via_header.params {
+                    params.push(param.clone());
+                }
+                
+                // Create Via header with all parameters preserved
+                if let Ok(complete_via) = Via::new(
+                    &via_header.sent_protocol.name,
+                    &via_header.sent_protocol.version,
+                    &transport,
+                    &via_header.sent_by_host.to_string(),
+                    via_header.sent_by_port,
+                    params
+                ) {
+                    builder = builder.header(TypedHeader::Via(complete_via));
+                }
             }
         }
         

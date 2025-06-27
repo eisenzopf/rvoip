@@ -12,11 +12,17 @@ use tokio::sync::Mutex;
 use crate::api::common::error::SecurityError;
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
 
-pub mod server_security_impl;
+// Import necessary modules as public
+pub mod default;
+pub mod core;
+pub mod client;
+pub mod dtls;
+pub mod srtp;
+pub mod util;
 
-// Re-export public implementation
-pub use server_security_impl::DefaultServerSecurityContext;
-pub use server_security_impl::DefaultClientSecurityContext as ServerClientSecurityContext;
+// Re-export DefaultServerSecurityContext
+pub use default::DefaultServerSecurityContext;
+pub use client::context::DefaultClientSecurityContext;
 
 // Define our own types for API compatibility
 /// Socket handle for network operations
@@ -79,6 +85,8 @@ pub struct ServerSecurityConfig {
     pub srtp_profiles: Vec<SrtpProfile>,
     /// Whether to require client certificate
     pub require_client_certificate: bool,
+    /// Pre-shared SRTP key (for SRTP mode)
+    pub srtp_key: Option<Vec<u8>>,
 }
 
 impl Default for ServerSecurityConfig {
@@ -93,6 +101,7 @@ impl Default for ServerSecurityConfig {
                 SrtpProfile::AesGcm128,
             ],
             require_client_certificate: false,
+            srtp_key: None,
         }
     }
 }
@@ -171,16 +180,16 @@ pub trait ServerSecurityContext: Send + Sync {
     async fn capture_initial_packet(&self) -> Result<Option<(Vec<u8>, SocketAddr)>, SecurityError>;
     
     /// Create a security context for a new client
-    async fn create_client_context(&self, addr: SocketAddr) -> Result<Arc<dyn ClientSecurityContext>, SecurityError>;
+    async fn create_client_context(&self, addr: SocketAddr) -> Result<Arc<dyn ClientSecurityContext + Send + Sync>, SecurityError>;
     
     /// Get all client security contexts
-    async fn get_client_contexts(&self) -> Vec<Arc<dyn ClientSecurityContext>>;
+    async fn get_client_contexts(&self) -> Vec<Arc<dyn ClientSecurityContext + Send + Sync>>;
     
     /// Remove a client security context
     async fn remove_client(&self, addr: SocketAddr) -> Result<(), SecurityError>;
     
     /// Register a callback for clients that complete security setup
-    async fn on_client_secure(&self, callback: Box<dyn Fn(Arc<dyn ClientSecurityContext>) + Send + Sync>) -> Result<(), SecurityError>;
+    async fn on_client_secure(&self, callback: Box<dyn Fn(Arc<dyn ClientSecurityContext + Send + Sync>) + Send + Sync>) -> Result<(), SecurityError>;
     
     /// Get the list of supported SRTP profiles
     async fn get_supported_srtp_profiles(&self) -> Vec<SrtpProfile>;
@@ -197,9 +206,35 @@ pub trait ServerSecurityContext: Send + Sync {
     /// Check if the server is fully initialized and ready to process handshake messages
     /// This verifies that all prerequisites (socket, etc.) are set
     async fn is_ready(&self) -> Result<bool, SecurityError>;
+    
+    /// Get the security configuration
+    fn get_config(&self) -> &ServerSecurityConfig;
 }
 
 /// Create a new server security context
-pub async fn new(config: ServerSecurityConfig) -> Result<Arc<dyn ServerSecurityContext>, SecurityError> {
-    DefaultServerSecurityContext::new(config).await
+pub async fn new(config: ServerSecurityConfig) -> Result<Arc<dyn ServerSecurityContext + Send + Sync>, SecurityError> {
+    match config.security_mode {
+        SecurityMode::Srtp => {
+            // Use SRTP-only context for pre-shared keys (no DTLS handshake)
+            let srtp_ctx = srtp::SrtpServerSecurityContext::new(config).await?;
+            Ok(srtp_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
+        },
+        SecurityMode::DtlsSrtp => {
+            // Use DTLS-SRTP context for handshake-based keys
+            let dtls_ctx = DefaultServerSecurityContext::new(config).await?;
+            Ok(dtls_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
+        },
+        SecurityMode::SdesSrtp |
+        SecurityMode::MikeySrtp |
+        SecurityMode::ZrtpSrtp => {
+            // For now, treat these as DTLS-based (they would need specific implementations)
+            let dtls_ctx = DefaultServerSecurityContext::new(config).await?;
+            Ok(dtls_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
+        },
+        SecurityMode::None => {
+            // For None, we could return a no-op security context, but for now use DTLS as fallback
+            let dtls_ctx = DefaultServerSecurityContext::new(config).await?;
+            Ok(dtls_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
+        }
+    }
 } 

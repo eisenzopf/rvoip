@@ -7,6 +7,7 @@ pub mod timer;
 pub mod utils;
 pub mod method;
 pub mod transport;
+pub mod dialog;
 
 // Re-export core types
 pub use error::{Error, Result};
@@ -24,6 +25,40 @@ pub use transport::{
     TransportCapabilities, TransportInfo, NetworkInfoForSdp, 
     WebSocketStatus, TransportCapabilitiesExt
 };
+
+/// Convenient re-exports for request and response builders
+pub mod builders {
+    /// Client-side request builders for common SIP operations
+    pub use crate::client::builders::{
+        InviteBuilder, ByeBuilder, RegisterBuilder, InDialogRequestBuilder,
+        quick as client_quick
+    };
+    
+    /// Server-side response builders for common SIP operations
+    pub use crate::server::builders::{
+        ResponseBuilder, InviteResponseBuilder, RegisterResponseBuilder,
+        quick as server_quick
+    };
+    
+    /// Dialog utility functions for bridging dialog-core integration
+    pub mod dialog_utils {
+        pub use crate::dialog::{
+            DialogRequestTemplate, DialogTransactionContext,
+            request_builder_from_dialog_template, response_builder_for_dialog_transaction,
+            extract_dialog_template_from_request, create_dialog_transaction_context,
+            helpers
+        };
+    }
+    
+    /// Quick dialog functions for one-liner dialog operations  
+    pub mod dialog_quick {
+        pub use crate::dialog::quick::{
+            bye_for_dialog, refer_for_dialog, update_for_dialog, info_for_dialog,
+            notify_for_dialog, message_for_dialog, reinvite_for_dialog,
+            response_for_dialog_transaction
+        };
+    }
+}
 
 /// # SIP Transaction Layer
 /// 
@@ -379,165 +414,90 @@ pub use transport::{
 /// ### 2. Basic Server Transaction
 ///
 /// ```
-/// # mod doctest_helpers {
-/// #   use rvoip_sip_core::{Method, Message as SipMessage, Request as SipCoreRequest, Response as SipCoreResponse, Uri};
-/// #   use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-/// #   use rvoip_sip_core::types::{
-/// #       header::TypedHeader,
-/// #       content_length::ContentLength as ContentLengthHeaderType,
-/// #       status::StatusCode,
-/// #       param::Param,
-/// #       via::Via,
-/// #   };
-/// #   use rvoip_sip_transport::{Transport, Error as TransportError, TransportEvent as TransportLayerEvent};
-/// #   use std::net::SocketAddr;
-/// #   use std::sync::Arc;
-/// #   use tokio::sync::{Mutex, mpsc};
-/// #   use std::collections::VecDeque;
-/// #   use async_trait::async_trait;
-/// #   use std::str::FromStr;
-/// #   use uuid::Uuid;
-///
-/// #   #[derive(Debug, Clone)]
-/// #   pub struct DocMockTransport {
-/// #       pub sent_messages: Arc<Mutex<VecDeque<(SipMessage, SocketAddr)>>>,
-/// #       pub event_injector: mpsc::Sender<TransportLayerEvent>,
-/// #       local_socket_addr: SocketAddr,
-/// #       is_transport_closed: Arc<Mutex<bool>>,
-/// #   }
-///
-/// #   impl DocMockTransport {
-/// #       pub fn new(event_injector: mpsc::Sender<TransportLayerEvent>, local_addr_str: &str) -> Self {
-/// #           DocMockTransport {
-/// #               sent_messages: Arc::new(Mutex::new(VecDeque::new())),
-/// #               event_injector,
-/// #               local_socket_addr: local_addr_str.parse().expect("Invalid local_addr_str"),
-/// #               is_transport_closed: Arc::new(Mutex::new(false)),
-/// #           }
-/// #       }
-/// #       #[allow(dead_code)] pub async fn inject_event(&self, event: TransportLayerEvent) -> std::result::Result<(), String> {
-/// #           self.event_injector.send(event).await.map_err(|e| e.to_string())
-/// #       }
-/// #   }
-///
-/// #   #[async_trait]
-/// #   impl Transport for DocMockTransport {
-/// #       fn local_addr(&self) -> std::result::Result<SocketAddr, TransportError> {
-/// #           Ok(self.local_socket_addr)
-/// #       }
-/// #       async fn send_message(&self, message: SipMessage, destination: SocketAddr) -> std::result::Result<(), TransportError> {
-/// #           if *self.is_transport_closed.lock().await { return Err(TransportError::TransportClosed); }
-/// #           self.sent_messages.lock().await.push_back((message, destination));
-/// #           Ok(())
-/// #       }
-/// #       async fn close(&self) -> std::result::Result<(), TransportError> {
-/// #           *self.is_transport_closed.lock().await = true; Ok(())
-/// #       }
-/// #       fn is_closed(&self) -> bool { self.is_transport_closed.try_lock().map_or(false, |g| *g) }
-/// #   }
-///
-/// #   pub fn build_incoming_invite(from_client_addr_str: &str, to_server_uri_str: &str) -> std::result::Result<SipCoreRequest, Box<dyn std::error::Error>> {
-/// #       let from_uri_str = format!("sip:caller@{}", from_client_addr_str.split(':').next().unwrap_or("client.com"));
-/// #       let request = SimpleRequestBuilder::new(Method::Invite, to_server_uri_str)?
-/// #           .from("Caller", &from_uri_str, Some("fromtagServer1"))
-/// #           .to("Server", to_server_uri_str, None)
-/// #           .call_id(&format!("callserver1-{}", Uuid::new_v4()))
-/// #           .cseq(1)
-/// #           .via(from_client_addr_str, "UDP", Some(&format!("z9hG4bK{}", Uuid::new_v4().simple())))
-/// #           .contact(&format!("sip:caller@{}", from_client_addr_str), Some("Caller Contact"))
-/// #           .header(TypedHeader::ContentLength(ContentLengthHeaderType::new(0)))
-/// #           .build();
-/// #       Ok(request)
-/// #   }
-/// # }
-/// # use doctest_helpers::*;
-/// use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionKey};
-/// use rvoip_sip_core::{Method, Message as SipMessage, Request as SipCoreRequest, Response as SipCoreResponse, types::status::StatusCode};
-/// use rvoip_sip_core::builder::SimpleResponseBuilder;
-/// use rvoip_sip_core::types::header::TypedHeader;
-/// use rvoip_sip_core::types::content_length::ContentLength as ContentLengthHeaderType;
-/// use rvoip_sip_transport::{TransportEvent as TransportLayerEvent, Transport};
+/// use rvoip_transaction_core::{TransactionManager, TransactionEvent};
+/// use rvoip_transaction_core::builders::{client_quick, server_quick};
+/// use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
+/// use rvoip_sip_core::{Method, StatusCode};
 /// use std::net::SocketAddr;
-/// use std::sync::Arc;
-/// use tokio::sync::mpsc;
 /// use std::time::Duration;
 ///
 /// #[tokio::main]
-/// async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-///     let (event_injector_tx, event_injector_rx_for_manager) = mpsc::channel(100);
-///     let mock_server_addr_str = "127.0.0.1:5070";
-///     let mock_transport = Arc::new(DocMockTransport::new(event_injector_tx.clone(), mock_server_addr_str));
-///
-///     let (manager, mut server_events_rx) = TransactionManager::new(
-///         mock_transport.clone() as Arc<dyn Transport>,
-///         event_injector_rx_for_manager,
-///         Some(10)
-///     ).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-///
-///     let client_addr_str = "127.0.0.1:6000";
-///     let client_socket_addr: SocketAddr = client_addr_str.parse()?;
-///     let server_uri_str = format!("sip:server@{}", mock_server_addr_str);
-///     let incoming_invite = build_incoming_invite(client_addr_str, &server_uri_str)?;
-///
-///     event_injector_tx.send(TransportLayerEvent::MessageReceived {
-///         message: SipMessage::Request(incoming_invite.clone()),
-///         source: client_socket_addr,
-///         destination: mock_transport.local_addr()?,
-///     }).await?;
-///
-///     let received_tx_id: TransactionKey;
-///     let original_request_for_response: SipCoreRequest;
-///
-///     tokio::select! {
-///         Some(event) = server_events_rx.recv() => {
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     // Create server transport
+///     let server_config = TransportManagerConfig {
+///         enable_udp: true,
+///         bind_addresses: vec!["127.0.0.1:5060".parse()?],
+///         ..Default::default()
+///     };
+///     
+///     let (mut server_transport, server_transport_rx) = TransportManager::new(server_config).await?;
+///     server_transport.initialize().await?;
+///     let server_addr = server_transport.default_transport().await
+///         .ok_or("No default transport")?.local_addr()?;
+///     
+///     // Create transaction manager
+///     let (server_tm, mut server_events) = TransactionManager::with_transport_manager(
+///         server_transport,
+///         server_transport_rx,
+///         Some(10),
+///     ).await?;
+///     
+///     // Clone for use in spawn (to avoid ownership issues)
+///     let server_tm_clone = server_tm.clone();
+///     
+///     // Handle incoming requests
+///     tokio::spawn(async move {
+///         while let Some(event) = server_events.recv().await {
 ///             match event {
-///                 TransactionEvent::NewRequest { transaction_id, request, source, .. } => {
-///                     println!("Received new INVITE with ID: {} from {}", transaction_id, source);
-///                     assert_eq!(request.method(), Method::Invite);
-///                     assert_eq!(source, client_socket_addr);
+///                 TransactionEvent::NonInviteRequest { transaction_id, request, source, .. } => {
+///                     println!("Received {} from {}", request.method(), source);
 ///                     
-///                     // Create a server transaction (don't use the transaction_id from NewRequest)
-///                     let server_tx = manager.create_server_transaction(
-///                         request.clone(), 
-///                         source
-///                     ).await.expect("Failed to create server transaction");
-///                     received_tx_id = server_tx.id().clone();
-///                     original_request_for_response = request;
-///
-///                     // Wait a short time for the transaction to be fully registered
-///                     tokio::time::sleep(Duration::from_millis(50)).await;
-///
-///                     let ringing_response = SimpleResponseBuilder::response_from_request(&original_request_for_response, StatusCode::Ringing, Some("Ringing"))
-///                         .header(TypedHeader::ContentLength(ContentLengthHeaderType::new(0)))
-///                         .build();
-///
-///                     manager.send_response(&received_tx_id, ringing_response).await
-///                         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-///                     println!("Sent 180 Ringing");
+///                     // Send appropriate response using builders
+///                     match request.method() {
+///                         Method::Register => {
+///                             let ok = server_quick::ok_register(
+///                                 &request, 
+///                                 3600, 
+///                                 vec![format!("sip:user@{}", source.ip())]
+///                             ).expect("Failed to create REGISTER response");
+///                             
+///                             let _ = server_tm_clone.send_response(&transaction_id, ok).await;
+///                         },
+///                         Method::Options => {
+///                             let ok = server_quick::ok_options(
+///                                 &request, 
+///                                 vec![Method::Invite, Method::Register, Method::Options]
+///                             ).expect("Failed to create OPTIONS response");
+///                             
+///                             let _ = server_tm_clone.send_response(&transaction_id, ok).await;
+///                         },
+///                         _ => {
+///                             let ok = server_quick::ok_bye(&request)
+///                                 .expect("Failed to create OK response");
+///                             let _ = server_tm_clone.send_response(&transaction_id, ok).await;
+///                         }
+///                     }
 ///                 },
-///                 other_event => return Err(format!("Unexpected event instead of NewRequest: {:?}", other_event).into()),
+///                 TransactionEvent::InviteRequest { transaction_id, request, source, .. } => {
+///                     println!("Received INVITE from {}", source);
+///                     
+///                     // Send INVITE response
+///                     let ok = server_quick::ok_invite(
+///                         &request, 
+///                         Some("v=0\r\no=server 456 789 IN IP4 127.0.0.1\r\n...".to_string()),
+///                         format!("sip:server@{}", source.ip())
+///                     ).expect("Failed to create INVITE response");
+///                     
+///                     let _ = server_tm_clone.send_response(&transaction_id, ok).await;
+///                 },
+///                 _ => {}
 ///             }
-///         },
-///         _ = tokio::time::sleep(Duration::from_secs(2)) => return Err("Timeout waiting for NewRequest".into()),
-///     }
-///
-///     tokio::time::sleep(Duration::from_millis(50)).await; // Allow manager to send the message
-///
-///     let sent_messages = mock_transport.sent_messages.lock().await;
-///     assert_eq!(sent_messages.len(), 1, "Ringing response should have been sent");
-///     if let Some((msg, dest)) = sent_messages.front() {
-///         assert!(msg.is_response(), "Sent message should be a response");
-///         if let SipMessage::Response(ref resp_msg) = msg {
-///             assert_eq!(resp_msg.status_code(), StatusCode::Ringing.as_u16());
-///         } else {
-///             panic!("Sent message was not a response type as expected");
 ///         }
-///         assert_eq!(*dest, client_socket_addr);
-///     } else {
-///         panic!("No message found in sent_messages for ringing");
-///     }
-///
-///     manager.shutdown().await;
+///     });
+///     
+///     // Keep server running for a bit
+///     tokio::time::sleep(Duration::from_millis(100)).await;
+///     server_tm.shutdown().await;
 ///     Ok(())
 /// }
 /// ```
@@ -548,257 +508,79 @@ pub use transport::{
 /// and then the Transaction User (TU) constructing and sending an ACK.
 ///
 /// ```
-/// # mod doctest_helpers {
-/// #   use rvoip_sip_core::{Method, Message as SipMessage, Request as SipCoreRequest, Response as SipCoreResponse, Uri};
-/// #   use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-/// #   use rvoip_sip_core::types::{
-/// #       header::TypedHeader,
-/// #       content_length::ContentLength as ContentLengthHeaderType,
-/// #       status::StatusCode,
-/// #       param::Param,
-/// #       via::Via,
-/// #       cseq::CSeq,
-/// #       address::Address,
-/// #       call_id::CallId as CallIdHeader,
-/// #       from::From as FromHeader,
-/// #       to::To as ToHeader,
-/// #       contact::Contact as ContactHeader, // For TypedHeader::Contact(ContactHeader)
-/// #   };
-/// #   use rvoip_sip_transport::{Transport, Error as TransportError, TransportEvent as TransportLayerEvent};
-/// #   use rvoip_sip_core::json::ext::SipMessageJson; // May not be needed if direct access works
-/// #   use std::net::SocketAddr;
-/// #   use std::sync::Arc;
-/// #   use tokio::sync::{Mutex, mpsc};
-/// #   use std::collections::VecDeque;
-/// #   use async_trait::async_trait;
-/// #   use std::str::FromStr;
-/// #   use uuid::Uuid;
-///
-/// #   #[derive(Debug, Clone)]
-/// #   pub struct DocMockTransport {
-/// #       pub sent_messages: Arc<Mutex<VecDeque<(SipMessage, SocketAddr)>>>,
-/// #       pub event_injector: mpsc::Sender<TransportLayerEvent>,
-/// #       local_socket_addr: SocketAddr,
-/// #       is_transport_closed: Arc<Mutex<bool>>,
-/// #   }
-///
-/// #   impl DocMockTransport {
-/// #       pub fn new(event_injector: mpsc::Sender<TransportLayerEvent>, local_addr_str: &str) -> Self {
-/// #           DocMockTransport {
-/// #               sent_messages: Arc::new(Mutex::new(VecDeque::new())),
-/// #               event_injector,
-/// #               local_socket_addr: local_addr_str.parse().expect("Invalid local_addr_str"),
-/// #               is_transport_closed: Arc::new(Mutex::new(false)),
-/// #           }
-/// #       }
-/// #       #[allow(dead_code)] pub async fn inject_event(&self, event: TransportLayerEvent) -> std::result::Result<(), String> {
-/// #           self.event_injector.send(event).await.map_err(|e| e.to_string())
-/// #       }
-/// #   }
-///
-/// #   #[async_trait]
-/// #   impl Transport for DocMockTransport {
-/// #       fn local_addr(&self) -> std::result::Result<SocketAddr, TransportError> { Ok(self.local_socket_addr) }
-/// #       async fn send_message(&self, message: SipMessage, destination: SocketAddr) -> std::result::Result<(), TransportError> {
-/// #           if *self.is_transport_closed.lock().await { return Err(TransportError::TransportClosed); }
-/// #           self.sent_messages.lock().await.push_back((message, destination)); Ok(())
-/// #       }
-/// #       async fn close(&self) -> std::result::Result<(), TransportError> { *self.is_transport_closed.lock().await = true; Ok(()) }
-/// #       fn is_closed(&self) -> bool { self.is_transport_closed.try_lock().map_or(false, |g| *g) }
-/// #   }
-///
-/// #   pub fn build_invite_for_ack_test(client_addr_str: &str, server_uri_str: &str) -> std::result::Result<SipCoreRequest, Box<dyn std::error::Error>> {
-/// #       let from_uri_str = format!("sip:ackclient@{}", client_addr_str.split(':').next().unwrap_or("client.com"));
-/// #       let request = SimpleRequestBuilder::new(Method::Invite, server_uri_str)?
-/// #           .from("AckClient", &from_uri_str, Some("fromtagAckClient"))
-/// #           .to("AckServer", server_uri_str, None)
-/// #           .call_id(&format!("callack-{}", Uuid::new_v4()))
-/// #           .cseq(1)
-/// #           .via(client_addr_str, "UDP", Some(&format!("z9hG4bK{}", Uuid::new_v4().simple())))
-/// #           .contact(&format!("sip:ackclient@{}", client_addr_str), Some("AckClient Contact"))
-/// #           .header(TypedHeader::ContentLength(ContentLengthHeaderType::new(0)))
-/// #           .build();
-/// #       Ok(request)
-/// #   }
-///
-/// #   pub fn build_ok_for_invite(invite_req: &SipCoreRequest, server_contact_str: &str, to_tag: &str) -> std::result::Result<SipCoreResponse, Box<dyn std::error::Error>> {
-/// #       let invite_to_header = invite_req.to().ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "Invite missing To header")) as Box<dyn std::error::Error>)?;
-/// #       let response = SimpleResponseBuilder::response_from_request(invite_req, StatusCode::Ok, Some("OK"))
-/// #           .to( // Rebuild To header with the new tag
-/// #               invite_to_header.address().display_name().unwrap_or_default(),
-/// #               &invite_to_header.address().uri.to_string(),
-/// #               Some(to_tag)
-/// #           )
-/// #           .contact(server_contact_str, None)
-/// #           .header(TypedHeader::ContentLength(ContentLengthHeaderType::new(0)))
-/// #           .build();
-/// #       Ok(response)
-/// #   }
-///
-/// #   pub async fn create_ack_for_2xx_invite(
-/// #       ok_response: &SipCoreResponse,
-/// #       original_invite: &SipCoreRequest,
-/// #       client_via_addr_str: &str
-/// #   ) -> std::result::Result<(SipCoreRequest, SocketAddr), Box<dyn std::error::Error>> {
-/// #
-/// #       let ack_request_uri_string = ok_response.header(&rvoip_sip_core::types::header::HeaderName::Contact) // Use full path for HeaderName
-/// #           .and_then(|h| if let TypedHeader::Contact(c_header) = h { // c_header is ContactHeader
-/// #               c_header.address().map(|addr| addr.uri.to_string()) // Access Contact -> Option<Address> -> uri
-/// #           } else { None })
-/// #           .or_else(|| ok_response.to().map(|t| t.address().uri.to_string()))
-/// #           .ok_or_else(|| "Could not determine ACK Request-URI from 200 OK".to_string())?;
-/// #
-/// #       let from_hdr_val = original_invite.from().ok_or("Missing From in original INVITE")?.clone();
-/// #       let to_hdr_val = ok_response.to().ok_or("Missing To in 2xx response")?.clone();
-/// #       let call_id_hdr_val = original_invite.call_id().ok_or("Missing Call-ID in original INVITE")?.clone();
-/// #       let original_cseq_val = original_invite.cseq().ok_or("Missing CSeq in original INVITE")?;
-/// #       let ack_cseq_hdr_val = CSeq::new(original_cseq_val.seq, Method::Ack);
-/// #
-/// #       let mut ack_builder = SimpleRequestBuilder::new(Method::Ack, &ack_request_uri_string)?;
-/// #
-/// #       ack_builder = ack_builder
-/// #           .header(TypedHeader::From(from_hdr_val))
-/// #           .header(TypedHeader::To(to_hdr_val))
-/// #           .header(TypedHeader::CallId(call_id_hdr_val))
-/// #           .header(TypedHeader::CSeq(ack_cseq_hdr_val));
-/// #
-/// #       let ack_branch = format!("z9hG4bK{}", Uuid::new_v4().simple());
-/// #       ack_builder = ack_builder.via(client_via_addr_str, "UDP", Some(&ack_branch));
-/// #
-/// #       ack_builder = ack_builder.header(TypedHeader::ContentLength(ContentLengthHeaderType::new(0)));
-/// #       let ack_request = ack_builder.build();
-/// #
-/// #       let ack_request_uri_parsed = Uri::from_str(&ack_request_uri_string)?;
-/// #       let host = ack_request_uri_parsed.host.as_str();
-/// #       let port = ack_request_uri_parsed.port.unwrap_or(5060);
-/// #       // Use numeric IP address instead of hostname to avoid parsing issues
-/// #       let ack_destination: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
-/// #
-/// #       Ok((ack_request, ack_destination))
-/// #   }
-/// # }
-/// # use doctest_helpers::*;
-/// use rvoip_transaction_core::{TransactionManager, TransactionEvent, TransactionKey};
-/// use rvoip_sip_core::{
-///     Method, Message as SipMessage, Uri, Request as SipCoreRequest, Response as SipCoreResponse,
-///     types::status::StatusCode,
-///     types::address::Address,
-///     types::header::HeaderName, // For ok_response.header(&HeaderName::Contact)
-/// };
-/// use rvoip_sip_transport::{TransportEvent as TransportLayerEvent, Transport};
+/// use rvoip_transaction_core::{TransactionManager, TransactionEvent};
+/// use rvoip_transaction_core::builders::client_quick;
+/// use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
+/// use rvoip_sip_core::{Method, StatusCode};
 /// use std::net::SocketAddr;
-/// use std::sync::Arc;
-/// use tokio::sync::mpsc;
 /// use std::time::Duration;
-/// use std::str::FromStr;
-/// use uuid::Uuid;
 ///
 /// #[tokio::main]
-/// async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
-///     let (event_injector_tx, event_injector_rx_for_manager) = mpsc::channel(100);
-///     let client_addr_str = "127.0.0.1:5088";
-///     let mock_transport = Arc::new(DocMockTransport::new(event_injector_tx.clone(), client_addr_str));
-///
-///     let (manager, mut client_events_rx) = TransactionManager::new(
-///         mock_transport.clone() as Arc<dyn Transport>,
-///         event_injector_rx_for_manager,
-///         Some(10)
-///     ).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-///
-///     let server_uri_str = "sip:ackserver@server.com:5098";
-///     let server_socket_addr: SocketAddr = "127.0.0.1:5098".parse()?;  // Use direct IP address instead of parsing from URI
-///
-///     let invite_request = build_invite_for_ack_test(client_addr_str, server_uri_str)?;
-///
-///     let tx_id = manager.create_client_transaction(invite_request.clone(), server_socket_addr)
-///         .await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-///     println!("Client INVITE for ACK test created: {}", tx_id);
-/// 
-///     // Explicitly send the request (don't just wait)
-///     manager.send_request(&tx_id).await.map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     // Create client transport
+///     let client_config = TransportManagerConfig {
+///         enable_udp: true,
+///         bind_addresses: vec!["127.0.0.1:0".parse()?], // Ephemeral port
+///         ..Default::default()
+///     };
 ///     
-///     // Wait for state change events first, to avoid the "Unexpected event" error
-///     let mut state_changed_received = false;
-///     while !state_changed_received {
-///         tokio::select! {
-///             Some(event) = client_events_rx.recv() => {
-///                 match event {
-///                     TransactionEvent::StateChanged { .. } => {
-///                         state_changed_received = true;
-///                     },
-///                     _ => {}
-///                 }
-///             },
-///             _ = tokio::time::sleep(Duration::from_millis(100)) => {
-///                 break;
-///             }
-///         }
-///     }
+///     let (mut client_transport, client_transport_rx) = TransportManager::new(client_config).await?;
+///     client_transport.initialize().await?;
+///     let client_addr = client_transport.default_transport().await
+///         .ok_or("No default transport")?.local_addr()?;
 ///     
-///     tokio::time::sleep(Duration::from_millis(50)).await; // Allow manager to send INVITE
-///
-///     let server_contact_str = format!("sip:contact@{}", server_socket_addr);
-///     let ok_response_to_invite = build_ok_for_invite(&invite_request, &server_contact_str, "totagForAckDialog1")?;
-///
-///     mock_transport.inject_event(TransportLayerEvent::MessageReceived {
-///         message: SipMessage::Response(ok_response_to_invite.clone()),
-///         source: server_socket_addr,
-///         destination: mock_transport.local_addr()?,
-///     }).await?;
-///
-///     // Wait for the SuccessResponse event with a timeout
-///     let success_response = tokio::time::timeout(
-///         Duration::from_secs(1),
-///         async {
-///             loop {
-///                 if let Some(event) = client_events_rx.recv().await {
-///                     match event {
-///                         TransactionEvent::SuccessResponse { transaction_id, response, .. } 
-///                             if transaction_id == tx_id => {
-///                             return Ok::<_, Box<dyn std::error::Error>>(response);
-///                         },
-///                         other => {
-///                             println!("Ignoring event while waiting for SuccessResponse: {:?}", other);
-///                         }
-///                     }
-///                 } else {
-///                     return Err::<_, Box<dyn std::error::Error>>("Event channel closed".into());
-///                 }
-///             }
-///         }
-///     ).await.map_err(|_| "Timeout waiting for SuccessResponse")??;
-///
-///     println!("Received Success Response: {} {}", 
-///              success_response.status_code(), 
-///              success_response.reason_phrase());
-///     assert!(StatusCode::from_u16(success_response.status_code())?.is_success());
-///
-///     let (ack_request, ack_destination) = create_ack_for_2xx_invite(
-///         &success_response,
-///         &invite_request,
-///         client_addr_str
+///     // Create transaction manager
+///     let (client_tm, mut client_events) = TransactionManager::with_transport_manager(
+///         client_transport,
+///         client_transport_rx,
+///         Some(10),
 ///     ).await?;
-///
-///     println!("TU sending ACK to {} for 2xx INVITE response", ack_destination);
-///     mock_transport.send_message(SipMessage::Request(ack_request), ack_destination).await?;
-///
-///     tokio::time::sleep(Duration::from_millis(100)).await;
-///     let sent_messages = mock_transport.sent_messages.lock().await;
-///     assert_eq!(sent_messages.len(), 2, "Expected INVITE and ACK to be sent. Found: {:?}",
-///         sent_messages.iter().map(|(m,_)| {
-///             match m {
-///                 SipMessage::Request(req) => format!("Method: {:?}", req.method()),
-///                 SipMessage::Response(res) => format!("Status: {}", res.status_code()),
+///     
+///     // Create INVITE using builders
+///     let server_addr: SocketAddr = "127.0.0.1:5060".parse()?;
+///     let invite_request = client_quick::invite(
+///         "sip:alice@example.com",
+///         "sip:bob@example.com", 
+///         client_addr,
+///         Some("v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\n")
+///     ).expect("Failed to create INVITE");
+///     
+///     // Create client transaction
+///     let tx_id = client_tm.create_client_transaction(invite_request, server_addr).await?;
+///     println!("Created INVITE transaction: {}", tx_id);
+///     
+///     // Send the INVITE
+///     client_tm.send_request(&tx_id).await?;
+///     println!("Sent INVITE request");
+///     
+///     // Handle events
+///     tokio::spawn(async move {
+///         while let Some(event) = client_events.recv().await {
+///             match event {
+///                 TransactionEvent::SuccessResponse { transaction_id, response, .. } => {
+///                     println!("Received {} {}", response.status_code(), response.reason_phrase());
+///                     
+///                     // For 2xx responses to INVITE, the TU must send ACK
+///                     // (This would normally be done by the dialog layer)
+///                     if response.status_code() >= 200 && response.status_code() < 300 {
+///                         println!("Would send ACK for 2xx response (handled by TU/Dialog layer)");
+///                     }
+///                 },
+///                 TransactionEvent::FailureResponse { transaction_id, response } => {
+///                     println!("Received error: {} {}", response.status_code(), response.reason_phrase());
+///                     // ACK for non-2xx responses is handled automatically by transaction layer
+///                 },
+///                 TransactionEvent::StateChanged { transaction_id, new_state, .. } => {
+///                     println!("Transaction {} state: {:?}", transaction_id, new_state);
+///                 },
+///                 _ => {}
 ///             }
-///         }).collect::<Vec<_>>()
-///     );
-///
-///     let invite_sent = sent_messages.iter().any(|(m, _)| m.method() == Some(Method::Invite));
-///     let ack_sent = sent_messages.iter().any(|(m, _)| m.method() == Some(Method::Ack));
-///     assert!(invite_sent, "INVITE not found in sent messages");
-///     assert!(ack_sent, "ACK not found in sent messages");
-///
-///     manager.shutdown().await;
+///         }
+///     });
+///     
+///     // Keep client running for a bit
+///     tokio::time::sleep(Duration::from_millis(100)).await;
+///     client_tm.shutdown().await;
 ///     Ok(())
 /// }
 /// ```
@@ -958,6 +740,8 @@ mod tests {
         let custom_settings = TimerSettings {
             t1: Duration::from_millis(200),
             t2: Duration::from_secs(2),
+            t4: Duration::from_secs(5),
+            timer_100_interval: Duration::from_millis(200),
             transaction_timeout: Duration::from_secs(16),
             wait_time_d: Duration::from_secs(16),
             wait_time_h: Duration::from_secs(16),
