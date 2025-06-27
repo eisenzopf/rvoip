@@ -10,13 +10,19 @@ license = "MIT OR Apache-2.0"
 warnings = "allow"
 
 [dependencies]
-# Our own crates
-rvoip-sip-core = { path = "../sip-core" }
-rvoip-transaction-core = { path = "../transaction-core" }
-rvoip-session-core = { path = "../session-core" }
-rvoip-media-core = { path = "../media-core" }
-rvoip-rtp-core = { path = "../rtp-core" }
+# Workspace crates
 rvoip-sip-transport = { path = "../sip-transport" }
+rvoip-sip-core = { path = "../sip-core" }
+# Our own crates - following client-core pattern
+rvoip-session-core = { path = "../session-core" }
+# Infrastructure - shared types
+infra-common = { path = "../infra-common", features = ["no-global-allocator"] }
+
+# Database
+limbo = { version = "0.0.22", features = ["index_experimental"] }
+
+# Web framework
+axum = "0.7"
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
@@ -28,17 +34,61 @@ anyhow = { workspace = true }
 
 # Utilities
 bytes = { workspace = true }
-uuid = { workspace = true, features = ["serde"] }
-dashmap = "5.5"
-parking_lot = "0.12"
+uuid = { workspace = true, features = ["v4", "serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
 
 # Logging
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Collections
+dashmap = "5.5"
+parking_lot = "0.12"
+
+# For examples
+clap = { version = "4.5", features = ["derive"] }
+rvoip-client-core = { path = "../client-core" }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full", "test-util"] }
-tracing-subscriber = { workspace = true } 
+# Testing
+tokio-test = "0.4"
+serial_test = "3.1"
+
+# Benchmarking
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "call_center_benchmarks"
+harness = false
+
+[[example]]
+name = "phase0_basic_call_flow"
+path = "examples/phase0_basic_call_flow.rs"
+
+[[example]]
+name = "phase2_call_routing_demo"
+path = "examples/phase2_call_routing_demo.rs"
+
+[[example]]
+name = "call_center_with_database"
+path = "examples/call_center_with_database.rs"
+
+[[example]]
+name = "register_demo_server"
+path = "examples/register_demo/server.rs"
+
+[[example]]
+name = "register_demo_client"
+path = "examples/register_demo/client.rs"
+
+[[example]]
+name = "e2e_test_server"
+path = "examples/e2e_test/server/basic_call_center_server.rs"
+
+[[example]]
+name = "e2e_test_agent"
+path = "examples/e2e_test/agent/agent_client.rs" 

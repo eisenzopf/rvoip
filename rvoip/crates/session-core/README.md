@@ -1,183 +1,408 @@
 # rvoip-session-core
 
-`rvoip-session-core` is a Rust library that provides Session Initiation Protocol (SIP) session and dialog management for the RVOIP stack. It serves as the middle layer between the low-level SIP transaction processing and high-level application logic for VoIP applications.
+High-level SIP session and media management for building VoIP applications in Rust.
 
 ## Overview
 
-This library implements RFC-compliant SIP dialog and session management, providing a clean, type-safe API for building SIP clients and servers. It handles the complex state machines defined in SIP RFCs while abstracting away many of the protocol intricacies.
+`rvoip-session-core` provides a clean, type-safe API for building SIP clients and servers. It handles the complexity of SIP dialogs, media negotiation, and call control while exposing a simple interface for application developers.
 
-## Role in SIP Applications
+## 📚 Documentation
 
-### For SIP Clients
+- **[API Documentation](src/api/mod.rs)** - Comprehensive API reference with examples
+- **[API Guide](API_GUIDE.md)** - Complete developer guide with patterns and best practices
+- **[COOKBOOK.md](COOKBOOK.md)** - Practical recipes for common VoIP scenarios
+- **[Examples](examples/)** - Full working examples including:
+  - [API Best Practices](examples/api_best_practices/) - Clean API usage demonstrations
+  - [Client-Server Demo](examples/client-server/) - Complete UAC/UAS implementation
+  - [SIPp Integration Tests](examples/sipp_tests/) - Interoperability testing
 
-In client applications (`rvoip-sip-client`), `session-core` manages:
+## Features
 
-- Outgoing call establishment (INVITE transactions)
-- Dialog state tracking through call setup, in-call operations, and termination
-- Media stream negotiation via SDP
-- Mid-call operations (hold, transfer)
-- Call termination (BYE transactions)
-- Event notifications for UI updates
+- 🎯 **Clean API** - Simple traits for session and media control
+- 📞 **Complete Call Management** - Make, receive, hold, transfer calls
+- 🎵 **Media Integration** - Built-in RTP/RTCP with quality monitoring
+- 🔄 **Two Calling Patterns** - Immediate or deferred call decisions
+- 🌉 **Bridge Management** - Connect calls for conferencing
+- 📊 **Real-time Statistics** - Monitor call quality with MOS scores
+- 🏗️ **Builder Pattern** - Easy configuration and setup
+- ⚡ **Async/Await** - Modern async Rust throughout
 
-### For SIP Servers
+## Quick Start
 
-In server applications (`rvoip-call-engine`), `session-core` provides:
+```rust
+use rvoip_session_core::api::*;
+use std::sync::Arc;
 
-- Incoming call processing
-- Server-side dialog state management
-- Session tracking for multiple concurrent calls
-- Media negotiation for server-side media processing
-- Call routing based on dialog relationships
-- Resource management for active calls
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Build and start a session coordinator
+    let coordinator = SessionManagerBuilder::new()
+        .with_sip_port(5060)
+        .with_local_address("sip:alice@192.168.1.100:5060")
+        .with_handler(Arc::new(AutoAnswerHandler))
+        .build()
+        .await?;
+    
+    SessionControl::start(&coordinator).await?;
+    
+    // Make a call
+    let session = SessionControl::create_outgoing_call(
+        &coordinator,
+        "sip:alice@192.168.1.100",  // from
+        "sip:bob@example.com",       // to
+        None  // SDP will be generated automatically
+    ).await?;
+    
+    println!("Call initiated: {}", session.id());
+    
+    // Wait for answer
+    SessionControl::wait_for_answer(
+        &coordinator,
+        &session.id,
+        Duration::from_secs(30)
+    ).await?;
+    
+    println!("Call connected!");
+    
+    // Clean shutdown
+    SessionControl::stop(&coordinator).await?;
+    Ok(())
+}
+```
+
+## Core API Components
+
+### SessionControl Trait
+
+The main interface for call control operations:
+
+```rust
+use rvoip_session_core::api::*;
+
+// Create outgoing calls
+let session = SessionControl::create_outgoing_call(
+    &coordinator,
+    "sip:caller@myserver.com",
+    "sip:callee@example.com",
+    None
+).await?;
+
+// Wait for answer
+SessionControl::wait_for_answer(
+    &coordinator,
+    session.id(),
+    Duration::from_secs(30)
+).await?;
+
+// Control calls
+SessionControl::hold_session(&coordinator, session.id()).await?;
+SessionControl::resume_session(&coordinator, session.id()).await?;
+SessionControl::send_dtmf(&coordinator, session.id(), "1234#").await?;
+SessionControl::terminate_session(&coordinator, session.id()).await?;
+```
+
+### MediaControl Trait
+
+Interface for media stream management:
+
+```rust
+// Generate SDP for negotiation
+let sdp_offer = MediaControl::generate_sdp_offer(&coordinator, &session_id).await?;
+let sdp_answer = MediaControl::generate_sdp_answer(&coordinator, &session_id, &offer).await?;
+
+// Control audio
+MediaControl::start_audio_transmission(&coordinator, &session_id).await?;
+MediaControl::stop_audio_transmission(&coordinator, &session_id).await?;  // Mute
+
+// Monitor quality
+let stats = MediaControl::get_media_statistics(&coordinator, &session_id).await?;
+if let Some(quality) = stats.and_then(|s| s.quality_metrics) {
+    println!("MOS Score: {:.1}", quality.mos_score.unwrap_or(0.0));
+    println!("Packet Loss: {:.1}%", quality.packet_loss_percent);
+    println!("Jitter: {:.1}ms", quality.jitter_ms);
+}
+```
+
+### Call Handlers
+
+Two patterns for handling incoming calls:
+
+#### Pattern 1: Immediate Decision
+
+```rust
+#[derive(Debug)]
+struct MyHandler;
+
+#[async_trait::async_trait]
+impl CallHandler for MyHandler {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+        // Make decision immediately
+        if is_authorized(&call.from) {
+            CallDecision::Accept(None)  // Auto-generate SDP answer
+        } else {
+            CallDecision::Reject("Unauthorized".to_string())
+        }
+    }
+    
+    async fn on_call_ended(&self, call: CallSession, reason: &str) {
+        println!("Call {} ended: {}", call.id(), reason);
+    }
+}
+```
+
+#### Pattern 2: Deferred Decision
+
+```rust
+#[derive(Debug)]
+struct DeferHandler {
+    pending_calls: Arc<Mutex<Vec<IncomingCall>>>,
+}
+
+#[async_trait::async_trait]
+impl CallHandler for DeferHandler {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+        // Defer for async processing
+        self.pending_calls.lock().unwrap().push(call);
+        CallDecision::Defer
+    }
+    
+    async fn on_call_ended(&self, call: CallSession, reason: &str) {
+        // Update records
+    }
+}
+
+// Process deferred calls asynchronously
+async fn process_deferred_calls(
+    coordinator: &Arc<SessionCoordinator>,
+    handler: &DeferHandler
+) -> Result<()> {
+    while let Some(call) = handler.pending_calls.lock().unwrap().pop() {
+        // Async operations: database lookup, authentication, etc.
+        let user = lookup_user(&call.from).await?;
+        
+        if user.is_authorized {
+            let sdp_answer = MediaControl::generate_sdp_answer(
+                coordinator,
+                &call.id,
+                &call.sdp.unwrap()
+            ).await?;
+            
+            SessionControl::accept_incoming_call(
+                coordinator,
+                &call,
+                Some(sdp_answer)
+            ).await?;
+        } else {
+            SessionControl::reject_incoming_call(
+                coordinator,
+                &call,
+                "Not authorized"
+            ).await?;
+        }
+    }
+    
+    Ok(())
+}
+```
+
+## Bridge Management
+
+Connect two calls together (e.g., customer to agent):
+
+```rust
+// Create bridge between two active sessions
+let bridge_id = coordinator.bridge_sessions(&session1_id, &session2_id).await?;
+
+// Monitor bridge events
+let mut events = coordinator.subscribe_to_bridge_events().await;
+while let Some(event) = events.recv().await {
+    match event {
+        BridgeEvent::ParticipantAdded { bridge_id, session_id } => {
+            println!("Session {} joined bridge {}", session_id, bridge_id);
+        }
+        BridgeEvent::ParticipantRemoved { bridge_id, session_id, reason } => {
+            println!("Session {} left bridge {}: {}", session_id, bridge_id, reason);
+        }
+        BridgeEvent::BridgeDestroyed { bridge_id } => {
+            println!("Bridge {} ended", bridge_id);
+            break;
+        }
+    }
+}
+```
 
 ## Architecture
 
-The library is structured around several core components:
-
-- **Dialog Management**: Tracks SIP dialogs (call relationships) according to RFC 3261
-- **Session Management**: Provides higher-level call session abstraction on top of dialogs
-- **Media Handling**: Manages media stream setup, configuration, and negotiation via SDP
-- **Event System**: Provides asynchronous notifications for session and dialog state changes
+The library is organized into clean layers with well-defined responsibilities:
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌───────────────┐
-│ SIP Client/     │    │ Transaction Core │    │ SIP Core      │
-│ Server App      │◄───┤ Dialog & Session │◄───┤ Messages &    │
-│ (UI/Logic)      │    │ Management       │    │ Transports    │
-└─────────────────┘    └──────────────────┘    └───────────────┘
-                           │       ▲
-                           ▼       │
-                        ┌──────────────────┐
-                        │ Media Core       │
-                        │ (RTP/Audio)      │
-                        └──────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Application Layer                        │
+│                 Your VoIP Application                       │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                      Public API Layer                       │
+│         SessionControl & MediaControl Traits                │
+│                Clean, Simple, Type-Safe                     │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                  SessionCoordinator                         │
+│           Coordinates All Session Components                │
+│         Implements SessionControl & MediaControl            │
+└─────────────────────────────────────────────────────────────┘
+        ↓               ↓                ↓                ↓
+┌─────────────┬─────────────┬─────────────┬─────────────────┐
+│DialogManager│MediaManager │ConferenceApi│SessionRegistry  │
+│ SIP Dialogs │RTP Sessions │  Bridges    │ Session State   │
+└─────────────┴─────────────┴─────────────┴─────────────────┘
+        ↓               ↓                ↓
+┌─────────────┬─────────────┬─────────────────────────────────┐
+│transaction  │ media-core  │    dialog-core                  │
+│   -core     │ RTP/Codecs  │  Dialog State Machine           │
+└─────────────┴─────────────┴─────────────────────────────────┘
+```
+
+## Common Use Cases
+
+### Basic Softphone
+
+```rust
+let coordinator = SessionManagerBuilder::new()
+    .with_sip_port(5060)
+    .with_handler(Arc::new(AutoAnswerHandler))
+    .build()
+    .await?;
+```
+
+### Call Center with Queue
+
+```rust
+let queue = Arc::new(QueueHandler::new(100));
+let coordinator = SessionManagerBuilder::new()
+    .with_sip_port(5060)
+    .with_handler(queue.clone())
+    .build()
+    .await?;
+
+// Process queued calls in separate task
+tokio::spawn(async move {
+    while let Some(call) = queue.dequeue() {
+        process_queued_call(&coordinator, call).await?;
+    }
+});
+```
+
+### PBX with Routing
+
+```rust
+let mut router = RoutingHandler::new();
+router.add_route("sip:support@*", "sip:queue@support.local");
+router.add_route("sip:sales@*", "sip:queue@sales.local");
+router.add_route("sip:+1800*", "sip:tollfree@gateway.com");
+
+let coordinator = SessionManagerBuilder::new()
+    .with_sip_port(5060)
+    .with_handler(Arc::new(router))
+    .build()
+    .await?;
+```
+
+### Composite Handler Chain
+
+```rust
+let handler = CompositeHandler::new()
+    .add_handler(Arc::new(BlacklistHandler::new()))
+    .add_handler(Arc::new(BusinessHoursHandler::new()))
+    .add_handler(Arc::new(RoutingHandler::new()))
+    .add_handler(Arc::new(QueueHandler::new(50)));
+
+let coordinator = SessionManagerBuilder::new()
+    .with_handler(Arc::new(handler))
+    .build()
+    .await?;
 ```
 
 ## RFC Compliance
 
-### Supported RFC Components
+### ✅ Fully Supported
 
-The library implements the following key RFCs and sections:
+- **RFC 3261** - Core SIP: Dialog management, session handling, in-dialog requests
+- **RFC 4566** - SDP: Session Description Protocol parsing and generation
+- **RFC 3264** - Offer/Answer Model: SDP negotiation
+- **RFC 3550** - RTP: Real-time Transport Protocol
+- **RFC 3551** - RTP Profile: Audio codecs (G.711 µ-law/A-law)
 
-#### Core SIP (RFC 3261)
-- **Dialog Management** (Section 12) ✅
-  - Dialog creation from INVITE responses
-  - Dialog identification (Call-ID, tags)
-  - Dialog state machine (early, confirmed, terminated states)
-  - Route set management
-  
-- **Session Management** ✅
-  - INVITE handling
-  - ACK processing
-  - BYE processing
-  - Call establishment flows
-  
-- **In-Dialog Requests** ✅
-  - CSeq handling
-  - Route header generation
-  - Target refresh processing
+### ⚠️ Partially Supported
 
-#### SDP for Media Negotiation (RFC 4566, RFC 3264) ✅
-- SDP message parsing and generation
-- Support for common audio codecs (G.711, etc.)
-- Basic offer/answer model
+- **RFC 3262** - Reliable Provisional Responses (basic PRACK)
+- **RFC 3515** - REFER Method (basic call transfer)
+- **RFC 4235** - Dialog Event Package (limited support)
 
-#### Core Call Features ✅
-- Basic call hold
-- Session modification (re-INVITE)
-- Call termination
+### ❌ Not Currently Supported
 
-### Partially Supported
+- SIP Authentication (RFC 3261 Section 22)
+- TLS/SIPS Security
+- ICE for NAT Traversal (RFC 8445)
+- SRTP Media Encryption (RFC 3711)
+- Advanced Call Features (attended transfer, replaces)
 
-#### Reliable Provisional Responses (RFC 3262) ⚠️
-- Basic 1xx response handling
-- Limited PRACK support
+## Best Practices
 
-#### Call Transfer (RFC 3515) ⚠️
-- Partial REFER processing
-- Basic transfer support
-
-#### Dialog Event Package (RFC 4235) ⚠️
-- Limited dialog event notifications
-
-### Not Currently Supported
-
-- **SIP Authentication** (RFC 3261 Section 22) ❌
-- **SIP Security (TLS, SIPS)** ❌
-- **ICE for NAT Traversal** (RFC 8445) ❌
-- **SRTP for Media Encryption** (RFC 3711) ❌
-- **SIP Identity** (RFC 8224) ❌
-- **Presence and Events Framework** (RFC 3856, RFC 3265) ❌
-- **Advanced Call Transfers and Replaces** (RFC 3891) ❌
-
-## Usage
-
-### Basic Client Example
-
-```rust
-use rvoip_session_core::prelude::*;
-
-async fn make_call(transaction_manager: Arc<TransactionManager>, uri: &str) -> Result<SessionId> {
-    // Create session manager
-    let config = SessionConfig::default();
-    let event_bus = EventBus::new(100);
-    let session_manager = Arc::new(SessionManager::new(
-        transaction_manager,
-        config,
-        event_bus.clone()
-    ));
-    
-    // Create outgoing session
-    let session = session_manager.create_outgoing_session().await?;
-    
-    // Parse destination URI
-    let target_uri = Uri::from_str(uri)?;
-    
-    // Send INVITE
-    session.send_invite(target_uri).await?;
-    
-    Ok(session.id.clone())
-}
-```
-
-### Basic Server Example
-
-```rust
-use rvoip_session_core::prelude::*;
-
-async fn handle_incoming_call(
-    transaction_manager: Arc<TransactionManager>,
-    request: Request
-) -> Result<Response> {
-    // Create session manager
-    let config = SessionConfig::default();
-    let event_bus = EventBus::new(100);
-    let session_manager = Arc::new(SessionManager::new(
-        transaction_manager,
-        config,
-        event_bus.clone()
-    ));
-    
-    // Create incoming session
-    let session = session_manager.create_incoming_session(request.clone()).await?;
-    
-    // Process the INVITE request
-    session.handle_request(request).await
-}
-```
+1. **Use the Public API** - Always use `SessionControl` and `MediaControl` traits
+2. **Handle Errors** - All operations can fail due to network issues
+3. **Monitor Quality** - Use `MediaControl::get_media_statistics()` for production
+4. **Clean Resources** - Always call `terminate_session()` when done
+5. **Choose Patterns Wisely** - Immediate for simple cases, deferred for complex
+6. **Test Thoroughly** - Use the provided examples and SIPp tests
 
 ## Dependencies
 
-- `rvoip-sip-core`: Provides core SIP message types and parsing
-- `rvoip-transaction-core`: Handles SIP transactions (request-response pairs)
-- `rvoip-rtp-core`: Manages RTP media packets
-- `rvoip-media-core`: Handles audio processing and codecs
+- `rvoip-sip-core` - Core SIP types and parsing
+- `rvoip-dialog-core` - Dialog state management
+- `rvoip-transaction-core` - SIP transaction handling
+- `rvoip-media-core` - Media processing and codecs
+- `rvoip-rtp-core` - RTP/RTCP protocol support
+- `rvoip-infra-common` - Common infrastructure
+
+## Testing
+
+Run the test suite:
+
+```bash
+# Unit tests
+cargo test
+
+# Integration tests
+cargo test --test '*'
+
+# Run examples
+cd examples/api_best_practices
+./run_clean_examples.sh
+
+# SIPp interoperability tests
+cd examples/sipp_tests
+./run_all_tests.sh
+```
 
 ## License
 
-This crate is licensed under either:
+Licensed under either:
 
 - MIT License
 - Apache License 2.0
 
-at your option. 
+at your option.
+
+## Contributing
+
+Contributions are welcome! Please see our [Contributing Guide](../../CONTRIBUTING.md) for details.
+
+## Support
+
+- [API Documentation](src/api/mod.rs) - Complete reference
+- [Cookbook](COOKBOOK.md) - Practical recipes
+- [API Guide](API_GUIDE.md) - In-depth guide
+- [Examples](examples/) - Working code samples
+- [Issues](https://github.com/yourusername/rvoip/issues) - Bug reports and feature requests 

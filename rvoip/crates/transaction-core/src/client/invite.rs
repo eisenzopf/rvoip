@@ -615,6 +615,7 @@ impl TransactionLogic<ClientTransactionData, ClientInviteTimerHandles> for Clien
         data: &Arc<ClientTransactionData>,
         message: Message,
         current_state: TransactionState,
+        timer_handles: &mut ClientInviteTimerHandles,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
         
@@ -627,17 +628,11 @@ impl TransactionLogic<ClientTransactionData, ClientInviteTimerHandles> for Clien
                     *last_response = Some(response.clone());
                 }
                 
-                // Create dummy timer_handles - we can't access the actual timer_handles from the runner
-                // For retransmissions and response ACKs in Completed state, this is a limitation we have to accept
-                // In practice, this works because INVITE transaction state changes will trigger the appropriate
-                // timers in on_enter_state, and response handling doesn't typically need to manipulate timers directly
-                let mut timer_handles = ClientInviteTimerHandles::default();
-                
-                // Use the command_tx from data for timers
+                // Use the command_tx from data for timer operations
                 let self_command_tx = data.cmd_tx.clone();
                 
-                // Process the response with temporary timer_handles
-                self.process_response(data, response, current_state, &mut timer_handles, self_command_tx).await
+                // Process the response with real timer_handles
+                self.process_response(data, response, current_state, timer_handles, self_command_tx).await
             },
             Err(e) => {
                 warn!(id=%tx_id, error=%e, "Received non-response message");

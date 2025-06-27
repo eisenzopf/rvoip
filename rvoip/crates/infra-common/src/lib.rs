@@ -14,6 +14,8 @@ RVOIP stack can leverage to ensure consistency and reduce duplication.
 */
 
 // Set mimalloc as the global allocator for better memory performance
+// Only when this crate is used as a binary, not as a library dependency
+#[cfg(not(feature = "no-global-allocator"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -30,8 +32,8 @@ pub use events::bus::EventPool;
 pub use events::types::EventPriority;
 pub use events::types::EventError;
 pub use events::types::EventResult;
-pub use events::publisher::Publisher;
-pub use events::publisher::PublisherFactory;
+pub use events::bus::Publisher;
+pub use events::bus::PublisherFactory;
 pub use config::provider::ConfigProvider;
 pub use lifecycle::component::Component;
 pub use logging::setup::setup_logging;

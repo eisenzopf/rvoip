@@ -1,314 +1,322 @@
-use std::time::{Duration, Instant};
-use std::cmp::{min, max};
+//! Adaptive Buffer
+//!
+//! This module provides an adaptive buffer that can dynamically resize
+//! based on usage patterns and network conditions.
+
 use std::collections::VecDeque;
+use tokio::sync::RwLock;
+use tracing::{debug, trace};
 
-use bytes::Bytes;
-use tracing::{debug, trace, warn};
+use crate::error::{Result, BufferError};
 
-use crate::error::{Error, Result};
-use crate::buffer::common::JitterCalculator;
-
-/// Configuration for the adaptive buffer
+/// Configuration for adaptive buffer
 #[derive(Debug, Clone)]
-pub struct AdaptiveBufferConfig {
-    /// Initial buffer size in milliseconds
-    pub initial_size_ms: u32,
-    /// Minimum buffer size in milliseconds
-    pub min_size_ms: u32,
-    /// Maximum buffer size in milliseconds
-    pub max_size_ms: u32,
-    /// Target occupancy (0.0-1.0)
-    pub target_occupancy: f32,
-    /// How quickly to adapt buffer size (higher = faster) [0.0-1.0]
-    pub adaptation_rate: f32,
-    /// How often to check for adaptation (in milliseconds)
-    pub adaptation_interval_ms: u32,
-    /// Whether to use variable bitrate adaptation
-    pub use_vbr: bool,
-    /// Maximum data size in bytes before scaling buffer
-    pub max_bytes: usize,
+pub struct AdaptiveConfig {
+    /// Initial capacity
+    pub initial_capacity: usize,
+    /// Minimum capacity
+    pub min_capacity: usize,
+    /// Maximum capacity
+    pub max_capacity: usize,
+    /// Growth factor when expanding
+    pub growth_factor: f32,
+    /// Shrink threshold (buffer usage ratio)
+    pub shrink_threshold: f32,
+    /// Expand threshold (buffer usage ratio)
+    pub expand_threshold: f32,
 }
 
-impl Default for AdaptiveBufferConfig {
+impl Default for AdaptiveConfig {
     fn default() -> Self {
         Self {
-            initial_size_ms: 100,
-            min_size_ms: 20,
-            max_size_ms: 500,
-            target_occupancy: 0.5,
-            adaptation_rate: 0.1,
-            adaptation_interval_ms: 500, // Check every 500ms
-            use_vbr: true,
-            max_bytes: 1024 * 100, // 100KB
+            initial_capacity: 100,
+            min_capacity: 10,
+            max_capacity: 1000,
+            growth_factor: 1.5,
+            shrink_threshold: 0.25,
+            expand_threshold: 0.8,
         }
     }
 }
 
-/// Adaptive buffer for managing media data with variable network conditions
-pub struct AdaptiveBuffer {
+/// An adaptive buffer that resizes based on usage patterns
+pub struct AdaptiveBuffer<T> {
     /// Configuration
-    config: AdaptiveBufferConfig,
-    /// Buffer data
-    buffer: VecDeque<Bytes>,
-    /// Current buffer size in milliseconds
-    current_size_ms: u32,
-    /// Total bytes in buffer
-    bytes_in_buffer: usize,
-    /// Jitter calculator
-    jitter_calculator: JitterCalculator,
-    /// Last adaptation time
-    last_adaptation: Instant,
-    /// Clock rate (for timestamp calculations)
-    clock_rate: u32,
-    /// Last added timestamp
-    last_timestamp: Option<u32>,
-    /// Duration of data in buffer (in timestamp units)
-    buffer_duration: u32,
+    config: AdaptiveConfig,
+    /// Internal buffer
+    buffer: RwLock<VecDeque<T>>,
+    /// Current capacity
+    capacity: RwLock<usize>,
+    /// Usage statistics
+    stats: RwLock<AdaptiveStats>,
 }
 
-impl AdaptiveBuffer {
-    /// Create a new adaptive buffer with the given configuration
-    pub fn new(config: AdaptiveBufferConfig, clock_rate: u32) -> Self {
+/// Adaptive buffer statistics
+#[derive(Debug, Clone, Default)]
+pub struct AdaptiveStats {
+    /// Total items added
+    pub items_added: u64,
+    /// Total items removed
+    pub items_removed: u64,
+    /// Number of expansions
+    pub expansions: u64,
+    /// Number of shrinks
+    pub shrinks: u64,
+    /// Current size
+    pub current_size: usize,
+    /// Current capacity
+    pub current_capacity: usize,
+    /// Peak size reached
+    pub peak_size: usize,
+}
+
+impl<T> AdaptiveBuffer<T> {
+    /// Create a new adaptive buffer
+    pub fn new(config: AdaptiveConfig) -> Self {
+        let initial_capacity = config.initial_capacity;
+        
         Self {
             config,
-            buffer: VecDeque::new(),
-            current_size_ms: config.initial_size_ms,
-            bytes_in_buffer: 0,
-            jitter_calculator: JitterCalculator::new(),
-            last_adaptation: Instant::now(),
-            clock_rate,
-            last_timestamp: None,
-            buffer_duration: 0,
+            buffer: RwLock::new(VecDeque::with_capacity(initial_capacity)),
+            capacity: RwLock::new(initial_capacity),
+            stats: RwLock::new(AdaptiveStats {
+                current_capacity: initial_capacity,
+                ..Default::default()
+            }),
         }
     }
     
-    /// Create a new adaptive buffer with default configuration
-    pub fn new_default(clock_rate: u32) -> Self {
-        Self::new(AdaptiveBufferConfig::default(), clock_rate)
-    }
-    
-    /// Add data to the buffer
-    pub fn add(&mut self, data: Bytes, timestamp: u32) -> Result<()> {
-        // Update jitter calculation if we have previous timestamps
-        if let Some(last_ts) = self.last_timestamp {
-            let arrival_time = Instant::now();
-            self.jitter_calculator.update(timestamp, arrival_time, self.clock_rate);
+    /// Add an item to the buffer
+    pub async fn push(&self, item: T) -> Result<()> {
+        let should_expand = {
+            let buffer = self.buffer.read().await;
+            let capacity = *self.capacity.read().await;
             
-            // Update buffer duration
-            let duration = timestamp.wrapping_sub(last_ts);
-            self.buffer_duration = self.buffer_duration.wrapping_add(duration);
+            // Check if we need to expand
+            let usage_ratio = buffer.len() as f32 / capacity as f32;
+            usage_ratio >= self.config.expand_threshold
+        };
+        
+        if should_expand {
+            self.expand().await?;
         }
         
-        // Store this timestamp
-        self.last_timestamp = Some(timestamp);
-        
-        // Add to buffer
-        self.buffer.push_back(data.clone());
-        self.bytes_in_buffer += data.len();
-        
-        // Check if we need to adapt the buffer
-        let now = Instant::now();
-        if now.duration_since(self.last_adaptation).as_millis() >= self.config.adaptation_interval_ms as u128 {
-            self.adapt_buffer();
-            self.last_adaptation = now;
+        // Add the item
+        {
+            let mut buffer = self.buffer.write().await;
+            buffer.push_back(item);
         }
         
-        // Check if buffer is too large
-        self.check_buffer_size();
+        // Update statistics
+        {
+            let mut stats = self.stats.write().await;
+            stats.items_added += 1;
+            
+            let buffer = self.buffer.read().await;
+            stats.current_size = buffer.len();
+            if stats.current_size > stats.peak_size {
+                stats.peak_size = stats.current_size;
+            }
+        }
         
         Ok(())
     }
     
-    /// Get data from the buffer if available
-    pub fn get(&mut self) -> Option<Bytes> {
-        // Check if we should return data based on buffer filling
-        if self.should_output_data() {
-            if let Some(data) = self.buffer.pop_front() {
-                // Update buffer stats
-                self.bytes_in_buffer = self.bytes_in_buffer.saturating_sub(data.len());
+    /// Remove an item from the buffer
+    pub async fn pop(&self) -> Option<T> {
+        let item = {
+            let mut buffer = self.buffer.write().await;
+            buffer.pop_front()
+        };
+        
+        if item.is_some() {
+            // Update statistics
+            {
+                let mut stats = self.stats.write().await;
+                stats.items_removed += 1;
+                stats.current_size = stats.current_size.saturating_sub(1);
+            }
+            
+            // Check if we should shrink
+            let should_shrink = {
+                let buffer = self.buffer.read().await;
+                let capacity = *self.capacity.read().await;
                 
-                // Update buffer duration (rough estimate assuming constant sizes)
-                if !self.buffer.is_empty() {
-                    let frames_remaining = self.buffer.len() as f32;
-                    let frames_total = frames_remaining + 1.0;
-                    let duration_per_frame = self.buffer_duration as f32 / frames_total;
-                    self.buffer_duration = (duration_per_frame * frames_remaining) as u32;
-                } else {
-                    self.buffer_duration = 0;
+                let usage_ratio = buffer.len() as f32 / capacity as f32;
+                usage_ratio <= self.config.shrink_threshold && capacity > self.config.min_capacity
+            };
+            
+            if should_shrink {
+                if let Err(e) = self.shrink().await {
+                    debug!("Failed to shrink buffer: {}", e);
                 }
-                
-                return Some(data);
             }
         }
         
-        None
+        item
+    }
+    
+    /// Peek at the front item without removing it
+    pub async fn peek(&self) -> Option<T> 
+    where 
+        T: Clone,
+    {
+        let buffer = self.buffer.read().await;
+        buffer.front().cloned()
+    }
+    
+    /// Get the current size of the buffer
+    pub async fn len(&self) -> usize {
+        self.buffer.read().await.len()
     }
     
     /// Check if the buffer is empty
-    pub fn is_empty(&self) -> bool {
-        self.buffer.is_empty()
+    pub async fn is_empty(&self) -> bool {
+        self.buffer.read().await.is_empty()
     }
     
-    /// Get the current buffer size in milliseconds
-    pub fn size_ms(&self) -> u32 {
-        self.current_size_ms
+    /// Get the current capacity
+    pub async fn capacity(&self) -> usize {
+        *self.capacity.read().await
     }
     
-    /// Get the current buffer occupancy (0.0-1.0)
-    pub fn occupancy(&self) -> f32 {
-        if self.current_size_ms == 0 {
-            return 0.0;
+    /// Clear all items from the buffer
+    pub async fn clear(&self) {
+        let mut buffer = self.buffer.write().await;
+        buffer.clear();
+        
+        let mut stats = self.stats.write().await;
+        stats.current_size = 0;
+    }
+    
+    /// Expand the buffer capacity
+    async fn expand(&self) -> Result<()> {
+        let new_capacity = {
+            let current_capacity = *self.capacity.read().await;
+            let new_cap = ((current_capacity as f32) * self.config.growth_factor) as usize;
+            new_cap.min(self.config.max_capacity)
+        };
+        
+        let current_capacity = *self.capacity.read().await;
+        if new_capacity > current_capacity {
+            // Reserve additional space
+            {
+                let mut buffer = self.buffer.write().await;
+                buffer.reserve(new_capacity - current_capacity);
+            }
+            
+            {
+                let mut capacity = self.capacity.write().await;
+                *capacity = new_capacity;
+            }
+            
+            {
+                let mut stats = self.stats.write().await;
+                stats.expansions += 1;
+                stats.current_capacity = new_capacity;
+            }
+            
+            trace!("Expanded adaptive buffer: {} -> {}", current_capacity, new_capacity);
         }
-        
-        // Calculate how full the buffer is in time units
-        let buffer_duration_ms = self.buffer_duration_ms();
-        let occupancy = buffer_duration_ms as f32 / self.current_size_ms as f32;
-        
-        // Clamp to 0.0-1.0 range
-        occupancy.clamp(0.0, 1.0)
-    }
-    
-    /// Get the number of bytes in the buffer
-    pub fn bytes_in_buffer(&self) -> usize {
-        self.bytes_in_buffer
-    }
-    
-    /// Get the number of items in the buffer
-    pub fn items_in_buffer(&self) -> usize {
-        self.buffer.len()
-    }
-    
-    /// Reset the buffer
-    pub fn reset(&mut self) {
-        self.buffer.clear();
-        self.bytes_in_buffer = 0;
-        self.current_size_ms = self.config.initial_size_ms;
-        self.jitter_calculator.reset();
-        self.last_adaptation = Instant::now();
-        self.last_timestamp = None;
-        self.buffer_duration = 0;
-    }
-    
-    /// Set the target buffer size in milliseconds
-    pub fn set_target_size(&mut self, size_ms: u32) -> Result<()> {
-        if size_ms < self.config.min_size_ms || size_ms > self.config.max_size_ms {
-            return Err(Error::InvalidParameter(format!(
-                "Buffer size must be between {} and {} ms", 
-                self.config.min_size_ms, 
-                self.config.max_size_ms
-            )));
-        }
-        
-        self.current_size_ms = size_ms;
         
         Ok(())
     }
     
-    /// Check if the buffer is too large and trim if needed
-    fn check_buffer_size(&mut self) {
-        // Check if buffer has too many bytes
-        if self.bytes_in_buffer > self.config.max_bytes {
-            warn!("Buffer too large ({}KB), trimming to keep memory usage in check", 
-                  self.bytes_in_buffer / 1024);
-            
-            // Remove oldest data until we're under the threshold
-            let target_bytes = self.config.max_bytes / 2; // Aim for half the max
-            while self.bytes_in_buffer > target_bytes && !self.buffer.is_empty() {
-                if let Some(data) = self.buffer.pop_front() {
-                    self.bytes_in_buffer = self.bytes_in_buffer.saturating_sub(data.len());
-                    
-                    // Also update buffer duration (rough estimate)
-                    if !self.buffer.is_empty() && self.buffer_duration > 0 {
-                        let remaining_ratio = self.buffer.len() as f32 / (self.buffer.len() + 1) as f32;
-                        self.buffer_duration = (self.buffer_duration as f32 * remaining_ratio) as u32;
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Determine if we should output data based on buffer fullness
-    fn should_output_data(&self) -> bool {
-        // Always output if we have more than target occupancy
-        let occupancy = self.occupancy();
+    /// Shrink the buffer capacity
+    async fn shrink(&self) -> Result<()> {
+        let new_capacity = {
+            let current_capacity = *self.capacity.read().await;
+            let new_cap = ((current_capacity as f32) / self.config.growth_factor) as usize;
+            new_cap.max(self.config.min_capacity)
+        };
         
-        if occupancy >= self.config.target_occupancy {
-            return true;
-        }
-        
-        // If buffer is too small, don't output yet unless we have a lot of data
-        if occupancy < 0.2 && self.buffer.len() < 5 {
-            return false;
-        }
-        
-        // If we have a very large buffer, output to avoid memory issues
-        if self.bytes_in_buffer > self.config.max_bytes / 2 {
-            return true;
-        }
-        
-        // Default to true if we have any data
-        !self.buffer.is_empty()
-    }
-    
-    /// Adapt the buffer size based on network conditions
-    fn adapt_buffer(&mut self) {
-        // Only adapt if we have enough data
-        if self.buffer.len() < 2 {
-            return;
-        }
-        
-        // Get current jitter in milliseconds
-        let jitter_ms = self.jitter_calculator.jitter_ms();
-        
-        // Calculate target buffer size based on jitter
-        // We want buffer size to be jitter * safety_factor
-        let safety_factor = 3.0;
-        let target_size_ms = (jitter_ms * safety_factor) as u32;
-        
-        // Clamp to configured min/max
-        let target_size_ms = max(
-            self.config.min_size_ms,
-            min(target_size_ms, self.config.max_size_ms)
-        );
-        
-        // If using VBR, also consider occupancy
-        let mut final_target_ms = target_size_ms;
-        if self.config.use_vbr {
-            let occupancy = self.occupancy();
-            
-            // If buffer is too empty, increase size
-            if occupancy < self.config.target_occupancy * 0.5 {
-                final_target_ms = (final_target_ms as f32 * 1.5) as u32;
+        let current_capacity = *self.capacity.read().await;
+        if new_capacity < current_capacity {
+            // Note: VecDeque doesn't have a shrink_to method, so we recreate it
+            {
+                let mut buffer = self.buffer.write().await;
+                let items: Vec<T> = buffer.drain(..).collect();
+                *buffer = VecDeque::with_capacity(new_capacity);
+                buffer.extend(items);
             }
             
-            // If buffer is too full, decrease size
-            if occupancy > self.config.target_occupancy * 1.5 {
-                final_target_ms = (final_target_ms as f32 * 0.8) as u32;
+            {
+                let mut capacity = self.capacity.write().await;
+                *capacity = new_capacity;
             }
             
-            // Clamp again
-            final_target_ms = max(
-                self.config.min_size_ms,
-                min(final_target_ms, self.config.max_size_ms)
-            );
-        }
-        
-        // Gradual adaptation
-        let delta = final_target_ms as f32 - self.current_size_ms as f32;
-        let adjustment = delta * self.config.adaptation_rate;
-        
-        // Only adapt if change is significant
-        if adjustment.abs() >= 1.0 {
-            self.current_size_ms = (self.current_size_ms as f32 + adjustment) as u32;
+            {
+                let mut stats = self.stats.write().await;
+                stats.shrinks += 1;
+                stats.current_capacity = new_capacity;
+            }
             
-            trace!("Adapted buffer size: jitter={:.1}ms, target={}ms, actual={}ms, occupancy={:.2}", 
-                   jitter_ms, final_target_ms, self.current_size_ms, self.occupancy());
+            trace!("Shrunk adaptive buffer: {} -> {}", current_capacity, new_capacity);
         }
+        
+        Ok(())
     }
     
-    /// Get the duration of data in the buffer in milliseconds
-    fn buffer_duration_ms(&self) -> u32 {
-        // Convert from timestamp units to milliseconds
-        self.buffer_duration * 1000 / self.clock_rate
+    /// Get buffer statistics
+    pub async fn get_statistics(&self) -> AdaptiveStats {
+        let mut stats = self.stats.read().await.clone();
+        stats.current_size = self.len().await;
+        stats.current_capacity = self.capacity().await;
+        stats
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[tokio::test]
+    async fn test_adaptive_buffer_creation() {
+        let config = AdaptiveConfig::default();
+        let buffer: AdaptiveBuffer<i32> = AdaptiveBuffer::new(config);
+        
+        assert_eq!(buffer.len().await, 0);
+        assert!(buffer.is_empty().await);
+        assert_eq!(buffer.capacity().await, 100);
+    }
+    
+    #[tokio::test]
+    async fn test_push_and_pop() {
+        let buffer: AdaptiveBuffer<i32> = AdaptiveBuffer::new(AdaptiveConfig::default());
+        
+        // Add items
+        buffer.push(1).await.unwrap();
+        buffer.push(2).await.unwrap();
+        buffer.push(3).await.unwrap();
+        
+        assert_eq!(buffer.len().await, 3);
+        
+        // Remove items
+        assert_eq!(buffer.pop().await, Some(1));
+        assert_eq!(buffer.pop().await, Some(2));
+        assert_eq!(buffer.pop().await, Some(3));
+        assert_eq!(buffer.pop().await, None);
+        
+        assert!(buffer.is_empty().await);
+    }
+    
+    #[tokio::test]
+    async fn test_buffer_expansion() {
+        let config = AdaptiveConfig {
+            initial_capacity: 5,
+            expand_threshold: 0.8,
+            growth_factor: 2.0,
+            ..Default::default()
+        };
+        let buffer: AdaptiveBuffer<i32> = AdaptiveBuffer::new(config);
+        
+        // Fill buffer to trigger expansion
+        for i in 0..5 {
+            buffer.push(i).await.unwrap();
+        }
+        
+        let stats = buffer.get_statistics().await;
+        assert!(stats.expansions > 0);
+        assert!(buffer.capacity().await > 5);
     }
 } 

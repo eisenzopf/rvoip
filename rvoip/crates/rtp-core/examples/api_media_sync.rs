@@ -25,6 +25,9 @@ use rvoip_rtp_core::api::{
     },
 };
 
+use rvoip_rtp_core::api::client::transport::DefaultMediaTransportClient;
+use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
+
 // Constants for our streams
 const AUDIO_SSRC: u32 = 0x1234ABCD;
 const VIDEO_SSRC: u32 = 0x5678DCBA;
@@ -60,7 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .expect("Failed to build server config");
             
             // Create server
-            let server = rvoip_rtp_core::api::server::transport::server_transport_impl::DefaultMediaTransportServer::new(server_config).await?;
+            let server = DefaultMediaTransportServer::new(server_config).await?;
             
             // Start server
             server.start().await?;
@@ -81,7 +84,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build();
             
             // Create client
-            let client = rvoip_rtp_core::api::client::transport::client_transport_impl::DefaultMediaTransportClient::new(client_config).await?;
+            let client = DefaultMediaTransportClient::new(client_config).await?;
             
             // Connect client to server
             info!("Connecting client to server");
@@ -91,14 +94,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let media_sync_enabled = client.is_media_sync_enabled().await?;
             info!("Media synchronization enabled: {}", media_sync_enabled);
             
-            // Register audio and video streams for synchronization
+            // Get the actual session SSRC for primary stream
+            let client_session = client.get_session().await?;
+            let primary_ssrc = {
+                let session_guard = client_session.lock().await;
+                session_guard.get_ssrc()
+            };
+            
+            info!("Using session SSRC for sync: {:08x}", primary_ssrc);
+            
+            // Register audio and video streams for synchronization using actual SSRCs
             info!("Registering audio and video streams for synchronization");
-            client.register_sync_stream(AUDIO_SSRC, AUDIO_CLOCK_RATE).await?;
-            client.register_sync_stream(VIDEO_SSRC, VIDEO_CLOCK_RATE).await?;
+            client.register_sync_stream(primary_ssrc, AUDIO_CLOCK_RATE).await?;
+            client.register_sync_stream(primary_ssrc, VIDEO_CLOCK_RATE).await?; // Note: Using same SSRC for demo
             
             // Set audio as reference stream (typical for lip sync)
             info!("Setting audio as reference stream");
-            client.set_sync_reference_stream(AUDIO_SSRC).await?;
+            client.set_sync_reference_stream(primary_ssrc).await?;
             
             // Exchange some media packets to establish the session
             info!("Exchanging media packets");
@@ -113,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sequence: 0, // Will be set by the transport
                     marker: i == 0, // First packet has marker bit
                     payload_type: 96, // Dynamic audio
-                    ssrc: AUDIO_SSRC,
+                    ssrc: primary_ssrc, // Use actual session SSRC
                     csrcs: Vec::new(), // Empty CSRC list
                 };
                 
@@ -134,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     sequence: 0, // Will be set by the transport
                     marker: i == 0, // First packet has marker bit
                     payload_type: 97, // Dynamic video
-                    ssrc: VIDEO_SSRC,
+                    ssrc: primary_ssrc, // Use actual session SSRC
                     csrcs: Vec::new(), // Empty CSRC list
                 };
                 
@@ -172,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             // Get sync information for audio stream
             info!("Retrieving synchronization information");
-            if let Some(audio_info) = client.get_sync_info(AUDIO_SSRC).await? {
+            if let Some(audio_info) = client.get_sync_info(primary_ssrc).await? {
                 info!("Audio stream sync info:");
                 info!("  SSRC: {:08x}", audio_info.ssrc);
                 info!("  Clock rate: {} Hz", audio_info.clock_rate);
@@ -180,32 +192,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("  Last NTP timestamp: {:?}", audio_info.last_ntp);
                 info!("  Clock drift: {:.2} PPM", audio_info.clock_drift_ppm);
             } else {
-                warn!("No synchronization info available for audio stream");
+                warn!("No synchronization info available for primary stream");
             }
             
-            if let Some(video_info) = client.get_sync_info(VIDEO_SSRC).await? {
-                info!("Video stream sync info:");
-                info!("  SSRC: {:08x}", video_info.ssrc);
-                info!("  Clock rate: {} Hz", video_info.clock_rate);
-                info!("  Last RTP timestamp: {:?}", video_info.last_rtp);
-                info!("  Last NTP timestamp: {:?}", video_info.last_ntp);
-                info!("  Clock drift: {:.2} PPM", video_info.clock_drift_ppm);
-            } else {
-                warn!("No synchronization info available for video stream");
-            }
+            // Note: In a real scenario, you would have multiple SSRCs for different streams
+            // For this demo, we're using the same SSRC but registered with different clock rates
             
             // Demonstrate timestamp conversion
             info!("Demonstrating timestamp conversion:");
             let audio_ts = AUDIO_CLOCK_RATE * 2; // 2 seconds in
-            if let Some(video_ts) = client.convert_timestamp(AUDIO_SSRC, VIDEO_SSRC, audio_ts).await? {
+            if let Some(video_ts) = client.convert_timestamp(primary_ssrc, primary_ssrc, audio_ts).await? {
                 info!("Audio timestamp {} maps to video timestamp {}", audio_ts, video_ts);
                 info!("  Video time: {:.2}s", video_ts as f64 / VIDEO_CLOCK_RATE as f64);
             } else {
                 warn!("Failed to convert audio timestamp to video timestamp");
             }
             
-            // Check if streams are synchronized
-            let sync_status = client.are_streams_synchronized(AUDIO_SSRC, VIDEO_SSRC, 50.0).await?;
+            // Check if streams are synchronized (same SSRC, so should be perfectly synchronized)
+            let sync_status = client.are_streams_synchronized(primary_ssrc, primary_ssrc, 50.0).await?;
             info!("Streams synchronized within 50ms tolerance: {}", sync_status);
             
             // Get all sync info

@@ -1,175 +1,244 @@
-//! Audio resampling implementation
+//! Audio Resampler - Sample rate conversion
 //!
-//! This module provides utilities for converting audio between different sample rates.
+//! This module implements sample rate conversion using linear interpolation
+//! for basic resampling needs.
 
-use std::sync::Arc;
-use bytes::Bytes;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, warn};
+use crate::error::{Result, AudioProcessingError};
 
-use crate::error::{Error, Result};
-use crate::{Sample, SampleRate, AudioBuffer, AudioFormat};
-
-/// Resampling quality level
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResamplingQuality {
-    /// Fastest, lowest quality
-    Low,
-    /// Medium quality and speed
-    Medium,
-    /// Highest quality, slowest
-    High,
+/// Configuration for resampler
+#[derive(Debug, Clone)]
+pub struct ResamplerConfig {
+    /// Input sample rate
+    pub input_rate: u32,
+    /// Output sample rate  
+    pub output_rate: u32,
+    /// Quality level (0-10, higher = better quality)
+    pub quality: u8,
 }
 
-impl Default for ResamplingQuality {
-    fn default() -> Self {
-        Self::Medium
-    }
-}
-
-/// Audio resampler implementation
-#[derive(Debug)]
+/// Audio resampler for sample rate conversion
 pub struct Resampler {
-    /// Source sample rate
-    source_rate: SampleRate,
-    
-    /// Target sample rate
-    target_rate: SampleRate,
-    
-    /// Number of channels
-    channels: u8,
-    
-    /// Resampling quality
-    quality: ResamplingQuality,
-    
-    /// Internal state buffer
-    state_buffer: Vec<Sample>,
+    /// Resampler configuration
+    config: ResamplerConfig,
+    /// Conversion ratio (output_rate / input_rate)
+    ratio: f64,
+    /// Current position in the input stream (fractional)
+    position: f64,
+    /// Previous sample for interpolation
+    prev_sample: i16,
+    /// Whether this is the first sample
+    first_sample: bool,
 }
 
 impl Resampler {
-    /// Create a new resampler with the given parameters
-    pub fn new(source_rate: SampleRate, target_rate: SampleRate, channels: u8, quality: ResamplingQuality) -> Self {
-        Self {
-            source_rate,
-            target_rate,
-            channels,
-            quality,
-            state_buffer: Vec::new(),
-        }
-    }
-    
-    /// Create a new resampler with default quality
-    pub fn new_default(source_rate: SampleRate, target_rate: SampleRate, channels: u8) -> Self {
-        Self::new(source_rate, target_rate, channels, ResamplingQuality::default())
-    }
-    
-    /// Get the source sample rate
-    pub fn source_rate(&self) -> SampleRate {
-        self.source_rate
-    }
-    
-    /// Get the target sample rate
-    pub fn target_rate(&self) -> SampleRate {
-        self.target_rate
-    }
-    
-    /// Get the number of channels
-    pub fn channels(&self) -> u8 {
-        self.channels
-    }
-    
-    /// Get the resampling quality
-    pub fn quality(&self) -> ResamplingQuality {
-        self.quality
-    }
-    
-    /// Calculate the number of output samples that would be generated
-    pub fn calculate_output_size(&self, input_size: usize) -> usize {
-        let ratio = self.target_rate.as_hz() as f64 / self.source_rate.as_hz() as f64;
-        (input_size as f64 * ratio).ceil() as usize
-    }
-    
-    /// Resample audio data
-    pub fn process(&mut self, input: &[Sample]) -> Result<Vec<Sample>> {
-        if self.source_rate == self.target_rate {
-            // No resampling needed
-            return Ok(input.to_vec());
+    /// Create a new resampler
+    pub fn new(input_rate: u32, output_rate: u32, quality: u8) -> Result<Self> {
+        if input_rate == 0 || output_rate == 0 {
+            return Err(AudioProcessingError::ResamplingFailed {
+                from_rate: input_rate,
+                to_rate: output_rate,
+            }.into());
         }
         
-        // Stub implementation
-        Err(Error::NotImplemented("Resampling not yet implemented".to_string()))
-    }
-    
-    /// Resample an audio buffer
-    pub fn process_buffer(&mut self, input: &AudioBuffer) -> Result<AudioBuffer> {
-        if self.source_rate != input.format.sample_rate {
-            return Err(Error::InvalidArgument(format!(
-                "Buffer sample rate ({:?}) doesn't match resampler source rate ({:?})",
-                input.format.sample_rate, self.source_rate
-            )));
+        if quality > 10 {
+            warn!("Resampler quality {} clamped to 10", quality);
         }
         
-        if self.channels != input.format.channels {
-            return Err(Error::InvalidArgument(format!(
-                "Buffer channels ({}) doesn't match resampler channels ({})",
-                input.format.channels, self.channels
-            )));
-        }
+        let ratio = output_rate as f64 / input_rate as f64;
         
-        // Stub implementation
-        Err(Error::NotImplemented("Resampling not yet implemented".to_string()))
+        debug!("Creating resampler: {}Hz -> {}Hz (ratio: {:.4})", 
+               input_rate, output_rate, ratio);
+        
+        Ok(Self {
+            config: ResamplerConfig {
+                input_rate,
+                output_rate,
+                quality: quality.min(10),
+            },
+            ratio,
+            position: 0.0,
+            prev_sample: 0,
+            first_sample: true,
+        })
     }
     
-    /// Reset the resampler state
+    /// Resample audio samples
+    pub fn resample(&mut self, input_samples: &[i16]) -> Result<Vec<i16>> {
+        if input_samples.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Calculate expected output length
+        let expected_output_len = ((input_samples.len() as f64) * self.ratio).ceil() as usize;
+        let mut output_samples = Vec::with_capacity(expected_output_len);
+        
+        // Reset position for each new frame (simple approach)
+        self.position = 0.0;
+        
+        // Generate output samples
+        while self.position < input_samples.len() as f64 {
+            let sample = self.interpolate_sample(input_samples)?;
+            output_samples.push(sample);
+            
+            // Advance position
+            self.position += 1.0 / self.ratio;
+        }
+        
+        // Update state for next frame
+        if !input_samples.is_empty() {
+            self.prev_sample = input_samples[input_samples.len() - 1];
+            self.first_sample = false;
+        }
+        
+        Ok(output_samples)
+    }
+    
+    /// Reset resampler state
     pub fn reset(&mut self) {
-        self.state_buffer.clear();
+        self.position = 0.0;
+        self.prev_sample = 0;
+        self.first_sample = true;
+        debug!("Resampler reset");
     }
-}
-
-/// Builder for creating resampler instances
-pub struct ResamplerBuilder {
-    source_rate: SampleRate,
-    target_rate: SampleRate,
-    channels: u8,
-    quality: ResamplingQuality,
-}
-
-impl ResamplerBuilder {
-    /// Create a new resampler builder
-    pub fn new() -> Self {
-        Self {
-            source_rate: SampleRate::Rate8000,
-            target_rate: SampleRate::Rate16000,
-            channels: 1,
-            quality: ResamplingQuality::default(),
+    
+    /// Get conversion ratio
+    pub fn ratio(&self) -> f64 {
+        self.ratio
+    }
+    
+    /// Get configuration
+    pub fn config(&self) -> &ResamplerConfig {
+        &self.config
+    }
+    
+    /// Interpolate sample at current position
+    fn interpolate_sample(&self, input_samples: &[i16]) -> Result<i16> {
+        let index = self.position as usize;
+        let fraction = self.position - index as f64;
+        
+        // Handle edge cases
+        if index >= input_samples.len() {
+            return Ok(self.prev_sample);
         }
+        
+        let current_sample = input_samples[index];
+        
+        // If no interpolation needed (exact sample)
+        if fraction == 0.0 {
+            return Ok(current_sample);
+        }
+        
+        // Get next sample for interpolation
+        let next_sample = if index + 1 < input_samples.len() {
+            input_samples[index + 1]
+        } else {
+            // Use previous sample if at end
+            current_sample
+        };
+        
+        // Linear interpolation based on quality setting
+        let interpolated = match self.config.quality {
+            0..=2 => {
+                // Nearest neighbor (no interpolation)
+                if fraction < 0.5 { current_sample } else { next_sample }
+            }
+            3..=6 => {
+                // Linear interpolation
+                self.linear_interpolate(current_sample, next_sample, fraction)
+            }
+            7..=10 => {
+                // Enhanced linear interpolation with smoothing
+                self.smooth_interpolate(input_samples, index, fraction)
+            }
+            _ => current_sample, // Should not happen due to clamping
+        };
+        
+        Ok(interpolated)
     }
     
-    /// Set the source sample rate
-    pub fn with_source_rate(mut self, rate: SampleRate) -> Self {
-        self.source_rate = rate;
-        self
+    /// Perform linear interpolation between two samples
+    fn linear_interpolate(&self, sample1: i16, sample2: i16, fraction: f64) -> i16 {
+        let result = sample1 as f64 + (sample2 as f64 - sample1 as f64) * fraction;
+        result.round() as i16
     }
     
-    /// Set the target sample rate
-    pub fn with_target_rate(mut self, rate: SampleRate) -> Self {
-        self.target_rate = rate;
-        self
+    /// Perform smooth interpolation with neighboring samples
+    fn smooth_interpolate(&self, input_samples: &[i16], index: usize, fraction: f64) -> i16 {
+        // Use more samples for smoother interpolation
+        let prev_sample = if index > 0 {
+            input_samples[index - 1]
+        } else if !self.first_sample {
+            self.prev_sample
+        } else {
+            input_samples[index]
+        };
+        
+        let current_sample = input_samples[index];
+        let next_sample = if index + 1 < input_samples.len() {
+            input_samples[index + 1]
+        } else {
+            current_sample
+        };
+        
+        let next_next_sample = if index + 2 < input_samples.len() {
+            input_samples[index + 2]
+        } else {
+            next_sample
+        };
+        
+        // Cubic interpolation (simplified)
+        let t = fraction;
+        let t2 = t * t;
+        let t3 = t2 * t;
+        
+        // Catmull-Rom spline coefficients
+        let a0 = -0.5 * prev_sample as f64 + 1.5 * current_sample as f64 
+                 - 1.5 * next_sample as f64 + 0.5 * next_next_sample as f64;
+        let a1 = prev_sample as f64 - 2.5 * current_sample as f64 
+                + 2.0 * next_sample as f64 - 0.5 * next_next_sample as f64;
+        let a2 = -0.5 * prev_sample as f64 + 0.5 * next_sample as f64;
+        let a3 = current_sample as f64;
+        
+        let result = a0 * t3 + a1 * t2 + a2 * t + a3;
+        
+        // Clamp to 16-bit range
+        result.max(i16::MIN as f64).min(i16::MAX as f64).round() as i16
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_resampler_creation() {
+        let resampler = Resampler::new(8000, 16000, 5);
+        assert!(resampler.is_ok());
+        
+        let resampler = resampler.unwrap();
+        assert_eq!(resampler.ratio(), 2.0);
     }
     
-    /// Set the number of channels
-    pub fn with_channels(mut self, channels: u8) -> Self {
-        self.channels = channels;
-        self
+    #[test]
+    fn test_upsampling() {
+        let mut resampler = Resampler::new(8000, 16000, 5).unwrap();
+        let input = vec![100, 200, 300, 400];
+        let output = resampler.resample(&input).unwrap();
+        
+        // Should approximately double the number of samples
+        assert!(output.len() >= input.len() * 2 - 1);
+        assert!(output.len() <= input.len() * 2 + 1);
     }
     
-    /// Set the resampling quality
-    pub fn with_quality(mut self, quality: ResamplingQuality) -> Self {
-        self.quality = quality;
-        self
-    }
-    
-    /// Build the resampler
-    pub fn build(self) -> Resampler {
-        Resampler::new(self.source_rate, self.target_rate, self.channels, self.quality)
+    #[test]
+    fn test_downsampling() {
+        let mut resampler = Resampler::new(16000, 8000, 5).unwrap();
+        let input = vec![100, 150, 200, 250, 300, 350, 400, 450];
+        let output = resampler.resample(&input).unwrap();
+        
+        // Should approximately halve the number of samples
+        assert!(output.len() >= input.len() / 2 - 1);
+        assert!(output.len() <= input.len() / 2 + 1);
     }
 } 

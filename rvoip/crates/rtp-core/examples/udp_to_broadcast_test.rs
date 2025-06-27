@@ -63,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         marker,
                         payload_type,
                         ssrc: 12345, // Default SSRC
+                        csrcs: Vec::new(),
                     };
                     
                     // Forward to broadcast channel

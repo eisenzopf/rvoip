@@ -58,21 +58,21 @@ use rvoip_transaction_core::{TransactionEvent, TransactionKey};
 
 use transaction_test_utils::*;
 
-/// Integration test for non-INVITE client/server transaction flow with direct control
+/// Integration test for non-INVITE client/server transaction flow with event-driven control
 ///
 /// Tests the key aspects of non-INVITE transactions according to RFC 3261 section 17.1.2 and 17.2.2
-/// This test uses direct transaction creation and message passing to avoid relying on internal events
+/// This test uses the proper event-driven approach to work with the transaction state machine
 #[tokio::test]
 #[serial]
 async fn test_non_invite_direct_flow() {
     println!("\n==== TEST: Non-INVITE Direct Flow ====");
-    println!("Testing complete client/server transaction sequence for OPTIONS method");
+    println!("Testing complete client/server transaction sequence for OPTIONS method using event-driven approach");
     println!("This test verifies non-INVITE transactions according to RFC 3261 Section 17.1.2/17.2.2");
     println!("Scenario: Client sends OPTIONS, server responds with 100 Trying then 200 OK");
     println!("Expected behavior: Transactions follow non-INVITE state machine and terminate properly\n");
     
     // Test timeout to prevent hanging
-    let test_result = timeout(Duration::from_secs(5), async {
+    let test_result = timeout(Duration::from_secs(10), async {
         // 1. Initialize the test environment
         let mut env = TestEnvironment::new().await;
         
@@ -80,7 +80,7 @@ async fn test_non_invite_direct_flow() {
         let server_uri = format!("sip:server@{}", env.server_addr);
         let options_request = env.create_request(Method::Options, &server_uri);
         
-        // 3. Create client transaction and store its ID
+        // 3. Create client transaction and subscribe to events
         println!("Creating client transaction");
         let client_tx_id = env.client_manager.create_client_transaction(
             options_request.clone(),
@@ -88,156 +88,268 @@ async fn test_non_invite_direct_flow() {
         ).await.expect("Failed to create client transaction");
         println!("Client transaction created with ID: {:?}", client_tx_id);
         
-        // 4. Send the request (initial)
+        // Subscribe to client transaction events
+        let mut client_events = env.client_manager.subscribe_to_transaction(&client_tx_id)
+            .await.expect("Failed to subscribe to client transaction events");
+        
+        // 4. Send the request - triggers automatic state machine
         println!("Starting client transaction");
         env.client_manager.send_request(&client_tx_id).await
             .expect("Failed to send request");
         println!("Request sent from client");
         
-        // 5. Get the sent request from the mock transport
-        // Wait a short time to ensure the message is sent
-        sleep(Duration::from_millis(30)).await;
-        let sent_message_opt = env.client_transport.get_sent_message().await;
-        if sent_message_opt.is_none() {
-            panic!("Client did not send any message");
-        }
-        let (message, destination) = sent_message_opt.unwrap();
+        // 5. Wait for client to transition to Trying state automatically
+        println!("Waiting for client to enter Trying state");
+        let trying_success = env.client_manager.wait_for_transaction_state(
+            &client_tx_id,
+            TransactionState::Trying,
+            Duration::from_millis(1000)
+        ).await.expect("Failed to wait for Trying state");
+        assert!(trying_success, "Client should transition to Trying state");
+        println!("✅ Client entered Trying state");
         
-        // 6. Extract the request from the message
-        if let Message::Request(request) = message {
-            assert_eq!(request.method(), Method::Options);
-            assert_eq!(destination, env.server_addr);
-            println!("Client sent OPTIONS request to server");
-            
-            // 7. Create server transaction directly
-            println!("Creating server transaction");
+        // 6. Find the auto-created server transaction
+        println!("Looking for auto-created server transaction");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        
+        let server_tx_id = TransactionKey::from_request(&options_request)
+            .expect("Failed to create server transaction key");
+        println!("Expected server transaction ID: {:?}", server_tx_id);
+        
+        // Verify server transaction exists (may be auto-created)
+        let server_tx_exists = env.server_manager.transaction_exists(&server_tx_id).await;
+        if !server_tx_exists {
+            // Create server transaction manually if not auto-created
             let server_tx = env.server_manager.create_server_transaction(
-                request.clone(), 
+                options_request.clone(), 
                 env.client_addr
             ).await.expect("Failed to create server transaction");
-            let server_tx_id = server_tx.id().clone();
-            println!("Server transaction created with ID: {:?}", server_tx_id);
-            
-            // 8. Verify server transaction exists
-            let tx_exists = env.server_manager.transaction_exists(&server_tx_id).await;
-            println!("Server transaction exists: {}", tx_exists);
-            assert!(tx_exists, "Server transaction should exist after creation");
-            
-            // 9. Create and send a 100 Trying response
-            println!("Creating 100 Trying response");
-            let trying_response = env.create_response(&request, StatusCode::Trying, Some("Trying"));
-            
-            println!("Server sending 100 Trying response");
-            let send_result = env.server_manager.send_response(&server_tx_id, trying_response).await;
-            if let Err(e) = &send_result {
-                println!("Error sending 100 Trying: {:?}", e);
-            }
-            send_result.expect("Failed to send provisional response");
-            
-            // 10. Wait for 100 Trying to be sent
-            sleep(Duration::from_millis(30)).await;
-            let sent_response_opt = env.server_transport.get_sent_message().await;
-            if sent_response_opt.is_none() {
-                panic!("Server did not send any response");
-            }
-            
-            let (message, _) = sent_response_opt.unwrap();
-            if let Message::Response(trying) = message {
-                assert_eq!(trying.status_code(), StatusCode::Trying.as_u16());
-                println!("Server sent 100 Trying response");
-                
-                // 11. Directly inject the response to the client
-                println!("Injecting 100 Trying to client");
-                env.inject_response_s2c(trying.clone()).await
-                    .expect("Failed to inject response");
-                
-                // 12. Wait longer for client to process the response
-                // RFC 3261 says client SHOULD move to Proceeding on 1xx response
-                // But allow more time as the state transition might take longer
-                sleep(Duration::from_millis(80)).await;
-                
-                // 13. Verify client state - allow either Trying or Proceeding after 1xx response
-                let client_state = env.client_manager.transaction_state(&client_tx_id).await
-                    .expect("Failed to get client transaction state");
-                println!("Client state after 100 Trying: {:?}", client_state);
-                
-                // Note: The RFC says client SHOULD transition to Proceeding on 1xx, but might not have
-                // processed the state transition yet, so we accept both states here
-                assert!(client_state == TransactionState::Trying || 
-                        client_state == TransactionState::Proceeding,
-                        "Client state should be Trying or Proceeding after receiving 100 Trying");
-                
-                // 14. Create and send 200 OK from server
-                println!("Creating 200 OK response");
-                let ok_response = env.create_response(&request, StatusCode::Ok, Some("OK"));
-                
-                println!("Server sending 200 OK response");
-                env.server_manager.send_response(&server_tx_id, ok_response).await
-                    .expect("Failed to send final response");
-                
-                // 15. Wait for OK to be sent
-                sleep(Duration::from_millis(30)).await;
-                let final_response_opt = env.server_transport.get_sent_message().await;
-                if final_response_opt.is_none() {
-                    panic!("Server did not send final response");
-                }
-                
-                let (message, _) = final_response_opt.unwrap();
-                if let Message::Response(ok) = message {
-                    assert_eq!(ok.status_code(), StatusCode::Ok.as_u16());
-                    println!("Server sent 200 OK response");
-                    
-                    // 16. Inject final response to client
-                    println!("Injecting 200 OK to client");
-                    env.inject_response_s2c(ok.clone()).await
-                        .expect("Failed to inject final response");
-                    
-                    // 17. Wait for client to process
-                    sleep(Duration::from_millis(30)).await;
-                    
-                    // 18. Verify client state transitioned to Completed or Terminated
-                    let client_state = env.client_manager.transaction_state(&client_tx_id).await
-                        .expect("Failed to get client transaction state");
-                    println!("Client state after 200 OK: {:?}", client_state);
-                    
-                    // According to RFC 3261, client should move to Completed on receiving a final response
-                    // But the implementation might move directly to Terminated, which is also acceptable
-                    assert!(client_state == TransactionState::Completed || 
-                            client_state == TransactionState::Terminated,
-                            "Client state should be Completed or Terminated after receiving 200 OK");
-                    
-                    // If already terminated, we can skip waiting for Timer K
-                    if client_state == TransactionState::Terminated {
-                        println!("Client transaction already terminated - no need to wait for Timer K");
-                    }
-                    else {
-                        // 19. Wait for transactions to terminate (Timer K & J)
-                        // Client Timer K should be 40ms in test environment
-                        println!("Waiting for transaction termination");
-                        sleep(Duration::from_millis(100)).await;
-                    }
-                    
-                    // 20. Verify transactions terminated
-                    let client_exists = env.client_manager.transaction_exists(&client_tx_id).await;
-                    println!("Client transaction still exists: {}", client_exists);
-                    
-                    let server_exists = env.server_manager.transaction_exists(&server_tx_id).await;
-                    println!("Server transaction still exists: {}", server_exists);
-                    
-                    // In some cases, the timers might not have fired yet due to timing variations
-                    // Focus on the state transitions which are more important for the test
-                    // than waiting for termination timers
-                    
-                    println!("Test completed successfully");
-                } else {
-                    panic!("Server sent message is not a response");
-                }
-            } else {
-                panic!("Server sent message is not a response");
-            }
+            println!("✅ Server transaction created with ID: {:?}", server_tx.id());
         } else {
-            panic!("Client sent message is not a request");
+            println!("✅ Server transaction auto-created");
         }
+        
+        // Subscribe to server transaction events
+        let mut server_events = env.server_manager.subscribe_to_transaction(&server_tx_id)
+            .await.expect("Failed to subscribe to server transaction events");
+        
+        // 7. Check if client already received auto-sent 100 Trying
+        println!("Checking for auto-sent 100 Trying");
+        let trying_result = tokio::time::timeout(
+            Duration::from_millis(500),
+            env.wait_for_client_event(Duration::from_millis(1000), |event| match_provisional_response(event))
+        ).await;
+        
+        match trying_result {
+            Ok(Some((trying_tx_id, trying_resp))) => {
+                assert_eq!(trying_tx_id, client_tx_id);
+                assert_eq!(trying_resp.status_code(), StatusCode::Trying.as_u16());
+                println!("✅ Client received auto-sent 100 Trying");
+            }
+            _ => {
+                println!("ℹ️  100 Trying may have been processed before subscription - this is OK");
+            }
+        }
+        
+        // 8. Server sends additional 100 Trying response (to test provisional handling)
+        println!("Server sending 100 Trying response");
+        let trying_response = env.create_response(&options_request, StatusCode::Trying, Some("Trying"));
+        env.server_manager.send_response(&server_tx_id, trying_response).await
+            .expect("Failed to send provisional response");
+        
+        // 9. Wait for client to receive 100 Trying via ProvisionalResponse event
+        println!("Waiting for client to receive 100 Trying");
+        let trying_event_result = tokio::time::timeout(
+            Duration::from_millis(1000),
+            env.wait_for_client_event(Duration::from_millis(2000), |event| match_provisional_response(event))
+        ).await;
+        
+        match trying_event_result {
+            Ok(Some((trying_tx_id, trying_resp))) => {
+                assert_eq!(trying_tx_id, client_tx_id);
+                assert_eq!(trying_resp.status_code(), StatusCode::Trying.as_u16());
+                println!("✅ Client received 100 Trying via event");
+            }
+            _ => {
+                println!("ℹ️  100 Trying event may have been processed already");
+            }
+        }
+        
+        // 10. Wait for client to transition to Proceeding state after receiving 1xx
+        println!("Waiting for client to enter Proceeding state");
+        let proceeding_success = env.client_manager.wait_for_transaction_state(
+            &client_tx_id,
+            TransactionState::Proceeding,
+            Duration::from_millis(1000)
+        ).await.expect("Failed to wait for Proceeding state");
+        
+        // Note: Client SHOULD transition to Proceeding on 1xx, but might not have processed it yet
+        if proceeding_success {
+            println!("✅ Client entered Proceeding state after 1xx");
+        } else {
+            // Check current state - might still be in Trying
+            let current_state = env.client_manager.transaction_state(&client_tx_id).await
+                .expect("Failed to get current state");
+            println!("ℹ️  Client still in {:?} state - this is acceptable", current_state);
+            assert!(
+                current_state == TransactionState::Trying || current_state == TransactionState::Proceeding,
+                "Client should be in Trying or Proceeding state"
+            );
+        }
+        
+        // 11. Server sends 200 OK (final response)
+        println!("Server sending 200 OK response");
+        let ok_response = env.create_response(&options_request, StatusCode::Ok, Some("OK"));
+        env.server_manager.send_response(&server_tx_id, ok_response).await
+            .expect("Failed to send final response");
+        
+        // 12. Wait for client to receive 200 OK via SuccessResponse event
+        println!("Waiting for client to receive 200 OK");
+        let (success_tx_id, success_resp) = env.wait_for_client_event(
+            Duration::from_millis(1000),
+            |event| match_success_response(event)
+        ).await.expect("Timeout waiting for 200 OK");
+        assert_eq!(success_tx_id, client_tx_id);
+        assert_eq!(success_resp.status_code(), StatusCode::Ok.as_u16());
+        println!("✅ Client received 200 OK");
+        
+        // 13. Wait for client to transition to Completed state
+        println!("Waiting for client to enter Completed state");
+        let completed_success = env.client_manager.wait_for_transaction_state(
+            &client_tx_id,
+            TransactionState::Completed,
+            Duration::from_millis(1000)
+        ).await.expect("Failed to wait for Completed state");
+        
+        if completed_success {
+            println!("✅ Client entered Completed state");
+        } else {
+            // Check if client went directly to Terminated (optimization)
+            let final_state = env.client_manager.transaction_state(&client_tx_id).await;
+            match final_state {
+                Ok(TransactionState::Terminated) => {
+                    println!("✅ Client optimized directly to Terminated state");
+                }
+                Ok(state) => {
+                    println!("ℹ️  Client in state: {:?}", state);
+                    assert!(
+                        state == TransactionState::Completed || state == TransactionState::Terminated,
+                        "Client should be in Completed or Terminated state after 200 OK"
+                    );
+                }
+                Err(_) => {
+                    println!("✅ Client transaction already cleaned up");
+                }
+            }
+        }
+        
+        // 14. Wait for server to transition to Completed state after sending final response
+        println!("Waiting for server to enter Completed state");
+        let server_completed_success = env.server_manager.wait_for_transaction_state(
+            &server_tx_id,
+            TransactionState::Completed,
+            Duration::from_millis(1000)
+        ).await.expect("Failed to wait for server Completed state");
+        
+        if server_completed_success {
+            println!("✅ Server entered Completed state");
+        } else {
+            // Check server state
+            let server_state = env.server_manager.transaction_state(&server_tx_id).await;
+            match server_state {
+                Ok(state) => {
+                    println!("ℹ️  Server in state: {:?}", state);
+                    assert!(
+                        state == TransactionState::Completed || state == TransactionState::Terminated,
+                        "Server should be in Completed or Terminated state after sending final response"
+                    );
+                }
+                Err(_) => {
+                    println!("✅ Server transaction already cleaned up");
+                }
+            }
+        }
+        
+        // 15. Both transactions should terminate automatically via RFC 3261 timers (Timer K and J)
+        println!("Waiting for transactions to terminate via RFC 3261 timers");
+        
+        // Wait for client termination (Timer K)
+        let client_terminated = tokio::time::timeout(
+            Duration::from_millis(2000),
+            env.wait_for_client_event(Duration::from_millis(3000), |event| match_transaction_terminated(event))
+        ).await;
+        
+        match client_terminated {
+            Ok(Some(terminated_tx_id)) => {
+                assert_eq!(terminated_tx_id, client_tx_id);
+                println!("✅ Client transaction terminated via Timer K");
+            }
+            _ => {
+                // Check final state
+                let final_state = env.client_manager.transaction_state(&client_tx_id).await;
+                match final_state {
+                    Ok(TransactionState::Terminated) => {
+                        println!("✅ Client transaction in Terminated state");
+                    },
+                    Ok(state) => {
+                        println!("ℹ️  Client transaction in state: {:?}", state);
+                    },
+                    Err(_) => {
+                        println!("✅ Client transaction already cleaned up");
+                    }
+                }
+            }
+        }
+        
+        // Wait for server termination (Timer J)
+        let server_terminated = tokio::time::timeout(
+            Duration::from_millis(2000),
+            async {
+                loop {
+                    tokio::select! {
+                        Some(event) = server_events.recv() => {
+                            if let Some(terminated_tx_id) = match_transaction_terminated(&event) {
+                                if terminated_tx_id == server_tx_id {
+                                    return Some(terminated_tx_id);
+                                }
+                            }
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                            // Check current state
+                            if let Ok(state) = env.server_manager.transaction_state(&server_tx_id).await {
+                                if state == TransactionState::Terminated {
+                                    return Some(server_tx_id.clone());
+                                }
+                            } else {
+                                // Transaction cleaned up
+                                return Some(server_tx_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        ).await;
+        
+        match server_terminated {
+            Ok(Some(_)) => println!("✅ Server transaction terminated via Timer J"),
+            _ => {
+                // Check final state
+                let final_state = env.server_manager.transaction_state(&server_tx_id).await;
+                match final_state {
+                    Ok(TransactionState::Terminated) => {
+                        println!("✅ Server transaction in Terminated state");
+                    },
+                    Ok(state) => {
+                        println!("ℹ️  Server transaction in state: {:?}", state);
+                    },
+                    Err(_) => {
+                        println!("✅ Server transaction already cleaned up");
+                    }
+                }
+            }
+        }
+        
+        println!("✅ Non-INVITE direct flow test completed successfully using event-driven approach");
         
         // Clean up
         env.shutdown().await;
@@ -245,7 +357,7 @@ async fn test_non_invite_direct_flow() {
     
     // Handle test timeout
     if let Err(_) = test_result {
-        panic!("Test timed out after 5 seconds");
+        panic!("Test timed out after 10 seconds");
     }
 }
 

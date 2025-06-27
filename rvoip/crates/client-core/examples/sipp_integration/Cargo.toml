@@ -1,0 +1,33 @@
+[package]
+name = "sipp-integration-test"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "sip_test_server"
+path = "sip_test_server.rs"
+
+[dependencies]
+# Local crates
+rvoip-client-core = { path = "../../../client-core" }
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Data structures  
+dashmap = "6.1"
+
+# Utilities
+uuid = { version = "1.8", features = ["v4", "serde"] }
+clap = { version = "4.5", features = ["derive"] }
+
+[workspace] 

@@ -3,7 +3,8 @@
 //! This module provides implementations for various RTP payload formats
 //! as defined in RFC 3551 and other RFCs.
 
-mod traits;
+pub mod registry;
+pub mod traits;
 mod g711;
 mod g722;
 mod opus;

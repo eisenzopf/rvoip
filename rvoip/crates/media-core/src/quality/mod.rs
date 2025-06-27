@@ -1,16 +1,13 @@
-//! Media quality monitoring module for the media-core library
+//! Quality Monitoring and Adaptation
 //!
-//! This module provides components for monitoring and adapting to media quality,
-//! including metrics collection, quality estimation, and adaptive quality control.
+//! This module provides real-time quality monitoring, metrics collection,
+//! and adaptive quality management for media sessions.
 
-// Quality metrics collection
+pub mod monitor;
 pub mod metrics;
-pub use metrics::{QualityMetrics, NetworkMetrics, AudioMetrics};
-
-// Quality estimation (MOS, etc.)
-pub mod estimation;
-pub use estimation::{QualityEstimator, QualityScore, QualityLevel};
-
-// Quality-based adaptation
 pub mod adaptation;
-pub use adaptation::{QualityAdapter, AdaptationAction, AdaptationConfig}; 
+
+// Re-export main types
+pub use monitor::{QualityMonitor, QualityMonitorConfig};
+pub use metrics::{QualityMetrics, SessionMetrics, OverallMetrics};
+pub use adaptation::{QualityAdjustment, AdaptationEngine, AdaptationStrategy}; 

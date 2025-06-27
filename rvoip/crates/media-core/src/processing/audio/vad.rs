@@ -1,302 +1,231 @@
-use std::collections::VecDeque;
-use std::time::Duration;
+//! Voice Activity Detection (VAD)
+//!
+//! This module implements voice activity detection to distinguish between
+//! speech and silence in audio streams.
 
-use tracing::trace;
+use tracing::{debug, trace};
+use crate::error::{Result, AudioProcessingError};
+use crate::types::AudioFrame;
 
-use crate::error::Result;
-use crate::codec::audio::common::{AudioFormat, SampleFormat};
-
-/// Voice activity detection parameters
+/// Configuration for Voice Activity Detection
 #[derive(Debug, Clone)]
 pub struct VadConfig {
-    /// Energy threshold for speech detection (0.0-1.0)
+    /// Energy threshold for voice detection (relative to frame RMS)
     pub energy_threshold: f32,
-    /// Speech hang time in milliseconds
-    pub speech_hang_time_ms: u32,
-    /// Non-speech hang time in milliseconds
-    pub non_speech_hang_time_ms: u32,
-    /// Window size for energy calculation in milliseconds
-    pub window_size_ms: u32,
-    /// Audio format
-    pub format: AudioFormat,
+    /// Zero crossing rate threshold 
+    pub zcr_threshold: f32,
+    /// Minimum frame length for analysis (samples)
+    pub min_frame_length: usize,
+    /// Smoothing factor for energy calculation (0.0-1.0)
+    pub energy_smoothing: f32,
+    /// Hangover frames (frames to keep detecting voice after energy drops)
+    pub hangover_frames: u32,
 }
 
 impl Default for VadConfig {
     fn default() -> Self {
         Self {
-            energy_threshold: 0.05,
-            speech_hang_time_ms: 300,
-            non_speech_hang_time_ms: 100,
-            window_size_ms: 20,
-            format: AudioFormat::pcm_telephony(),
+            energy_threshold: 0.01,     // 1% of max energy
+            zcr_threshold: 0.15,        // 15% zero crossing rate
+            min_frame_length: 160,      // 20ms at 8kHz
+            energy_smoothing: 0.9,      // 90% history, 10% current
+            hangover_frames: 5,         // Keep detecting for 5 frames after drop
         }
     }
 }
 
-/// Voice activity detection (VAD) state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VadState {
-    /// Speech detected
-    Speech,
-    /// No speech detected
-    NonSpeech,
+/// Result of voice activity detection
+#[derive(Debug, Clone, Copy)]
+pub struct VadResult {
+    /// Whether voice activity was detected
+    pub is_voice: bool,
+    /// Energy level of the frame (0.0-1.0)
+    pub energy_level: f32,
+    /// Zero crossing rate (0.0-1.0)
+    pub zero_crossing_rate: f32,
+    /// Confidence score (0.0-1.0)
+    pub confidence: f32,
 }
 
-impl Default for VadState {
-    fn default() -> Self {
-        Self::NonSpeech
-    }
-}
-
-/// Voice activity detection statistics
-#[derive(Debug, Clone, Default)]
-pub struct VadStats {
-    /// Current VAD state
-    pub state: VadState,
-    /// Current energy level (0.0-1.0)
-    pub energy: f32,
-    /// Time spent in speech state
-    pub speech_time: Duration,
-    /// Time spent in non-speech state
-    pub non_speech_time: Duration,
-    /// Number of speech segments detected
-    pub speech_segments: u32,
-    /// Average energy during speech
-    pub avg_speech_energy: f32,
-    /// Maximum energy seen during speech
-    pub max_speech_energy: f32,
-}
-
-/// Voice activity detector
+/// Voice Activity Detector
 pub struct VoiceActivityDetector {
-    /// Configuration
+    /// VAD configuration
     config: VadConfig,
-    /// Current state
-    state: VadState,
-    /// Time in current state
-    time_in_state_ms: u32,
-    /// Energy history for smoothing
-    energy_history: VecDeque<f32>,
-    /// Statistics
-    stats: VadStats,
-    /// Samples processed
-    samples_processed: u64,
-    /// Sample rate
-    sample_rate: u32,
-    /// Current frame size
-    frame_size: usize,
-    /// Timestamp for statistics
-    speech_start_time: Option<Duration>,
+    /// Smoothed energy history
+    smoothed_energy: f32,
+    /// Background noise estimate
+    noise_energy: f32,
+    /// Hangover counter
+    hangover_count: u32,
+    /// Frame count for adaptation
+    frame_count: u64,
 }
 
 impl VoiceActivityDetector {
-    /// Create a new voice activity detector
-    pub fn new(config: VadConfig) -> Self {
-        let sample_rate = config.format.sample_rate.as_hz();
-        let channels = config.format.channels.channel_count() as usize;
-        let window_samples = (sample_rate as u64 * config.window_size_ms as u64 / 1000) as usize;
-        let frame_size = window_samples * channels;
+    /// Create a new VAD with the given configuration
+    pub fn new(config: VadConfig) -> Result<Self> {
+        debug!("Creating VoiceActivityDetector with config: {:?}", config);
         
-        Self {
+        if config.energy_threshold <= 0.0 || config.energy_threshold >= 1.0 {
+            return Err(AudioProcessingError::InvalidFormat {
+                details: "VAD energy threshold must be between 0.0 and 1.0".to_string(),
+            }.into());
+        }
+        
+        if config.energy_smoothing < 0.0 || config.energy_smoothing > 1.0 {
+            return Err(AudioProcessingError::InvalidFormat {
+                details: "VAD energy smoothing must be between 0.0 and 1.0".to_string(),
+            }.into());
+        }
+        
+        Ok(Self {
             config,
-            state: VadState::NonSpeech,
-            time_in_state_ms: 0,
-            energy_history: VecDeque::with_capacity(5),
-            stats: VadStats::default(),
-            samples_processed: 0,
-            sample_rate,
-            frame_size,
-            speech_start_time: None,
-        }
+            smoothed_energy: 0.0,
+            noise_energy: 0.0,
+            hangover_count: 0,
+            frame_count: 0,
+        })
     }
     
-    /// Create a new voice activity detector with default config
-    pub fn new_default() -> Self {
-        Self::new(VadConfig::default())
-    }
-    
-    /// Process audio frame and detect voice activity
-    pub fn process<T: AsRef<[u8]>>(&mut self, frame: T) -> Result<VadState> {
-        let frame = frame.as_ref();
-        
-        // Calculate energy of the frame
-        let energy = self.calculate_energy(frame);
-        
-        // Update energy history
-        self.energy_history.push_back(energy);
-        if self.energy_history.len() > 5 {
-            self.energy_history.pop_front();
+    /// Analyze an audio frame for voice activity
+    pub fn analyze_frame(&mut self, frame: &AudioFrame) -> Result<VadResult> {
+        if frame.samples.len() < self.config.min_frame_length {
+            return Err(AudioProcessingError::InvalidFormat {
+                details: format!(
+                    "Frame too short for VAD analysis: {} < {}",
+                    frame.samples.len(), self.config.min_frame_length
+                ),
+            }.into());
         }
         
-        // Get smoothed energy
-        let smoothed_energy = self.energy_history.iter().sum::<f32>() / self.energy_history.len() as f32;
+        // Calculate frame energy (RMS)
+        let energy = self.calculate_energy(&frame.samples);
         
-        // Determine if this is speech
-        let is_speech = smoothed_energy > self.config.energy_threshold;
+        // Calculate zero crossing rate
+        let zcr = self.calculate_zero_crossing_rate(&frame.samples);
         
-        // Update state machine
-        let frame_time_ms = (frame.len() as u64 * 1000 / self.sample_rate as u64 / 
-            self.config.format.bytes_per_sample() as u64 / 
-            self.config.format.channels.channel_count() as u64) as u32;
-        
-        self.time_in_state_ms += frame_time_ms;
-        
-        // Determine state transitions
-        match (self.state, is_speech) {
-            (VadState::NonSpeech, true) => {
-                // Transition to speech if we've been above threshold long enough
-                if self.time_in_state_ms >= self.config.non_speech_hang_time_ms {
-                    self.state = VadState::Speech;
-                    self.time_in_state_ms = 0;
-                    self.stats.speech_segments += 1;
-                    self.speech_start_time = Some(Duration::from_millis(self.samples_processed as u64 * 1000 / self.sample_rate as u64));
-                    trace!("VAD: Speech detected, energy={:.3}", smoothed_energy);
-                }
-            },
-            (VadState::Speech, false) => {
-                // Transition to non-speech if we've been below threshold long enough
-                if self.time_in_state_ms >= self.config.speech_hang_time_ms {
-                    // Update speech time statistics
-                    if let Some(start_time) = self.speech_start_time {
-                        let now = Duration::from_millis(self.samples_processed as u64 * 1000 / self.sample_rate as u64);
-                        let duration = now - start_time;
-                        self.stats.speech_time += duration;
-                    }
-                    
-                    self.state = VadState::NonSpeech;
-                    self.time_in_state_ms = 0;
-                    self.speech_start_time = None;
-                    trace!("VAD: Silence detected, energy={:.3}", smoothed_energy);
-                }
-            },
-            _ => {
-                // Stay in the same state, just update time
-            }
-        }
-        
-        // Update statistics
-        self.stats.energy = smoothed_energy;
-        self.stats.state = self.state;
-        
-        if self.state == VadState::Speech {
-            // Update speech energy statistics
-            self.stats.avg_speech_energy = (self.stats.avg_speech_energy * 0.95) + (smoothed_energy * 0.05);
-            if smoothed_energy > self.stats.max_speech_energy {
-                self.stats.max_speech_energy = smoothed_energy;
-            }
+        // Update smoothed energy
+        if self.frame_count == 0 {
+            self.smoothed_energy = energy;
+            self.noise_energy = energy;
         } else {
-            // Update non-speech time
-            self.stats.non_speech_time += Duration::from_millis(frame_time_ms as u64);
+            self.smoothed_energy = self.config.energy_smoothing * self.smoothed_energy 
+                + (1.0 - self.config.energy_smoothing) * energy;
         }
         
-        // Update samples processed
-        self.samples_processed += (frame.len() / self.config.format.bytes_per_sample() / 
-            self.config.format.channels.channel_count() as usize) as u64;
+        // Detect voice activity
+        let is_voice = self.detect_voice_activity(energy, zcr);
         
-        Ok(self.state)
-    }
-    
-    /// Calculate energy of a frame (RMS)
-    fn calculate_energy(&self, frame: &[u8]) -> f32 {
-        let format = &self.config.format;
-        let bytes_per_sample = format.bytes_per_sample();
-        let channels = format.channels.channel_count() as usize;
-        
-        if frame.is_empty() {
-            return 0.0;
+        // Update noise estimate during silence
+        if !is_voice && self.hangover_count == 0 {
+            self.noise_energy = 0.95 * self.noise_energy + 0.05 * energy;
         }
         
-        let num_samples = frame.len() / bytes_per_sample / channels;
+        // Calculate confidence score
+        let confidence = self.calculate_confidence(energy, zcr);
         
-        match format.format {
-            SampleFormat::S16 => {
-                let samples = unsafe {
-                    std::slice::from_raw_parts(
-                        frame.as_ptr() as *const i16,
-                        frame.len() / 2
-                    )
-                };
-                
-                // Sum squares of samples
-                let mut sum_squares = 0.0;
-                for ch in 0..channels {
-                    for i in 0..num_samples {
-                        let sample = samples[i * channels + ch] as f32 / 32768.0;
-                        sum_squares += sample * sample;
-                    }
-                }
-                
-                // Calculate RMS
-                let mean_square = sum_squares / (num_samples * channels) as f32;
-                mean_square.sqrt()
-            },
-            SampleFormat::U8 => {
-                // Sum squares of samples
-                let mut sum_squares = 0.0;
-                for ch in 0..channels {
-                    for i in 0..num_samples {
-                        let sample = ((frame[i * channels + ch] as f32) - 128.0) / 128.0;
-                        sum_squares += sample * sample;
-                    }
-                }
-                
-                // Calculate RMS
-                let mean_square = sum_squares / (num_samples * channels) as f32;
-                mean_square.sqrt()
-            },
-            SampleFormat::F32 => {
-                let samples = unsafe {
-                    std::slice::from_raw_parts(
-                        frame.as_ptr() as *const f32,
-                        frame.len() / 4
-                    )
-                };
-                
-                // Sum squares of samples
-                let mut sum_squares = 0.0;
-                for ch in 0..channels {
-                    for i in 0..num_samples {
-                        let sample = samples[i * channels + ch];
-                        sum_squares += sample * sample;
-                    }
-                }
-                
-                // Calculate RMS
-                let mean_square = sum_squares / (num_samples * channels) as f32;
-                mean_square.sqrt()
-            },
-            // For other formats, we'll need to convert to a common format first
-            _ => 0.0,
-        }
-    }
-    
-    /// Get current VAD state
-    pub fn state(&self) -> VadState {
-        self.state
-    }
-    
-    /// Get VAD statistics
-    pub fn stats(&self) -> &VadStats {
-        &self.stats
+        self.frame_count += 1;
+        
+        trace!("VAD: energy={:.4}, zcr={:.4}, voice={}, confidence={:.2}", 
+               energy, zcr, is_voice, confidence);
+        
+        Ok(VadResult {
+            is_voice,
+            energy_level: energy,
+            zero_crossing_rate: zcr,
+            confidence,
+        })
     }
     
     /// Reset VAD state
     pub fn reset(&mut self) {
-        self.state = VadState::NonSpeech;
-        self.time_in_state_ms = 0;
-        self.energy_history.clear();
-        self.stats = VadStats::default();
-        self.samples_processed = 0;
-        self.speech_start_time = None;
+        self.smoothed_energy = 0.0;
+        self.noise_energy = 0.0;
+        self.hangover_count = 0;
+        self.frame_count = 0;
+        debug!("VAD state reset");
     }
     
-    /// Set energy threshold
-    pub fn set_energy_threshold(&mut self, threshold: f32) {
-        self.config.energy_threshold = threshold.clamp(0.0, 1.0);
+    /// Get current noise energy estimate
+    pub fn get_noise_energy(&self) -> f32 {
+        self.noise_energy
     }
     
-    /// Get recommended frame size for this VAD
-    pub fn recommended_frame_size(&self) -> usize {
-        self.frame_size
+    /// Calculate RMS energy of audio samples
+    fn calculate_energy(&self, samples: &[i16]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        
+        let sum_squares: f64 = samples.iter()
+            .map(|&sample| (sample as f64).powi(2))
+            .sum();
+        
+        let rms = (sum_squares / samples.len() as f64).sqrt();
+        
+        // Normalize to 0.0-1.0 range (assuming 16-bit samples)
+        (rms / 32768.0) as f32
+    }
+    
+    /// Calculate zero crossing rate
+    fn calculate_zero_crossing_rate(&self, samples: &[i16]) -> f32 {
+        if samples.len() < 2 {
+            return 0.0;
+        }
+        
+        let mut crossings = 0;
+        for i in 1..samples.len() {
+            if (samples[i-1] >= 0) != (samples[i] >= 0) {
+                crossings += 1;
+            }
+        }
+        
+        crossings as f32 / (samples.len() - 1) as f32
+    }
+    
+    /// Detect voice activity based on energy and ZCR
+    fn detect_voice_activity(&mut self, energy: f32, zcr: f32) -> bool {
+        // Energy-based detection
+        let energy_above_threshold = energy > self.config.energy_threshold * 
+            (self.noise_energy + 0.001); // Add small constant to avoid division by zero
+        
+        // ZCR-based detection (speech typically has moderate ZCR)
+        let zcr_in_speech_range = zcr > 0.05 && zcr < self.config.zcr_threshold;
+        
+        // Combined decision
+        let current_decision = energy_above_threshold && zcr_in_speech_range;
+        
+        // Apply hangover logic
+        if current_decision {
+            self.hangover_count = self.config.hangover_frames;
+            true
+        } else if self.hangover_count > 0 {
+            self.hangover_count -= 1;
+            true
+        } else {
+            false
+        }
+    }
+    
+    /// Calculate confidence score for the VAD decision
+    fn calculate_confidence(&self, energy: f32, zcr: f32) -> f32 {
+        // Energy confidence
+        let energy_ratio = if self.noise_energy > 0.0 {
+            (energy / self.noise_energy).min(10.0) // Cap at 10x noise level
+        } else {
+            energy * 100.0 // If no noise estimate, use energy directly
+        };
+        
+        let energy_confidence = (energy_ratio / 3.0).min(1.0); // Normalize
+        
+        // ZCR confidence (speech-like ZCR gets higher confidence)
+        let zcr_confidence = if zcr > 0.05 && zcr < 0.5 {
+            1.0 - (zcr - 0.15).abs() * 2.0 // Peak confidence around 15% ZCR
+        } else {
+            0.0
+        };
+        
+        // Combined confidence
+        (energy_confidence * 0.7 + zcr_confidence * 0.3).max(0.0).min(1.0)
     }
 } 

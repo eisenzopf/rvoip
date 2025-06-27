@@ -1,0 +1,29 @@
+# Additional dependencies for cutting-edge audio processing
+# Add these to your Cargo.toml [dependencies] section
+
+# FFT and signal processing
+rustfft = "6.1"
+apodize = "1.0"              # Windowing functions
+num-complex = "0.4"
+
+# Machine learning (lightweight)
+candle = { version = "0.3", features = ["accelerate"] }  # Rust ML framework
+ort = "1.16"                 # ONNX Runtime for pre-trained models
+
+# Advanced math and signal processing
+ndarray = "0.15"
+linfa = "0.7"                # Machine learning toolkit
+biquad = "0.4"               # Digital filters
+
+# Audio analysis
+aubio-rs = "0.2"             # Feature extraction (MFCC, pitch, etc.)
+pitch_detection = "0.1"      # YIN pitch detection
+spectrum-analyzer = "1.4"    # Spectral analysis
+
+# Performance optimization
+rayon = "1.7"                # Parallel processing
+memmap2 = "0.7"              # Memory mapping for large models
+
+# Real-time constraints
+heapless = "0.7"             # No-allocation collections
+ringbuf = "0.3"              # Lock-free ring buffers 

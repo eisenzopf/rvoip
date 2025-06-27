@@ -45,6 +45,7 @@ either = "1.9.0"
 nix = { version = "0.27.1", features = ["socket"] }
 libc = "0.2"
 winapi = { version = "0.3", features = ["winsock2", "ws2def"] }
+time = { version = "0.3", features = ["std"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

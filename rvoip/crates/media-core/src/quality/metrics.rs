@@ -1,337 +1,208 @@
-use std::time::{Duration, Instant};
-use std::collections::VecDeque;
+//! Quality Metrics Collection and Analysis
+//!
+//! This module defines quality metrics structures and calculation utilities
+//! for monitoring media session performance.
 
-/// Network quality metrics
-#[derive(Debug, Clone)]
-pub struct NetworkMetrics {
-    /// Packet loss rate (0.0-1.0)
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+use crate::types::{MediaSessionId, MediaPacket};
+
+/// Comprehensive quality metrics for a media session
+#[derive(Debug, Clone, Default)]
+pub struct QualityMetrics {
+    /// Packet loss percentage (0.0-100.0)
     pub packet_loss: f32,
-    /// Jitter in milliseconds
+    /// Average jitter in milliseconds
     pub jitter_ms: f32,
     /// Round-trip time in milliseconds
     pub rtt_ms: f32,
-    /// Bandwidth estimate in kbps
-    pub bandwidth_kbps: f32,
-    /// Consecutive packet losses
-    pub consecutive_losses: u32,
-    /// Maximum packet loss burst observed
-    pub max_loss_burst: u32,
-}
-
-impl Default for NetworkMetrics {
-    fn default() -> Self {
-        Self {
-            packet_loss: 0.0,
-            jitter_ms: 0.0,
-            rtt_ms: 0.0,
-            bandwidth_kbps: 0.0,
-            consecutive_losses: 0,
-            max_loss_burst: 0,
-        }
-    }
-}
-
-/// Audio quality metrics
-#[derive(Debug, Clone)]
-pub struct AudioMetrics {
-    /// Average energy level (0.0-1.0)
-    pub avg_level: f32,
-    /// Peak level (0.0-1.0)
-    pub peak_level: f32,
-    /// Speech activity ratio (0.0-1.0)
-    pub speech_activity: f32,
-    /// Signal-to-noise ratio in dB
+    /// Audio quality score (1.0-5.0, where 5.0 is excellent)
+    pub mos_score: f32,
+    /// Average bitrate in bps
+    pub avg_bitrate: u32,
+    /// Signal-to-noise ratio
     pub snr_db: f32,
-    /// Estimated audio clarity (0.0-1.0)
-    pub clarity: f32,
-    /// Audio codec bitrate in kbps
-    pub codec_bitrate_kbps: f32,
-    /// Audio sample rate in Hz
-    pub sample_rate_hz: u32,
+    /// Processing latency in milliseconds
+    pub processing_latency_ms: f32,
 }
 
-impl Default for AudioMetrics {
-    fn default() -> Self {
-        Self {
-            avg_level: 0.0,
-            peak_level: 0.0,
-            speech_activity: 0.0,
-            snr_db: 30.0, // Default to a reasonable value
-            clarity: 1.0,
-            codec_bitrate_kbps: 64.0, // Default to common bitrate
-            sample_rate_hz: 8000, // Default to narrowband
-        }
-    }
-}
-
-/// Complete quality metrics collection
+/// Session-specific metrics with temporal data
 #[derive(Debug, Clone)]
-pub struct QualityMetrics {
-    /// Network metrics
-    pub network: NetworkMetrics,
-    /// Audio metrics
-    pub audio: AudioMetrics,
-    /// Timestamp when metrics were collected
-    pub timestamp: Instant,
-    /// Call duration in seconds
-    pub duration_sec: u64,
-    /// Metrics collection interval in milliseconds
-    pub collection_interval_ms: u32,
+pub struct SessionMetrics {
+    /// Session identifier
+    pub session_id: MediaSessionId,
+    /// Current quality metrics
+    pub current: QualityMetrics,
+    /// Quality history (last N measurements)
+    pub history: VecDeque<QualityMetrics>,
+    /// Session duration
+    pub duration: Duration,
+    /// Total packets received
+    pub packets_received: u64,
+    /// Total packets sent
+    pub packets_sent: u64,
+    /// Total bytes transferred
+    pub bytes_transferred: u64,
+    /// Last update timestamp
+    pub last_updated: Instant,
 }
 
-impl Default for QualityMetrics {
+/// Overall system metrics across all sessions
+#[derive(Debug, Clone, Default)]
+pub struct OverallMetrics {
+    /// Number of active sessions
+    pub active_sessions: u32,
+    /// Average quality across all sessions
+    pub avg_quality: QualityMetrics,
+    /// System resource utilization
+    pub cpu_usage: f32,
+    /// Memory usage in bytes
+    pub memory_usage: u64,
+    /// Network bandwidth utilization
+    pub bandwidth_usage: u32,
+}
+
+/// Quality threshold configuration
+#[derive(Debug, Clone)]
+pub struct QualityThresholds {
+    /// Critical packet loss threshold (%)
+    pub critical_packet_loss: f32,
+    /// High jitter threshold (ms)
+    pub high_jitter: f32,
+    /// Poor MOS score threshold
+    pub poor_mos: f32,
+    /// High latency threshold (ms)
+    pub high_latency: f32,
+}
+
+impl Default for QualityThresholds {
     fn default() -> Self {
         Self {
-            network: NetworkMetrics::default(),
-            audio: AudioMetrics::default(),
-            timestamp: Instant::now(),
-            duration_sec: 0,
-            collection_interval_ms: 1000, // Default to 1 second
+            critical_packet_loss: 5.0,  // 5% packet loss is critical
+            high_jitter: 30.0,           // 30ms jitter is high
+            poor_mos: 2.5,               // MOS below 2.5 is poor
+            high_latency: 150.0,         // 150ms latency is high
         }
     }
 }
 
-/// Metric sample with timestamp
-#[derive(Debug, Clone, Copy)]
-struct MetricSample {
-    /// The value
-    value: f32,
-    /// When it was recorded
-    timestamp: Instant,
-}
-
-/// Tracks metrics over time with moving averages
-#[derive(Debug)]
-pub struct MetricsTracker {
-    /// Network metrics history
-    packet_loss_samples: VecDeque<MetricSample>,
-    jitter_samples: VecDeque<MetricSample>,
-    rtt_samples: VecDeque<MetricSample>,
-    bandwidth_samples: VecDeque<MetricSample>,
-    
-    /// Audio metrics history
-    level_samples: VecDeque<MetricSample>,
-    speech_activity_samples: VecDeque<MetricSample>,
-    snr_samples: VecDeque<MetricSample>,
-    
-    /// Aggregate metrics
-    metrics: QualityMetrics,
-    
-    /// Maximum samples to keep for each metric
-    max_samples: usize,
-    
-    /// Start time of the call
-    start_time: Instant,
-    
-    /// Last update time
-    last_update: Instant,
-    
-    /// Packet counters
-    total_packets: u64,
-    lost_packets: u64,
-    
-    /// Current consecutive loss count
-    current_loss_burst: u32,
-}
-
-impl MetricsTracker {
-    /// Create a new metrics tracker
-    pub fn new(max_samples: usize) -> Self {
-        let now = Instant::now();
+impl SessionMetrics {
+    /// Create new session metrics
+    pub fn new(session_id: MediaSessionId) -> Self {
         Self {
-            packet_loss_samples: VecDeque::with_capacity(max_samples),
-            jitter_samples: VecDeque::with_capacity(max_samples),
-            rtt_samples: VecDeque::with_capacity(max_samples),
-            bandwidth_samples: VecDeque::with_capacity(max_samples),
-            
-            level_samples: VecDeque::with_capacity(max_samples),
-            speech_activity_samples: VecDeque::with_capacity(max_samples),
-            snr_samples: VecDeque::with_capacity(max_samples),
-            
-            metrics: QualityMetrics::default(),
-            max_samples,
-            start_time: now,
-            last_update: now,
-            
-            total_packets: 0,
-            lost_packets: 0,
-            current_loss_burst: 0,
+            session_id,
+            current: QualityMetrics::default(),
+            history: VecDeque::with_capacity(100), // Keep last 100 measurements
+            duration: Duration::ZERO,
+            packets_received: 0,
+            packets_sent: 0,
+            bytes_transferred: 0,
+            last_updated: Instant::now(),
         }
     }
     
-    /// Update network metrics with new values
-    pub fn update_network(
-        &mut self,
-        jitter_ms: Option<f32>,
-        rtt_ms: Option<f32>,
-        bandwidth_kbps: Option<f32>,
-        packet_received: bool,
-    ) {
-        let now = Instant::now();
+    /// Update metrics with new measurement
+    pub fn update(&mut self, metrics: QualityMetrics) {
+        // Store previous metrics in history
+        if self.history.len() >= 100 {
+            self.history.pop_front();
+        }
+        self.history.push_back(self.current.clone());
         
-        // Track packet loss
-        self.total_packets += 1;
-        if !packet_received {
-            self.lost_packets += 1;
-            self.current_loss_burst += 1;
-            
-            // Update max loss burst if needed
-            if self.current_loss_burst > self.metrics.network.max_loss_burst {
-                self.metrics.network.max_loss_burst = self.current_loss_burst;
-            }
+        // Update current metrics
+        self.current = metrics;
+        self.last_updated = Instant::now();
+    }
+    
+    /// Get quality trend (improving, stable, degrading)
+    pub fn get_trend(&self) -> QualityTrend {
+        if self.history.len() < 3 {
+            return QualityTrend::Stable;
+        }
+        
+        let recent: Vec<_> = self.history.iter().rev().take(3).collect();
+        let latest_mos = self.current.mos_score;
+        let avg_recent_mos = recent.iter().map(|m| m.mos_score).sum::<f32>() / recent.len() as f32;
+        
+        let trend_threshold = 0.2; // MOS difference threshold
+        
+        if latest_mos > avg_recent_mos + trend_threshold {
+            QualityTrend::Improving
+        } else if latest_mos < avg_recent_mos - trend_threshold {
+            QualityTrend::Degrading
         } else {
-            // Reset consecutive loss counter
-            self.current_loss_burst = 0;
-        }
-        
-        // Update packet loss rate
-        if self.total_packets > 0 {
-            let packet_loss = self.lost_packets as f32 / self.total_packets as f32;
-            self.add_sample(&mut self.packet_loss_samples, packet_loss, now);
-            self.metrics.network.packet_loss = self.average(&self.packet_loss_samples);
-        }
-        
-        // Update other network metrics if provided
-        if let Some(jitter) = jitter_ms {
-            self.add_sample(&mut self.jitter_samples, jitter, now);
-            self.metrics.network.jitter_ms = self.average(&self.jitter_samples);
-        }
-        
-        if let Some(rtt) = rtt_ms {
-            self.add_sample(&mut self.rtt_samples, rtt, now);
-            self.metrics.network.rtt_ms = self.average(&self.rtt_samples);
-        }
-        
-        if let Some(bandwidth) = bandwidth_kbps {
-            self.add_sample(&mut self.bandwidth_samples, bandwidth, now);
-            self.metrics.network.bandwidth_kbps = self.average(&self.bandwidth_samples);
-        }
-        
-        // Update consecutive losses
-        self.metrics.network.consecutive_losses = self.current_loss_burst;
-        
-        // Update timestamp and duration
-        self.update_timestamp(now);
-    }
-    
-    /// Update audio metrics with new values
-    pub fn update_audio(
-        &mut self,
-        level: Option<f32>,
-        peak_level: Option<f32>,
-        speech_active: Option<bool>,
-        snr_db: Option<f32>,
-        codec_bitrate_kbps: Option<f32>,
-        sample_rate_hz: Option<u32>,
-    ) {
-        let now = Instant::now();
-        
-        // Update level if provided
-        if let Some(l) = level {
-            self.add_sample(&mut self.level_samples, l, now);
-            self.metrics.audio.avg_level = self.average(&self.level_samples);
-        }
-        
-        // Update peak level if provided and higher than current
-        if let Some(peak) = peak_level {
-            if peak > self.metrics.audio.peak_level {
-                self.metrics.audio.peak_level = peak;
-            }
-        }
-        
-        // Update speech activity if provided
-        if let Some(active) = speech_active {
-            let activity_value = if active { 1.0 } else { 0.0 };
-            self.add_sample(&mut self.speech_activity_samples, activity_value, now);
-            self.metrics.audio.speech_activity = self.average(&self.speech_activity_samples);
-        }
-        
-        // Update SNR if provided
-        if let Some(snr) = snr_db {
-            self.add_sample(&mut self.snr_samples, snr, now);
-            self.metrics.audio.snr_db = self.average(&self.snr_samples);
-        }
-        
-        // Update codec info if provided
-        if let Some(bitrate) = codec_bitrate_kbps {
-            self.metrics.audio.codec_bitrate_kbps = bitrate;
-        }
-        
-        if let Some(sample_rate) = sample_rate_hz {
-            self.metrics.audio.sample_rate_hz = sample_rate;
-        }
-        
-        // Update timestamp and duration
-        self.update_timestamp(now);
-    }
-    
-    /// Set the audio clarity estimate (after processing)
-    pub fn set_clarity(&mut self, clarity: f32) {
-        self.metrics.audio.clarity = clarity.clamp(0.0, 1.0);
-    }
-    
-    /// Get the current quality metrics
-    pub fn metrics(&self) -> &QualityMetrics {
-        &self.metrics
-    }
-    
-    /// Reset the metrics tracker
-    pub fn reset(&mut self) {
-        let now = Instant::now();
-        
-        self.packet_loss_samples.clear();
-        self.jitter_samples.clear();
-        self.rtt_samples.clear();
-        self.bandwidth_samples.clear();
-        
-        self.level_samples.clear();
-        self.speech_activity_samples.clear();
-        self.snr_samples.clear();
-        
-        self.metrics = QualityMetrics::default();
-        self.start_time = now;
-        self.last_update = now;
-        
-        self.total_packets = 0;
-        self.lost_packets = 0;
-        self.current_loss_burst = 0;
-    }
-    
-    /// Add a metric sample, maintaining the maximum sample count
-    fn add_sample(&mut self, samples: &mut VecDeque<MetricSample>, value: f32, timestamp: Instant) {
-        samples.push_back(MetricSample { value, timestamp });
-        
-        // Keep sample count in check
-        while samples.len() > self.max_samples {
-            samples.pop_front();
+            QualityTrend::Stable
         }
     }
     
-    /// Calculate the average of samples
-    fn average(&self, samples: &VecDeque<MetricSample>) -> f32 {
-        if samples.is_empty() {
-            return 0.0;
+    /// Check if quality is below thresholds
+    pub fn is_quality_poor(&self, thresholds: &QualityThresholds) -> bool {
+        self.current.packet_loss > thresholds.critical_packet_loss ||
+        self.current.jitter_ms > thresholds.high_jitter ||
+        self.current.mos_score < thresholds.poor_mos ||
+        self.current.processing_latency_ms > thresholds.high_latency
+    }
+    
+    /// Update packet statistics
+    pub fn update_packet_stats(&mut self, packet: &MediaPacket, is_received: bool) {
+        if is_received {
+            self.packets_received += 1;
+        } else {
+            self.packets_sent += 1;
+        }
+        self.bytes_transferred += packet.payload.len() as u64;
+    }
+}
+
+impl QualityMetrics {
+    /// Calculate MOS (Mean Opinion Score) from technical metrics
+    pub fn calculate_mos(packet_loss: f32, jitter_ms: f32, latency_ms: f32) -> f32 {
+        // Simplified MOS calculation based on ITU-T P.800
+        let mut mos = 4.5; // Start with good quality
+        
+        // Reduce score based on packet loss
+        mos -= packet_loss * 0.1; // 10% packet loss = -1.0 MOS
+        
+        // Reduce score based on jitter
+        if jitter_ms > 20.0 {
+            mos -= (jitter_ms - 20.0) * 0.02; // High jitter penalty
         }
         
-        let sum: f32 = samples.iter().map(|s| s.value).sum();
-        sum / samples.len() as f32
+        // Reduce score based on latency
+        if latency_ms > 150.0 {
+            mos -= (latency_ms - 150.0) * 0.01; // High latency penalty
+        }
+        
+        // Clamp to valid MOS range (1.0-5.0)
+        mos.max(1.0).min(5.0)
     }
     
-    /// Update timestamp and duration
-    fn update_timestamp(&mut self, now: Instant) {
-        self.metrics.timestamp = now;
-        self.metrics.duration_sec = now.duration_since(self.start_time).as_secs();
-        self.last_update = now;
+    /// Get quality grade from MOS score
+    pub fn get_quality_grade(&self) -> QualityGrade {
+        match self.mos_score {
+            mos if mos >= 4.0 => QualityGrade::Excellent,
+            mos if mos >= 3.5 => QualityGrade::Good,
+            mos if mos >= 2.5 => QualityGrade::Fair,
+            mos if mos >= 1.5 => QualityGrade::Poor,
+            _ => QualityGrade::Bad,
+        }
     }
-    
-    /// Check if metrics should be updated based on collection interval
-    pub fn should_update(&self) -> bool {
-        let now = Instant::now();
-        now.duration_since(self.last_update).as_millis() >= self.metrics.collection_interval_ms as u128
-    }
-    
-    /// Set the collection interval in milliseconds
-    pub fn set_collection_interval(&mut self, interval_ms: u32) {
-        self.metrics.collection_interval_ms = interval_ms;
-    }
+}
+
+/// Quality trend indicators
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityTrend {
+    Improving,
+    Stable,
+    Degrading,
+}
+
+/// Quality grades based on MOS scores
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualityGrade {
+    Excellent, // 4.0-5.0
+    Good,      // 3.5-4.0
+    Fair,      // 2.5-3.5
+    Poor,      // 1.5-2.5
+    Bad,       // 1.0-1.5
 } 

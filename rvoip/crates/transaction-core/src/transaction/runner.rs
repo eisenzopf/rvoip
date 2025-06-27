@@ -195,10 +195,11 @@ where
                 }
             }
             InternalTransactionCommand::ProcessMessage(message) => {
-                match logic.process_message(&data, message, current_state).await {
+                debug!(id=%tx_id_clone, "Received ProcessMessage command with {:?}", message);
+                match logic.process_message(&data, message, current_state, &mut timer_handles).await {
                     Ok(Some(next_state)) => {
                         if let Err(e) = data.get_self_command_sender().send(InternalTransactionCommand::TransitionTo(next_state)).await {
-                            error!(id=%tx_id_clone, error=%e, "Failed to send self-command for state transition after ProcessMessage");
+                             error!(id=%tx_id_clone, error=%e, "Failed to send self-command for state transition after ProcessMessage");
                         }
                     }
                     Ok(None) => { /* No state change needed */ }
@@ -268,19 +269,18 @@ where
                 }
             }
             InternalTransactionCommand::Terminate => {
-                debug!(id=%tx_id_clone, "Received explicit termination command");
-                if current_state != TransactionState::Terminated {
-                    if let Err(e) = data.get_self_command_sender().send(InternalTransactionCommand::TransitionTo(TransactionState::Terminated)).await {
-                        error!(id=%tx_id_clone, error=%e, "Failed to send self-command for Terminated state on explicit Terminate");
-                        // Even if we can't send the command, still terminate
-                        if !is_test_mode {
-                            data.as_ref_state().set(TransactionState::Terminated);
-                            break;
-                        }
-                    }
-                } else {
-                    debug!(id=%tx_id_clone, "Already terminated, stopping event loop.");
-                    break;
+                debug!(id=%tx_id_clone, "Received Terminate command, shutting down transaction");
+                logic.cancel_all_specific_timers(&mut timer_handles);
+                data.as_ref_state().set(TransactionState::Terminated);
+                break;
+            }
+            
+            InternalTransactionCommand::CancelTimer100 => {
+                debug!(id=%tx_id_clone, "Received CancelTimer100 command, canceling automatic 100 Trying timer");
+                // This command is specific to INVITE server transactions
+                // The logic implementation will handle the actual timer cancellation
+                if let Err(e) = logic.handle_cancel_timer_100(&mut timer_handles).await {
+                    error!(id=%tx_id_clone, error=%e, "Failed to cancel Timer 100");
                 }
             }
         }

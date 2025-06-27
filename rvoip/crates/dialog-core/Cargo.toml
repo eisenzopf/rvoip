@@ -1,0 +1,79 @@
+[package]
+name = "rvoip-dialog-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["RVOIP Team"]
+description = "RFC 3261 SIP Dialog Management Layer for RVOIP"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rvoip/rvoip"
+keywords = ["sip", "voip", "dialog", "rfc3261", "protocol"]
+categories = ["network-programming", "multimedia"]
+
+[dependencies]
+# Core SIP and RTP functionality
+rvoip-sip-core = { path = "../sip-core" }
+rvoip-transaction-core = { path = "../transaction-core" }
+
+# Async runtime and utilities
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+
+# Data structures and synchronization
+dashmap = "5.4"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+bytes = "1.5"
+
+# Serialization and deserialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging and tracing
+tracing = "0.1"
+log = "0.4"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Time and duration utilities
+chrono = { version = "0.4", features = ["serde"] }
+
+# Network utilities
+http = "0.2"
+
+# Random number generation for tags
+rand = "0.8"
+
+# Optional dependencies
+mockall = { version = "0.11", optional = true }
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+rstest = "0.18"
+
+# Logging for examples
+tracing-subscriber = "0.3"
+
+# SIPp testing (for integration tests)
+assert_cmd = "2.0"
+predicates = "3.0"
+
+[features]
+default = ["recovery", "events"]
+
+# Dialog recovery features
+recovery = []
+
+# Event system features  
+events = []
+
+# Testing features
+testing = ["mockall"]
+
+# Development features (additional debugging)
+dev = ["recovery", "events", "testing"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"] 

@@ -1,0 +1,21 @@
+{
+  "comment": "Test SRTP keys for examples - DO NOT USE IN PRODUCTION",
+  "warning": "These keys are for testing purposes only and must never be used in production environments",
+  "keys": {
+    "master_key": [
+      43, 126, 21, 22, 40, 174, 210, 166,
+      171, 247, 21, 136, 9, 207, 79, 60
+    ],
+    "salt": [
+      240, 241, 242, 243, 244, 245, 246, 247,
+      248, 249, 250, 251, 252, 253
+    ]
+  },
+  "key_info": {
+    "master_key_length": 16,
+    "salt_length": 14,
+    "crypto_suite": "AES_CM_128_HMAC_SHA1_80",
+    "generated_at": "2025-01-23T19:53:00Z",
+    "purpose": "Example and testing only"
+  }
+} 

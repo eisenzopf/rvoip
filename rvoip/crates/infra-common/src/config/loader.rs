@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::fmt::Debug;
-use std::sync::Arc;
+
 use crate::errors::types::{Error, Result};
-use crate::config::provider::{ConfigProvider, ConfigSource, BasicConfigProvider};
+use crate::config::provider::{ConfigSource, BasicConfigProvider};
 use serde::de::DeserializeOwned;
 use config::{Config, Environment, File};
 

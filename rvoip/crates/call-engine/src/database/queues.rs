@@ -1,0 +1,322 @@
+//! Queue-related database operations
+
+use anyhow::{Result, anyhow};
+use tracing::{info, warn, debug};
+use super::{DatabaseManager, DbQueuedCall, DbQueue, Transaction};
+use chrono::{DateTime, Utc};
+use serde_json;
+use crate::queue::QueuedCall;
+use rvoip_session_core::SessionId;
+use super::value_helpers::*;
+use uuid::Uuid;
+
+impl DatabaseManager {
+    /// Enqueue a call
+    pub async fn enqueue_call(&self, queue_id: &str, call: &QueuedCall) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let expires_at = (Utc::now() + chrono::Duration::minutes(5)).to_rfc3339();
+        
+        // Generate a call ID since QueuedCall doesn't have one
+        let call_id = Uuid::new_v4().to_string();
+        let session_id = call.session_id.0.clone();
+        let priority = call.priority as i64;
+        
+        // Create customer info as JSON with available fields
+        let customer_info = serde_json::json!({
+            "caller_id": call.caller_id,
+            "queued_at": call.queued_at.to_rfc3339(),
+            "retry_count": call.retry_count,
+        }).to_string();
+        
+        self.execute(
+            "INSERT INTO call_queue (call_id, session_id, queue_id, customer_info, priority, enqueued_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            vec![
+                call_id.into(),
+                session_id.into(),
+                queue_id.into(),
+                customer_info.into(),
+                priority.into(),
+                now.into(),
+                expires_at.into(),
+            ] as Vec<limbo::Value>
+        ).await?;
+        
+        Ok(())
+    }
+    
+    /// Dequeue a call for a specific agent (atomic operation)
+    pub async fn dequeue_call_for_agent(&self, queue_id: &str, agent_id: &str) -> Result<Option<QueuedCall>> {
+        let queue_id = queue_id.to_string();
+        let agent_id = agent_id.to_string();
+        
+        self.transaction(|tx| {
+            Box::pin(async move {
+                // First, check agent status for debugging
+                let agent_status_rows = tx.query(
+                    "SELECT agent_id, status, current_calls, max_calls FROM agents WHERE agent_id = ?1",
+                    vec![agent_id.clone().into()] as Vec<limbo::Value>
+                ).await?;
+                
+                if let Some(status_row) = agent_status_rows.into_iter().next() {
+                    let status = value_to_string(&status_row.get_value(1)?)?;
+                    let current_calls = value_to_i32(&status_row.get_value(2)?)?;
+                    let max_calls = value_to_i32(&status_row.get_value(3)?)?;
+                    tracing::info!("📋 DB ASSIGNMENT: Agent {} has status='{}', current_calls={}, max_calls={}", 
+                                  agent_id, status, current_calls, max_calls);
+                }
+                
+                // LIMBO FIX: Use atomic UPDATE with WHERE conditions (no separate SELECT)
+                // This avoids transaction isolation issues by doing everything in one operation
+                tracing::info!("📋 DB ASSIGNMENT: Attempting atomic reservation for agent {} with WHERE conditions", agent_id);
+                
+                // Execute the atomic UPDATE (Limbo always reports 0 rows, so we ignore the return value)
+                match tx.execute(
+                    "UPDATE agents SET status = 'BUSY', current_calls = current_calls + 1 WHERE agent_id = ?1 AND (status = 'AVAILABLE' OR status = 'RESERVED') AND current_calls < max_calls",
+                    vec![agent_id.clone().into()] as Vec<limbo::Value>
+                ).await {
+                    Ok(count) => {
+                        tracing::info!("📋 DB ASSIGNMENT: Atomic UPDATE executed for agent {} (Limbo reported {} rows, will verify with SELECT)", agent_id, count);
+                    }
+                    Err(e) => {
+                        tracing::error!("📋 DB ASSIGNMENT: Atomic UPDATE failed for agent {}: {:?}", agent_id, e);
+                        return Ok(None);
+                    }
+                };
+                
+                // LIMBO QUIRK FIX: Verify the UPDATE worked by checking the agent's current status
+                // Since Limbo reports 0 rows even on successful UPDATEs, we must confirm with SELECT
+                let verify_rows = tx.query(
+                    "SELECT status, current_calls FROM agents WHERE agent_id = ?1",
+                    vec![agent_id.clone().into()] as Vec<limbo::Value>
+                ).await?;
+                
+                if let Some(verify_row) = verify_rows.into_iter().next() {
+                    let current_status = value_to_string(&verify_row.get_value(0)?)?;
+                    let current_calls = value_to_i32(&verify_row.get_value(1)?)?;
+                    
+                    if current_status == "BUSY" {
+                        tracing::info!("✅ DB ASSIGNMENT: CONFIRMED - Agent {} successfully reserved (status='{}', current_calls={})", 
+                                     agent_id, current_status, current_calls);
+                    } else {
+                        tracing::warn!("📋 DB ASSIGNMENT: Agent {} still has status='{}' after UPDATE - reservation failed (conditions not met)", 
+                                     agent_id, current_status);
+                        return Ok(None);
+                    }
+                } else {
+                    tracing::error!("📋 DB ASSIGNMENT: Cannot find agent {} to verify UPDATE result", agent_id);
+                    return Ok(None);
+                }
+                
+                // Agent successfully reserved - proceed to find calls in queue
+                
+                // Find highest priority call in the queue
+                let rows = tx.query(
+                    "SELECT call_id, session_id, queue_id, customer_info, priority, enqueued_at, attempts, last_attempt, expires_at FROM call_queue 
+                     WHERE queue_id = ?1 
+                     AND expires_at > datetime('now')
+                     ORDER BY priority ASC, enqueued_at ASC 
+                     LIMIT 1",
+                    vec![queue_id.clone().into()] as Vec<limbo::Value>
+                ).await?;
+                
+                tracing::info!("📋 DB ASSIGNMENT: Found {} calls in queue '{}' for agent {}", rows.len(), queue_id, agent_id);
+                
+                if let Some(row) = rows.into_iter().next() {
+                    let db_call = Self::parse_db_queued_call_row(&row)?;
+                    
+                    if let Some(db_call) = db_call {
+                        // Convert DbQueuedCall to QueuedCall
+                        let call = Self::db_call_to_queued_call(&db_call)?;
+                        
+                        // Remove from queue and add to active calls
+                        tx.execute(
+                            "DELETE FROM call_queue WHERE call_id = ?1",
+                            vec![db_call.call_id.clone().into()] as Vec<limbo::Value>
+                        ).await?;
+                        
+                        let now = Utc::now().to_rfc3339();
+                        tx.execute(
+                            "INSERT INTO active_calls (call_id, agent_id, session_id, assigned_at)
+                             VALUES (?1, ?2, ?3, ?4)",
+                            vec![
+                                db_call.call_id.into(),
+                                agent_id.clone().into(),
+                                call.session_id.0.clone().into(),
+                                now.into(),
+                            ] as Vec<limbo::Value>
+                        ).await?;
+                        
+                        Ok(Some(call))
+                    } else {
+                        // Failed to parse call, unreserve agent
+                        tracing::warn!("📋 DB ASSIGNMENT: Failed to parse call, unreserving agent {}", agent_id);
+                        tx.execute(
+                            "UPDATE agents 
+                             SET status = 'AVAILABLE', current_calls = current_calls - 1
+                             WHERE agent_id = ?1",
+                            vec![agent_id.into()] as Vec<limbo::Value>
+                        ).await?;
+                        Ok(None)
+                    }
+                } else {
+                    // No calls in queue, unreserve agent
+                    tracing::warn!("📋 DB ASSIGNMENT: No calls found in queue '{}' for agent {}, unreserving agent", queue_id, agent_id);
+                    let unreserved = tx.execute(
+                        "UPDATE agents 
+                         SET status = 'AVAILABLE', current_calls = current_calls - 1
+                         WHERE agent_id = ?1",
+                        vec![agent_id.clone().into()] as Vec<limbo::Value>
+                    ).await?;
+                    tracing::info!("📋 DB ASSIGNMENT: Unreserved agent {} (updated {} rows)", agent_id, unreserved);
+                    Ok(None)
+                }
+            })
+        }).await
+    }
+    
+    /// Get queue depth
+    pub async fn get_queue_depth(&self, queue_id: &str) -> Result<usize> {
+        let params: Vec<limbo::Value> = vec![queue_id.into()];
+        let row = self.query_row(
+            "SELECT COUNT(*) FROM call_queue 
+             WHERE queue_id = ?1 AND expires_at > datetime('now')",
+            params
+        ).await?;
+        
+        if let Some(row) = row {
+            let count = value_to_i64(&row.get_value(0)?)?;
+            Ok(count as usize)
+        } else {
+            Ok(0)
+        }
+    }
+    
+    /// Get available assignments (returns agent_id, call_id, session_id tuples)
+    pub async fn get_available_assignments(&self, queue_id: &str) -> Result<Vec<(String, String, String)>> {
+        // Limbo doesn't support complex queries, so we'll do this in steps
+        
+        // Step 1: Get available agents
+        let agent_rows = self.query(
+            "SELECT agent_id FROM agents 
+             WHERE status = 'AVAILABLE' 
+             AND current_calls < max_calls
+             LIMIT 10",
+            ()
+        ).await?;
+        
+        if agent_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Step 2: Get queued calls
+        let call_rows = self.query(
+            "SELECT call_id, session_id 
+             FROM call_queue 
+             WHERE queue_id = ?1 AND expires_at > datetime('now')
+             ORDER BY priority ASC, enqueued_at ASC
+             LIMIT 10",
+            vec![queue_id.into()] as Vec<limbo::Value>
+        ).await?;
+        
+        if call_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Step 3: Check which calls are not already active
+        let mut assignments = Vec::new();
+        
+        for (agent_idx, agent_row) in agent_rows.iter().enumerate() {
+            if agent_idx >= call_rows.len() {
+                break; // No more calls to assign
+            }
+            
+            let agent_id = value_to_string(&agent_row.get_value(0)?)?;
+            let call_row = &call_rows[agent_idx];
+            let call_id = value_to_string(&call_row.get_value(0)?)?;
+            let session_id = value_to_string(&call_row.get_value(1)?)?;
+            
+            // Check if this call is already active
+            let active_check = self.query(
+                "SELECT 1 FROM active_calls WHERE call_id = ?1",
+                vec![call_id.clone().into()] as Vec<limbo::Value>
+            ).await?;
+            
+            if active_check.is_empty() {
+                // Call is not active, can be assigned
+                assignments.push((agent_id, call_id, session_id));
+            }
+        }
+        
+        Ok(assignments)
+    }
+    
+    /// Remove expired calls from queue
+    pub async fn remove_expired_calls(&self, queue_id: &str) -> Result<usize> {
+        let result = self.execute(
+            "DELETE FROM call_queue 
+             WHERE queue_id = ?1 AND expires_at <= datetime('now')",
+            vec![queue_id.into()] as Vec<limbo::Value>
+        ).await?;
+        
+        Ok(result)
+    }
+    
+    /// Parse queued call row
+    fn parse_db_queued_call_row(row: &limbo::Row) -> Result<Option<DbQueuedCall>> {
+        let enqueued_str = value_to_string(&row.get_value(5)?)?;
+        let enqueued_at = DateTime::parse_from_rfc3339(&enqueued_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse enqueued_at: {}", e))?
+            .with_timezone(&Utc);
+        
+        let last_attempt_str = value_to_optional_string(&row.get_value(7)?);
+        let last_attempt = last_attempt_str
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|dt| dt.with_timezone(&Utc));
+        
+        let expires_str = value_to_string(&row.get_value(8)?)?;
+        let expires_at = DateTime::parse_from_rfc3339(&expires_str)
+            .map_err(|e| anyhow::anyhow!("Failed to parse expires_at: {}", e))?
+            .with_timezone(&Utc);
+        
+        Ok(Some(DbQueuedCall {
+            call_id: value_to_string(&row.get_value(0)?)?,
+            session_id: value_to_string(&row.get_value(1)?)?,
+            queue_id: value_to_string(&row.get_value(2)?)?,
+            customer_info: value_to_optional_string(&row.get_value(3)?),
+            priority: value_to_i32(&row.get_value(4)?)?,
+            enqueued_at,
+            attempts: value_to_i32(&row.get_value(6)?)?,
+            last_attempt,
+            expires_at,
+        }))
+    }
+    
+    /// Convert DbQueuedCall to QueuedCall
+    fn db_call_to_queued_call(db_call: &DbQueuedCall) -> Result<QueuedCall> {
+        // Parse customer info JSON to get caller_id
+        let customer_info: serde_json::Value = if let Some(info) = &db_call.customer_info {
+            serde_json::from_str(info)?
+        } else {
+            serde_json::json!({})
+        };
+        
+        let caller_id = customer_info.get("caller_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        
+        let retry_count = customer_info.get("retry_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u8;
+        
+        Ok(QueuedCall {
+            session_id: SessionId(db_call.session_id.clone()),
+            caller_id,
+            priority: db_call.priority as u8,
+            queued_at: db_call.enqueued_at,
+            estimated_wait_time: None,
+            retry_count,
+        })
+    }
+} 

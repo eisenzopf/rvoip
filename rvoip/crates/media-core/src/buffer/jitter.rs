@@ -1,461 +1,517 @@
-use std::collections::{BTreeMap, VecDeque};
+//! Adaptive Jitter Buffer
+//!
+//! This module implements an adaptive jitter buffer for VoIP that handles
+//! packet reordering, network jitter compensation, and smooth audio playback.
+
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
-use std::cmp::{min, max};
+use tokio::sync::RwLock;
+use tracing::{debug, warn, trace};
 
-use bytes::Bytes;
-use tracing::{debug, trace, warn};
-use rvoip_rtp_core::packet::RtpPacket;
+use crate::error::{Result, BufferError};
+use crate::types::{AudioFrame, MediaPacket};
+use crate::quality::metrics::QualityMetrics;
 
-use crate::buffer::common::{BufferedPacket, BufferedFrame, JitterCalculator};
-use crate::error::{Error, Result};
-
-/// Jitter buffer operating mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JitterBufferMode {
-    /// Fixed delay (constant buffer size in ms)
-    Fixed,
-    /// Adaptive delay (changes based on network conditions)
-    Adaptive,
-}
-
-impl Default for JitterBufferMode {
-    fn default() -> Self {
-        Self::Adaptive
-    }
-}
-
-/// Configuration for the jitter buffer
+/// Jitter buffer configuration
 #[derive(Debug, Clone)]
 pub struct JitterBufferConfig {
-    /// Initial buffer size in milliseconds
-    pub initial_delay_ms: u32,
-    /// Minimum buffer size in milliseconds
-    pub min_delay_ms: u32,
-    /// Maximum buffer size in milliseconds
-    pub max_delay_ms: u32,
-    /// Operating mode (fixed or adaptive)
-    pub mode: JitterBufferMode,
-    /// Maximum number of frames to store
-    pub max_frames: usize,
-    /// Whether to generate padding for missing packets
-    pub generate_padding: bool,
-    /// Maximum time to wait for packet reordering (ms)
-    pub reordering_time_ms: u32,
-    /// Clock rate in Hz (for timestamp calculations)
-    pub clock_rate: u32,
-    /// Number of consecutive packets needed to trigger an adaptation
-    pub adaptation_trigger_count: usize,
-    /// How quickly to adapt to jitter (higher = faster) [0.0-1.0]
-    pub adaptation_rate: f32,
+    /// Initial buffer depth in frames
+    pub initial_depth: usize,
+    /// Minimum buffer depth in frames
+    pub min_depth: usize,
+    /// Maximum buffer depth in frames
+    pub max_depth: usize,
+    /// Frame duration in milliseconds
+    pub frame_duration_ms: u32,
+    /// Maximum age for late packets (ms)
+    pub max_late_packet_age_ms: u32,
+    /// Adaptation strategy
+    pub adaptation_strategy: AdaptationStrategy,
+    /// Enable statistics collection
+    pub enable_statistics: bool,
 }
 
 impl Default for JitterBufferConfig {
     fn default() -> Self {
         Self {
-            initial_delay_ms: 50,
-            min_delay_ms: 20,
-            max_delay_ms: 200,
-            mode: JitterBufferMode::default(),
-            max_frames: 100,
-            generate_padding: true,
-            reordering_time_ms: 50,
-            clock_rate: 8000, // Default to 8kHz (common for telephony)
-            adaptation_trigger_count: 5,
-            adaptation_rate: 0.2,
+            initial_depth: 4,      // 80ms at 20ms frames
+            min_depth: 2,          // 40ms minimum
+            max_depth: 20,         // 400ms maximum
+            frame_duration_ms: 20, // Standard 20ms frames
+            max_late_packet_age_ms: 100,
+            adaptation_strategy: AdaptationStrategy::Conservative,
+            enable_statistics: true,
         }
     }
 }
 
-/// Statistics for the jitter buffer
-#[derive(Debug, Clone, Default)]
-pub struct JitterBufferStats {
-    /// Number of packets received
-    pub packets_received: u64,
-    /// Number of packets played out
-    pub packets_played: u64,
-    /// Number of late packets (arrived after their playout time)
-    pub late_packets: u64,
-    /// Number of lost packets (never arrived)
-    pub lost_packets: u64,
-    /// Number of duplicate packets
-    pub duplicate_packets: u64,
-    /// Number of packets reordered
-    pub reordered_packets: u64,
-    /// Current jitter estimate in milliseconds
-    pub jitter_ms: f64,
-    /// Current buffer delay in milliseconds
-    pub current_delay_ms: u32,
-    /// Number of frames in the buffer
-    pub buffer_size: usize,
+/// Buffer adaptation strategies
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdaptationStrategy {
+    /// Conservative: slow to adapt, stable
+    Conservative,
+    /// Balanced: moderate adaptation speed
+    Balanced,
+    /// Aggressive: fast adaptation, responsive
+    Aggressive,
 }
 
-/// Jitter buffer for handling variable network packet timing
+/// Buffered frame with metadata
+#[derive(Debug, Clone)]
+struct BufferedFrame {
+    /// Audio frame data
+    frame: AudioFrame,
+    /// Arrival timestamp
+    arrival_time: Instant,
+    /// Original RTP timestamp
+    rtp_timestamp: u32,
+    /// Sequence number
+    sequence_number: u16,
+}
+
+/// Jitter buffer statistics
+#[derive(Debug, Clone, Default)]
+pub struct JitterBufferStats {
+    /// Frames received
+    pub frames_received: u64,
+    /// Frames played
+    pub frames_played: u64,
+    /// Frames dropped (late)
+    pub frames_dropped_late: u64,
+    /// Frames dropped (overflow)
+    pub frames_dropped_overflow: u64,
+    /// Current buffer depth
+    pub current_depth: usize,
+    /// Average jitter (ms)
+    pub average_jitter_ms: f32,
+    /// Maximum jitter seen (ms)
+    pub max_jitter_ms: f32,
+    /// Adaptation count
+    pub adaptation_count: u64,
+    /// Underrun count
+    pub underrun_count: u64,
+}
+
+/// Adaptive jitter buffer for smooth audio playback
 pub struct JitterBuffer {
     /// Configuration
     config: JitterBufferConfig,
+    /// Buffered frames (indexed by sequence number)
+    buffer: RwLock<BTreeMap<u16, BufferedFrame>>,
+    /// Current target buffer depth
+    target_depth: RwLock<usize>,
     /// Statistics
-    stats: JitterBufferStats,
-    /// Buffered frames, sorted by timestamp
-    frames: BTreeMap<u32, BufferedFrame>,
-    /// Order of frames for playout
-    frame_queue: VecDeque<u32>,
+    stats: RwLock<JitterBufferStats>,
     /// Next expected sequence number
-    next_sequence: Option<u16>,
-    /// Received sequence numbers in a window
-    received_sequences: Vec<u16>,
-    /// Last played out timestamp
-    last_played_timestamp: Option<u32>,
-    /// Timestamp offset for converting to playout time
-    timestamp_offset: u32,
-    /// First packet received (for initializing)
-    first_packet_received: bool,
-    /// Jitter calculator
-    jitter_calculator: JitterCalculator,
-    /// Current delay in timestamp units
-    current_delay: u32,
-    /// Adaptation counter for triggering adaptations
-    adaptation_counter: usize,
-    /// Start time
-    start_time: Instant,
+    next_sequence: RwLock<Option<u16>>,
+    /// Jitter calculation state
+    jitter_state: RwLock<JitterState>,
+    /// Last playout timestamp
+    last_playout_time: RwLock<Option<Instant>>,
+}
+
+/// Jitter calculation state
+#[derive(Debug, Default)]
+struct JitterState {
+    /// Previous packet arrival time
+    prev_arrival: Option<Instant>,
+    /// Previous RTP timestamp
+    prev_timestamp: Option<u32>,
+    /// Running jitter estimate (RFC 3550)
+    jitter: f32,
 }
 
 impl JitterBuffer {
-    /// Create a new jitter buffer with the given configuration
+    /// Create a new jitter buffer
     pub fn new(config: JitterBufferConfig) -> Self {
-        let timestamp_units_per_ms = config.clock_rate / 1000;
-        let initial_delay = config.initial_delay_ms * timestamp_units_per_ms;
+        debug!("Creating JitterBuffer with config: {:?}", config);
         
         Self {
+            target_depth: RwLock::new(config.initial_depth),
             config,
-            stats: JitterBufferStats::default(),
-            frames: BTreeMap::new(),
-            frame_queue: VecDeque::new(),
-            next_sequence: None,
-            received_sequences: Vec::with_capacity(1000),
-            last_played_timestamp: None,
-            timestamp_offset: 0,
-            first_packet_received: false,
-            jitter_calculator: JitterCalculator::new(),
-            current_delay: initial_delay,
-            adaptation_counter: 0,
-            start_time: Instant::now(),
+            buffer: RwLock::new(BTreeMap::new()),
+            stats: RwLock::new(JitterBufferStats::default()),
+            next_sequence: RwLock::new(None),
+            jitter_state: RwLock::new(JitterState::default()),
+            last_playout_time: RwLock::new(None),
         }
     }
     
-    /// Create a new jitter buffer with default configuration
-    pub fn new_default() -> Self {
-        Self::new(JitterBufferConfig::default())
-    }
-    
-    /// Add an RTP packet to the jitter buffer
-    pub fn add_packet(&mut self, packet: &RtpPacket) -> Result<()> {
-        let sequence = packet.sequence();
-        let timestamp = packet.timestamp();
-        let payload = packet.payload();
-        let marker = packet.marker();
+    /// Add a frame to the buffer
+    pub async fn add_frame(&self, packet: MediaPacket, frame: AudioFrame) -> Result<()> {
+        let arrival_time = Instant::now();
         
-        // Update stats
-        self.stats.packets_received += 1;
+        // Update jitter calculation
+        self.update_jitter(packet.timestamp, arrival_time).await;
         
-        // Check for duplicates
-        if self.is_duplicate(sequence) {
-            self.stats.duplicate_packets += 1;
+        // Check if packet is too late
+        if self.is_packet_too_late(packet.sequence_number, arrival_time).await? {
+            let mut stats = self.stats.write().await;
+            stats.frames_dropped_late += 1;
+            trace!("Dropped late packet: seq={}", packet.sequence_number);
             return Ok(());
         }
         
-        // Update next sequence if this is the first packet
-        if !self.first_packet_received {
-            self.next_sequence = Some(sequence.wrapping_add(1));
-            self.first_packet_received = true;
-            
-            // Initialize timestamp offset for playout timing
-            self.timestamp_offset = timestamp;
-        }
-        
-        // Check if packet is out of order
-        if let Some(expected) = self.next_sequence {
-            if sequence != expected {
-                // Could be packet loss or reordering
-                if self.sequence_greater_than(sequence, expected) {
-                    // Out of order in the future - we missed some packets
-                    let missed = self.sequence_distance(expected, sequence);
-                    
-                    // Update next expected sequence
-                    self.next_sequence = Some(sequence.wrapping_add(1));
-                    
-                    // Generate padding for lost packets
-                    if self.config.generate_padding {
-                        for seq in 0..missed {
-                            let lost_seq = expected.wrapping_add(seq as u16);
-                            let estimated_ts = self.estimate_timestamp(lost_seq, timestamp);
-                            self.handle_lost_packet(lost_seq, estimated_ts);
-                        }
-                    }
-                } else {
-                    // Out of order in the past - reordered packet
-                    self.stats.reordered_packets += 1;
-                    
-                    // Check if it's too late
-                    if self.is_too_late(timestamp) {
-                        self.stats.late_packets += 1;
-                        return Ok(());
-                    }
-                }
-            } else {
-                // In sequence - update next expected
-                self.next_sequence = Some(expected.wrapping_add(1));
-            }
-        }
-        
-        // Track received sequence
-        self.received_sequences.push(sequence);
-        if self.received_sequences.len() > 1000 {
-            self.received_sequences.remove(0);
-        }
-        
-        // Create buffered packet
-        let buffered_packet = BufferedPacket::new(
-            payload.clone(),
-            sequence,
-            timestamp,
-            marker,
-        );
-        
-        // Update jitter calculation
-        self.jitter_calculator.update(timestamp, buffered_packet.arrival_time, self.config.clock_rate);
-        self.stats.jitter_ms = self.jitter_calculator.jitter_ms();
-        
-        // Add to frame or create new frame
-        if let Some(frame) = self.frames.get_mut(&timestamp) {
-            // Add to existing frame
-            frame.add_packet(buffered_packet);
-        } else {
-            // Create new frame
-            let frame = BufferedFrame::new(buffered_packet);
-            self.frames.insert(timestamp, frame);
-            self.frame_queue.push_back(timestamp);
-            
-            // Keep buffer size in check
-            while self.frames.len() > self.config.max_frames {
-                if let Some(oldest_ts) = self.frame_queue.pop_front() {
-                    self.frames.remove(&oldest_ts);
-                }
-            }
-        }
-        
-        // Adapt buffer if in adaptive mode
-        if self.config.mode == JitterBufferMode::Adaptive {
-            self.adaptation_counter += 1;
-            if self.adaptation_counter >= self.config.adaptation_trigger_count {
-                self.adapt_delay();
-                self.adaptation_counter = 0;
-            }
-        }
-        
-        // Update current delay in statistics
-        self.stats.current_delay_ms = self.current_delay * 1000 / self.config.clock_rate;
-        self.stats.buffer_size = self.frames.len();
-        
-        Ok(())
-    }
-    
-    /// Get the next frame from the jitter buffer if it's ready for playout
-    pub fn get_next_frame(&mut self) -> Option<Bytes> {
-        // Nothing to play if buffer is empty
-        if self.frames.is_empty() {
-            return None;
-        }
-        
-        // Get the oldest timestamp
-        let oldest_ts = match self.frame_queue.front() {
-            Some(&ts) => ts,
-            None => return None,
+        // Create buffered frame
+        let buffered_frame = BufferedFrame {
+            frame,
+            arrival_time,
+            rtp_timestamp: packet.timestamp,
+            sequence_number: packet.sequence_number,
         };
         
-        // Check if we've waited long enough
-        let playout_point = self.get_playout_point();
-        if !self.is_ready_for_playout(oldest_ts, playout_point) {
-            return None;
-        }
-        
-        // Retrieve the frame
-        if let Some(ts) = self.frame_queue.pop_front() {
-            if let Some(frame) = self.frames.remove(&ts) {
-                // Update stats
-                self.stats.packets_played += frame.packet_count() as u64;
-                
-                // Update last played timestamp
-                self.last_played_timestamp = Some(ts);
-                
-                // Return the combined data
-                return Some(frame.data());
+        // Add to buffer
+        {
+            let mut buffer = self.buffer.write().await;
+            
+            // Check for buffer overflow
+            if buffer.len() >= self.config.max_depth {
+                // Drop oldest frame
+                if let Some((oldest_seq, _)) = buffer.iter().next() {
+                    let oldest_seq = *oldest_seq;
+                    buffer.remove(&oldest_seq);
+                    let mut stats = self.stats.write().await;
+                    stats.frames_dropped_overflow += 1;
+                    warn!("Buffer overflow, dropped frame: seq={}", oldest_seq);
+                }
             }
+            
+            buffer.insert(packet.sequence_number, buffered_frame);
         }
         
-        None
-    }
-    
-    /// Get the current jitter buffer statistics
-    pub fn stats(&self) -> &JitterBufferStats {
-        &self.stats
-    }
-    
-    /// Reset the jitter buffer
-    pub fn reset(&mut self) {
-        self.frames.clear();
-        self.frame_queue.clear();
-        self.next_sequence = None;
-        self.received_sequences.clear();
-        self.last_played_timestamp = None;
-        self.timestamp_offset = 0;
-        self.first_packet_received = false;
-        self.jitter_calculator.reset();
-        self.adaptation_counter = 0;
-        
-        let timestamp_units_per_ms = self.config.clock_rate / 1000;
-        self.current_delay = self.config.initial_delay_ms * timestamp_units_per_ms;
-        
-        self.stats = JitterBufferStats::default();
-        self.start_time = Instant::now();
-    }
-    
-    /// Check if a sequence number is a duplicate
-    fn is_duplicate(&self, sequence: u16) -> bool {
-        self.received_sequences.contains(&sequence)
-    }
-    
-    /// Check if a timestamp is too late for playback
-    fn is_too_late(&self, timestamp: u32) -> bool {
-        if let Some(last_ts) = self.last_played_timestamp {
-            return timestamp <= last_ts;
-        }
-        false
-    }
-    
-    /// Get the current playout point
-    fn get_playout_point(&self) -> u32 {
-        // The playout point is the current time plus the buffer delay
-        let elapsed = self.start_time.elapsed();
-        let elapsed_ms = elapsed.as_millis() as u32;
-        let elapsed_units = elapsed_ms * self.config.clock_rate / 1000;
-        
-        // Add timestamp offset and subtract the delay
-        let mut playout_point = self.timestamp_offset.wrapping_add(elapsed_units);
-        playout_point = playout_point.wrapping_sub(self.current_delay);
-        
-        playout_point
-    }
-    
-    /// Check if a frame is ready for playout
-    fn is_ready_for_playout(&self, timestamp: u32, playout_point: u32) -> bool {
-        // We can play this frame if its timestamp is less than or equal to the playout point
-        self.sequence_greater_than(playout_point, timestamp)
-    }
-    
-    /// Handle a lost packet
-    fn handle_lost_packet(&mut self, sequence: u16, timestamp: u32) {
-        self.stats.lost_packets += 1;
-        
-        // Create a padding packet
-        let padding_packet = BufferedPacket::padding(sequence, timestamp);
-        
-        // Add to frame or create new frame
-        if let Some(frame) = self.frames.get_mut(&timestamp) {
-            frame.add_packet(padding_packet);
-        } else {
-            let frame = BufferedFrame::new(padding_packet);
-            self.frames.insert(timestamp, frame);
-            self.frame_queue.push_back(timestamp);
-        }
-    }
-    
-    /// Estimate the timestamp for a sequence number
-    fn estimate_timestamp(&self, sequence: u16, reference_ts: u32) -> u32 {
-        // Try to find a nearby packet to estimate from
-        for &seq in &self.received_sequences {
-            if let Some(frame) = self.frame_queue.iter()
-                .filter_map(|&ts| self.frames.get(&ts))
-                .find(|f| f.contains_sequence(seq))
-            {
-                // Found a reference frame, estimate based on sequence difference
-                let seq_diff = self.sequence_distance(seq, sequence);
-                // In timestamp units, each packet is typically a fixed duration
-                // For 20ms frames at 8kHz, this would be 160 timestamp units
-                const TIMESTAMP_UNITS_PER_PACKET: u32 = 160;
-                return frame.timestamp.wrapping_add(seq_diff as u32 * TIMESTAMP_UNITS_PER_PACKET);
-            }
+        // Update statistics
+        {
+            let mut stats = self.stats.write().await;
+            stats.frames_received += 1;
+            stats.current_depth = self.buffer.read().await.len();
         }
         
-        // Fallback - use the reference timestamp
-        reference_ts
-    }
-    
-    /// Compare sequence numbers accounting for wraparound
-    fn sequence_greater_than(&self, a: u16, b: u16) -> bool {
-        // RFC 3550 algorithm for sequence comparison
-        (a > b && a - b < 32768) || (a < b && b - a > 32768)
-    }
-    
-    /// Calculate the distance between two sequence numbers
-    fn sequence_distance(&self, a: u16, b: u16) -> u32 {
-        if a <= b {
-            (b - a) as u32
-        } else {
-            (65536 - a as u32) + b as u32
-        }
-    }
-    
-    /// Adapt the buffer delay based on current jitter
-    fn adapt_delay(&mut self) {
-        // Current jitter measured in timestamp units
-        let jitter_units = (self.stats.jitter_ms * self.config.clock_rate as f64 / 1000.0) as u32;
-        
-        // Target delay is jitter plus a safety margin
-        let safety_factor = 2.0;
-        let target_delay = (jitter_units as f32 * safety_factor as f32) as u32;
-        
-        // Clamp to configured min/max
-        let min_delay = self.config.min_delay_ms * self.config.clock_rate / 1000;
-        let max_delay = self.config.max_delay_ms * self.config.clock_rate / 1000;
-        let target_delay = max(min_delay, min(target_delay, max_delay));
-        
-        // Slowly adapt to the target
-        let delta = target_delay as f32 - self.current_delay as f32;
-        let adjustment = delta * self.config.adaptation_rate;
-        self.current_delay = (self.current_delay as f32 + adjustment) as u32;
-        
-        // Update stats
-        self.stats.current_delay_ms = self.current_delay * 1000 / self.config.clock_rate;
-        
-        trace!("Adapted jitter buffer: jitter={}ms, delay={}ms", 
-               self.stats.jitter_ms, self.stats.current_delay_ms);
-    }
-    
-    /// Set the buffer mode
-    pub fn set_mode(&mut self, mode: JitterBufferMode) {
-        self.config.mode = mode;
-    }
-    
-    /// Get the current buffer mode
-    pub fn mode(&self) -> JitterBufferMode {
-        self.config.mode
-    }
-    
-    /// Set fixed buffer delay
-    pub fn set_fixed_delay(&mut self, delay_ms: u32) -> Result<()> {
-        if delay_ms < self.config.min_delay_ms || delay_ms > self.config.max_delay_ms {
-            return Err(Error::InvalidParameter(format!(
-                "Delay must be between {} and {} ms", 
-                self.config.min_delay_ms, 
-                self.config.max_delay_ms
-            )));
-        }
-        
-        self.config.mode = JitterBufferMode::Fixed;
-        let delay_units = delay_ms * self.config.clock_rate / 1000;
-        self.current_delay = delay_units;
-        self.stats.current_delay_ms = delay_ms;
+        trace!("Added frame to jitter buffer: seq={}, buffer_depth={}", 
+               packet.sequence_number, self.get_current_depth().await);
         
         Ok(())
+    }
+    
+    /// Get the next frame for playout
+    pub async fn get_next_frame(&self) -> Result<Option<AudioFrame>> {
+        let next_seq = {
+            let next_sequence = self.next_sequence.read().await;
+            *next_sequence
+        };
+        
+        // If we don't have a next sequence, start with the oldest in buffer
+        let target_seq = if let Some(seq) = next_seq {
+            seq
+        } else {
+            let buffer = self.buffer.read().await;
+            if let Some((&first_seq, _)) = buffer.iter().next() {
+                let mut next_sequence = self.next_sequence.write().await;
+                *next_sequence = Some(first_seq);
+                first_seq
+            } else {
+                return Ok(None); // Buffer empty
+            }
+        };
+        
+        // Check if we're ready for playout
+        if !self.is_ready_for_playout().await {
+            return Ok(None); // Not enough frames buffered
+        }
+        
+        // Try to get the next expected frame
+        let frame = {
+            let mut buffer = self.buffer.write().await;
+            if let Some(buffered_frame) = buffer.remove(&target_seq) {
+                Some(buffered_frame.frame)
+            } else {
+                // Frame missing, check for gaps
+                self.handle_missing_frame(target_seq, &mut buffer).await
+            }
+        };
+        
+        // Update next sequence number
+        {
+            let mut next_sequence = self.next_sequence.write().await;
+            *next_sequence = Some(target_seq.wrapping_add(1));
+        }
+        
+        // Update statistics and timestamps
+        if frame.is_some() {
+            let mut stats = self.stats.write().await;
+            stats.frames_played += 1;
+            
+            let mut last_playout = self.last_playout_time.write().await;
+            *last_playout = Some(Instant::now());
+        }
+        
+        // Adapt buffer if needed
+        self.adapt_buffer_depth().await?;
+        
+        Ok(frame)
+    }
+    
+    /// Check if buffer is ready for playout
+    async fn is_ready_for_playout(&self) -> bool {
+        let buffer = self.buffer.read().await;
+        let target_depth = *self.target_depth.read().await;
+        
+        buffer.len() >= target_depth
+    }
+    
+    /// Handle missing frame (gap in sequence)
+    async fn handle_missing_frame(
+        &self,
+        missing_seq: u16,
+        buffer: &mut BTreeMap<u16, BufferedFrame>,
+    ) -> Option<AudioFrame> {
+        // Look ahead for the next available frame
+        let next_available = buffer
+            .range(missing_seq.wrapping_add(1)..)
+            .next()
+            .map(|(&seq, frame)| (seq, frame.clone()));
+        
+        if let Some((next_seq, buffered_frame)) = next_available {
+            // Use the next available frame and remove it
+            buffer.remove(&next_seq);
+            
+            warn!("Missing frame seq={}, using seq={} instead", missing_seq, next_seq);
+            
+            // Could implement packet loss concealment here
+            Some(buffered_frame.frame)
+        } else {
+            // No frames available, underrun
+            let mut stats = self.stats.write().await;
+            stats.underrun_count += 1;
+            warn!("Buffer underrun at seq={}", missing_seq);
+            None
+        }
+    }
+    
+    /// Update jitter calculation (RFC 3550)
+    async fn update_jitter(&self, rtp_timestamp: u32, arrival_time: Instant) {
+        let mut jitter_state = self.jitter_state.write().await;
+        
+        if let (Some(prev_arrival), Some(prev_timestamp)) = 
+            (jitter_state.prev_arrival, jitter_state.prev_timestamp) {
+            
+            // Calculate arrival time difference (in RTP timestamp units)
+            let arrival_diff = arrival_time.duration_since(prev_arrival).as_millis() as i32;
+            let timestamp_diff = rtp_timestamp.wrapping_sub(prev_timestamp) as i32;
+            
+            // RFC 3550 jitter calculation
+            let d = (arrival_diff - timestamp_diff).abs() as f32;
+            jitter_state.jitter += (d - jitter_state.jitter) / 16.0;
+            
+            // Update statistics
+            {
+                let mut stats = self.stats.write().await;
+                stats.average_jitter_ms = jitter_state.jitter;
+                if jitter_state.jitter > stats.max_jitter_ms {
+                    stats.max_jitter_ms = jitter_state.jitter;
+                }
+            }
+        }
+        
+        jitter_state.prev_arrival = Some(arrival_time);
+        jitter_state.prev_timestamp = Some(rtp_timestamp);
+    }
+    
+    /// Check if packet is too late to be useful
+    async fn is_packet_too_late(&self, sequence_number: u16, arrival_time: Instant) -> Result<bool> {
+        let next_seq = self.next_sequence.read().await;
+        
+        if let Some(expected_seq) = *next_seq {
+            // Check sequence number distance
+            let seq_distance = sequence_number.wrapping_sub(expected_seq);
+            
+            // If sequence number is very old (wrapped around), it's too late
+            if seq_distance > 32768 {
+                return Ok(true);
+            }
+        }
+        
+        // Check time-based lateness
+        if let Some(last_playout) = *self.last_playout_time.read().await {
+            let age = arrival_time.duration_since(last_playout);
+            if age.as_millis() > self.config.max_late_packet_age_ms as u128 {
+                return Ok(true);
+            }
+        }
+        
+        Ok(false)
+    }
+    
+    /// Adapt buffer depth based on network conditions
+    async fn adapt_buffer_depth(&self) -> Result<()> {
+        let jitter = {
+            let jitter_state = self.jitter_state.read().await;
+            jitter_state.jitter
+        };
+        
+        let current_target = *self.target_depth.read().await;
+        let frame_duration = self.config.frame_duration_ms as f32;
+        
+        // Calculate desired depth based on jitter
+        let jitter_frames = (jitter / frame_duration).ceil() as usize;
+        let desired_depth = match self.config.adaptation_strategy {
+            AdaptationStrategy::Conservative => {
+                (current_target + jitter_frames * 2).max(self.config.min_depth)
+            }
+            AdaptationStrategy::Balanced => {
+                (jitter_frames * 3 + 2).max(self.config.min_depth)
+            }
+            AdaptationStrategy::Aggressive => {
+                (jitter_frames * 2 + 1).max(self.config.min_depth)
+            }
+        }.min(self.config.max_depth);
+        
+        // Only adapt if change is significant
+        if desired_depth != current_target && 
+           (desired_depth as i32 - current_target as i32).abs() > 1 {
+            
+            let mut target_depth = self.target_depth.write().await;
+            *target_depth = desired_depth;
+            
+            let mut stats = self.stats.write().await;
+            stats.adaptation_count += 1;
+            
+            debug!("Adapted jitter buffer depth: {} -> {} (jitter: {:.1}ms)", 
+                   current_target, desired_depth, jitter);
+        }
+        
+        Ok(())
+    }
+    
+    /// Get current buffer depth
+    pub async fn get_current_depth(&self) -> usize {
+        self.buffer.read().await.len()
+    }
+    
+    /// Get target buffer depth
+    pub async fn get_target_depth(&self) -> usize {
+        *self.target_depth.read().await
+    }
+    
+    /// Get buffer statistics
+    pub async fn get_statistics(&self) -> JitterBufferStats {
+        let mut stats = self.stats.read().await.clone();
+        stats.current_depth = self.get_current_depth().await;
+        stats
+    }
+    
+    /// Reset the buffer
+    pub async fn reset(&self) {
+        {
+            let mut buffer = self.buffer.write().await;
+            buffer.clear();
+        }
+        
+        {
+            let mut next_sequence = self.next_sequence.write().await;
+            *next_sequence = None;
+        }
+        
+        {
+            let mut target_depth = self.target_depth.write().await;
+            *target_depth = self.config.initial_depth;
+        }
+        
+        {
+            let mut jitter_state = self.jitter_state.write().await;
+            *jitter_state = JitterState::default();
+        }
+        
+        debug!("Jitter buffer reset");
+    }
+    
+    /// Check if buffer is empty
+    pub async fn is_empty(&self) -> bool {
+        self.buffer.read().await.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{SampleRate, MediaType};
+    
+    #[tokio::test]
+    async fn test_jitter_buffer_creation() {
+        let config = JitterBufferConfig::default();
+        let buffer = JitterBuffer::new(config);
+        
+        assert_eq!(buffer.get_current_depth().await, 0);
+        assert_eq!(buffer.get_target_depth().await, 4);
+        assert!(buffer.is_empty().await);
+    }
+    
+    #[tokio::test]
+    async fn test_frame_addition_and_retrieval() {
+        let config = JitterBufferConfig {
+            initial_depth: 2,
+            min_depth: 1,
+            max_depth: 10,
+            ..Default::default()
+        };
+        let buffer = JitterBuffer::new(config);
+        
+        // Create test frames
+        let frame1 = AudioFrame::new(vec![100; 160], 8000, 1, 1000);
+        let frame2 = AudioFrame::new(vec![200; 160], 8000, 1, 1001);
+        let frame3 = AudioFrame::new(vec![300; 160], 8000, 1, 1002);
+        
+        let packet1 = MediaPacket {
+            payload: vec![1, 2, 3].into(),
+            payload_type: 0,
+            sequence_number: 1000,
+            timestamp: 8000,
+            ssrc: 12345,
+            received_at: std::time::Instant::now(),
+        };
+        
+        let packet2 = MediaPacket { sequence_number: 1001, timestamp: 8160, ..packet1.clone() };
+        let packet3 = MediaPacket { sequence_number: 1002, timestamp: 8320, ..packet1.clone() };
+        
+        // Add first frame
+        buffer.add_frame(packet1, frame1).await.unwrap();
+        
+        // Should not be ready for playout yet (need target_depth frames)
+        assert!(buffer.get_next_frame().await.unwrap().is_none());
+        
+        // Add second frame - now should reach target depth
+        buffer.add_frame(packet2, frame2).await.unwrap();
+        
+        // Should be able to get frames now (reached target depth of 2)
+        let retrieved = buffer.get_next_frame().await.unwrap();
+        assert!(retrieved.is_some());
+        
+        // Add third frame
+        buffer.add_frame(packet3, frame3).await.unwrap();
+        
+        let stats = buffer.get_statistics().await;
+        assert_eq!(stats.frames_received, 3);
+        assert_eq!(stats.frames_played, 1);
+    }
+    
+    #[tokio::test]
+    async fn test_buffer_reset() {
+        let buffer = JitterBuffer::new(JitterBufferConfig::default());
+        
+        let frame = AudioFrame::new(vec![100; 160], 8000, 1, 1000);
+        let packet = MediaPacket {
+            payload: vec![1, 2, 3].into(),
+            payload_type: 0,
+            sequence_number: 1000,
+            timestamp: 8000,
+            ssrc: 12345,
+            received_at: std::time::Instant::now(),
+        };
+        
+        buffer.add_frame(packet, frame).await.unwrap();
+        assert!(!buffer.is_empty().await);
+        
+        buffer.reset().await;
+        assert!(buffer.is_empty().await);
+        assert_eq!(buffer.get_target_depth().await, 4); // Reset to initial
     }
 } 

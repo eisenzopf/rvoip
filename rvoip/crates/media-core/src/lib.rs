@@ -1,104 +1,124 @@
 //! # Media Core library for the RVOIP project
 //! 
-//! `media-core` is the media processing engine for the rvoip stack. It handles audio/video codec
-//! management, media session coordination, and acts as the bridge between signaling (`session-core`)
-//! and media transport (`rtp-core`).
+//! `media-core` provides comprehensive media processing capabilities for SIP servers.
+//! It focuses exclusively on media processing, codec management, and media session
+//! coordination while integrating cleanly with `session-core` and `rtp-core`.
 //!
-//! This crate provides:
+//! ## Core Components
 //! 
-//! - Media session management
-//! - Codec implementations (Opus, G.711, G.722, etc.)
-//! - Audio processing (echo cancellation, noise suppression, etc.)
-//! - RTP integration (packetization, depacketization)
-//! - Media quality monitoring and adaptation
-//! - SDP media negotiation support
+//! - **MediaEngine**: Central orchestrator for all media processing
+//! - **MediaSession**: Per-dialog media management
+//! - **Codec Framework**: Audio codec support (G.711, Opus, etc.)
+//! - **Audio Processing**: AEC, AGC, VAD, noise suppression
+//! - **Quality Monitoring**: Real-time quality metrics and adaptation
 //!
-//! ## Architecture
+//! ## Quick Start
 //!
-//! The library is organized into several modules:
-//!
-//! - `session`: Media session management
-//! - `codec`: Codec framework and implementations
-//! - `engine`: Audio/video processing engines
-//! - `processing`: Media signal processing
-//! - `buffer`: Media buffer management
-//! - `quality`: Media quality monitoring
-//! - `rtp`: RTP integration
-//! - `security`: Media security (SRTP, DTLS)
-//! - `sync`: Media synchronization
-//! - `integration`: Integration with other components
+//! ```rust
+//! use rvoip_media_core::prelude::*;
+//! 
+//! #[tokio::main]
+//! async fn main() -> Result<()> {
+//!     // Create and start media engine
+//!     let config = MediaEngineConfig::default();
+//!     let engine = MediaEngine::new(config).await?;
+//!     engine.start().await?;
+//!     
+//!     // Create media session for SIP dialog
+//!     let dialog_id = DialogId::new("call-123");
+//!     let params = MediaSessionParams::audio_only()
+//!         .with_preferred_codec(payload_types::PCMU);
+//!     let session = engine.create_media_session(dialog_id, params).await?;
+//!     
+//!     // Get codec capabilities for SDP negotiation
+//!     let capabilities = engine.get_supported_codecs();
+//!     
+//!     // Clean shutdown
+//!     engine.stop().await?;
+//!     Ok(())
+//! }
+//! ```
 
-// Error handling
+// Core modules
 pub mod error;
-
-// Core modules for media handling
-pub mod session;
-pub mod codec;
+pub mod types;
 pub mod engine;
-pub mod processing;
-pub mod buffer;
-pub mod quality;
-pub mod rtp;
-pub mod security;
-pub mod sync;
-pub mod integration;
+pub mod session;     // New session module
+pub mod processing;  // New processing pipeline module
+pub mod quality;     // New quality monitoring module
+pub mod integration; // New integration module
+pub mod buffer;      // New buffer module
+pub mod performance; // New performance optimization module
 
-// Re-export common types
+// Working modules from old implementation (to be refactored)
+pub mod codec;
+pub mod relay;
+
+// Re-export core types
 pub use error::{Error, Result};
-pub use codec::Codec;
-pub use security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
-pub use security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole, TransportConn};
-// Re-export rtp-core types for convenience
-pub use security::{
-    SrtpContext, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
-    SrtpCryptoSuite, DtlsVersion
+pub use types::*;
+
+// Re-export RTP statistics types from rtp-core
+pub use rvoip_rtp_core::session::{RtpSessionStats, RtpStreamStats};
+
+// Re-export engine components
+pub use engine::{
+    MediaEngine, 
+    MediaEngineConfig, 
+    EngineCapabilities,
+    MediaSessionParams,
+    MediaSessionHandle,
+    EngineState,
 };
 
-use std::net::SocketAddr;
-use std::io;
+// NEW: Enhanced configuration exports from media_engine
+pub use engine::media_engine::{
+    PerformanceLevel,
+    AdvancedProcessorFactory,
+};
+
+// Re-export session components
+pub use session::{
+    MediaSession,
+    MediaSessionConfig,
+    MediaSessionState,
+    MediaSessionEvent as SessionEvent, // Rename to avoid conflict
+    MediaSessionEventType,
+};
+
+// Re-export integration components
+pub use integration::{
+    RtpBridge,
+    RtpBridgeConfig,
+    SessionBridge,
+    SessionBridgeConfig,
+    IntegrationEvent,
+    IntegrationEventType,
+};
+
+// Legacy exports (will be replaced in Phase 2)
+pub use codec::{Codec, CodecRegistry};
+pub use relay::{
+    MediaSessionController,
+    MediaConfig,
+    MediaSessionStatus,
+    MediaSessionInfo,
+    G711PcmuCodec,
+    G711PcmaCodec,
+};
+
+// NEW: Enhanced configuration re-exports
+pub use engine::config::{
+    PerformanceConfig,
+    AdvancedProcessingConfig,
+    AudioConfig,
+    CodecConfig,
+    QualityConfig,
+    BufferConfig,
+};
 
 /// Media sample type (raw audio data)
 pub type Sample = i16;
-
-/// PCM sample rate in Hz
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SampleRate {
-    /// 8kHz (narrowband)
-    Rate8000 = 8000,
-    /// 16kHz (wideband)
-    Rate16000 = 16000,
-    /// 32kHz
-    Rate32000 = 32000,
-    /// 44.1kHz (CD quality)
-    Rate44100 = 44100,
-    /// 48kHz
-    Rate48000 = 48000,
-}
-
-impl SampleRate {
-    /// Get the sample rate in Hz
-    pub fn as_hz(&self) -> u32 {
-        *self as u32
-    }
-    
-    /// Create from a raw Hz value, defaulting to 8kHz if not recognized
-    pub fn from_hz(hz: u32) -> Self {
-        match hz {
-            8000 => Self::Rate8000,
-            16000 => Self::Rate16000,
-            32000 => Self::Rate32000,
-            44100 => Self::Rate44100,
-            48000 => Self::Rate48000,
-            _ => Self::Rate8000, // Default to 8kHz
-        }
-    }
-}
-
-impl Default for SampleRate {
-    fn default() -> Self {
-        Self::Rate8000 // Default to 8kHz (common for telephony)
-    }
-}
 
 /// Audio format (channels, bit depth, sample rate)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +128,7 @@ pub struct AudioFormat {
     /// Bits per sample (typically 8, 16, or 32)
     pub bit_depth: u8,
     /// Sample rate in Hz
-    pub sample_rate: SampleRate,
+    pub sample_rate: crate::types::SampleRate,
 }
 
 impl Default for AudioFormat {
@@ -116,14 +136,14 @@ impl Default for AudioFormat {
         Self {
             channels: 1,         // Default to mono
             bit_depth: 16,       // Default to 16-bit
-            sample_rate: SampleRate::default(),
+            sample_rate: crate::types::SampleRate::default(),
         }
     }
 }
 
 impl AudioFormat {
     /// Create a new audio format
-    pub fn new(channels: u8, bit_depth: u8, sample_rate: SampleRate) -> Self {
+    pub fn new(channels: u8, bit_depth: u8, sample_rate: crate::types::SampleRate) -> Self {
         Self {
             channels,
             bit_depth,
@@ -132,18 +152,18 @@ impl AudioFormat {
     }
     
     /// Create a new mono 16-bit format with the given sample rate
-    pub fn mono_16bit(sample_rate: SampleRate) -> Self {
+    pub fn mono_16bit(sample_rate: crate::types::SampleRate) -> Self {
         Self::new(1, 16, sample_rate)
     }
     
     /// Create a new stereo 16-bit format with the given sample rate
-    pub fn stereo_16bit(sample_rate: SampleRate) -> Self {
+    pub fn stereo_16bit(sample_rate: crate::types::SampleRate) -> Self {
         Self::new(2, 16, sample_rate)
     }
     
     /// Standard narrowband telephony format (mono, 16-bit, 8kHz)
     pub fn telephony() -> Self {
-        Self::mono_16bit(SampleRate::Rate8000)
+        Self::mono_16bit(crate::types::SampleRate::Rate8000)
     }
 }
 
@@ -178,28 +198,181 @@ impl AudioBuffer {
 
 /// Prelude module with commonly used types
 pub mod prelude {
+    // Core types
     pub use crate::{
         Error, 
         Result,
-        Sample,
+        DialogId,
+        MediaSessionId,
+        PayloadType,
+        AudioFrame,
+        MediaPacket,
+        MediaType,
+        MediaDirection,
         SampleRate,
-        AudioFormat,
-        AudioBuffer,
     };
     
-    pub use crate::codec::Codec;
-    pub use crate::security::srtp::{SrtpSession, SrtpConfig, SrtpKeys};
-    pub use crate::security::dtls::{DtlsConnection, DtlsConfig, DtlsEvent, DtlsRole};
-    pub use crate::security::{
-        SrtpContext, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
-        SrtpCryptoSuite, DtlsVersion
+    // RTP statistics types
+    pub use rvoip_rtp_core::session::{RtpSessionStats, RtpStreamStats};
+    
+    // Engine components
+    pub use crate::engine::{
+        MediaEngine,
+        MediaEngineConfig,
+        EngineCapabilities,
+        MediaSessionParams,
+        MediaSessionHandle,
+        EngineState,
     };
     
-    // These will be available once the modules are implemented
-    // pub use crate::session::{
-    //     MediaSession,
-    //     MediaDirection,
-    //     MediaType,
-    //     MediaState,
-    // };
+    // NEW: Enhanced configuration and factory from media_engine
+    pub use crate::engine::media_engine::{
+        PerformanceLevel,
+        AdvancedProcessorFactory,
+    };
+    
+    // Session components
+    pub use crate::session::{
+        MediaSession,
+        MediaSessionConfig,
+        MediaSessionState,
+        MediaSessionEvent as SessionEvent, // Rename to avoid conflict
+        MediaSessionEventType,
+    };
+    
+    // Integration components
+    pub use crate::integration::{
+        RtpBridge,
+        RtpBridgeConfig,
+        SessionBridge,
+        SessionBridgeConfig,
+        IntegrationEvent,
+        IntegrationEventType,
+    };
+    
+    // Processing pipeline components
+    pub use crate::processing::{
+        ProcessingPipeline,
+        ProcessingConfig,
+        AudioProcessor,
+        AudioProcessingConfig,
+        AudioProcessingResult,
+        VoiceActivityDetector,
+        VadConfig,
+        VadResult,
+        AutomaticGainControl,
+        AgcConfig,
+        AgcResult,
+        AcousticEchoCanceller,
+        AecConfig,
+        AecResult,
+        FormatConverter,
+        ConversionParams,
+    };
+    
+    // Conference audio mixing components (Phase 5)
+    pub use crate::processing::audio::{
+        AudioMixer,
+        AudioStreamManager,
+        AudioStreamConfig,
+    };
+    
+    // Quality monitoring components
+    pub use crate::quality::{
+        QualityMonitor,
+        QualityMonitorConfig,
+        QualityMetrics,
+        SessionMetrics,
+        OverallMetrics,
+        QualityAdjustment,
+        AdaptationEngine,
+        AdaptationStrategy,
+    };
+    
+    // Buffer components
+    pub use crate::buffer::{
+        JitterBuffer,
+        JitterBufferConfig,
+        JitterBufferStats,
+        AdaptiveBuffer,
+        AdaptiveConfig,
+        FrameBuffer,
+        FrameBufferConfig,
+        RingBuffer,
+        RingBufferError,
+    };
+    
+    // Audio codec components
+    pub use crate::codec::audio::{
+        G711Codec,
+        G711Config,
+        G711Variant,
+        OpusCodec,
+        OpusConfig,
+        OpusApplication,
+        G729Codec,
+        G729Config,
+        G729Annexes,
+    };
+    
+    // Codec transcoding components
+    pub use crate::codec::{
+        Transcoder,
+        TranscodingPath,
+        TranscodingStats,
+    };
+    
+    // Payload type constants for convenience
+    pub use crate::types::payload_types;
+    
+    // Conference types
+    pub use crate::types::conference::{
+        ParticipantId,
+        AudioStream,
+        ConferenceMixingConfig,
+        MixingQuality,
+        MixedAudioOutput,
+        ConferenceMixingStats,
+        ConferenceError,
+        ConferenceMixingEvent,
+        ConferenceResult,
+    };
+    
+    // Performance optimization components
+    pub use crate::performance::zero_copy::{ZeroCopyAudioFrame, SharedAudioBuffer};
+    pub use crate::performance::pool::{AudioFramePool, PooledAudioFrame, PoolConfig};
+    pub use crate::performance::metrics::{PerformanceMetrics, BenchmarkResults};
+    pub use crate::performance::simd::SimdProcessor;
+    
+    // Advanced v2 processor components (Phase 1.3)
+    pub use crate::processing::audio::{
+        AdvancedVoiceActivityDetector, 
+        AdvancedVadConfig, 
+        AdvancedVadResult,
+        AdvancedAutomaticGainControl, 
+        AdvancedAgcConfig, 
+        AdvancedAgcResult,
+        AdvancedAcousticEchoCanceller, 
+        AdvancedAecConfig, 
+        AdvancedAecResult,
+    };
+    
+    // Session controller advanced processing (Phase 1.3)
+    pub use crate::relay::controller::{
+        AdvancedProcessorSet,
+        AdvancedProcessorConfig,
+    };
+    
+    // Legacy types (temporary)
+    pub use crate::codec::{Codec, CodecRegistry};
+    
+    // NEW: Enhanced configuration types
+    pub use crate::engine::config::{
+        PerformanceConfig,
+        AdvancedProcessingConfig,
+        AudioConfig,
+        CodecConfig,
+        QualityConfig,
+        BufferConfig,
+    };
 } 

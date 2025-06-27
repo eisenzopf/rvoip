@@ -3,8 +3,8 @@
 // to-param = tag-param / generic-param
 
 // TODO: Future improvements needed:
-// 1. Enhance display-name parser to properly handle unquoted display names with multiple tokens
-//    separated by whitespace (current implementation requires quoting for multi-word display names)
+// 1. ✅ COMPLETED: Enhanced display-name parser to properly handle unquoted display names with multiple tokens
+//    separated by whitespace (RFC 3261 Section 25.1 compliance implemented)
 // 2. Add more comprehensive parameter validation for semantic constraints beyond syntax
 //    (e.g., validate tag values format constraints if any exist in the RFC)
 
@@ -248,20 +248,19 @@ mod tests {
             }
         }
         
-        // Test with unquoted display name (this may not work if spaces aren't handled correctly)
+        // Test with unquoted display name (now works correctly with RFC 3261 compliance!)
         let input = b"The User <sip:user@example.com>;tag=941683";
         let result = parse_to(input);
         if let Ok((rem, parsed)) = result {
             assert!(rem.is_empty());
-            assert_eq!(parsed.0.display_name, Some("The".to_string())); // Note: only "The" should be parsed as display name
+            // After our RFC 3261 fix, this now correctly parses the full "The User" display name
+            assert_eq!(parsed.0.display_name, Some("The User".to_string()));
             assert_eq!(parsed.0.uri.scheme, Scheme::Sip);
             assert_eq!(parsed.0.uri.host.to_string(), "example.com");
             assert_eq!(parsed.0.params.len(), 1);
             assert!(parsed.0.params.contains(&Param::Tag("941683".to_string())));
         } else {
-            // This is expected to fail with the current parser implementation
-            // since "The User" has a space and would need quotes
-            println!("Note: Unquoted display name with spaces failed as expected: {:?}", result);
+            panic!("Multi-token display name parsing should now work with RFC 3261 compliance: {:?}", result);
         }
         
         // Test RFC 3261 example 2 (no display name)
@@ -344,6 +343,60 @@ mod tests {
             },
             Err(e) => {
                 panic!("Failed to parse RFC example 2: {:?}", e);
+            }
+        }
+    }
+
+    // Test the specific SIPp To header format that was also failing
+    #[test]
+    fn test_parse_to_sipp_format() {
+        // Test the exact To header format that SIPp sends - this was failing before our fix
+        let input1 = b"Test User <sip:test@127.0.0.1:5062>";
+        let result1 = parse_to(input1);
+        match result1 {
+            Ok((rem, parsed)) => {
+                assert!(rem.is_empty());
+                let addr = parsed.0;
+                assert_eq!(addr.display_name, Some("Test User".to_string())); // Should now work!
+                assert_eq!(addr.uri.scheme, Scheme::Sip);
+                assert_eq!(addr.uri.user.as_deref(), Some("test"));
+                assert_eq!(addr.uri.host.to_string(), "127.0.0.1");
+                assert_eq!(addr.uri.port, Some(5062));
+                assert!(addr.params.is_empty());
+            },
+            Err(e) => {
+                panic!("Failed to parse SIPp To header: {:?}", e);
+            }
+        }
+        
+        // Test other multi-token display names that should work now
+        let input2 = b"Sales Department <sip:sales@company.com>";
+        let result2 = parse_to(input2);
+        match result2 {
+            Ok((rem, parsed)) => {
+                assert!(rem.is_empty());
+                assert_eq!(parsed.0.display_name, Some("Sales Department".to_string()));
+            },
+            Err(e) => {
+                panic!("Failed to parse multi-token To header: {:?}", e);
+            }
+        }
+        
+        // Test the old broken behavior is now fixed
+        let input3 = b"The User <sip:user@example.com>;tag=941683";
+        let result3 = parse_to(input3);
+        match result3 {
+            Ok((rem, parsed)) => {
+                assert!(rem.is_empty());
+                // Before our fix, this would only parse "The" - now it should parse "The User"
+                assert_eq!(parsed.0.display_name, Some("The User".to_string()));
+                assert_eq!(parsed.0.uri.scheme, Scheme::Sip);
+                assert_eq!(parsed.0.uri.host.to_string(), "example.com");
+                assert_eq!(parsed.0.params.len(), 1);
+                assert!(parsed.0.params.contains(&Param::Tag("941683".to_string())));
+            },
+            Err(e) => {
+                panic!("Failed to parse multi-token To header with tag: {:?}", e);
             }
         }
     }

@@ -36,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 marker: false,
                 payload_type: 8,
                 ssrc: 12345,
+                csrcs: Vec::new(),
             };
             
             let client_id = format!("test-client-{}", i);

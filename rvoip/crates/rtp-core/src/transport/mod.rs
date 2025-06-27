@@ -85,9 +85,19 @@ impl Default for RtpTransportConfig {
             symmetric_rtp: true,
             rtcp_mux: true, // Enable by default as it's the modern approach
             session_id: None,
-            use_port_allocator: true,
+            // Don't use port allocator by default - let the caller decide
+            use_port_allocator: false,
         }
     }
+}
+
+/// Port allocation strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortPairingStrategy {
+    /// Use adjacent port numbers (even for RTP, odd for RTCP)
+    Adjacent,
+    /// Use the same port for both RTP and RTCP (requires RTCP-MUX)
+    Muxed,
 }
 
 // Re-export submodules
@@ -95,9 +105,11 @@ mod udp;
 mod tcp;
 mod validation;
 mod allocator;
+pub mod security_transport;
 
 // Re-export transport implementations
 pub use udp::UdpRtpTransport;
 pub use tcp::TcpRtpTransport;
 pub use validation::{PlatformType, PlatformSocketStrategy, RtpSocketValidator}; 
 pub use allocator::{PortAllocator, GlobalPortAllocator, PortAllocatorConfig, AllocationStrategy, PairingStrategy}; 
+pub use security_transport::SecurityRtpTransport; 

@@ -1,40 +1,34 @@
-//! Audio processing components for enhancing call quality
+//! Audio Processing Components
 //!
-//! This module contains implementations of audio processing algorithms 
-//! that enhance call quality in VoIP applications.
+//! This module contains audio processing components including voice activity detection,
+//! echo cancellation, automatic gain control, and noise suppression.
 
-// Acoustic Echo Cancellation (AEC)
-pub mod aec;
-
-// Automatic Gain Control (AGC)
-pub mod agc;
-
-// Voice Activity Detection (VAD)
+pub mod processor;
 pub mod vad;
+pub mod agc;  // New AGC implementation
+pub mod aec;  // New AEC implementation
+pub mod stream;  // New conference audio stream management
+pub mod mixer;  // New audio mixer for conference calls
 
-// Noise Suppression
-pub mod ns;
+// Advanced v2 implementations with cutting-edge features
+pub mod vad_v2;  // Advanced VAD with spectral features
+pub mod agc_v2;  // Multi-band AGC with look-ahead
+pub mod aec_v2;  // Frequency-domain AEC with NLMS
 
-// Packet Loss Concealment
-pub mod plc;
+// Future components (to be implemented in Phase 3)
+// pub mod ns;
+// pub mod plc;
+// pub mod dtmf_detector;
 
-// DTMF Detection and Generation
-pub mod dtmf;
+// Re-export main types
+pub use processor::{AudioProcessor, AudioProcessingConfig, AudioProcessingResult};
+pub use vad::{VoiceActivityDetector, VadConfig, VadResult};
+pub use agc::{AutomaticGainControl, AgcConfig, AgcResult};
+pub use aec::{AcousticEchoCanceller, AecConfig, AecResult};
+pub use stream::{AudioStreamManager, AudioStreamConfig};
+pub use mixer::{AudioMixer};
 
-// Common types and utilities for audio processing
-mod common;
-pub use common::*;
-
-/// Trait for audio processing components
-pub trait AudioProcessor: Send + Sync {
-    /// Process an audio buffer in-place
-    /// 
-    /// Returns true if the buffer was modified
-    fn process(&self, buffer: &mut crate::AudioBuffer) -> crate::error::Result<bool>;
-    
-    /// Reset the processor state
-    fn reset(&mut self);
-    
-    /// Update processor configuration
-    fn configure(&mut self, config: &std::collections::HashMap<String, String>) -> crate::error::Result<()>;
-} 
+// Re-export advanced v2 types
+pub use vad_v2::{AdvancedVoiceActivityDetector, AdvancedVadConfig, AdvancedVadResult, DetectorScores};
+pub use agc_v2::{AdvancedAutomaticGainControl, AdvancedAgcConfig, AdvancedAgcResult};
+pub use aec_v2::{AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAecResult};

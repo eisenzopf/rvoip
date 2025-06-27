@@ -276,4 +276,20 @@ mod tests {
         assert!(rem.is_empty());
         assert!(addr.params.contains(&Param::Tag("case-test".to_string())));
     }
+
+    #[test]
+    fn test_sipp_from_header_exact() {
+        // This is the exact From header that SIPp sends that's failing to parse
+        let input = b"SIPp Test <sip:sipp@127.0.0.1:5061>;tag=22134SIPpTag001";
+        let result = parse_from(input);
+        println!("Parse result: {:?}", result);
+        assert!(result.is_ok());
+        let (rem, from_header) = result.unwrap();
+        let addr = from_header.0;
+        assert!(rem.is_empty());
+        assert_eq!(addr.display_name, Some("SIPp Test".to_string()));
+        assert_eq!(addr.uri.scheme, Scheme::Sip);
+        assert_eq!(addr.params.len(), 1);
+        assert!(matches!(addr.params[0], Param::Tag(ref s) if s == "22134SIPpTag001"));
+    }
 } 

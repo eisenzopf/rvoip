@@ -1,14 +1,12 @@
-// Session module - Handles SIP sessions and call management
-mod session_id;
-mod session_types;
-mod session_config;
-// Add the missing modules
+//! Session Module
+//!
+//! Contains session-specific implementations.
+
 pub mod session;
-pub mod manager;
+pub mod state;
+pub mod media;
+pub mod lifecycle;
 
 // Re-export main types
-pub use session_id::SessionId;
-pub use session_types::{SessionState, SessionDirection, SessionTransactionType};
-pub use session_config::SessionConfig;
-pub use session::Session;
-pub use manager::SessionManager; 
+pub use session::*;
+pub use state::*; 

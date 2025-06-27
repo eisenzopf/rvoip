@@ -63,6 +63,7 @@ impl SecurityManager {
                     certificate_path: None,
                     private_key_path: None,
                     require_client_certificate: false,
+                    srtp_key: self.config.srtp_key.clone(),
                 }
             },
             SecurityMode::DtlsSrtp => {
@@ -74,7 +75,12 @@ impl SecurityManager {
                     certificate_path: self.config.certificate_path.clone(),
                     private_key_path: self.config.private_key_path.clone(),
                     require_client_certificate: self.config.require_client_certificate,
+                    srtp_key: None, // Not used for DTLS-SRTP
                 }
+            },
+            SecurityMode::SdesSrtp | SecurityMode::MikeySrtp | SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                return Err(SecurityError::Configuration("SIP-derived SRTP methods should use SecurityContextManager".to_string()));
             }
         };
         
@@ -123,6 +129,7 @@ impl SecurityManager {
                     certificate_path: None,
                     private_key_path: None,
                     require_client_certificate: false,
+                    srtp_key: self.config.srtp_key.clone(),
                 }
             },
             SecurityMode::DtlsSrtp => {
@@ -134,7 +141,12 @@ impl SecurityManager {
                     certificate_path: self.config.certificate_path.clone(),
                     private_key_path: self.config.private_key_path.clone(),
                     require_client_certificate: self.config.require_client_certificate,
+                    srtp_key: None, // Not used for DTLS-SRTP
                 }
+            },
+            SecurityMode::SdesSrtp | SecurityMode::MikeySrtp | SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                return Err(SecurityError::Configuration("SIP-derived SRTP methods should use SecurityContextManager".to_string()));
             }
         };
         
@@ -175,12 +187,13 @@ impl SecurityManager {
                 crate::api::client::security::ClientSecurityConfig {
                     security_mode: SecurityMode::Srtp,
                     fingerprint_algorithm: self.config.fingerprint_algorithm.clone(),
-                    remote_fingerprint: self.config.remote_fingerprint.clone(),
-                    remote_fingerprint_algorithm: self.config.remote_fingerprint_algorithm.clone(),
+                    remote_fingerprint: None,
+                    remote_fingerprint_algorithm: None,
                     validate_fingerprint: false,
                     srtp_profiles: self.config.srtp_profiles.clone(),
                     certificate_path: None,
                     private_key_path: None,
+                    srtp_key: self.config.srtp_key.clone(),
                 }
             },
             SecurityMode::DtlsSrtp => {
@@ -190,11 +203,16 @@ impl SecurityManager {
                     fingerprint_algorithm: self.config.fingerprint_algorithm.clone(),
                     remote_fingerprint: self.config.remote_fingerprint.clone(),
                     remote_fingerprint_algorithm: self.config.remote_fingerprint_algorithm.clone(),
-                    validate_fingerprint: self.config.remote_fingerprint.is_some(),
+                    validate_fingerprint: true,
                     srtp_profiles: self.config.srtp_profiles.clone(),
                     certificate_path: self.config.certificate_path.clone(),
                     private_key_path: self.config.private_key_path.clone(),
+                    srtp_key: None, // Not used for DTLS-SRTP
                 }
+            },
+            SecurityMode::SdesSrtp | SecurityMode::MikeySrtp | SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                return Err(SecurityError::Configuration("SIP-derived SRTP methods should use SecurityContextManager".to_string()));
             }
         };
         
@@ -238,12 +256,13 @@ impl SecurityManager {
                 crate::api::client::security::ClientSecurityConfig {
                     security_mode: SecurityMode::Srtp,
                     fingerprint_algorithm: self.config.fingerprint_algorithm.clone(),
-                    remote_fingerprint: self.config.remote_fingerprint.clone(),
-                    remote_fingerprint_algorithm: self.config.remote_fingerprint_algorithm.clone(),
+                    remote_fingerprint: None,
+                    remote_fingerprint_algorithm: None,
                     validate_fingerprint: false,
                     srtp_profiles: self.config.srtp_profiles.clone(),
                     certificate_path: None,
                     private_key_path: None,
+                    srtp_key: self.config.srtp_key.clone(),
                 }
             },
             SecurityMode::DtlsSrtp => {
@@ -253,11 +272,16 @@ impl SecurityManager {
                     fingerprint_algorithm: self.config.fingerprint_algorithm.clone(),
                     remote_fingerprint: self.config.remote_fingerprint.clone(),
                     remote_fingerprint_algorithm: self.config.remote_fingerprint_algorithm.clone(),
-                    validate_fingerprint: self.config.remote_fingerprint.is_some(),
+                    validate_fingerprint: true,
                     srtp_profiles: self.config.srtp_profiles.clone(),
                     certificate_path: self.config.certificate_path.clone(),
                     private_key_path: self.config.private_key_path.clone(),
+                    srtp_key: None, // Not used for DTLS-SRTP
                 }
+            },
+            SecurityMode::SdesSrtp | SecurityMode::MikeySrtp | SecurityMode::ZrtpSrtp => {
+                // SIP-derived SRTP methods use the unified security context instead
+                return Err(SecurityError::Configuration("SIP-derived SRTP methods should use SecurityContextManager".to_string()));
             }
         };
         

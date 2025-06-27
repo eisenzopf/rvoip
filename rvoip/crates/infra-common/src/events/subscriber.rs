@@ -1,7 +1,7 @@
 use crate::events::types::{Event, EventFilter, EventHandler, EventType, EventPriority};
 use std::sync::Arc;
 use std::any::Any;
-use std::marker::PhantomData;
+
 use std::fmt::Debug;
 
 /// Handle returned when subscribing to events

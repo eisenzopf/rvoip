@@ -1,33 +1,12 @@
-//! Audio codec implementations for the media-core library
-//!
-//! This module contains implementations of various audio codecs used in VoIP applications,
-//! including G.711 (PCMU/PCMA), G.722, Opus, and others.
+//! Audio codec types and utilities
 
 // Common types and utilities for audio codecs
-mod common;
+pub mod common;
+pub mod g711;  // G.711 codec implementation
+pub mod opus;  // Opus codec implementation
+pub mod g729;  // Add G.729 codec
+
 pub use common::*;
-
-// G.711 µ-law codec (PCMU)
-#[cfg(feature = "pcmu")]
-pub mod pcmu;
-
-// G.711 A-law codec (PCMA)
-#[cfg(feature = "pcma")]
-pub mod pcma;
-
-// G.722 wideband codec
-#[cfg(feature = "g722")]
-pub mod g722;
-
-// Opus codec (wide-band and full-band)
-#[cfg(feature = "opus")]
-pub mod opus;
-
-// Re-export common audio codec types
-pub use crate::codec::AudioCodec;
-
-// Utility to convert PCM samples between formats
-pub mod converter;
 
 /// Payload type constants for static audio codecs
 pub mod payload_type {
@@ -40,6 +19,18 @@ pub mod payload_type {
     /// G.722 (16kHz)
     pub const G722: u8 = 9;
     
+    /// G.729 (8kHz, 8kbps)
+    pub const G729: u8 = 18;
+    
     /// Telephone-event (DTMF) RFC 4733
     pub const TELEPHONE_EVENT: u8 = 101;
-} 
+}
+
+// Re-export G.711 codec types
+pub use g711::{G711Codec, G711Config, G711Variant};
+
+// Re-export Opus codec types
+pub use opus::{OpusCodec, OpusConfig, OpusApplication};
+
+// Re-export G.729 codec types
+pub use g729::{G729Codec, G729Config, G729Annexes}; 

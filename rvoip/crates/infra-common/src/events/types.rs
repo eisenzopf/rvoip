@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use std::any::Any;
 use async_trait::async_trait;
-use std::time::Duration;
+
 use serde::{Serialize, Deserialize};
 
 /// Represents a type of event
@@ -92,6 +92,8 @@ pub enum EventError {
     ChannelError(String),
     /// Subscriber not found
     SubscriberNotFound(String),
+    /// Other unspecified errors
+    Other(String),
 }
 
 impl Display for EventError {
@@ -105,6 +107,7 @@ impl Display for EventError {
             EventError::InvalidPriority(msg) => write!(f, "Invalid event priority: {}", msg),
             EventError::ChannelError(msg) => write!(f, "Event channel error: {}", msg),
             EventError::SubscriberNotFound(msg) => write!(f, "Subscriber not found: {}", msg),
+            EventError::Other(msg) => write!(f, "Other error: {}", msg),
         }
     }
 }

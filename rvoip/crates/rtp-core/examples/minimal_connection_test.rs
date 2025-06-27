@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 use tracing::Level;
 
 use rvoip_rtp_core::api::common::frame::{MediaFrame, MediaFrameType};
-use rvoip_rtp_core::api::server::transport::server_transport_impl::DefaultMediaTransportServer;
+use rvoip_rtp_core::api::server::transport::DefaultMediaTransportServer;
 use rvoip_rtp_core::api::server::transport::MediaTransportServer;
 use rvoip_rtp_core::api::server::config::{ServerConfig, ServerConfigBuilder};
 use rvoip_rtp_core::api::common::config::SecurityMode;
@@ -93,15 +93,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let monitor_task = tokio::spawn(async move {
         println!("[MONITOR] Frame monitoring started");
         
+        // Get a persistent frame receiver instead of calling receive_frame() repeatedly
+        let mut frame_receiver = server_clone.get_frame_receiver();
+        
         for i in 0..20 {
-            match server_clone.receive_frame().await {
-                Ok((client_id, frame)) => {
+            match tokio::time::timeout(Duration::from_millis(100), frame_receiver.recv()).await {
+                Ok(Ok((client_id, frame))) => {
                     println!("[MONITOR] Frame received! Client ID: {}, Frame seq: {}, PT: {}, size: {} bytes", 
                              client_id, frame.sequence, frame.payload_type, frame.data.len());
                 },
-                Err(e) => {
+                Ok(Err(e)) => {
                     if i % 5 == 0 { // Only print every 5th error to reduce noise
-                        println!("[MONITOR] No frame available: {}", e);
+                        println!("[MONITOR] Broadcast channel error: {}", e);
+                    }
+                },
+                Err(_) => {
+                    // Timeout - this is normal when no frames are available
+                    if i % 5 == 0 { // Only print every 5th timeout to reduce noise
+                        println!("[MONITOR] No frame available (timeout)");
                     }
                 }
             }
@@ -119,6 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => println!("[MONITOR] Error getting clients: {}", e),
             }
             
+            // Small delay between iterations
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         

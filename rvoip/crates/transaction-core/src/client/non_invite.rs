@@ -408,19 +408,20 @@ impl ClientNonInviteLogic {
         }
     }
 
-    /// Process a SIP response
+    /// Process a response and determine state transition
     ///
-    /// This method implements the core logic for handling incoming responses
-    /// according to RFC 3261 Section 17.1.2.2. It validates the response,
-    /// determines the appropriate action based on the current state and the
-    /// response status, and returns any state transition that should occur.
+    /// This method handles incoming responses according to RFC 3261 Section 17.1.2.2
+    /// and manages Timer E cancellation for proper retransmission control.
     async fn process_response(
         &self,
         data: &Arc<ClientTransactionData>,
         response: Response,
         current_state: TransactionState,
+        timer_handles: &mut ClientNonInviteTimerHandles,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
+        
+        debug!(id=%tx_id, status=%response.status(), state=?current_state, "🔍 DEBUG: process_response called");
         
         // Get the original method from the request to validate the response
         let request_guard = data.request.lock().await;
@@ -433,6 +434,46 @@ impl ClientNonInviteLogic {
             return Ok(None);
         }
         
+        // Get status information for timer management
+        let status = response.status();
+        let is_provisional = status.is_provisional();
+        let is_final = !is_provisional;
+        
+        debug!(id=%tx_id, status=%status, is_provisional=%is_provisional, is_final=%is_final, state=?current_state, 
+               "🔍 DEBUG: Response classification");
+        
+        match current_state {
+            TransactionState::Trying | TransactionState::Proceeding => {
+                debug!(id=%tx_id, "🔍 DEBUG: In Trying/Proceeding state");
+                
+                // **RFC 3261 COMPLIANCE**: Cancel Timer E for final responses
+                // Section 17.1.2.2: "When a final response is received, the client
+                // transaction enters the Completed state after possibly generating an ACK"
+                if is_final {
+                    debug!(id=%tx_id, "🔍 DEBUG: This is a final response, checking Timer E");
+                    
+                    // Cancel Timer E (retransmission timer) for final responses
+                    if let Some(handle) = timer_handles.timer_e.take() {
+                        handle.abort();
+                        debug!(id=%tx_id, status=%status, "✅ Cancelled Timer E (final response received)");
+                    } else {
+                        debug!(id=%tx_id, "🔍 DEBUG: No Timer E handle found to cancel");
+                    }
+                    // Reset the interval tracking
+                    timer_handles.current_timer_e_interval = None;
+                } else {
+                    debug!(id=%tx_id, "🔍 DEBUG: This is a provisional response, keeping Timer E running");
+                }
+                
+                // Note: Timer F (transaction timeout) is left running until state transition
+                // It will be cancelled by the runner's cancel_all_specific_timers during state change
+            },
+            _ => {
+                // In other states, no timer changes needed for response processing
+                debug!(id=%tx_id, state=?current_state, "🔍 DEBUG: In non-active state, no timer changes");
+            }
+        }
+        
         // Use the common_logic handler which works for both INVITE and non-INVITE transactions
         // For non-INVITE transactions, is_invite is false
         let new_state = common_logic::handle_response_by_status(
@@ -443,6 +484,8 @@ impl ClientNonInviteLogic {
             false, // non-INVITE
             data.remote_addr
         ).await;
+        
+        debug!(id=%tx_id, old_state=?current_state, new_state=?new_state, "🔍 DEBUG: State transition result");
         
         Ok(new_state)
     }
@@ -549,20 +592,28 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
         data: &Arc<ClientTransactionData>,
         message: Message,
         current_state: TransactionState,
+        timer_handles: &mut ClientNonInviteTimerHandles,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
+        
+        debug!(id=%tx_id, state=?current_state, "🔍 DEBUG: process_message called with message type: {}", 
+               if message.is_response() { "Response" } else { "Request" });
         
         // Use the validators utility to extract and validate the response
         match validators::extract_response(&message, tx_id) {
             Ok(response) => {
+                debug!(id=%tx_id, status=%response.status(), "🔍 DEBUG: Extracted response, storing and processing");
+                
                 // Store the response
                 {
                     let mut last_response = data.last_response.lock().await;
                     *last_response = Some(response.clone());
                 }
                 
-                // Use our helper for response processing
-                self.process_response(data, response, current_state).await
+                // Use our helper for response processing with real timer handles
+                let result = self.process_response(data, response, current_state, timer_handles).await;
+                debug!(id=%tx_id, "🔍 DEBUG: process_response completed");
+                result
             },
             Err(e) => {
                 warn!(id=%tx_id, error=%e, "Received non-response message");

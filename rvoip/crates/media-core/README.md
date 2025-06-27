@@ -1,201 +1,206 @@
 # RVOIP Media Core
 
-`media-core` is the media handling library for the RVOIP project, providing audio processing, codec management, and media session coordination. It acts as the bridge between signaling (via session-core) and media transport (via rtp-core).
+`media-core` is the media processing engine for the RVOIP project. It focuses exclusively on media processing, codec management, and media session coordination while integrating cleanly with `session-core` (SIP signaling) and `rtp-core` (RTP transport).
 
-## Features
+## Vision & Scope
 
-- **Codec Framework**: Support for audio codecs including G.711, G.722, and Opus
-- **Audio Processing**: Components for echo cancellation, noise suppression, and voice activity detection
-- **Session Management**: High-level media session abstraction for VoIP applications
-- **RTP Integration**: Packetization, depacketization, and session management for RTP
-- **Format Conversions**: Audio resampling and channel conversion utilities
-- **Buffer Management**: Jitter buffers and adaptive media buffers
-- **Secure Media**: SRTP and DTLS integration for secure communications
+**media-core** handles the "smart" media processing while delegating transport and signaling to specialized crates:
+
+### ✅ **Core Responsibilities**
+- **Media Processing**: Codec encode/decode, audio processing (AEC, AGC, VAD, NS)
+- **Media Session Management**: Coordinate media flows for SIP dialogs  
+- **Quality Management**: Monitor and adapt media quality in real-time
+- **Format Conversion**: Sample rate conversion, channel mixing
+- **Codec Management**: Registry, negotiation, transcoding
+
+### ❌ **Delegated Responsibilities**
+- **RTP Transport**: Handled by `rtp-core`
+- **SIP Signaling**: Handled by `session-core`  
+- **Network I/O**: Handled by `rtp-core`
+- **SDP Negotiation**: Handled by `session-core` (media-core provides capabilities)
 
 ## Architecture
 
-The media-core library follows a layered architecture:
+Clean separation of concerns across three specialized crates:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                Session Management Layer                  │
-│       (Media sessions, negotiation, coordination)        │
-└───────────┬─────────────────────────────────┬───────────┘
-            │                                 │
-┌───────────▼────────────┐   ┌───────────────▼────────────┐
-│     Codec Framework    │   │       Media Processing      │
-│   (Encoding/Decoding)  │◄──┤ (Echo, Noise, VAD, Format)  │
-└───────────┬────────────┘   └───────────────┬────────────┘
-            │                                │
-┌───────────▼────────────┐   ┌───────────────▼────────────┐
-│     Buffer Management  │   │       Security Layer        │
-│  (Jitter, Adaptive)    │   │    (SRTP, DTLS, Crypto)     │
-└───────────┬────────────┘   └───────────────┬────────────┘
-            │                                │
-┌───────────▼────────────────┬──────────────▼────────────┐
-│       RTP Integration       │    Integration Layer       │
-│ (Packet, Depacket, Session) │ (session-core, rtp-core)   │
-└────────────────────────────┴───────────────────────────┘
+┌─────────────────┐    Media Capabilities    ┌─────────────────┐
+│                 │ ◄──────────────────────── │                 │
+│  session-core   │                           │   media-core    │
+│ (SIP Signaling) │ ──────────────────────► │ (Processing)    │
+│                 │    Media Session Mgmt     │                 │
+└─────────────────┘                           └─────────────────┘
+                                                       │
+                                                       │ Media Streams
+                                                       ▼
+                                              ┌─────────────────┐
+                                              │    rtp-core     │
+                                              │  (Transport)    │
+                                              └─────────────────┘
+```
+
+### Integration Flow
+1. **session-core → media-core**: Request capabilities, create/destroy media sessions
+2. **media-core → session-core**: Provide codec capabilities, report events  
+3. **rtp-core → media-core**: Deliver incoming media packets for processing
+4. **media-core → rtp-core**: Send processed media packets for transmission
+
+## Core Components
+
+### MediaEngine - Central Orchestrator
+```rust
+pub struct MediaEngine {
+    codec_manager: Arc<CodecManager>,
+    session_manager: Arc<SessionManager>,
+    quality_monitor: Arc<QualityMonitor>,
+    audio_processor: Arc<AudioProcessor>,
+    // ...
+}
+```
+
+### MediaSession - Per-Dialog Management
+```rust
+pub struct MediaSession {
+    dialog_id: DialogId,
+    audio_codec: RwLock<Option<Box<dyn AudioCodec>>>,
+    jitter_buffer: Arc<JitterBuffer>,
+    quality_metrics: Arc<RwLock<QualityMetrics>>,
+    // ...
+}
 ```
 
 ## Module Structure
 
-The library is organized into several core modules:
-
-- **codec**: Framework for audio/video codecs
-  - **registry**: Manages available codecs and creates instances
-  - **audio**: Audio codec implementations (G.711, G.722, Opus)
-  - **video**: Video codec implementations (future)
-
-- **session**: Media session management
-  - **media_session**: Core media session implementation
-  - **config**: Session configuration
-  - **events**: Media session events
-  - **flow**: Media flow control (start/stop/pause)
-
-- **processing**: Media signal processing
-  - **audio**: Audio processing components
-    - **aec**: Acoustic echo cancellation
-    - **agc**: Automatic gain control
-    - **vad**: Voice activity detection
-    - **ns**: Noise suppression
-    - **plc**: Packet loss concealment
-  - **format**: Format conversion utilities
-
-- **buffer**: Media buffer management
-  - **jitter**: Jitter buffer implementation
-  - **adaptive**: Adaptive buffer sizing
-
-- **rtp**: RTP integration
-  - **packetizer**: Converts media frames to RTP packets
-  - **depacketizer**: Converts RTP packets to media frames
-  - **session**: RTP session management
-
-- **security**: Media security features
-  - **srtp**: SRTP integration
-  - **dtls**: DTLS key exchange
-
-- **engine**: Audio/video processing engines
-  - **audio**: Audio capture and playback
-  - **mixer**: Audio mixing capabilities
-
-- **integration**: Integration with other components
-  - **session_core**: Session-core integration
-  - **rtp_core**: RTP-core integration
-  - **sdp**: SDP handling for media negotiation
+```
+src/
+├── engine/                    # Core Media Engine
+│   ├── media_engine.rs        # Central MediaEngine orchestrator
+│   ├── config.rs              # Engine configuration
+│   └── lifecycle.rs           # Startup/shutdown management
+│
+├── session/                   # Media Session Management  
+│   ├── media_session.rs       # MediaSession per SIP dialog
+│   ├── session_manager.rs     # Manages multiple MediaSessions
+│   └── events.rs              # Media session events
+│
+├── codec/                     # Codec Framework
+│   ├── manager.rs             # CodecManager orchestration
+│   ├── registry.rs            # Available codecs
+│   ├── negotiation.rs         # Capability matching
+│   ├── audio/                 # Audio codec implementations
+│   │   ├── g711.rs            # G.711 μ-law/A-law (PCMU/PCMA)
+│   │   ├── opus.rs            # Opus codec
+│   │   └── g722.rs            # G.722 wideband
+│   └── video/                 # Video codecs (future)
+│
+├── processing/                # Signal Processing
+│   ├── audio/                 # Audio processing
+│   │   ├── processor.rs       # Main audio processor
+│   │   ├── aec.rs             # Echo cancellation
+│   │   ├── agc.rs             # Gain control
+│   │   ├── vad.rs             # Voice activity detection
+│   │   └── ns.rs              # Noise suppression
+│   └── format/                # Format conversion
+│       ├── resampler.rs       # Sample rate conversion
+│       └── channel_mixer.rs   # Channel conversion
+│
+├── quality/                   # Quality Management
+│   ├── monitor.rs             # Real-time monitoring
+│   ├── metrics.rs             # Quality metrics
+│   └── adaptation.rs          # Quality adaptation
+│
+├── buffer/                    # Media Buffering
+│   ├── jitter.rs              # Adaptive jitter buffering
+│   └── adaptive.rs            # Dynamic buffer sizing
+│
+└── integration/               # Cross-Crate Bridges
+    ├── rtp_bridge.rs          # rtp-core integration
+    └── session_bridge.rs      # session-core integration
+```
 
 ## Implementation Status
 
-### Completed Components
+This is a **clean rewrite** following SIP best practices and modern Rust patterns.
 
-- ✅ Core library structure and error handling
-- ✅ Audio format definitions and utilities
-- ✅ RTP packetizer and depacketizer
-- ✅ Basic codec registry framework
-- ✅ Initial G.711 codec implementation
-- ✅ Audio processing framework (VAD)
-- ✅ Media session abstraction
-- ✅ SDP integration for media negotiation
-- ✅ RTP session management
-- ✅ Format conversion utilities
+### ✅ **Phase 1: Foundation** (In Progress)
+- [ ] Core types and error handling
+- [ ] MediaEngine structure
+- [ ] Basic MediaSession
+- [ ] G.711 codec implementation
+- [ ] Integration bridges
 
-### In Progress
+### 📋 **Phase 2: Processing Pipeline**
+- [ ] AudioProcessor framework
+- [ ] Voice Activity Detection (VAD)
+- [ ] Format conversion
+- [ ] Jitter buffering
+- [ ] Quality monitoring
 
-- 🔄 Complete codec framework
-- 🔄 SRTP and DTLS integration
-- 🔄 Remaining audio processing components (AEC, AGC)
-- 🔄 Jitter buffer implementation
-- 🔄 Media flow control
-
-### Planned Next
-
-- 📝 Quality monitoring and metrics
-- 📝 Media engine integration with audio devices
-- 📝 Additional codec implementations
-- 📝 Media synchronization
-- 📝 Full integration with session-core
+### 🚀 **Phase 3: Advanced Features**
+- [ ] Acoustic Echo Cancellation (AEC)
+- [ ] Automatic Gain Control (AGC)
+- [ ] Opus codec
+- [ ] Codec transcoding
+- [ ] Quality adaptation
 
 ## Usage Example
 
 ```rust
 use rvoip_media_core::prelude::*;
-use rvoip_media_core::codec::registry::CodecRegistry;
-use rvoip_media_core::rtp::create_audio_session;
-use std::sync::Arc;
 
-async fn create_call() -> Result<()> {
-    // Create codec registry
-    let registry = CodecRegistry::new();
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Create media engine
+    let config = MediaEngineConfig::default();
+    let engine = MediaEngine::new(config).await?;
     
-    // Get a codec (PCMU/G.711)
-    let codec = registry.create_codec_by_payload_type(0)?;
+    // Start the engine
+    engine.start().await?;
     
-    // Create an RTP session
-    let local_addr = "0.0.0.0:10000".parse()?;
-    let (session, mut events) = create_audio_session(
-        Arc::new(codec),
-        local_addr,
-        0, // PCMU payload type
-        SampleRate::Rate8000
-    ).await?;
+    // Create media session for SIP dialog
+    let dialog_id = DialogId::new("call-123");
+    let params = MediaSessionParams::audio_only()
+        .with_preferred_codec(PayloadType::PCMU)
+        .with_processing_enabled(true);
     
-    // Connect to remote party
-    let remote_addr = "192.168.1.100:20000".parse()?;
-    session.set_remote_addr(remote_addr).await?;
+    let session = engine.create_media_session(dialog_id, params).await?;
     
-    // Process events
-    tokio::spawn(async move {
-        while let Some(event) = events.recv().await {
-            match event {
-                RtpSessionEvent::AudioReceived(buffer) => {
-                    // Process received audio
-                    println!("Received audio: {} bytes", buffer.data.len());
-                },
-                RtpSessionEvent::Connected(addr) => {
-                    println!("Connected to {}", addr);
-                },
-                RtpSessionEvent::Disconnected => {
-                    println!("Disconnected");
-                    break;
-                },
-                RtpSessionEvent::Error(err) => {
-                    println!("Error: {}", err);
-                    break;
-                },
-                _ => {}
-            }
-        }
-    });
+    // Get codec capabilities for SDP negotiation
+    let capabilities = engine.get_supported_codecs();
+    println!("Supported codecs: {:?}", capabilities);
     
-    // Create audio buffer
-    let pcm_data = vec![0i16; 160].into_iter()
-        .map(|_| rand::random::<i16>())
-        .collect::<Vec<_>>();
+    // Process incoming media (called by rtp-core)
+    session.process_incoming_media(media_packet).await?;
     
-    let bytes_data = unsafe {
-        std::slice::from_raw_parts(
-            pcm_data.as_ptr() as *const u8,
-            pcm_data.len() * 2
-        )
-    };
+    // Send outgoing media (to rtp-core)
+    session.send_outgoing_media(audio_frame).await?;
     
-    let buffer = AudioBuffer::new(
-        bytes::Bytes::copy_from_slice(bytes_data),
-        AudioFormat::telephony()
-    );
+    // Monitor quality
+    let metrics = session.get_quality_metrics().await;
+    println!("Call quality: {:?}", metrics);
     
-    // Send audio
-    session.send_audio(&buffer).await?;
+    // Clean shutdown
+    engine.destroy_media_session(dialog_id).await?;
+    engine.stop().await?;
     
     Ok(())
 }
 ```
 
+## Features
+
+- 🎵 **Advanced Audio Processing**: AEC, AGC, VAD, noise suppression
+- 🔊 **Multiple Codecs**: G.711, Opus, G.722, DTMF support
+- 📊 **Quality Monitoring**: Real-time quality metrics and adaptation
+- 🔄 **Format Conversion**: Sample rate and channel conversion
+- 📦 **Jitter Buffering**: Adaptive buffering for smooth playback
+- ⚡ **High Performance**: Optimized for real-time media processing
+- 🧩 **Clean Integration**: Works seamlessly with session-core and rtp-core
+
 ## Integration with Other Crates
 
-- **rvoip-rtp-core**: Provides RTP packet definitions and transport
-- **rvoip-session-core**: Provides SIP signaling and session management
-- **rvoip-ice-core**: Handles NAT traversal (planned)
+- **rvoip-session-core**: Provides SIP signaling and dialog management
+- **rvoip-rtp-core**: Provides RTP transport and packet handling
 
 ## License
 

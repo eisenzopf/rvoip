@@ -74,6 +74,10 @@ pub enum MediaTransportError {
     /// Buffer error
     #[error("Buffer error: {0}")]
     BufferError(String),
+    
+    /// Invalid input
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 /// Error related to security operations
@@ -99,6 +103,14 @@ pub enum SecurityError {
     #[error("Security not initialized: {0}")]
     NotInitialized(String),
     
+    /// Invalid state error
+    #[error("Invalid security state: {0}")]
+    InvalidState(String),
+    
+    /// Cryptographic operation error
+    #[error("Cryptographic error: {0}")]
+    CryptoError(String),
+    
     /// Internal security error
     #[error("Internal security error: {0}")]
     Internal(String),
@@ -106,6 +118,22 @@ pub enum SecurityError {
     /// Security timeout error
     #[error("Security timeout: {0}")]
     Timeout(String),
+    
+    /// Network connectivity error
+    #[error("Network error: {0}")]
+    Network(String),
+    
+    /// Authentication failure
+    #[error("Authentication failed: {0}")]
+    Authentication(String),
+    
+    /// Resource not found
+    #[error("Not found: {0}")]
+    NotFound(String),
+    
+    /// Security policy violation
+    #[error("Security policy violation: {0}")]
+    PolicyViolation(String),
 }
 
 /// Error types for buffer operations

@@ -1,12 +1,13 @@
-//! Format conversion module
+//! Format Conversion Components
 //!
-//! This module provides utilities for converting between different audio formats,
-//! including sample rate conversion and channel conversion.
+//! This module handles audio format conversion including sample rate conversion,
+//! channel mixing, and bit depth conversion.
 
-// Re-export components
+pub mod converter;
 pub mod resampler;
-pub mod channels;
+pub mod channel_mixer;
 
-// Re-export key types
-pub use resampler::Resampler;
-pub use channels::ChannelConverter; 
+// Re-export main types
+pub use converter::{FormatConverter, ConversionParams, ConversionResult};
+pub use resampler::{Resampler, ResamplerConfig};
+pub use channel_mixer::{ChannelMixer, ChannelLayout}; 

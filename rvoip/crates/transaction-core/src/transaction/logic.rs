@@ -102,32 +102,33 @@ where
     /// A reference to the `TimerSettings` for this transaction.
     fn timer_settings<'a>(data: &'a Arc<D>) -> &'a TimerSettings;
 
-    /// Processes an incoming SIP message according to the transaction's current state.
+    /// Process an incoming message for this transaction type.
     ///
-    /// This is a core method that implements the state machine logic described in
-    /// RFC 3261 Section 17 for each transaction type. It:
+    /// This method is called when a message (request or response) is received
+    /// that matches this transaction. The implementation should handle the message
+    /// according to the transaction's state machine and return any state transition.
     ///
-    /// 1. Examines the message type (request/response)
-    /// 2. Considers the current transaction state
-    /// 3. Performs appropriate actions based on the RFC 3261 state diagram
-    /// 4. Determines if a state transition is needed
+    /// For client transactions, this is typically used to handle responses.
+    /// For server transactions, this is typically used to handle request retransmissions.
     ///
     /// # Arguments
     ///
-    /// * `data`: The shared data associated with this transaction.
-    /// * `message`: The SIP message (request or response) to process.
-    /// * `current_state`: The current `TransactionState`.
+    /// * `data`: Shared transaction data
+    /// * `message`: The incoming SIP message to process
+    /// * `current_state`: The current transaction state
+    /// * `timer_handles`: Mutable reference to the transaction's timer handles
     ///
     /// # Returns
     ///
-    /// * `Ok(Some(new_state))`: If processing the message requires a state transition.
-    /// * `Ok(None)`: If the message is processed but no state change is needed.
-    /// * `Err(_)`: If an error occurs during message processing.
+    /// A Result containing an optional new state to transition to.
+    /// Return `Ok(Some(state))` to trigger a state transition,
+    /// or `Ok(None)` to remain in the current state.
     async fn process_message(
         &self,
         data: &Arc<D>,
         message: Message,
         current_state: TransactionState,
+        timer_handles: &mut TH,
     ) -> Result<Option<TransactionState>>;
 
     /// Handles a timer expiration event based on the transaction's current state.
@@ -219,4 +220,23 @@ where
     /// * `timer_handles`: Mutable reference to the transaction's timer handles.
     ///                  The implementation should abort and remove all active timers.
     fn cancel_all_specific_timers(&self, timer_handles: &mut TH);
+    
+    /// Cancels the automatic 100 Trying timer (Timer 100) for INVITE server transactions.
+    ///
+    /// This method is called when the TU sends any provisional response, making the
+    /// automatic 100 Trying response unnecessary per RFC 3261 Section 17.2.1.
+    ///
+    /// For non-INVITE transactions, this method should be a no-op.
+    ///
+    /// # Arguments
+    ///
+    /// * `timer_handles`: Mutable reference to the transaction's timer handles.
+    ///
+    /// # Returns
+    ///
+    /// A Result indicating success or failure of the timer cancellation.
+    async fn handle_cancel_timer_100(&self, timer_handles: &mut TH) -> Result<()> {
+        // Default implementation is a no-op for non-INVITE server transactions
+        Ok(())
+    }
 } 
