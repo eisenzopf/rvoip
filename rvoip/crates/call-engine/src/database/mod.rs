@@ -367,6 +367,7 @@ pub struct DbAgent {
     pub current_calls: i32,
     pub contact_uri: Option<String>,
     pub last_heartbeat: Option<DateTime<Utc>>,
+    pub available_since: Option<String>, // For fair round robin ordering
 }
 
 /// Queued call record

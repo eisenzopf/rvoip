@@ -14,7 +14,7 @@ use super::DatabaseManager;
 pub async fn initialize_call_center_schema(db_manager: &DatabaseManager) -> Result<()> {
     info!("🗄️ Initializing simplified call center database schema (Limbo 0.0.22 workaround)");
     
-    // STEP 1: Create agents table (simplified - no UNIQUE constraints)
+    // STEP 1: Create agents table (with availability timestamp for fair round robin)
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS agents (
             id INTEGER PRIMARY KEY,
@@ -24,7 +24,8 @@ pub async fn initialize_call_center_schema(db_manager: &DatabaseManager) -> Resu
             last_heartbeat TEXT,
             status TEXT NOT NULL DEFAULT 'OFFLINE',
             current_calls INTEGER NOT NULL DEFAULT 0,
-            max_calls INTEGER NOT NULL DEFAULT 1
+            max_calls INTEGER NOT NULL DEFAULT 1,
+            available_since TEXT
         )",
         vec![] as Vec<limbo::Value>
     ).await?;

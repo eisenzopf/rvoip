@@ -1,40 +1,216 @@
 # Call Engine TODO
 
-## 🎉 Current Status: Basic Call Delivery Working!
+## 🎉 Current Status: Database Integration Complete!
 
-**Great News**: Phase 0 is complete! The call engine can now:
-- Accept agent registrations via SIP REGISTER
-- Receive incoming customer calls
-- Route calls to available agents
-- Create outgoing calls to agents
-- Bridge customer and agent audio
-- Handle call teardown properly
+**Great News**: Phase 0.19 is complete! The call engine now has:
+- ✅ Working Limbo 0.0.22 database integration
+- ✅ Fixed schema column mismatches
+- ✅ Proper agent status management in database
+- ✅ Atomic queue operations
+- ✅ No more database crashes or panics
+- ✅ All 5 test calls process through the queue system
+- ✅ Agents properly transition between Available/Busy/Wrap-up states
 
-## 🚨 CURRENT PRIORITY: Fix B2BUA SDP Negotiation (Phase 0.9) - BYE FORWARDING FIXED ✅
+## 🚨 CURRENT PRIORITY: Fix Round Robin Load Balancing (Phase 0.21)
 
-**Critical Issues Found in Testing**:
-1. **No SDP to Agent**: Server sends INVITE to agent with `Content-Length: 0` (no SDP offer) ✅
-2. **Agent Can't Answer**: Without SDP offer, agent can't generate SDP answer ✅
-3. **No Audio Flow**: Both sides have no media negotiation ✅
-4. **Missing 180 Ringing**: Violates expected SIP call flow ✅
-5. **BYE Dialog Tracking**: 481 errors when agents try to hang up ✅ **FIXED!**
+**Issue Identified**: Current routing assigns all calls to the same agent instead of distributing them evenly across available agents.
 
-**Root Cause**: The B2BUA implementation is incomplete. It correctly generates SDP for the customer but not for the agent.
+**Root Cause**: Database query always returns agents in the same order (ORDER BY current_calls), so the first available agent always gets picked.
 
-**Fix Tasks**:
-1. ✅ FIXED: Use `prepare_outgoing_call` to generate B2BUA's SDP offer before calling agent
-2. ✅ FIXED: Accept customer's deferred call only after agent answers (not immediately)
-3. ✅ FIXED: Add 180 Ringing response to customer (via Defer)
-4. ✅ **NEW - FIXED**: BYE Dialog Tracking - agents can now hang up without 481 errors
-5. [ ] Test the complete flow with multiple concurrent calls
+**Solution**: **Event-Driven Fair Round Robin** using **"Longest Available Time"** algorithm
+- Track when each agent becomes available with timestamp
+- Always assign to agent who has been available longest
+- Event-driven updates when agents complete calls and become available
 
-**BYE Forwarding Fix Details** (Completed 2025-06-26):
-- **Root Cause**: dialog-core wasn't updating dialog lookup keys when dialogs transitioned to Confirmed state
-- **Solution**: Added lookup key updates in two places:
-  1. `response_handler.rs`: When receiving 200 OK responses
-  2. `transaction_integration.rs`: When processing transaction success events
-- **Result**: BYE requests now find their dialogs correctly, no more 481 errors!
-- **Verified**: E2E tests show 0 "Dialog not found" errors and proper BYE forwarding between call legs
+### **📊 Database Schema Enhancement**
+
+**Add Availability Timestamp Field**:
+```sql
+ALTER TABLE agents ADD COLUMN available_since TEXT;
+```
+
+**New Fair Agent Selection Query**:
+```sql
+SELECT agent_id, username, contact_uri, status, current_calls, max_calls, available_since
+FROM agents 
+WHERE status = 'AVAILABLE' 
+  AND current_calls < max_calls
+  AND available_since IS NOT NULL
+ORDER BY available_since ASC;  -- Oldest timestamp = longest wait = gets next call
+```
+
+### **💻 Implementation Tasks**
+
+#### **Phase 1: Database Operations**
+- [x] ✅ Update agents table schema with available_since field
+- [x] ✅ Update DbAgent struct to include available_since field
+- [x] ✅ Update agent status operations to handle timestamps:
+  - When status → AVAILABLE: Set available_since = NOW
+  - When status → BUSY/OFFLINE: Clear available_since = NULL
+- [x] ✅ Update agent registration to set timestamp
+- [x] ✅ Update agent selection query for fairness ordering
+
+#### **Phase 2: Event-Driven Updates**
+- [ ] Test call completion → wrap-up → available transition with timestamps
+- [ ] Verify agent registration sets proper timestamp  
+- [ ] Verify fair ordering in get_available_agents() results
+
+#### **Phase 3: Testing & Validation**
+- [ ] Run E2E test with 5 calls and 2 agents
+- [ ] Verify calls distribute fairly (3/2 or 2/3, not 5/0)
+- [ ] Check server.log for fair assignment patterns
+- [ ] Add logging to show agent timestamps in assignment decisions
+
+### **🎯 Expected Behavior Example**
+
+**5 Calls + 2 Agents Scenario**:
+```
+Initial: Alice (10:00:00), Bob (10:00:05)
+Call 1 → Alice (oldest available_since)
+Call 2 → Bob (now oldest)  
+Alice completes → Alice gets new timestamp (10:01:30)
+Call 3 → Bob (still has older timestamp: 10:00:05)
+Bob completes → Bob gets new timestamp (10:01:45)  
+Call 4 → Alice (older: 10:01:30 vs 10:01:45)
+Call 5 → Bob
+
+Result: Alice: 2 calls, Bob: 3 calls ✅ (vs current: Alice: 5, Bob: 0 ❌)
+```
+
+### **✅ Implementation Progress**
+
+**Database Changes**:
+- [x] Schema updated with available_since field
+- [x] DbAgent struct includes available_since field  
+- [x] Agent status updates handle timestamps correctly
+- [x] Agent registration sets initial timestamp
+- [x] Fair selection query implemented
+
+**Next Steps**:
+- [ ] Build and test changes
+- [ ] Run E2E test to verify fair distribution
+- [ ] Add debugging logs for assignment decisions
+
+## 📋 COMPREHENSIVE CALL CENTER IMPROVEMENT PLAN
+
+Based on analysis of current queue and distribution logic, here's our roadmap for transforming the basic call center into an intelligent, modern contact center:
+
+### **PHASE 1: Enhanced Agent Lifecycle Management (Weeks 1-2)**
+
+#### **1.1 Implement Proper Agent Status States**
+- [ ] Add comprehensive agent status enum with wrap-up reasons
+- [ ] Implement dynamic wrap-up times based on call complexity (30s-5min)
+- [ ] Add automatic status transition with configurable timeouts
+- [ ] Implement wrap-up activity tracking for compliance
+
+#### **1.2 Smart Wrap-Up Management**
+- [ ] Context-aware wrap-up durations
+- [ ] Wrap-up reason categorization (notes, CRM update, follow-up, escalation)
+- [ ] Productivity tracking during wrap-up time
+
+#### **1.3 Agent Capacity Management**
+- [ ] Weighted capacity scoring instead of simple call counts
+- [ ] Skill-based capacity allocation (complex calls = higher weight)
+- [ ] Real-time workload balancing algorithms
+
+### **PHASE 2: Advanced Queue Management (Weeks 3-4)**
+
+#### **2.1 Multi-Tier Priority System**
+- [ ] Implement customer tier-based priority (VIP, Premium, Standard, Basic)
+- [ ] Real-time sentiment analysis for priority adjustment
+- [ ] Wait time-based priority escalation
+- [ ] Business value impact scoring
+
+#### **2.2 Intelligent Queue Algorithms**
+- [ ] Weighted Fair Queuing implementation
+- [ ] Longest Wait Time Protection to prevent starvation
+- [ ] Dynamic Priority Adjustment based on real-time conditions
+- [ ] Queue Overflow Management with callbacks and alternate routing
+
+#### **2.3 Predictive Queue Management**
+- [ ] Call volume forecasting using historical patterns
+- [ ] Proactive agent scheduling recommendations
+- [ ] Overflow prediction and mitigation strategies
+
+### **PHASE 3: Skills-Based Routing 2.0 (Weeks 5-6)**
+
+#### **3.1 Advanced Skills Framework**
+- [ ] Multi-dimensional skill scoring (technical, language, product, soft skills)
+- [ ] Performance-based routing profiles
+- [ ] Real-time availability scoring
+- [ ] Dynamic skill level adjustments
+
+#### **3.2 Machine Learning Routing**
+- [ ] Agent-call matching algorithms using historical success rates
+- [ ] Performance-based routing for complex calls
+- [ ] Learning feedback loops to improve matching
+- [ ] A/B testing framework for routing strategies
+
+#### **3.3 Dynamic Skills Management**
+- [ ] Real-time skill updates based on call outcomes
+- [ ] Cross-training recommendations to fill skill gaps
+- [ ] Load balancing across skill groups
+
+### **PHASE 4: Customer Experience Optimization (Weeks 7-8)**
+
+#### **4.1 Customer Context Integration**
+- [ ] Customer tier and history integration
+- [ ] Real-time sentiment analysis during IVR
+- [ ] Preferred language and accessibility routing
+- [ ] Business value and escalation history tracking
+
+#### **4.2 Real-Time Sentiment Analysis**
+- [ ] Voice sentiment detection during IVR interaction
+- [ ] Emotional state routing to specialized agents
+- [ ] Proactive intervention for frustrated customers
+- [ ] Sentiment-based priority adjustment
+
+#### **4.3 Personalized Routing**
+- [ ] Agent-customer affinity matching based on past interactions
+- [ ] Cultural and language preference handling
+- [ ] Accessibility accommodation routing
+- [ ] VIP treatment workflows
+
+### **PHASE 5: Analytics & Optimization (Weeks 9-10)**
+
+#### **5.1 Real-Time Performance Monitoring**
+- [ ] Comprehensive metrics dashboard
+- [ ] Queue depth and agent utilization tracking
+- [ ] Service level and customer satisfaction monitoring
+- [ ] Cost per interaction and revenue impact analysis
+
+#### **5.2 Predictive Analytics Dashboard**
+- [ ] Call volume forecasting (15-min to 6-month horizons)
+- [ ] Staffing optimization recommendations
+- [ ] Queue bottleneck predictions
+- [ ] Agent performance trend analysis
+- [ ] Customer churn risk indicators
+
+#### **5.3 Automated Optimization**
+- [ ] Dynamic agent reallocation between queues
+- [ ] Automatic shift adjustments based on predicted demand
+- [ ] Callback scheduling optimization
+- [ ] Break time optimization to maintain service levels
+
+### **SUCCESS METRICS TARGET**
+
+#### **Operational KPIs:**
+- **Service Level:** Target 80% of calls answered ≤20 seconds
+- **Average Wait Time:** Reduce by 40%
+- **First Call Resolution:** Increase to 85%+
+- **Agent Utilization:** Optimize to 80-85%
+- **Call Abandonment:** Reduce to <3%
+
+#### **Business KPIs:**
+- **Customer Satisfaction:** Target 4.5/5.0
+- **Cost Per Call:** Reduce by 25%
+- **Revenue Per Call:** Increase by 15%
+- **Agent Retention:** Improve by 20%
+
+#### **Technical KPIs:**
+- **System Availability:** 99.9%
+- **Response Time:** <200ms for routing decisions
+- **Prediction Accuracy:** 90%+ for volume forecasts
 
 ## Overview
 The Call Engine is responsible for managing call center operations, including agent management, call queuing, routing, and session management. It builds on top of session-core to provide call center-specific functionality.
@@ -1056,145 +1232,86 @@ match coordinator.wait_for_answer(&agent_session_id, Duration::from_secs(30)).aw
 **Estimated Time**: 1-2 days ✅ COMPLETED
 **Priority**: CRITICAL - Core architectural issue blocking successful calls
 
-### Phase 0.19 - Fix Database Schema Mismatch 🚨 CRITICAL
+### Phase 0.19 - Fix Database Schema Mismatch ✅ COMPLETE
 
 **Problem Discovered from E2E Testing**: Database queries fail with "column 'status' not found in table 'agents'" preventing any calls from being assigned to agents.
 
+**Solution Implemented**:
+- ✅ Added missing `status` column to agents table schema
+- ✅ Added CHECK constraint for valid status values  
+- ✅ Fixed column name mismatches throughout codebase
+- ✅ Added proper database indexes for performance
+- ✅ Fixed Limbo 0.0.22 compatibility issues:
+  - Added `index_experimental` feature flag
+  - Replaced `INSERT OR IGNORE` with check-and-insert pattern
+  - Fixed column index mapping in row parsing
+  - Simplified schema to avoid optimizer bugs
+- ✅ All 5 test calls now complete successfully
+- ✅ Agents properly transition between Available/Busy/Wrap-up states
+- ✅ No more SQL parse errors or database crashes
+
+**Key Fixes**:
+1. **Schema Column Addition**: Added status column with proper constraints
+2. **Limbo Compatibility**: Enabled experimental features and simplified queries  
+3. **Query Optimization**: Fixed column indexes and removed complex operations
+4. **Error Handling**: Graceful fallback and comprehensive logging
+
+**Result**: Database integration now works reliably with atomic operations and proper state management.
+
+### Phase 0.21 - Fix Round Robin Load Balancing 🚨 NEW
+
+**Problem Identified**: Current routing assigns all calls to the same agent instead of distributing them evenly across available agents.
+
 **Root Cause Analysis**:
-1. The database schema is missing a `status` column in the `agents` table
-2. Code expects to check agent status (AVAILABLE/BUSY) but column doesn't exist
-3. All agent assignment operations fail with SQL parse errors
-4. System successfully receives calls and queues them, but cannot route to agents
-5. This is a fundamental schema mismatch that blocks all call routing
+1. Queue monitor gets list of available agents but doesn't track assignment order
+2. Always picks the first available agent from the list
+3. No round robin state tracking between assignment cycles
+4. Load balancing only happens when agents become busy, not proactively
 
-**Evidence from Logs**:
-```
-SQL execution failure: `Parse error: column 'status' not found in table 'agents'`
-Failed to atomically assign call to agent: SQL execution failure
-Failed to get available agents from database: SQL execution failure: `Parse error: Column status not found`
-```
+**Implementation Tasks**:
 
-**Current Schema (Missing Column)**:
-```sql
-CREATE TABLE agents (
-    agent_id TEXT PRIMARY KEY,
-    username TEXT NOT NULL,
-    -- status column is MISSING!
-    max_calls INTEGER DEFAULT 1,
-    current_calls INTEGER DEFAULT 0,
-    contact_uri TEXT,
-    last_heartbeat DATETIME
-);
-```
+#### Task 1: Add Round Robin State Tracking
+- [ ] Add `last_assigned_agent_index` to queue monitor state
+- [ ] Track assignment order across all available agents
+- [ ] Implement circular assignment logic
 
-**Required Schema**:
-```sql
-CREATE TABLE agents (
-    agent_id TEXT PRIMARY KEY,
-    username TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'OFFLINE',  -- This is missing!
-    max_calls INTEGER DEFAULT 1,
-    current_calls INTEGER DEFAULT 0,
-    contact_uri TEXT,
-    last_heartbeat DATETIME,
-    CHECK (status IN ('OFFLINE', 'AVAILABLE', 'BUSY', 'RESERVED'))
-);
-```
+#### Task 2: Modify Agent Selection Logic
+- [ ] Update `process_database_assignments()` to use round robin
+- [ ] Ensure agents are selected in rotating order
+- [ ] Handle agents going offline/busy during rotation
 
-**Fix Tasks**:
+#### Task 3: Add Load Balancing Metrics
+- [ ] Track calls assigned per agent
+- [ ] Monitor distribution fairness
+- [ ] Add logging for assignment decisions
 
-#### Task 1: Update Database Schema Definition ✅
-- [x] Add `status TEXT NOT NULL DEFAULT 'OFFLINE'` to agents table creation
-- [x] Add CHECK constraint for valid status values
-- [x] Ensure all queries that reference status will work
+#### Task 4: Test Load Distribution
+- [ ] Create test scenario with 5 calls and 2 agents
+- [ ] Verify calls are distributed 3/2 or 2/3 (not 5/0)
+- [ ] Test with varying numbers of agents
 
-#### Task 2: Fix Related Issues Found
-- [x] Also missing `agent_id` column references in some queries
-- [x] Ensure all expected columns exist in schema
-- [x] Add proper indexes for performance
+**Expected Behavior**:
+- 5 calls + 2 agents = 3 calls to agent A, 2 calls to agent B (or vice versa)
+- No agent should get all calls when multiple agents are available
+- Fair distribution over time, not just within single bursts
 
-#### Task 3: Database Migration Strategy
-- [ ] For existing databases, add migration to ALTER TABLE
-- [ ] Handle case where database already exists without column
-- [ ] Consider version tracking for schema changes
+**Estimated Time**: 4-6 hours
+**Priority**: HIGH - Essential for fair call center operation
 
-#### Task 4: Verification
-- [ ] Re-run E2E tests to confirm fix
-- [ ] Verify all 5 calls complete successfully
-- [ ] Check that agents properly transition between states
-- [ ] Ensure no more SQL parse errors in logs
-
-**Implementation Plan**:
-1. Update the CREATE TABLE statement in `database/mod.rs`
-2. Add the missing `status` column with proper constraints
-3. Test locally to ensure queries work
-4. Re-run E2E test suite
-5. Verify successful call completion
-
-**Expected Outcome**:
-- No more SQL parse errors
-- Agents can be queried by status
-- Calls successfully assigned to available agents
-- All 5 test calls complete successfully
-
-**Estimated Time**: 30 minutes
-**Priority**: CRITICAL - System is completely broken without this fix!
-
-### Phase 0.20 - Fix Queue Assignment Race Conditions 🚨 NEW
+### Phase 0.20 - Fix Queue Assignment Race Conditions ✅ RESOLVED via Database Integration
 
 **Problem Discovered from E2E Testing**: Only 2 out of 5 calls completed successfully. The other 3 calls got stuck in "being assigned" state.
 
-**Root Cause Analysis**:
-1. Queue monitor dequeues calls and marks them as "being assigned" without verifying agent availability
-2. When no agents are available, these calls are lost - neither in queue nor assigned
-3. No re-queue logic when assignment fails
-4. When agents exit wrap-up state, system doesn't check for stuck assignments
+**Resolution**: The database integration in Phase 0.19 resolved these race conditions by:
+- ✅ **Atomic Operations**: Database transactions prevent race conditions
+- ✅ **ACID Guarantees**: No more lost calls or inconsistent state
+- ✅ **Agent Reservation**: Proper atomic agent reservation before call assignment
+- ✅ **State Consistency**: Single source of truth in database eliminates synchronization issues
+- ✅ **Queue Integrity**: Calls cannot be lost between in-memory data structures
 
-**Fix Tasks**:
+**Result**: All 5 test calls now complete successfully with the database-backed queue management.
 
-#### Task 1: Fix Queue Assignment Logic ⚠️ CRITICAL
-- [x] Only dequeue calls when an agent is confirmed available
-- [x] Check agent availability atomically with dequeue operation
-- [x] Prevent marking calls as "being assigned" without an actual agent
-
-#### Task 2: Add Re-queue on Assignment Failure
-- [x] If `assign_specific_agent_to_call` fails, re-queue the call
-- [x] Clear "being assigned" flag before re-queuing
-- [x] Increment retry counter and apply priority boost
-- [ ] Add exponential backoff for retries
-
-#### Task 3: Fix Post-Wrap-Up Assignment Check
-- [x] When agents exit PostCallWrapUp state, check for:
-  - Calls stuck in "being assigned" state
-  - Calls waiting in queue
-- [x] Implement `check_stuck_assignments()` method
-- [x] Call it after wrap-up timer completes
-
-#### Task 4: Add Assignment Timeout Recovery
-- [x] Add timeout for "being assigned" state (e.g., 5 seconds)
-- [x] If assignment hasn't completed within timeout, re-queue
-- [x] Log warnings for stuck assignments
-- [ ] Track metrics on assignment failures
-
-#### Task 5: Fix SIPp Test Configuration
-- [ ] Increase test duration to allow wrap-up testing
-- [ ] Ensure customer calls stay active for full test duration
-- [ ] Add proper call completion verification
-
-**Implementation Order**:
-1. Fix queue assignment logic (prevents new occurrences)
-2. Add re-queue on failure (handles current failures)
-3. Add timeout recovery (catches edge cases)
-4. Fix post-wrap-up checks (utilizes freed agents)
-5. Update tests (verify fixes work)
-
-**Test Scenario**:
-- 5 simultaneous calls
-- 2 agents
-- Expected: All 5 calls complete (2 immediate, 3 after wrap-up)
-
-**Estimated Time**: 1-2 days
-**Priority**: CRITICAL - 60% of calls currently fail
+**Note**: The issues addressed here were symptoms of the in-memory data structure race conditions that are eliminated by the database approach.
 
 ### Phase 1 - Advanced Features
 

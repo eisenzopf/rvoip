@@ -15,45 +15,48 @@ impl DatabaseManager {
         debug!("🔍 upsert_agent called with agent_id='{}', username='{}', contact_uri='{:?}'", 
                agent_id, username, contact_uri);
         
-        // Try to update existing agent first (simplified query)
+        // Try to update existing agent first (with availability timestamp)
         let updated_rows = self.execute(
             "UPDATE agents 
              SET username = ?1, 
                  contact_uri = ?2, 
                  last_heartbeat = ?3,
-                 status = 'AVAILABLE'
-             WHERE agent_id = ?4",
+                 status = 'AVAILABLE',
+                 available_since = ?4
+             WHERE agent_id = ?5",
             vec![
                 username.into(),
                 contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
                 now.clone().into(),
+                now.clone().into(), // Set available_since timestamp
                 agent_id.into(),
             ] as Vec<limbo::Value>
         ).await?;
         
         if updated_rows == 0 {
-            // Agent doesn't exist, try to insert (handle duplicates with error handling)
+            // Agent doesn't exist, try to insert (with availability timestamp)
             let _result = self.execute(
-                "INSERT INTO agents (agent_id, username, contact_uri, last_heartbeat, status, current_calls, max_calls)
-                 VALUES (?1, ?2, ?3, ?4, 'AVAILABLE', 0, 1)",
+                "INSERT INTO agents (agent_id, username, contact_uri, last_heartbeat, status, current_calls, max_calls, available_since)
+                 VALUES (?1, ?2, ?3, ?4, 'AVAILABLE', 0, 1, ?5)",
                 vec![
                     agent_id.into(),
                     username.into(), 
                     contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
-                    now.into(),
+                    now.clone().into(),
+                    now.into(), // Set available_since timestamp  
                 ] as Vec<limbo::Value>
             ).await; // Ignore errors in case of duplicates
             
-            debug!("🔍 Attempted to insert new agent {} as AVAILABLE", agent_id);
+            debug!("🔍 Attempted to insert new agent {} as AVAILABLE with timestamp", agent_id);
         } else {
-            debug!("🔍 Updated existing agent {} to AVAILABLE: {} rows affected", agent_id, updated_rows);
+            debug!("🔍 Updated existing agent {} to AVAILABLE with timestamp: {} rows affected", agent_id, updated_rows);
         }
         
         info!("Agent {} processed in database with contact {:?}", agent_id, contact_uri);
         Ok(())
     }
     
-    /// Update agent status
+    /// Update agent status (with availability timestamp for fair round robin)
     pub async fn update_agent_status(&self, agent_id: &str, status: AgentStatus) -> Result<()> {
         let status_str = match status {
             AgentStatus::Available => "AVAILABLE",
@@ -62,12 +65,23 @@ impl DatabaseManager {
             AgentStatus::Offline => "OFFLINE",
         };
         
-        self.execute(
-            "UPDATE agents SET status = ?1 WHERE agent_id = ?2",
-            vec![status_str.into(), agent_id.into()] as Vec<limbo::Value>
-        ).await?;
+        // If transitioning to AVAILABLE, update the available_since timestamp for fairness
+        if matches!(status, AgentStatus::Available) {
+            let now = chrono::Utc::now().to_rfc3339();
+            self.execute(
+                "UPDATE agents SET status = ?1, available_since = ?2 WHERE agent_id = ?3",
+                vec![status_str.into(), now.into(), agent_id.into()] as Vec<limbo::Value>
+            ).await?;
+            debug!("Agent {} status updated to {:?} with available_since timestamp", agent_id, status);
+        } else {
+            // For non-available states, clear the available_since timestamp
+            self.execute(
+                "UPDATE agents SET status = ?1, available_since = NULL WHERE agent_id = ?2",
+                vec![status_str.into(), agent_id.into()] as Vec<limbo::Value>
+            ).await?;
+            debug!("Agent {} status updated to {:?}", agent_id, status);
+        }
         
-        debug!("Agent {} status updated to {:?}", agent_id, status);
         Ok(())
     }
     
@@ -83,14 +97,17 @@ impl DatabaseManager {
         Ok(())
     }
     
-    /// Get available agents for assignment (simplified query)
+    /// Get available agents for assignment (ordered by fairness - longest available time first)
     pub async fn get_available_agents(&self) -> Result<Vec<DbAgent>> {
+        debug!("🔍 Getting available agents with fairness ordering...");
+        
         let rows = self.query(
-            "SELECT agent_id, username, contact_uri, status, current_calls, max_calls 
+            "SELECT agent_id, username, contact_uri, status, current_calls, max_calls, available_since
              FROM agents 
              WHERE status = 'AVAILABLE' 
              AND current_calls < max_calls
-             ORDER BY current_calls",
+             AND available_since IS NOT NULL
+             ORDER BY available_since ASC",  // Oldest available_since timestamp first = fairest
             vec![] as Vec<limbo::Value>
         ).await?;
 
@@ -102,13 +119,19 @@ impl DatabaseManager {
                 contact_uri,
                 Ok(limbo::Value::Text(status)),
                 Ok(current_calls),
-                Ok(max_calls)
+                Ok(max_calls),
+                available_since
             ) = (
                 row.get_value(0), row.get_value(1), row.get_value(2), 
-                row.get_value(3), row.get_value(4), row.get_value(5)
+                row.get_value(3), row.get_value(4), row.get_value(5), row.get_value(6)
             ) {
                 let contact_uri = match contact_uri {
                     Ok(limbo::Value::Text(uri)) => Some(uri.clone()),
+                    _ => None,
+                };
+                
+                let available_since_str = match available_since {
+                    Ok(limbo::Value::Text(ts)) => Some(ts.clone()),
                     _ => None,
                 };
                 
@@ -132,11 +155,20 @@ impl DatabaseManager {
                     current_calls,
                     max_calls,
                     last_heartbeat: None, // Simplified for now
+                    available_since: available_since_str.clone(),
                 });
+                
+                info!("🔍 FAIRNESS: Agent {} (available since: {:?}) added to list", 
+                       agent_id, available_since_str);
             }
         }
 
-        debug!("🔍 Found {} available agents", agents.len());
+        info!("🔍 FAIRNESS: Found {} available agents in order:", agents.len());
+        for (idx, agent) in agents.iter().enumerate() {
+            info!("🔍 FAIRNESS: {}. {} (since: {:?})", 
+                  idx + 1, agent.agent_id, agent.available_since);
+        }
+
         Ok(agents)
     }
     
@@ -267,6 +299,7 @@ impl DatabaseManager {
             current_calls: value_to_i32(&row.get_value(6)?)?,    // current_calls at index 6
             contact_uri: value_to_optional_string(&row.get_value(3)?), // contact_uri at index 3
             last_heartbeat,
+            available_since: None, // Not included in standard queries, only in get_available_agents
         })
     }
     
