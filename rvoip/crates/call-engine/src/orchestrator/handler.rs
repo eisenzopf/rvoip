@@ -318,50 +318,8 @@ impl CallCenterEngine {
         
         tracing::info!("Contact URI with port: {}", contact_uri);
         
-        // Check if the agent exists in the database
-        let agent_exists = if let Some(db_manager) = &self.db_manager {
-            // Try to find the agent by username (extract from SIP URI)
-            let username = aor.split('@').next()
-                .unwrap_or(&aor)
-                .trim_start_matches("sip:")
-                .trim_start_matches('<');
-            
-            match db_manager.get_agent(&username).await {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(e) => {
-                    tracing::error!("Database error checking agent: {}", e);
-                    false
-                }
-            }
-        } else {
-            // No database, allow all registrations
-            true
-        };
-        
-        if !agent_exists {
-            tracing::warn!("Registration attempt for unknown agent: {}", aor);
-            
-            // Send 404 Not Found response
-            let session_coord = self.session_coordinator.as_ref()
-                .ok_or_else(|| CallCenterError::internal(
-                    "Session coordinator not available"
-                ))?;
-            
-            session_coord.send_sip_response(
-                transaction_id,
-                404,
-                Some("Agent not found"),
-                None,
-            ).await
-            .map_err(|e| CallCenterError::internal(
-                &format!("Failed to send REGISTER response: {}", e)
-            ))?;
-            
-            return Err(CallCenterError::NotFound(
-                format!("Agent {} not registered in system", aor)
-            ));
-        }
+        // Allow all agent registrations - agents can register themselves
+        // No need to pre-check database existence since upsert_agent will handle creation
         
         // Process the registration with our SIP registrar
         // Note: We now pass the contact_uri with port included

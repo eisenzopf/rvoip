@@ -35,7 +35,7 @@ impl DatabaseManager {
         
         if updated_rows == 0 {
             // Agent doesn't exist, try to insert (with availability timestamp)
-            let _result = self.execute(
+            match self.execute(
                 "INSERT INTO agents (agent_id, username, contact_uri, last_heartbeat, status, current_calls, max_calls, available_since)
                  VALUES (?1, ?2, ?3, ?4, 'AVAILABLE', 0, 1, ?5)",
                 vec![
@@ -43,11 +43,35 @@ impl DatabaseManager {
                     username.into(), 
                     contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
                     now.clone().into(),
-                    now.into(), // Set available_since timestamp  
+                    now.clone().into(), // Set available_since timestamp  
                 ] as Vec<limbo::Value>
-            ).await; // Ignore errors in case of duplicates
-            
-            debug!("🔍 Attempted to insert new agent {} as AVAILABLE with timestamp", agent_id);
+            ).await {
+                Ok(_) => {
+                    debug!("🔍 Inserted new agent {} as AVAILABLE with timestamp", agent_id);
+                },
+                Err(e) => {
+                    // Handle UNIQUE constraint violation gracefully - agent was already inserted by another thread
+                    debug!("🔍 Agent {} insert failed (likely duplicate): {}", agent_id, e);
+                    // Try to update the existing agent one more time
+                    let retry_rows = self.execute(
+                        "UPDATE agents 
+                         SET username = ?1, 
+                             contact_uri = ?2, 
+                             last_heartbeat = ?3,
+                             status = 'AVAILABLE',
+                             available_since = ?4
+                         WHERE agent_id = ?5",
+                        vec![
+                            username.into(),
+                            contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
+                            now.clone().into(),
+                            now.clone().into(),
+                            agent_id.into(),
+                        ] as Vec<limbo::Value>
+                    ).await?;
+                    debug!("🔍 Retry update of agent {} affected {} rows", agent_id, retry_rows);
+                }
+            }
         } else {
             debug!("🔍 Updated existing agent {} to AVAILABLE with timestamp: {} rows affected", agent_id, updated_rows);
         }
@@ -58,6 +82,8 @@ impl DatabaseManager {
     
     /// Update agent status (with availability timestamp for fair round robin)
     pub async fn update_agent_status(&self, agent_id: &str, status: AgentStatus) -> Result<()> {
+        debug!("🔧 update_agent_status called: agent_id='{}', status='{:?}'", agent_id, status);
+        
         let status_str = match status {
             AgentStatus::Available => "AVAILABLE",
             AgentStatus::Busy(_) => "BUSY",
@@ -68,18 +94,25 @@ impl DatabaseManager {
         // If transitioning to AVAILABLE, update the available_since timestamp for fairness
         if matches!(status, AgentStatus::Available) {
             let now = chrono::Utc::now().to_rfc3339();
-            self.execute(
+            debug!("🔧 Updating agent {} to AVAILABLE with NEW timestamp: {}", agent_id, now);
+            
+            let rows_updated = self.execute(
                 "UPDATE agents SET status = ?1, available_since = ?2 WHERE agent_id = ?3",
-                vec![status_str.into(), now.into(), agent_id.into()] as Vec<limbo::Value>
+                vec![status_str.into(), now.clone().into(), agent_id.into()] as Vec<limbo::Value>
             ).await?;
-            debug!("Agent {} status updated to {:?} with available_since timestamp", agent_id, status);
+            
+            debug!("🔧 Agent {} status updated to {:?} with available_since timestamp {} (rows affected: {})", 
+                   agent_id, status, now, rows_updated);
         } else {
+            debug!("🔧 Updating agent {} to {} and clearing available_since timestamp", agent_id, status_str);
+            
             // For non-available states, clear the available_since timestamp
-            self.execute(
+            let rows_updated = self.execute(
                 "UPDATE agents SET status = ?1, available_since = NULL WHERE agent_id = ?2",
                 vec![status_str.into(), agent_id.into()] as Vec<limbo::Value>
             ).await?;
-            debug!("Agent {} status updated to {:?}", agent_id, status);
+            
+            debug!("🔧 Agent {} status updated to {:?} (rows affected: {})", agent_id, status, rows_updated);
         }
         
         Ok(())

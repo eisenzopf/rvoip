@@ -18,7 +18,7 @@ pub async fn initialize_call_center_schema(db_manager: &DatabaseManager) -> Resu
     db_manager.execute(
         "CREATE TABLE IF NOT EXISTS agents (
             id INTEGER PRIMARY KEY,
-            agent_id TEXT NOT NULL,
+            agent_id TEXT NOT NULL UNIQUE,
             username TEXT NOT NULL,
             contact_uri TEXT,
             last_heartbeat TEXT,

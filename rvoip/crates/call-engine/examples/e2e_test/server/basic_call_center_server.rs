@@ -50,17 +50,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     server.start().await
         .map_err(|e| format!("Failed to start server: {}", e))?;
 
-    // Step 4: Add test agents
-    let agents = vec![
-        ("alice", "Alice Smith", "support"),
-        ("bob", "Bob Johnson", "support"),
-    ];
-    server.create_test_agents(agents).await?;
-
-    // Step 5: Create default queues
+    // Step 4: Create default queues (agents will register themselves via SIP REGISTER)
     server.create_default_queues().await?;
 
-    // Step 6: Run the server
+    // Step 5: Run the server
     // The server.run() method will run indefinitely and handle everything
     server.run().await
         .map_err(|e| format!("Server error: {}", e))?;
