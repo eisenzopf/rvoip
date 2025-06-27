@@ -1,0 +1,10 @@
+/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/client-core/examples/sipp_integration/target/debug/deps/libmemoffset-945396447dae6370.rmeta: /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/lib.rs /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/raw_field.rs /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/offset_of.rs /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/span_of.rs
+
+/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/client-core/examples/sipp_integration/target/debug/deps/libmemoffset-945396447dae6370.rlib: /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/lib.rs /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/raw_field.rs /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/offset_of.rs /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/span_of.rs
+
+/Users/jonathan/Documents/Work/Rudeless Ventures/rvoip/rvoip/crates/client-core/examples/sipp_integration/target/debug/deps/memoffset-945396447dae6370.d: /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/lib.rs /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/raw_field.rs /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/offset_of.rs /Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/span_of.rs
+
+/Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/lib.rs:
+/Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/raw_field.rs:
+/Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/offset_of.rs:
+/Users/jonathan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/memoffset-0.7.1/src/span_of.rs:
