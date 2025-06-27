@@ -12,23 +12,25 @@ impl DatabaseManager {
     pub async fn upsert_agent(&self, agent_id: &str, username: &str, contact_uri: Option<&str>) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         
+        debug!("🔍 upsert_agent called with agent_id='{}', username='{}', contact_uri='{:?}'", 
+               agent_id, username, contact_uri);
+        
         // First, check if agent exists
         let exists = self.query_row(
             "SELECT 1 FROM agents WHERE agent_id = ?1",
             vec![agent_id.into()] as Vec<limbo::Value>
         ).await?.is_some();
         
+        debug!("🔍 Agent '{}' exists in database: {}", agent_id, exists);
+        
         if exists {
-            // UPDATE existing agent
+            // UPDATE existing agent - ALWAYS set to AVAILABLE when they register
             let rows = self.execute(
                 "UPDATE agents 
                  SET username = ?1, 
                      contact_uri = ?2, 
                      last_heartbeat = ?3,
-                     status = CASE 
-                         WHEN status = 'OFFLINE' THEN 'AVAILABLE' 
-                         ELSE status 
-                     END
+                     status = 'AVAILABLE'
                  WHERE agent_id = ?4",
                 vec![
                     username.into(),
@@ -38,9 +40,9 @@ impl DatabaseManager {
                 ] as Vec<limbo::Value>
             ).await?;
             
-            debug!("Updated agent {}: {} rows affected", agent_id, rows);
+            debug!("✅ Updated agent {} to AVAILABLE: {} rows affected", agent_id, rows);
         } else {
-            // INSERT new agent
+            // INSERT new agent as AVAILABLE
             self.execute(
                 "INSERT INTO agents (agent_id, username, contact_uri, status, last_heartbeat)
                  VALUES (?1, ?2, ?3, 'AVAILABLE', ?4)",
@@ -52,8 +54,13 @@ impl DatabaseManager {
                 ] as Vec<limbo::Value>
             ).await?;
             
-            debug!("Inserted new agent {}", agent_id);
+            debug!("✅ Inserted new agent {} as AVAILABLE", agent_id);
         }
+        
+        // Also log current agents in database for debugging
+        let all_agents = self.list_agents().await?;
+        debug!("📋 Current agents in database: {:?}", 
+               all_agents.iter().map(|a| (&a.agent_id, &a.status)).collect::<Vec<_>>());
         
         Ok(())
     }

@@ -10,11 +10,16 @@ use tracing::{info, error, warn, debug};
 use std::pin::Pin;
 use std::future::Future;
 use crate::agent::AgentStatus;
+use uuid::Uuid;
 
-mod schema;
-mod agents;
-mod queues;
-mod calls;
+pub mod agents;
+pub mod queues;
+pub mod calls;
+pub mod schema;
+pub mod agent_store;
+pub mod routing_store;
+pub mod queue_store;
+pub mod call_records;
 
 pub use agents::*;
 pub use queues::*;
@@ -164,6 +169,7 @@ impl DatabaseManager {
     }
     
     /// Atomically assign a call to an agent with retry logic
+    /// ASSUMES: Agent has already been reserved (marked as BUSY) in previous step
     pub async fn atomic_assign_call_to_agent(
         &self,
         session_id: &str,
@@ -178,33 +184,25 @@ impl DatabaseManager {
                 let customer_sdp = customer_sdp.clone();
                 
                 Box::pin(async move {
-                    // 1. Reserve the agent (mark as busy)
-                    let reserve_query = "UPDATE agents SET status = 'Busy', current_calls = current_calls + 1 
-                                       WHERE agent_id = ? AND status = 'Available' AND current_calls = 0";
-                    let rows_updated = txn.execute(reserve_query, vec![
-                        limbo::Value::Text(agent_id.clone())
-                    ]).await?;
+                    // NOTE: Agent was already reserved in try_assign_to_specific_agent()
+                    // We do NOT check agent availability again here!
                     
-                    if rows_updated == 0 {
-                        return Err(anyhow!(
-                            "Agent is not available or already busy"
-                        ));
-                    }
-                    
-                    // 2. Remove call from queue
+                    // 1. Remove call from queue
                     let dequeue_query = "DELETE FROM call_queue WHERE session_id = ?";
                     txn.execute(dequeue_query, vec![
                         limbo::Value::Text(session_id.clone())
                     ]).await?;
                     
-                    // 3. Add to active calls
+                    // 2. Add to active calls
+                    // Generate a unique call_id for this assignment
+                    let call_id = format!("call_{}", uuid::Uuid::new_v4());
                     let add_active_query = "INSERT INTO active_calls 
-                        (customer_session_id, agent_session_id, agent_id, bridge_id, customer_sdp, started_at) 
-                        VALUES (?, NULL, ?, NULL, ?, datetime('now'))";
+                        (call_id, agent_id, session_id, assigned_at) 
+                        VALUES (?, ?, ?, datetime('now'))";
                     txn.execute(add_active_query, vec![
-                        limbo::Value::Text(session_id.clone()),
+                        limbo::Value::Text(call_id),
                         limbo::Value::Text(agent_id.clone()),
-                        customer_sdp.map(limbo::Value::Text).unwrap_or(limbo::Value::Null),
+                        limbo::Value::Text(session_id.clone()),
                     ]).await?;
                     
                     Ok(())
@@ -232,7 +230,6 @@ impl DatabaseManager {
         
         self.retry_operation("update_agent_call_count", operation).await
     }
-
 }
 
 /// Transaction wrapper for atomic operations
@@ -469,20 +466,17 @@ impl CallCenterDatabase {
     async fn initialize_schema(&self) -> Result<()> {
         debug!("📋 Creating call center database schema");
         
-        let conn = self.connection.read().await;
+        // Use the new centralized schema initialization by creating a temporary DatabaseManager
+        // and delegating to it (this ensures consistency)
+        let temp_db_manager = DatabaseManager {
+            db: self.db.clone(),
+            connection: self.connection.clone(),
+        };
         
-        // Create all tables using the correct Limbo execute() method for DDL
-        schema::create_agents_table(&*conn).await?;
-        schema::create_call_records_table(&*conn).await?;
-        schema::create_call_queues_table(&*conn).await?;
-        schema::create_routing_policies_table(&*conn).await?;
-        schema::create_agent_skills_table(&*conn).await?;
-        schema::create_call_metrics_table(&*conn).await?;
+        // Use the centralized schema initialization
+        schema::initialize_call_center_schema(&temp_db_manager).await?;
         
-        // Create indexes for performance
-        schema::create_indexes(&*conn).await?;
-        
-        debug!("✅ Database schema created successfully");
+        debug!("✅ Database schema created successfully using centralized initialization");
         Ok(())
     }
     

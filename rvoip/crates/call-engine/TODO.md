@@ -1056,7 +1056,91 @@ match coordinator.wait_for_answer(&agent_session_id, Duration::from_secs(30)).aw
 **Estimated Time**: 1-2 days ✅ COMPLETED
 **Priority**: CRITICAL - Core architectural issue blocking successful calls
 
-### Phase 0.19 - Fix Queue Assignment Race Conditions 🚨 NEW
+### Phase 0.19 - Fix Database Schema Mismatch 🚨 CRITICAL
+
+**Problem Discovered from E2E Testing**: Database queries fail with "column 'status' not found in table 'agents'" preventing any calls from being assigned to agents.
+
+**Root Cause Analysis**:
+1. The database schema is missing a `status` column in the `agents` table
+2. Code expects to check agent status (AVAILABLE/BUSY) but column doesn't exist
+3. All agent assignment operations fail with SQL parse errors
+4. System successfully receives calls and queues them, but cannot route to agents
+5. This is a fundamental schema mismatch that blocks all call routing
+
+**Evidence from Logs**:
+```
+SQL execution failure: `Parse error: column 'status' not found in table 'agents'`
+Failed to atomically assign call to agent: SQL execution failure
+Failed to get available agents from database: SQL execution failure: `Parse error: Column status not found`
+```
+
+**Current Schema (Missing Column)**:
+```sql
+CREATE TABLE agents (
+    agent_id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    -- status column is MISSING!
+    max_calls INTEGER DEFAULT 1,
+    current_calls INTEGER DEFAULT 0,
+    contact_uri TEXT,
+    last_heartbeat DATETIME
+);
+```
+
+**Required Schema**:
+```sql
+CREATE TABLE agents (
+    agent_id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'OFFLINE',  -- This is missing!
+    max_calls INTEGER DEFAULT 1,
+    current_calls INTEGER DEFAULT 0,
+    contact_uri TEXT,
+    last_heartbeat DATETIME,
+    CHECK (status IN ('OFFLINE', 'AVAILABLE', 'BUSY', 'RESERVED'))
+);
+```
+
+**Fix Tasks**:
+
+#### Task 1: Update Database Schema Definition ✅
+- [x] Add `status TEXT NOT NULL DEFAULT 'OFFLINE'` to agents table creation
+- [x] Add CHECK constraint for valid status values
+- [x] Ensure all queries that reference status will work
+
+#### Task 2: Fix Related Issues Found
+- [x] Also missing `agent_id` column references in some queries
+- [x] Ensure all expected columns exist in schema
+- [x] Add proper indexes for performance
+
+#### Task 3: Database Migration Strategy
+- [ ] For existing databases, add migration to ALTER TABLE
+- [ ] Handle case where database already exists without column
+- [ ] Consider version tracking for schema changes
+
+#### Task 4: Verification
+- [ ] Re-run E2E tests to confirm fix
+- [ ] Verify all 5 calls complete successfully
+- [ ] Check that agents properly transition between states
+- [ ] Ensure no more SQL parse errors in logs
+
+**Implementation Plan**:
+1. Update the CREATE TABLE statement in `database/mod.rs`
+2. Add the missing `status` column with proper constraints
+3. Test locally to ensure queries work
+4. Re-run E2E test suite
+5. Verify successful call completion
+
+**Expected Outcome**:
+- No more SQL parse errors
+- Agents can be queried by status
+- Calls successfully assigned to available agents
+- All 5 test calls complete successfully
+
+**Estimated Time**: 30 minutes
+**Priority**: CRITICAL - System is completely broken without this fix!
+
+### Phase 0.20 - Fix Queue Assignment Race Conditions 🚨 NEW
 
 **Problem Discovered from E2E Testing**: Only 2 out of 5 calls completed successfully. The other 3 calls got stuck in "being assigned" state.
 
