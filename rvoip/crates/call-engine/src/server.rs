@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::{sleep, interval};
 use tokio::task::JoinHandle;
-use tracing::{info, error};
+use tracing::{info, error, debug};
 
 use crate::{
     prelude::*,
@@ -243,18 +243,36 @@ impl CallCenterServer {
     
     /// Internal queue processor loop - assigns waiting calls to available agents
     async fn queue_processor_loop(engine: Arc<CallCenterEngine>) {
-        info!("🔄 Starting queue processor for automatic call distribution");
+        info!("🔄 Starting ROUTING-BASED queue processor for automatic call distribution");
         
-        let mut interval = interval(Duration::from_millis(100)); // Check every 100ms
+        let mut interval = tokio::time::interval(Duration::from_millis(500)); // Check every 500ms (reduced frequency)
         
         loop {
             interval.tick().await;
             
-            // Process all queues
-            if let Err(e) = engine.process_all_queues().await {
-                error!("Error processing queues: {}", e);
+            // Use ROUTING-BASED processing instead of simple core.rs logic
+            if let Err(e) = Self::process_all_queues_with_routing(&engine).await {
+                error!("Error processing queues with routing: {}", e);
             }
         }
+    }
+    
+    /// Process all queues using sophisticated routing logic (replaces simple core.rs assignment)
+    async fn process_all_queues_with_routing(engine: &Arc<CallCenterEngine>) -> Result<()> {
+        // Check standard queues for activity and trigger routing-based assignment
+        let standard_queues = vec!["general", "support", "sales", "billing", "vip", "premium"];
+        
+        for queue_id in standard_queues {
+            let queue_depth = engine.get_queue_depth(queue_id).await;
+            if queue_depth > 0 {
+                debug!("🔄 Processing queue '{}' with {} calls using ROUTING logic", queue_id, queue_depth);
+                
+                // Use the sophisticated routing logic with sequential assignment and BUSY status updates
+                engine.monitor_queue_for_agents(queue_id.to_string()).await;
+            }
+        }
+        
+        Ok(())
     }
     
     /// Helper to create test agents (for examples/testing)

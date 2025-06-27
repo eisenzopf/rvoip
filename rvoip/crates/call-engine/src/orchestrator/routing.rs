@@ -210,7 +210,7 @@ impl CallCenterEngine {
     }
     
     /// Get the current depth of a queue
-    async fn get_queue_depth(&self, queue_id: &str) -> usize {
+    pub async fn get_queue_depth(&self, queue_id: &str) -> usize {
         if let Some(db_manager) = &self.db_manager {
             match db_manager.get_queue_depth(queue_id).await {
                 Ok(depth) => depth,
@@ -444,7 +444,7 @@ impl CallCenterEngine {
     }
     
     /// Monitor queue for agent availability
-    pub(super) async fn monitor_queue_for_agents(&self, queue_id: String) {
+    pub async fn monitor_queue_for_agents(&self, queue_id: String) {
         // Check if queue has calls before starting monitor
         let initial_queue_size = self.get_queue_depth(&queue_id).await;
         
@@ -463,6 +463,16 @@ impl CallCenterEngine {
             }
             
             info!("👁️ Starting queue monitor for queue: {} (initial size: {})", queue_id, initial_queue_size);
+            
+            // BATCHING DELAY: Wait 2 seconds to allow multiple calls to accumulate
+            // This enables fair round robin distribution instead of serial processing
+            info!("⏱️ BATCHING: Waiting 2 seconds to accumulate calls for fair distribution");
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            
+            // Check queue size after batching delay
+            let batched_queue_size = engine.get_queue_depth(&queue_id).await;
+            info!("📊 BATCHING: Queue '{}' size after 2s delay: {} calls (was {})", 
+                  queue_id, batched_queue_size, initial_queue_size);
             
             // Monitor for 5 minutes max (to prevent orphaned tasks)
             let start_time = std::time::Instant::now();
@@ -540,47 +550,84 @@ impl CallCenterEngine {
                     }
                 }
                 
-                // Fallback to in-memory assignment with atomic agent reservation
+                // FIXED: Sequential assignment with last agent exclusion
                 let mut assignments_made = 0;
-                for agent_id in &available_agents {
-                    // Use atomic assignment to prevent race conditions
-                    if let Some(queued_call) = engine.try_assign_to_specific_agent(&queue_id, agent_id).await {
-                        info!("📤 Atomically assigned call {} from queue {} to agent {}", 
-                              queued_call.session_id, queue_id, agent_id);
-                        
-                        // Log queue depth after dequeue
-                        let remaining_calls = engine.get_in_memory_queue_depth(&queue_id).await;
-                        info!("📊 Queue '{}' status after dequeue: {} calls remaining", 
-                              queue_id, remaining_calls);
-                        
-                        // Update call status to indicate it's being assigned
-                        if let Some(mut call_info) = engine.active_calls.get_mut(&queued_call.session_id) {
-                            call_info.status = super::types::CallStatus::Connecting;
-                            // Don't clear queue_id yet - we might need to re-queue
-                        }
-                        
-                        // Note: Agent is already marked as busy by try_assign_to_specific_agent
-                        
-                        // Spawn task to handle the actual call setup
-                        let engine_clone = engine.clone();
-                        let queue_id_clone = queue_id.clone();
-                        let agent_id_clone = agent_id.clone();
-                        tokio::spawn(async move {
-                            Self::handle_call_assignment(
-                                engine_clone,
-                                queue_id_clone,
-                                queued_call,
-                                agent_id_clone,
-                            ).await;
-                        });
-                        
-                        assignments_made += 1;
+                let mut last_assigned_agent: Option<String> = None;
+                
+                // Process calls one at a time to ensure fair round robin
+                while assignments_made < queue_size && assignments_made < available_agents.len() {
+                    // Get available agents excluding the last one assigned
+                    let available_agents_ordered = if assignments_made == 0 {
+                        // First assignment - use normal order
+                        available_agents.clone()
                     } else {
-                        // Agent was not available or no more calls in queue
-                        debug!("Could not assign to agent {} (already taken or no calls)", agent_id);
-                        // Continue trying with next agent
+                        // Subsequent assignments - exclude last assigned agent by moving to end
+                        let mut filtered_agents = available_agents.clone();
+                        if let Some(ref last_agent_id) = last_assigned_agent {
+                            if let Some(pos) = filtered_agents.iter().position(|agent| agent.0 == *last_agent_id) {
+                                let excluded_agent = filtered_agents.remove(pos);
+                                filtered_agents.push(excluded_agent);
+                                info!("🚫 Moved last assigned agent '{}' to end for fairness", last_agent_id);
+                            }
+                        }
+                        filtered_agents
+                    };
+                    
+                    // Log current assignment order for debugging
+                    info!("🔄 ASSIGNMENT ORDER for call #{}: {:?}", 
+                          assignments_made + 1, 
+                          available_agents_ordered.iter().map(|a| &a.0).collect::<Vec<_>>());
+                    
+                    // Try to assign to the FIRST available agent in ordered list
+                    let mut call_assigned = false;
+                    for agent_id in &available_agents_ordered {
+                        if let Some(queued_call) = engine.try_assign_to_specific_agent(&queue_id, agent_id).await {
+                            info!("📤 SEQUENTIAL ASSIGNMENT #{}: call {} → agent {}", 
+                                  assignments_made + 1, queued_call.session_id, agent_id);
+                            
+                            // Log queue depth after dequeue
+                            let remaining_calls = engine.get_in_memory_queue_depth(&queue_id).await;
+                            info!("📊 Queue '{}' status after assignment: {} calls remaining", 
+                                  queue_id, remaining_calls);
+                            
+                            // Update call status to indicate it's being assigned
+                            if let Some(mut call_info) = engine.active_calls.get_mut(&queued_call.session_id) {
+                                call_info.status = super::types::CallStatus::Connecting;
+                            }
+                            
+                            // Spawn task to handle the actual call setup
+                            let engine_clone = engine.clone();
+                            let queue_id_clone = queue_id.clone();
+                            let agent_id_clone = agent_id.clone();
+                            tokio::spawn(async move {
+                                Self::handle_call_assignment(
+                                    engine_clone,
+                                    queue_id_clone,
+                                    queued_call,
+                                    agent_id_clone,
+                                ).await;
+                            });
+                            
+                            // Track this agent as last assigned for next iteration
+                            last_assigned_agent = Some(agent_id.0.clone());
+                            assignments_made += 1;
+                            call_assigned = true;
+                            
+                            // Small delay to ensure status updates propagate
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            
+                            break; // Move to next call
+                        }
+                    }
+                    
+                    if !call_assigned {
+                        // No more agents available for assignment
+                        debug!("No more agents available for assignment in queue {}", queue_id);
+                        break;
                     }
                 }
+                
+                info!("🎯 FINAL RESULT: Made {} sequential assignments in queue {}", assignments_made, queue_id);
                 
                 if assignments_made == 0 && !available_agents.is_empty() {
                     debug!("No calls in queue {} despite having available agents", queue_id);
