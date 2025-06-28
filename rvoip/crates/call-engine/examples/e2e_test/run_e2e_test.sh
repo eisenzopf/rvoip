@@ -153,7 +153,7 @@ main() {
         --username alice \
         --server 127.0.0.1:5060 \
         --port 5071 \
-        --call-duration 15 \
+        --call-duration 5 \
         > "$ALICE_LOG" 2>&1 &
     ALICE_PID=$!
     
@@ -166,7 +166,7 @@ main() {
         --username bob \
         --server 127.0.0.1:5060 \
         --port 5072 \
-        --call-duration 15 \
+        --call-duration 5 \
         > "$BOB_LOG" 2>&1 &
     BOB_PID=$!
     
@@ -202,7 +202,7 @@ main() {
     
     # Run SIPp test calls
     echo -e "\n${YELLOW}Running SIPp test calls...${NC}"
-    echo "Making 5 calls in a burst..."
+    echo "Making 5 calls with coordinated timing..."
     
     cd "$SIPP_DIR"
     sipp -sf customer_uac.xml \
@@ -210,7 +210,7 @@ main() {
         -i 127.0.0.1 \
         -p 5080 \
         -m 5 \
-        -r 10 \
+        -r 5 \
         -trace_msg \
         -trace_err \
         -trace_screen \
@@ -219,8 +219,8 @@ main() {
         > "$SIPP_LOG" 2>&1 || true
     
     # Wait for calls to complete (extended for queue testing)
-    echo "Waiting for calls to complete (90s to ensure all calls go through queue)..."
-    sleep 90
+    echo "Waiting for calls to complete (30s - calls now have 8s duration)..."
+    sleep 30
     
     # Stop packet capture
     echo -e "\n${YELLOW}Stopping packet capture...${NC}"

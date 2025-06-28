@@ -44,7 +44,7 @@ struct Args {
     domain: String,
     
     /// Call duration in seconds (0 for manual hangup)
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value = "5")]
     call_duration: u64,
     
     /// Enable verbose logging

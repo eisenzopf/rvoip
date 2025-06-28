@@ -173,41 +173,129 @@ impl DialogManager {
             .ok_or_else(|| DialogError::SessionNotFound {
                 session_id: session_id.0.clone(),
             })?;
-        
+
         // Check the session state to determine the appropriate termination method
         match session.state() {
             CallState::Initiating => {
-                // Early dialog - send CANCEL
-                tracing::info!("Canceling early dialog for session {} in state {:?}", session_id, session.state());
+                // Early dialog - attempt CANCEL but handle race conditions
+                tracing::info!("Attempting to cancel early dialog for session {} in state {:?}", session_id, session.state());
                 
-                let _tx_key = self.dialog_api
-                    .send_cancel(&dialog_id)
-                    .await
-                    .map_err(|e| DialogError::DialogCore {
-                        source: Box::new(e),
-                    })?;
-                
-                tracing::info!("Sent CANCEL for session: {}", session_id);
+                // 🚨 CRITICAL RACE CONDITION FIX: Always use atomic dialog state check
+                // This prevents the "Cannot send CANCEL for dialog in state Confirmed" error
+                match self.dialog_api.get_dialog_state(&dialog_id).await {
+                    Ok(dialog_state) => {
+                        match dialog_state {
+                            rvoip_dialog_core::dialog::DialogState::Initial | 
+                            rvoip_dialog_core::dialog::DialogState::Early => {
+                                // Safe to send CANCEL
+                                match self.dialog_api.send_cancel(&dialog_id).await {
+                                    Ok(_tx_key) => {
+                                        tracing::info!("✅ Sent CANCEL for early dialog session: {}", session_id);
+                                    }
+                                    Err(e) => {
+                                        // CANCEL failed, likely due to race condition - try BYE instead
+                                        tracing::warn!("⚠️ CANCEL failed for dialog {} (race condition), attempting BYE: {}", dialog_id, e);
+                                        
+                                        match self.dialog_api.send_bye(&dialog_id).await {
+                                            Ok(_tx_key) => {
+                                                tracing::info!("✅ Sent BYE after CANCEL failure for session: {}", session_id);
+                                            }
+                                            Err(e2) => {
+                                                tracing::warn!("⚠️ Both CANCEL and BYE failed for session {}: CANCEL={}, BYE={}", session_id, e, e2);
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            _ => {
+                                // Dialog has already progressed beyond Early state - send BYE instead
+                                tracing::info!("Dialog {} has progressed beyond Early state ({}), sending BYE instead of CANCEL", 
+                                    dialog_id, format!("{:?}", dialog_state));
+                                
+                                match self.dialog_api.send_bye(&dialog_id).await {
+                                    Ok(_tx_key) => {
+                                        tracing::info!("✅ Sent BYE for confirmed dialog session: {}", session_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("⚠️ BYE failed for confirmed dialog session {}: {}", session_id, e);
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        // Dialog not found or error getting state - it may have already terminated
+                        tracing::warn!("Could not get dialog state for {}: {}. Dialog may have already terminated.", dialog_id, e);
+                    }
+                }
             },
             CallState::Ringing | CallState::Active | CallState::OnHold | CallState::Transferring => {
-                // Established dialog - send BYE
+                // Established dialog - send BYE with improved error handling
                 tracing::info!("Terminating established dialog for session {} in state {:?}", session_id, session.state());
                 
-                let _tx_key = self.dialog_api
-                    .send_bye(&dialog_id)
-                    .await
-                    .map_err(|e| DialogError::DialogCore {
-                        source: Box::new(e),
-                    })?;
-                
-                tracing::info!("Sent BYE for session: {}", session_id);
+                // 🚨 IMPROVED BYE ERROR HANDLING: Handle unreachable endpoints gracefully
+                // This prevents excessive Timer E retransmissions when agents are unreachable
+                match self.dialog_api.send_bye(&dialog_id).await {
+                    Ok(_tx_key) => {
+                        tracing::info!("✅ Sent BYE for established session: {}", session_id);
+                        
+                        // Set a reasonable timeout for BYE response (shorter than default)
+                        // If no response in 5 seconds, consider the call terminated locally
+                        let dialog_api = self.dialog_api.clone();
+                        let session_id_timeout = session_id.clone();
+                        let dialog_id_timeout = dialog_id.clone();
+                        
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            
+                            // Check if dialog still exists and force cleanup if needed
+                            match dialog_api.get_dialog_state(&dialog_id_timeout).await {
+                                Ok(state) => {
+                                    if !matches!(state, rvoip_dialog_core::dialog::DialogState::Terminated) {
+                                        tracing::warn!("⏰ BYE timeout for session {} - forcing dialog termination", session_id_timeout);
+                                        // Force terminate the dialog to stop retransmissions
+                                        let _ = dialog_api.terminate_dialog(&dialog_id_timeout).await;
+                                    }
+                                }
+                                Err(_) => {
+                                    // Dialog already cleaned up, which is fine
+                                }
+                            }
+                        });
+                    },
+                    Err(e) => {
+                        let error_msg = e.to_string();
+                        
+                        // Categorize BYE failures for better handling
+                        if error_msg.contains("unreachable") || error_msg.contains("timeout") || 
+                           error_msg.contains("connection") || error_msg.contains("network") {
+                            tracing::warn!("🌐 BYE failed due to network/connectivity issue for session {}: {}. Terminating locally.", session_id, e);
+                            
+                            // For network issues, terminate the dialog immediately to prevent retransmissions
+                            match self.dialog_api.terminate_dialog(&dialog_id).await {
+                                Ok(()) => {
+                                    tracing::info!("✅ Forcibly terminated dialog {} due to network issue", dialog_id);
+                                }
+                                Err(e2) => {
+                                    tracing::warn!("⚠️ Failed to forcibly terminate dialog {}: {}", dialog_id, e2);
+                                }
+                            }
+                        } else if error_msg.contains("already terminated") || error_msg.contains("not exist") {
+                            tracing::info!("ℹ️ BYE not needed for session {} - dialog already terminated: {}", session_id, e);
+                            // This is fine, the dialog is already gone
+                        } else {
+                            tracing::warn!("⚠️ BYE failed for session {} with unknown error: {}. Continuing with cleanup.", session_id, e);
+                            // Continue with cleanup even if BYE fails for unknown reasons
+                        }
+                    }
+                }
             },
             CallState::Terminating | CallState::Terminated | CallState::Cancelled | CallState::Failed(_) => {
                 // Already terminated - just clean up
                 tracing::warn!("Session {} is already in state {:?}, just cleaning up", session_id, session.state());
             }
         }
-        
+
         // Remove the dialog-to-session mapping
         self.dialog_to_session.remove(&dialog_id);
         

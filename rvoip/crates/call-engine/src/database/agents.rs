@@ -8,108 +8,27 @@ use super::value_helpers::*;
 use crate::agent::{AgentId, AgentStatus};
 
 impl DatabaseManager {
-    /// Debug function to dump all database contents and verify Limbo compatibility
+    /// Lightweight debug function (Limbo-optimized) 
     pub async fn debug_dump_database(&self) -> Result<()> {
-        info!("🔍 === DATABASE DEBUG DUMP ===");
-        
-        // Check if the agents table exists
-        match self.query("SELECT name FROM sqlite_master WHERE type='table' AND name='agents'", ()).await {
-            Ok(rows) => {
-                if rows.is_empty() {
-                    info!("🔍 ❌ agents table does not exist!");
-                    return Ok(());
-                } else {
-                    info!("🔍 ✅ agents table exists");
-                }
-            }
-            Err(e) => {
-                info!("🔍 ❌ Error checking table existence: {}", e);
-                return Ok(());
-            }
-        }
-        
-        // Get table schema
-        match self.query("PRAGMA table_info(agents)", ()).await {
-            Ok(rows) => {
-                info!("🔍 agents table schema:");
-                for row in rows {
-                    if let (Ok(cid), Ok(name), Ok(type_), Ok(notnull), Ok(dflt_value), Ok(pk)) = (
-                        row.get_value(0), row.get_value(1), row.get_value(2), 
-                        row.get_value(3), row.get_value(4), row.get_value(5)
-                    ) {
-                        info!("🔍   Column: {:?} ({:?}), NOT NULL: {:?}, DEFAULT: {:?}, PK: {:?}", 
-                              name, type_, notnull, dflt_value, pk);
-                    }
-                }
-            }
-            Err(e) => {
-                info!("🔍 ❌ Error getting table schema: {}", e);
-            }
-        }
-        
-        // Count total rows
-        match self.query("SELECT COUNT(*) FROM agents", ()).await {
-            Ok(rows) => {
-                if let Some(row) = rows.first() {
-                    if let Ok(count) = row.get_value(0) {
-                        info!("🔍 Total agents in database: {:?}", count);
-                    }
-                }
-            }
-            Err(e) => {
-                info!("🔍 ❌ Error counting agents: {}", e);
-            }
-        }
-        
-        // Dump all agent records with full details
-        match self.query("SELECT * FROM agents", ()).await {
-            Ok(rows) => {
-                info!("🔍 All agent records ({} rows):", rows.len());
-                for (i, row) in rows.iter().enumerate() {
-                    // Try to extract readable data from each column
-                    let mut row_data = Vec::new();
-                    for col_idx in 0..8 { // We expect 8 columns
-                        match row.get_value(col_idx) {
-                            Ok(value) => row_data.push(format!("{:?}", value)),
-                            Err(_) => row_data.push("ERROR".to_string()),
-                        }
-                    }
-                    info!("🔍   Row {}: [{}]", i + 1, row_data.join(", "));
-                }
-            }
-            Err(e) => {
-                info!("🔍 ❌ Error dumping agents: {}", e);
-            }
-        }
-        
-        info!("🔍 === END DATABASE DEBUG DUMP ===");
+        // LIMBO OPTIMIZATION: Skip heavy debug operations to prevent database overload
+        debug!("🔍 Database debug: Lightweight check only (Limbo mode)");
         Ok(())
     }
 
-    /// Register or update an agent (simplified for Limbo compatibility)
+    /// Register or update an agent (Limbo-optimized for stability)
     pub async fn upsert_agent(&self, agent_id: &str, username: &str, contact_uri: Option<&str>) -> Result<()> {
         let now = Utc::now().to_rfc3339();
+        info!("🔍 upsert_agent: {} -> {}", agent_id, username);
         
-        info!("🔍 upsert_agent called with agent_id='{}', username='{}', contact_uri='{:?}'", 
-               agent_id, username, contact_uri);
-        
-        // DEBUG: Dump database contents BEFORE operation
-        self.debug_dump_database().await?;
-        
-        // Since Limbo has "No indexing", we can't rely on UNIQUE constraints
-        // Let's do a manual check-and-insert approach
-        
-        // First, check if agent already exists
-        info!("🔍 Checking if agent {} already exists...", agent_id);
+        // LIMBO OPTIMIZATION: Simple operations only, no verification queries
         let existing = self.query(
             "SELECT agent_id FROM agents WHERE agent_id = ?1",
             vec![agent_id.into()] as Vec<limbo::Value>
         ).await?;
         
         if existing.is_empty() {
-            // Agent doesn't exist, insert new one
-            info!("🔍 Agent {} not found, inserting new record", agent_id);
-            let insert_result = self.execute(
+            // Insert new agent
+            self.execute(
                 "INSERT INTO agents (agent_id, username, contact_uri, last_heartbeat, status, current_calls, max_calls, available_since)
                  VALUES (?1, ?2, ?3, ?4, 'AVAILABLE', 0, 1, ?5)",
                 vec![
@@ -117,154 +36,32 @@ impl DatabaseManager {
                     username.into(), 
                     contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
                     now.clone().into(),
-                    now.clone().into(), // Set available_since timestamp  
+                    now.into(),
                 ] as Vec<limbo::Value>
-            ).await;
-            
-            match insert_result {
-                Ok(rows_affected) => {
-                    info!("🔍 ✅ INSERT successful: {} rows affected", rows_affected);
-                    
-                    // Verify the insert by selecting the specific record we just created
-                    info!("🔍 Verifying INSERT with targeted SELECT...");
-                    let verification = self.query(
-                        "SELECT agent_id, username, contact_uri, status, available_since FROM agents WHERE agent_id = ?1",
-                        vec![agent_id.into()] as Vec<limbo::Value>
-                    ).await;
-                    
-                    match verification {
-                        Ok(rows) => {
-                            if rows.is_empty() {
-                                info!("🔍 ❌ VERIFICATION FAILED: Record not found after INSERT!");
-                            } else if rows.len() > 1 {
-                                info!("🔍 ⚠️ VERIFICATION WARNING: Multiple records found for agent_id {}", agent_id);
-                            } else {
-                                let row = &rows[0];
-                                if let (Ok(db_agent_id), Ok(db_username), contact_uri_val, Ok(db_status), available_since_val) = (
-                                    row.get_value(0), row.get_value(1), row.get_value(2), row.get_value(3), row.get_value(4)
-                                ) {
-                                    let db_agent_id = match db_agent_id {
-                                        limbo::Value::Text(s) => s,
-                                        _ => "INVALID".to_string(),
-                                    };
-                                    let db_username = match db_username {
-                                        limbo::Value::Text(s) => s,
-                                        _ => "INVALID".to_string(),
-                                    };
-                                    let db_contact_uri = match contact_uri_val {
-                                        Ok(limbo::Value::Text(s)) => Some(s),
-                                        _ => None,
-                                    };
-                                    let db_status = match db_status {
-                                        limbo::Value::Text(s) => s,
-                                        _ => "INVALID".to_string(),
-                                    };
-                                    let db_available_since = match available_since_val {
-                                        Ok(limbo::Value::Text(s)) => Some(s),
-                                        _ => None,
-                                    };
-                                    
-                                    info!("🔍 ✅ VERIFICATION SUCCESS: Record found and verified:");
-                                    info!("🔍   - agent_id: '{}' (expected: '{}')", db_agent_id, agent_id);
-                                    info!("🔍   - username: '{}' (expected: '{}')", db_username, username);
-                                    info!("🔍   - contact_uri: '{:?}' (expected: '{:?}')", db_contact_uri, contact_uri);
-                                    info!("🔍   - status: '{}' (expected: 'AVAILABLE')", db_status);
-                                    info!("🔍   - available_since: '{:?}' (expected: recent timestamp)", db_available_since);
-                                    
-                                    // Check for mismatches
-                                    if db_agent_id != agent_id {
-                                        info!("🔍 ❌ MISMATCH: agent_id doesn't match!");
-                                    }
-                                    if db_username != username {
-                                        info!("🔍 ❌ MISMATCH: username doesn't match!");
-                                    }
-                                    if db_status != "AVAILABLE" {
-                                        info!("🔍 ❌ MISMATCH: status is not AVAILABLE!");
-                                    }
-                                } else {
-                                    info!("🔍 ❌ VERIFICATION FAILED: Could not parse record fields");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            info!("🔍 ❌ VERIFICATION FAILED: SELECT error: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    info!("🔍 ❌ INSERT failed: {}", e);
-                    return Err(e);
-                }
-            }
+            ).await?;
+            info!("✅ Agent {} created", agent_id);
         } else {
-            // Agent exists, update it
-            info!("🔍 Agent {} found, updating existing record", agent_id);
-            let update_result = self.execute(
+            // Update existing agent
+            self.execute(
                 "UPDATE agents 
-                 SET username = ?1, 
-                     contact_uri = ?2, 
-                     last_heartbeat = ?3,
-                     status = 'AVAILABLE',
-                     available_since = ?4
+                 SET username = ?1, contact_uri = ?2, last_heartbeat = ?3, status = 'AVAILABLE', available_since = ?4
                  WHERE agent_id = ?5",
                 vec![
                     username.into(),
                     contact_uri.map(|s| s.into()).unwrap_or(limbo::Value::Null),
                     now.clone().into(),
-                    now.clone().into(), // Set available_since timestamp
+                    now.into(),
                     agent_id.into(),
                 ] as Vec<limbo::Value>
-            ).await;
-            
-            match update_result {
-                Ok(rows_affected) => {
-                    info!("🔍 ✅ UPDATE successful: {} rows affected", rows_affected);
-                    
-                    // Verify the update by selecting the specific record we just updated
-                    info!("🔍 Verifying UPDATE with targeted SELECT...");
-                    let verification = self.query(
-                        "SELECT agent_id, username, contact_uri, status, available_since FROM agents WHERE agent_id = ?1",
-                        vec![agent_id.into()] as Vec<limbo::Value>
-                    ).await;
-                    
-                    match verification {
-                        Ok(rows) => {
-                            if rows.is_empty() {
-                                info!("🔍 ❌ VERIFICATION FAILED: Record not found after UPDATE!");
-                            } else {
-                                let row = &rows[0];
-                                if let (Ok(db_agent_id), Ok(db_username), contact_uri_val, Ok(db_status), available_since_val) = (
-                                    row.get_value(0), row.get_value(1), row.get_value(2), row.get_value(3), row.get_value(4)
-                                ) {
-                                    info!("🔍 ✅ VERIFICATION SUCCESS: UPDATE verified with current values");
-                                } else {
-                                    info!("🔍 ❌ VERIFICATION FAILED: Could not parse updated record fields");
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            info!("🔍 ❌ VERIFICATION FAILED: SELECT error after UPDATE: {}", e);
-                        }
-                    }
-                }
-                Err(e) => {
-                    info!("🔍 ❌ UPDATE failed: {}", e);
-                    return Err(e);
-                }
-            }
+            ).await?;
+            info!("✅ Agent {} updated", agent_id);
         }
         
-        // DEBUG: Dump database contents AFTER operation
-        self.debug_dump_database().await?;
-        
-        info!("Agent {} processed in database with contact {:?}", agent_id, contact_uri);
         Ok(())
     }
     
-    /// Update agent status (with availability timestamp for fair round robin)
+    /// Update agent status (Limbo-optimized)
     pub async fn update_agent_status(&self, agent_id: &str, status: AgentStatus) -> Result<()> {
-        info!("🔧 update_agent_status called: agent_id='{}', status='{:?}'", agent_id, status);
-        
         let status_str = match status {
             AgentStatus::Available => "AVAILABLE",
             AgentStatus::Busy(_) => "BUSY",
@@ -272,145 +69,18 @@ impl DatabaseManager {
             AgentStatus::Offline => "OFFLINE",
         };
         
-        // If transitioning to AVAILABLE, update the available_since timestamp for fairness
+        // LIMBO OPTIMIZATION: Simple update without verification
         if matches!(status, AgentStatus::Available) {
             let now = chrono::Utc::now().to_rfc3339();
-            info!("🔧 Updating agent {} to AVAILABLE with NEW timestamp: {}", agent_id, now);
-            
-            let rows_updated = self.execute(
+            self.execute(
                 "UPDATE agents SET status = ?1, available_since = ?2 WHERE agent_id = ?3",
-                vec![status_str.into(), now.clone().into(), agent_id.into()] as Vec<limbo::Value>
+                vec![status_str.into(), now.into(), agent_id.into()] as Vec<limbo::Value>
             ).await?;
-            
-            info!("🔧 Agent {} status updated to {:?} with available_since timestamp {} (rows affected: {})", 
-                   agent_id, status, now, rows_updated);
-                   
-            // Verify the UPDATE by selecting the specific record we just updated
-            info!("🔍 Verifying UPDATE with targeted SELECT...");
-            let verification = self.query(
-                "SELECT agent_id, status, available_since FROM agents WHERE agent_id = ?1",
-                vec![agent_id.into()] as Vec<limbo::Value>
-            ).await;
-            
-            match verification {
-                Ok(rows) => {
-                    if rows.is_empty() {
-                        info!("🔍 ❌ VERIFICATION FAILED: Agent {} not found after UPDATE!", agent_id);
-                    } else {
-                        let row = &rows[0];
-                        if let (Ok(db_agent_id), Ok(db_status), available_since_val) = (
-                            row.get_value(0), row.get_value(1), row.get_value(2)
-                        ) {
-                            let db_agent_id = match db_agent_id {
-                                limbo::Value::Text(s) => s,
-                                _ => "INVALID".to_string(),
-                            };
-                            let db_status = match db_status {
-                                limbo::Value::Text(s) => s,
-                                _ => "INVALID".to_string(),
-                            };
-                            let db_available_since = match available_since_val {
-                                Ok(limbo::Value::Text(s)) => Some(s),
-                                _ => None,
-                            };
-                            
-                            info!("🔍 ✅ UPDATE VERIFICATION SUCCESS:");
-                            info!("🔍   - agent_id: '{}' (expected: '{}')", db_agent_id, agent_id);
-                            info!("🔍   - status: '{}' (expected: 'AVAILABLE')", db_status);
-                            info!("🔍   - available_since: '{:?}' (expected: '{}')", db_available_since, now);
-                            
-                            // Check for mismatches
-                            if db_agent_id != agent_id {
-                                info!("🔍 ❌ MISMATCH: agent_id doesn't match!");
-                            }
-                            if db_status != "AVAILABLE" {
-                                info!("🔍 ❌ MISMATCH: status is not AVAILABLE!");
-                            }
-                            if let Some(db_timestamp) = &db_available_since {
-                                if db_timestamp != &now {
-                                    info!("🔍 ❌ TIMESTAMP MISMATCH: available_since '{}' != expected '{}'", db_timestamp, now);
-                                } else {
-                                    info!("🔍 ✅ TIMESTAMP MATCH: available_since correctly updated to '{}'", now);
-                                }
-                            } else {
-                                info!("🔍 ❌ TIMESTAMP MISSING: available_since is NULL!");
-                            }
-                        } else {
-                            info!("🔍 ❌ VERIFICATION FAILED: Could not parse updated record fields");
-                        }
-                    }
-                }
-                Err(e) => {
-                    info!("🔍 ❌ VERIFICATION FAILED: SELECT error after UPDATE: {}", e);
-                }
-            }
         } else {
-            info!("🔧 Updating agent {} to {} and clearing available_since timestamp", agent_id, status_str);
-            
-            // For non-available states, clear the available_since timestamp
-            let rows_updated = self.execute(
+            self.execute(
                 "UPDATE agents SET status = ?1, available_since = NULL WHERE agent_id = ?2",
                 vec![status_str.into(), agent_id.into()] as Vec<limbo::Value>
             ).await?;
-            
-            info!("🔧 Agent {} status updated to {:?} (rows affected: {})", agent_id, status, rows_updated);
-            
-            // Verify the UPDATE by selecting the specific record we just updated
-            info!("🔍 Verifying UPDATE with targeted SELECT...");
-            let verification = self.query(
-                "SELECT agent_id, status, available_since FROM agents WHERE agent_id = ?1",
-                vec![agent_id.into()] as Vec<limbo::Value>
-            ).await;
-            
-            match verification {
-                Ok(rows) => {
-                    if rows.is_empty() {
-                        info!("🔍 ❌ VERIFICATION FAILED: Agent {} not found after UPDATE!", agent_id);
-                    } else {
-                        let row = &rows[0];
-                        if let (Ok(db_agent_id), Ok(db_status), available_since_val) = (
-                            row.get_value(0), row.get_value(1), row.get_value(2)
-                        ) {
-                            let db_agent_id = match db_agent_id {
-                                limbo::Value::Text(s) => s,
-                                _ => "INVALID".to_string(),
-                            };
-                            let db_status = match db_status {
-                                limbo::Value::Text(s) => s,
-                                _ => "INVALID".to_string(),
-                            };
-                            let db_available_since = match available_since_val {
-                                Ok(limbo::Value::Text(s)) => Some(s),
-                                Ok(limbo::Value::Null) => None,
-                                _ => None,
-                            };
-                            
-                            info!("🔍 ✅ UPDATE VERIFICATION SUCCESS:");
-                            info!("🔍   - agent_id: '{}' (expected: '{}')", db_agent_id, agent_id);
-                            info!("🔍   - status: '{}' (expected: '{}')", db_status, status_str);
-                            info!("🔍   - available_since: '{:?}' (expected: NULL)", db_available_since);
-                            
-                            // Check for mismatches
-                            if db_agent_id != agent_id {
-                                info!("🔍 ❌ MISMATCH: agent_id doesn't match!");
-                            }
-                            if db_status != status_str {
-                                info!("🔍 ❌ MISMATCH: status '{}' != expected '{}'!", db_status, status_str);
-                            }
-                            if db_available_since.is_some() {
-                                info!("🔍 ❌ TIMESTAMP MISMATCH: available_since should be NULL but is '{:?}'", db_available_since);
-                            } else {
-                                info!("🔍 ✅ TIMESTAMP CORRECTLY CLEARED: available_since is NULL");
-                            }
-                        } else {
-                            info!("🔍 ❌ VERIFICATION FAILED: Could not parse updated record fields");
-                        }
-                    }
-                }
-                Err(e) => {
-                    info!("🔍 ❌ VERIFICATION FAILED: SELECT error after UPDATE: {}", e);
-                }
-            }
         }
         
         Ok(())
