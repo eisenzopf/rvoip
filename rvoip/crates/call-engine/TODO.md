@@ -1795,19 +1795,214 @@ WARN Customer session is in unexpected state: Initiating
 
 ### **🎯 Recommendations for Future Phases**
 
-#### **Phase 0.22 - Call Termination Cleanup (Low Priority)**
-- [ ] Fix CANCEL vs BYE logic in call termination
-- [ ] Improve media session cleanup ordering  
-- [ ] Handle edge cases in rapid call sequences
-- [ ] Add proper transaction timeout handling
+## 🚨 URGENT: Fix Server Log Issues (Phase 0.22) 🚨 NEW
 
-#### **Phase 0.23 - Logging & Monitoring Improvements**  
-- [ ] Reduce noise from cleanup warnings
-- [ ] Add structured logging for better debugging
-- [ ] Implement proper health checks
-- [ ] Add metrics for call success/failure rates
+**Priority Elevated from LOW to HIGH** after comprehensive server log analysis revealed critical issues affecting system reliability and performance.
 
-**Estimated Time**: 1-2 weeks for cleanup (optional)
-**Priority**: LOW - System is fully functional for production use
+### **Critical Issues Discovered in Production Logs**
+
+#### **🔴 Issue #1: Excessive BYE Retransmissions (MOST CRITICAL)**
+**Problem**: Continuous Timer E retransmissions sending BYE messages to port 5080 (SIPp client) every ~2 seconds.
+```
+Received command: Timer("E") for transaction Key(z9hG4bK-....:BYE:client)
+Sending BYE message to 127.0.0.1:5080
+```
+**Impact**: 
+- Creates unnecessary network traffic and log spam
+- Wastes system resources with infinite retransmissions
+- SIPp client terminates after calls and can't respond to BYE messages
+
+**Root Cause**: Server sends BYE to unreachable endpoints (SIPp terminates) and retries indefinitely.
+
+**Fix Tasks**:
+- [ ] Add endpoint reachability detection before sending BYE
+- [ ] Implement BYE timeout with forced dialog termination (5-10 seconds max)
+- [ ] Add graceful fallback when endpoints are unreachable
+- [ ] Stop retransmissions for obviously dead endpoints
+
+#### **🔴 Issue #2: Integer Overflow in Call Counting (CRITICAL)**
+**Problem**: Server shows impossible active call counts.
+```
+📊 Server Stats: Total=5, Active=18446744073709551615, Connected=2
+```
+**Impact**: 
+- Suggests serious bug in call accounting (u64::MAX - 4 = integer underflow)
+- Could cause memory leaks or system instability
+- Breaks monitoring and metrics
+
+**Root Cause**: Integer underflow in active call counter when calls terminate.
+
+**Fix Tasks**:
+- [ ] Debug call increment/decrement logic in call accounting
+- [ ] Add bounds checking to prevent underflow 
+- [ ] Fix counter synchronization issues
+- [ ] Add comprehensive call state validation
+
+#### **🟡 Issue #3: Media Session Management Issues (MEDIUM)**
+**Problem**: Frequent warnings about missing media sessions.
+```
+[WARN] No media session found for SIP session: sess_xxx
+```
+**Impact**: 
+- Indicates cleanup order issues
+- May cause resource leaks
+- Adds log noise making debugging harder
+
+**Fix Tasks**:
+- [ ] Fix cleanup order between SIP sessions and media sessions
+- [ ] Add proper media session lifecycle management
+- [ ] Improve synchronization between session-core and call-engine
+
+#### **🟡 Issue #4: BYE Timeout Issues (MEDIUM)**
+**Problem**: Multiple forced dialog terminations due to BYE timeouts.
+```
+⏰ BYE timeout for session sess_xxx - forcing dialog termination
+```
+**Impact**: 
+- Calls may not terminate cleanly
+- Could cause session leaks
+- Creates error conditions during normal operation
+
+**Fix Tasks**:
+- [ ] Implement proper BYE response handling
+- [ ] Add configurable BYE timeout (currently hardcoded?)
+- [ ] Better error recovery for unreachable endpoints
+
+#### **🟡 Issue #5: Agent Assignment Race Conditions (MEDIUM)**
+**Problem**: Calls assigned to agents but agents never answer.
+```
+🧹 Cleaning up pending assignment for call sess_xxx (agent alice never answered)
+```
+**Impact**: 
+- Calls may fail unnecessarily
+- Agents may appear busy when they're not
+- Queue efficiency reduced
+
+**Fix Tasks**:
+- [ ] Debug agent answer detection timing
+- [ ] Improve pending assignment timeout handling
+- [ ] Add better agent state synchronization
+
+#### **🟡 Issue #6: Excessive Verbose Logging (LOW)**
+**Problem**: Too much noise from debugging information.
+- Individual RTP packet logging every 20ms
+- Repeated call status dumps every second  
+- Duplicate connection information
+
+**Impact**: 
+- Makes logs unreadable for debugging
+- High disk I/O and storage usage
+- Hides important error messages
+
+**Fix Tasks**:
+- [ ] Move RTP packet logs to debug level (already partially done)
+- [ ] Reduce frequency of status dumps
+- [ ] Remove duplicate logging statements
+- [ ] Add log level configuration
+
+### **Implementation Plan**
+
+#### **Phase 1: Stop the Bleeding (Week 1) - URGENT**
+**Focus**: Fix the most critical issues causing system stress
+
+**Task 1.1: Fix BYE Retransmissions** ⭐ **HIGHEST PRIORITY**
+- [ ] **File**: `session-core/src/dialog/manager.rs`
+- [ ] Add BYE timeout detection (5-10 second max)
+- [ ] Force dialog termination when endpoint unreachable
+- [ ] Stop Timer E retransmissions after timeout
+- [ ] Add endpoint reachability heuristics
+
+**Task 1.2: Fix Call Counter Overflow** ⭐ **COMPLETED** ✅
+- [x] **Files**: `client-core/src/client/calls.rs`, call accounting logic ✅
+- [x] Debug increment/decrement operations ✅
+- [x] Add bounds checking and validation ✅
+- [x] Fix integer underflow bug (use saturating_sub) ✅
+- [x] Add comprehensive logging for counter changes ✅
+- [x] Recalculate stats from actual call states to prevent drift ✅
+
+**Task 1.3: Reduce Log Noise** 
+- [ ] **Files**: Various logging statements throughout
+- [ ] Move RTP packet logs to `debug!` level
+- [ ] Reduce status dump frequency (every 10s instead of 1s)
+- [ ] Remove duplicate log statements
+
+#### **Phase 2: Improve Stability (Week 2) - HIGH**
+**Focus**: Fix medium-priority issues affecting reliability
+
+**Task 2.1: Media Session Cleanup**
+- [ ] **File**: Session termination logic
+- [ ] Fix cleanup order between SIP and media sessions
+- [ ] Add proper lifecycle management
+- [ ] Test under load to verify no leaks
+
+**Task 2.2: BYE Timeout Handling**
+- [ ] **Files**: Dialog termination logic
+- [ ] Make BYE timeouts configurable  
+- [ ] Improve error recovery
+- [ ] Add graceful degradation
+
+**Task 2.3: Agent Assignment Issues**
+- [ ] **File**: `call-engine/src/orchestrator/calls.rs`
+- [ ] Debug agent answer detection timing
+- [ ] Improve pending assignment cleanup
+- [ ] Add agent state validation
+
+#### **Phase 3: Monitoring & Prevention (Week 3) - MEDIUM**
+**Focus**: Add safeguards and monitoring to prevent future issues
+
+**Task 3.1: Add Comprehensive Metrics**
+- [ ] Call completion rates
+- [ ] BYE timeout rates  
+- [ ] Media session leak detection
+- [ ] Agent assignment success rates
+
+**Task 3.2: Add Health Checks**
+- [ ] System resource monitoring
+- [ ] Call counter validation
+- [ ] Dialog state consistency checks
+- [ ] Automatic recovery procedures
+
+**Task 3.3: Improved Error Handling**
+- [ ] Graceful degradation strategies
+- [ ] Automatic retry with backoff
+- [ ] Circuit breaker patterns
+- [ ] Alert thresholds
+
+### **Testing Strategy**
+
+#### **Load Testing Requirements**:
+- [ ] Test with 100+ concurrent calls
+- [ ] Verify no BYE retransmission storms
+- [ ] Confirm call counters remain accurate
+- [ ] Monitor for memory/resource leaks
+- [ ] Test agent assignment under load
+
+#### **Edge Case Testing**:
+- [ ] Agents disconnecting mid-call
+- [ ] Network failures during BYE
+- [ ] Rapid call setup/teardown sequences
+- [ ] Resource exhaustion scenarios
+
+### **Success Criteria**
+
+#### **Week 1 (Critical)**:
+- [ ] ✅ No BYE retransmission storms (retries limited to 5-10 seconds)
+- [x] ✅ Call counters never show impossible values ✅ **COMPLETED**
+- [ ] ✅ Log volume reduced by 80%+
+
+#### **Week 2 (Stability)**:
+- [ ] ✅ No media session leak warnings under normal load
+- [ ] ✅ BYE timeouts handled gracefully
+- [ ] ✅ Agent assignment success rate >95%
+
+#### **Week 3 (Monitoring)**:
+- [ ] ✅ Comprehensive metrics dashboard
+- [ ] ✅ Automated health checks
+- [ ] ✅ Alert system for critical issues
+
+**Estimated Time**: 3 weeks total
+**Priority**: **HIGH** - These issues significantly impact production reliability
+
+**Resource Requirements**: 1-2 developers full-time for optimal progress
 
 --- 
