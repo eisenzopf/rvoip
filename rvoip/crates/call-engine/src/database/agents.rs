@@ -183,7 +183,7 @@ impl DatabaseManager {
                       idx + 1, agent.agent_id, agent.available_since);
             }
         } else {
-            info!("🔄 ROUND ROBIN: Only {} agent(s) available, no rotation needed", agents.len());
+            debug!("🔄 ROUND ROBIN: Only {} agent(s) available, no rotation needed", agents.len());
         }
 
         Ok(agents)
