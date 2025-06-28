@@ -18,8 +18,8 @@ rvoip-session-core = { path = "../session-core" }
 # Infrastructure - shared types
 infra-common = { path = "../infra-common", features = ["no-global-allocator"] }
 
-# Database
-limbo = { version = "0.0.22", features = ["index_experimental"] }
+# Database - Limbo with minimal features for stability
+limbo = { version = "0.0.22", default-features = false }
 
 # Web framework
 axum = "0.7"

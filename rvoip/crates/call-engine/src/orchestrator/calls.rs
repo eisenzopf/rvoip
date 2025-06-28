@@ -612,6 +612,39 @@ impl CallCenterEngine {
     pub(super) async fn handle_call_termination(&self, session_id: SessionId) -> CallCenterResult<()> {
         info!("🛑 Handling call termination: {}", session_id);
         
+        // 🚨 CRITICAL B2BUA FIX: Handle bidirectional termination FIRST
+        // When one leg of the B2BUA call terminates, terminate the other leg
+        let related_session_id = self.active_calls.get(&session_id)
+            .and_then(|call_info| call_info.related_session_id.clone());
+        
+        if let Some(related_session_id) = related_session_id {
+            info!("🔗 B2BUA: Session {} terminated, also terminating related session {}", 
+                  session_id, related_session_id);
+            
+            // Prevent infinite loop by checking if the related session is still active
+            if self.active_calls.contains_key(&related_session_id) {
+                // Remove the related session from active calls to prevent recursive termination
+                if let Some((_, related_call_info)) = self.active_calls.remove(&related_session_id) {
+                    info!("🔗 B2BUA: Removed related session {} from active calls", related_session_id);
+                    
+                    // Terminate the related session via session coordinator
+                    if let Some(coordinator) = &self.session_coordinator {
+                        match coordinator.terminate_session(&related_session_id).await {
+                            Ok(()) => {
+                                info!("✅ B2BUA: Successfully sent BYE to related session {}", related_session_id);
+                            }
+                            Err(e) => {
+                                warn!("⚠️ B2BUA: Failed to send BYE to related session {}: {}", related_session_id, e);
+                                // Continue with cleanup even if BYE fails
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            debug!("🔗 B2BUA: Session {} has no related session to terminate", session_id);
+        }
+        
         // First, update the call end time and calculate metrics
         let now = chrono::Utc::now();
         if let Some(mut call_info) = self.active_calls.get_mut(&session_id) {

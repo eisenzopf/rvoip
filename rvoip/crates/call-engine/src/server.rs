@@ -220,17 +220,27 @@ impl CallCenterServer {
             info!("  ⚫ Offline: {}", offline);
             info!("  📋 Total: {}", agents.len());
             
-            // PHASE 0.10: Show individual agent status for debugging
+            // PHASE 0.10: Show individual agent status for debugging with error handling
             if agents.len() > 0 && agents.len() <= 5 {  // Only show individual status for small teams
-                info!("👤 Individual Agent Status:");
-                for agent in &agents {
-                    let status_str = match &agent.status {
-                        AgentStatus::Available => "Available ✅".to_string(),
-                        AgentStatus::Busy(calls) => format!("Busy ({} calls) 🔴", calls.len()),
-                        AgentStatus::PostCallWrapUp => "Wrap-up ⏰".to_string(),
-                        AgentStatus::Offline => "Offline ⚫".to_string(),
-                    };
-                    info!("  - {} ({}): {}", agent.sip_uri, agent.agent_id, status_str);
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    info!("👤 Individual Agent Status:");
+                    for agent in &agents {
+                        let status_str = match &agent.status {
+                            AgentStatus::Available => "Available ✅".to_string(),
+                            AgentStatus::Busy(calls) => format!("Busy ({} calls) 🔴", calls.len()),
+                            AgentStatus::PostCallWrapUp => "Wrap-up ⏰".to_string(),
+                            AgentStatus::Offline => "Offline ⚫".to_string(),
+                        };
+                        info!("  - {} ({}): {}", agent.sip_uri, agent.agent_id, status_str);
+                    }
+                })) {
+                    Ok(_) => {
+                        // Agent status displayed successfully
+                    }
+                    Err(_) => {
+                        error!("🚨 Database panic caught during agent status display - continuing server operation");
+                        info!("👤 Individual Agent Status: {} agents available (details unavailable due to database error)", agents.len());
+                    }
                 }
             }
             
