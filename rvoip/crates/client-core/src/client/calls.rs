@@ -340,11 +340,9 @@ impl super::manager::ClientManager {
             });
         }
         
-        // Update stats
+        // Update stats - use saturating_sub to prevent integer underflow
         let mut stats = self.stats.lock().await;
-        if stats.connected_calls > 0 {
-            stats.connected_calls -= 1;
-        }
+        stats.connected_calls = stats.connected_calls.saturating_sub(1);
         
         tracing::info!("Hung up call {}", call_id);
         Ok(())
@@ -428,12 +426,21 @@ impl super::manager::ClientManager {
     pub async fn get_client_stats(&self) -> ClientStats {
         let mut stats = self.stats.lock().await.clone();
         
-        // Update with current call counts
+        // Always recalculate call counts from actual call states to avoid counter bugs
+        // This prevents integer overflow/underflow issues from race conditions
         let _active_calls = self.get_active_calls().await;
         let connected_calls = self.get_calls_by_state(crate::call::CallState::Connected).await;
         
+        // Use actual counts instead of potentially corrupted stored counters
         stats.connected_calls = connected_calls.len();
         stats.total_calls = self.call_info.len();
+        
+        // Ensure connected_calls never exceeds total_calls (defensive programming)
+        if stats.connected_calls > stats.total_calls {
+            tracing::warn!("Connected calls ({}) exceeded total calls ({}), correcting to total", 
+                         stats.connected_calls, stats.total_calls);
+            stats.connected_calls = stats.total_calls;
+        }
         
         stats
     }

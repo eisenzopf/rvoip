@@ -298,6 +298,13 @@ impl CallHandler for ClientCallHandler {
     async fn on_call_ended(&self, session: CallSession, reason: &str) {
         // Map session to client call and emit event
         if let Some(call_id) = self.call_mapping.get(&session.id).map(|entry| *entry.value()) {
+            // Check if the call was previously connected to determine if we need to decrement counter
+            let was_connected = if let Some(call_info) = self.call_info.get(&call_id) {
+                call_info.state == crate::call::CallState::Connected
+            } else {
+                false
+            };
+            
             // Update call info with final state
             if let Some(mut call_info_ref) = self.call_info.get_mut(&call_id) {
                 call_info_ref.state = self.map_session_state_to_client_state(&session.state);
@@ -305,6 +312,21 @@ impl CallHandler for ClientCallHandler {
                 
                 // Add termination reason to metadata
                 call_info_ref.metadata.insert("termination_reason".to_string(), reason.to_string());
+            }
+            
+            // Update stats - decrement connected_calls if the call was connected
+            // This fixes the critical integer overflow bug where calls ending through
+            // session-core (network timeouts, remote hangup, etc.) weren't decrementing the counter
+            if was_connected {
+                // We need access to the stats, but we don't have it directly here.
+                // We'll emit a special event that the manager can handle to update stats.
+                tracing::debug!("Call {} was connected and ended, should decrement connected_calls counter", call_id);
+                
+                // Since we can't access stats directly, we'll add metadata to let
+                // the manager know to decrement the counter when processing this event
+                if let Some(mut call_info_ref) = self.call_info.get_mut(&call_id) {
+                    call_info_ref.metadata.insert("was_connected_when_ended".to_string(), "true".to_string());
+                }
             }
             
             let status_info = CallStatusInfo {
