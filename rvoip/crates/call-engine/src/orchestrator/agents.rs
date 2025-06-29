@@ -22,7 +22,7 @@ impl CallCenterEngine {
         let session = SessionControl::create_outgoing_call(
             self.session_manager(),
             &agent.sip_uri,  // From: agent's SIP URI
-            "sip:registrar@callcenter.local",  // To: local registrar
+            &self.config.general.registrar_uri(),  // To: local registrar
             None  // No SDP for registration
         )
         .await
@@ -101,7 +101,8 @@ impl CallCenterEngine {
         if let Some(db_manager) = &self.db_manager {
             match db_manager.get_agent(&agent_id.0).await {
                 Ok(Some(db_agent)) => {
-                    Some(AgentInfo::from_db_agent(&db_agent, format!("sip:{}@127.0.0.1", db_agent.username)))
+                    let contact_uri = self.config.general.agent_sip_uri(&db_agent.username);
+                    Some(AgentInfo::from_db_agent(&db_agent, contact_uri, &self.config.general))
                 }
                 Ok(None) => None,
                 Err(e) => {
@@ -120,7 +121,10 @@ impl CallCenterEngine {
             match db_manager.list_agents().await {
                 Ok(db_agents) => {
                     db_agents.into_iter()
-                        .map(|db_agent| AgentInfo::from_db_agent(&db_agent, format!("sip:{}@127.0.0.1", db_agent.username)))
+                        .map(|db_agent| {
+                            let contact_uri = self.config.general.agent_sip_uri(&db_agent.username);
+                            AgentInfo::from_db_agent(&db_agent, contact_uri, &self.config.general)
+                        })
                         .collect()
                 }
                 Err(e) => {

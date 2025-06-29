@@ -214,6 +214,164 @@ SIPp log: All calls completed successfully (no 481 errors)
 
 **✅ Mission Accomplished**: B2BUA BYE message routing now works correctly with proper bidirectional termination!
 
+## Phase 0.23 - Remove Hardcoded IP Addresses and Domains 🌐 NEW
+
+**Problem**: The orchestrator files contain hardcoded IP addresses (127.0.0.1) and domain names, making deployment to different environments impossible.
+
+**Hardcoded Values Found**:
+- `agents.rs`: Lines 103, 122 - Agent SIP URI generation with 127.0.0.1
+- `types.rs`: Line 181 - AgentInfo::from_db_agent method with 127.0.0.1  
+- `routing.rs`: Lines 487, 593 - Agent contact URIs and call center URIs
+- `calls.rs`: Lines 362, 441 - Agent info and call center URIs
+- `agents.rs`: Line 24 - `callcenter.local` registrar URI
+- Mixed usage where some code uses `self.config.general.domain` correctly, others use hardcoded values
+
+### **Solution Strategy**
+
+#### **Phase 1: Extend Configuration System** ✅ COMPLETE
+- [x] Add new fields to `GeneralConfig`:
+  ```rust
+  pub struct GeneralConfig {
+      // ... existing fields ...
+      
+      /// Local IP address for SIP URIs (replaces 127.0.0.1)
+      pub local_ip: String,
+      
+      /// Registrar domain for agent registration  
+      pub registrar_domain: String,
+      
+      /// Call center service URI prefix
+      pub call_center_service: String,
+  }
+  ```
+
+#### **Phase 2: Create URI Builder Module** ✅ COMPLETE
+- [x] New module: `orchestrator/uri_builder.rs`:
+  ```rust
+  pub struct SipUriBuilder<'a> {
+      config: &'a GeneralConfig,
+  }
+  
+  impl<'a> SipUriBuilder<'a> {
+      pub fn agent_uri(&self, username: &str) -> String;
+      pub fn call_center_uri(&self) -> String; 
+      pub fn registrar_uri(&self) -> String;
+      pub fn contact_uri(&self, username: &str, port: Option<u16>) -> String;
+  }
+  ```
+
+#### **Phase 3: Add Helper Methods to Config** ✅ COMPLETE
+- [x] Add to `GeneralConfig`:
+  ```rust
+  impl GeneralConfig {
+      /// Generate agent SIP URI from username
+      pub fn agent_sip_uri(&self, username: &str) -> String;
+      
+      /// Generate call center SIP URI  
+      pub fn call_center_uri(&self) -> String;
+      
+      /// Generate registrar URI
+      pub fn registrar_uri(&self) -> String;
+  }
+  ```
+
+#### **Phase 4: Systematic Replacement** ✅ COMPLETE
+- [x] Update `types.rs`:
+  - Modify `AgentInfo::from_db_agent` to accept config parameter
+  - Replace hardcoded IP with config-driven URI generation
+
+- [x] Update `agents.rs`:
+  - Use config for registrar URI in `register_agent`
+  - Use URI builder for agent info generation
+
+- [x] Update `calls.rs`:
+  - Replace hardcoded call center URIs with config-driven ones
+  - Use consistent URI generation for agent contact URIs
+
+- [x] Update `routing.rs`:
+  - Replace hardcoded URIs in routing logic
+  - Use config for all SIP URI generation
+
+#### **Phase 5: Configuration Validation** ✅ COMPLETE
+- [x] Add validation methods:
+  ```rust
+  impl CallCenterConfig {
+      pub fn validate(&self) -> Result<(), ConfigError>;
+  }
+  ```
+- [x] Validate at startup:
+  - Ensure IP addresses are valid
+  - Ensure domain names are properly formatted
+  - Ensure required fields are not empty
+
+### **Default Configuration Values**
+```rust
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self {
+            // ... existing defaults ...
+            local_ip: "127.0.0.1".to_string(),  // Safe default for development
+            registrar_domain: "call-center.local".to_string(),
+            call_center_service: "call-center".to_string(),
+        }
+    }
+}
+```
+
+### **Benefits**
+- **Flexibility**: Easy deployment to different environments
+- **Security**: No hardcoded production values in code
+- **Maintainability**: Centralized URI generation
+- **Testing**: Easy to test with different configurations
+- **Production Ready**: Configurable for real deployments
+
+### **Implementation Steps**
+1. **Extend Configuration** (Low Risk) - Add new config fields with sensible defaults
+2. **Create URI Builder** (Low Risk) - Create centralized URI generation with comprehensive tests
+3. **Add Helper Methods** (Low Risk) - Add convenience methods to config structs
+4. **Update Method Signatures** (Medium Risk) - Modify methods to accept config parameters
+5. **Replace Hardcoded Values** (Medium Risk) - Replace each hardcoded value systematically
+6. **Add Validation** (Low Risk) - Add configuration validation and error handling
+
+**Estimated Time**: 1-2 days ✅ COMPLETED in 1 day
+**Priority**: MEDIUM - Important for production deployment flexibility
+
+### **✅ IMPLEMENTATION RESULTS**
+
+**Successfully Completed**:
+1. **Extended Configuration System**: Added `local_ip`, `registrar_domain`, and `call_center_service` fields to `GeneralConfig`
+2. **Created URI Builder Module**: New `orchestrator/uri_builder.rs` with centralized SIP URI generation
+3. **Added Helper Methods**: Convenient methods in `GeneralConfig` for generating common URIs
+4. **Systematic Replacement**: Replaced all hardcoded IP addresses and domains across:
+   - `types.rs`: Updated `AgentInfo::from_db_agent` to use config
+   - `agents.rs`: Updated registrar URI and agent info generation
+   - `calls.rs`: Updated call center URIs and agent contact URIs  
+   - `routing.rs`: Updated all URI generation in routing logic
+5. **Configuration Validation**: Added comprehensive validation with IP address and domain checking
+
+**Before (Hardcoded)**:
+- `sip:alice@127.0.0.1` (hardcoded in multiple places)
+- `sip:registrar@callcenter.local` (hardcoded)
+- `sip:call-center@127.0.0.1` (hardcoded)
+
+**After (Configurable)**:
+- `config.general.agent_sip_uri("alice")` → `sip:alice@{local_ip}`
+- `config.general.registrar_uri()` → `sip:registrar@{registrar_domain}`
+- `config.general.call_center_uri()` → `sip:{call_center_service}@{domain}`
+
+**Tests**: ✅ All URI builder tests pass
+**Compilation**: ✅ Clean compilation with no errors
+**Backward Compatibility**: ✅ Maintained with sensible defaults
+
+**Benefits Achieved**:
+- 🌐 **Environment Flexibility**: Easy deployment to different networks/environments
+- 🔒 **Security**: No hardcoded production values in source code
+- 🛠️ **Maintainability**: Centralized URI generation in one place
+- 🧪 **Testability**: Easy to test with different configurations
+- 🚀 **Production Ready**: Configurable for real deployments
+
+**Next Steps**: This phase is complete and ready for production use. The system can now be deployed to any environment by simply updating the configuration file.
+
 ## 📋 COMPREHENSIVE CALL CENTER IMPROVEMENT PLAN
 
 Based on analysis of current queue and distribution logic, here's our roadmap for transforming the basic call center into an intelligent, modern contact center:

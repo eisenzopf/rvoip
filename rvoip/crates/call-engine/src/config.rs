@@ -50,6 +50,15 @@ pub struct GeneralConfig {
     
     /// Domain name
     pub domain: String,
+    
+    /// Local IP address for SIP URIs (replaces hardcoded 127.0.0.1)
+    pub local_ip: String,
+    
+    /// Registrar domain for agent registration
+    pub registrar_domain: String,
+    
+    /// Call center service URI prefix
+    pub call_center_service: String,
 }
 
 /// Agent management configuration
@@ -169,6 +178,50 @@ pub struct DatabaseConfig {
     pub backup_interval: u64,
 }
 
+impl CallCenterConfig {
+    /// Validate the configuration for consistency and correctness
+    pub fn validate(&self) -> Result<(), String> {
+        // Validate IP address format
+        if self.general.local_ip.is_empty() {
+            return Err("local_ip cannot be empty".to_string());
+        }
+        
+        // Basic IP address validation (IPv4 or IPv6)
+        if !self.general.local_ip.parse::<std::net::IpAddr>().is_ok() {
+            return Err(format!("Invalid IP address format: {}", self.general.local_ip));
+        }
+        
+        // Validate domain names are not empty
+        if self.general.domain.is_empty() {
+            return Err("domain cannot be empty".to_string());
+        }
+        
+        if self.general.registrar_domain.is_empty() {
+            return Err("registrar_domain cannot be empty".to_string());
+        }
+        
+        if self.general.call_center_service.is_empty() {
+            return Err("call_center_service cannot be empty".to_string());
+        }
+        
+        // Validate numeric constraints
+        if self.general.max_concurrent_calls == 0 {
+            return Err("max_concurrent_calls must be greater than 0".to_string());
+        }
+        
+        if self.general.max_agents == 0 {
+            return Err("max_agents must be greater than 0".to_string());
+        }
+        
+        // Validate queue configuration
+        if self.queues.max_queue_size == 0 {
+            return Err("max_queue_size must be greater than 0".to_string());
+        }
+        
+        Ok(())
+    }
+}
+
 impl Default for CallCenterConfig {
     fn default() -> Self {
         Self {
@@ -178,6 +231,31 @@ impl Default for CallCenterConfig {
             routing: RoutingConfig::default(),
             monitoring: MonitoringConfig::default(),
             database: DatabaseConfig::default(),
+        }
+    }
+}
+
+impl GeneralConfig {
+    /// Generate agent SIP URI from username
+    pub fn agent_sip_uri(&self, username: &str) -> String {
+        format!("sip:{}@{}", username, self.local_ip)
+    }
+    
+    /// Generate call center SIP URI  
+    pub fn call_center_uri(&self) -> String {
+        format!("sip:{}@{}", self.call_center_service, self.domain)
+    }
+    
+    /// Generate registrar URI
+    pub fn registrar_uri(&self) -> String {
+        format!("sip:registrar@{}", self.registrar_domain)
+    }
+    
+    /// Generate contact URI for an agent with optional port
+    pub fn agent_contact_uri(&self, username: &str, port: Option<u16>) -> String {
+        match port {
+            Some(port) => format!("sip:{}@{}:{}", username, self.local_ip, port),
+            None => self.agent_sip_uri(username),
         }
     }
 }
@@ -193,6 +271,9 @@ impl Default for GeneralConfig {
             local_media_addr: "0.0.0.0:10000".parse().unwrap(),
             user_agent: "rvoip-call-center/0.1.0".to_string(),
             domain: "call-center.local".to_string(),
+            local_ip: "127.0.0.1".to_string(),  // Safe default for development
+            registrar_domain: "call-center.local".to_string(),
+            call_center_service: "call-center".to_string(),
         }
     }
 }

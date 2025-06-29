@@ -13,15 +13,6 @@ members = [
     "crates/client-core",
     "crates/sip-client",
     "crates/infra-common",
-    "examples/simple-softswitch",
-    "examples/sip-message-test",
-    "examples/rtp-loopback",
-    "examples/rtp-g711",
-    "examples/simple-session",
-    "examples/simple-call-engine",
-    "examples/sip-test-client",
-    "examples/sip-client-demo",
-    "examples/sip-parser-demo",
     "crates/session-core/examples/sipp_tests",
 ]
 

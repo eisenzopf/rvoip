@@ -12,6 +12,7 @@ pub mod agents;
 pub mod bridge_operations;
 pub mod bridge;
 pub mod lifecycle;
+pub mod uri_builder;
 
 // Export the main call center engine
 pub use core::CallCenterEngine;
@@ -27,4 +28,7 @@ pub use handler::CallCenterCallHandler;
 
 // Export other managers
 pub use bridge::BridgeManager;
-pub use lifecycle::CallLifecycleManager; 
+pub use lifecycle::CallLifecycleManager;
+
+// Export URI builder
+pub use uri_builder::SipUriBuilder; 
