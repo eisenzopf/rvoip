@@ -73,12 +73,31 @@ impl CallHandler for CallCenterCallHandler {
                 info!("❌ Not re-queuing call {} - customer ended the call", pending_assignment.customer_session_id);
             }
             
-            // Get the call info to find the related session
+            // PHASE 0.24: Enhanced call termination coordination
             let related_session_id = engine.active_calls.get(&call.id())
                 .and_then(|call_info| call_info.related_session_id.clone());
             
             if let Some(related_id) = related_session_id {
-                info!("📞 Forwarding BYE to related B2BUA session: {}", related_id);
+                info!("📞 BYE-FORWARD: Session {} terminated, checking related session {}", call.id(), related_id);
+                
+                // PHASE 0.24: Add termination flags to prevent race conditions
+                if let Some(mut call_info) = engine.active_calls.get_mut(&related_id) {
+                    if call_info.status == crate::orchestrator::types::CallStatus::Disconnected {
+                        info!("🔄 BYE-RACE: Related session {} already terminating, skipping BYE forward", related_id);
+                        return;
+                    }
+                    // Mark as terminating to prevent race conditions
+                    call_info.status = crate::orchestrator::types::CallStatus::Disconnected;
+                    info!("🏷️ BYE-MARK: Marked related session {} as terminating", related_id);
+                } else {
+                    info!("ℹ️ BYE-FORWARD: Related session {} not found in active calls (may already be cleaned up)", related_id);
+                }
+                
+                // PHASE 0.24: Add configurable delay before forwarding BYE to prevent race conditions
+                let race_delay = std::time::Duration::from_millis(engine.config.general.bye_race_delay_ms);
+                tokio::time::sleep(race_delay).await;
+                
+                info!("📤 BYE-FORWARD: Forwarding BYE to related B2BUA session: {}", related_id);
                 
                 // Clean up related session from database too
                 if let Some(db_manager) = &engine.db_manager {
@@ -89,20 +108,25 @@ impl CallHandler for CallCenterCallHandler {
                 if let Some(coordinator) = &engine.session_coordinator {
                     match coordinator.terminate_session(&related_id).await {
                         Ok(_) => {
-                            info!("✅ Successfully terminated related B2BUA session: {}", related_id);
+                            info!("✅ BYE-FORWARD: Successfully terminated related B2BUA session: {}", related_id);
                         }
                         Err(e) => {
-                            // This is expected if the other side already hung up
-                            if e.to_string().contains("not found") || e.to_string().contains("No dialog found") {
-                                info!("ℹ️ Related session {} already terminated (this is normal)", related_id);
+                            let error_msg = e.to_string();
+                            
+                            // PHASE 0.24: Better error categorization for BYE forwarding
+                            if error_msg.contains("not found") || error_msg.contains("No dialog found") || 
+                               error_msg.contains("session not found") {
+                                info!("ℹ️ BYE-FORWARD: Related session {} already terminated (this is normal)", related_id);
+                            } else if error_msg.contains("already terminated") || error_msg.contains("terminated") {
+                                info!("ℹ️ BYE-FORWARD: Related session {} was already terminated", related_id);
                             } else {
-                                warn!("Failed to terminate related session {}: {}", related_id, e);
+                                warn!("⚠️ BYE-FORWARD: Failed to terminate related session {}: {}", related_id, e);
                             }
                         }
                     }
                 }
             } else {
-                debug!("No related B2BUA session found for {} (may be a pending call)", call.id());
+                debug!("🔍 BYE-FORWARD: No related B2BUA session found for {} (may be a pending call)", call.id());
             }
             
             // Clean up the call info - this will handle agent wrap-up

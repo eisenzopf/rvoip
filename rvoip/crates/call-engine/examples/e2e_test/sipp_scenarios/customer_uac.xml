@@ -7,10 +7,10 @@
   <!-- Send INVITE to call center support line -->
   <send retrans="500">
     <![CDATA[
-      INVITE sip:support@127.0.0.1:[remote_port] SIP/2.0
+      INVITE sip:support@[remote_ip]:[remote_port] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-      From: "Test Customer" <sip:customer@[local_ip]:[local_port]>;tag=[call_number]
-      To: <sip:support@127.0.0.1:[remote_port]>
+      From: "Test Customer" <sip:customer@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: <sip:support@[remote_ip]:[remote_port]>
       Call-ID: [call_id]
       CSeq: 1 INVITE
       Contact: <sip:customer@[local_ip]:[local_port]>
@@ -35,12 +35,10 @@
   </send>
 
   <!-- Receive 100 Trying (optional) -->
-  <recv response="100" optional="true">
-  </recv>
+  <recv response="100" optional="true"/>
 
   <!-- Receive 180 Ringing (optional) -->
-  <recv response="180" optional="true">
-  </recv>
+  <recv response="180" optional="true"/>
 
   <!-- Receive 200 OK -->
   <recv response="200" rtd="true" rrs="true">
@@ -54,7 +52,7 @@
     <![CDATA[
       ACK [next_url] SIP/2.0
       Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-      From: "Test Customer" <sip:customer@[local_ip]:[local_port]>;tag=[call_number]
+      From: "Test Customer" <sip:customer@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
       [last_To:]
       Call-ID: [call_id]
       CSeq: [$cseq_number] ACK
@@ -65,40 +63,39 @@
     ]]>
   </send>
 
-  <!-- Play G.711 audio for 5 seconds -->
+  <!-- Play G.711 audio - use proper SIPp RTP stream syntax -->
   <nop>
     <action>
-      <exec play_pcap_audio="../pcaps/g711a.pcap"/>
+      <exec rtp_stream="../pcaps/g711a.pcap,-1,8,PCMA/8000"/>
     </action>
   </nop>
 
-  <!-- Wait for call duration (60 seconds for testing - ensure all calls process through queue) -->
-  <pause milliseconds="60000"/>
+  <!-- Wait for server-initiated BYE (server sends BYE when agents hang up after 5s) -->
+  <recv request="BYE" crlf="true">
+  </recv>
 
-  <!-- Send BYE to end the call -->
-  <send retrans="500">
+  <!-- Respond with 200 OK to server BYE -->
+  <send>
     <![CDATA[
-      BYE [next_url] SIP/2.0
-      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
-      From: "Test Customer" <sip:customer@[local_ip]:[local_port]>;tag=[call_number]
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
       [last_To:]
-      Call-ID: [call_id]
-      CSeq: 2 BYE
+      [last_Call-ID:]
+      [last_CSeq:]
       Contact: <sip:customer@[local_ip]:[local_port]>
-      Max-Forwards: 70
       User-Agent: SIPp Customer/1.0
       Content-Length: 0
     ]]>
   </send>
 
-  <!-- Receive 200 OK for BYE -->
-  <recv response="200" crlf="true">
-  </recv>
+  <!-- Keep the call open for a while in case the 200 is lost -->
+  <timewait milliseconds="2000"/>
 
   <!-- Definition of the response time repartition table (unit is ms) -->
   <ResponseTimeRepartition value="10, 20, 30, 40, 50, 100, 150, 200"/>
 
   <!-- Definition of the call length repartition table (unit is ms) -->
-  <CallLengthRepartition value="10000, 20000, 30000, 40000, 50000"/>
+  <CallLengthRepartition value="10, 50, 100, 500, 1000, 5000, 10000"/>
 
 </scenario> 

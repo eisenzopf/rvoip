@@ -357,24 +357,47 @@ impl SessionDialogCoordinator {
         
         // Handle BYE responses first - check transaction type before status code
         if tx_id_str.contains("BYE") && tx_id_str.contains("client") {
-            tracing::info!("📞 BYE RESPONSE: Processing response to BYE request");
+            tracing::info!("📞 BYE-RESPONSE: Processing response to BYE request (tx: {}, dialog: {})", tx_id_str, dialog_id);
             
             match response.status_code() {
                 200 => {
+                    // PHASE 0.24: Enhanced BYE success logging
+                    tracing::info!("✅ BYE-200OK: Received 200 OK for BYE request (tx: {}, dialog: {})", tx_id_str, dialog_id);
+                    
+                    // Log timing information if available
+                    if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+                        let session_id = session_id_ref.value().clone();
+                        tracing::info!("🎯 BYE-COMPLETE: Session {} successfully terminated with 200 OK", session_id);
+                    }
+                    
                     // Successful BYE - generate SessionTerminated for UAC
                     self.handle_bye_success(dialog_id).await?;
                 }
                 code if code >= 400 => {
-                    // BYE failed
-                    tracing::warn!("BYE request failed with {}: {}", code, response.reason().unwrap_or("Unknown"));
-                    // Still try to clean up the session
+                    // PHASE 0.24: Enhanced BYE failure logging
+                    let reason = response.reason().unwrap_or("Unknown");
+                    tracing::warn!("❌ BYE-ERROR: BYE request failed with {} {}: {} (tx: {}, dialog: {})", 
+                                 code, reason, response.reason().unwrap_or("No reason"), tx_id_str, dialog_id);
+                    
+                    if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+                        let session_id = session_id_ref.value().clone();
+                        tracing::warn!("💥 BYE-FAILED: Session {} termination failed: {} {}", session_id, code, reason);
+                    }
+                    
+                    // Still try to clean up the session even if BYE failed
                     if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
                         let session_id = session_id_ref.value().clone();
                         self.update_session_state(session_id, CallState::Failed(format!("BYE failed: {}", code))).await?;
                     }
                 }
+                code if code >= 100 && code < 200 => {
+                    // PHASE 0.24: Track provisional responses to BYE
+                    tracing::debug!("📞 BYE-PROVISIONAL: Received {} {} for BYE (tx: {}, dialog: {})", 
+                                  code, response.reason().unwrap_or(""), tx_id_str, dialog_id);
+                }
                 _ => {
-                    tracing::debug!("Unexpected response {} to BYE", response.status_code());
+                    tracing::debug!("🤔 BYE-UNEXPECTED: Unexpected response {} to BYE (tx: {}, dialog: {})", 
+                                  response.status_code(), tx_id_str, dialog_id);
                 }
             }
             
@@ -726,33 +749,52 @@ impl SessionDialogCoordinator {
     
     /// Handle successful BYE response (200 OK) for UAC
     async fn handle_bye_success(&self, dialog_id: DialogId) -> DialogResult<()> {
-        tracing::info!("📞 BYE SUCCESS: Processing successful BYE for dialog {}", dialog_id);
-        println!("📞 BYE SUCCESS: Processing successful BYE for dialog {}", dialog_id);
+        tracing::info!("📞 BYE-SUCCESS: Processing successful BYE for dialog {}", dialog_id);
+        println!("📞 BYE-SUCCESS: Processing successful BYE for dialog {}", dialog_id);
+        
+        // PHASE 0.24: Add detailed success metrics
+        let start_time = std::time::Instant::now();
         
         // Look up session - get it before removing the mapping!
         let session_info = self.dialog_to_session.get(&dialog_id)
             .map(|entry| entry.value().clone());
             
         if let Some(session_id) = session_info {
-            tracing::info!("✅ BYE SUCCESS: Found session {} for dialog {}", session_id, dialog_id);
+            tracing::info!("✅ BYE-SUCCESS: Found session {} for dialog {} - termination successful", session_id, dialog_id);
+            
+            // PHASE 0.24: Log BYE completion timing
+            let completion_time = start_time.elapsed();
+            tracing::info!("⏱️ BYE-TIMING: Session {} BYE completion took {:?}", session_id, completion_time);
             
             // Send SessionTerminated event for the UAC
             self.send_session_event(SessionEvent::SessionTerminated {
                 session_id: session_id.clone(),
                 reason: "Call terminated by local BYE".to_string(),
             }).await.unwrap_or_else(|e| {
-                tracing::error!("Failed to send SessionTerminated event: {}", e);
+                tracing::error!("❌ BYE-SUCCESS: Failed to send SessionTerminated event for {}: {}", session_id, e);
             });
             
-            tracing::info!("✅ BYE SUCCESS: Generated SessionTerminated event for UAC session {}", session_id);
-            println!("✅ BYE SUCCESS: Generated SessionTerminated event for UAC session {}", session_id);
+            tracing::info!("✅ BYE-SUCCESS: Generated SessionTerminated event for UAC session {} in {:?}", 
+                         session_id, start_time.elapsed());
+            println!("✅ BYE-SUCCESS: Generated SessionTerminated event for UAC session {}", session_id);
             
             // NOW remove the dialog mapping after sending the event
             self.dialog_to_session.remove(&dialog_id);
-            tracing::debug!("Removed dialog mapping for {}", dialog_id);
+            
+            // PHASE 0.24: Enhanced cleanup logging
+            tracing::debug!("🧹 BYE-CLEANUP: Removed dialog mapping for {} (session: {})", dialog_id, session_id);
+            
+            // Log final BYE success summary
+            tracing::info!("🎉 BYE-FINAL: Session {} termination completed successfully in {:?}", 
+                         session_id, start_time.elapsed());
+            
         } else {
-            tracing::warn!("❌ BYE SUCCESS: No session found for dialog {} - mapping may have been removed prematurely", dialog_id);
-            println!("❌ BYE SUCCESS: No session found for dialog {}", dialog_id);
+            tracing::warn!("❌ BYE-SUCCESS: No session found for dialog {} - mapping may have been removed prematurely", dialog_id);
+            println!("❌ BYE-SUCCESS: No session found for dialog {}", dialog_id);
+            
+            // PHASE 0.24: Still remove dialog if no session (cleanup)
+            self.dialog_to_session.remove(&dialog_id);
+            tracing::debug!("🧹 BYE-CLEANUP: Removed orphaned dialog mapping for {}", dialog_id);
         }
         
         Ok(())
