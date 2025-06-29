@@ -36,13 +36,17 @@ impl CallCenterClient {
     /// # Example
     /// ```no_run
     /// # use rvoip_call_engine::api::CallCenterClient;
-    /// # use rvoip_call_engine::agent::{Agent, AgentId};
+    /// # use rvoip_call_engine::agent::{Agent, AgentStatus};
     /// # async fn example(client: CallCenterClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let agent = Agent {
-    ///     id: AgentId::from("agent001"),
+    ///     id: "agent001".to_string(),
     ///     sip_uri: "sip:agent001@example.com".to_string(),
+    ///     display_name: "Agent 001".to_string(),
     ///     skills: vec!["sales".to_string(), "support".to_string()],
     ///     max_concurrent_calls: 3,
+    ///     status: AgentStatus::Available,
+    ///     department: Some("sales".to_string()),
+    ///     extension: Some("001".to_string()),
     /// };
     /// 
     /// let session_id = client.register_agent(&agent).await?;
@@ -63,8 +67,8 @@ impl CallCenterClient {
     /// # async fn example(client: CallCenterClient) -> Result<(), Box<dyn std::error::Error>> {
     /// let agent_id = AgentId::from("agent001");
     /// 
-    /// // Mark agent as away
-    /// client.update_agent_status(&agent_id, AgentStatus::Away).await?;
+    /// // Mark agent as offline
+    /// client.update_agent_status(&agent_id, AgentStatus::Offline).await?;
     /// 
     /// // Mark agent as available again
     /// client.update_agent_status(&agent_id, AgentStatus::Available).await?;
