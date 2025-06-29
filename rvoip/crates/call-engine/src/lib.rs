@@ -1,67 +1,184 @@
-//! # Call Center Engine for RVOIP
+//! # RVOIP Call Engine
 //!
-//! This crate provides call center orchestration functionality for the RVOIP stack.
-//! It integrates with session-core for SIP handling and provides call center business logic
-//! including agent management, call queuing, routing, and monitoring.
+//! A comprehensive call center orchestration engine built on top of the RVOIP SIP stack.
+//! This crate provides enterprise-grade call center functionality including agent management,
+//! call queuing, intelligent routing, and real-time monitoring.
 //!
-//! ## Features
+//! ## Overview
 //!
-//! - **Call Orchestration**: Central coordination of agent-customer calls
-//! - **Agent Management**: Registration, availability tracking, skill-based routing
-//! - **Call Queuing**: Priority queues with overflow policies
-//! - **Routing Engine**: Business rules and skill-based call distribution
-//! - **Monitoring**: Real-time metrics and supervisor features
-//! - **Database Integration**: Persistent storage with Limbo database
+//! The Call Engine is the heart of a modern call center system, providing:
+//!
+//! - **Call Orchestration**: Central coordination of agent-customer calls with SIP bridge management
+//! - **Agent Management**: Registration, availability tracking, skill-based routing, and performance monitoring
+//! - **Call Queuing**: Priority-based queues with overflow policies and wait time management
+//! - **Intelligent Routing**: Business rules engine with skill matching and load balancing
+//! - **Real-time Monitoring**: Live dashboards, quality metrics, and supervisor tools
+//! - **Database Integration**: Persistent storage with SQLite (Limbo) for scalability
 //!
 //! ## Architecture
 //!
-//! The call center is organized into several key modules:
+//! The call center is built on a modular architecture:
 //!
-//! - [`orchestrator`]: Core call center coordination and bridge management
-//! - [`agent`]: Agent registration, status tracking, and skill routing
-//! - [`queue`]: Call queuing with priorities and overflow handling
-//! - [`routing`]: Call routing engine with business rules
-//! - [`monitoring`]: Real-time monitoring and analytics
-//! - [`api`]: Public APIs for applications
-//! - [`integration`]: Session-core integration adapters
-//! - [`database`]: Persistent storage with Limbo
+//! ```text
+//! ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+//! │   Client API    │    │  Supervisor API │    │    Admin API    │
+//! └─────────────────┘    └─────────────────┘    └─────────────────┘
+//!           │                       │                       │
+//!           └───────────────────────┼───────────────────────┘
+//!                                   │
+//!                      ┌─────────────────┐
+//!                      │ CallCenterEngine │
+//!                      └─────────────────┘
+//!                                   │
+//!           ┌───────────────────────┼───────────────────────┐
+//!           │                       │                       │
+//!  ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+//!  │  Agent Registry │    │  Queue Manager  │    │ Routing Engine  │
+//!  └─────────────────┘    └─────────────────┘    └─────────────────┘
+//!           │                       │                       │
+//!           └───────────────────────┼───────────────────────┘
+//!                                   │
+//!                        ┌─────────────────┐
+//!                        │ Session Manager │ (rvoip-session-core)
+//!                        └─────────────────┘
+//! ```
 //!
 //! ## Quick Start
 //!
-//! ```no_run
-//! use rvoip_call_engine::prelude::*;
-//! use std::sync::Arc;
-//! 
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     // Create configuration
-//!     let config = CallCenterConfig::default();
-//!     
-//!     // Create call center with in-memory database
-//!     let call_center = CallCenterEngine::new(config, Some(":memory:".to_string())).await?;
-//!     
-//!     // Register agents with session-core
-//!     let agent = Agent {
-//!         id: "agent-001".to_string(),
-//!         sip_uri: "sip:alice@example.com".to_string(),
-//!         display_name: "Alice".to_string(),
-//!         skills: vec!["english".to_string(), "sales".to_string()],
-//!         max_concurrent_calls: 2,
-//!         status: AgentStatus::Available,
-//!         department: Some("sales".to_string()),
-//!         extension: Some("1001".to_string()),
-//!     };
-//!     
-//!     let session_id = call_center.register_agent(&agent).await?;
-//!     println!("Agent registered with session ID: {}", session_id);
-//!     
-//!     // Get call center statistics
-//!     let stats = call_center.get_stats().await;
-//!     println!("Available agents: {}", stats.available_agents);
-//!     
-//!     Ok(())
-//! }
+//! ### Basic Call Center Setup
+//!
 //! ```
+//! use rvoip_call_engine::prelude::*;
+//! 
+//! # async fn example() -> Result<()> {
+//! // Create configuration with sensible defaults
+//! let config = CallCenterConfig::default();
+//! 
+//! // Create call center with in-memory database for this example
+//! let call_center = CallCenterEngine::new(config, None).await?;
+//! 
+//! println!("Call center engine created successfully!");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Agent Registration
+//!
+//! ```
+//! use rvoip_call_engine::prelude::*;
+//! 
+//! # async fn example() -> Result<()> {
+//! # let call_center = CallCenterEngine::new(CallCenterConfig::default(), None).await?;
+//! // Define an agent with skills and capabilities
+//! let agent = Agent {
+//!     id: "agent-001".to_string(),
+//!     sip_uri: "sip:alice@call-center.local".to_string(),
+//!     display_name: "Alice Johnson".to_string(),
+//!     skills: vec!["english".to_string(), "sales".to_string(), "tier1".to_string()],
+//!     max_concurrent_calls: 2,
+//!     status: AgentStatus::Available,
+//!     department: Some("sales".to_string()),
+//!     extension: Some("1001".to_string()),
+//! };
+//! 
+//! // Register the agent (this creates a SIP session)
+//! let session_id = call_center.register_agent(&agent).await?;
+//! println!("Agent {} registered with session ID: {}", agent.display_name, session_id);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Advanced Routing Configuration
+//!
+//! ```
+//! use rvoip_call_engine::prelude::*;
+//! 
+//! # async fn example() -> Result<()> {
+//! let mut config = CallCenterConfig::default();
+//! 
+//! // Configure skill-based routing
+//! config.routing.default_strategy = RoutingStrategy::SkillBased;
+//! config.routing.enable_load_balancing = true;
+//! config.routing.load_balance_strategy = LoadBalanceStrategy::LeastBusy;
+//! 
+//! // Configure queue settings
+//! config.queues.default_max_wait_time = 300; // 5 minutes max wait
+//! config.queues.max_queue_size = 50;
+//! config.queues.enable_priorities = true;
+//! 
+//! // Configure agent settings
+//! config.agents.enable_skill_based_routing = true;
+//! config.agents.default_skills = vec!["general".to_string(), "english".to_string()];
+//! 
+//! let call_center = CallCenterEngine::new(config, None).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Monitoring and Statistics
+//!
+//! ```
+//! use rvoip_call_engine::prelude::*;
+//! 
+//! # async fn example() -> Result<()> {
+//! # let call_center = CallCenterEngine::new(CallCenterConfig::default(), None).await?;
+//! // Get real-time statistics
+//! let stats = call_center.get_stats().await;
+//! println!("Call Center Status:");
+//! println!("  Active calls: {}", stats.active_calls);
+//! println!("  Available agents: {}", stats.available_agents);
+//! println!("  Queued calls: {}", stats.queued_calls);
+//! println!("  Total calls handled: {}", stats.total_calls_handled);
+//! 
+//! // Get detailed routing statistics
+//! println!("Routing Performance:");
+//! println!("  Direct routes: {}", stats.routing_stats.calls_routed_directly);
+//! println!("  Queued calls: {}", stats.routing_stats.calls_queued);
+//! println!("  Rejected calls: {}", stats.routing_stats.calls_rejected);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Key Modules
+//!
+//! - [`orchestrator`]: Core call center coordination and bridge management
+//! - [`agent`]: Agent registration, status tracking, and skill-based routing
+//! - [`queue`]: Call queuing with priorities and overflow handling
+//! - [`routing`]: Intelligent call routing engine with business rules
+//! - [`monitoring`]: Real-time monitoring, metrics collection, and analytics
+//! - [`api`]: Public APIs for client applications, supervisors, and administrators
+//! - [`integration`]: Session-core integration adapters and handlers
+//! - [`database`]: Persistent storage with Limbo SQLite database
+//! - [`config`]: Configuration management and validation
+//! - [`error`]: Comprehensive error handling and result types
+//!
+//! ## Integration with RVOIP Stack
+//!
+//! This crate integrates seamlessly with other RVOIP components:
+//!
+//! - **rvoip-session-core**: SIP session management and call handling
+//! - **rvoip-sip-core**: Low-level SIP protocol handling
+//! - **rvoip-media-core**: Audio processing and codec management
+//! - **rvoip-client-core**: Client-side integration for softphones
+//!
+//! ## Production Deployment
+//!
+//! For production deployments, consider:
+//!
+//! - **Database**: Use a dedicated database file with regular backups
+//! - **Monitoring**: Enable real-time monitoring and quality alerts
+//! - **Security**: Configure proper authentication and authorization
+//! - **Scaling**: Monitor agent and call limits, scale horizontally as needed
+//! - **Network**: Ensure proper SIP and RTP port configuration
+//!
+//! ## Examples
+//!
+//! See the `examples/` directory for complete working examples:
+//!
+//! - `e2e_test/`: End-to-end call center testing setup
+//! - Basic call center server implementation
+//! - Agent client simulation
+//! - Load testing scenarios
 
 // Core modules
 pub mod error;
@@ -92,16 +209,33 @@ pub use orchestrator::core::CallCenterEngine;
 // Export API types
 pub use api::{CallCenterClient, SupervisorApi, AdminApi};
 
-/// Call center statistics
+/// Call center statistics and performance metrics
+///
+/// This struct provides a snapshot of the call center's current operational state,
+/// including active calls, agent availability, and routing performance.
 #[derive(Debug, Clone)]
 pub struct CallCenterStats {
+    /// Number of currently active calls in the system
     pub active_calls: usize,
+    /// Number of active SIP bridges connecting agents to customers
     pub active_bridges: usize,
+    /// Total number of calls handled since startup
     pub total_calls_handled: u64,
 }
 
 /// Prelude module for convenient imports
+///
+/// Import this module to get access to the most commonly used types and traits:
+///
+/// ```
+/// use rvoip_call_engine::prelude::*;
+/// ```
 pub mod prelude {
+    //! Commonly used types and traits for call center applications
+    //!
+    //! This module re-exports the most frequently used items from the call engine,
+    //! making it easy to get started with a single import.
+    
     // **UPDATED**: Core types - now using REAL CallCenterEngine
     pub use crate::{CallCenterError, CallCenterConfig, Result, CallCenterStats};
     
@@ -123,7 +257,7 @@ pub mod prelude {
     
     // Agent types - import from correct modules
     pub use crate::agent::{
-        AgentRegistry, Agent, AgentStatus, SkillBasedRouter, AvailabilityTracker,
+        AgentRegistry, Agent, AgentId, AgentStatus, SkillBasedRouter, AvailabilityTracker,
     };
     pub use crate::agent::registry::AgentStats;
     
