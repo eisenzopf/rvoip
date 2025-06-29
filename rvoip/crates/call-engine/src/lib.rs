@@ -34,20 +34,16 @@
 //! 
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // Create database
-//!     let database = CallCenterDatabase::new_in_memory().await?;
-//!     
 //!     // Create configuration
 //!     let config = CallCenterConfig::default();
 //!     
-//!     // Create call center with real session-core integration
-//!     // Session-core manages all transport and transaction layers internally
-//!     let call_center = CallCenterEngine::new(config, database).await?;
+//!     // Create call center with in-memory database
+//!     let call_center = CallCenterEngine::new(config, Some(":memory:".to_string())).await?;
 //!     
 //!     // Register agents with session-core
 //!     let agent = Agent {
 //!         id: "agent-001".to_string(),
-//!         sip_uri: "sip:alice@example.com".parse()?,
+//!         sip_uri: "sip:alice@example.com".to_string(),
 //!         display_name: "Alice".to_string(),
 //!         skills: vec!["english".to_string(), "sales".to_string()],
 //!         max_concurrent_calls: 2,

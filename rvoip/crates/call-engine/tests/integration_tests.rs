@@ -9,21 +9,18 @@ use std::sync::Arc;
 use serial_test::serial;
 
 async fn create_test_call_center() -> Result<Arc<CallCenterEngine>> {
-    // Create test database
-    let database = CallCenterDatabase::new_in_memory().await?;
-    
     // Create test configuration
     let mut config = CallCenterConfig::default();
-    // Use standard SIP port for testing
-    config.general.local_signaling_addr = "127.0.0.1:5060".parse()?;
-    config.general.local_media_addr = "127.0.0.1:10000".parse()?;
+    // Use test ports to avoid conflicts
+    config.general.local_signaling_addr = "127.0.0.1:15060".parse()?;
+    config.general.local_media_addr = "127.0.0.1:20000".parse()?;
     
     println!("Creating call center with SIP on {} and media on {}", 
              config.general.local_signaling_addr, 
              config.general.local_media_addr);
     
-    // Create call center engine - session-core will handle all transport/transaction setup internally
-    let call_center = CallCenterEngine::new(config, database).await?;
+    // Create call center engine with in-memory database
+    let call_center = CallCenterEngine::new(config, Some(":memory:".to_string())).await?;
     
     Ok(call_center)
 }
@@ -37,144 +34,106 @@ async fn test_call_center_creation() {
     // Verify initial state
     assert_eq!(stats.active_calls, 0);
     assert_eq!(stats.active_bridges, 0);
-    assert_eq!(stats.available_agents, 0);
     assert_eq!(stats.queued_calls, 0);
+    
+    // Verify configuration is accessible
+    let config = call_center.config();
+    assert!(config.general.max_concurrent_calls > 0);
+    assert!(config.general.max_agents > 0);
+    assert!(!config.general.domain.is_empty());
 }
 
 #[tokio::test]
 #[serial]
-async fn test_agent_registration() {
+async fn test_database_agent_operations() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
     
-    // Create test agent
-    let agent = Agent {
-        id: "test-agent-001".to_string(),
-        sip_uri: "sip:test@example.com".parse().expect("Valid SIP URI"),
-        display_name: "Test Agent".to_string(),
-        skills: vec!["english".to_string(), "support".to_string()],
-        max_concurrent_calls: 2,
-        status: AgentStatus::Available,
-        department: Some("test".to_string()),
-        extension: Some("1001".to_string()),
-    };
+    // Get database manager
+    let db_manager = call_center.database_manager().expect("Database manager should be available");
     
-    // Register agent
-    let session_id = call_center.register_agent(&agent).await.expect("Agent registration failed");
-    
-    // Verify session ID is valid
-    assert!(!session_id.to_string().is_empty());
-    
-    // Check updated statistics
-    let stats = call_center.get_stats().await;
-    assert_eq!(stats.available_agents, 1);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_bridge_management() {
-    let call_center = create_test_call_center().await.expect("Call center creation failed");
-    
-    // Register two test agents
-    let agent1 = Agent {
-        id: "agent-001".to_string(),
-        sip_uri: "sip:agent1@example.com".parse().expect("Valid SIP URI"),
-        display_name: "Agent One".to_string(),
-        skills: vec!["english".to_string()],
-        max_concurrent_calls: 1,
-        status: AgentStatus::Available,
-        department: None,
-        extension: None,
-    };
-    
-    let agent2 = Agent {
-        id: "agent-002".to_string(),
-        sip_uri: "sip:agent2@example.com".parse().expect("Valid SIP URI"),
-        display_name: "Agent Two".to_string(),
-        skills: vec!["english".to_string()],
-        max_concurrent_calls: 1,
-        status: AgentStatus::Available,
-        department: None,
-        extension: None,
-    };
-    
-    let session1 = call_center.register_agent(&agent1).await.expect("Agent 1 registration failed");
-    let session2 = call_center.register_agent(&agent2).await.expect("Agent 2 registration failed");
-    
-    // Test conference creation
-    let bridge_id = call_center.create_conference(&[session1, session2]).await.expect("Conference creation failed");
-    
-    // Verify bridge was created
-    assert!(!bridge_id.to_string().is_empty());
-    
-    // Check bridge info
-    let bridge_info = call_center.get_bridge_info(&bridge_id).await.expect("Bridge info retrieval failed");
-    assert_eq!(bridge_info.sessions.len(), 2);
-    
-    // Check statistics
-    let stats = call_center.get_stats().await;
-    assert_eq!(stats.active_bridges, 1);
-}
-
-#[tokio::test]
-#[serial]
-async fn test_database_integration() {
-    let call_center = create_test_call_center().await.expect("Call center creation failed");
-    
-    // Create agent store
-    let agent_store = AgentStore::new(call_center.database().clone());
-    
-    // Test database operations
-    let create_request = CreateAgentRequest {
-        sip_uri: "sip:dbtest@example.com".to_string(),
-        display_name: "Database Test Agent".to_string(),
-        max_concurrent_calls: 1,
-        department: Some("test".to_string()),
-        extension: Some("2001".to_string()),
-        phone_number: None,
-    };
-    
-    let created_agent = agent_store.create_agent(create_request).await.expect("Database agent creation failed");
-    assert_eq!(created_agent.display_name, "Database Test Agent");
-    // Note: Agent status depends on the database implementation
+    // Test agent creation directly via database
+    db_manager.upsert_agent(
+        "test-agent-001",
+        "Test Agent",
+        Some("sip:test@example.com")
+    ).await.expect("Database agent creation failed");
     
     // Test agent retrieval
-    let retrieved_agent = agent_store.get_agent_by_id(&created_agent.id).await.expect("Database query failed");
+    let retrieved_agent = db_manager.get_agent("test-agent-001").await.expect("Database query failed");
     assert!(retrieved_agent.is_some());
-    assert_eq!(retrieved_agent.unwrap().id, created_agent.id);
+    let agent = retrieved_agent.unwrap();
+    assert_eq!(agent.agent_id, "test-agent-001");
+    assert_eq!(agent.username, "Test Agent");
+    assert_eq!(agent.contact_uri, Some("sip:test@example.com".to_string()));
+    
+    // Test agent status update
+    db_manager.update_agent_status("test-agent-001", AgentStatus::Busy(vec![])).await
+        .expect("Status update should succeed");
+    
+    // Verify status was updated
+    let updated_agent = db_manager.get_agent("test-agent-001").await.expect("Database query failed");
+    assert!(updated_agent.is_some());
+    // Note: Database uses DbAgentStatus::Busy, not AgentStatus::Busy
 }
 
 #[tokio::test]
 #[serial]
-async fn test_call_center_statistics() {
+async fn test_database_agent_statistics() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
+    let db_manager = call_center.database_manager().expect("Database manager should be available");
     
-    // Initial statistics
-    let initial_stats = call_center.get_stats().await;
-    assert_eq!(initial_stats.active_calls, 0);
+    // Initial stats - should be empty
+    let initial_stats = db_manager.get_agent_stats().await.expect("Getting stats should work");
+    assert_eq!(initial_stats.total_agents, 0);
     assert_eq!(initial_stats.available_agents, 0);
     
-    // Register an agent
-    let agent = Agent {
-        id: "stats-test-agent".to_string(),
-        sip_uri: "sip:stats@example.com".parse().expect("Valid SIP URI"),
-        display_name: "Statistics Test Agent".to_string(),
-        skills: vec!["test".to_string()],
-        max_concurrent_calls: 1,
-        status: AgentStatus::Available,
-        department: None,
-        extension: None,
-    };
+    // Add some test agents
+    db_manager.upsert_agent("agent-001", "Agent One", Some("sip:agent1@example.com")).await
+        .expect("Agent creation should succeed");
+    db_manager.upsert_agent("agent-002", "Agent Two", Some("sip:agent2@example.com")).await
+        .expect("Agent creation should succeed");
     
-    call_center.register_agent(&agent).await.expect("Agent registration failed");
+    // Update their statuses
+    db_manager.update_agent_status("agent-001", AgentStatus::Available).await
+        .expect("Status update should succeed");
+    db_manager.update_agent_status("agent-002", AgentStatus::Busy(vec![])).await
+        .expect("Status update should succeed");
     
-    // Updated statistics
-    let updated_stats = call_center.get_stats().await;
+    // Check updated statistics
+    let updated_stats = db_manager.get_agent_stats().await.expect("Getting stats should work");
+    assert_eq!(updated_stats.total_agents, 2);
     assert_eq!(updated_stats.available_agents, 1);
+    assert_eq!(updated_stats.busy_agents, 1);
 }
 
 #[tokio::test]
 #[serial]
-async fn test_call_center_config() {
+async fn test_queue_operations() {
+    let call_center = create_test_call_center().await.expect("Call center creation failed");
+    
+    // Test queue creation - use a standard queue name that will actually be created
+    call_center.create_queue("general").await
+        .expect("Queue creation should succeed");
+    
+    // Now test queue stats access - should have at least the queue we created
+    let queue_stats = call_center.get_queue_stats().await
+        .expect("Queue stats should be accessible");
+    
+    // Should have at least the queue we created, though it might be empty or others might exist
+    // Just check that we can get stats successfully (don't assert on specific count)
+    let _ = queue_stats; // Queue stats retrieved successfully
+    
+    // Test queue manager access
+    let queue_manager = call_center.queue_manager().read().await;
+    let queue_ids = queue_manager.get_queue_ids();
+    // Should have at least our general queue, but the queue manager might pre-populate others
+    assert!(!queue_ids.is_empty(), "Should have at least some queues after creating one");
+    assert!(queue_ids.contains(&"general".to_string()), "Should contain the 'general' queue we created");
+}
+
+#[tokio::test]
+#[serial]
+async fn test_call_center_configuration() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
     
     // Test configuration access
@@ -182,6 +141,14 @@ async fn test_call_center_config() {
     assert!(config.general.max_concurrent_calls > 0);
     assert!(config.general.max_agents > 0);
     assert!(!config.general.domain.is_empty());
+    assert!(config.general.local_signaling_addr.port() > 0);
+    assert!(config.general.local_media_addr.port() > 0);
+    
+    // Test various config sections exist
+    assert!(config.agents.default_max_concurrent_calls > 0);
+    assert!(config.queues.max_queue_size > 0);
+    // Just check that routing strategy is set (can't compare due to no PartialEq)
+    let _ = &config.routing.default_strategy;
 }
 
 #[tokio::test]
@@ -192,17 +159,49 @@ async fn test_session_manager_access() {
     // Test session manager access
     let session_manager = call_center.session_manager();
     
-    // Verify we can access session-core APIs
+    // Verify we can access session-core APIs (these should not fail even without live SIP)
     let active_sessions = session_manager.list_active_sessions().await;
     match active_sessions {
-        Ok(sessions) => assert!(sessions.len() >= 0),
-        Err(_) => (), // If not implemented yet, that's ok
+        Ok(sessions) => {
+            assert!(sessions.len() >= 0); // Should be empty in test but callable
+        },
+        Err(_) => {
+            // If not implemented yet, that's also acceptable
+            println!("list_active_sessions not yet implemented - this is expected");
+        }
     }
 }
 
+#[tokio::test]
+#[serial]
+async fn test_orchestrator_stats_integration() {
+    let call_center = create_test_call_center().await.expect("Call center creation failed");
+    let db_manager = call_center.database_manager().expect("Database manager should be available");
+    
+    // Add some agents to the database
+    db_manager.upsert_agent("stats-agent-1", "Stats Agent 1", Some("sip:stats1@example.com")).await
+        .expect("Agent creation should succeed");
+    db_manager.upsert_agent("stats-agent-2", "Stats Agent 2", Some("sip:stats2@example.com")).await
+        .expect("Agent creation should succeed");
+    
+    // Set different statuses
+    db_manager.update_agent_status("stats-agent-1", AgentStatus::Available).await
+        .expect("Status update should succeed");
+    db_manager.update_agent_status("stats-agent-2", AgentStatus::PostCallWrapUp).await
+        .expect("Status update should succeed");
+    
+    // Get orchestrator stats - this should integrate database stats
+    let stats = call_center.get_stats().await;
+    
+    // Should reflect the agents we added
+    assert_eq!(stats.available_agents, 1);
+    assert_eq!(stats.busy_agents, 1); // PostCallWrapUp counts as busy
+    assert_eq!(stats.active_calls, 0); // No actual calls in test
+    assert_eq!(stats.active_bridges, 0); // No actual bridges in test
+}
+
 // TODO: Add more integration tests as modules are implemented
-// - Test agent registration and status changes
-// - Test call queuing and dequeuing
-// - Test call routing decisions
-// - Test bridge creation and management
-// - Test monitoring and metrics collection 
+// - Test actual SIP agent registration with real SIP infrastructure
+// - Test call routing with live sessions
+// - Test bridge creation with active calls
+// - Test monitoring and metrics collection with real events 

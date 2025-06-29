@@ -66,26 +66,6 @@ name = "call_center_benchmarks"
 harness = false
 
 [[example]]
-name = "phase0_basic_call_flow"
-path = "examples/phase0_basic_call_flow.rs"
-
-[[example]]
-name = "phase2_call_routing_demo"
-path = "examples/phase2_call_routing_demo.rs"
-
-[[example]]
-name = "call_center_with_database"
-path = "examples/call_center_with_database.rs"
-
-[[example]]
-name = "register_demo_server"
-path = "examples/register_demo/server.rs"
-
-[[example]]
-name = "register_demo_client"
-path = "examples/register_demo/client.rs"
-
-[[example]]
 name = "e2e_test_server"
 path = "examples/e2e_test/server/basic_call_center_server.rs"
 
