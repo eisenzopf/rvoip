@@ -491,6 +491,401 @@ mod simple_tests {
     }
 }
 
+/// **DIAGNOSTIC TEST: Find the Breaking Point**
+/// 
+/// This tests incremental agent counts to find where the segfault occurs
+/// and monitors resource usage to understand the failure
+async fn diagnostic_agent_scaling_test() {
+    println!("🔍 DIAGNOSTIC: Finding agent scaling breaking point");
+    
+    // Start ONE server
+    use rvoip_call_engine::{CallCenterServerBuilder, CallCenterConfig};
+    
+    let mut config = CallCenterConfig::default();
+    config.general.local_signaling_addr = "0.0.0.0:5060".parse().unwrap();
+    config.general.domain = "127.0.0.1".to_string();
+    config.agents.default_max_concurrent_calls = 1;
+    
+    let mut server = CallCenterServerBuilder::new()
+        .with_config(config)
+        .with_database_path(":memory:".to_string())
+        .build()
+        .await
+        .expect("Server creation should work");
+        
+    server.start().await.expect("Server start should work");
+    server.create_default_queues().await.expect("Queue creation should work");
+    
+    // Start server's event loop in background
+    let server_task = tokio::spawn(async move {
+        if let Err(e) = server.run().await {
+            eprintln!("❌ SERVER: Runtime error: {}", e);
+        }
+    });
+    
+    // Give server time to fully start
+    tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+    println!("✅ SERVER: Ready for agent scaling test");
+    
+    // Test different agent counts to find breaking point
+    let test_counts = vec![10, 20, 30, 50, 75, 100];
+    
+    for &num_agents in &test_counts {
+        println!("\n🧪 TESTING: {} agents", num_agents);
+        
+        // Memory before test
+        let process = std::process::Command::new("ps")
+            .args(&["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok();
+        let memory_before = if let Some(output) = process {
+            String::from_utf8_lossy(&output.stdout).trim().parse::<u64>().unwrap_or(0)
+        } else { 0 };
+        
+        println!("💾 Memory before: {} KB", memory_before);
+        
+        let test_start = std::time::Instant::now();
+        let mut agent_handles = Vec::with_capacity(num_agents);
+        
+        // Create agents with error tracking
+        for i in 0..num_agents {
+            let agent_id = i + (num_agents * 1000); // Unique port range per test
+            let handle = tokio::spawn(async move {
+                create_and_register_agent(agent_id, 5060).await
+            });
+            agent_handles.push(handle);
+            
+            // Small delay to avoid overwhelming
+            if i % 10 == 0 && i > 0 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                println!("🔄 Created {} agents so far...", i + 1);
+            }
+        }
+        
+        println!("⏱️  All {} agent tasks spawned, waiting for completion...", num_agents);
+        
+        // Wait for results with timeout
+        let mut successful = 0;
+        let mut failed = 0;
+        let mut crashed = 0;
+        
+        for (i, handle) in agent_handles.into_iter().enumerate() {
+            match tokio::time::timeout(std::time::Duration::from_secs(30), handle).await {
+                Ok(Ok(Ok(()))) => successful += 1,
+                Ok(Ok(Err(e))) => {
+                    failed += 1;
+                    if failed <= 3 {
+                        eprintln!("⚠️  Agent {} failed: {}", i, e);
+                    }
+                }
+                Ok(Err(e)) => {
+                    crashed += 1;
+                    if crashed <= 3 {
+                        eprintln!("💥 Agent {} task crashed: {}", i, e);
+                    }
+                }
+                Err(_) => {
+                    failed += 1;
+                    if failed <= 3 {
+                        eprintln!("⏰ Agent {} timed out", i);
+                    }
+                }
+            }
+        }
+        
+        let test_duration = test_start.elapsed();
+        
+        // Memory after test
+        let process = std::process::Command::new("ps")
+            .args(&["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok();
+        let memory_after = if let Some(output) = process {
+            String::from_utf8_lossy(&output.stdout).trim().parse::<u64>().unwrap_or(0)
+        } else { 0 };
+        
+        println!("📊 RESULTS FOR {} AGENTS:", num_agents);
+        println!("  ✅ Successful: {}", successful);
+        println!("  ❌ Failed: {}", failed);
+        println!("  💥 Crashed: {}", crashed);
+        println!("  ⏱️  Duration: {:?}", test_duration);
+        println!("  💾 Memory after: {} KB", memory_after);
+        println!("  📈 Memory delta: {} KB", memory_after.saturating_sub(memory_before));
+        
+        if successful == 0 && (failed > 0 || crashed > 0) {
+            println!("🚨 BREAKING POINT FOUND: {} agents failed completely", num_agents);
+            break;
+        }
+        
+        // Give system time to cleanup between tests
+        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+    }
+    
+    // Cleanup
+    server_task.abort();
+    println!("🛑 CLEANUP: Diagnostic complete, server stopped");
+}
+
+/// Run this as: cargo test --release --bench call_center_benchmarks diagnostic_scaling
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    
+    #[tokio::test]
+    #[ignore] // Use --ignored to run this
+    async fn diagnostic_scaling() {
+        diagnostic_agent_scaling_test().await;
+    }
+}
+
+/// Simple test to run diagnostic manually  
+/// Run with: cargo test --release --bench call_center_benchmarks test_diagnostic_simple
+#[cfg(test)]
+mod simple_diagnostic {
+    use super::*;
+    
+    #[tokio::test]
+    async fn test_diagnostic_simple() {
+        println!("🔍 STARTING SIMPLE DIAGNOSTIC TEST");
+        
+        // Just test a smaller case first
+        println!("Testing server creation...");
+        
+        use rvoip_call_engine::{CallCenterServerBuilder, CallCenterConfig};
+        
+        let mut config = CallCenterConfig::default();
+        config.general.local_signaling_addr = "0.0.0.0:5062".parse().unwrap(); // Different port
+        config.general.domain = "127.0.0.1".to_string();
+        
+        let server_result = CallCenterServerBuilder::new()
+            .with_config(config)
+            .with_database_path(":memory:".to_string())
+            .build()
+            .await;
+            
+        match server_result {
+            Ok(mut server) => {
+                println!("✅ Server created successfully");
+                
+                match server.start().await {
+                    Ok(()) => {
+                        println!("✅ Server started successfully");
+                        
+                        // Start server task
+                        let server_task = tokio::spawn(async move {
+                            if let Err(e) = server.run().await {
+                                eprintln!("❌ SERVER: Runtime error: {}", e);
+                            }
+                        });
+                        
+                        // Give server time to fully start  
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                        println!("✅ Server running, testing agent creation...");
+                        
+                        // Try to create one agent
+                        println!("Testing single agent creation...");
+                        let agent_result = create_and_register_agent(1, 5062).await;
+                        match agent_result {
+                            Ok(()) => println!("✅ Single agent registration successful"),
+                            Err(e) => println!("❌ Single agent registration failed: {}", e),
+                        }
+                        
+                        // Try to create 5 agents
+                        println!("Testing 5 agents...");
+                        let mut handles = Vec::new();
+                        for i in 0..5 {
+                            let handle = tokio::spawn(async move {
+                                create_and_register_agent(i + 100, 5062).await
+                            });
+                            handles.push(handle);
+                        }
+                        
+                        let mut successful = 0;
+                        let mut failed = 0;
+                        
+                        for (i, handle) in handles.into_iter().enumerate() {
+                            match handle.await {
+                                Ok(Ok(())) => {
+                                    successful += 1;
+                                    println!("✅ Agent {} successful", i);
+                                }
+                                Ok(Err(e)) => {
+                                    failed += 1;
+                                    println!("❌ Agent {} failed: {}", i, e);
+                                }
+                                Err(e) => {
+                                    failed += 1;
+                                    println!("💥 Agent {} task crashed: {}", i, e);
+                                }
+                            }
+                        }
+                        
+                        println!("📊 RESULTS: {} successful, {} failed", successful, failed);
+                        
+                        // Try 20 agents
+                        if successful > 0 {
+                            println!("Testing 20 agents...");
+                            let mut handles = Vec::new();
+                            for i in 0..20 {
+                                let handle = tokio::spawn(async move {
+                                    create_and_register_agent(i + 200, 5062).await
+                                });
+                                handles.push(handle);
+                            }
+                            
+                            let mut successful = 0;
+                            let mut failed = 0;
+                            
+                            for (i, handle) in handles.into_iter().enumerate() {
+                                match tokio::time::timeout(std::time::Duration::from_secs(10), handle).await {
+                                    Ok(Ok(Ok(()))) => {
+                                        successful += 1;
+                                        if successful <= 3 {
+                                            println!("✅ Agent {} successful", i);
+                                        }
+                                    }
+                                    Ok(Ok(Err(e))) => {
+                                        failed += 1;
+                                        if failed <= 3 {
+                                            println!("❌ Agent {} failed: {}", i, e);
+                                        }
+                                    }
+                                    Ok(Err(e)) => {
+                                        failed += 1;
+                                        if failed <= 3 {
+                                            println!("💥 Agent {} task crashed: {}", i, e);
+                                        }
+                                    }
+                                    Err(_) => {
+                                        failed += 1;
+                                        if failed <= 3 {
+                                            println!("⏰ Agent {} timed out", i);
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            println!("📊 20 AGENT RESULTS: {} successful, {} failed", successful, failed);
+                            
+                            // If 20 works, try 50
+                            if successful > 15 {
+                                println!("Testing 50 agents...");
+                                let mut handles = Vec::new();
+                                for i in 0..50 {
+                                    let handle = tokio::spawn(async move {
+                                        create_and_register_agent(i + 300, 5062).await
+                                    });
+                                    handles.push(handle);
+                                }
+                                
+                                let mut successful = 0;
+                                let mut failed = 0;
+                                
+                                for (i, handle) in handles.into_iter().enumerate() {
+                                    match tokio::time::timeout(std::time::Duration::from_secs(15), handle).await {
+                                        Ok(Ok(Ok(()))) => {
+                                            successful += 1;
+                                            if successful % 10 == 0 {
+                                                println!("✅ {} agents successful so far", successful);
+                                            }
+                                        }
+                                        Ok(Ok(Err(e))) => {
+                                            failed += 1;
+                                            if failed <= 3 {
+                                                println!("❌ Agent {} failed: {}", i, e);
+                                            }
+                                        }
+                                        Ok(Err(e)) => {
+                                            failed += 1;
+                                            if failed <= 3 {
+                                                println!("💥 Agent {} task crashed: {}", i, e);
+                                            }
+                                        }
+                                        Err(_) => {
+                                            failed += 1;
+                                            if failed <= 3 {
+                                                println!("⏰ Agent {} timed out", i);
+                                            }
+                                        }
+                                    }
+                                }
+                                
+                                println!("📊 50 AGENT RESULTS: {} successful, {} failed", successful, failed);
+                                
+                                // If 50 works, try 100!
+                                if successful > 40 {
+                                    println!("Testing 100 agents...");
+                                    let mut handles = Vec::new();
+                                    for i in 0..100 {
+                                        let handle = tokio::spawn(async move {
+                                            create_and_register_agent(i + 400, 5062).await
+                                        });
+                                        handles.push(handle);
+                                    }
+                                    
+                                    let mut successful = 0;
+                                    let mut failed = 0;
+                                    
+                                    for (i, handle) in handles.into_iter().enumerate() {
+                                        match tokio::time::timeout(std::time::Duration::from_secs(20), handle).await {
+                                            Ok(Ok(Ok(()))) => {
+                                                successful += 1;
+                                                if successful % 20 == 0 {
+                                                    println!("✅ {} agents successful so far", successful);
+                                                }
+                                            }
+                                            Ok(Ok(Err(e))) => {
+                                                failed += 1;
+                                                if failed <= 3 {
+                                                    println!("❌ Agent {} failed: {}", i, e);
+                                                }
+                                            }
+                                            Ok(Err(e)) => {
+                                                failed += 1;
+                                                if failed <= 3 {
+                                                    println!("💥 Agent {} task crashed: {}", i, e);
+                                                }
+                                            }
+                                            Err(_) => {
+                                                failed += 1;
+                                                if failed <= 3 {
+                                                    println!("⏰ Agent {} timed out", i);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    println!("📊 🎯 100 AGENT FINAL RESULTS: {} successful, {} failed", successful, failed);
+                                    
+                                    if successful == 100 {
+                                        println!("🎉 SUCCESS: All 100 agents registered successfully!");
+                                    } else if successful > 90 {
+                                        println!("✅ EXCELLENT: {} out of 100 agents registered", successful);
+                                    } else if successful > 50 {
+                                        println!("👍 GOOD: {} out of 100 agents registered", successful);
+                                    } else {
+                                        println!("⚠️  ISSUES: Only {} out of 100 agents registered", successful);
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Cleanup
+                        server_task.abort();
+                        println!("🛑 CLEANUP: Server stopped");
+                    }
+                    Err(e) => println!("❌ Server start failed: {}", e),
+                }
+            }
+            Err(e) => {
+                println!("❌ Server creation failed: {}", e);
+            }
+        }
+        
+        println!("🔍 DIAGNOSTIC TEST COMPLETE");
+    }
+}
+
 // TODO: Add more benchmarks as modules are implemented:
 // - Benchmark call routing decisions
 // - Benchmark bridge creation and management
