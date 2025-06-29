@@ -360,7 +360,9 @@ impl CallCenterEngine {
             match db_manager.get_agent(&agent_id.0).await {
                 Ok(Some(db_agent)) => {
                     // Convert to AgentInfo
-                    AgentInfo::from_db_agent(&db_agent, db_agent.contact_uri.clone().unwrap_or_else(|| format!("sip:{}@127.0.0.1", db_agent.username)))
+                    let contact_uri = db_agent.contact_uri.clone()
+                        .unwrap_or_else(|| self.config.general.agent_sip_uri(&db_agent.username));
+                    AgentInfo::from_db_agent(&db_agent, contact_uri, &self.config.general)
                 }
                 Ok(None) => {
                     error!("Agent {} not found in database after assignment", agent_id);
@@ -403,7 +405,7 @@ impl CallCenterEngine {
         
         // Step 1: B2BUA prepares its own SDP offer for the agent
         let agent_contact_uri = agent_info.contact_uri.clone();
-        let call_center_uri = format!("sip:call-center@{}", self.config.general.domain);
+        let call_center_uri = self.config.general.call_center_uri();
         
         info!("📞 B2BUA: Preparing outgoing call to agent {} at {}", 
               agent_id, agent_contact_uri);
@@ -439,7 +441,7 @@ impl CallCenterEngine {
                 let agent_call_info = CallInfo {
                     session_id: call_session.id.clone(),
                     caller_id: "Call Center".to_string(),
-                    from: "sip:call-center@127.0.0.1".to_string(),
+                    from: self.config.general.call_center_uri(),
                     to: agent_info.sip_uri.clone(),
                     agent_id: Some(agent_id.clone()),
                     queue_id: None,

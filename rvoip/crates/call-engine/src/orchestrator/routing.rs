@@ -485,7 +485,9 @@ impl CallCenterEngine {
         // Get agent information
         let agent_info = match db_manager.get_agent(&agent_id.0).await {
             Ok(Some(db_agent)) => {
-                super::types::AgentInfo::from_db_agent(&db_agent, db_agent.contact_uri.clone().unwrap_or_else(|| format!("sip:{}@127.0.0.1", db_agent.username)))
+                let contact_uri = db_agent.contact_uri.clone()
+                    .unwrap_or_else(|| engine.config.general.agent_sip_uri(&db_agent.username));
+                super::types::AgentInfo::from_db_agent(&db_agent, contact_uri, &engine.config.general)
             }
             Ok(None) => {
                 error!("❌ Agent {} not found in database", agent_id);
@@ -546,7 +548,7 @@ impl CallCenterEngine {
         
         // Prepare B2BUA call to agent
         let agent_contact_uri = agent_info.contact_uri.clone();
-        let call_center_uri = format!("sip:call-center@{}", engine.config.general.domain);
+        let call_center_uri = engine.config.general.call_center_uri();
         
         info!("📞 FULL ROUTING: B2BUA preparing outgoing call to agent {} at {}", agent_id, agent_contact_uri);
         
@@ -591,7 +593,7 @@ impl CallCenterEngine {
         let agent_call_info = super::types::CallInfo {
             session_id: agent_session_id.clone(),
             caller_id: "Call Center".to_string(),
-            from: "sip:call-center@127.0.0.1".to_string(),
+            from: engine.config.general.call_center_uri(),
             to: agent_info.sip_uri.clone(),
             agent_id: Some(agent_id.clone()),
             queue_id: None,

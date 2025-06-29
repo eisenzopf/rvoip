@@ -1,9 +1,0 @@
-[package]
-name = "sip-parser-demo"
-version = "0.1.0"
-edition = "2021"
-description = "Example application demonstrating how to use rvoip-sip-core for SIP message parsing and building"
-
-[dependencies]
-rvoip-sip-core = { path = "../../crates/sip-core" }
-bytes = "1.5" 
