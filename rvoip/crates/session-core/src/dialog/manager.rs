@@ -235,30 +235,49 @@ impl DialogManager {
                 
                 // 🚨 IMPROVED BYE ERROR HANDLING: Handle unreachable endpoints gracefully
                 // This prevents excessive Timer E retransmissions when agents are unreachable
+                tracing::info!("📞 BYE-SEND: Attempting to send BYE for established session: {} (dialog: {})", session_id, dialog_id);
+                
                 match self.dialog_api.send_bye(&dialog_id).await {
-                    Ok(_tx_key) => {
-                        tracing::info!("✅ Sent BYE for established session: {}", session_id);
+                    Ok(tx_key) => {
+                        tracing::info!("✅ BYE-SEND: Successfully sent BYE for session: {} (tx: {}, dialog: {})", 
+                                     session_id, tx_key, dialog_id);
                         
-                        // Set a reasonable timeout for BYE response (shorter than default)
-                        // If no response in 5 seconds, consider the call terminated locally
+                        // PHASE 0.24: Set a reasonable timeout for BYE response (increased from 5s to 15s)
+                        // If no response in 15 seconds, consider the call terminated locally
                         let dialog_api = self.dialog_api.clone();
                         let session_id_timeout = session_id.clone();
                         let dialog_id_timeout = dialog_id.clone();
                         
                         tokio::spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            // PHASE 0.24: Increased timeout from 5s to 15s for better reliability
+                            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
                             
                             // Check if dialog still exists and force cleanup if needed
                             match dialog_api.get_dialog_state(&dialog_id_timeout).await {
                                 Ok(state) => {
                                     if !matches!(state, rvoip_dialog_core::dialog::DialogState::Terminated) {
-                                        tracing::warn!("⏰ BYE timeout for session {} - forcing dialog termination", session_id_timeout);
+                                        tracing::warn!("⏰ BYE timeout for session {} after 15s - forcing dialog termination (state: {:?})", 
+                                                     session_id_timeout, state);
+                                        
+                                        // PHASE 0.24: Add detailed timeout logging
+                                        tracing::info!("📞 BYE-TIMEOUT: Session {} did not receive 200 OK within 15 seconds", session_id_timeout);
+                                        
                                         // Force terminate the dialog to stop retransmissions
-                                        let _ = dialog_api.terminate_dialog(&dialog_id_timeout).await;
+                                        match dialog_api.terminate_dialog(&dialog_id_timeout).await {
+                                            Ok(()) => {
+                                                tracing::info!("✅ BYE-TIMEOUT: Successfully forced termination of dialog {}", dialog_id_timeout);
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("⚠️ BYE-TIMEOUT: Failed to force terminate dialog {}: {}", dialog_id_timeout, e);
+                                            }
+                                        }
+                                    } else {
+                                        tracing::debug!("✅ BYE-SUCCESS: Session {} dialog already terminated within 15s", session_id_timeout);
                                     }
                                 }
-                                Err(_) => {
-                                    // Dialog already cleaned up, which is fine
+                                Err(e) => {
+                                    // Dialog already cleaned up, which is normal for successful BYE
+                                    tracing::debug!("✅ BYE-SUCCESS: Session {} dialog already cleaned up: {}", session_id_timeout, e);
                                 }
                             }
                         });
@@ -266,26 +285,62 @@ impl DialogManager {
                     Err(e) => {
                         let error_msg = e.to_string();
                         
-                        // Categorize BYE failures for better handling
+                        tracing::warn!("❌ BYE-SEND: Failed to send BYE for session {} (dialog: {}): {}", 
+                                     session_id, dialog_id, e);
+                        
+                        // PHASE 0.24: Enhanced error categorization for better handling
                         if error_msg.contains("unreachable") || error_msg.contains("timeout") || 
-                           error_msg.contains("connection") || error_msg.contains("network") {
-                            tracing::warn!("🌐 BYE failed due to network/connectivity issue for session {}: {}. Terminating locally.", session_id, e);
+                           error_msg.contains("connection") || error_msg.contains("network") ||
+                           error_msg.contains("Connection refused") || error_msg.contains("No route to host") {
+                            tracing::warn!("🌐 BYE-ERROR-NETWORK: Network/connectivity issue for session {}: {}. Terminating locally.", session_id, e);
                             
                             // For network issues, terminate the dialog immediately to prevent retransmissions
                             match self.dialog_api.terminate_dialog(&dialog_id).await {
                                 Ok(()) => {
-                                    tracing::info!("✅ Forcibly terminated dialog {} due to network issue", dialog_id);
+                                    tracing::info!("✅ BYE-ERROR-NETWORK: Forcibly terminated dialog {} due to network issue", dialog_id);
                                 }
                                 Err(e2) => {
-                                    tracing::warn!("⚠️ Failed to forcibly terminate dialog {}: {}", dialog_id, e2);
+                                    tracing::warn!("⚠️ BYE-ERROR-NETWORK: Failed to forcibly terminate dialog {}: {}", dialog_id, e2);
                                 }
                             }
-                        } else if error_msg.contains("already terminated") || error_msg.contains("not exist") {
-                            tracing::info!("ℹ️ BYE not needed for session {} - dialog already terminated: {}", session_id, e);
-                            // This is fine, the dialog is already gone
+                        } else if error_msg.contains("already terminated") || error_msg.contains("not exist") ||
+                                  error_msg.contains("dialog not found") || error_msg.contains("No dialog found") {
+                            tracing::info!("ℹ️ BYE-ERROR-ALREADY-GONE: BYE not needed for session {} - dialog already terminated: {}", session_id, e);
+                            // This is fine, the dialog is already gone - no further action needed
+                        } else if error_msg.contains("invalid state") || error_msg.contains("wrong state") ||
+                                  error_msg.contains("Cannot send") {
+                            tracing::warn!("🔄 BYE-ERROR-STATE: State issue for session {} - may need retry: {}", session_id, e);
+                            
+                            // For state issues, try to force terminate after a brief delay
+                            let dialog_api = self.dialog_api.clone();
+                            let dialog_id_retry = dialog_id.clone();
+                            let session_id_retry = session_id.clone();
+                            
+                            tokio::spawn(async move {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                tracing::info!("🔄 BYE-RETRY: Attempting force termination for session {} after state error", session_id_retry);
+                                
+                                match dialog_api.terminate_dialog(&dialog_id_retry).await {
+                                    Ok(()) => {
+                                        tracing::info!("✅ BYE-RETRY: Successfully force terminated dialog {} after state error", dialog_id_retry);
+                                    }
+                                    Err(e2) => {
+                                        tracing::warn!("⚠️ BYE-RETRY: Failed to force terminate dialog {} after state error: {}", dialog_id_retry, e2);
+                                    }
+                                }
+                            });
                         } else {
-                            tracing::warn!("⚠️ BYE failed for session {} with unknown error: {}. Continuing with cleanup.", session_id, e);
-                            // Continue with cleanup even if BYE fails for unknown reasons
+                            tracing::warn!("⚠️ BYE-ERROR-UNKNOWN: Unknown error for session {}: {}. Attempting force termination.", session_id, e);
+                            
+                            // For unknown errors, attempt immediate force termination
+                            match self.dialog_api.terminate_dialog(&dialog_id).await {
+                                Ok(()) => {
+                                    tracing::info!("✅ BYE-ERROR-UNKNOWN: Force terminated dialog {} for unknown error", dialog_id);
+                                }
+                                Err(e2) => {
+                                    tracing::warn!("⚠️ BYE-ERROR-UNKNOWN: Failed to force terminate dialog {} for unknown error: {}", dialog_id, e2);
+                                }
+                            }
                         }
                     }
                 }

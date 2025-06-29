@@ -59,6 +59,15 @@ pub struct GeneralConfig {
     
     /// Call center service URI prefix
     pub call_center_service: String,
+    
+    /// PHASE 0.24: BYE timeout configuration (seconds)
+    pub bye_timeout_seconds: u64,
+    
+    /// PHASE 0.24: BYE retry attempts
+    pub bye_retry_attempts: u32,
+    
+    /// PHASE 0.24: Race condition prevention delay (milliseconds)
+    pub bye_race_delay_ms: u64,
 }
 
 /// Agent management configuration
@@ -218,6 +227,23 @@ impl CallCenterConfig {
             return Err("max_queue_size must be greater than 0".to_string());
         }
         
+        // PHASE 0.24: Validate BYE configuration
+        if self.general.bye_timeout_seconds == 0 {
+            return Err("bye_timeout_seconds must be greater than 0".to_string());
+        }
+        
+        if self.general.bye_timeout_seconds > 300 {
+            return Err("bye_timeout_seconds cannot exceed 300 seconds (5 minutes)".to_string());
+        }
+        
+        if self.general.bye_retry_attempts > 10 {
+            return Err("bye_retry_attempts cannot exceed 10".to_string());
+        }
+        
+        if self.general.bye_race_delay_ms > 5000 {
+            return Err("bye_race_delay_ms cannot exceed 5000ms (5 seconds)".to_string());
+        }
+        
         Ok(())
     }
 }
@@ -274,6 +300,11 @@ impl Default for GeneralConfig {
             local_ip: "127.0.0.1".to_string(),  // Safe default for development
             registrar_domain: "call-center.local".to_string(),
             call_center_service: "call-center".to_string(),
+            
+            // PHASE 0.24: BYE handling configuration with production-ready defaults
+            bye_timeout_seconds: 15,     // Increased from 5s to 15s for better reliability
+            bye_retry_attempts: 3,       // Allow 3 retry attempts for failed BYEs
+            bye_race_delay_ms: 100,      // 100ms delay to prevent race conditions
         }
     }
 }

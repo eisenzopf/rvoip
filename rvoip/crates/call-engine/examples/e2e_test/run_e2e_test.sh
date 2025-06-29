@@ -178,13 +178,13 @@ main() {
     
     # Check agent status in server log
     echo -e "\n${YELLOW}Checking agent registration status...${NC}"
-    if grep -q "Agent alice added to available agents pool" "$SERVER_LOG"; then
+    if grep -q "Agent alice registered in database" "$SERVER_LOG"; then
         echo -e "Alice: ${GREEN}Registered${NC}"
     else
         echo -e "Alice: ${RED}Not registered${NC}"
     fi
     
-    if grep -q "Agent bob added to available agents pool" "$SERVER_LOG"; then
+    if grep -q "Agent bob registered in database" "$SERVER_LOG"; then
         echo -e "Bob: ${GREEN}Registered${NC}"
     else
         echo -e "Bob: ${RED}Not registered${NC}"
@@ -200,9 +200,9 @@ main() {
         echo -e "${GREEN}Test will include G.711 audio${NC}"
     fi
     
-    # Run SIPp test calls
-    echo -e "\n${YELLOW}Running SIPp test calls...${NC}"
-    echo "Making 5 calls with coordinated timing..."
+    # PHASE 0.24: Enhanced SIPp test calls with BYE tracking
+    echo -e "\n${YELLOW}Running SIPp test calls (PHASE 0.24)...${NC}"
+    echo "Making 5 calls waiting for server-initiated BYE (no duration limit)..."
     
     cd "$SIPP_DIR"
     sipp -sf customer_uac.xml \
@@ -210,7 +210,8 @@ main() {
         -i 127.0.0.1 \
         -p 5080 \
         -m 5 \
-        -r 5 \
+        -r 1 \
+        -l 5 \
         -trace_msg \
         -trace_err \
         -trace_screen \
@@ -218,9 +219,9 @@ main() {
         127.0.0.1:5060 \
         > "$SIPP_LOG" 2>&1 || true
     
-    # Wait for calls to complete (extended for queue testing)
-    echo "Waiting for calls to complete (30s - calls now have 8s duration)..."
-    sleep 30
+    # PHASE 0.24: Wait for calls to complete with extended time for BYE processing
+    echo "Waiting for calls to complete (45s - allowing time for 20s calls + BYE completion)..."
+    sleep 45
     
     # Stop packet capture
     echo -e "\n${YELLOW}Stopping packet capture...${NC}"
@@ -233,7 +234,7 @@ main() {
     echo -e "${GREEN}Test Results${NC}"
     echo -e "${GREEN}================================${NC}\n"
     
-    # Check server log for successful calls
+    # PHASE 0.24: Enhanced server log analysis with BYE tracking
     echo "Analyzing server log..."
     CALLS_RECEIVED=$(grep -c "Received incoming call" "$SERVER_LOG" || true)
     CALLS_ESTABLISHED=$(grep -c "Call .* established" "$SERVER_LOG" || true)
@@ -243,6 +244,26 @@ main() {
     echo "Calls established: $CALLS_ESTABLISHED"
     echo "Calls ended: $CALLS_ENDED"
     
+    # PHASE 0.24: Server-side BYE analysis
+    echo -e "\nServer BYE handling analysis:"
+    BYE_SEND_ATTEMPTS=$(grep -c "BYE-SEND: Attempting to send BYE" "$SERVER_LOG" || true)
+    BYE_SEND_SUCCESS=$(grep -c "BYE-SEND: Successfully sent BYE" "$SERVER_LOG" || true)
+    BYE_200OK_RECEIVED=$(grep -c "BYE-200OK: Received 200 OK" "$SERVER_LOG" || true)
+    BYE_TIMEOUTS=$(grep -c "BYE timeout.*forcing dialog termination" "$SERVER_LOG" || true)
+    BYE_FORWARD=$(grep -c "BYE-FORWARD: Successfully terminated" "$SERVER_LOG" || true)
+    
+    echo "BYE send attempts: $BYE_SEND_ATTEMPTS"
+    echo "BYE send successful: $BYE_SEND_SUCCESS"
+    echo "BYE 200 OK received: $BYE_200OK_RECEIVED"
+    echo "BYE timeouts: $BYE_TIMEOUTS"
+    echo "BYE forwarding successful: $BYE_FORWARD"
+    
+    if [ "$BYE_200OK_RECEIVED" -gt 0 ]; then
+        echo -e "${GREEN}✅ Server BYE handling working - $BYE_200OK_RECEIVED successful terminations${NC}"
+    else
+        echo -e "${YELLOW}⚠️ Server BYE handling - no 200 OK confirmations logged${NC}"
+    fi
+    
     # Check agent logs
     echo -e "\nAnalyzing agent logs..."
     ALICE_CALLS=$(grep -c "Incoming call" "$ALICE_LOG" || true)
@@ -251,13 +272,29 @@ main() {
     echo "Calls handled by Alice: $ALICE_CALLS"
     echo "Calls handled by Bob: $BOB_CALLS"
     
-    # Check SIPp results
+    # PHASE 0.24: Enhanced SIPp results analysis with BYE tracking
     echo -e "\nAnalyzing SIPp results..."
     if [ -f "${SIPP_DIR}/customer_uac_*.csv" ]; then
         SIPP_SUCCESS=$(tail -1 ${SIPP_DIR}/customer_uac_*.csv | cut -d';' -f5)
         SIPP_FAILED=$(tail -1 ${SIPP_DIR}/customer_uac_*.csv | cut -d';' -f6)
         echo "SIPp successful calls: $SIPP_SUCCESS"
         echo "SIPp failed calls: $SIPP_FAILED"
+    fi
+    
+    # PHASE 0.24: BYE completion analysis
+    echo -e "\nBYE completion analysis:"
+    BYE_SENT=$(grep -c "Sending BYE" "$SIPP_LOG" || true)
+    BYE_200OK=$(grep -c "200 OK.*BYE" "$SIPP_LOG" || true)
+    BYE_TIMEOUT=$(grep -c "BYE.*timeout" "$SIPP_LOG" || true)
+    
+    echo "BYE messages sent: $BYE_SENT"
+    echo "BYE 200 OK received: $BYE_200OK"
+    echo "BYE timeouts: $BYE_TIMEOUT"
+    
+    if [ "$BYE_200OK" -gt 0 ]; then
+        echo -e "${GREEN}✅ BYE completion working - $BYE_200OK calls terminated properly${NC}"
+    else
+        echo -e "${RED}❌ BYE completion issue - no 200 OK responses to BYE${NC}"
     fi
     
     # PCAP analysis
@@ -283,10 +320,19 @@ main() {
     echo -e "${GREEN}Test Summary${NC}"
     echo -e "${GREEN}================================${NC}\n"
     
-    # Determine overall success
+    # PHASE 0.24: Enhanced success criteria including BYE completion
     if [ "$CALLS_ESTABLISHED" -gt 0 ] && [ "$((ALICE_CALLS + BOB_CALLS))" -gt 0 ]; then
         echo -e "${GREEN}✅ E2E Test PASSED!${NC}"
         echo "Successfully routed calls from customers to agents"
+        
+        # PHASE 0.24: Additional BYE completion validation
+        if [ "$BYE_200OK_RECEIVED" -gt 0 ] || [ "$BYE_200OK" -gt 0 ]; then
+            echo -e "${GREEN}✅ BYE Completion PASSED!${NC}"
+            echo "Call termination working properly"
+        else
+            echo -e "${YELLOW}⚠️ BYE Completion PARTIAL${NC}"
+            echo "Calls completed but BYE termination may need investigation"
+        fi
     else
         echo -e "${RED}❌ E2E Test FAILED!${NC}"
         echo "Failed to establish calls between customers and agents"
