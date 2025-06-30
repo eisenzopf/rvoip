@@ -304,16 +304,8 @@ async fn run_real_sip_call_test(duration_secs: u64) -> Result<(), Box<dyn std::e
         if i % 3 == 0 {
             // Get statistics every 3 seconds
             if let Ok(Some(stats)) = alice_coordinator.get_media_statistics(&call.id()).await {
-                if let Some(rtp) = &stats.rtp_stats {
-                    info!("📊 Alice RTP: Sent {} pkts, Recv {} pkts, Lost {} pkts, Jitter {:.1}ms",
-                          rtp.packets_sent, rtp.packets_received, rtp.packets_lost, rtp.jitter_ms);
-                }
-                if let Some(quality) = &stats.quality_metrics {
-                    info!("📈 Quality: Loss {:.1}%, MOS {:.1}, Network {}%",
-                          quality.packet_loss_percent, 
-                          quality.mos_score.unwrap_or(0.0),
-                          quality.network_quality);
-                }
+                info!("📊 Alice Media Stats: local_addr={:?}, remote_addr={:?}, codec={:?}, media_flowing={}",
+                      stats.local_addr, stats.remote_addr, stats.codec, stats.media_flowing);
             }
         }
     }
