@@ -292,5 +292,9 @@ pub mod policies;
 pub mod overflow;
 
 pub use manager::{CallQueue, QueueManager, QueuedCall, QueueStats};
-pub use policies::QueuePolicies;
-pub use overflow::OverflowHandler; 
+pub use policies::{
+    QueuePolicies, PriorityLevel, CallContext, QueueAssignment,
+    TimeBasedRule, BusinessHours, AssignmentRule, AssignmentCondition,
+    ServiceLevelTarget, QueueLimit
+};
+pub use overflow::{OverflowHandler, OverflowPolicy, OverflowCondition, OverflowAction}; 

@@ -1,4 +1,284 @@
-//! Active call-related database operations
+//! # Active Call Database Operations
+//!
+//! This module provides comprehensive database operations for managing active calls
+//! within the call center system. It handles the lifecycle of calls from assignment
+//! to agents through completion, including dialog management, status tracking, and
+//! atomic operations to ensure data consistency.
+//!
+//! ## Overview
+//!
+//! Active call operations are critical for maintaining real-time state consistency
+//! between the call center engine and the database. This module provides atomic
+//! operations for call assignment, status updates, and cleanup to ensure data
+//! integrity during high-volume call processing.
+//!
+//! ## Key Features
+//!
+//! - **Call Lifecycle Management**: Complete active call lifecycle from assignment to completion
+//! - **Agent Assignment**: Atomic operations for assigning calls to agents
+//! - **Dialog Tracking**: Management of customer and agent dialog identifiers
+//! - **Status Updates**: Real-time call status tracking and updates
+//! - **Atomic Operations**: Transaction-safe operations to prevent data corruption
+//! - **Performance Monitoring**: Call statistics and performance metrics
+//! - **Cleanup Operations**: Safe removal of completed calls with agent state updates
+//!
+//! ## Database Schema
+//!
+//! The active calls operations work with the following key tables:
+//!
+//! ### active_calls Table
+//! - `call_id`: Unique identifier for the call
+//! - `agent_id`: Assigned agent identifier
+//! - `session_id`: Session management identifier
+//! - `customer_dialog_id`: Customer-side dialog identifier
+//! - `agent_dialog_id`: Agent-side dialog identifier
+//! - `assigned_at`: Timestamp when call was assigned
+//! - `answered_at`: Timestamp when call was answered
+//!
+//! ### Integration Points
+//! - Agent status updates for availability tracking
+//! - Queue management for call routing
+//! - Session coordination for call state management
+//!
+//! ## Examples
+//!
+//! ### Basic Call Assignment
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! use chrono::Utc;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Add a new active call when agent is assigned
+//! db.add_active_call(
+//!     "call-12345",
+//!     "agent-001", 
+//!     "session-abc123",
+//!     Some("customer-dialog-456"),
+//!     Some("agent-dialog-789")
+//! ).await?;
+//! 
+//! println!("✅ Active call created and assigned to agent");
+//! 
+//! // Mark call as answered when agent picks up
+//! db.mark_call_answered("call-12345").await?;
+//! println!("📞 Call marked as answered");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Call Status Tracking
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Check if a specific call is active
+//! if let Some(call) = db.get_active_call("call-12345").await? {
+//!     println!("📋 Active Call Details:");
+//!     println!("  Call ID: {}", call.call_id);
+//!     println!("  Agent: {}", call.agent_id);
+//!     println!("  Session: {}", call.session_id);
+//!     println!("  Assigned: {}", call.assigned_at);
+//!     
+//!     if let Some(answered) = call.answered_at {
+//!         let duration = answered.signed_duration_since(call.assigned_at);
+//!         println!("  Answer time: {}s", duration.num_seconds());
+//!     } else {
+//!         println!("  Status: Ringing (not yet answered)");
+//!     }
+//! } else {
+//!     println!("❌ Call not found or no longer active");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Agent Call Management
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Get all active calls for a specific agent
+//! let agent_calls = db.get_agent_active_calls("agent-001").await?;
+//! 
+//! println!("📞 Agent's Active Calls:");
+//! if agent_calls.is_empty() {
+//!     println!("  No active calls");
+//! } else {
+//!     for call in agent_calls {
+//!         let status = if call.answered_at.is_some() {
+//!             "Connected"
+//!         } else {
+//!             "Ringing"
+//!         };
+//!         
+//!         println!("  Call {}: {} ({})", call.call_id, status, call.session_id);
+//!     }
+//! }
+//! 
+//! // Get system-wide call statistics
+//! let (total, answered, avg_answer_time) = db.get_call_stats().await?;
+//! println!("\n📊 System Statistics:");
+//! println!("  Total active calls: {}", total);
+//! println!("  Answered calls: {}", answered);
+//! if let Some(avg_time) = avg_answer_time {
+//!     println!("  Average answer time: {:.1}s", avg_time);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Atomic Call Completion
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // When a call ends, atomically remove it and update agent status
+//! // This ensures the agent's availability is properly updated
+//! db.remove_active_call_with_agent_update("call-12345").await?;
+//! 
+//! println!("✅ Call completed and agent status updated atomically");
+//! 
+//! // Alternative: Remove call from queue when call ends
+//! db.remove_call_from_queue("session-abc123").await?;
+//! println!("📋 Call removed from queue system");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Dialog Management
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Update dialog identifiers as they become available
+//! db.update_call_dialogs(
+//!     "call-12345",
+//!     Some("customer-dialog-new-456"),
+//!     Some("agent-dialog-new-789")
+//! ).await?;
+//! 
+//! println!("🔄 Call dialog IDs updated");
+//! 
+//! // Look up call information by dialog ID
+//! if let Some((agent_dialog, call_id)) = db.get_dialog_mapping("customer-dialog-456").await? {
+//!     println!("🔍 Dialog Mapping:");
+//!     println!("  Call ID: {}", call_id);
+//!     if let Some(agent_dialog) = agent_dialog {
+//!         println!("  Agent Dialog: {}", agent_dialog);
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Performance Monitoring
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Monitor system call volume
+//! let active_count = db.get_active_calls_count().await?;
+//! println!("📈 Current active calls: {}", active_count);
+//! 
+//! // Get detailed call statistics
+//! let (total_calls, answered_calls, avg_answer_time) = db.get_call_stats().await?;
+//! 
+//! // Calculate performance metrics
+//! let answer_rate = if total_calls > 0 {
+//!     (answered_calls as f64 / total_calls as f64) * 100.0
+//! } else {
+//!     0.0
+//! };
+//! 
+//! println!("📊 Performance Metrics:");
+//! println!("  Answer rate: {:.1}%", answer_rate);
+//! 
+//! if let Some(avg_time) = avg_answer_time {
+//!     println!("  Average answer time: {:.1}s", avg_time);
+//!     
+//!     // Alert on slow answer times
+//!     if avg_time > 30.0 {
+//!         println!("⚠️ Answer times above target (30s)");
+//!     }
+//! }
+//! 
+//! // Performance alerts
+//! if answer_rate < 90.0 {
+//!     println!("🚨 Low answer rate detected!");
+//! }
+//! 
+//! if active_count > 100 {
+//!     println!("📞 High call volume alert!");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Transaction Safety
+//!
+//! Many operations in this module use database transactions to ensure atomicity.
+//! The `remove_active_call_with_agent_update` function is a prime example of
+//! atomic operations that prevent data inconsistency:
+//!
+//! ```rust
+//! # use rvoip_call_engine::database::DatabaseManager;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // This operation ensures that:
+//! // 1. The call is removed from active_calls
+//! // 2. The agent's call count is decremented
+//! // 3. The agent's status is updated if they become available
+//! // All within a single atomic transaction
+//! db.remove_active_call_with_agent_update("call-12345").await?;
+//! 
+//! println!("✅ Atomic operation completed successfully");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Error Handling
+//!
+//! All database operations return `Result` types and should be handled appropriately:
+//!
+//! ```rust
+//! # use rvoip_call_engine::database::DatabaseManager;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! match db.get_active_call("call-12345").await {
+//!     Ok(Some(call)) => {
+//!         println!("✅ Found active call: {}", call.call_id);
+//!     }
+//!     Ok(None) => {
+//!         println!("ℹ️ Call not found - may have ended");
+//!     }
+//!     Err(e) => {
+//!         eprintln!("❌ Database error: {}", e);
+//!         // Handle error appropriately
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use anyhow::{Result, anyhow};
 use tracing::{info, warn, debug};

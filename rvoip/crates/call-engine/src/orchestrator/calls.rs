@@ -1,7 +1,554 @@
-//! Call handling logic for the call center
+//! # Call Handling Logic for Call Center Operations
 //!
-//! This module implements the core call processing functionality including
-//! incoming call handling, agent assignment, and call lifecycle management.
+//! This module implements the core call processing functionality for the call center,
+//! including sophisticated incoming call handling, intelligent agent assignment, B2BUA
+//! (Back-to-Back User Agent) operations, call lifecycle management, and comprehensive
+//! routing logic. It serves as the heart of the call center's operational engine.
+//!
+//! ## Overview
+//!
+//! Call handling is the most critical component of any call center system. This module
+//! provides enterprise-grade call processing that handles everything from initial call
+//! reception through agent assignment, bridge management, and call termination. The
+//! system operates as a B2BUA, managing both customer-facing and agent-facing call legs
+//! while providing intelligent routing, queue management, and comprehensive monitoring.
+//!
+//! ## Key Features
+//!
+//! - **B2BUA Operations**: Complete Back-to-Back User Agent functionality
+//! - **Intelligent Routing**: Sophisticated call routing based on multiple factors
+//! - **Queue Management**: Advanced queue-first routing with fair distribution
+//! - **Agent Assignment**: Atomic agent assignment with rollback capabilities
+//! - **Call Lifecycle**: Complete call lifecycle management from ingress to termination
+//! - **SDP Handling**: Full SDP offer/answer processing for media negotiation
+//! - **Monitoring & Metrics**: Comprehensive call metrics and performance tracking
+//! - **Error Recovery**: Robust error handling with automatic recovery mechanisms
+//! - **Database Integration**: Real-time call state synchronization with persistence
+//! - **Concurrent Processing**: High-performance concurrent call handling
+//!
+//! ## B2BUA Architecture
+//!
+//! The call center operates as a B2BUA, managing two separate call legs:
+//!
+//! ### Customer Leg
+//! - Receives incoming calls from customers
+//! - Processes SDP offers and generates answers
+//! - Provides hold music and queue announcements
+//! - Manages customer experience during wait times
+//!
+//! ### Agent Leg  
+//! - Creates outgoing calls to available agents
+//! - Handles agent registration and availability
+//! - Manages agent-specific call routing
+//! - Provides call supervision and monitoring
+//!
+//! ### Bridge Management
+//! - Coordinates media bridging between legs
+//! - Handles call transfers and conference creation
+//! - Manages call hold and resume operations
+//! - Provides recording and monitoring capabilities
+//!
+//! ## Call Flow Process
+//!
+//! The typical call flow follows this pattern:
+//!
+//! 1. **Call Reception**: Customer call received and analyzed
+//! 2. **Immediate Accept**: B2BUA accepts call with SDP answer
+//! 3. **Customer Analysis**: Caller information and requirements analyzed
+//! 4. **Routing Decision**: Intelligent routing decision made
+//! 5. **Queue Placement**: Call placed in appropriate queue with priority
+//! 6. **Agent Selection**: Available agent selected using fair algorithms
+//! 7. **Agent Call**: Outgoing call created to selected agent
+//! 8. **Bridge Creation**: Media bridge established when agent answers
+//! 9. **Call Management**: Ongoing call monitoring and management
+//! 10. **Call Termination**: Proper cleanup and metrics recording
+//!
+//! ## Examples
+//!
+//! ### Basic Incoming Call Processing
+//!
+//! ```rust
+//! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, orchestrator::types::CustomerType};
+//! use rvoip_session_core::{IncomingCall, SessionId, CallDecision};
+//! use std::collections::HashMap;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! // Simulate incoming call
+//! let incoming_call = IncomingCall {
+//!     id: SessionId("customer-support-001".to_string()),
+//!     from: "sip:customer@external.com".to_string(),
+//!     to: "sip:support@call-center.local".to_string(),
+//!     sdp: Some("v=0\r\no=- 123456 IN IP4 192.168.1.100\r\n...".to_string()),
+//!     headers: HashMap::new(),
+//!     received_at: std::time::Instant::now(),
+//! };
+//! 
+//! // Route the incoming call through the call center
+//! engine.route_incoming_call(&incoming_call.id).await?;
+//! 
+//! println!("📞 Call routing initiated for session: {}", incoming_call.id);
+//! println!("🎵 Customer will hear hold music while we find an agent");
+//! 
+//! println!("🔄 Call now being routed to available agent...");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Call Information Tracking
+//!
+//! ```rust
+//! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, orchestrator::types::{CallInfo, CallStatus}};
+//! use rvoip_session_core::SessionId;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! let session_id = SessionId("call-tracking-example".to_string());
+//! 
+//! // Get detailed call information
+//! if let Some(call_info) = engine.active_calls().get(&session_id) {
+//!     println!("📞 Call Information:");
+//!     println!("  Session ID: {}", call_info.session_id);
+//!     println!("  From: {}", call_info.from);
+//!     println!("  To: {}", call_info.to);
+//!     println!("  Status: {:?}", call_info.status);
+//!     println!("  Priority: {}", call_info.priority);
+//!     println!("  Customer Type: {:?}", call_info.customer_type);
+//!     
+//!     // Agent assignment information
+//!     if let Some(ref agent_id) = call_info.agent_id {
+//!         println!("  Assigned Agent: {}", agent_id);
+//!     }
+//!     
+//!     // Queue information
+//!     if let Some(ref queue_id) = call_info.queue_id {
+//!         println!("  Queue: {}", queue_id);
+//!         if let Some(queued_at) = call_info.queued_at {
+//!             let wait_time = chrono::Utc::now().signed_duration_since(queued_at);
+//!             println!("  Wait Time: {:.1}s", wait_time.num_milliseconds() as f64 / 1000.0);
+//!         }
+//!     }
+//!     
+//!     // Call timing metrics
+//!     println!("  Duration: {}s", call_info.duration_seconds);
+//!     println!("  Talk Time: {}s", call_info.talk_time_seconds);
+//!     println!("  Hold Time: {}s", call_info.hold_time_seconds);
+//!     
+//!     // B2BUA tracking
+//!     if let Some(ref related_session) = call_info.related_session_id {
+//!         println!("  Related Session (B2BUA): {}", related_session);
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Agent Assignment Process
+//!
+//! ```rust
+//! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::AgentId};
+//! use rvoip_session_core::SessionId;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! let customer_session = SessionId("waiting-customer".to_string());
+//! let agent_id = AgentId("agent-001".to_string());
+//! 
+//! // Assign specific agent to customer call
+//! match engine.assign_agent_to_call(customer_session.clone(), agent_id.clone()).await {
+//!     Ok(()) => {
+//!         println!("✅ Agent {} assigned to call {}", agent_id, customer_session);
+//!         println!("📞 B2BUA creating outgoing call to agent...");
+//!         println!("⏱️ Waiting for agent to answer (30s timeout)...");
+//!         
+//!         // The system will automatically:
+//!         // 1. Update database with atomic assignment
+//!         // 2. Create outgoing SIP call to agent
+//!         // 3. Generate SDP offer for agent
+//!         // 4. Wait for agent to answer
+//!         // 5. Bridge customer and agent when answered
+//!         // 6. Handle timeout if agent doesn't answer
+//!     }
+//!     Err(e) => {
+//!         println!("❌ Assignment failed: {}", e);
+//!         println!("🔄 Call will be re-queued with higher priority");
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Call State Management
+//!
+//! ```rust
+//! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, orchestrator::types::{CallStatus, CallInfo}};
+//! use rvoip_session_core::SessionId;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! let session_id = SessionId("state-management-example".to_string());
+//! 
+//! // Monitor call state transitions
+//! if let Some(call_info) = engine.active_calls().get(&session_id) {
+//!     match call_info.status {
+//!         CallStatus::Incoming => {
+//!             println!("📞 Call state: INCOMING - Just received");
+//!         }
+//!         CallStatus::Ringing => {
+//!             println!("📞 Call state: RINGING - Processing by B2BUA");
+//!         }
+//!         CallStatus::Queued => {
+//!             println!("📞 Call state: QUEUED - Waiting for agent");
+//!             if let Some(queue_id) = &call_info.queue_id {
+//!                 println!("  In queue: {}", queue_id);
+//!                 println!("  Priority: {}", call_info.priority);
+//!             }
+//!         }
+//!         CallStatus::Connecting => {
+//!             println!("📞 Call state: CONNECTING - Agent being contacted");
+//!             if let Some(agent_id) = &call_info.agent_id {
+//!                 println!("  Agent: {}", agent_id);
+//!             }
+//!         }
+//!         CallStatus::Bridged => {
+//!             println!("📞 Call state: BRIDGED - Active conversation");
+//!             if let Some(bridge_id) = &call_info.bridge_id {
+//!                 println!("  Bridge: {}", bridge_id);
+//!             }
+//!             println!("  Talk time: {}s", call_info.talk_time_seconds);
+//!         }
+//!         CallStatus::OnHold => {
+//!             println!("📞 Call state: ON HOLD - Customer on hold");
+//!             println!("  Hold count: {}", call_info.hold_count);
+//!         }
+//!         CallStatus::Transferring => {
+//!             println!("📞 Call state: TRANSFERRING - Being transferred");
+//!             println!("  Transfer count: {}", call_info.transfer_count);
+//!         }
+//!         CallStatus::Disconnected => {
+//!             println!("📞 Call state: DISCONNECTED - Call ended");
+//!         }
+//!         CallStatus::Failed => {
+//!             println!("📞 Call state: FAILED - Call failed");
+//!         }
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Advanced Call Operations
+//!
+//! ```rust
+//! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
+//! use rvoip_session_core::SessionId;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! let session_id = SessionId("advanced-ops-example".to_string());
+//! 
+//! // Put call on hold
+//! engine.put_call_on_hold(&session_id).await?;
+//! println!("⏸️ Call placed on hold");
+//! 
+//! // Resume from hold
+//! tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+//! engine.resume_call_from_hold(&session_id).await?;
+//! println!("▶️ Call resumed from hold");
+//! 
+//! // Transfer call (simple version)
+//! let transfer_target = "queue:vip";
+//! engine.transfer_call_simple(&session_id, transfer_target).await?;
+//! println!("🔄 Call transferred to {}", transfer_target);
+//! 
+//! // Call operations automatically:
+//! // - Update call metrics (hold time, transfer count)
+//! // - Maintain call state consistency
+//! // - Integrate with session-core for media operations
+//! // - Provide comprehensive audit trail
+//! 
+//! println!("📊 All operations tracked and monitored");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Queue Processing and Assignment
+//!
+//! ```rust
+//! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::AgentId};
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! let agent_id = AgentId("newly-available-agent".to_string());
+//! 
+//! // When agent becomes available, process queued calls
+//! engine.process_all_queues().await?;
+//! 
+//! println!("🔍 Processed queued calls for agent {}", agent_id);
+//! println!("  System automatically:");
+//! println!("  1️⃣ Checked agent skills and availability");
+//! println!("  2️⃣ Searched relevant queues for matching calls");
+//! println!("  3️⃣ Selected highest priority call");
+//! println!("  4️⃣ Performed atomic assignment");
+//! println!("  5️⃣ Started B2BUA call to agent");
+//! 
+//! println!("📊 Queue processing completed successfully");
+//! println!("🧹 Checked for and resolved any stuck assignments");
+//! 
+//! // Queue monitoring ensures fair distribution
+//! let queue_id = "general";
+//! engine.monitor_queue_for_agents(queue_id.to_string()).await;
+//! println!("👁️ Started queue monitor for fair call distribution");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Call Termination and Cleanup
+//!
+//! ```rust
+//! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
+//! use rvoip_session_core::SessionId;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! let session_id = SessionId("terminating-call".to_string());
+//! 
+//! // Handle call termination with comprehensive cleanup
+//! engine.cleanup_call(&session_id).await?;
+//! 
+//! println!("🛑 Call termination completed:");
+//! println!("  ✅ B2BUA cleanup: Both call legs terminated");
+//! println!("  ✅ Database cleanup: Call removed from queues");
+//! println!("  ✅ Agent status: Updated to post-call wrap-up");
+//! println!("  ✅ Metrics calculated: Duration, wait time, talk time");
+//! println!("  ✅ Bridge destroyed: Media resources freed");
+//! println!("  ✅ Memory cleanup: Call info removed from active calls");
+//! 
+//! // Agent will automatically transition through wrap-up period
+//! println!("⏰ Agent entering 10-second post-call wrap-up");
+//! println!("🔄 Agent will become available for new calls automatically");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## B2BUA Implementation Details
+//!
+//! ### SDP Handling
+//!
+//! The B2BUA manages SDP offer/answer exchange between customer and agent:
+//!
+//! ```rust
+//! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
+//! # use rvoip_session_core::{IncomingCall, SessionId};
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! // Customer SDP offer received
+//! let customer_sdp = "v=0\r\no=customer 123456 IN IP4 192.168.1.100\r\n...";
+//! 
+//! // B2BUA process:
+//! println!("📄 B2BUA SDP Processing:");
+//! println!("  1️⃣ Receive customer SDP offer");
+//! println!("  2️⃣ Generate B2BUA SDP answer for customer");
+//! println!("  3️⃣ Store customer SDP for later use");
+//! println!("  4️⃣ Create agent call with B2BUA SDP offer");
+//! println!("  5️⃣ Receive agent SDP answer");
+//! println!("  6️⃣ Bridge media streams between customer and agent");
+//! 
+//! // Each leg has independent SDP negotiation
+//! println!("🔗 Independent SDP negotiation:");
+//! println!("  Customer ↔ B2BUA: Customer SDP ↔ B2BUA Answer");
+//! println!("  B2BUA ↔ Agent: B2BUA Offer ↔ Agent SDP");
+//! println!("  Bridge: Media relay between negotiated streams");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Pending Assignment Management
+//!
+//! The system tracks pending agent assignments to handle timeouts and failures:
+//!
+//! ```rust
+//! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, orchestrator::types::PendingAssignment};
+//! # use rvoip_session_core::SessionId;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! // Pending assignments track agent call attempts
+//! let customer_session = SessionId("customer-123".to_string());
+//! let agent_session = SessionId("agent-456".to_string());
+//! 
+//! // System automatically manages pending assignments:
+//! println!("📝 Pending Assignment Management:");
+//! println!("  ✅ Store assignment when agent call initiated");
+//! println!("  ⏰ Start 30-second timeout timer");
+//! println!("  🔔 Remove when agent answers (success)");
+//! println!("  ⏰ Rollback on timeout (failure)");
+//! println!("  🔄 Re-queue customer call on failure");
+//! println!("  📊 Track assignment success rates");
+//! 
+//! // Automatic timeout handling prevents hung calls
+//! println!("🛡️ Timeout Protection:");
+//! println!("  - Agent doesn't answer within 30s");
+//! println!("  - Terminate agent call leg");
+//! println!("  - Restore agent to available status");
+//! println!("  - Re-queue customer with higher priority");
+//! println!("  - Continue assignment attempts");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Routing Intelligence
+//!
+//! ### Customer Analysis
+//!
+//! The system analyzes customer information for intelligent routing:
+//!
+//! ```rust
+//! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, orchestrator::types::CustomerType};
+//! # use rvoip_session_core::IncomingCall;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! // Customer analysis considers multiple factors
+//! println!("🧠 Customer Analysis Factors:");
+//! println!("  📞 Caller ID patterns (VIP numbers, known customers)");
+//! println!("  🏢 Company/domain identification");
+//! println!("  📊 Historical call patterns");
+//! println!("  🎯 Requested service type (sales, support, billing)");
+//! println!("  ⚡ Priority indicators (emergency, escalation)");
+//! 
+//! // Results in customer classification
+//! let customer_types = vec![
+//!     (CustomerType::VIP, "Priority 0 - Immediate assignment"),
+//!     (CustomerType::Premium, "Priority 10 - High priority queue"),
+//!     (CustomerType::Standard, "Priority 50 - Standard queue"),
+//!     (CustomerType::Trial, "Priority 100 - Lower priority"),
+//! ];
+//! 
+//! println!("\n🏷️ Customer Classifications:");
+//! for (customer_type, description) in customer_types {
+//!     println!("  {:?}: {}", customer_type, description);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Queue-First Routing
+//!
+//! The system uses queue-first routing for fair call distribution:
+//!
+//! ```rust
+//! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! // Queue-first ensures fairness
+//! println!("⚖️ Queue-First Routing Benefits:");
+//! println!("  🎯 Fair distribution: Round-robin with last-agent exclusion");
+//! println!("  📊 Load balancing: Even distribution across agents");
+//! println!("  🔄 Priority handling: Higher priority calls served first");
+//! println!("  🛡️ Overload protection: Queue limits prevent system overload");
+//! println!("  📈 Scalability: Works with any number of agents");
+//! 
+//! // Queue management
+//! println!("\n📋 Queue Management:");
+//! println!("  general: Standard support calls");
+//! println!("  sales: Sales inquiries and opportunities");
+//! println!("  support: Technical support requests");
+//! println!("  billing: Billing and account questions");
+//! println!("  vip: VIP customer priority queue");
+//! println!("  premium: Premium customer queue");
+//! println!("  overflow: Overflow when other queues full");
+//! 
+//! // Automatic queue monitoring
+//! println!("\n👁️ Automatic Queue Monitoring:");
+//! println!("  ✅ Real-time depth monitoring");
+//! println!("  ⏰ Agent availability detection");
+//! println!("  🔄 Automatic assignment when agents available");
+//! println!("  🧹 Stuck assignment cleanup");
+//! println!("  📊 Queue performance metrics");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Performance and Scalability
+//!
+//! ### Concurrent Call Handling
+//!
+//! The system is designed for high-concurrency call processing:
+//!
+//! ```rust
+//! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! // High-performance characteristics
+//! println!("⚡ Performance Characteristics:");
+//! println!("  🚀 Async/await throughout for non-blocking operations");
+//! println!("  🔒 Thread-safe data structures (DashMap, Arc, Mutex)");
+//! println!("  💾 Database connection pooling for scalability");
+//! println!("  📊 Efficient algorithms for agent selection (O(log n))");
+//! println!("  🎯 Optimized queue operations (O(1) enqueue/dequeue)");
+//! 
+//! // Concurrent operations
+//! println!("\n🔄 Concurrent Operations:");
+//! println!("  📞 Multiple incoming calls processed simultaneously");
+//! println!("  🔍 Agent assignment happens in parallel");
+//! println!("  💾 Database operations use connection pools");
+//! println!("  🌉 Bridge operations don't block call processing");
+//! println!("  📊 Metrics collection happens asynchronously");
+//! 
+//! // Scalability features
+//! println!("\n📈 Scalability Features:");
+//! println!("  🏗️ Horizontal scaling: Multiple call center instances");
+//! println!("  💾 Database-backed state: Survives restarts");
+//! println!("  🔄 Load balancing: Distributes calls across instances");
+//! println!("  📊 Monitoring: Real-time performance metrics");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Error Recovery
+//!
+//! Comprehensive error recovery ensures system reliability:
+//!
+//! ```rust
+//! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
+//! 
+//! // Error recovery mechanisms
+//! println!("🛡️ Error Recovery Mechanisms:");
+//! println!("  🔄 Automatic retry with exponential backoff");
+//! println!("  🎯 Rollback on failed agent assignments");
+//! println!("  📞 Re-queue calls on assignment failures");
+//! println!("  ⏰ Timeout protection for hung operations");
+//! println!("  🧹 Automatic cleanup of stuck assignments");
+//! 
+//! // Graceful degradation
+//! println!("\n⚡ Graceful Degradation:");
+//! println!("  📞 Continue operating with partial agent availability");
+//! println!("  💾 Fallback to in-memory operations if database issues");
+//! println!("  🔄 Queue overflow to secondary queues");
+//! println!("  📊 Maintain metrics even during partial failures");
+//! 
+//! // System resilience
+//! println!("\n🏗️ System Resilience:");
+//! println!("  🔒 Atomic operations prevent data corruption");
+//! println!("  📊 Comprehensive logging for troubleshooting");
+//! println!("  🎯 Circuit breaker patterns for external dependencies");
+//! println!("  🔄 Automatic recovery from transient failures");
+//! # Ok(())
+//! # }
+//! ```
 
 use std::sync::Arc;
 use std::collections::HashMap;

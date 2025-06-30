@@ -1,7 +1,350 @@
-//! Administrative API for call center management
+//! # Administrative API for Call Center Management
 //!
-//! This module provides APIs for administrators to configure and manage
-//! the call center system.
+//! This module provides comprehensive administrative APIs for call center system
+//! management, configuration, and maintenance. It enables system administrators
+//! to manage agents, configure queues, monitor system health, and perform
+//! operational tasks through a powerful administrative interface.
+//!
+//! ## Overview
+//!
+//! The Administrative API is designed for call center administrators who need
+//! complete control over system configuration and operations. It provides
+//! enterprise-grade management capabilities for large-scale call center
+//! deployments with sophisticated configuration and monitoring needs.
+//!
+//! ## Key Features
+//!
+//! - **Agent Management**: Complete CRUD operations for agent profiles
+//! - **Queue Configuration**: Dynamic queue creation and configuration
+//! - **Routing Management**: Advanced routing rule configuration
+//! - **System Health**: Comprehensive system monitoring and diagnostics
+//! - **Database Operations**: Database maintenance and optimization
+//! - **Configuration Management**: Import/export and dynamic updates
+//! - **Statistics & Reporting**: System-wide analytics and reporting
+//!
+//! ## Administrative Capabilities
+//!
+//! ### Agent Administration
+//! - Add, update, and remove agent profiles
+//! - Manage agent skills and capabilities
+//! - Configure agent routing preferences
+//! - Monitor agent performance and status
+//!
+//! ### Queue Management
+//! - Create and configure call queues
+//! - Set queue-specific routing rules
+//! - Configure overflow and escalation policies
+//! - Monitor queue performance metrics
+//!
+//! ### System Configuration
+//! - Dynamic routing rule updates
+//! - System-wide configuration changes
+//! - Feature flag management
+//! - Performance parameter tuning
+//!
+//! ### Monitoring & Maintenance
+//! - Real-time system health monitoring
+//! - Database maintenance operations
+//! - Performance optimization tools
+//! - Diagnostic and troubleshooting utilities
+//!
+//! ## Security Considerations
+//!
+//! The Administrative API provides powerful system management capabilities
+//! and should be secured appropriately:
+//!
+//! - Authentication and authorization required
+//! - Role-based access control recommended
+//! - Audit logging for all administrative actions
+//! - Network access restrictions
+//! - Secure communication channels (HTTPS/TLS)
+//!
+//! ## Examples
+//!
+//! ### Basic Agent Management
+//!
+//! ```rust
+//! use rvoip_call_engine::api::AdminApi;
+//! use rvoip_call_engine::agent::{Agent, AgentStatus};
+//! use rvoip_call_engine::CallCenterEngine;
+//! use std::sync::Arc;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Initialize admin API
+//! let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
+//! let admin = AdminApi::new(Arc::clone(&engine));
+//! 
+//! // Create a new agent
+//! let agent = Agent {
+//!     id: "agent-001".to_string(),
+//!     sip_uri: "sip:alice@call-center.com".to_string(),
+//!     display_name: "Alice Smith".to_string(),
+//!     skills: vec!["sales".to_string(), "english".to_string()],
+//!     max_concurrent_calls: 2,
+//!     status: AgentStatus::Available,
+//!     department: Some("Sales".to_string()),
+//!     extension: Some("101".to_string()),
+//! };
+//! 
+//! // Add agent to system
+//! admin.add_agent(agent).await?;
+//! println!("✅ Agent added successfully");
+//! 
+//! // List all agents
+//! let agents = admin.list_agents().await?;
+//! println!("📋 Total agents: {}", agents.len());
+//! 
+//! for agent in agents {
+//!     println!("  {} ({}): {:?}", agent.display_name, agent.id, agent.status);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Queue Management Operations
+//!
+//! ```rust
+//! use rvoip_call_engine::api::AdminApi;
+//! use rvoip_call_engine::config::QueueConfig;
+//! # use rvoip_call_engine::CallCenterEngine;
+//! # use std::sync::Arc;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
+//! let admin = AdminApi::new(Arc::clone(&engine));
+//! 
+//! // Create specialized queues
+//! let queue_configs = vec![
+//!     ("vip-support", "VIP customer support queue"),
+//!     ("technical-escalation", "Technical escalation queue"),
+//!     ("billing-inquiries", "Billing and payment inquiries"),
+//! ];
+//! 
+//! for (queue_id, description) in queue_configs {
+//!     // Create the queue
+//!     admin.create_queue(queue_id).await?;
+//!     println!("✅ Created queue: {} ({})", queue_id, description);
+//!     
+//!     // Configure queue parameters
+//!     let config = QueueConfig {
+//!         default_max_wait_time: 300,     // 5 minutes max wait
+//!         max_queue_size: 50,             // Maximum 50 calls in queue
+//!         enable_priorities: true,        // Enable priority routing
+//!         enable_overflow: true,          // Enable overflow to other queues
+//!         announcement_interval: 30,      // Announcements every 30 seconds
+//!     };
+//!     
+//!     admin.update_queue(queue_id, config).await?;
+//!     println!("🔧 Configured queue: {}", queue_id);
+//! }
+//! 
+//! // Get queue configurations
+//! let configs = admin.get_queue_configs().await;
+//! println!("📊 Queue Configurations:");
+//! for (queue_id, config) in configs {
+//!     println!("  {}: max_wait={}s, max_size={}", 
+//!              queue_id, config.default_max_wait_time, config.max_queue_size);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### System Health Monitoring
+//!
+//! ```rust
+//! use rvoip_call_engine::api::admin::{AdminApi, HealthStatus};
+//! # use rvoip_call_engine::CallCenterEngine;
+//! # use std::sync::Arc;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
+//! let admin = AdminApi::new(Arc::clone(&engine));
+//! 
+//! // Get comprehensive system health
+//! let health = admin.get_system_health().await;
+//! 
+//! println!("🏥 System Health Report:");
+//! println!("┌─────────────────────────────────────────┐");
+//! println!("│ Status: {:>28} │", match health.status {
+//!     HealthStatus::Healthy => "🟢 Healthy",
+//!     HealthStatus::Degraded => "🟡 Degraded",
+//!     HealthStatus::Critical => "🔴 Critical",
+//! });
+//! println!("│ Database: {:>25} │", 
+//!          if health.database_connected { "🟢 Connected" } else { "🔴 Disconnected" });
+//! println!("│ Active Sessions: {:>16} │", health.active_sessions);
+//! println!("│ Registered Agents: {:>14} │", health.registered_agents);
+//! println!("│ Queued Calls: {:>19} │", health.queued_calls);
+//! println!("│ Uptime: {:>25} │", format!("{}s", health.uptime_seconds));
+//! println!("└─────────────────────────────────────────┘");
+//! 
+//! // Display warnings if any
+//! if !health.warnings.is_empty() {
+//!     println!("\n⚠️ System Warnings:");
+//!     for warning in health.warnings {
+//!         println!("  • {}", warning);
+//!     }
+//! }
+//! 
+//! // Take action based on health status
+//! match health.status {
+//!     HealthStatus::Critical => {
+//!         println!("🚨 CRITICAL: Immediate attention required!");
+//!     }
+//!     HealthStatus::Degraded => {
+//!         println!("⚠️ DEGRADED: Performance monitoring recommended");
+//!     }
+//!     HealthStatus::Healthy => {
+//!         println!("✅ System operating normally");
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Configuration Management
+//!
+//! ```rust
+//! use rvoip_call_engine::api::AdminApi;
+//! use rvoip_call_engine::config::{RoutingConfig, CallCenterConfig, RoutingStrategy};
+//! # use rvoip_call_engine::CallCenterEngine;
+//! # use std::sync::Arc;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
+//! let admin = AdminApi::new(Arc::clone(&engine));
+//! 
+//! // Export current configuration for backup
+//! let config_json = admin.export_config().await?;
+//! println!("📤 Configuration exported ({} bytes)", config_json.len());
+//! 
+//! // Save to file (in real application)
+//! // std::fs::write("call_center_config_backup.json", &config_json)?;
+//! 
+//! // Update routing configuration
+//! let mut new_routing = RoutingConfig::default();
+//! new_routing.default_strategy = RoutingStrategy::RoundRobin;
+//! new_routing.enable_load_balancing = true;
+//! new_routing.enable_time_based_routing = true;
+//! 
+//! admin.update_routing_config(new_routing).await?;
+//! println!("🔧 Routing configuration updated");
+//! 
+//! // Get current system configuration
+//! let current_config = admin.get_config();
+//! println!("⚙️ Current Configuration:");
+//! println!("  Default strategy: {:?}", current_config.routing.default_strategy);
+//! println!("  Load balancing: {}", current_config.routing.enable_load_balancing);
+//! println!("  Time-based routing: {}", current_config.routing.enable_time_based_routing);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Advanced Agent Management
+//!
+//! ```rust
+//! use rvoip_call_engine::api::AdminApi;
+//! use rvoip_call_engine::agent::{Agent, AgentId, AgentStatus};
+//! # use rvoip_call_engine::CallCenterEngine;
+//! # use std::sync::Arc;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
+//! let admin = AdminApi::new(Arc::clone(&engine));
+//! 
+//! // Bulk agent operations
+//! let new_agents = vec![
+//!     ("agent-sales-01", "Sales Agent 1", "Sales", vec!["sales", "english"]),
+//!     ("agent-sales-02", "Sales Agent 2", "Sales", vec!["sales", "spanish"]),
+//!     ("agent-support-01", "Support Agent 1", "Support", vec!["technical", "english"]),
+//! ];
+//! 
+//! for (id, name, dept, skills) in new_agents {
+//!     let agent = Agent {
+//!         id: id.to_string(),
+//!         sip_uri: format!("sip:{}@call-center.com", id),
+//!         display_name: name.to_string(),
+//!         skills: skills.iter().map(|s| s.to_string()).collect(),
+//!         max_concurrent_calls: 2,
+//!         status: AgentStatus::Offline,
+//!         department: Some(dept.to_string()),
+//!         extension: None,
+//!     };
+//!     
+//!     admin.add_agent(agent).await?;
+//!     println!("➕ Added agent: {} ({})", name, dept);
+//! }
+//! 
+//! // Update agent skills
+//! let agent_id = AgentId::from("agent-sales-01");
+//! admin.update_agent_skills(&agent_id, vec![
+//!     "sales".to_string(),
+//!     "english".to_string(),
+//!     "vip".to_string(), // Add VIP handling skill
+//! ]).await?;
+//! 
+//! println!("🎯 Updated agent skills");
+//! 
+//! // Get system statistics
+//! let stats = admin.get_statistics().await;
+//! println!("📈 System Statistics:");
+//! println!("  Total agents: {}", stats.total_agents);
+//! println!("  Available agents: {}", stats.available_agents);
+//! println!("  Active calls: {}", stats.active_calls);
+//! println!("  Queued calls: {}", stats.queued_calls);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Database Maintenance
+//!
+//! ```rust
+//! use rvoip_call_engine::api::AdminApi;
+//! use tokio::time::{Duration, interval};
+//! # use rvoip_call_engine::CallCenterEngine;
+//! # use std::sync::Arc;
+//! 
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
+//! let admin = AdminApi::new(Arc::clone(&engine));
+//! 
+//! // Periodic maintenance routine
+//! async fn maintenance_routine(admin: &AdminApi) -> Result<(), Box<dyn std::error::Error>> {
+//!     println!("🧹 Starting maintenance routine...");
+//!     
+//!     // Check system health first
+//!     let health = admin.get_system_health().await;
+//!     if !health.database_connected {
+//!         println!("❌ Database not connected - skipping maintenance");
+//!         return Ok(());
+//!     }
+//!     
+//!     // Optimize database
+//!     admin.optimize_database().await?;
+//!     println!("✅ Database optimization completed");
+//!     
+//!     // Get updated statistics
+//!     let stats = admin.get_statistics().await;
+//!     println!("📊 Post-maintenance statistics:");
+//!     println!("  Agents: {}", stats.total_agents);
+//!     println!("  Active calls: {}", stats.active_calls);
+//!     
+//!     Ok(())
+//! }
+//! 
+//! // Run maintenance
+//! maintenance_routine(&admin).await?;
+//! 
+//! // In a real system, you might schedule this periodically:
+//! // let mut interval = interval(Duration::from_hours(24));
+//! // loop {
+//! //     interval.tick().await;
+//! //     maintenance_routine(&admin).await?;
+//! // }
+//! # Ok(())
+//! # }
+//! ```
 
 use axum::{
     Router,
@@ -22,14 +365,73 @@ use crate::{
     queue::QueueStats,
 };
 
-/// Administrative API for call center management
+/// # Administrative API for Call Center Management
 /// 
-/// This provides system-level management capabilities:
-/// - Agent management (add, remove, modify)
-/// - Queue configuration
-/// - Routing rules management
-/// - System configuration updates
-/// - Database maintenance
+/// The `AdminApi` provides comprehensive administrative capabilities for call center
+/// management, including agent operations, queue configuration, system monitoring,
+/// and maintenance tasks. This API is designed for system administrators who need
+/// complete control over call center operations and configuration.
+/// 
+/// ## Core Administrative Functions
+/// 
+/// ### Agent Management
+/// - **Add/Remove Agents**: Complete lifecycle management of agent profiles
+/// - **Update Agent Information**: Modify agent details, skills, and configuration
+/// - **Skills Management**: Assign and update agent capabilities and specializations
+/// - **Status Monitoring**: Track agent availability and performance
+/// 
+/// ### Queue Operations
+/// - **Queue Creation**: Establish new call queues with custom configurations
+/// - **Configuration Updates**: Modify queue parameters and routing rules
+/// - **Queue Deletion**: Remove unused queues (with safety checks)
+/// - **Performance Monitoring**: Track queue metrics and utilization
+/// 
+/// ### System Management
+/// - **Health Monitoring**: Comprehensive system health and status tracking
+/// - **Configuration Management**: Import/export and dynamic configuration updates
+/// - **Database Operations**: Maintenance, optimization, and integrity checks
+/// - **Statistics & Analytics**: System-wide performance metrics and reporting
+/// 
+/// ## Security and Access Control
+/// 
+/// The `AdminApi` provides powerful system management capabilities and should be
+/// used with appropriate security measures:
+/// 
+/// - Administrative authentication required
+/// - Role-based access control recommended
+/// - Audit logging for all operations
+/// - Network access restrictions
+/// - Secure communication channels
+/// 
+/// ## Thread Safety
+/// 
+/// The `AdminApi` is thread-safe and can be cloned for use across multiple
+/// administrative components or tasks. All operations are asynchronous and
+/// designed for concurrent administrative access.
+/// 
+/// ## Examples
+/// 
+/// ### Basic Administrative Setup
+/// 
+/// ```rust
+/// use rvoip_call_engine::api::AdminApi;
+/// use rvoip_call_engine::CallCenterEngine;
+/// use std::sync::Arc;
+/// 
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
+/// let admin = AdminApi::new(Arc::clone(&engine));
+/// 
+/// // Get system health overview
+/// let health = admin.get_system_health().await;
+/// println!("System status: {:?}", health.status);
+/// 
+/// // Get system statistics
+/// let stats = admin.get_statistics().await;
+/// println!("Total agents: {}", stats.total_agents);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct AdminApi {
     engine: Arc<CallCenterEngine>,
@@ -37,11 +439,80 @@ pub struct AdminApi {
 
 impl AdminApi {
     /// Create a new admin API instance
+    /// 
+    /// Initializes a new administrative API connected to the specified call center
+    /// engine. This provides access to all administrative functions and system
+    /// management capabilities.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `engine` - Shared reference to the call center engine
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use rvoip_call_engine::api::AdminApi;
+    /// use rvoip_call_engine::CallCenterEngine;
+    /// use std::sync::Arc;
+    /// 
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
+    /// let admin = AdminApi::new(Arc::clone(&engine));
+    /// 
+    /// println!("Administrative API ready");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new(engine: Arc<CallCenterEngine>) -> Self {
         Self { engine }
     }
     
     /// Add a new agent
+    /// 
+    /// Registers a new agent profile with the call center system, including
+    /// database storage and registry updates. This is the primary method for
+    /// agent onboarding and profile creation.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `agent` - Complete agent profile including identification, skills, and configuration
+    /// 
+    /// # Returns
+    /// 
+    /// `Ok(())` if agent added successfully, or error if operation fails.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use rvoip_call_engine::api::AdminApi;
+    /// use rvoip_call_engine::agent::{Agent, AgentStatus};
+    /// # use rvoip_call_engine::CallCenterEngine;
+    /// # use std::sync::Arc;
+    /// 
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
+    /// let admin = AdminApi::new(Arc::clone(&engine));
+    /// 
+    /// let new_agent = Agent {
+    ///     id: "agent-005".to_string(),
+    ///     sip_uri: "sip:john.doe@call-center.com".to_string(),
+    ///     display_name: "John Doe".to_string(),
+    ///     skills: vec!["technical".to_string(), "escalation".to_string()],
+    ///     max_concurrent_calls: 3,
+    ///     status: AgentStatus::Offline, // Will be set to Available when agent logs in
+    ///     department: Some("Technical Support".to_string()),
+    ///     extension: Some("5005".to_string()),
+    /// };
+    /// 
+    /// admin.add_agent(new_agent).await?;
+    /// println!("✅ Agent added to system");
+    /// 
+    /// // Verify agent was added
+    /// let agents = admin.list_agents().await?;
+    /// println!("Total agents now: {}", agents.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn add_agent(&self, agent: Agent) -> Result<(), CallCenterError> {
         // Register with the registry
         let mut registry = self.engine.agent_registry.lock().await;

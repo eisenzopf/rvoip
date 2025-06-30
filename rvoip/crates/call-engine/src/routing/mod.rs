@@ -269,5 +269,17 @@ pub mod policies;
 pub mod skills;
 
 pub use engine::{RoutingEngine, RoutingDecision};
-pub use policies::RoutingPolicies;
-pub use skills::SkillMatcher; 
+pub use policies::{
+    RoutingPolicies, TimeBasedRules as TimeBasedRule, BusinessHours, 
+    GeographicRules as GeographicRule,
+    SkillRequirement as PoliciesSkillRequirement, 
+    SkillLevel as PoliciesSkillLevel, RoutingDecision as PoliciesRoutingDecision
+};
+pub use skills::{
+    SkillMatcher, SkillHierarchy, SkillSubstitution, AgentSkillUpdate,
+    MatchingConfig, MatchingAlgorithm, ScoringWeights,
+    SkillRequirement, SkillLevel
+};
+
+// Re-export queue's CallContext since routing docs reference it
+pub use crate::queue::CallContext; 
