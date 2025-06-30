@@ -68,10 +68,11 @@
 //! ```rust
 //! use rvoip_call_engine::monitoring::{SupervisorMonitor, MetricsCollector, CallCenterEvents};
 //! 
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = rvoip_call_engine::CallCenterEngine::new(Default::default(), None).await?;
 //! // Initialize monitoring components
-//! let supervisor_monitor = SupervisorMonitor::new();
-//! let metrics_collector = MetricsCollector::new();
+//! let supervisor_monitor = SupervisorMonitor::new(engine.clone());
+//! let metrics_collector = MetricsCollector::new(engine.clone());
 //! let event_system = CallCenterEvents::new();
 //! 
 //! println!("Monitoring system initialized");
@@ -85,7 +86,8 @@
 //! use rvoip_call_engine::monitoring::SupervisorMonitor;
 //! 
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let monitor = SupervisorMonitor::new();
+//! # let engine = rvoip_call_engine::CallCenterEngine::new(Default::default(), None).await?;
+//! let monitor = SupervisorMonitor::new(engine);
 //! 
 //! // Example monitoring loop for supervisor dashboard
 //! loop {
@@ -119,8 +121,9 @@
 //! ```rust
 //! use rvoip_call_engine::monitoring::MetricsCollector;
 //! 
-//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let metrics = MetricsCollector::new();
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let engine = rvoip_call_engine::CallCenterEngine::new(Default::default(), None).await?;
+//! let metrics = MetricsCollector::new(engine);
 //! 
 //! // Collect various metrics
 //! // metrics.record_call_start("call-123", "agent-001").await?;

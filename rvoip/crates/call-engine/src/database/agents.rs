@@ -1,4 +1,360 @@
-//! Agent-related database operations
+//! # Agent Database Operations
+//!
+//! This module provides comprehensive database operations for managing call center
+//! agents, including registration, status management, availability tracking, and
+//! performance monitoring. It implements sophisticated agent selection algorithms
+//! and maintains real-time agent state for optimal call routing.
+//!
+//! ## Overview
+//!
+//! Agent management is at the heart of call center operations. This module provides
+//! robust database operations for agent lifecycle management, from initial registration
+//! through ongoing status updates, call assignment, and performance tracking. It
+//! includes advanced features like round-robin routing, last-agent exclusion for
+//! fairness, and atomic reservation systems.
+//!
+//! ## Key Features
+//!
+//! - **Agent Registration**: Complete agent profile management and registration
+//! - **Status Management**: Real-time agent status tracking and updates
+//! - **Availability Tracking**: Sophisticated availability monitoring and selection
+//! - **Round Robin Routing**: Fair distribution with last-agent exclusion
+//! - **Atomic Reservations**: Transaction-safe agent reservation system
+//! - **Performance Monitoring**: Agent statistics and performance metrics
+//! - **Heartbeat Management**: Agent connectivity and health monitoring
+//! - **Cleanup Operations**: Automated cleanup of stale agent connections
+//!
+//! ## Agent Status States
+//!
+//! The system tracks agents through several states:
+//!
+//! - **AVAILABLE**: Agent is online and ready to receive calls
+//! - **BUSY**: Agent is currently handling one or more calls
+//! - **POSTCALLWRAPUP**: Agent is completing post-call tasks
+//! - **OFFLINE**: Agent is not available for calls
+//! - **RESERVED**: Agent is temporarily reserved for assignment
+//!
+//! ## Database Schema
+//!
+//! ### agents Table
+//! - `agent_id`: Unique identifier for the agent
+//! - `username`: Agent's username for authentication
+//! - `contact_uri`: SIP URI for agent contact
+//! - `status`: Current agent status (see states above)
+//! - `current_calls`: Number of calls currently assigned
+//! - `max_calls`: Maximum concurrent calls the agent can handle
+//! - `last_heartbeat`: Last heartbeat timestamp
+//! - `available_since`: Timestamp when agent became available
+//!
+//! ## Examples
+//!
+//! ### Agent Registration and Management
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! use rvoip_call_engine::agent::AgentStatus;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Register a new agent
+//! db.upsert_agent(
+//!     "agent-001",
+//!     "alice_smith", 
+//!     Some("sip:alice@call-center.com")
+//! ).await?;
+//! 
+//! println!("✅ Agent registered successfully");
+//! 
+//! // Update agent status
+//! db.update_agent_status("agent-001", AgentStatus::Available).await?;
+//! println!("🟢 Agent marked as available");
+//! 
+//! // Update heartbeat to show agent is online
+//! db.update_agent_heartbeat("agent-001").await?;
+//! println!("💓 Agent heartbeat updated");
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Agent Availability and Selection
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Get available agents for call assignment
+//! let available_agents = db.get_available_agents().await?;
+//! 
+//! println!("👥 Available Agents ({}):", available_agents.len());
+//! for agent in &available_agents {
+//!     println!("  {} ({}): {}/{} calls", 
+//!              agent.agent_id, 
+//!              agent.username,
+//!              agent.current_calls, 
+//!              agent.max_calls);
+//!     
+//!     if let Some(since) = &agent.available_since {
+//!         println!("    Available since: {}", since);
+//!     }
+//! }
+//! 
+//! // Get available agents excluding the last assigned agent (for fairness)
+//! let fair_agents = db.get_available_agents_excluding_last(Some("agent-001")).await?;
+//! println!("🔄 Fair rotation agents: {}", fair_agents.len());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Atomic Agent Reservation
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Atomically reserve an agent for call assignment
+//! if db.reserve_agent("agent-001").await? {
+//!     println!("🔒 Agent successfully reserved");
+//!     
+//!     // Simulate call assignment process
+//!     // ... assign call to agent ...
+//!     
+//!     // If assignment succeeds, agent stays reserved/busy
+//!     // If assignment fails, release the reservation
+//!     // db.release_agent_reservation("agent-001").await?;
+//! } else {
+//!     println!("❌ Could not reserve agent (not available or at capacity)");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Agent Call Management
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Update agent call count when call is assigned
+//! db.update_agent_call_count("agent-001", 1).await?;
+//! println!("📞 Agent call count incremented");
+//! 
+//! // When call ends, decrement call count
+//! db.update_agent_call_count("agent-001", -1).await?;
+//! println!("📞 Agent call count decremented");
+//! 
+//! // Get specific agent details
+//! if let Some(agent) = db.get_agent("agent-001").await? {
+//!     println!("📋 Agent Details:");
+//!     println!("  Status: {:?}", agent.status);
+//!     println!("  Current calls: {}", agent.current_calls);
+//!     println!("  Max calls: {}", agent.max_calls);
+//!     println!("  Contact: {:?}", agent.contact_uri);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Agent Performance Monitoring
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Get comprehensive agent statistics
+//! let stats = db.get_agent_stats().await?;
+//! 
+//! println!("📊 Agent Statistics:");
+//! println!("┌─────────────────────────────────────┐");
+//! println!("│ Total Agents: {:>18} │", stats.total_agents);
+//! println!("│ Available: {:>21} │", stats.available_agents);
+//! println!("│ Busy: {:>26} │", stats.busy_agents);
+//! println!("│ Post-Call Wrap-Up: {:>12} │", stats.post_call_wrap_up_agents);
+//! println!("│ Offline: {:>23} │", stats.offline_agents);
+//! println!("│ Reserved: {:>22} │", stats.reserved_agents);
+//! println!("└─────────────────────────────────────┘");
+//! 
+//! // Calculate utilization metrics
+//! let online_agents = stats.available_agents + stats.busy_agents + stats.reserved_agents;
+//! let utilization = if online_agents > 0 {
+//!     (stats.busy_agents as f64 / online_agents as f64) * 100.0
+//! } else {
+//!     0.0
+//! };
+//! 
+//! println!("📈 Utilization: {:.1}%", utilization);
+//! 
+//! // Alerts
+//! if stats.available_agents == 0 && stats.busy_agents > 0 {
+//!     println!("🚨 No agents available - all busy!");
+//! }
+//! 
+//! if utilization > 90.0 {
+//!     println!("⚠️ High utilization - consider adding agents");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### System Maintenance
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! use tokio::time::{interval, Duration};
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Cleanup stale agents (in a real system, this would run periodically)
+//! let cleaned_count = db.cleanup_stale_agents().await?;
+//! if cleaned_count > 0 {
+//!     println!("🧹 Cleaned up {} stale agents", cleaned_count);
+//! }
+//! 
+//! // Count total agents in system
+//! let total_count = db.count_total_agents().await?;
+//! println!("👥 Total agents in system: {}", total_count);
+//! 
+//! // List all agents for administrative overview
+//! let all_agents = db.list_agents().await?;
+//! println!("📋 All Agents:");
+//! for agent in all_agents {
+//!     let status_icon = match agent.status {
+//!         rvoip_call_engine::database::DbAgentStatus::Available => "🟢",
+//!         rvoip_call_engine::database::DbAgentStatus::Busy => "🔴", 
+//!         rvoip_call_engine::database::DbAgentStatus::PostCallWrapUp => "🟡",
+//!         rvoip_call_engine::database::DbAgentStatus::Offline => "⚫",
+//!         rvoip_call_engine::database::DbAgentStatus::Reserved => "🔒",
+//!     };
+//!     
+//!     println!("  {} {} ({}): {}/{} calls", 
+//!              status_icon, agent.agent_id, agent.username,
+//!              agent.current_calls, agent.max_calls);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Round Robin Fairness Algorithm
+//!
+//! The agent selection system implements sophisticated fairness algorithms:
+//!
+//! ```rust
+//! use rvoip_call_engine::database::DatabaseManager;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Simulating multiple call assignments with fairness
+//! let mut last_assigned: Option<String> = None;
+//! 
+//! for call_num in 1..=5 {
+//!     println!("📞 Assigning call #{}", call_num);
+//!     
+//!     // Get agents with last-agent exclusion for fairness
+//!     let agents = db.get_available_agents_excluding_last(
+//!         last_assigned.as_deref()
+//!     ).await?;
+//!     
+//!     if let Some(selected_agent) = agents.first() {
+//!         println!("  ✅ Selected: {} (fair rotation)", selected_agent.agent_id);
+//!         last_assigned = Some(selected_agent.agent_id.clone());
+//!         
+//!         // In real system: reserve agent and assign call
+//!         // db.reserve_agent(&selected_agent.agent_id).await?;
+//!     } else {
+//!         println!("  ❌ No agents available");
+//!         break;
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Performance Considerations
+//!
+//! ### Optimized Queries
+//! 
+//! The module uses optimized queries for high-performance operations:
+//!
+//! ```rust
+//! # use rvoip_call_engine::database::DatabaseManager;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Efficient availability check with capacity filtering
+//! let agents = db.get_available_agents().await?;
+//! 
+//! // This query efficiently finds agents where:
+//! // - status = 'AVAILABLE'
+//! // - current_calls < max_calls  
+//! // - Ordered by available_since for fairness
+//! 
+//! println!("Found {} available agents efficiently", agents.len());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Transaction Safety
+//!
+//! Agent reservation uses atomic operations to prevent race conditions:
+//!
+//! ```rust
+//! # use rvoip_call_engine::database::DatabaseManager;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Atomic reservation prevents double-assignment
+//! if db.reserve_agent("agent-001").await? {
+//!     println!("🔒 Agent atomically reserved");
+//!     
+//!     // The reservation changed status from AVAILABLE to RESERVED
+//!     // Only one concurrent request can succeed
+//!     
+//! } else {
+//!     println!("❌ Agent reservation failed - not available");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Error Handling Best Practices
+//!
+//! ```rust
+//! # use rvoip_call_engine::database::DatabaseManager;
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let db = DatabaseManager::new_in_memory().await?;
+//! 
+//! // Robust error handling for agent operations
+//! match db.get_agent("agent-001").await {
+//!     Ok(Some(agent)) => {
+//!         println!("✅ Found agent: {}", agent.agent_id);
+//!     }
+//!     Ok(None) => {
+//!         println!("ℹ️ Agent not found - may need to register");
+//!     }
+//!     Err(e) => {
+//!         eprintln!("❌ Database error: {}", e);
+//!         // Implement appropriate error recovery
+//!     }
+//! }
+//! 
+//! // Graceful handling of status updates
+//! if let Err(e) = db.update_agent_heartbeat("agent-001").await {
+//!     eprintln!("⚠️ Failed to update heartbeat: {}", e);
+//!     // Agent may be disconnected - handle accordingly
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use anyhow::{Result, anyhow};
 use tracing::{info, warn, debug};
