@@ -194,31 +194,27 @@ impl CallHandler for UasHandler {
                                         interval.tick().await;
                                         update_count += 1;
                                         
-                                        match stats_coordinator.get_media_statistics(&stats_session_id).await {
+                                        match stats_coordinator.get_call_statistics(&stats_session_id).await {
                                             Ok(Some(stats)) => {
                                                 info!("📊 Statistics Update #{} for session {}", update_count, stats_session_id);
                                                 
-                                                if let Some(rtp) = &stats.rtp_stats {
-                                                    info!("  RTP - Sent: {} pkts ({} bytes), Recv: {} pkts ({} bytes)",
-                                                          rtp.packets_sent, rtp.bytes_sent, 
-                                                          rtp.packets_received, rtp.bytes_received);
-                                                    info!("  RTP - Lost: {} pkts, Jitter: {:.1}ms",
-                                                          rtp.packets_lost, rtp.jitter_ms);
-                                                }
+                                                let rtp = &stats.rtp;
+                                                info!("  RTP - Sent: {} pkts ({} bytes), Recv: {} pkts ({} bytes)",
+                                                      rtp.packets_sent, rtp.bytes_sent, 
+                                                      rtp.packets_received, rtp.bytes_received);
+                                                info!("  RTP - Lost: {} pkts, Jitter: {:.1}ms",
+                                                      rtp.packets_lost, rtp.jitter_buffer_ms);
                                                 
-                                                if let Some(quality) = &stats.quality_metrics {
-                                                    info!("  Quality - Loss: {:.1}%, MOS: {:.1}, Network: {}%",
-                                                          quality.packet_loss_percent, 
-                                                          quality.mos_score.unwrap_or(0.0),
-                                                          quality.network_quality);
-                                                }
+                                                let quality = &stats.quality;
+                                                info!("  Quality - Loss: {:.1}%, MOS: {:.1}, Network: {:.1}%",
+                                                      quality.packet_loss_rate, 
+                                                      quality.mos_score,
+                                                      quality.network_effectiveness * 100.0);
                                                 
                                                 // Alert on quality degradation
-                                                if let Some(quality) = &stats.quality_metrics {
-                                                    if quality.packet_loss_percent > 5.0 || quality.jitter_ms > 50.0 {
-                                                        warn!("⚠️ Quality degradation detected for call {}: Loss: {:.1}%, Jitter: {:.1}ms",
-                                                              stats_session_id, quality.packet_loss_percent, quality.jitter_ms);
-                                                    }
+                                                if quality.packet_loss_rate > 5.0 || quality.jitter_ms > 50.0 {
+                                                    warn!("⚠️ Quality degradation detected for call {}: Loss: {:.1}%, Jitter: {:.1}ms",
+                                                          stats_session_id, quality.packet_loss_rate, quality.jitter_ms);
                                                 }
                                             }
                                             Ok(None) => {
@@ -267,27 +263,27 @@ impl CallHandler for UasHandler {
         // Get final statistics for the call
         let coordinator_guard = self.session_coordinator.read().await;
         if let Some(coordinator) = coordinator_guard.as_ref() {
-            // Get final media statistics
-            match coordinator.get_media_statistics(&session.id).await {
+            // Get final call statistics
+            match coordinator.get_call_statistics(&session.id).await {
                 Ok(Some(final_stats)) => {
                     info!("📊 Final call statistics for session {}:", session.id);
                     
-                    if let Some(rtp) = &final_stats.rtp_stats {
-                        info!("  Total packets sent: {}", rtp.packets_sent);
-                        info!("  Total packets received: {}", rtp.packets_received);
-                        info!("  Total bytes sent: {}", rtp.bytes_sent);
-                        info!("  Total bytes received: {}", rtp.bytes_received);
-                        info!("  Packets lost: {}", rtp.packets_lost);
-                        info!("  Final jitter: {:.1}ms", rtp.jitter_ms);
-                    }
+                    let rtp = &final_stats.rtp;
+                    info!("  Total packets sent: {}", rtp.packets_sent);
+                    info!("  Total packets received: {}", rtp.packets_received);
+                    info!("  Total bytes sent: {}", rtp.bytes_sent);
+                    info!("  Total bytes received: {}", rtp.bytes_received);
+                    info!("  Packets lost: {}", rtp.packets_lost);
+                    info!("  Final jitter: {:.1}ms", rtp.jitter_buffer_ms);
                     
-                    if let Some(quality) = &final_stats.quality_metrics {
-                        info!("  Final packet loss: {:.1}%", quality.packet_loss_percent);
-                        info!("  Final MOS score: {:.1}", quality.mos_score.unwrap_or(0.0));
-                        info!("  Final network quality: {}%", quality.network_quality);
-                    }
+                    let quality = &final_stats.quality;
+                    info!("  Final packet loss: {:.1}%", quality.packet_loss_rate);
+                    info!("  Final MOS score: {:.1}", quality.mos_score);
+                    info!("  Final network effectiveness: {:.1}%", quality.network_effectiveness * 100.0);
                     
-                    info!("  Call duration: {:?}", final_stats.session_duration);
+                    if let Some(duration) = final_stats.duration {
+                        info!("  Call duration: {:?}", duration);
+                    }
                 }
                 Ok(None) => {
                     info!("No final statistics available for session {}", session.id);

@@ -76,9 +76,9 @@ analyze_results() {
     
     log_info "Checking server log for successful calls..."
     # Strip ANSI color codes before grepping
-    SERVER_CALLS=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "uas_server: Incoming call from" | wc -l | tr -d ' ')
-    SERVER_ACCEPTED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "Successfully answered incoming call" | wc -l | tr -d ' ')
-    SERVER_ENDED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "uas_server: Call.*ended:" | wc -l | tr -d ' ')
+    SERVER_CALLS=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "uas_server.*Incoming call from" | wc -l | tr -d ' ')
+    SERVER_ACCEPTED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "Successfully answered call" | wc -l | tr -d ' ')
+    SERVER_ENDED=$(sed 's/\x1b\[[0-9;]*m//g' "$SERVER_LOG" | grep "uas_server.*Call.*ended:" | wc -l | tr -d ' ')
     
     log_info "Checking client log for successful calls..."
     CLIENT_INITIATED=$(sed 's/\x1b\[[0-9;]*m//g' "$CLIENT_LOG" | grep "Making call.*of" | wc -l | tr -d ' ')

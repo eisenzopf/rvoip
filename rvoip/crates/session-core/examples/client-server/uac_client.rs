@@ -137,18 +137,16 @@ impl CallHandler for UacHandler {
             loop {
                 interval.tick().await;
                 
-                if let Ok(Some(stats)) = stats_coordinator.get_media_statistics(&stats_session_id).await {
-                    if let Some(rtp) = &stats.rtp_stats {
-                        info!("📊 RTP Statistics - Sent: {} pkts, Recv: {} pkts, Lost: {} pkts, Jitter: {:.1}ms",
-                              rtp.packets_sent, rtp.packets_received, rtp.packets_lost, rtp.jitter_ms);
-                    }
+                if let Ok(Some(stats)) = stats_coordinator.get_call_statistics(&stats_session_id).await {
+                    let rtp = &stats.rtp;
+                    info!("📊 RTP Statistics - Sent: {} pkts, Recv: {} pkts, Lost: {} pkts, Jitter: {:.1}ms",
+                          rtp.packets_sent, rtp.packets_received, rtp.packets_lost, rtp.jitter_buffer_ms);
                     
-                    if let Some(quality) = &stats.quality_metrics {
-                        info!("📈 Quality Metrics - Loss: {:.1}%, MOS: {:.1}, Quality: {}%",
-                              quality.packet_loss_percent, 
-                              quality.mos_score.unwrap_or(0.0),
-                              quality.network_quality);
-                    }
+                    let quality = &stats.quality;
+                    info!("📈 Quality Metrics - Loss: {:.1}%, MOS: {:.1}, Effectiveness: {:.1}%",
+                          quality.packet_loss_rate, 
+                          quality.mos_score,
+                          quality.network_effectiveness * 100.0);
                 }
             }
         });
