@@ -733,10 +733,9 @@ impl CallCenterEngine {
     pub async fn get_queue_depth(&self, queue_id: &str) -> usize {
         if let Some(db_manager) = &self.db_manager {
             match db_manager.get_queue_depth(queue_id).await {
-                Ok(depth) => depth,
+                Ok(depth) => depth.try_into().unwrap_or(0),
                 Err(e) => {
                     error!("Failed to get queue depth from database: {}", e);
-                    // Fallback to in-memory
                     self.get_in_memory_queue_depth(queue_id).await
                 }
             }
@@ -828,7 +827,7 @@ impl CallCenterEngine {
 
         // Make assignments using atomic database operations with round-robin
         let mut assignments_made = 0;
-        let max_assignments = std::cmp::min(available_agents.len(), queue_depth);
+        let max_assignments = std::cmp::min(available_agents.len(), queue_depth.try_into().unwrap_or(0));
 
         for i in 0..max_assignments {
             let agent_id = &available_agents[i % available_agents.len()];
@@ -848,7 +847,7 @@ impl CallCenterEngine {
                         Self::handle_call_assignment(
                             engine,
                             queue_id_clone,
-                            queued_call,
+                            queued_call.to_queued_call(),
                             agent_id_clone,
                         ).await;
                     });
@@ -889,8 +888,7 @@ impl CallCenterEngine {
             match db_manager.get_agent(&agent_id.0).await {
                 Ok(Some(agent)) => {
                     // Only consider agents with Available status (not Busy or PostCallWrapUp)
-                    matches!(agent.status, crate::database::DbAgentStatus::Available) &&
-                    agent.current_calls < agent.max_calls
+                    agent.status == "AVAILABLE" && agent.current_calls < agent.max_calls
                 }
                 _ => false
             }
@@ -1031,17 +1029,8 @@ impl CallCenterEngine {
         }
         
         // Add to active calls with proper tracking
-        let now = chrono::Utc::now().to_rfc3339();
         let call_id = format!("call_{}", uuid::Uuid::new_v4());
-        match db_manager.execute(
-            "INSERT INTO active_calls (call_id, agent_id, session_id, assigned_at) VALUES (?, ?, ?, ?)",
-            vec![
-                limbo::Value::Text(call_id.clone()),
-                limbo::Value::Text(agent_id.0.clone()),
-                limbo::Value::Text(session_id.0.clone()),
-                limbo::Value::Text(now),
-            ]
-        ).await {
+        match db_manager.add_active_call(&call_id, &agent_id.0, &session_id.0).await {
             Ok(_) => info!("✅ FULL ROUTING: Added call {} to active calls for agent {}", call_id, agent_id),
             Err(e) => {
                 error!("❌ Failed to add active call to database: {}", e);
@@ -1239,10 +1228,7 @@ impl CallCenterEngine {
         
         if let Some(db_manager) = &engine.db_manager {
             // Remove from active calls
-            if let Err(e) = db_manager.execute(
-                "DELETE FROM active_calls WHERE session_id = ?",
-                vec![limbo::Value::Text(session_id.0.clone())]
-            ).await {
+            if let Err(e) = db_manager.remove_active_call(&session_id.0).await {
                 error!("Failed to remove active call during rollback: {}", e);
             }
             

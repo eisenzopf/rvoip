@@ -499,7 +499,7 @@ impl CallCenterEngine {
         // Check if agent is available in database
         let to_agent_available = if let Some(db_manager) = &self.db_manager {
             match db_manager.get_agent(&to_agent.0).await {
-                Ok(Some(agent)) => matches!(agent.status, crate::database::DbAgentStatus::Available),
+                Ok(Some(agent)) => agent.status == "AVAILABLE",
                 _ => false,
             }
         } else {

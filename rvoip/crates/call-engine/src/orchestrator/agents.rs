@@ -538,11 +538,11 @@ impl CallCenterEngine {
                         .map_err(|e| CallCenterError::database(&format!("Failed to update agent status: {}", e)))?;
                     
                     // Return old status for logging
-                    match db_agent.status {
-                        crate::database::DbAgentStatus::Available => AgentStatus::Available,
-                        crate::database::DbAgentStatus::Busy => AgentStatus::Busy(vec![]),
-                        crate::database::DbAgentStatus::PostCallWrapUp => AgentStatus::PostCallWrapUp,
-                        _ => AgentStatus::Offline,
+                    match db_agent.status.as_str() {
+                        "AVAILABLE" => AgentStatus::Available,
+                        "BUSY" => AgentStatus::Busy(vec![]),
+                        "POSTCALLWRAPUP" => AgentStatus::PostCallWrapUp,
+                        _ => AgentStatus::Offline, // Default for unknown statuses
                     }
                 }
                 Ok(None) => {

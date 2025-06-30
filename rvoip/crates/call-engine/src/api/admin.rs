@@ -598,12 +598,13 @@ impl AdminApi {
                     display_name: db_agent.username,
                     skills: vec![], // TODO: Load from database when skill table is implemented
                     max_concurrent_calls: db_agent.max_calls as u32,
-                    status: match db_agent.status {
-                                            crate::database::DbAgentStatus::Available => AgentStatus::Available,
-                    crate::database::DbAgentStatus::Busy => AgentStatus::Busy(vec![]),
-                    crate::database::DbAgentStatus::PostCallWrapUp => AgentStatus::PostCallWrapUp,
-                    crate::database::DbAgentStatus::Offline => AgentStatus::Offline,
-                    crate::database::DbAgentStatus::Reserved => AgentStatus::Available, // Treat as available
+                    status: match db_agent.status.as_str() {
+                        "AVAILABLE" => AgentStatus::Available,
+                        "BUSY" => AgentStatus::Busy(vec![]),
+                        "POSTCALLWRAPUP" => AgentStatus::PostCallWrapUp,
+                        "OFFLINE" => AgentStatus::Offline,
+                        "RESERVED" => AgentStatus::Available, // Treat as available
+                        _ => AgentStatus::Offline, // Default for unknown statuses
                     },
                     department: None,
                     extension: None,
@@ -739,7 +740,7 @@ impl AdminApi {
     async fn check_database_health(&self) -> bool {
         if let Some(db) = self.engine.database_manager() {
             // Try to query the database with a simple query
-            match db.query("SELECT 1", ()).await {
+            match db.query("SELECT 1", &[]).await {
                 Ok(_) => true,
                 Err(e) => {
                     tracing::error!("Database health check failed: {}", e);
@@ -782,8 +783,8 @@ impl AdminApi {
         
         CallCenterStats {
             total_agents,
-            available_agents,
-            active_calls,
+            available_agents: available_agents.try_into().unwrap_or(0),
+            active_calls: active_calls.try_into().unwrap_or(0),
             queued_calls,
         }
     }

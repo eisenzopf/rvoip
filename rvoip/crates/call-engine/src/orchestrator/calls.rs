@@ -596,7 +596,7 @@ impl CallCenterEngine {
         drop(queue_manager);
         
         // If we have too many calls queued relative to agents, reject new calls
-        if total_queued > (total_agents * 3) {  // Allow 3 calls per agent max
+        if total_queued > (total_agents as usize * 3) {  // Allow 3 calls per agent max
             warn!("❌ Queue overload: {} calls queued for {} agents", total_queued, total_agents);
             return Ok(CallDecision::Reject("System at capacity - please try again later".to_string()));
         }
@@ -765,7 +765,16 @@ impl CallCenterEngine {
                         // Add to database queue
                         let mut enqueue_success = false;
                         if let Some(db_manager) = &self.db_manager {
-                            match db_manager.enqueue_call(&queue_id, &queued_call).await {
+                            let customer_info_str = customer_info.as_ref().map(|v| v.to_string());
+                            
+                            match db_manager.enqueue_call(
+                                &call_id,
+                                &session_id.0,
+                                &queue_id,
+                                None, // Simplified for now to avoid temporary reference
+                                priority as i32,
+                                chrono::Utc::now() + chrono::Duration::hours(1), // 1 hour expiry
+                            ).await {
                                 Ok(_) => {
                                     info!("✅ Call {} enqueued to database queue '{}'", session_id, queue_id);
                                     
@@ -881,7 +890,7 @@ impl CallCenterEngine {
         
         // First, perform atomic database assignment with retry logic
         if let Some(db_manager) = &self.db_manager {
-            match db_manager.atomic_assign_call_to_agent(&session_id.0, &agent_id.0, customer_sdp.clone()).await {
+            match db_manager.atomic_assign_call_to_agent(&session_id.0, &agent_id.0, customer_sdp.clone().unwrap_or_default()).await {
                 Ok(()) => {
                     info!("✅ Atomically assigned call {} to agent {} in database", session_id, agent_id);
                 }
@@ -1078,29 +1087,23 @@ impl CallCenterEngine {
                 engine.rollback_failed_assignment(&timeout_customer_session_id, &timeout_agent_id).await;
                 
                 // Only re-queue if the customer call is still active
-                if engine.active_calls.contains_key(&timeout_customer_session_id) {
+                if let Some(call_info) = engine.active_calls.get(&timeout_customer_session_id) {
                     // Re-queue the customer call
-                    if let Some(mut call_info) = engine.active_calls.get_mut(&timeout_customer_session_id) {
-                        call_info.status = CallStatus::Queued;
-                        call_info.agent_id = None;
-                        
-                        if let Some(queue_id) = &call_info.queue_id {
-                            if let Some(db_manager) = &engine.db_manager {
-                                // Re-enqueue to database
-                                let queued_call = crate::queue::QueuedCall {
-                                    session_id: timeout_customer_session_id.clone(),
-                                    caller_id: call_info.caller_id.clone(),
-                                    priority: call_info.priority.saturating_sub(5), // Higher priority
-                                    queued_at: chrono::Utc::now(),
-                                    estimated_wait_time: None,
-                                    retry_count: call_info.transfer_count as u8 + 1, // Use transfer_count as a proxy for retry
-                                };
-                                
-                                if let Err(e) = db_manager.enqueue_call(queue_id, &queued_call).await {
-                                    error!("Failed to re-queue call after timeout: {}", e);
-                                } else {
-                                    info!("📞 Re-queued call {} after agent timeout", timeout_customer_session_id);
-                                }
+                    if let Some(queue_id) = &call_info.queue_id {
+                        let call_id = uuid::Uuid::new_v4().to_string();
+                        if let Some(db_manager) = &engine.db_manager {
+                            if let Err(e) = db_manager.enqueue_call(
+                                &call_id,
+                                &timeout_customer_session_id.0,
+                                queue_id,
+                                Some(&call_info.caller_id),
+                                call_info.priority as i32,
+                                chrono::Utc::now() + chrono::Duration::hours(1), // 1 hour expiry
+                            ).await {
+                                error!("Failed to re-queue call during rollback: {}", e);
+                            } else {
+                                info!("🔓 Rolled back assignment: agent {} restored to available, call {} re-queued", 
+                                      timeout_agent_id, timeout_customer_session_id);
                             }
                         }
                     }
@@ -1128,16 +1131,16 @@ impl CallCenterEngine {
             // Re-queue the call
             if let Some(call_info) = self.active_calls.get(session_id) {
                 if let Some(queue_id) = &call_info.queue_id {
-                    let queued_call = crate::queue::QueuedCall {
-                        session_id: session_id.clone(),
-                        caller_id: call_info.caller_id.clone(),
-                        priority: call_info.priority,
-                        queued_at: chrono::Utc::now(),
-                        estimated_wait_time: None,
-                        retry_count: call_info.transfer_count as u8, // Use transfer_count as a proxy for retry count
-                    };
+                    let call_id = format!("call_{}", uuid::Uuid::new_v4());
                     
-                    if let Err(e) = db_manager.enqueue_call(queue_id, &queued_call).await {
+                    if let Err(e) = db_manager.enqueue_call(
+                        &call_id,
+                        &session_id.0,
+                        queue_id,
+                        Some(&call_info.caller_id),
+                        call_info.priority as i32,
+                        chrono::Utc::now() + chrono::Duration::hours(1), // 1 hour expiry
+                    ).await {
                         error!("Failed to re-queue call during rollback: {}", e);
                     } else {
                         info!("🔓 Rolled back assignment: agent {} restored to available, call {} re-queued", 
@@ -1279,7 +1282,7 @@ impl CallCenterEngine {
                                     if let Some(db_manager) = &engine.db_manager {
                                         match db_manager.get_agent(&wrap_up_agent_id.0).await {
                                             Ok(Some(agent)) => {
-                                                if matches!(agent.status, crate::database::DbAgentStatus::PostCallWrapUp) {
+                                                if agent.status == "POSTCALLWRAPUP" {
                                                     info!("🔄 Agent {} status change: PostCallWrapUp → Available (wrap-up complete)", wrap_up_agent_id);
                                                     
                                                     if let Err(e) = db_manager.update_agent_status_with_retry(&wrap_up_agent_id.0, AgentStatus::Available).await {
@@ -1499,7 +1502,7 @@ impl CallCenterEngine {
                     }
                     Err(e) => {
                         error!("Failed to re-queue stuck call {}: {}", session_id, e);
-                        // As a last resort, terminate the call
+                        // As a last resort, terminate the call if we can't re-queue
                         if let Some(coordinator) = &self.session_coordinator {
                             let _ = coordinator.terminate_session(&session_id).await;
                         }

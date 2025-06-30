@@ -18,8 +18,16 @@ rvoip-session-core = { path = "../session-core" }
 # Infrastructure - shared types
 infra-common = { path = "../infra-common", features = ["no-global-allocator"] }
 
-# Database - Limbo with minimal features for stability
-limbo = { version = "0.0.22", default-features = false }
+# Database - Modern async approach with sqlx
+# Replace rusqlite/r2d2 with sqlx for true async support
+sqlx = { version = "0.7", features = [
+    "runtime-tokio-rustls",
+    "sqlite", 
+    "chrono", 
+    "uuid",
+    "migrate",
+    "macros"
+] }
 
 # Web framework
 axum = "0.7"
@@ -60,8 +68,6 @@ serial_test = "3.1"
 
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-
-
 
 [[example]]
 name = "e2e_test_server"
