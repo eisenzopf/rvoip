@@ -579,12 +579,13 @@ impl AgentInfo {
         contact_uri: String,
         config: &crate::config::GeneralConfig,
     ) -> Self {
-        let status = match db_agent.status {
-            crate::database::DbAgentStatus::Available => crate::agent::AgentStatus::Available,
-            crate::database::DbAgentStatus::Busy => crate::agent::AgentStatus::Busy(vec![]),
-            crate::database::DbAgentStatus::PostCallWrapUp => crate::agent::AgentStatus::PostCallWrapUp,
-            crate::database::DbAgentStatus::Offline => crate::agent::AgentStatus::Offline,
-            crate::database::DbAgentStatus::Reserved => crate::agent::AgentStatus::Available, // Treat reserved as available
+        let status = match db_agent.status.as_str() {
+            "AVAILABLE" => crate::agent::AgentStatus::Available,
+            "BUSY" => crate::agent::AgentStatus::Busy(vec![]),
+            "POSTCALLWRAPUP" => crate::agent::AgentStatus::PostCallWrapUp,
+            "OFFLINE" => crate::agent::AgentStatus::Offline,
+            "RESERVED" => crate::agent::AgentStatus::Available, // Treat reserved as available
+            _ => crate::agent::AgentStatus::Offline, // Default for unknown statuses
         };
         
         Self {

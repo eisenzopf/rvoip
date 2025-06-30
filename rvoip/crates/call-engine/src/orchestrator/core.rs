@@ -385,8 +385,8 @@ impl CallCenterEngine {
             active_calls: self.active_calls.len(),
             active_bridges: bridges.len(),
             total_calls_handled: routing_stats.calls_routed_directly + routing_stats.calls_queued,
-            available_agents: available_count,
-            busy_agents: busy_count,
+            available_agents: available_count as usize,
+            busy_agents: busy_count as usize,
             queued_calls,
             routing_stats: routing_stats.clone(),
         }
