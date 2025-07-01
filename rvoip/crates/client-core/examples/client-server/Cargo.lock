@@ -2367,7 +2367,6 @@ dependencies = [
  "chrono",
  "dashmap 5.5.3",
  "futures",
- "infra-common",
  "rand",
  "rvoip-session-core",
  "serde",
