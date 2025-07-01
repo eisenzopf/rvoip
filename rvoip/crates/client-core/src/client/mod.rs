@@ -197,9 +197,12 @@
 //! ```
 
 pub mod calls;
+/// Client configuration structures and presets
 pub mod config;
+/// Call and media control operations
 pub mod controls;
 pub mod events;
+/// Main client manager implementation
 pub mod manager;
 pub mod media;
 pub mod media_builder;
@@ -247,7 +250,26 @@ pub use recovery::{
     with_timeout,
 };
 
-// Type alias for convenient use
+/// Type alias for the main client interface
+/// 
+/// This provides a more convenient name for the `ClientManager` type,
+/// allowing users to simply use `Client` instead of `ClientManager`.
+/// 
+/// # Examples
+/// 
+/// ```rust
+/// use rvoip_client_core::Client;
+/// use rvoip_client_core::ClientBuilder;
+/// use std::sync::Arc;
+/// 
+/// # tokio_test::block_on(async {
+/// let client: Arc<Client> = ClientBuilder::new()
+///     .local_address("127.0.0.1:5080".parse().unwrap())
+///     .build()
+///     .await
+///     .expect("Failed to create client");
+/// # })
+/// ```
 pub type Client = ClientManager;
 
 // Note: Individual operation methods are implemented as impl blocks in separate files

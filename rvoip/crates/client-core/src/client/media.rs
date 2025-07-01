@@ -202,6 +202,47 @@ impl super::manager::ClientManager {
         self.get_available_codecs().await
     }
     
+    /// Get list of available audio codecs with detailed information
+    /// 
+    /// Returns a comprehensive list of audio codecs supported by the client,
+    /// including payload types, sample rates, quality ratings, and descriptions.
+    /// This information can be used for codec selection, capability negotiation,
+    /// and display in user interfaces.
+    /// 
+    /// # Returns
+    /// 
+    /// A vector of `AudioCodecInfo` structures, each containing:
+    /// - Codec name and standard designation
+    /// - RTP payload type number
+    /// - Audio sampling rate and channel count
+    /// - Human-readable description
+    /// - Quality rating (1-5 scale, 5 being highest)
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust,no_run
+    /// # use rvoip_client_core::client::ClientManager;
+    /// # use std::sync::Arc;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client = ClientManager::new(Default::default()).await?;
+    /// // Get available codecs for capability display
+    /// let codecs = client.get_available_codecs().await;
+    /// 
+    /// for codec in codecs {
+    ///     println!("Codec: {} (PT: {}, Rate: {}Hz, Quality: {}/5)", 
+    ///              codec.name, codec.payload_type, codec.clock_rate, codec.quality_rating);
+    ///     println!("  Description: {}", codec.description);
+    /// }
+    /// 
+    /// // Find high-quality codecs
+    /// let high_quality: Vec<_> = client.get_available_codecs().await
+    ///     .into_iter()
+    ///     .filter(|c| c.quality_rating >= 4)
+    ///     .collect();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn get_available_codecs(&self) -> Vec<AudioCodecInfo> {
         // Enhanced codec list with quality ratings and detailed information
         vec![
