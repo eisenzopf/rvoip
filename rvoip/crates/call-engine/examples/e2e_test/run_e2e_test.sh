@@ -1,12 +1,12 @@
 #!/bin/bash
 #
-# End-to-End Call Center Test Script
+# End-to-End Call Center Test Script (PHASE 0.24+)
 # This script:
 # 1. Starts the call center server
 # 2. Starts two agent clients (alice and bob)
 # 3. Runs SIPp to make test calls
 # 4. Captures packets and logs
-# 5. Analyzes results
+# 5. Analyzes results (including server-initiated BYE completion)
 
 set -e  # Exit on error
 
@@ -201,6 +201,12 @@ main() {
     fi
     
     # PHASE 0.24: Enhanced SIPp test calls with BYE tracking
+    # NOTE: This test uses SERVER-INITIATED BYE scenario:
+    # 1. SIPp clients make calls to the server
+    # 2. Server routes calls to agents (Alice/Bob)
+    # 3. After call duration timeout (~20s), SERVER sends BYE to SIPp clients
+    # 4. SIPp clients respond with 200 OK to terminate calls
+    # This is different from client-initiated BYE where clients would send BYE first
     echo -e "\n${YELLOW}Running SIPp test calls (PHASE 0.24)...${NC}"
     echo "Making 5 calls waiting for server-initiated BYE (no duration limit)..."
     
@@ -281,20 +287,54 @@ main() {
         echo "SIPp failed calls: $SIPP_FAILED"
     fi
     
-    # PHASE 0.24: BYE completion analysis
-    echo -e "\nBYE completion analysis:"
-    BYE_SENT=$(grep -c "Sending BYE" "$SIPP_LOG" || true)
-    BYE_200OK=$(grep -c "200 OK.*BYE" "$SIPP_LOG" || true)
-    BYE_TIMEOUT=$(grep -c "BYE.*timeout" "$SIPP_LOG" || true)
+    # PHASE 0.24: BYE completion analysis (Server-Initiated BYE Scenario)
+    echo -e "\nBYE completion analysis (Server-Initiated):"
     
-    echo "BYE messages sent: $BYE_SENT"
-    echo "BYE 200 OK received: $BYE_200OK"
-    echo "BYE timeouts: $BYE_TIMEOUT"
+    # In server-initiated BYE scenario:
+    # - Server sends BYE to SIPp client
+    # - SIPp client responds with 200 OK
+    # - SIPp receives BYE (shown in statistics screen)
+    # - SIPp sends 200 OK responses (shown in statistics screen)
     
-    if [ "$BYE_200OK" -gt 0 ]; then
-        echo -e "${GREEN}✅ BYE completion working - $BYE_200OK calls terminated properly${NC}"
+    # Check SIPp statistics for BYE messages received
+    BYE_RECEIVED_SIPP=$(grep -A 20 "Messages.*Retrans.*Timeout" "$SIPP_LOG" | grep "BYE <----------" | awk '{print $5}' || echo "0")
+    BYE_200OK_SENT_SIPP=$(grep -A 20 "Messages.*Retrans.*Timeout" "$SIPP_LOG" | grep "200 ---------->" | awk '{print $5}' || echo "0")
+    
+    # Fallback: Check PCAP file for BYE/200 OK exchanges if available
+    if [ -f "$PCAP_FILE" ]; then
+        BYE_IN_PCAP=$(sudo tcpdump -r "$PCAP_FILE" -A 2>/dev/null | grep -c "BYE sip:" || true)
+        BYE_200OK_IN_PCAP=$(sudo tcpdump -r "$PCAP_FILE" -A 2>/dev/null | grep -A 5 "200 OK" | grep -c "CSeq:.*BYE" || true)
+        echo "PCAP BYE messages: $BYE_IN_PCAP"
+        echo "PCAP BYE 200 OK responses: $BYE_200OK_IN_PCAP"
     else
-        echo -e "${RED}❌ BYE completion issue - no 200 OK responses to BYE${NC}"
+        BYE_IN_PCAP=0
+        BYE_200OK_IN_PCAP=0
+    fi
+    
+    # Use PCAP data as primary source, SIPp stats as fallback
+    if [ "$BYE_IN_PCAP" -gt 0 ] && [ "$BYE_200OK_IN_PCAP" -gt 0 ]; then
+        BYE_RECEIVED=$BYE_IN_PCAP
+        BYE_200OK_RESPONSES=$BYE_200OK_IN_PCAP
+        echo "BYE messages received by SIPp: $BYE_RECEIVED (from PCAP)"
+        echo "200 OK responses sent by SIPp: $BYE_200OK_RESPONSES (from PCAP)"
+    else
+        BYE_RECEIVED=$BYE_RECEIVED_SIPP
+        BYE_200OK_RESPONSES=$BYE_200OK_SENT_SIPP
+        echo "BYE messages received by SIPp: $BYE_RECEIVED (from SIPp stats)"
+        echo "200 OK responses sent by SIPp: $BYE_200OK_RESPONSES (from SIPp stats)"
+    fi
+    
+    # Evaluate BYE completion success
+    if [ "$BYE_RECEIVED" -gt 0 ] && [ "$BYE_200OK_RESPONSES" -gt 0 ]; then
+        echo -e "${GREEN}✅ BYE completion working - $BYE_200OK_RESPONSES server-initiated terminations completed${NC}"
+        BYE_COMPLETION_SUCCESS=true
+    elif [ "$BYE_200OK_RECEIVED" -gt 0 ]; then
+        # Fallback to server-side analysis
+        echo -e "${GREEN}✅ BYE completion working - $BYE_200OK_RECEIVED server-side confirmations${NC}"
+        BYE_COMPLETION_SUCCESS=true
+    else
+        echo -e "${RED}❌ BYE completion issue - no successful termination confirmations found${NC}"
+        BYE_COMPLETION_SUCCESS=false
     fi
     
     # PCAP analysis
@@ -325,10 +365,10 @@ main() {
         echo -e "${GREEN}✅ E2E Test PASSED!${NC}"
         echo "Successfully routed calls from customers to agents"
         
-        # PHASE 0.24: Additional BYE completion validation
-        if [ "$BYE_200OK_RECEIVED" -gt 0 ] || [ "$BYE_200OK" -gt 0 ]; then
+        # PHASE 0.24: BYE completion validation using improved analysis
+        if [ "$BYE_COMPLETION_SUCCESS" = true ]; then
             echo -e "${GREEN}✅ BYE Completion PASSED!${NC}"
-            echo "Call termination working properly"
+            echo "Server-initiated call termination working properly"
         else
             echo -e "${YELLOW}⚠️ BYE Completion PARTIAL${NC}"
             echo "Calls completed but BYE termination may need investigation"

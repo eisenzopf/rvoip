@@ -56,7 +56,11 @@ impl ClientBuilder {
     /// 
     /// # Example
     /// ```
+    /// use rvoip_client_core::ClientBuilder;
+    /// 
+    /// # tokio_test::block_on(async {
     /// let client = ClientBuilder::new()
+    ///     .local_address("127.0.0.1:5060".parse().unwrap())
     ///     .with_media(|m| m
     ///         .codecs(vec!["opus", "PCMU"])
     ///         .require_srtp(true)
@@ -64,7 +68,16 @@ impl ClientBuilder {
     ///         .max_bandwidth_kbps(128)
     ///     )
     ///     .build()
-    ///     .await?;
+    ///     .await
+    ///     .expect("Failed to build client");
+    /// 
+    /// // Verify the media configuration was applied
+    /// let media_config = client.get_media_config();
+    /// assert_eq!(media_config.preferred_codecs, vec!["opus", "PCMU"]);
+    /// assert!(media_config.require_srtp);
+    /// assert!(media_config.echo_cancellation);
+    /// assert_eq!(media_config.max_bandwidth_kbps, Some(128));
+    /// # })
     /// ```
     pub fn with_media<F>(mut self, f: F) -> Self 
     where
@@ -85,10 +98,21 @@ impl ClientBuilder {
     /// 
     /// # Example
     /// ```
+    /// use rvoip_client_core::{ClientBuilder, MediaPreset};
+    /// 
+    /// # tokio_test::block_on(async {
     /// let client = ClientBuilder::new()
+    ///     .local_address("127.0.0.1:5060".parse().unwrap())
     ///     .media_preset(MediaPreset::VoiceOptimized)
     ///     .build()
-    ///     .await?;
+    ///     .await
+    ///     .expect("Failed to build client");
+    /// 
+    /// // Verify the preset was applied
+    /// let media_config = client.get_media_config();
+    /// assert!(media_config.echo_cancellation);
+    /// assert!(media_config.noise_suppression);
+    /// # })
     /// ```
     pub fn media_preset(mut self, preset: MediaPreset) -> Self {
         self.config.media = MediaConfig::from_preset(preset);
