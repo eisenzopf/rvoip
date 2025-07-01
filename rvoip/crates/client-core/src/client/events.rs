@@ -26,6 +26,35 @@ use crate::{
 // All types are re-exported from the main events module
 
 /// Internal call handler that bridges session-core events to client-core events
+/// 
+/// This handler receives events from the session-core layer and translates them
+/// into client-core events that applications can consume. It manages mappings
+/// between session IDs and call IDs, tracks call state, and forwards events
+/// to registered event handlers.
+/// 
+/// # Architecture
+/// 
+/// The handler maintains several mappings:
+/// - Session ID ↔ Call ID mapping for event translation
+/// - Call information storage with extended metadata
+/// - Incoming call storage for deferred acceptance/rejection
+/// - Event broadcasting through multiple channels
+/// 
+/// # Examples
+/// 
+/// ```rust
+/// use rvoip_client_core::client::events::ClientCallHandler;
+/// use rvoip_session_core::CallHandler;
+/// use std::sync::Arc;
+/// use dashmap::DashMap;
+/// 
+/// let handler = ClientCallHandler::new(
+///     Arc::new(DashMap::new()), // call_mapping
+///     Arc::new(DashMap::new()), // session_mapping  
+///     Arc::new(DashMap::new()), // call_info
+///     Arc::new(DashMap::new()), // incoming_calls
+/// );
+/// ```
 pub struct ClientCallHandler {
     pub client_event_handler: Arc<RwLock<Option<Arc<dyn ClientEventHandler>>>>,
     pub call_mapping: Arc<DashMap<SessionId, CallId>>,

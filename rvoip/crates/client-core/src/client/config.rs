@@ -1,34 +1,104 @@
+//! Client configuration structures and presets
+//!
+//! This module provides configuration structures for the VoIP client, including
+//! media settings, codec preferences, and network parameters.
+//!
+//! # Key Components
+//!
+//! - **ClientConfig** - Main client configuration
+//! - **MediaConfig** - Media-specific settings and preferences
+//! - **MediaPreset** - Predefined media configuration templates
+//!
+//! # Usage Examples
+//!
+//! ## Basic Client Configuration
+//!
+//! ```rust
+//! use rvoip_client_core::client::config::{ClientConfig, MediaPreset};
+//! use std::net::SocketAddr;
+//!
+//! let config = ClientConfig::new()
+//!     .with_sip_addr("127.0.0.1:5060".parse().unwrap())
+//!     .with_media_addr("127.0.0.1:0".parse().unwrap())
+//!     .with_user_agent("MyApp/1.0".to_string())
+//!     .with_max_calls(5);
+//!
+//! assert_eq!(config.max_concurrent_calls, 5);
+//! ```
+//!
+//! ## Using Media Presets
+//!
+//! ```rust
+//! use rvoip_client_core::client::config::{ClientConfig, MediaPreset};
+//!
+//! let secure_config = ClientConfig::new()
+//!     .with_media_preset(MediaPreset::Secure);
+//!
+//! assert!(secure_config.media.require_srtp);
+//! ```
+
 use std::net::SocketAddr;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Media configuration preferences
+/// 
+/// Defines media-related settings including codec preferences, audio processing
+/// options, security requirements, and network parameters.
+/// 
+/// # Examples
+/// 
+/// ```rust
+/// use rvoip_client_core::client::config::MediaConfig;
+/// 
+/// let media_config = MediaConfig {
+///     preferred_codecs: vec!["opus".to_string(), "PCMU".to_string()],
+///     dtmf_enabled: true,
+///     echo_cancellation: true,
+///     noise_suppression: true,
+///     auto_gain_control: true,
+///     max_bandwidth_kbps: Some(128),
+///     require_srtp: false,
+///     srtp_profiles: vec![],
+///     rtp_port_start: 10000,
+///     rtp_port_end: 20000,
+///     preferred_ptime: Some(20),
+///     custom_sdp_attributes: std::collections::HashMap::new(),
+/// };
+/// 
+/// assert_eq!(media_config.preferred_codecs[0], "opus");
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaConfig {
     /// Preferred codecs in order of preference
     pub preferred_codecs: Vec<String>,
     
-    /// Media capabilities
+    /// Whether DTMF (Dual-Tone Multi-Frequency) signaling is enabled
     pub dtmf_enabled: bool,
+    /// Whether echo cancellation audio processing is enabled
     pub echo_cancellation: bool,
+    /// Whether noise suppression audio processing is enabled
     pub noise_suppression: bool,
+    /// Whether automatic gain control audio processing is enabled
     pub auto_gain_control: bool,
     
-    /// Bandwidth preferences
+    /// Maximum bandwidth in kilobits per second (None for unlimited)
     pub max_bandwidth_kbps: Option<u32>,
     
-    /// SRTP preferences
+    /// Whether SRTP (Secure RTP) encryption is required
     pub require_srtp: bool,
+    /// List of supported SRTP encryption profiles
     pub srtp_profiles: Vec<String>,
     
-    /// RTP port range
+    /// Starting port number for RTP media streams
     pub rtp_port_start: u16,
+    /// Ending port number for RTP media streams
     pub rtp_port_end: u16,
     
-    /// Ptime (packetization time) preferences in milliseconds
+    /// Preferred packetization time in milliseconds
     pub preferred_ptime: Option<u8>,
     
-    /// Additional SDP attributes
+    /// Additional custom SDP (Session Description Protocol) attributes
     pub custom_sdp_attributes: HashMap<String, String>,
 }
 
