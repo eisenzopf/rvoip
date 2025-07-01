@@ -56,11 +56,46 @@ use crate::{
 /// );
 /// ```
 pub struct ClientCallHandler {
+    /// Client event handler for forwarding processed events to applications
+    /// 
+    /// This optional handler receives high-level client events after they have been
+    /// processed and enriched by this bridge. Applications can register handlers
+    /// to receive notifications about incoming calls, state changes, etc.
     pub client_event_handler: Arc<RwLock<Option<Arc<dyn ClientEventHandler>>>>,
+    
+    /// Mapping from session-core SessionId to client-core CallId
+    /// 
+    /// This bidirectional mapping allows the handler to translate between
+    /// session-core's internal session identifiers and the client-facing call IDs
+    /// that applications use to reference calls.
     pub call_mapping: Arc<DashMap<SessionId, CallId>>,
+    
+    /// Reverse mapping from client-core CallId to session-core SessionId
+    /// 
+    /// Provides efficient lookup in the opposite direction from call_mapping,
+    /// allowing quick translation from client call IDs to session IDs when
+    /// making session-core API calls.
     pub session_mapping: Arc<DashMap<CallId, SessionId>>,
+    
+    /// Enhanced call information storage with extended metadata
+    /// 
+    /// Stores comprehensive call information including state, timing data,
+    /// participant details, and custom metadata. This information persists
+    /// throughout the call lifecycle and can be used for history and reporting.
     pub call_info: Arc<DashMap<CallId, CallInfo>>,
+    
+    /// Storage for incoming calls awaiting acceptance or rejection
+    /// 
+    /// When incoming calls arrive, they are stored here until the application
+    /// decides whether to accept or reject them. This allows for deferred
+    /// call handling and provides access to full call details for decision making.
     pub incoming_calls: Arc<DashMap<CallId, IncomingCall>>,
+    
+    /// Optional broadcast channel for real-time event streaming
+    /// 
+    /// If configured, events are broadcast through this channel in addition to
+    /// being sent to the registered event handler. This allows multiple consumers
+    /// to receive events independently.
     pub event_tx: Option<tokio::sync::broadcast::Sender<crate::events::ClientEvent>>,
 }
 
