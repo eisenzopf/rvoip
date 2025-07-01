@@ -18,8 +18,8 @@ MEDIA_PORT=20000
 SIPP_PORT=5061
 SIPP_MEDIA_PORT=30000
 NUM_CALLS=5
-CALL_RATE=1
-CALL_DURATION=10
+CALL_RATE=0.1  # One call every 10 seconds (sequential)
+CALL_DURATION=8  # Shorter duration to ensure no overlap
 
 # Paths
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
