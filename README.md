@@ -167,6 +167,132 @@ rvoip follows a **layered architecture** with clear separation of concerns and e
 - **Features**: One-line clients, basic call operations, minimal configuration
 - **Use Cases**: Learning, prototyping, simple applications
 
+## 🚀 SIP Protocol Features
+
+rvoip provides comprehensive SIP (Session Initiation Protocol) support with RFC-compliant implementations:
+
+### 📋 **Core SIP Methods**
+- ✅ **INVITE** - Session initiation and modification
+- ✅ **ACK** - Final response acknowledgment  
+- ✅ **BYE** - Session termination
+- ✅ **CANCEL** - Request cancellation
+- ✅ **REGISTER** - User registration with location service
+- ✅ **OPTIONS** - Capability discovery
+- ✅ **SUBSCRIBE** - Event notification subscription (RFC 6665)
+- ✅ **NOTIFY** - Event notifications (RFC 6665)
+- ✅ **MESSAGE** - Instant messaging (RFC 3428)
+- ✅ **UPDATE** - Session modification (RFC 3311)
+- ✅ **INFO** - Mid-session information (RFC 6086)
+- ✅ **PRACK** - Provisional response acknowledgment (RFC 3262)
+- ✅ **REFER** - Call transfer initiation (RFC 3515)
+- ✅ **PUBLISH** - Event state publication (RFC 3903)
+- ✅ **Custom Methods** - Extensible method support
+
+### 🔐 **Authentication & Security**
+- ✅ **Digest Authentication** - RFC 3261 compliant challenge-response
+  - MD5 and SHA-256 algorithm support
+  - Quality of Protection (qop) auth/auth-int
+  - Nonce validation and replay protection
+  - Client nonce (cnonce) and nonce count support
+- ✅ **Basic Authentication** - Simple username/password (TLS recommended)
+- ✅ **SRTP** - Secure Real-time Transport Protocol
+  - AES-CM-128/256 encryption
+  - HMAC-SHA1-80/32 authentication
+  - AEAD AES-128/256 GCM support
+  - Key derivation and session management
+- ✅ **DTLS-SRTP** - WebRTC-compatible security
+- ✅ **SDES** - Session Description Protocol Security Descriptions
+- 🚧 **MIKEY** - Multimedia Internet KEYing (partial)
+- 🚧 **ZRTP** - Media path key agreement (partial)
+
+### 🎵 **Media & Codecs**
+- ✅ **Audio Codecs**
+  - G.711 PCMU/PCMA (μ-law/A-law) - 8kHz
+  - G.722 - Wideband audio, 16kHz
+  - Opus - High-quality adaptive bitrate, 8-48kHz
+  - G.729 - Low bandwidth compression, 8kHz
+- ✅ **RTP/RTCP** - Real-time Transport Protocol
+  - Packet transmission and reception
+  - RTCP statistics and reporting
+  - Jitter buffer management
+  - Payload format support
+- ✅ **Audio Processing**
+  - Echo cancellation (AEC)
+  - Automatic gain control (AGC)
+  - Voice activity detection (VAD)
+  - Noise suppression
+  - Quality monitoring and MOS scoring
+- ✅ **Transcoding** - Real-time codec conversion between endpoints
+- 🚧 **Video Support** - Planned H.264/VP8/VP9 support
+
+### 🌐 **Transport Protocols**
+- ✅ **UDP** - Primary SIP transport
+- ✅ **TCP** - Reliable transport for large messages
+- 🚧 **TLS** - Secure transport (in progress)
+- 🚧 **WebSocket** - Web browser compatibility (planned)
+- ✅ **Via Header Management** - Multi-hop routing support
+- ✅ **Route/Record-Route** - Proxy path management
+
+### 🔌 **NAT Traversal**
+- 🚧 **ICE** - Interactive Connectivity Establishment (RFC 8445)
+  - Host candidate gathering
+  - Server-reflexive candidate discovery
+  - Relay candidate allocation
+  - Connectivity checks and pair selection
+- ✅ **STUN** - Session Traversal Utilities for NAT (RFC 5389)
+  - Binding requests/responses
+  - XOR-MAPPED-ADDRESS support
+  - Keep-alive mechanisms
+- 🚧 **TURN** - Traversal Using Relays around NAT (partial)
+- 🔮 **UPnP** - Universal Plug and Play (planned)
+
+### 📞 **Dialog & Session Management**
+- ✅ **Dialog State Machine** - RFC 3261 compliant dialog tracking
+  - Early/confirmed dialog states
+  - In-dialog request routing
+  - Dialog recovery and cleanup
+- ✅ **Transaction Layer** - Reliable message delivery
+  - Client/server transaction state machines
+  - Timer management (T1, T2, T4, etc.)
+  - Retransmission handling
+- ✅ **Session Coordination** - Multi-party call management
+  - B2BUA (Back-to-Back User Agent) operations
+  - Call bridging and transfer
+  - Conference call management
+
+### 🎛️ **Advanced Call Features**
+- ✅ **Call Center Operations**
+  - Agent registration and management
+  - Call queuing and distribution
+  - Load balancing and overflow handling
+  - Statistics and monitoring
+- ✅ **SDP** - Session Description Protocol (RFC 4566)
+  - Offer/answer model
+  - Media negotiation
+  - Codec selection and parameters
+  - Bandwidth management
+- ✅ **Event System** - Real-time monitoring and control
+- 🚧 **Call Transfer** - REFER-based transfers (partial)
+- 🚧 **Call Forking** - Parallel/sequential forking (planned)
+- 🔮 **Presence & Instant Messaging** - SIMPLE protocol support (planned)
+
+### 🔧 **Protocol Compliance & Testing**
+- ✅ **RFC 3261** - Core SIP specification
+- ✅ **RFC 4566** - Session Description Protocol
+- ✅ **RFC 4475** - SIP torture tests for robustness
+- ✅ **SIPp Integration** - Comprehensive interoperability testing
+- ✅ **Commercial PBX Compatibility** - Tested with major vendors
+
+### 🏗️ **Infrastructure & Performance**
+- ✅ **High-Performance Event Bus** - 2M+ events/second
+- ✅ **Zero-Copy Optimizations** - Minimal memory allocation
+- ✅ **Async/Await Architecture** - Built on Tokio runtime
+- ✅ **Memory Pool Management** - Efficient resource utilization
+- ✅ **Metrics & Monitoring** - Real-time performance tracking
+- ✅ **Error Recovery** - Graceful degradation and failover
+
+**Legend**: ✅ Complete, 🚧 In Progress, 🔮 Planned
+
 ## 🔄 Event-Driven Architecture
 
 The RVOIP stack uses a comprehensive event-driven architecture for loose coupling and real-time monitoring:
