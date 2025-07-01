@@ -37,7 +37,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5060".parse().unwrap(),
             local_media_addr: "127.0.0.1:7070".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -61,7 +64,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5061".parse().unwrap(),
             local_media_addr: "127.0.0.1:7071".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -89,7 +95,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5062".parse().unwrap(),
             local_media_addr: "127.0.0.1:7072".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -129,7 +138,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5063".parse().unwrap(),
             local_media_addr: "127.0.0.1:7073".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -163,7 +175,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5064".parse().unwrap(),
             local_media_addr: "127.0.0.1:7074".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -197,7 +212,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5065".parse().unwrap(),
             local_media_addr: "127.0.0.1:7075".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -231,7 +249,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5066".parse().unwrap(),
             local_media_addr: "127.0.0.1:7076".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -272,7 +293,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5067".parse().unwrap(),
             local_media_addr: "127.0.0.1:7077".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -307,7 +331,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5068".parse().unwrap(),
             local_media_addr: "127.0.0.1:7078".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -340,7 +367,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5069".parse().unwrap(),
             local_media_addr: "127.0.0.1:7079".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -379,7 +409,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5070".parse().unwrap(),
             local_media_addr: "127.0.0.1:7080".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -418,7 +451,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5071".parse().unwrap(),
             local_media_addr: "127.0.0.1:7081".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,
@@ -472,7 +508,10 @@ mod tests {
             local_sip_addr: "127.0.0.1:5072".parse().unwrap(),
             local_media_addr: "127.0.0.1:7082".parse().unwrap(),
             user_agent: "Test Client".to_string(),
-            preferred_codecs: vec!["PCMU".to_string()],
+            media: crate::client::config::MediaConfig {
+                preferred_codecs: vec!["PCMU".to_string()],
+                ..Default::default()
+            },
             max_concurrent_calls: 10,
             session_timeout_secs: 300,
             enable_audio: true,

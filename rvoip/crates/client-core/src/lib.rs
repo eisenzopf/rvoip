@@ -79,6 +79,7 @@
 //! 
 //! ```rust,no_run
 //! # use rvoip_client_core::{ClientBuilder, registration::RegistrationConfig};
+//! # use std::sync::Arc;
 //! # async fn example(client: Arc<rvoip_client_core::Client>) -> Result<(), Box<dyn std::error::Error>> {
 //! // Register with a SIP server
 //! let config = RegistrationConfig::new(
@@ -114,11 +115,12 @@
 //! 
 //! ```rust,no_run
 //! # use rvoip_client_core::{Client, ClientError};
+//! # use std::sync::Arc;
 //! # async fn example(client: Arc<Client>) -> Result<(), Box<dyn std::error::Error>> {
 //! match client.make_call("sip:alice@example.com".to_string(), "sip:bob@example.com".to_string(), None).await {
 //!     Ok(call_id) => println!("Call started: {}", call_id),
-//!     Err(ClientError::NetworkError { details }) => {
-//!         eprintln!("Network problem: {}", details);
+//!     Err(ClientError::NetworkError { reason }) => {
+//!         eprintln!("Network problem: {}", reason);
 //!         // Retry or notify user
 //!     }
 //!     Err(e) => eprintln!("Call failed: {}", e),

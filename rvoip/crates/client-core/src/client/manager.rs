@@ -456,6 +456,11 @@ impl ClientManager {
         *self.is_running.read().await
     }
     
+    /// Get the media configuration
+    pub fn get_media_config(&self) -> &MediaConfig {
+        &self.media_config
+    }
+    
     // ===== PRIORITY 3.2: CALL CONTROL OPERATIONS =====
     // Call control operations have been moved to controls.rs
     

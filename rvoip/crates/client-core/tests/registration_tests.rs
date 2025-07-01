@@ -3,7 +3,7 @@
 //! Tests registration, unregistration, refresh, and error handling.
 
 use rvoip_client_core::{
-    ClientBuilder, ClientEvent, ClientError,
+    ClientBuilder, ClientEvent,
     registration::{RegistrationConfig, RegistrationStatus},
 };
 use serial_test::serial;

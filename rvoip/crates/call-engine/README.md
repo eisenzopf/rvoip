@@ -1,261 +1,280 @@
-# Call Engine - Advanced Call Center with Session-Core Integration
+# Call Engine - Proof of Concept Call Center Library
 
-This crate provides enterprise-grade call center orchestration functionality with deep integration into session-core for SIP/RTP handling and a clean API layer for different user types.
+A **working proof-of-concept call center library** that builds on [session-core](../session-core) to provide essential call center functionality. While it has limited features compared to commercial solutions, it's **fully functional** and demonstrates all the core components needed to build a complete call center system.
 
-## Architecture
+## 🎯 Current Status: **Fully Working Basic Call Center**
 
-The call-engine now follows a clean architecture with session-core as its only direct dependency:
+**✅ What's Working Now:**
+- **Agent Registration**: SIP-based agent registration and management
+- **Incoming Call Routing**: Customer calls automatically routed to available agents
+- **Queue Management**: Database-backed call queuing with overflow handling
+- **Round-Robin Load Balancing**: Fair distribution of calls across agents
+- **B2BUA Call Bridging**: Proper two-way audio between customers and agents
+- **Agent Status Management**: Available/Busy/Offline state tracking
+- **Call Termination**: Clean call cleanup and resource management
+- **Database Persistence**: SQLite-compatible storage with atomic operations
+- **End-to-End Testing**: Complete test suite with SIPp scenarios
+
+**🔧 Recently Fixed:**
+- Database integration with proper schema
+- BYE message routing and timeouts
+- Configuration management (no hardcoded IPs)
+- Race condition fixes in queue management
+- Event-driven architecture throughout
+
+## Architecture Overview
 
 ```
 ┌─────────────────┐  ┌──────────────────┐  ┌─────────────────┐
-│ Agent Apps      │  │ Supervisor Apps  │  │ Admin Apps      │
+│  Customer Calls │  │   Agent Apps     │  │  Admin Tools    │
+│  (SIP Phones)   │  │  (Softphones)    │  │  (Monitoring)   │
 └────────┬────────┘  └────────┬─────────┘  └────────┬────────┘
-         │                    │                      │
-    ┌────▼────────┐    ┌──────▼────────┐    ┌──────▼────────┐
-    │CallCenterClient│  │SupervisorApi  │    │AdminApi       │
-    └────────┬────────┘ └──────┬────────┘    └──────┬────────┘
-             └──────────────────┼────────────────────┘
+         │                    │                     │
+    ┌────▼────────┐    ┌──────▼──────┐       ┌──────▼──────┐
+    │   SIP       │    │    Agent    │       │    Queue    │
+    │  Transport  │    │ Registration│       │ Management  │
+    └────────┬────┘    └──────┬──────┘       └──────┬──────┘
+             └──────────────────┼─────────────────────┘
                                │
                     ┌──────────▼──────────┐
                     │  CallCenterEngine   │
-                    │  - CallHandler impl │
-                    │  - Event processors │
+                    │  - Call routing     │
+                    │  - Agent management │
+                    │  - Queue processing │
                     └──────────┬──────────┘
                                │
                     ┌──────────▼──────────┐
                     │    session-core     │
                     │  - SIP handling     │
                     │  - RTP/Media        │
-                    │  - Transport        │
+                    │  - Call bridging    │
                     └─────────────────────┘
 ```
 
-## Features
-
-### Core Capabilities
-- 🎯 **Session-Core Integration**: CallHandler implementation for incoming calls
-- 📞 **Real-Time Events**: Call state, media quality, DTMF, and warnings
-- 🌉 **Call Bridging**: Automatic agent-customer call bridging
-- 🗄️ **Limbo Database**: Modern async SQLite-compatible storage
-- 🔌 **Clean API Layer**: Type-safe APIs for agents, supervisors, and admins
-
-### Agent Management
-- 👥 **Registration**: SIP-based agent registration with skills
-- 📊 **Status Tracking**: Available, busy, break, offline states
-- 🎯 **Skill Routing**: Match calls to agents based on skills
-- 📈 **Performance**: Track agent performance metrics
-
-### Call Processing
-- 📋 **Smart Queuing**: Priority-based queues with overflow
-- 🚦 **Routing Engine**: Business rules and skill-based routing
-- 📊 **Real-Time Monitoring**: Live call and queue statistics
-- 🎙️ **Quality Tracking**: MOS scores and packet loss monitoring
-
 ## Quick Start
 
-### Add Dependencies
+### Prerequisites
 
 ```toml
 [dependencies]
 rvoip-call-engine = { path = "../call-engine" }
+rvoip-session-core = { path = "../session-core" }
 tokio = { version = "1.0", features = ["full"] }
-anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 ```
 
-### Basic Usage - Agent Application
+### Basic Call Center Server
 
 ```rust
-use rvoip_call_engine::{
-    prelude::*,
-    api::{CallCenterClient, CallCenterClientBuilder},
-    agent::{Agent, AgentId, AgentStatus},
-};
+use rvoip_call_engine::prelude::*;
+use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Build the client
-    let client = CallCenterClientBuilder::new()
-        .with_config(CallCenterConfig::default())
-        .with_database(CallCenterDatabase::new_in_memory().await?)
-        .build()
-        .await?;
+    // Initialize logging
+    tracing_subscriber::fmt::init();
     
-    // Register an agent
-    let agent = Agent {
-        id: AgentId::from("alice-001"),
-        sip_uri: "sip:alice@callcenter.local".to_string(),
-        display_name: "Alice Smith".to_string(),
-        skills: vec!["english".to_string(), "sales".to_string()],
-        max_concurrent_calls: 3,
-        status: AgentStatus::Available,
-        department: Some("sales".to_string()),
-        extension: Some("1001".to_string()),
-    };
+    // Create call center with default configuration
+    let engine = CallCenterEngine::new(CallCenterConfig::default()).await?;
     
-    let session_id = client.register_agent(&agent).await?;
-    println!("Agent registered with session: {}", session_id);
+    println!("🏢 Call Center Server starting on port 5060...");
     
-    // Update status
-    client.update_agent_status(&agent.id, AgentStatus::Available).await?;
-    
-    // Check queue stats
-    let stats = client.get_queue_stats().await?;
-    for (queue, info) in stats {
-        println!("Queue {}: {} calls", queue, info.total_calls);
-    }
+    // Start the server (will run indefinitely)
+    engine.run().await?;
     
     Ok(())
 }
 ```
 
-### Supervisor Monitoring
+### Agent Application
 
 ```rust
-use rvoip_call_engine::api::SupervisorApi;
+use rvoip_client_core::prelude::*;
 
-// Create supervisor API
-let supervisor = SupervisorApi::new(engine);
-
-// Get real-time statistics
-let stats = supervisor.get_stats().await;
-println!("Active calls: {}", stats.active_calls);
-println!("Available agents: {}", stats.available_agents);
-
-// Monitor specific agent
-let agent_calls = supervisor.monitor_agent_calls(&agent_id).await;
-
-// Force assign a queued call
-supervisor.force_assign_call(session_id, agent_id).await?;
-
-// Get performance metrics
-let metrics = supervisor.get_performance_metrics(start_time, end_time).await;
-println!("Service level: {:.1}%", metrics.service_level_percentage);
+#[tokio::main] 
+async fn main() -> anyhow::Result<()> {
+    // Create SIP client for agent
+    let config = ClientConfig {
+        sip_uri: "sip:alice@127.0.0.1".to_string(),
+        server_uri: "sip:127.0.0.1:5060".to_string(),
+        local_port: 5071,
+        ..Default::default()
+    };
+    
+    let client = ClientManager::new(config).await?;
+    
+    // Register with call center
+    client.register().await?;
+    println!("👤 Agent Alice registered and ready for calls");
+    
+    // Handle incoming calls automatically
+    client.run().await?;
+    
+    Ok(())
+}
 ```
 
-### Administrative Management
+### Testing with SIPp
+
+The E2E test suite demonstrates a **complete working call center** with real SIP calls and audio bridging:
+
+**What it demonstrates:**
+- ✅ SIP-based agent registration (Alice & Bob register as agents)
+- ✅ Customer calls routed through the call center server
+- ✅ Fair load balancing (calls distributed between agents)
+- ✅ B2BUA call bridging with full audio flow
+- ✅ Database-backed queue management and agent status
+- ✅ Clean call termination and resource cleanup
+
+**What it simulates:**
+- **Customers**: SIPp generates 5 test calls to `sip:support@127.0.0.1`
+- **Call Center**: Server receives calls, manages queues, routes to agents
+- **Agents**: Two agent applications (Alice/Bob) handle incoming calls
+- **Network**: All SIP/RTP traffic captured via tcpdump for analysis
+
+**Limitations tested:**
+- ❌ No IVR menu navigation (calls go directly to agents)
+- ❌ No call recording verification
+- ❌ No supervisor features or monitoring
+- ❌ Basic round-robin routing only
+
+```bash
+cd examples/e2e_test
+./run_e2e_test.sh
+```
+
+**Expected Result**: 5 customer calls distributed between Alice and Bob (typically 3/2 or 2/3 split), with successful call completion and clean BYE message handling.
+
+For detailed test setup, troubleshooting, and analysis instructions, see the [E2E Test README](./examples/e2e_test/README.md).
+
+## Current Feature Set
+
+### ✅ Core Features (Working)
+
+- **Agent Management**
+  - SIP REGISTER-based agent registration
+  - Real-time status tracking (Available/Busy/Offline)
+  - Automatic status transitions during calls
+  - Fair round-robin call distribution
+
+- **Call Processing**
+  - Incoming call reception and routing
+  - Queue-based call distribution
+  - B2BUA call bridging with proper media flow
+  - Clean call termination and resource cleanup
+
+- **Queue Management** 
+  - Database-backed call queuing
+  - Configurable queue timeouts and capacities
+  - Atomic assignment operations
+  - Overflow handling and re-queuing
+
+- **Database Integration**
+  - SQLite storage
+  - Agent status persistence
+  - Call history tracking
+  - Atomic operations for consistency
+
+### 🚧 Limitations (Not Yet Implemented)
+
+- **No IVR System**: Calls go directly to agents (no menu navigation)
+- **No Call Recording**: Audio is not recorded or stored
+- **No Supervisor Features**: No monitoring, whisper, or barge-in
+- **No REST API**: Management only via code (no web interface)
+- **Basic Routing**: Only round-robin (no skills-based routing)
+- **No Reporting**: Limited metrics and analytics
+- **Single-Tenant**: No multi-tenant support
+
+## Configuration
 
 ```rust
-use rvoip_call_engine::api::AdminApi;
+use rvoip_call_engine::config::*;
 
-// Create admin API
-let admin = AdminApi::new(engine);
+let config = CallCenterConfig {
+    general: GeneralConfig {
+        domain: "call-center.local".to_string(),
+        local_ip: "127.0.0.1".to_string(),
+        port: 5060,
+        bye_timeout_seconds: 15,
+        ..Default::default()
+    },
+    database: DatabaseConfig {
+        url: "sqlite:call_center.db".to_string(),
+        max_connections: 5,
+        ..Default::default()
+    },
+    ..Default::default()
+};
 
-// Add new agent
-admin.add_agent(agent).await?;
-
-// Update agent skills
-admin.update_agent_skills(&agent_id, vec![
-    AgentSkill { skill_name: "spanish".into(), skill_level: 4 }
-]).await?;
-
-// Create queue
-admin.create_queue("priority_support").await?;
-
-// Check system health
-let health = admin.get_system_health().await;
-println!("System status: {:?}", health.status);
+let engine = CallCenterEngine::new(config).await?;
 ```
-
-## Event Handling
-
-The call-engine implements all CallHandler trait methods:
-
-### Core Events
-- `on_incoming_call` - Route incoming calls to agents or queues
-- `on_call_ended` - Clean up resources and update agent status
-- `on_call_established` - Track bridged calls
-
-### New Real-Time Events
-- `on_call_state_changed` - Track call lifecycle transitions
-- `on_media_quality` - Monitor MOS scores and packet loss
-- `on_dtmf` - Handle IVR and feature codes
-- `on_media_flow` - Track media stream status
-- `on_warning` - System-level alerts and warnings
 
 ## Examples
 
-### Running Examples
+The [examples](./examples) directory contains:
 
-```bash
-cd rvoip/crates/call-engine/examples
+- **`call_center_server.rs`**: Complete call center server implementation
+- **`agent_client.rs`**: Agent application for handling calls
+- **`e2e_test/`**: End-to-end testing with SIPp scenarios
 
-# Agent registration with new API
-cargo run --example agent_registration_demo
+## What Can You Build?
 
-# Basic call flow with all APIs
-cargo run --example phase0_basic_call_flow
+Despite its limitations, call-engine provides a solid foundation for:
 
-# Supervisor monitoring dashboard
-cargo run --example supervisor_monitoring_demo
+### ✅ **Small Call Centers (5-50 agents)**
+- Basic inbound call handling
+- Agent queue management
+- Simple call distribution
+- Call center server deployment
 
-# Database integration
-cargo run --example call_center_with_database
-```
+### ✅ **Proof-of-Concept Systems**
+- Demonstrate SIP call center concepts
+- Test call routing algorithms
+- Prototype custom call flows
+- Educational and learning projects
 
-## Database Schema
+### ✅ **Development Platform**
+- Build IVR systems on top
+- Add custom routing logic
+- Integrate with external systems
+- Extend with REST APIs
 
-### Core Tables
-- **agents** - Agent profiles, skills, and status
-- **call_records** - Complete call history and metrics
-- **call_queues** - Queue configuration and policies
-- **routing_policies** - Dynamic routing rules
-- **agent_skills** - Skill assignments and proficiency
+## Future Roadmap
 
-## Performance Optimization
+See [TODO.md](./TODO.md) for the comprehensive development plan, including:
 
-- **Async Architecture**: Non-blocking operations throughout
-- **Connection Pooling**: Efficient database connections
-- **Event-Driven**: React to changes without polling
-- **Minimal Dependencies**: Only depends on session-core
-- **Zero-Copy**: Efficient data handling
+- **Phase 1**: IVR system with DTMF handling
+- **Phase 2**: Skills-based routing and advanced queuing
+- **Phase 3**: Call recording and supervisor features  
+- **Phase 4**: REST API and web interfaces
+- **Phase 5**: Production scaling and monitoring
+- **Phase 6**: Enterprise features and integrations
 
-## Testing
+**Estimated Timeline**: 5-6 months for full production readiness
 
-```bash
-# Run all tests
-cargo test
+## Contributing
 
-# Run with logging
-RUST_LOG=debug cargo test
+This is a proof-of-concept library under active development. Key areas where contributions are welcome:
 
-# Run specific test
-cargo test test_api_layer
-```
+1. **IVR System Implementation** - DTMF handling and menu navigation
+2. **REST API Development** - Management and monitoring interfaces
+3. **Advanced Routing** - Skills-based and intelligent routing
+4. **Testing and Documentation** - More examples and test scenarios
+5. **Performance Optimization** - Scaling and resource management
 
-## Migration from Direct SIP Usage
+## Dependencies
 
-If you're migrating from direct SIP library usage:
+Built on top of the RVOIP ecosystem:
+- **[session-core](../session-core)**: SIP session management and call bridging
+- **[dialog-core](../dialog-core)**: SIP dialog state management  
+- **[sip-core](../sip-core)**: SIP message parsing and generation
+- **[rtp-core](../rtp-core)**: RTP media handling
 
-1. **Remove Dependencies**: Remove sip-core, rtp-core, etc.
-2. **Use CallCenterClient**: Replace manual SIP handling
-3. **Implement CallHandler**: For custom call processing
-4. **Use Event Callbacks**: Replace polling with events
-5. **Leverage APIs**: Use appropriate API for your user type
+## License
 
-## Architecture Benefits
-
-### Clean Separation
-- **API Layer**: Type-safe interfaces for different users
-- **Session Abstraction**: No direct SIP/RTP handling needed
-- **Event-Driven**: Real-time updates without polling
-- **Modular Design**: Easy to extend and maintain
-
-### Scalability
-- **Async-First**: Handle thousands of concurrent calls
-- **Efficient Routing**: O(1) agent lookups
-- **Queue Management**: Prevent system overload
-- **Database Backed**: Persistent state across restarts
-
-## Future Enhancements
-
-- **WebSocket Events**: Real-time browser dashboards
-- **Recording Integration**: Call recording with session-core
-- **Advanced Analytics**: ML-based routing optimization
-- **Multi-Tenant**: Isolated call center instances
-- **High Availability**: Distributed architecture support
+See the main RVOIP project license.
 
 ---
 
-For more examples and documentation, see the [examples](./examples) directory. 
+**TL;DR**: This is a **working call center** that can route customer calls to agents with proper queuing and load balancing. It's perfect for small deployments, learning, and as a foundation for building more advanced call center systems. 

@@ -103,10 +103,10 @@
 //! # async fn example(client: Arc<Client>) -> Result<(), Box<dyn std::error::Error>> {
 //! match client.register_simple(
 //!     "sip:alice@example.com",
-//!     "registrar.example.com:5060",
+//!     &"127.0.0.1:5060".parse().unwrap(),
 //!     Duration::from_secs(3600)
 //! ).await {
-//!     Ok(reg_id) => {
+//!     Ok(()) => {
 //!         println!("Registered successfully");
 //!     }
 //!     Err(e) if e.is_auth_error() => {
@@ -139,17 +139,19 @@
 //! // Safe call control with state checking
 //! async fn safe_hold_call(client: &Arc<Client>, call_id: &CallId) -> Result<(), ClientError> {
 //!     // Get call info first
-//!     let info = client.get_call_info(call_id).await?
-//!         .ok_or(ClientError::CallNotFound { call_id: *call_id })?;
+//!     let info = client.get_call(call_id).await?;
 //!     
 //!     // Check if we can hold
 //!     match info.state {
 //!         rvoip_client_core::call::CallState::Connected => {
 //!             client.hold_call(call_id).await
 //!         }
-//!         rvoip_client_core::call::CallState::OnHold => {
-//!             // Already on hold
-//!             Ok(())
+//!         rvoip_client_core::call::CallState::Failed => {
+//!             // Call failed, cannot hold
+//!             Err(ClientError::InvalidCallStateGeneric {
+//!                 expected: "Connected".to_string(),
+//!                 actual: "Failed".to_string(),
+//!             })
 //!         }
 //!         _ => {
 //!             Err(ClientError::InvalidCallStateGeneric {
@@ -197,7 +199,7 @@
 //! ```rust,no_run
 //! # use rvoip_client_core::{Client, ClientError, CallId};
 //! # use std::sync::Arc;
-//! # let call_id = CallId::new();
+//! # let call_id = CallId::new_v4();
 //! # async fn example(client: Arc<Client>, call_id: CallId) {
 //! use tracing::{error, warn, info};
 //! 
