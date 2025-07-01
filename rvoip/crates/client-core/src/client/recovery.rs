@@ -10,6 +10,62 @@ use tokio::time::sleep;
 use tracing::{debug, warn, error};
 
 /// Configuration for retry behavior
+/// 
+/// Defines the parameters for retry operations including maximum attempts, delay strategies,
+/// and backoff behavior. This configuration is used by retry mechanisms to control how
+/// operations are retried when they encounter recoverable errors.
+/// 
+/// # Examples
+/// 
+/// ```rust
+/// # use rvoip_client_core::client::recovery::RetryConfig;
+/// # use std::time::Duration;
+/// # fn main() {
+/// // Create a default retry configuration
+/// let config = RetryConfig::default();
+/// assert_eq!(config.max_attempts, 3);
+/// assert_eq!(config.initial_delay, Duration::from_millis(100));
+/// assert_eq!(config.backoff_multiplier, 2.0);
+/// assert!(config.use_jitter);
+/// 
+/// // Create a custom configuration
+/// let custom_config = RetryConfig {
+///     max_attempts: 5,
+///     initial_delay: Duration::from_millis(200),
+///     max_delay: Duration::from_secs(10),
+///     backoff_multiplier: 1.5,
+///     use_jitter: false,
+/// };
+/// 
+/// println!("Custom config allows {} attempts", custom_config.max_attempts);
+/// # }
+/// ```
+/// 
+/// ```rust
+/// # use rvoip_client_core::client::recovery::RetryConfig;
+/// # use std::time::Duration;
+/// # fn main() {
+/// // Configuration for different scenarios
+/// let network_config = RetryConfig {
+///     max_attempts: 3,
+///     initial_delay: Duration::from_millis(100),
+///     max_delay: Duration::from_secs(5),
+///     backoff_multiplier: 2.0,
+///     use_jitter: true,
+/// };
+/// 
+/// let registration_config = RetryConfig {
+///     max_attempts: 5,
+///     initial_delay: Duration::from_secs(1),
+///     max_delay: Duration::from_secs(30),
+///     backoff_multiplier: 2.5,
+///     use_jitter: false,
+/// };
+/// 
+/// println!("Network retries: {} attempts", network_config.max_attempts);
+/// println!("Registration retries: {} attempts", registration_config.max_attempts);
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     /// Maximum number of retry attempts
