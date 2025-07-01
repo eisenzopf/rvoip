@@ -16,7 +16,7 @@ rvoip-session-core = { path = "../session-core" }
 # No direct access to lower layers - session-core handles ALL of these:
 # rvoip-transaction-core, rvoip-sip-core, rvoip-sip-transport, 
 # rvoip-media-core, rvoip-rtp-core, rvoip-dialog-core
-infra-common = { path = "../infra-common" }
+# infra-common = { path = "../infra-common" }
 
 # Async runtime and utilities
 tokio = { version = "1.0", features = ["full"] }
