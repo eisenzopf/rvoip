@@ -36,7 +36,7 @@
 //! 
 //! ## Basic Client Setup
 //! 
-//! ```rust,no_run
+//! ```rust
 //! use rvoip_client_core::{ClientBuilder, Client, ClientEvent};
 //! use std::sync::Arc;
 //! 
@@ -77,7 +77,7 @@
 //! 
 //! ## Registration Example
 //! 
-//! ```rust,no_run
+//! ```rust
 //! # use rvoip_client_core::{ClientBuilder, registration::RegistrationConfig};
 //! # use std::sync::Arc;
 //! # async fn example(client: Arc<rvoip_client_core::Client>) -> Result<(), Box<dyn std::error::Error>> {
@@ -113,7 +113,7 @@
 //! 
 //! All operations return `ClientResult<T>` which wraps `ClientError`:
 //! 
-//! ```rust,no_run
+//! ```rust
 //! # use rvoip_client_core::{Client, ClientError};
 //! # use std::sync::Arc;
 //! # async fn example(client: Arc<Client>) -> Result<(), Box<dyn std::error::Error>> {

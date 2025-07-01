@@ -17,7 +17,7 @@
 //! 
 //! ## Basic Pattern
 //! 
-//! ```rust,no_run
+//! ```rust
 //! # use rvoip_client_core::{Client, ClientError};
 //! # use std::sync::Arc;
 //! # async fn example(client: Arc<Client>) {
@@ -51,7 +51,7 @@
 //! 
 //! Network errors are often temporary. Implement exponential backoff:
 //! 
-//! ```rust,no_run
+//! ```rust
 //! # use rvoip_client_core::{Client, ClientError};
 //! # use std::sync::Arc;
 //! # use std::time::Duration;
@@ -96,7 +96,7 @@
 //! 
 //! Handle authentication and server errors:
 //! 
-//! ```rust,no_run
+//! ```rust
 //! # use rvoip_client_core::{Client, ClientError};
 //! # use std::sync::Arc;
 //! # use std::time::Duration;
@@ -132,7 +132,7 @@
 //! 
 //! Check state before operations:
 //! 
-//! ```rust,no_run
+//! ```rust
 //! # use rvoip_client_core::{Client, ClientError, CallId};
 //! # use std::sync::Arc;
 //! # async fn example(client: Arc<Client>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
@@ -171,7 +171,7 @@
 //! 
 //! Handle codec and port allocation issues:
 //! 
-//! ```rust,no_run
+//! ```rust
 //! # use rvoip_client_core::{Client, ClientError, CallId};
 //! # use std::sync::Arc;
 //! # async fn example(client: Arc<Client>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
@@ -196,7 +196,7 @@
 //! 
 //! Always log errors with context for debugging:
 //! 
-//! ```rust,no_run
+//! ```rust
 //! # use rvoip_client_core::{Client, ClientError, CallId};
 //! # use std::sync::Arc;
 //! # let call_id = CallId::new_v4();
@@ -235,7 +235,7 @@
 //! 
 //! Use the `category()` method to group errors for metrics:
 //! 
-//! ```rust,no_run
+//! ```rust
 //! # use rvoip_client_core::ClientError;
 //! # use std::collections::HashMap;
 //! # let errors: Vec<ClientError> = vec![];
