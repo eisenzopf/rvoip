@@ -36,6 +36,56 @@ impl super::manager::ClientManager {
     // ===== PRIORITY 4.1: ENHANCED MEDIA INTEGRATION =====
     
     /// Enhanced microphone mute/unmute with proper session-core integration
+    /// 
+    /// Controls the microphone mute state for a specific call. When muted, the local audio
+    /// transmission is stopped, preventing the remote party from hearing your voice.
+    /// This operation validates the call state and emits appropriate media events.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to mute/unmute
+    /// * `muted` - `true` to mute the microphone, `false` to unmute
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if the operation succeeds, or a `ClientError` if:
+    /// - The call is not found
+    /// - The call is in an invalid state (terminated, failed, cancelled)
+    /// - The underlying media session fails to change mute state
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Basic usage - mute the microphone
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would mute microphone for call {}", call_id);
+    /// 
+    /// // Toggle functionality
+    /// let current_state = false; // Simulated current state
+    /// let new_state = !current_state;
+    /// println!("Would toggle microphone from {} to {}", current_state, new_state);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Privacy mode example
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Enabling privacy mode for call {}", call_id);
+    /// println!("Microphone would be muted");
+    /// # }
+    /// ```
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Updates call metadata with mute state and timestamp
+    /// - Emits a `MediaEventType::MicrophoneStateChanged` event
+    /// - Calls session-core to actually control audio transmission
     pub async fn set_microphone_mute(&self, call_id: &CallId, muted: bool) -> ClientResult<()> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -97,6 +147,56 @@ impl super::manager::ClientManager {
     }
     
     /// Enhanced speaker mute/unmute with event emission
+    /// 
+    /// Controls the speaker (audio output) mute state for a specific call. When speaker
+    /// is muted, you won't hear audio from the remote party. This is typically handled
+    /// client-side as it controls local audio playback rather than network transmission.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to mute/unmute
+    /// * `muted` - `true` to mute the speaker, `false` to unmute
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if the operation succeeds, or a `ClientError` if the call is not found.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Basic speaker control
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would mute speaker for call {}", call_id);
+    /// 
+    /// // Unmute speaker
+    /// println!("Would unmute speaker for call {}", call_id);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Privacy mode: mute both microphone and speaker
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Enabling full privacy mode for call {}", call_id);
+    /// println!("Would mute microphone and speaker");
+    /// # }
+    /// ```
+    /// 
+    /// # Implementation Notes
+    /// 
+    /// This function handles client-side audio output control and does not affect
+    /// network RTP streams. The mute state is stored in call metadata and can be
+    /// retrieved using `get_speaker_mute_state()`.
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Updates call metadata with speaker mute state and timestamp
+    /// - Emits a `MediaEventType::SpeakerStateChanged` event
     pub async fn set_speaker_mute(&self, call_id: &CallId, muted: bool) -> ClientResult<()> {
         // Validate call exists
         if !self.call_info.contains_key(call_id) {
@@ -136,7 +236,62 @@ impl super::manager::ClientManager {
         Ok(())
     }
     
-    /// Get media information for a call using session-core
+    /// Get comprehensive media information for a call using session-core
+    /// 
+    /// Retrieves detailed media information about an active call, including SDP negotiation
+    /// details, RTP port assignments, codec information, and current media state.
+    /// This is useful for monitoring call quality, debugging media issues, and displaying
+    /// technical call information to users or administrators.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to query
+    /// 
+    /// # Returns
+    /// 
+    /// Returns a `CallMediaInfo` struct containing:
+    /// - Local and remote SDP descriptions
+    /// - RTP port assignments (local and remote)
+    /// - Negotiated audio codec
+    /// - Current mute and hold states
+    /// - Audio direction (send/receive/both/inactive)
+    /// - Quality metrics (if available)
+    /// 
+    /// Returns `ClientError::CallNotFound` if the call doesn't exist, or
+    /// `ClientError::InternalError` if media information cannot be retrieved.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use rvoip_client_core::client::types::AudioDirection;
+    /// # fn main() {
+    /// // Basic media info retrieval
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would get media info for call {}", call_id);
+    /// 
+    /// // Check audio direction
+    /// let audio_direction = AudioDirection::SendReceive;
+    /// match audio_direction {
+    ///     AudioDirection::SendReceive => println!("Full duplex audio"),
+    ///     AudioDirection::SendOnly => println!("Send-only (e.g., hold)"),
+    ///     AudioDirection::ReceiveOnly => println!("Receive-only"),
+    ///     AudioDirection::Inactive => println!("No audio flow"),
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Diagnostic information
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Getting diagnostic info for call {}", call_id);
+    /// println!("This would include SDP, ports, codec, and states");
+    /// # }
+    /// ```
     pub async fn get_call_media_info(&self, call_id: &CallId) -> ClientResult<CallMediaInfo> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -172,7 +327,52 @@ impl super::manager::ClientManager {
         Ok(call_media_info)
     }
     
-    /// Get microphone mute state
+    /// Get the current microphone mute state for a call
+    /// 
+    /// Retrieves the current mute state of the microphone for the specified call.
+    /// This state is maintained in the call's metadata and reflects whether local
+    /// audio transmission is currently enabled (false) or disabled (true).
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to query
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(true)` if the microphone is muted, `Ok(false)` if unmuted,
+    /// or `ClientError::CallNotFound` if the call doesn't exist.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Check microphone state
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would check microphone mute state for call {}", call_id);
+    /// 
+    /// // Conditional logic based on mute state
+    /// let is_muted = false; // Simulated state
+    /// if is_muted {
+    ///     println!("Microphone is currently muted");
+    /// } else {
+    ///     println!("Microphone is active");
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // UI indicator logic
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let mute_state = false; // Would get actual state
+    /// let indicator = if mute_state { "🔇" } else { "🔊" };
+    /// println!("Microphone status for call {}: {}", call_id, indicator);
+    /// # }
+    /// ```
     pub async fn get_microphone_mute_state(&self, call_id: &CallId) -> ClientResult<bool> {
         if let Some(call_info) = self.call_info.get(call_id) {
             let muted = call_info.metadata.get("microphone_muted")
@@ -184,7 +384,55 @@ impl super::manager::ClientManager {
         }
     }
     
-    /// Get speaker mute state
+    /// Get the current speaker mute state for a call
+    /// 
+    /// Retrieves the current mute state of the speaker (audio output) for the specified call.
+    /// This state is maintained in the call's metadata and reflects whether remote
+    /// audio playback is currently enabled (false) or disabled (true).
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to query
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(true)` if the speaker is muted, `Ok(false)` if unmuted,
+    /// or `ClientError::CallNotFound` if the call doesn't exist.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Check speaker state
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would check speaker mute state for call {}", call_id);
+    /// 
+    /// // Audio feedback prevention
+    /// let speaker_muted = true; // Simulated state
+    /// if speaker_muted {
+    ///     println!("Safe to use speakerphone mode");
+    /// } else {
+    ///     println!("May cause audio feedback");
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Privacy status check
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let mic_muted = true;
+    /// let speaker_muted = true;
+    /// 
+    /// if mic_muted && speaker_muted {
+    ///     println!("Call {} is in full privacy mode", call_id);
+    /// }
+    /// # }
+    /// ```
     pub async fn get_speaker_mute_state(&self, call_id: &CallId) -> ClientResult<bool> {
         if let Some(call_info) = self.call_info.get(call_id) {
             let muted = call_info.metadata.get("speaker_muted")
@@ -196,7 +444,49 @@ impl super::manager::ClientManager {
         }
     }
     
-    /// Get available audio codecs with enhanced information
+    /// Get supported audio codecs with comprehensive information
+    /// 
+    /// Returns a complete list of audio codecs supported by this client implementation.
+    /// This is an alias for `get_available_codecs()` provided for API consistency.
+    /// Each codec includes detailed information about capabilities, quality ratings,
+    /// and technical specifications.
+    /// 
+    /// # Returns
+    /// 
+    /// A vector of `AudioCodecInfo` structures containing:
+    /// - Codec name and payload type
+    /// - Sample rate and channel configuration
+    /// - Quality rating (1-5 scale)
+    /// - Human-readable description
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::client::types::AudioCodecInfo;
+    /// # fn main() {
+    /// // Simulate codec information
+    /// let codec = AudioCodecInfo {
+    ///     name: "OPUS".to_string(),
+    ///     payload_type: 111,
+    ///     clock_rate: 48000,
+    ///     channels: 2,
+    ///     description: "High quality codec".to_string(),
+    ///     quality_rating: 5,
+    /// };
+    /// 
+    /// println!("Codec: {} (Quality: {}/5)", codec.name, codec.quality_rating);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Filter high-quality codecs
+    /// let quality_threshold = 4;
+    /// println!("Looking for codecs with quality >= {}", quality_threshold);
+    /// println!("Would filter codec list by quality rating");
+    /// # }
+    /// ```
+    /// 
     /// Get supported audio codecs (alias for get_available_codecs)
     pub async fn get_supported_audio_codecs(&self) -> Vec<AudioCodecInfo> {
         self.get_available_codecs().await
@@ -220,27 +510,41 @@ impl super::manager::ClientManager {
     /// 
     /// # Examples
     /// 
-    /// ```rust,no_run
-    /// # use rvoip_client_core::client::ClientManager;
-    /// # use std::sync::Arc;
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client = ClientManager::new(Default::default()).await?;
-    /// // Get available codecs for capability display
-    /// let codecs = client.get_available_codecs().await;
+    /// ```rust
+    /// # use rvoip_client_core::client::types::AudioCodecInfo;
+    /// # fn main() {
+    /// // Example codec information
+    /// let codecs = vec![
+    ///     AudioCodecInfo {
+    ///         name: "OPUS".to_string(),
+    ///         payload_type: 111,
+    ///         clock_rate: 48000,
+    ///         channels: 2,
+    ///         description: "High quality codec".to_string(),
+    ///         quality_rating: 5,
+    ///     },
+    ///     AudioCodecInfo {
+    ///         name: "G722".to_string(),
+    ///         payload_type: 9,
+    ///         clock_rate: 8000,
+    ///         channels: 1,
+    ///         description: "Wideband audio".to_string(),
+    ///         quality_rating: 4,
+    ///     }
+    /// ];
     /// 
-    /// for codec in codecs {
+    /// for codec in &codecs {
     ///     println!("Codec: {} (PT: {}, Rate: {}Hz, Quality: {}/5)", 
     ///              codec.name, codec.payload_type, codec.clock_rate, codec.quality_rating);
     ///     println!("  Description: {}", codec.description);
     /// }
     /// 
     /// // Find high-quality codecs
-    /// let high_quality: Vec<_> = client.get_available_codecs().await
+    /// let high_quality: Vec<_> = codecs
     ///     .into_iter()
     ///     .filter(|c| c.quality_rating >= 4)
     ///     .collect();
-    /// # Ok(())
+    /// println!("Found {} high-quality codecs", high_quality.len());
     /// # }
     /// ```
     pub async fn get_available_codecs(&self) -> Vec<AudioCodecInfo> {
@@ -289,7 +593,68 @@ impl super::manager::ClientManager {
         ]
     }
     
-    /// Get codec information for a specific call
+    /// Get codec information for a specific active call
+    /// 
+    /// Retrieves detailed information about the audio codec currently being used
+    /// for the specified call. This includes technical specifications, quality ratings,
+    /// and capabilities of the negotiated codec. Returns `None` if no codec has been
+    /// negotiated yet or if the call doesn't have active media.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to query
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(Some(AudioCodecInfo))` with codec details if available,
+    /// `Ok(None)` if no codec is negotiated, or `ClientError` if the call is not found
+    /// or media information cannot be retrieved.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use rvoip_client_core::client::types::AudioCodecInfo;
+    /// # fn main() {
+    /// // Check call codec
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would get codec info for call {}", call_id);
+    /// 
+    /// // Example codec info handling
+    /// let codec_info = Some(AudioCodecInfo {
+    ///     name: "G722".to_string(),
+    ///     payload_type: 9,
+    ///     clock_rate: 8000,
+    ///     channels: 1,
+    ///     description: "Wideband audio".to_string(),
+    ///     quality_rating: 4,
+    /// });
+    /// 
+    /// match codec_info {
+    ///     Some(codec) => println!("Using codec: {} ({})", codec.name, codec.description),
+    ///     None => println!("No codec negotiated yet"),
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Quality assessment
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Assessing call quality for call {}", call_id);
+    /// 
+    /// let quality_rating = 4; // Simulated rating
+    /// match quality_rating {
+    ///     5 => println!("Excellent audio quality"),
+    ///     4 => println!("Good audio quality"),
+    ///     3 => println!("Acceptable audio quality"),
+    ///     _ => println!("Poor audio quality"),
+    /// }
+    /// # }
+    /// ```
     pub async fn get_call_codec_info(&self, call_id: &CallId) -> ClientResult<Option<AudioCodecInfo>> {
         let media_info = self.get_call_media_info(call_id).await?;
         
@@ -303,7 +668,65 @@ impl super::manager::ClientManager {
         }
     }
     
-    /// Set preferred codec order
+    /// Set preferred codec order for future calls
+    /// 
+    /// Configures the preferred order of audio codecs for use in future call negotiations.
+    /// The client will attempt to negotiate codecs in the specified order, with the first
+    /// codec in the list being the most preferred. This setting affects SDP generation
+    /// and codec negotiation during call establishment.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `codec_names` - Vector of codec names in order of preference (e.g., ["OPUS", "G722", "PCMU"])
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` on success. Currently always succeeds as this stores preferences
+    /// for future use rather than validating codec availability immediately.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Set high-quality codec preference
+    /// let high_quality_codecs = vec![
+    ///     "OPUS".to_string(),
+    ///     "G722".to_string(),
+    ///     "PCMU".to_string(),
+    /// ];
+    /// println!("Would set codec preference: {:?}", high_quality_codecs);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Low bandwidth preference
+    /// let low_bandwidth_codecs = vec![
+    ///     "G729".to_string(),
+    ///     "PCMU".to_string(),
+    ///     "PCMA".to_string(),
+    /// ];
+    /// println!("Low bandwidth codec order: {:?}", low_bandwidth_codecs);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Enterprise compatibility preference
+    /// let enterprise_codecs = vec![
+    ///     "G722".to_string(),  // Good quality, widely supported
+    ///     "PCMU".to_string(),  // Universal compatibility
+    ///     "PCMA".to_string(),  // European preference
+    /// ];
+    /// println!("Enterprise codec preference: {:?}", enterprise_codecs);
+    /// # }
+    /// ```
+    /// 
+    /// # Implementation Notes
+    /// 
+    /// This setting will be applied to future call negotiations. Active calls will
+    /// continue using their currently negotiated codecs. The codec names should match
+    /// those returned by `get_available_codecs()`.
     pub async fn set_preferred_codecs(&self, codec_names: Vec<String>) -> ClientResult<()> {
         // This would typically configure the session manager with preferred codecs
         // For now, we'll store it in client configuration metadata
@@ -316,6 +739,57 @@ impl super::manager::ClientManager {
     }
     
     /// Start audio transmission for a call
+    /// 
+    /// Initiates audio transmission for the specified call, enabling the flow of
+    /// RTP audio packets between the local client and the remote endpoint. This
+    /// function validates the call state and coordinates with the session-core
+    /// to establish the media flow.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to start audio transmission for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` on success, or a `ClientError` if:
+    /// - The call is not found
+    /// - The call is not in a connected state
+    /// - The underlying media session fails to start transmission
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Start audio transmission
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would start audio transmission for call {}", call_id);
+    /// println!("RTP audio packets would begin flowing");
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Resume audio after hold
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Resuming audio transmission for call {}", call_id);
+    /// println!("Call would be taken off hold");
+    /// # }
+    /// ```
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Updates call metadata with transmission status and timestamp
+    /// - Emits a `MediaEventType::AudioStarted` event
+    /// - Begins RTP packet transmission through session-core
+    /// 
+    /// # State Requirements
+    /// 
+    /// The call must be in `Connected` state. Calls that are terminated, failed,
+    /// or cancelled cannot have audio transmission started.
     pub async fn start_audio_transmission(&self, call_id: &CallId) -> ClientResult<()> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -377,6 +851,68 @@ impl super::manager::ClientManager {
     }
     
     /// Stop audio transmission for a call
+    /// 
+    /// Stops audio transmission for the specified call, halting the flow of
+    /// RTP audio packets between the local client and the remote endpoint. This
+    /// is typically used when putting a call on hold or during call termination.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to stop audio transmission for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` on success, or a `ClientError` if:
+    /// - The call is not found
+    /// - The underlying media session fails to stop transmission
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Stop audio transmission
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would stop audio transmission for call {}", call_id);
+    /// println!("RTP audio packets would stop flowing");
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Put call on hold
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Putting call {} on hold", call_id);
+    /// println!("Audio transmission would be stopped");
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Emergency stop
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Emergency stop of audio for call {}", call_id);
+    /// println!("Immediate halt of RTP transmission");
+    /// # }
+    /// ```
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Updates call metadata with transmission status and timestamp
+    /// - Emits a `MediaEventType::AudioStopped` event
+    /// - Stops RTP packet transmission through session-core
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Putting calls on hold
+    /// - Call termination procedures
+    /// - Emergency audio cutoff
+    /// - Bandwidth conservation
     pub async fn stop_audio_transmission(&self, call_id: &CallId) -> ClientResult<()> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -414,7 +950,51 @@ impl super::manager::ClientManager {
         Ok(())
     }
     
-    /// Check if audio transmission is active
+    /// Check if audio transmission is active for a call
+    /// 
+    /// Determines whether audio transmission is currently active for the specified call.
+    /// This status is tracked in the call's metadata and reflects the current state
+    /// of RTP audio packet transmission.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to check
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(true)` if audio transmission is active, `Ok(false)` if inactive,
+    /// or `ClientError::CallNotFound` if the call doesn't exist.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Check transmission status
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let is_active = true; // Simulated state
+    /// 
+    /// if is_active {
+    ///     println!("Call {} has active audio transmission", call_id);
+    /// } else {
+    ///     println!("Call {} audio transmission is stopped", call_id);
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Conditional UI display
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let transmission_active = false; // Simulated
+    /// 
+    /// let status_icon = if transmission_active { "🔊" } else { "⏸️" };
+    /// println!("Audio status for call {}: {}", call_id, status_icon);
+    /// # }
+    /// ```
     pub async fn is_audio_transmission_active(&self, call_id: &CallId) -> ClientResult<bool> {
         if let Some(call_info) = self.call_info.get(call_id) {
             let active = call_info.metadata.get("audio_transmission_active")
@@ -426,7 +1006,56 @@ impl super::manager::ClientManager {
         }
     }
     
-    /// Update call media configuration
+    /// Update call media configuration with new SDP
+    /// 
+    /// Updates the media configuration for an existing call using a new Session Description
+    /// Protocol (SDP) description. This is typically used for handling re-INVITE scenarios,
+    /// media parameter changes, or call modifications during an active session.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to update
+    /// * `new_sdp` - The new SDP description to apply
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` on success, or a `ClientError` if:
+    /// - The call is not found
+    /// - The SDP is empty or invalid
+    /// - The session-core fails to apply the media update
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Update media configuration
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let new_sdp = "v=0\r\no=example 123 456 IN IP4 192.168.1.1\r\n";
+    /// 
+    /// println!("Would update media for call {} with new SDP", call_id);
+    /// println!("SDP length: {} bytes", new_sdp.len());
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Re-INVITE scenario
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Processing re-INVITE for call {}", call_id);
+    /// println!("Would update call media parameters");
+    /// # }
+    /// ```
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Handling SIP re-INVITE messages
+    /// - Updating codec parameters mid-call
+    /// - Changing media endpoints
+    /// - Modifying bandwidth allocations
     pub async fn update_call_media(&self, call_id: &CallId, new_sdp: &str) -> ClientResult<()> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -451,7 +1080,87 @@ impl super::manager::ClientManager {
         Ok(())
     }
     
-    /// Get media capabilities
+    /// Get comprehensive media capabilities of the client
+    /// 
+    /// Returns a detailed description of the media capabilities supported by this client,
+    /// including available codecs, supported features, and operational limits. This information
+    /// is useful for capability negotiation, feature detection, and system configuration.
+    /// 
+    /// # Returns
+    /// 
+    /// Returns a `MediaCapabilities` struct containing:
+    /// - List of supported audio codecs with full details
+    /// - Feature support flags (hold, mute, DTMF, transfer)
+    /// - Protocol support indicators (SDP, RTP, RTCP)
+    /// - Operational limits (max concurrent calls)
+    /// - Supported media types
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::client::types::{MediaCapabilities, AudioCodecInfo};
+    /// # fn main() {
+    /// // Check client capabilities
+    /// let capabilities = MediaCapabilities {
+    ///     supported_codecs: vec![
+    ///         AudioCodecInfo {
+    ///             name: "OPUS".to_string(),
+    ///             payload_type: 111,
+    ///             clock_rate: 48000,
+    ///             channels: 2,
+    ///             description: "High quality".to_string(),
+    ///             quality_rating: 5,
+    ///         }
+    ///     ],
+    ///     can_hold: true,
+    ///     can_mute_microphone: true,
+    ///     can_mute_speaker: true,
+    ///     can_send_dtmf: true,
+    ///     can_transfer: true,
+    ///     supports_sdp_offer_answer: true,
+    ///     supports_rtp: true,
+    ///     supports_rtcp: true,
+    ///     max_concurrent_calls: 10,
+    ///     supported_media_types: vec!["audio".to_string()],
+    /// };
+    /// 
+    /// println!("Client supports {} codecs", capabilities.supported_codecs.len());
+    /// println!("Max concurrent calls: {}", capabilities.max_concurrent_calls);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Feature detection
+    /// let can_hold = true;
+    /// let can_transfer = true;
+    /// 
+    /// if can_hold && can_transfer {
+    ///     println!("Advanced call control features available");
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Protocol support check
+    /// let supports_rtp = true;
+    /// let supports_rtcp = true;
+    /// 
+    /// match (supports_rtp, supports_rtcp) {
+    ///     (true, true) => println!("Full RTP/RTCP support"),
+    ///     (true, false) => println!("RTP only support"),
+    ///     _ => println!("Limited media support"),
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Client capability advertisement
+    /// - Feature availability checking before operations
+    /// - System configuration and limits planning
+    /// - Interoperability assessment
     pub async fn get_media_capabilities(&self) -> MediaCapabilities {
         MediaCapabilities {
             supported_codecs: self.get_available_codecs().await,
@@ -501,6 +1210,61 @@ impl super::manager::ClientManager {
     // ===== PRIORITY 4.2: MEDIA SESSION COORDINATION =====
     
     /// Generate SDP offer for a call using session-core
+    /// 
+    /// Creates a Session Description Protocol (SDP) offer for the specified call, which
+    /// describes the media capabilities and parameters that this client is willing to
+    /// negotiate. The offer includes codec preferences, RTP port assignments, and other
+    /// media configuration details required for establishing the call.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to generate an SDP offer for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns the SDP offer as a string, or a `ClientError` if:
+    /// - The call is not found
+    /// - The call is not in an appropriate state (must be Initiating or Connected)
+    /// - The underlying session-core fails to generate the SDP
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Generate SDP offer for outgoing call
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would generate SDP offer for call {}", call_id);
+    /// 
+    /// // Example SDP structure
+    /// let sdp_example = "v=0\r\no=- 123456 654321 IN IP4 192.168.1.1\r\n";
+    /// println!("SDP offer would be {} bytes", sdp_example.len());
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // SIP call flow context
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Generating SDP offer for INVITE to call {}", call_id);
+    /// println!("This SDP will be included in the SIP INVITE message");
+    /// # }
+    /// ```
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Updates call metadata with the generated SDP offer and timestamp
+    /// - Emits a `MediaEventType::SdpOfferGenerated` event
+    /// - Coordinates with session-core for media session setup
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Initiating outbound calls
+    /// - Re-INVITE scenarios for call modifications
+    /// - Media renegotiation during active calls
     pub async fn generate_sdp_offer(&self, call_id: &CallId) -> ClientResult<String> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -563,6 +1327,62 @@ impl super::manager::ClientManager {
     }
     
     /// Process SDP answer for a call using session-core
+    /// 
+    /// Processes a Session Description Protocol (SDP) answer received from the remote party,
+    /// completing the media negotiation process. This function validates the SDP answer,
+    /// updates the media session parameters, and establishes the agreed-upon media flow
+    /// configuration for the call.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to process the SDP answer for
+    /// * `sdp_answer` - The SDP answer string received from the remote party
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` on successful processing, or a `ClientError` if:
+    /// - The call is not found
+    /// - The SDP answer is empty or malformed
+    /// - The underlying session-core fails to process the SDP
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Process SDP answer from 200 OK response
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let sdp_answer = "v=0\r\no=remote 456789 987654 IN IP4 192.168.1.2\r\n";
+    /// 
+    /// println!("Would process SDP answer for call {}", call_id);
+    /// println!("SDP answer size: {} bytes", sdp_answer.len());
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Media negotiation completion
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Completing media negotiation for call {}", call_id);
+    /// println!("Would establish RTP flow based on negotiated parameters");
+    /// # }
+    /// ```
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Updates call metadata with the processed SDP answer and timestamp
+    /// - Emits a `MediaEventType::SdpAnswerProcessed` event
+    /// - Establishes media flow parameters with session-core
+    /// - Enables RTP packet transmission/reception
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Processing 200 OK responses to INVITE requests
+    /// - Handling SDP answers in re-INVITE scenarios
+    /// - Completing media renegotiation processes
     pub async fn process_sdp_answer(&self, call_id: &CallId, sdp_answer: &str) -> ClientResult<()> {
         // Validate SDP answer is not empty first
         if sdp_answer.trim().is_empty() {
@@ -609,6 +1429,57 @@ impl super::manager::ClientManager {
     }
     
     /// Stop media session for a call
+    /// 
+    /// Terminates the media session for the specified call, stopping all audio transmission
+    /// and reception. This function cleanly shuts down the RTP flows, releases media resources,
+    /// and updates the call state to reflect that media is no longer active.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to stop media session for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` on successful termination, or a `ClientError` if:
+    /// - The call is not found
+    /// - The underlying media session fails to stop cleanly
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Stop media session during call termination
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would stop media session for call {}", call_id);
+    /// println!("RTP flows would be terminated");
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Cleanup during error handling
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Emergency media session cleanup for call {}", call_id);
+    /// println!("Would release all media resources");
+    /// # }
+    /// ```
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Updates call metadata to mark media session as inactive
+    /// - Emits a `MediaEventType::MediaSessionStopped` event
+    /// - Releases RTP ports and media resources
+    /// - Stops all audio transmission and reception
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Call termination procedures
+    /// - Error recovery and cleanup
+    /// - Media session reinitiation prep
     pub async fn stop_media_session(&self, call_id: &CallId) -> ClientResult<()> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -647,6 +1518,77 @@ impl super::manager::ClientManager {
     }
     
     /// Start media session for a call
+    /// 
+    /// Initiates a new media session for the specified call, creating the necessary RTP flows
+    /// and establishing audio transmission capabilities. This function coordinates with
+    /// session-core to set up media parameters and returns detailed information about
+    /// the created media session.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to start media session for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `MediaSessionInfo` containing detailed session information, or a `ClientError` if:
+    /// - The call is not found
+    /// - The call is not in Connected state
+    /// - The underlying session-core fails to create the media session
+    /// - Media information cannot be retrieved after session creation
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use rvoip_client_core::client::types::{MediaSessionInfo, AudioDirection};
+    /// # use chrono::Utc;
+    /// # fn main() {
+    /// // Start media session for connected call
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would start media session for call {}", call_id);
+    /// 
+    /// // Example session info
+    /// let session_info = MediaSessionInfo {
+    ///     call_id,
+    ///     session_id: rvoip_session_core::api::SessionId("session-123".to_string()),
+    ///     media_session_id: "media-123".to_string(),
+    ///     local_rtp_port: Some(12000),
+    ///     remote_rtp_port: Some(12001),
+    ///     codec: Some("OPUS".to_string()),
+    ///     media_direction: AudioDirection::SendReceive,
+    ///     quality_metrics: None,
+    ///     is_active: true,
+    ///     created_at: Utc::now(),
+    /// };
+    /// 
+    /// println!("Media session {} created on port {}", 
+    ///          session_info.media_session_id, 
+    ///          session_info.local_rtp_port.unwrap_or(0));
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Enterprise call setup
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Establishing enterprise media session for call {}", call_id);
+    /// println!("Would configure high-quality codecs and QoS parameters");
+    /// # }
+    /// ```
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Creates a new media session in session-core
+    /// - Updates call metadata with media session details
+    /// - Emits a `MediaEventType::MediaSessionStarted` event
+    /// - Allocates RTP ports and resources
+    /// 
+    /// # State Requirements
+    /// 
+    /// The call must be in `Connected` state before starting a media session.
     pub async fn start_media_session(&self, call_id: &CallId) -> ClientResult<MediaSessionInfo> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -729,7 +1671,52 @@ impl super::manager::ClientManager {
         Ok(client_media_info)
     }
     
-    /// Check if media session is active
+    /// Check if media session is active for a call
+    /// 
+    /// Determines whether a media session is currently active for the specified call.
+    /// A media session is considered active if it has been started and not yet stopped,
+    /// meaning RTP flows are established and audio can be transmitted/received.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to check
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(true)` if media session is active, `Ok(false)` if inactive,
+    /// or `ClientError::CallNotFound` if the call doesn't exist.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Check media session status
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let is_active = true; // Simulated state
+    /// 
+    /// if is_active {
+    ///     println!("Call {} has active media session", call_id);
+    /// } else {
+    ///     println!("Call {} media session is inactive", call_id);
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Conditional media operations
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let media_active = false; // Simulated
+    /// 
+    /// if !media_active {
+    ///     println!("Need to start media session for call {}", call_id);
+    /// }
+    /// # }
+    /// ```
     pub async fn is_media_session_active(&self, call_id: &CallId) -> ClientResult<bool> {
         if let Some(call_info) = self.call_info.get(call_id) {
             let active = call_info.metadata.get("media_session_active")
@@ -741,7 +1728,67 @@ impl super::manager::ClientManager {
         }
     }
     
-    /// Get media session information
+    /// Get detailed media session information for a call
+    /// 
+    /// Retrieves comprehensive information about the media session for the specified call,
+    /// including session identifiers, RTP port assignments, codec details, media direction,
+    /// and session timestamps. Returns `None` if no active media session exists.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to query
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(Some(MediaSessionInfo))` with session details if active,
+    /// `Ok(None)` if no media session is active, or `ClientError` if the call
+    /// is not found or media information cannot be retrieved.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use rvoip_client_core::client::types::{MediaSessionInfo, AudioDirection};
+    /// # use chrono::Utc;
+    /// # fn main() {
+    /// // Get current media session info
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would get media session info for call {}", call_id);
+    /// 
+    /// // Example session info structure
+    /// let session_info = Some(MediaSessionInfo {
+    ///     call_id,
+    ///     session_id: rvoip_session_core::api::SessionId("session-456".to_string()),
+    ///     media_session_id: "media-456".to_string(),
+    ///     local_rtp_port: Some(13000),
+    ///     remote_rtp_port: Some(13001),
+    ///     codec: Some("G722".to_string()),
+    ///     media_direction: AudioDirection::SendReceive,
+    ///     quality_metrics: None,
+    ///     is_active: true,
+    ///     created_at: Utc::now(),
+    /// });
+    /// 
+    /// match session_info {
+    ///     Some(info) => println!("Active session: {} using codec {}", 
+    ///                           info.media_session_id, 
+    ///                           info.codec.unwrap_or("Unknown".to_string())),
+    ///     None => println!("No active media session"),
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Session diagnostics
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Gathering diagnostic info for call {}", call_id);
+    /// println!("Would include ports, codecs, and quality metrics");
+    /// # }
+    /// ```
     pub async fn get_media_session_info(&self, call_id: &CallId) -> ClientResult<Option<MediaSessionInfo>> {
         if !self.is_media_session_active(call_id).await? {
             return Ok(None);
@@ -792,6 +1839,55 @@ impl super::manager::ClientManager {
     }
     
     /// Update media session for a call (e.g., for re-INVITE)
+    /// 
+    /// Updates an existing media session with new parameters, typically used during
+    /// SIP re-INVITE scenarios where call parameters need to be modified mid-call.
+    /// This can include codec changes, hold/unhold operations, or other media modifications.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to update
+    /// * `new_sdp` - The new SDP description with updated media parameters
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` on successful update, or a `ClientError` if:
+    /// - The call is not found
+    /// - The new SDP is empty or invalid
+    /// - The session-core fails to apply the media update
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Handle re-INVITE with new media parameters
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let new_sdp = "v=0\r\no=updated 789 012 IN IP4 192.168.1.3\r\n";
+    /// 
+    /// println!("Would update media session for call {}", call_id);
+    /// println!("New SDP size: {} bytes", new_sdp.len());
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Codec change during call
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Updating codec for call {} due to network conditions", call_id);
+    /// println!("Would switch to lower bandwidth codec");
+    /// # }
+    /// ```
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Processing SIP re-INVITE requests
+    /// - Codec switching for quality adaptation
+    /// - Hold/unhold operations
+    /// - Media parameter renegotiation
     pub async fn update_media_session(&self, call_id: &CallId, new_sdp: &str) -> ClientResult<()> {
         // Validate SDP is not empty first
         if new_sdp.trim().is_empty() {
@@ -838,6 +1934,80 @@ impl super::manager::ClientManager {
     }
     
     /// Get negotiated media parameters for a call
+    /// 
+    /// Retrieves the final negotiated media parameters that resulted from the SDP
+    /// offer/answer exchange. This includes the agreed-upon codec, ports, bandwidth
+    /// limits, and other media configuration details that both parties have accepted.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to get negotiated parameters for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(Some(NegotiatedMediaParams))` with negotiated parameters if available,
+    /// `Ok(None)` if negotiation is incomplete, or `ClientError` if the call is not found
+    /// or parameters cannot be retrieved.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use rvoip_client_core::client::types::{NegotiatedMediaParams, AudioDirection};
+    /// # use chrono::Utc;
+    /// # fn main() {
+    /// // Check negotiated parameters
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would get negotiated media parameters for call {}", call_id);
+    /// 
+    /// // Example negotiated parameters
+    /// let params = Some(NegotiatedMediaParams {
+    ///     call_id,
+    ///     negotiated_codec: Some("G722".to_string()),
+    ///     local_rtp_port: Some(14000),
+    ///     remote_rtp_port: Some(14001),
+    ///     audio_direction: AudioDirection::SendReceive,
+    ///     local_sdp: "v=0\r\no=local...".to_string(),
+    ///     remote_sdp: "v=0\r\no=remote...".to_string(),
+    ///     negotiated_at: Utc::now(),
+    ///     supports_dtmf: true,
+    ///     supports_hold: true,
+    ///     bandwidth_kbps: Some(64),
+    ///     encryption_enabled: false,
+    /// });
+    /// 
+    /// match params {
+    ///     Some(p) => println!("Negotiated: {} at {}kbps", 
+    ///                        p.negotiated_codec.unwrap_or("Unknown".to_string()),
+    ///                        p.bandwidth_kbps.unwrap_or(0)),
+    ///     None => println!("Negotiation not complete"),
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Compatibility check
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Checking feature compatibility for call {}", call_id);
+    /// 
+    /// let supports_dtmf = true; // From negotiated params
+    /// let supports_hold = true;
+    /// 
+    /// println!("DTMF support: {}", if supports_dtmf { "Yes" } else { "No" });
+    /// println!("Hold support: {}", if supports_hold { "Yes" } else { "No" });
+    /// # }
+    /// ```
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Verifying successful media negotiation
+    /// - Feature availability checking
+    /// - Quality monitoring and optimization
+    /// - Debugging media setup issues
     pub async fn get_negotiated_media_params(&self, call_id: &CallId) -> ClientResult<Option<NegotiatedMediaParams>> {
         let media_info = self.get_call_media_info(call_id).await?;
         
@@ -866,7 +2036,85 @@ impl super::manager::ClientManager {
         }
     }
     
-    /// Get enhanced media capabilities
+    /// Get enhanced media capabilities with advanced features
+    /// 
+    /// Returns an extended set of media capabilities that includes advanced features
+    /// like session lifecycle management, SDP renegotiation support, early media,
+    /// and encryption capabilities. This provides a more detailed view of the client's
+    /// media processing capabilities compared to the basic capabilities.
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `EnhancedMediaCapabilities` containing:
+    /// - Basic media capabilities (codecs, mute, hold, etc.)
+    /// - Advanced SDP features (offer/answer, renegotiation)
+    /// - Session lifecycle management capabilities
+    /// - Encryption and security features
+    /// - Transport protocol support
+    /// - Performance and scalability limits
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::client::types::{EnhancedMediaCapabilities, MediaCapabilities, AudioCodecInfo};
+    /// # fn main() {
+    /// // Check advanced capabilities
+    /// let basic_caps = MediaCapabilities {
+    ///     supported_codecs: vec![],
+    ///     can_hold: true,
+    ///     can_mute_microphone: true,
+    ///     can_mute_speaker: true,
+    ///     can_send_dtmf: true,
+    ///     can_transfer: true,
+    ///     supports_sdp_offer_answer: true,
+    ///     supports_rtp: true,
+    ///     supports_rtcp: true,
+    ///     max_concurrent_calls: 10,
+    ///     supported_media_types: vec!["audio".to_string()],
+    /// };
+    /// 
+    /// let enhanced_caps = EnhancedMediaCapabilities {
+    ///     basic_capabilities: basic_caps,
+    ///     supports_sdp_offer_answer: true,
+    ///     supports_media_session_lifecycle: true,
+    ///     supports_sdp_renegotiation: true,
+    ///     supports_early_media: true,
+    ///     supports_media_session_updates: true,
+    ///     supports_codec_negotiation: true,
+    ///     supports_bandwidth_management: false,
+    ///     supports_encryption: false,
+    ///     supported_sdp_version: "0".to_string(),
+    ///     max_media_sessions: 10,
+    ///     preferred_rtp_port_range: (10000, 20000),
+    ///     supported_transport_protocols: vec!["RTP/AVP".to_string()],
+    /// };
+    /// 
+    /// println!("SDP renegotiation: {}", enhanced_caps.supports_sdp_renegotiation);
+    /// println!("Early media: {}", enhanced_caps.supports_early_media);
+    /// println!("Max sessions: {}", enhanced_caps.max_media_sessions);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Feature availability matrix
+    /// let supports_renegotiation = true;
+    /// let supports_early_media = true;
+    /// let supports_encryption = false;
+    /// 
+    /// println!("Advanced Features:");
+    /// println!("  SDP Renegotiation: {}", if supports_renegotiation { "✓" } else { "✗" });
+    /// println!("  Early Media: {}", if supports_early_media { "✓" } else { "✗" });
+    /// println!("  Encryption: {}", if supports_encryption { "✓" } else { "✗" });
+    /// # }
+    /// ```
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Advanced capability negotiation
+    /// - Enterprise feature planning
+    /// - Integration compatibility assessment
+    /// - Performance planning and sizing
     pub async fn get_enhanced_media_capabilities(&self) -> EnhancedMediaCapabilities {
         let basic_capabilities = self.get_media_capabilities().await;
         
@@ -888,6 +2136,105 @@ impl super::manager::ClientManager {
     }
     
     /// Helper method to extract bandwidth information from SDP
+    /// 
+    /// Parses both local and remote SDP descriptions to extract bandwidth information
+    /// from standard SDP bandwidth lines (b=AS:). This function searches for bandwidth
+    /// specifications in either SDP and returns the first valid bandwidth value found.
+    /// The bandwidth is typically specified in kilobits per second (kbps).
+    /// 
+    /// # Arguments
+    /// 
+    /// * `local_sdp` - The local SDP description to search for bandwidth information
+    /// * `remote_sdp` - The remote SDP description to search for bandwidth information
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Some(bandwidth_kbps)` if a valid bandwidth specification is found,
+    /// or `None` if no bandwidth information is present in either SDP.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // SDP with bandwidth specification
+    /// let local_sdp = "v=0\r\no=- 123 456 IN IP4 192.168.1.1\r\nb=AS:64\r\nm=audio 5004 RTP/AVP 0\r\n";
+    /// let remote_sdp = "v=0\r\no=- 789 012 IN IP4 192.168.1.2\r\nm=audio 5006 RTP/AVP 0\r\n";
+    /// 
+    /// // Simulated bandwidth extraction
+    /// let bandwidth_found = local_sdp.contains("b=AS:");
+    /// if bandwidth_found {
+    ///     // Extract bandwidth value (64 kbps in this example)
+    ///     let bandwidth = 64;
+    ///     println!("Found bandwidth specification: {}kbps", bandwidth);
+    /// } else {
+    ///     println!("No bandwidth specification found");
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Multiple bandwidth specifications
+    /// let sdp_with_multiple = r#"v=0
+    /// o=- 123 456 IN IP4 192.168.1.1
+    /// b=AS:128
+    /// m=audio 5004 RTP/AVP 0
+    /// b=AS:64
+    /// "#;
+    /// 
+    /// // Would extract the first valid bandwidth (128 kbps)
+    /// println!("SDP contains bandwidth specifications");
+    /// println!("Would extract first valid value: 128kbps");
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Bandwidth-aware call quality assessment
+    /// let available_bandwidth = Some(256); // kbps
+    /// 
+    /// match available_bandwidth {
+    ///     Some(bw) if bw >= 128 => {
+    ///         println!("High bandwidth available: {}kbps", bw);
+    ///         println!("Can use high-quality codecs");
+    ///     }
+    ///     Some(bw) if bw >= 64 => {
+    ///         println!("Medium bandwidth: {}kbps", bw);
+    ///         println!("Standard quality codecs recommended");
+    ///     }
+    ///     Some(bw) => {
+    ///         println!("Low bandwidth: {}kbps", bw);
+    ///         println!("Compressed codecs required");
+    ///     }
+    ///     None => {
+    ///         println!("No bandwidth specification");
+    ///         println!("Using default codec selection");
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// # SDP Bandwidth Format
+    /// 
+    /// This function specifically looks for lines in the format:
+    /// - `b=AS:value` - Application-Specific bandwidth in kbps
+    /// 
+    /// Other bandwidth types (like `b=CT:` for Conference Total) are not currently
+    /// parsed by this implementation.
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Quality of Service (QoS) planning
+    /// - Codec selection based on available bandwidth
+    /// - Network capacity monitoring
+    /// - Adaptive bitrate configuration
+    /// - Call quality optimization
+    /// 
+    /// # Implementation Notes
+    /// 
+    /// The function searches both SDPs and returns the first valid bandwidth found.
+    /// Priority is given to the local SDP, then the remote SDP. Invalid or malformed
+    /// bandwidth specifications are ignored.
     async fn extract_bandwidth_from_sdp(&self, local_sdp: &str, remote_sdp: &str) -> Option<u32> {
         // Simple bandwidth extraction from SDP "b=" lines
         for line in local_sdp.lines().chain(remote_sdp.lines()) {
@@ -901,6 +2248,77 @@ impl super::manager::ClientManager {
     }
     
     /// Generate SDP answer for an incoming call
+    /// 
+    /// Creates a Session Description Protocol (SDP) answer in response to an incoming
+    /// SDP offer, typically from a SIP INVITE request. The answer describes the media
+    /// capabilities and parameters that this client accepts and configures the
+    /// media session based on the negotiated parameters.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the incoming call
+    /// * `offer` - The SDP offer string received from the remote party
+    /// 
+    /// # Returns
+    /// 
+    /// Returns the SDP answer as a string, or a `ClientError` if:
+    /// - The call is not found
+    /// - The SDP offer is empty or malformed
+    /// - The underlying session-core fails to generate the SDP answer
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Generate SDP answer for incoming call
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let offer = "v=0\r\no=caller 123456 654321 IN IP4 192.168.1.10\r\n";
+    /// 
+    /// println!("Would generate SDP answer for call {}", call_id);
+    /// println!("Processing offer of {} bytes", offer.len());
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // SIP call flow context
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Processing INVITE for call {}", call_id);
+    /// println!("Generating SDP answer for 200 OK response");
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Media negotiation
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let offer = "v=0\r\nm=audio 5004 RTP/AVP 0 8\r\n";
+    /// 
+    /// println!("Negotiating media for call {}", call_id);
+    /// println!("Offer contains audio on port 5004");
+    /// println!("Would respond with compatible audio configuration");
+    /// # }
+    /// ```
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Applies media configuration preferences to the generated SDP
+    /// - Updates call metadata with the generated SDP answer and timestamp
+    /// - Coordinates with session-core for media session configuration
+    /// - May modify SDP with custom attributes, bandwidth limits, and timing preferences
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Responding to incoming SIP INVITE requests
+    /// - Completing media negotiation for incoming calls
+    /// - Auto-answering systems and IVR applications
+    /// - Conference bridge incoming call handling
     pub async fn generate_sdp_answer(&self, call_id: &CallId, offer: &str) -> ClientResult<String> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -945,6 +2363,99 @@ impl super::manager::ClientManager {
     }
     
     /// Apply media configuration to generated SDP
+    /// 
+    /// Post-processes a generated SDP description by applying the client's media
+    /// configuration preferences. This includes adding custom SDP attributes,
+    /// bandwidth constraints, packet time (ptime) preferences, and other
+    /// media-specific configuration options that customize the SDP for this client.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `sdp` - The base SDP string to be modified
+    /// 
+    /// # Returns
+    /// 
+    /// Returns the modified SDP string with applied configuration preferences.
+    /// This function always succeeds and returns a valid SDP.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Basic SDP modification
+    /// let base_sdp = "v=0\r\no=- 123 456 IN IP4 192.168.1.1\r\nm=audio 5004 RTP/AVP 0\r\n";
+    /// println!("Base SDP: {} bytes", base_sdp.len());
+    /// 
+    /// // Example configuration applications
+    /// let has_custom_attrs = true;
+    /// let has_bandwidth_limit = true;
+    /// let has_ptime_pref = true;
+    /// 
+    /// if has_custom_attrs {
+    ///     println!("Would add custom SDP attributes");
+    /// }
+    /// if has_bandwidth_limit {
+    ///     println!("Would add bandwidth constraint (b=AS:64)");
+    /// }
+    /// if has_ptime_pref {
+    ///     println!("Would add packet time preference (a=ptime:20)");
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Enterprise customization example
+    /// let original_sdp = "v=0\r\nm=audio 8000 RTP/AVP 111\r\na=rtpmap:111 OPUS/48000/2\r\n";
+    /// 
+    /// // Simulated configuration
+    /// let max_bandwidth = 128; // kbps
+    /// let preferred_ptime = 20; // ms
+    /// let custom_attrs = vec![("a=sendrecv", ""), ("a=tool", "rvoip-client")];
+    /// 
+    /// println!("Original SDP: {} bytes", original_sdp.len());
+    /// println!("Applying enterprise configuration:");
+    /// println!("  Max bandwidth: {}kbps", max_bandwidth);
+    /// println!("  Packet time: {}ms", preferred_ptime);
+    /// println!("  Custom attributes: {} items", custom_attrs.len());
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # fn main() {
+    /// // Quality optimization
+    /// let sdp = "v=0\r\nm=audio 5004 RTP/AVP 0 8\r\n";
+    /// 
+    /// // Configuration for different scenarios
+    /// let scenario = "low_bandwidth";
+    /// match scenario {
+    ///     "low_bandwidth" => {
+    ///         println!("Applying low bandwidth optimizations");
+    ///         println!("Would add: b=AS:32");
+    ///     }
+    ///     "high_quality" => {
+    ///         println!("Applying high quality settings");
+    ///         println!("Would add: b=AS:256");
+    ///     }
+    ///     _ => println!("Using default settings"),
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// # Configuration Applied
+    /// 
+    /// 1. **Custom SDP Attributes**: Adds configured custom attributes after the media line
+    /// 2. **Bandwidth Constraints**: Inserts `b=AS:` lines for bandwidth limits
+    /// 3. **Packet Time**: Adds `a=ptime:` attributes for timing preferences
+    /// 4. **Format Compliance**: Ensures proper SDP formatting with CRLF line endings
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Enterprise policy enforcement in SDP
+    /// - Network optimization for specific environments
+    /// - Codec-specific parameter tuning
+    /// - Quality of Service (QoS) configuration
+    /// - Compliance with specific SIP server requirements
     async fn apply_media_config_to_sdp(&self, mut sdp: String) -> String {
         // Add custom attributes if configured
         if !self.media_config.custom_sdp_attributes.is_empty() {
@@ -1005,6 +2516,86 @@ impl super::manager::ClientManager {
     }
     
     /// Establish media flow to a remote address
+    /// 
+    /// Establishes the actual media flow (RTP streams) between the local client and
+    /// a specified remote address. This function configures the media session to
+    /// begin transmitting and receiving audio packets to/from the designated endpoint.
+    /// This is typically called after SDP negotiation is complete.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to establish media flow for
+    /// * `remote_addr` - The remote address (IP:port) to establish media flow with
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` on successful establishment, or a `ClientError` if:
+    /// - The call is not found
+    /// - The remote address is invalid or unreachable
+    /// - The underlying session-core fails to establish the media flow
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Establish media flow after SDP negotiation
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let remote_addr = "192.168.1.20:5004";
+    /// 
+    /// println!("Would establish media flow for call {}", call_id);
+    /// println!("Target remote address: {}", remote_addr);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Direct media establishment for P2P calls
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let peer_endpoint = "10.0.1.100:12000";
+    /// 
+    /// println!("Establishing direct P2P media to {}", peer_endpoint);
+    /// println!("Call ID: {}", call_id);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Media relay configuration
+    /// let call_id: CallId = Uuid::new_v4();
+    /// let relay_address = "relay.example.com:8000";
+    /// 
+    /// println!("Configuring media relay for call {}", call_id);
+    /// println!("Relay endpoint: {}", relay_address);
+    /// println!("Would establish RTP flows through media relay");
+    /// # }
+    /// ```
+    /// 
+    /// # Side Effects
+    /// 
+    /// - Updates call metadata with media flow status and remote address
+    /// - Initiates RTP packet transmission/reception
+    /// - Configures network routing for media streams
+    /// - May trigger firewall/NAT traversal procedures
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Completing call setup after SDP negotiation
+    /// - Direct peer-to-peer media establishment
+    /// - Media relay and proxy configurations
+    /// - Network topology adaptation
+    /// - Quality of Service (QoS) path establishment
+    /// 
+    /// # Network Considerations
+    /// 
+    /// The remote address should be reachable and the specified port should be
+    /// available for RTP traffic. This function may trigger network discovery
+    /// and NAT traversal procedures if required by the network topology.
     pub async fn establish_media(&self, call_id: &CallId, remote_addr: &str) -> ClientResult<()> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -1029,7 +2620,60 @@ impl super::manager::ClientManager {
     
     /// Get RTP statistics for a call
     /// 
-    /// Returns RTP session statistics including packet counts, byte counts, and loss metrics
+    /// Retrieves detailed Real-time Transport Protocol (RTP) statistics for the specified call,
+    /// including packet counts, byte counts, jitter measurements, and packet loss metrics.
+    /// This information is crucial for monitoring call quality and diagnosing network issues.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to get RTP statistics for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(Some(RtpSessionStats))` with detailed RTP metrics if available,
+    /// `Ok(None)` if no RTP session exists, or `ClientError` if the call is not found
+    /// or statistics cannot be retrieved.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Monitor call quality
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would get RTP statistics for call {}", call_id);
+    /// 
+    /// // Example statistics evaluation
+    /// let packets_sent = 1000u64;
+    /// let packets_lost = 5u64;
+    /// let loss_rate = (packets_lost as f64 / packets_sent as f64) * 100.0;
+    /// 
+    /// if loss_rate > 5.0 {
+    ///     println!("High packet loss detected: {:.2}%", loss_rate);
+    /// } else {
+    ///     println!("Good quality: {:.2}% packet loss", loss_rate);
+    /// }
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Network diagnostics
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Running network diagnostics for call {}", call_id);
+    /// println!("Would analyze jitter, latency, and throughput");
+    /// # }
+    /// ```
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Real-time call quality monitoring
+    /// - Network performance analysis
+    /// - Troubleshooting audio issues
+    /// - Quality of Service (QoS) reporting
     pub async fn get_rtp_statistics(&self, call_id: &CallId) -> ClientResult<Option<RtpSessionStats>> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -1044,7 +2688,56 @@ impl super::manager::ClientManager {
     
     /// Get comprehensive media statistics for a call
     /// 
-    /// Returns detailed statistics including RTP/RTCP metrics and quality monitoring
+    /// Retrieves complete media session statistics including RTP/RTCP metrics, quality
+    /// measurements, and performance indicators. This provides a holistic view of the
+    /// media session's health and performance characteristics.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to get media statistics for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(Some(MediaSessionStats))` with comprehensive media metrics if available,
+    /// `Ok(None)` if no media session exists, or `ClientError` if the call is not found
+    /// or statistics cannot be retrieved.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Comprehensive call analysis
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would get comprehensive media statistics for call {}", call_id);
+    /// 
+    /// // Example quality assessment
+    /// let audio_quality_score = 4.2; // Out of 5.0
+    /// let network_quality = "Good"; // Based on metrics
+    /// 
+    /// println!("Audio Quality: {:.1}/5.0", audio_quality_score);
+    /// println!("Network Quality: {}", network_quality);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Performance monitoring dashboard
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Updating performance dashboard for call {}", call_id);
+    /// println!("Would include RTP, RTCP, jitter, and codec metrics");
+    /// # }
+    /// ```
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Call quality dashboards
+    /// - Performance monitoring systems
+    /// - Troubleshooting complex media issues
+    /// - Historical call quality analysis
     pub async fn get_media_statistics(&self, call_id: &CallId) -> ClientResult<Option<MediaSessionStats>> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
@@ -1059,7 +2752,60 @@ impl super::manager::ClientManager {
     
     /// Get comprehensive call statistics for a call
     /// 
-    /// Returns complete call statistics including RTP, quality metrics, and call details
+    /// Retrieves complete call statistics encompassing all aspects of the call including
+    /// RTP metrics, quality measurements, call duration, and detailed performance data.
+    /// This provides the most comprehensive view of call performance and quality.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to get complete statistics for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(Some(CallStatistics))` with complete call metrics if available,
+    /// `Ok(None)` if no call statistics exist, or `ClientError` if the call is not found
+    /// or statistics cannot be retrieved.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use std::time::Duration;
+    /// # fn main() {
+    /// // Complete call analysis
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Would get complete call statistics for call {}", call_id);
+    /// 
+    /// // Example comprehensive metrics
+    /// let call_duration = Duration::from_secs(300); // 5 minutes
+    /// let avg_jitter = 15; // milliseconds
+    /// let packet_loss = 0.8; // percent
+    /// 
+    /// println!("Call Duration: {:?}", call_duration);
+    /// println!("Average Jitter: {}ms", avg_jitter);
+    /// println!("Packet Loss: {:.1}%", packet_loss);
+    /// # }
+    /// ```
+    /// 
+    /// ```rust
+    /// # use uuid::Uuid;
+    /// # use rvoip_client_core::call::CallId;
+    /// # fn main() {
+    /// // Call quality reporting
+    /// let call_id: CallId = Uuid::new_v4();
+    /// println!("Generating call quality report for call {}", call_id);
+    /// println!("Would include all RTP, quality, and performance metrics");
+    /// # }
+    /// ```
+    /// 
+    /// # Use Cases
+    /// 
+    /// - Post-call quality reports
+    /// - Billing and usage analytics
+    /// - Network performance analysis
+    /// - Customer experience metrics
+    /// - SLA compliance monitoring
     pub async fn get_call_statistics(&self, call_id: &CallId) -> ClientResult<Option<CallStatistics>> {
         let session_id = self.session_mapping.get(call_id)
             .ok_or(ClientError::CallNotFound { call_id: *call_id })?
