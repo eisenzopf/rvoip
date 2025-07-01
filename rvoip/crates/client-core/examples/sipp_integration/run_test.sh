@@ -131,7 +131,7 @@ export RUST_LOG=rvoip_client_core=debug,rvoip_session_core=debug,info
 cargo run --release --example sipp_integration_sip_test_server -- \
     $SIP_PORT \
     $MEDIA_PORT \
-    auto > server.log 2>&1 &
+    auto > "$SCRIPT_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 
 # Give server a moment to start binding
@@ -148,7 +148,7 @@ for i in {1..10}; do
     fi
     
     # Also check server log for ready message
-    if [ -f "$PROJECT_ROOT/server.log" ] && grep -q "SIP Server ready!" "$PROJECT_ROOT/server.log"; then
+    if [ -f "$SCRIPT_DIR/server.log" ] && grep -q "SIP Server ready!" "$SCRIPT_DIR/server.log"; then
         echo -e "\n${GREEN}✅ Server is ready (confirmed by log)${NC}"
         SERVER_READY=true
         break
@@ -169,7 +169,7 @@ if [ "$SERVER_READY" != "true" ]; then
     echo "Checking if port is in use:"
     lsof -i :$SIP_PORT || echo "Port $SIP_PORT not in use"
     echo "Server log:"
-    tail -20 "$PROJECT_ROOT/server.log"
+    tail -20 "$SCRIPT_DIR/server.log"
     exit 1
 fi
 
@@ -233,7 +233,6 @@ run_media_test() {
          -mp $base_media_port \
          -min_rtp_port $base_media_port \
          -max_rtp_port $((base_media_port + 100)) \
-         -rtp_echo \
          -trace_msg \
          -message_file sipp_messages_media.log \
          -trace_screen \
@@ -316,11 +315,11 @@ fi
 # Show server log
 echo -e "\n${BLUE}📋 Server Log (last 30 lines):${NC}"
 echo "================================"
-tail -30 "$PROJECT_ROOT/server.log"
+tail -30 "$SCRIPT_DIR/server.log"
 
 echo -e "\n${GREEN}✅ Test completed!${NC}"
 echo "Log files available:"
-echo "  - Server log: $PROJECT_ROOT/server.log"
+echo "  - Server log: $SCRIPT_DIR/server.log"
 if [ "$TEST_TYPE" == "both" ]; then
     echo "  - Simple test logs: $SCRIPT_DIR/sipp_*_simple.log"
     echo "  - Media test logs: $SCRIPT_DIR/sipp_*_media.log"
