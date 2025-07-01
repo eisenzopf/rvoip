@@ -36,7 +36,7 @@
 //! 
 //! ## Basic Client Setup
 //! 
-//! ```rust
+//! ```rust,no_run
 //! use rvoip_client_core::{ClientBuilder, Client, ClientEvent};
 //! use std::sync::Arc;
 //! 
@@ -61,13 +61,20 @@
 //!         None, // Let session-core generate SDP
 //!     ).await?;
 //!     
-//!     // Handle events
-//!     while let Ok(event) = events.recv().await {
-//!         match event {
-//!             ClientEvent::CallStateChanged { info, .. } => {
-//!                 println!("Call {} state: {:?}", info.call_id, info.new_state);
+//!     // Handle events (in real applications, this would run until shutdown)
+//!     tokio::select! {
+//!         result = events.recv() => {
+//!             if let Ok(event) = result {
+//!                 match event {
+//!                     ClientEvent::CallStateChanged { info, .. } => {
+//!                         println!("Call {} state: {:?}", info.call_id, info.new_state);
+//!                     }
+//!                     _ => {}
+//!                 }
 //!             }
-//!             _ => {}
+//!         }
+//!         _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+//!             println!("Application timeout");
 //!         }
 //!     }
 //!     
@@ -114,19 +121,34 @@
 //! All operations return `ClientResult<T>` which wraps `ClientError`:
 //! 
 //! ```rust
-//! # use rvoip_client_core::{Client, ClientError};
-//! # use std::sync::Arc;
-//! # async fn example(client: Arc<Client>) -> Result<(), Box<dyn std::error::Error>> {
-//! match client.make_call("sip:alice@example.com".to_string(), "sip:bob@example.com".to_string(), None).await {
-//!     Ok(call_id) => println!("Call started: {}", call_id),
-//!     Err(ClientError::NetworkError { reason }) => {
-//!         eprintln!("Network problem: {}", reason);
-//!         // Retry or notify user
+//! use rvoip_client_core::{Client, ClientError};
+//! use std::sync::Arc;
+//! 
+//! async fn example(client: Arc<Client>) -> Result<(), Box<dyn std::error::Error>> {
+//!     // Example error handling pattern
+//!     match client.make_call(
+//!         "sip:alice@example.com".to_string(), 
+//!         "sip:bob@example.com".to_string(), 
+//!         None
+//!     ).await {
+//!         Ok(call_id) => {
+//!             println!("Call started: {}", call_id);
+//!         }
+//!         Err(ClientError::NetworkError { reason }) => {
+//!             eprintln!("Network problem: {}", reason);
+//!             // Could retry with exponential backoff
+//!         }
+//!         Err(ClientError::InvalidConfiguration { field, reason }) => {
+//!             eprintln!("Configuration error in {}: {}", field, reason);
+//!             // Fix configuration and retry
+//!         }
+//!         Err(e) => {
+//!             eprintln!("Call failed: {}", e);
+//!             // Handle other error types
+//!         }
 //!     }
-//!     Err(e) => eprintln!("Call failed: {}", e),
+//!     Ok(())
 //! }
-//! # Ok(())
-//! # }
 //! ```
 
 #![warn(missing_docs)]
