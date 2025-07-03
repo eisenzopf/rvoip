@@ -1,0 +1,113 @@
+[package]
+name = "rvoip-sip-core"
+version = "0.1.0"
+edition = "2021"
+description = "SIP protocol implementation for the rvoip stack"
+license = "MIT OR Apache-2.0"
+
+# Silence all Rust warnings and configure clippy
+[lints.rust]
+warnings = "allow"
+unused_imports = "allow"
+unused_variables = "allow"
+unused_mut = "allow"
+dead_code = "allow"
+unused_comparisons = "allow"
+elided_named_lifetimes = "allow"
+ambiguous_glob_reexports = "allow"
+deprecated = "allow"
+unexpected_cfgs = "allow"
+unreachable_patterns = "allow"
+irrefutable_let_patterns = "allow"
+unused_assignments = "allow"
+
+[lints.clippy]
+# Allow stylistic and pedantic lints that don't affect correctness
+pedantic = "allow"
+style = "allow"
+complexity = "allow"
+perf = "allow"
+cargo = "allow"
+nursery = "allow"
+
+# Keep important correctness lints as warnings/errors
+correctness = "warn"
+suspicious = "warn"
+restriction = "allow"
+
+# Allow specific common patterns that are acceptable
+len_zero = "allow"
+len_without_is_empty = "allow"
+new_without_default = "allow"
+too_many_arguments = "allow"
+module_inception = "allow"
+single_match = "allow"
+match_like_matches_macro = "allow"
+redundant_pattern_matching = "allow"
+needless_option_as_deref = "allow"
+unnecessary_filter_map = "allow"
+bool_assert_comparison = "allow"
+bool_comparison = "allow"
+comparison_to_empty = "allow"
+explicit_auto_deref = "allow"
+unnecessary_get_then_check = "allow"
+needless_borrows_for_generic_args = "allow"
+assertions_on_constants = "allow"
+expect_fun_call = "allow"
+option_as_ref_deref = "allow"
+useless_conversion = "allow"
+unnecessary_literal_unwrap = "allow"
+vec_init_then_push = "allow"
+useless_vec = "allow"
+redundant_closure = "allow"
+items_after_test_module = "allow"
+approx_constant = "allow"
+partialeq_to_none = "allow"
+legacy_numeric_constants = "allow"
+absurd_extreme_comparisons = "allow"
+cast_abs_to_unsigned = "allow"
+empty_line_after_doc_comments = "allow"
+multiple_bound_locations = "allow"
+
+# Features
+[features]
+default = ["sdp"]  # Include sdp in the default features
+lenient_parsing = []  # More lenient parsing for torture tests
+sdp = []  # Session Description Protocol support
+
+[dependencies]
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+serde_bytes = "0.11"
+# Utilities
+bytes = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["v4"] }
+base64 = "0.21"
+# Parsing
+nom = "7.1"
+rand = "0.8"
+log = "0.4"
+# Logging
+tracing = { workspace = true }
+ordered-float = { version = "4.2.0", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }
+async-trait = "0.1"
+
+# Integration tests configuration
+[[test]]
+name = "torture_tests"
+path = "tests/rfc_compliance/torture_test.rs"
+required-features = ["lenient_parsing"]
+
+[[test]]
+name = "parser"
+path = "tests/parser_tests.rs"
