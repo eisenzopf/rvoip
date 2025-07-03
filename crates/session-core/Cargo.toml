@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-session-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Call session management for the rvoip stack"
 license = "MIT OR Apache-2.0"
