@@ -75,7 +75,7 @@ collapsible_else_if = "allow"
 [dependencies]
 # Our own crates
 rvoip-sip-core = { path = "../sip-core", version = "0.1.1" }
-rvoip-sip-transport = { path = "../sip-transport", features = ["udp", "tcp", "tls", "ws"] }
+rvoip-sip-transport = { path = "../sip-transport", features = ["udp", "tcp", "tls", "ws"], version = "0.1.1" }
 
 # Async runtime
 tokio = { version = "1.28.2", features = ["full"] }
