@@ -1,9 +1,12 @@
 [package]
 name = "rvoip-transaction-core"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Core transaction handling for SIP"
 license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/rvoip-transaction-core"
+homepage = "https://github.com/eisenzopf/rvoip"
+repository = "https://github.com/eisenzopf/rvoip"
 
 # Silence all Rust warnings and configure clippy
 [lints.rust]
@@ -74,8 +77,8 @@ collapsible_else_if = "allow"
 
 [dependencies]
 # Our own crates
-rvoip-sip-core = { path = "../sip-core", version = "0.1.1" }
-rvoip-sip-transport = { path = "../sip-transport", features = ["udp", "tcp", "tls", "ws"], version = "0.1.1" }
+rvoip-sip-core = { path = "../sip-core", version = "0.1.2" }
+rvoip-sip-transport = { path = "../sip-transport", features = ["udp", "tcp", "tls", "ws"], version = "0.1.2" }
 
 # Async runtime
 tokio = { version = "1.28.2", features = ["full"] }

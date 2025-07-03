@@ -1,18 +1,20 @@
 [package]
 name = "rvoip-dialog-core"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["RVOIP Team"]
 description = "RFC 3261 SIP Dialog Management Layer for RVOIP"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/rvoip/rvoip"
+documentation = "https://docs.rs/rvoip-dialog-core"
+homepage = "https://github.com/eisenzopf/rvoip"
+repository = "https://github.com/eisenzopf/rvoip"
 keywords = ["sip", "voip", "dialog", "rfc3261", "protocol"]
 categories = ["network-programming", "multimedia"]
 
 [dependencies]
 # Core SIP and RTP functionality
-rvoip-sip-core = { path = "../sip-core" }
-rvoip-transaction-core = { path = "../transaction-core" }
+rvoip-sip-core = { path = "../sip-core", version = "0.1.2" }
+rvoip-transaction-core = { path = "../transaction-core", version = "0.1.2" }
 
 # Async runtime and utilities
 tokio = { version = "1.0", features = ["full"] }

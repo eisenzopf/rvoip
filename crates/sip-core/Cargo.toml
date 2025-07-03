@@ -1,9 +1,12 @@
 [package]
 name = "rvoip-sip-core"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "SIP protocol implementation for the rvoip stack"
 license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/rvoip-sip-core"
+homepage = "https://github.com/eisenzopf/rvoip"
+repository = "https://github.com/eisenzopf/rvoip"
 
 # Silence all Rust warnings and configure clippy
 [lints.rust]
