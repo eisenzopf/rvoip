@@ -1,0 +1,27 @@
+[package]
+name = "peer-to-peer-demo"
+version = "0.1.0"
+edition = "2021"
+description = "Peer-to-peer SIP call demo using client-core"
+
+[[bin]]
+name = "peer_a"
+path = "src/peer_a.rs"
+
+[[bin]]
+name = "peer_b"
+path = "src/peer_b.rs"
+
+[dependencies]
+rvoip-client-core = { path = "../../crates/client-core" }
+
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+anyhow = "1.0"
+uuid = { version = "1.0", features = ["v4"] }
+async-trait = "0.1"
+serde_json = "1.0"
+
+[workspace] 

@@ -1,0 +1,102 @@
+[package]
+name = "rvoip-transaction-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core transaction handling for SIP"
+license = "MIT OR Apache-2.0"
+
+# Silence all Rust warnings and configure clippy
+[lints.rust]
+warnings = "allow"
+unused_imports = "allow"
+unused_variables = "allow"
+unused_mut = "allow"
+dead_code = "allow"
+unused_comparisons = "allow"
+elided_named_lifetimes = "allow"
+ambiguous_glob_reexports = "allow"
+deprecated = "allow"
+unexpected_cfgs = "allow"
+unreachable_patterns = "allow"
+irrefutable_let_patterns = "allow"
+unused_assignments = "allow"
+
+[lints.clippy]
+# Allow stylistic and pedantic lints that don't affect correctness
+pedantic = "allow"
+style = "allow"
+complexity = "allow"
+perf = "allow"
+cargo = "allow"
+nursery = "allow"
+
+# Keep important correctness lints as warnings/errors
+correctness = "warn"
+suspicious = "warn"
+restriction = "allow"
+
+# Allow specific common patterns that are acceptable
+len_zero = "allow"
+len_without_is_empty = "allow"
+new_without_default = "allow"
+too_many_arguments = "allow"
+module_inception = "allow"
+single_match = "allow"
+match_like_matches_macro = "allow"
+redundant_pattern_matching = "allow"
+needless_option_as_deref = "allow"
+unnecessary_filter_map = "allow"
+bool_assert_comparison = "allow"
+bool_comparison = "allow"
+comparison_to_empty = "allow"
+explicit_auto_deref = "allow"
+unnecessary_get_then_check = "allow"
+needless_borrows_for_generic_args = "allow"
+assertions_on_constants = "allow"
+expect_fun_call = "allow"
+option_as_ref_deref = "allow"
+useless_conversion = "allow"
+unnecessary_literal_unwrap = "allow"
+vec_init_then_push = "allow"
+useless_vec = "allow"
+redundant_closure = "allow"
+items_after_test_module = "allow"
+approx_constant = "allow"
+partialeq_to_none = "allow"
+legacy_numeric_constants = "allow"
+absurd_extreme_comparisons = "allow"
+cast_abs_to_unsigned = "allow"
+empty_line_after_doc_comments = "allow"
+multiple_bound_locations = "allow"
+should_implement_trait = "allow"
+manual_find = "allow"
+collapsible_else_if = "allow"
+
+[dependencies]
+# Our own crates
+rvoip-sip-core = { path = "../sip-core" }
+rvoip-sip-transport = { path = "../sip-transport", features = ["udp", "tcp", "tls", "ws"] }
+
+# Async runtime
+tokio = { version = "1.28.2", features = ["full"] }
+async-trait = "0.1.60"
+futures = "0.3"
+pin-project = "1.0"
+
+# Error handling
+thiserror = "1.0.40"
+
+# Utilities
+uuid = { version = "1.0", features = ["v4"] }
+
+# Logging
+tracing = "0.1.37"
+
+# Added from the code block
+rand = "0.8"
+lazy_static = "1.4.0"
+
+[dev-dependencies]
+serial_test = "3.2.0"
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber = { workspace = true } 
