@@ -74,7 +74,7 @@ collapsible_else_if = "allow"
 
 [dependencies]
 # Our own crates
-rvoip-sip-core = { path = "../sip-core" }
+rvoip-sip-core = { path = "../sip-core", version = "0.1.1" }
 
 # Async runtime
 tokio = { workspace = true, features = ["net", "sync", "io-util", "time"] }
