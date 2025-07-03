@@ -10,9 +10,7 @@ members = [
     "crates/media-core",
     "crates/session-core",
     "crates/call-engine",
-    "crates/client-core",
-    "crates/infra-common",
-    "crates/session-core/examples/sipp_tests",
+    "crates/client-core"
 ]
 
 # Root package that re-exports all crates

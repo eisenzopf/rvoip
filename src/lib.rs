@@ -40,7 +40,6 @@
 //! - [`dialog_core`]: Dialog state management
 //! - [`transaction_core`]: Transaction management
 //! - [`sip_transport`]: SIP transport layer
-//! - [`infra_common`]: Common utilities
 
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
@@ -59,12 +58,41 @@ pub use rvoip_client_core as client_core;
 // Re-export commonly used items for convenience
 pub mod prelude {
     //! Common imports for rvoip applications
+    //!
+    //! This module provides convenient access to the most commonly used types
+    //! from the rvoip ecosystem. Instead of importing everything with wildcards,
+    //! users can import specific types they need from the individual crates.
+    //!
+    //! # Usage Examples
+    //!
+    //! ```rust
+    //! // Import specific modules and types as needed
+    //! use rvoip::sip_core::prelude::*;
+    //! use rvoip::client_core::{Client, ClientBuilder};
+    //! use rvoip::session_core::{SessionManager, SessionId};
+    //!
+    //! // Use the types normally
+    //! // let client = ClientBuilder::new()...
+    //! ```
+    //!
+    //! # Available Modules
+    //!
+    //! - [`crate::sip_core`] - Core SIP protocol types and parsing
+    //! - [`crate::client_core`] - High-level client API
+    //! - [`crate::session_core`] - Session management
+    //! - [`crate::call_engine`] - Call routing and business logic
+    //! - [`crate::rtp_core`] - RTP implementation
+    //! - [`crate::media_core`] - Media processing
+    //! - [`crate::dialog_core`] - Dialog state management
+    //! - [`crate::transaction_core`] - Transaction management
+    //! - [`crate::sip_transport`] - SIP transport layer
     
-    pub use crate::client_core::*;
-    pub use crate::session_core::*;
-    pub use crate::sip_core::*;
+    // Note: We don't re-export specific types to avoid naming conflicts.
+    // Users should import from the specific crates they need.
 }
 
 // Version information
+/// The version of the rvoip library
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The description of the rvoip library
 pub const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION"); 
