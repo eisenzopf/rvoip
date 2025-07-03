@@ -1,9 +1,11 @@
 use anyhow::Result;
-use rvoip_client_core::{
-    ClientConfig, ClientEventHandler, ClientError, 
-    IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
-    CallAction, CallId, CallState, MediaConfig,
-    client::ClientManager,
+use rvoip::{
+    client_core::{
+        ClientConfig, ClientEventHandler, ClientError, 
+        IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
+        CallAction, CallId, CallState, MediaConfig,
+        client::ClientManager,
+    },
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -111,7 +113,7 @@ async fn main() -> Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("peer_a=info".parse()?)
-                .add_directive("rvoip_client_core=debug".parse()?)
+                .add_directive("rvoip=debug".parse()?)
         )
         .init();
 

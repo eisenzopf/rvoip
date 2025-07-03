@@ -9,10 +9,8 @@
 
 use tracing::{info, error};
 
-use rvoip_call_engine::{
-    prelude::*,
-    CallCenterServerBuilder,
-    CallCenterConfig,
+use rvoip::{
+    call_engine::{prelude::*, CallCenterServerBuilder, CallCenterConfig},
 };
 
 #[tokio::main]
@@ -26,7 +24,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("call_center_demo=info".parse()?)
-                .add_directive("rvoip_call_engine=info".parse()?)
+                .add_directive("rvoip=info".parse()?)
         )
         .init();
 

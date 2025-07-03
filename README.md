@@ -23,42 +23,42 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Application Layer                        │
-│  ┌─────────────────┐  ┌─────────────────┐                  │
-│  │   call-engine   │  │   client-core   │                  │
-│  │ (Call Center)   │  │ (SIP Client)    │                  │
-│  └─────────────────┘  └─────────────────┘                  │
+│        ┌─────────────────┐  ┌─────────────────┐             │
+│        │   call-engine   │  │   client-core   │             │
+│        │ (Call Center)   │  │ (SIP Client)    │             │
+│        └─────────────────┘  └─────────────────┘             │
 ├─────────────────────────────────────────────────────────────┤
 │               Session & Coordination Layer                  │
-│  ┌─────────────────┐                                        │
-│  │  session-core   │                                        │
-│  │ (Session Mgmt)  │                                        │
-│  └─────────────────┘                                        │
+│                   ┌─────────────────┐                       │
+│                   │  session-core   │                       │
+│                   │ (Session Mgmt)  │                       │
+│                   └─────────────────┘                       │
 ├─────────────────────────────────────────────────────────────┤
 │               Protocol & Processing Layer                   │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────┐ │
-│  │   dialog-core   │  │   media-core    │  │transaction  │ │
-│  │ (SIP Dialogs)   │  │ (Audio Process) │  │   -core     │ │
-│  └─────────────────┘  └─────────────────┘  └─────────────┘ │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────┐  │
+│  │   dialog-core   │  │   media-core    │  │transaction  │  │
+│  │ (SIP Dialogs)   │  │ (Audio Process) │  │   -core     │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────┘  │
 ├─────────────────────────────────────────────────────────────┤
 │               Transport & Media Layer                       │
-│  ┌─────────────────┐  ┌─────────────────┐                  │
-│  │ sip-transport   │  │   rtp-core      │                  │
-│  │ (SIP Transport) │  │ (RTP/SRTP)      │                  │
-│  └─────────────────┘  └─────────────────┘                  │
+│      ┌─────────────────┐  ┌─────────────────┐               │
+│      │ sip-transport   │  │   rtp-core      │               │
+│      │ (SIP Transport) │  │ (RTP/SRTP)      │               │
+│      └─────────────────┘  └─────────────────┘               │
 ├─────────────────────────────────────────────────────────────┤
-│               Foundation Layer                              │
-│  ┌─────────────────┐                                        │
-│  │    sip-core     │                                        │
-│  │ (SIP Protocol)  │                                        │
-│  └─────────────────┘                                        │
+│                    Foundation Layer                         │
+│                  ┌─────────────────┐                        │
+│                  │    sip-core     │                        │
+│                  │ (SIP Protocol)  │                        │
+│                  └─────────────────┘                        │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## 🔧 Core Crates
 
 ### **call-engine** - Complete Call Center Solution
-- **Purpose**: Full-featured call center orchestration with agent management, queuing, and routing
-- **Status**: ✅ **Production Ready** - Fully functional call center with database integration
+- **Purpose**: Proof of concept call center orchestration with agent management, queuing, and routing
+- **Status**: ✅ **Not Production Ready** - Limited functionality and not yet tested in production
 - **Key Features**:
   - Agent SIP registration and status management
   - Database-backed call queuing with priority handling
@@ -69,7 +69,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 
 ### **client-core** - High-Level SIP Client Library
 - **Purpose**: Simplified SIP client library for building VoIP applications
-- **Status**: ✅ **Production Ready** - Complete client functionality with comprehensive API
+- **Status**: ✅ **Alpha Quality** - Complete client functionality with comprehensive API but not yet tested in production. API will change significantly as we move toward production readiness.
 - **Key Features**:
   - High-level call management (make, answer, hold, transfer, terminate)
   - Media controls with quality monitoring
@@ -80,7 +80,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 
 ### **session-core** - Session Management Hub
 - **Purpose**: Central coordination for SIP sessions, media, and call control
-- **Status**: ✅ **Production Ready** - Core session management with comprehensive API
+- **Status**: ✅ **Alpha Quality** - Core session management with comprehensive API for SIP and media coordination. API will change significantly as we move toward production readiness. Missing authentication and encryption which are available in rtp-core but not yet exposed in session-core.
 - **Key Features**:
   - Session lifecycle management from creation to termination
   - SIP-Media coordination with real media-core integration
@@ -91,7 +91,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 
 ### **dialog-core** - SIP Dialog Management
 - **Purpose**: RFC 3261 compliant SIP dialog state machine and message routing
-- **Status**: ✅ **Production Ready** - Full dialog lifecycle management
+- **Status**: ✅ **Alpha Quality** - Full dialog lifecycle management but not yet tested in production. API will change significantly as we move toward production readiness. Missing some SIP RFC extensions.
 - **Key Features**:
   - Complete RFC 3261 dialog state machine implementation
   - Early and confirmed dialog management
@@ -102,7 +102,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 
 ### **transaction-core** - SIP Transaction Layer
 - **Purpose**: Reliable SIP message delivery with retransmission and timeouts
-- **Status**: ✅ **Production Ready** - Full client/server transaction support
+- **Status**: ✅ **Alpha Quality** - Full client/server transaction support but not yet tested in production. API will change significantly as we move toward production readiness. Missing some SIP RFC extensions.
 - **Key Features**:
   - Complete RFC 3261 transaction state machines
   - Automatic retransmission and timeout handling
@@ -113,7 +113,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 
 ### **media-core** - Media Processing Engine
 - **Purpose**: Audio processing, codec management, and media session coordination
-- **Status**: ✅ **Production Ready** - Advanced audio processing with quality monitoring
+- **Status**: ✅ **Alpha Quality** - Advanced audio processing with quality monitoring but not yet tested in production. API will change significantly as we move toward production readiness.
 - **Key Features**:
   - Advanced audio processing (AEC, AGC, VAD, noise suppression)
   - Multi-codec support (G.711, G.722, Opus, G.729)
@@ -123,8 +123,8 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 - **Use Cases**: VoIP audio processing, codec transcoding, media quality
 
 ### **rtp-core** - RTP/RTCP Implementation
-- **Purpose**: Real-time media transport with comprehensive RTP/RTCP support
-- **Status**: ✅ **Production Ready** - Full-featured RTP stack with security
+- **Purpose**: Real-time media transport with comprehensive RTP/RTCP support. Some WebRTC support is available like SRTP/SRTCP but not yet tested in production.
+- **Status**: ✅ **Alpha Quality** - Full-featured RTP stack with security but not yet tested in production. API will change significantly as we move toward production readiness.
 - **Key Features**:
   - Complete RFC 3550 RTP/RTCP implementation
   - SRTP/SRTCP encryption with multiple cipher suites
@@ -135,7 +135,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 
 ### **sip-transport** - SIP Transport Layer
 - **Purpose**: Multi-protocol SIP transport (UDP/TCP/TLS/WebSocket)
-- **Status**: ✅ **Production Ready** - UDP/TCP complete, TLS/WebSocket functional
+- **Status**: ✅ **Alpha Quality** - UDP/TCP complete, TLS/WebSocket functional but not yet tested in production. API will change significantly as we move toward production readiness. May merge with rtp-core in the future so we have a single transport layer.
 - **Key Features**:
   - Multiple transport protocols (UDP, TCP, TLS, WebSocket)
   - Connection management and lifecycle
@@ -146,7 +146,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 
 ### **sip-core** - SIP Protocol Foundation
 - **Purpose**: Core SIP message parsing, serialization, and validation
-- **Status**: ✅ **Production Ready** - Complete RFC 3261 implementation
+- **Status**: ✅ **Alpha Quality** - Complete RFC 3261 implementation but not yet tested in production. API will change significantly as we move toward production readiness. Missing some SIP RFC extensions. Has strict parsing mode and lenient parsing mode which may need further improvements.
 - **Key Features**:
   - RFC 3261 compliant message parsing and serialization
   - 60+ standard SIP headers with typed representations

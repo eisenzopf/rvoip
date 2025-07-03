@@ -11,10 +11,12 @@ use tokio::time::sleep;
 use tracing::{info, error, warn};
 use clap::Parser;
 
-use rvoip_client_core::{
-    ClientConfig, ClientEventHandler, ClientError, ClientManager,
-    IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
-    CallAction, CallId, CallState, MediaConfig,
+use rvoip::{
+    client_core::{
+        ClientConfig, ClientEventHandler, ClientError, ClientManager,
+        IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
+        CallAction, CallId, CallState, MediaConfig,
+    },
 };
 use async_trait::async_trait;
 
@@ -170,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive("call_center_demo=info".parse()?)
-                .add_directive("rvoip_client_core=info".parse()?)
+                .add_directive("rvoip=info".parse()?)
         )
         .init();
     
