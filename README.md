@@ -265,13 +265,13 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 ### Ultra-Simple SIP Server (3 Lines!)
 
 ```rust
-use rvoip_session_core::prelude::*;
+use rvoip::session_core::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let session_manager = SessionManager::new(SessionConfig::server("127.0.0.1:5060")?).await?;
-    session_manager.set_call_handler(Arc::new(AutoAnswerHandler)).await?;
-    session_manager.start_server("127.0.0.1:5060".parse()?).await?;
+    let session_manager = SessionManagerBuilder::new()
+        .with_sip_port(5060)
+        .build().await?;
     
     println!("✅ SIP server running on port 5060");
     tokio::signal::ctrl_c().await?;
@@ -282,16 +282,27 @@ async fn main() -> Result<()> {
 ### Simple SIP Client
 
 ```rust
-use rvoip_client_core::prelude::*;
+use rvoip::client_core::{ClientConfig, ClientManager, MediaConfig};
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let client = ClientBuilder::new()
-        .local_address("127.0.0.1:5060".parse()?)
-        .build().await?;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = ClientConfig::new()
+        .with_sip_addr("127.0.0.1:5060".parse()?)
+        .with_media_addr("127.0.0.1:20000".parse()?)
+        .with_user_agent("MyApp/1.0".to_string())
+        .with_media(MediaConfig {
+            preferred_codecs: vec!["PCMU".to_string(), "PCMA".to_string()],
+            ..Default::default()
+        });
     
+    let client = ClientManager::new(config).await?;
     client.start().await?;
-    let call_id = client.make_call("sip:bob@example.com").await?;
+    
+    let call_id = client.make_call(
+        "sip:alice@127.0.0.1".to_string(),
+        "sip:bob@example.com".to_string(),
+        None
+    ).await?;
     
     println!("📞 Call initiated to bob@example.com");
     Ok(())
@@ -301,13 +312,23 @@ async fn main() -> Result<()> {
 ### Call Center Setup
 
 ```rust
-use rvoip_call_engine::prelude::*;
+use rvoip::call_engine::prelude::*;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let engine = CallCenterEngine::new(CallCenterConfig::default()).await?;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = CallCenterConfig::default();
+    config.general.local_signaling_addr = "0.0.0.0:5060".parse()?;
+    config.general.domain = "127.0.0.1".to_string();
+    
+    let mut server = CallCenterServerBuilder::new()
+        .with_config(config)
+        .with_database_path(":memory:".to_string())
+        .build()
+        .await?;
+    
+    server.start().await?;
     println!("🏢 Call Center Server starting...");
-    engine.run().await?;
+    server.run().await?;
     Ok(())
 }
 ```

@@ -1,6 +1,6 @@
 [package]
 name = "rvoip"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "A comprehensive VoIP library for Rust"
 license = "MIT OR Apache-2.0"
@@ -18,4 +18,9 @@ rvoip-rtp-core = { path = "../rtp-core", version = "0.1.2" }
 rvoip-media-core = { path = "../media-core", version = "0.1.2" }
 rvoip-session-core = { path = "../session-core", version = "0.1.2" }
 rvoip-call-engine = { path = "../call-engine", version = "0.1.2" }
-rvoip-client-core = { path = "../client-core", version = "0.1.2" } 
+rvoip-client-core = { path = "../client-core", version = "0.1.2" }
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+serial_test = "3.0"
