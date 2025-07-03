@@ -15,6 +15,29 @@ members = [
     "crates/session-core/examples/sipp_tests",
 ]
 
+# Root package that re-exports all crates
+[package]
+name = "rvoip"
+version = "0.1.1"
+edition = "2021"
+description = "A comprehensive VoIP library for Rust"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-username/rvoip"
+authors = ["Your Name <your-email@example.com>"]
+
+[dependencies]
+# Re-export all the crates in the workspace
+rvoip-sip-core = { path = "crates/sip-core", version = "0.1.1" }
+rvoip-sip-transport = { path = "crates/sip-transport", version = "0.1.1" }
+rvoip-transaction-core = { path = "crates/transaction-core", version = "0.1.1" }
+rvoip-dialog-core = { path = "crates/dialog-core", version = "0.1.1" }
+rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.1" }
+rvoip-media-core = { path = "crates/media-core", version = "0.1.1" }
+rvoip-session-core = { path = "crates/session-core", version = "0.1.1" }
+rvoip-call-engine = { path = "crates/call-engine", version = "0.1.1" }
+rvoip-client-core = { path = "crates/client-core", version = "0.1.1" }
+infra-common = { path = "crates/infra-common", version = "0.1.0" }
+
 # Silence all Rust warnings
 [workspace.lints.rust]
 warnings = "allow"

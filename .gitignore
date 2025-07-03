@@ -9,6 +9,7 @@
 ## File system
 .DS_Store
 desktop.ini
+Cargo.lock
 
 ## Editor
 *.swp
