@@ -99,7 +99,7 @@ pub async fn create_test_session_manager_with_config(
     };
     
     let manager = SessionManagerBuilder::new()
-        .with_local_address(&config.bind_address)
+        .with_local_address(&from_uri)
         .with_sip_port(port)
         .with_handler(handler)
         .build()
