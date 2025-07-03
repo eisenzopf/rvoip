@@ -1,10 +1,12 @@
 [package]
 name = "rvoip-client-core"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "SIP client coordination layer - leverages rvoip infrastructure for client applications"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/your-org/rvoip"
+documentation = "https://docs.rs/rvoip-client-core"
+homepage = "https://github.com/eisenzopf/rvoip"
+repository = "https://github.com/eisenzopf/rvoip"
 keywords = ["sip", "voip", "client", "telecommunications", "rtp"]
 categories = ["network-programming", "multimedia"]
 
@@ -77,7 +79,7 @@ manual_find = "allow"
 collapsible_else_if = "allow"
 
 [dependencies]
-rvoip-session-core = { path = "../session-core" }
+rvoip-session-core = { path = "../session-core", version = "0.1.2" }
 
 # Async runtime and utilities
 tokio = { version = "1.0", features = ["full"] }

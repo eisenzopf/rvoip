@@ -1,9 +1,12 @@
 [package]
 name = "rvoip-call-engine"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Call routing and business logic for the rvoip stack"
 license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/rvoip-call-engine"
+homepage = "https://github.com/eisenzopf/rvoip"
+repository = "https://github.com/eisenzopf/rvoip"
 
 # Silence all Rust warnings and configure clippy
 [lints.rust]
@@ -75,10 +78,8 @@ collapsible_else_if = "allow"
 
 [dependencies]
 # Workspace crates
-#rvoip-sip-transport = { path = "../sip-transport" }
-rvoip-sip-core = { path = "../sip-core" }
-# Our own crates - following client-core pattern
-rvoip-session-core = { path = "../session-core" }
+rvoip-sip-core = { path = "../sip-core", version = "0.1.2" }
+rvoip-session-core = { path = "../session-core", version = "0.1.2" }
 
 # Database - Modern async approach with sqlx
 # Replace rusqlite/r2d2 with sqlx for true async support
@@ -121,7 +122,7 @@ parking_lot = "0.12"
 
 # For examples
 clap = { version = "4.5", features = ["derive"] }
-rvoip-client-core = { path = "../client-core" }
+rvoip-client-core = { path = "../client-core", version = "0.1.1" }
 
 [dev-dependencies]
 # Testing

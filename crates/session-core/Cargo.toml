@@ -1,9 +1,12 @@
 [package]
 name = "rvoip-session-core"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Call session management for the rvoip stack"
 license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/rvoip-session-core"
+homepage = "https://github.com/eisenzopf/rvoip"
+repository = "https://github.com/eisenzopf/rvoip"
 
 # Silence all Rust warnings and configure clippy
 [lints.rust]
@@ -75,12 +78,12 @@ collapsible_else_if = "allow"
 
 [dependencies]
 # Our own crates
-rvoip-sip-core = { path = "../sip-core" }
-rvoip-transaction-core = { path = "../transaction-core" }
-rvoip-dialog-core = { path = "../dialog-core" }
-rvoip-rtp-core = { path = "../rtp-core" }
-rvoip-sip-transport = { path = "../sip-transport" }
-rvoip-media-core = { path = "../media-core" }
+rvoip-sip-core = { path = "../sip-core", version = "0.1.2" }
+rvoip-transaction-core = { path = "../transaction-core", version = "0.1.2" }
+rvoip-dialog-core = { path = "../dialog-core", version = "0.1.2" }
+rvoip-rtp-core = { path = "../rtp-core", version = "0.1.2" }
+rvoip-sip-transport = { path = "../sip-transport", version = "0.1.2" }
+rvoip-media-core = { path = "../media-core", version = "0.1.2" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }

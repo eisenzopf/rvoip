@@ -1,10 +1,13 @@
 [package]
 name = "rvoip-media-core"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Core media handling functionality for the RVOIP project"
 authors = ["RVOIP Team"]
 license = "MIT OR Apache-2.0"
+documentation = "https://docs.rs/rvoip-media-core"
+homepage = "https://github.com/eisenzopf/rvoip"
+repository = "https://github.com/eisenzopf/rvoip"
 
 # Silence all Rust warnings and configure clippy
 [lints.rust]
@@ -75,7 +78,7 @@ collapsible_else_if = "allow"
 
 [dependencies]
 # Use the rtp-core crate from our workspace
-rvoip-rtp-core = { path = "../rtp-core" }
+rvoip-rtp-core = { path = "../rtp-core", version = "0.1.2" }
 
 # Logging
 tracing = "0.1"
