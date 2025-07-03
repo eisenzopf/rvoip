@@ -36,7 +36,6 @@ rvoip-media-core = { path = "crates/media-core", version = "0.1.1" }
 rvoip-session-core = { path = "crates/session-core", version = "0.1.1" }
 rvoip-call-engine = { path = "crates/call-engine", version = "0.1.1" }
 rvoip-client-core = { path = "crates/client-core", version = "0.1.1" }
-infra-common = { path = "crates/infra-common", version = "0.1.0" }
 
 # Silence all Rust warnings
 [workspace.lints.rust]

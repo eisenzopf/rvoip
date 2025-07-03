@@ -55,7 +55,6 @@ pub use rvoip_media_core as media_core;
 pub use rvoip_session_core as session_core;
 pub use rvoip_call_engine as call_engine;
 pub use rvoip_client_core as client_core;
-pub use infra_common;
 
 // Re-export commonly used items for convenience
 pub mod prelude {
