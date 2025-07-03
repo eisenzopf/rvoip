@@ -34,10 +34,6 @@ impl PeerAHandler {
     pub async fn is_call_completed(&self) -> bool {
         *self.call_completed.lock().await
     }
-    
-    pub async fn get_call_id(&self) -> Option<CallId> {
-        self.call_id.lock().await.clone()
-    }
 }
 
 #[async_trait::async_trait]
