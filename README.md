@@ -2,11 +2,11 @@
 
 > **⚠️ Alpha Release** - This is an alpha release with rapidly evolving APIs. Libraries will change significantly as we move toward production readiness, but the core architecture and design principles are stable. The intent is to make this library production-ready for enterprise VoIP deployments. We are in the process of doing real-world testing and would appreciate any feedback, feature requests, contributions, or bug reports.
 
-rvoip is a comprehensive, 100% pure Rust implementation of a SIP/VoIP stack designed to handle, route, and manage phone calls at scale. Built from the ground up with modern Rust practices, it provides a robust, efficient, and secure foundation for VoIP applications ranging from simple softphones to enterprise call centers.
+rvoip is a comprehensive, 100% pure Rust implementation of a SIP/VoIP stack designed to handle, route, and manage phone calls at scale. Built from the ground up with modern Rust practices, it provides a robust, efficient, and secure foundation for VoIP applications ranging from simple softphones to enterprise call centers. This library is meant as a foundation to build SIP clients and servers that could in the future provide an alternative to open source systems like FreeSWITCH and Asterisk as well as commercial systems like Avaya and Cisco.
 
 ## 🎯 Library Purpose
 
-rvoip provides a complete alternative to traditional VoIP solutions like Asterisk and FreeSWITCH, offering:
+rvoip is a pure Rust set of libraries built from the ground up and follows SIP best practices for separation of concerns:
 
 - **Pure Rust Implementation**: Zero FFI dependencies, leveraging Rust's safety and performance
 - **Modular Architecture**: Clean separation of concerns across specialized crates
