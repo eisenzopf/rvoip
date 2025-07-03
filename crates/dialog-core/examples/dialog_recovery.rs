@@ -20,6 +20,7 @@ struct DialogRecoveryExample {
     primary_api: Arc<UnifiedDialogApi>,
     backup_api: Arc<UnifiedDialogApi>,
     primary_addr: SocketAddr,
+    #[allow(dead_code)]
     backup_addr: SocketAddr,
 }
 

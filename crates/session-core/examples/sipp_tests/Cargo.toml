@@ -14,16 +14,8 @@ name = "sip_test_client"
 path = "src/bin/sip_test_client.rs"
 
 [[bin]]
-name = "sip_echo_server"
-path = "src/bin/sip_echo_server.rs"
-
-[[bin]]
 name = "sip_conference_server"
 path = "src/bin/sip_conference_server.rs"
-
-[[bin]]
-name = "sip_rtp_test_server"
-path = "src/bin/sip_rtp_test_server.rs"
 
 [dependencies]
 # Core session library

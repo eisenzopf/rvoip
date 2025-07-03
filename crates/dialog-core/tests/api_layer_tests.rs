@@ -4,15 +4,12 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
-use tracing::{info, Level};
-use tracing_subscriber;
 
 use rvoip_dialog_core::api::{DialogClient, DialogServer, DialogApi};
-use rvoip_dialog_core::{DialogError, SessionCoordinationEvent, DialogId};
+use rvoip_dialog_core::DialogId;
 use rvoip_transaction_core::builders::{client_quick}; // Use the new builders
-use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri, TypedHeader, ContentLength};
+use rvoip_sip_core::{Request, Method, StatusCode, Uri, TypedHeader, ContentLength};
 use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_transaction_core::{TransactionManager, TransportManager};
 use rvoip_transaction_core::transport::TransportManagerConfig;
@@ -22,7 +19,9 @@ use uuid::Uuid;
 struct DialogApiTestEnvironment {
     pub server: Arc<DialogServer>,
     pub client: Arc<DialogClient>,
+    #[allow(dead_code)]
     pub server_transport: TransportManager,
+    #[allow(dead_code)]
     pub client_transport: TransportManager,
     pub server_addr: SocketAddr,
     pub client_addr: SocketAddr,

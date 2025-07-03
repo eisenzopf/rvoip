@@ -3,7 +3,7 @@
 //! Tests SDP offer/answer coordination within dialogs using **REAL IMPLEMENTATIONS**.
 
 use rvoip_dialog_core::{Dialog, DialogState};
-use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
+use rvoip_sip_core::{Request, Response, Method, StatusCode};
 use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use uuid::Uuid;
 

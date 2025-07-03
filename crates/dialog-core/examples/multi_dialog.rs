@@ -18,6 +18,7 @@ use rvoip_dialog_core::{
 /// Multi-dialog management example using unified API
 struct MultiDialogExample {
     hybrid_api: Arc<UnifiedDialogApi>,
+    #[allow(dead_code)]
     local_addr: SocketAddr,
 }
 
@@ -187,7 +188,7 @@ impl MultiDialogExample {
     }
     
     /// Demonstrate dialog operations on multiple dialogs
-    async fn perform_dialog_operations(&self, dialogs: &[rvoip_dialog_core::api::common::DialogHandle]) -> Result<(), Box<dyn std::error::Error>> {
+    async fn perform_dialog_operations(&self, _dialogs: &[rvoip_dialog_core::api::common::DialogHandle]) -> Result<(), Box<dyn std::error::Error>> {
         info!("\n📡 === Multi-Dialog SIP Operations ===");
         info!("💡 Demonstrating real SIP operations (no simulated establishment)");
         

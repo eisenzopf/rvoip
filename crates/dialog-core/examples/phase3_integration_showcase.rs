@@ -31,7 +31,9 @@ struct LifecycleTest {
     client_api: Arc<UnifiedDialogApi>,
     hybrid_api: Arc<UnifiedDialogApi>,
     server_addr: SocketAddr,
+    #[allow(dead_code)]
     client_addr: SocketAddr,
+    #[allow(dead_code)]
     hybrid_addr: SocketAddr,
 }
 

@@ -3,8 +3,7 @@
 //! Tests for the complete SIP dialog lifecycle from creation to termination.
 
 use tokio::time::{sleep, Duration};
-use tracing::{info, Level};
-use tracing_subscriber;
+use tracing::info;
 
 use rvoip_dialog_core::{DialogError, Dialog, DialogState};
 use rvoip_sip_core::Method;
