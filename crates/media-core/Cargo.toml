@@ -76,7 +76,6 @@ collapsible_else_if = "allow"
 [dependencies]
 # Use the rtp-core crate from our workspace
 rvoip-rtp-core = { path = "../rtp-core" }
-rvoip-ice-core = { path = "../ice-core" }
 
 # Logging
 tracing = "0.1"

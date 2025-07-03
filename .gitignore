@@ -10,6 +10,7 @@
 .DS_Store
 desktop.ini
 Cargo.lock
+publish_order.sh
 
 ## Editor
 *.swp
