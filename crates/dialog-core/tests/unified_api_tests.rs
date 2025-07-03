@@ -14,25 +14,20 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc;
-use tokio::time::timeout;
 
 use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
 use rvoip_transaction_core::TransactionManager;
-use rvoip_sip_core::{Request, Method, StatusCode, Uri};
+use rvoip_sip_core::{Request, Method};
 
 use rvoip_dialog_core::{
     // Core unified types
-    config::{DialogManagerConfig, ClientBehavior, ServerBehavior, HybridBehavior},
+    config::{DialogManagerConfig, ClientBehavior},
     manager::unified::UnifiedDialogManager,
     api::{
         unified::UnifiedDialogApi,
-        DialogConfig, Credentials, ApiError, ApiResult,
-        common::{DialogHandle, CallHandle}
+        DialogConfig, ApiError,
     },
-    events::{SessionCoordinationEvent, DialogEvent},
-    DialogId, DialogState
 };
 
 /// Test environment for unified API testing

@@ -3121,7 +3121,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-call-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3149,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-client-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3173,7 +3173,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-dialog-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3221,7 +3221,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-media-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "apodize",
  "async-std",
@@ -3294,7 +3294,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-session-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3325,7 +3325,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-transport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3369,7 +3369,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-transaction-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",

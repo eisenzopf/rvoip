@@ -4,8 +4,7 @@
 //! in the face of network failures and other issues.
 
 use tokio::time::{sleep, Duration};
-use tracing::{info, Level};
-use tracing_subscriber;
+use tracing::info;
 
 use rvoip_dialog_core::{DialogError, Dialog, DialogState};
 

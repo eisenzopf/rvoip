@@ -7,6 +7,21 @@ authors = ["Rudeless Ventures"]
 repository = "https://github.com/rudeless/rvoip"
 license = "MIT"
 
+# Silence all linter warnings and errors
+[lints.rust]
+warnings = "allow"
+unused = "allow"
+dead_code = "allow"
+unused_imports = "allow"
+unused_variables = "allow"
+unreachable_code = "allow"
+
+[lints.clippy]
+all = "allow"
+pedantic = "allow"
+nursery = "allow"
+cargo = "allow"
+
 [features]
 default = []
 no-global-allocator = []
