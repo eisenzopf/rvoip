@@ -205,7 +205,7 @@ pub struct DialogConfig {
 impl Default for DialogConfig {
     fn default() -> Self {
         Self {
-            local_address: "127.0.0.1:5060".parse().unwrap(),
+            local_address: "0.0.0.0:5060".parse().unwrap(),
             user_agent: Some("RVOIP-Dialog/1.0".to_string()),
             dialog_timeout: Duration::from_secs(180), // 3 minutes
             max_dialogs: Some(10000),

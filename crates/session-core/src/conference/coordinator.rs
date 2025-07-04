@@ -86,11 +86,14 @@ impl ConferenceCoordinator {
             .unwrap_or_default()
             .as_secs();
 
+        // Get local IP from SessionManager's MediaManager configuration
+        let local_ip = self.session_manager.get_local_bind_addr().ip();
+
         Ok(format!(
             "v=0\r\n\
-             o=conference_{} {} {} IN IP4 127.0.0.1\r\n\
+             o=conference_{} {} {} IN IP4 {}\r\n\
              s=Conference Room {}\r\n\
-             c=IN IP4 127.0.0.1\r\n\
+             c=IN IP4 {}\r\n\
              t=0 0\r\n\
              m=audio {} RTP/AVP 0 8\r\n\
              a=sendrecv\r\n\
@@ -102,7 +105,9 @@ impl ConferenceCoordinator {
             session_id.as_str(),
             timestamp,
             timestamp,
+            local_ip,
             conference_id,
+            local_ip,
             media_port,
             if config.audio_mixing_enabled {
                 "a=conf:audio-mixing\r\n"

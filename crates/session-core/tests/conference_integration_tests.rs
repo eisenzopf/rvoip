@@ -41,7 +41,7 @@ async fn create_test_system() -> (
     Arc<ConferenceManager>,
     Arc<tokio::sync::Mutex<Vec<ConferenceEvent>>>,
 ) {
-    let conference_manager = Arc::new(ConferenceManager::new());
+    let conference_manager = Arc::new(ConferenceManager::new("127.0.0.1".parse().unwrap()));
 
     let (event_handler, events) = EventCollector::new();
     conference_manager.add_event_handler("test", Arc::new(event_handler)).await;

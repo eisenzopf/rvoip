@@ -22,14 +22,17 @@ pub struct ConferenceManager {
     conferences: Arc<DashMap<ConferenceId, ConferenceRoom>>,
     /// Event handlers for conference events (using RwLock to avoid DashMap lifetime issues)
     event_handlers: Arc<RwLock<Vec<(String, Arc<dyn ConferenceEventHandler>)>>>,
+    /// Local IP address for SDP generation
+    local_ip: std::net::IpAddr,
 }
 
 impl ConferenceManager {
     /// Create a new conference manager
-    pub fn new() -> Self {
+    pub fn new(local_ip: std::net::IpAddr) -> Self {
         Self {
             conferences: Arc::new(DashMap::new()),
             event_handlers: Arc::new(RwLock::new(Vec::new())),
+            local_ip,
         }
     }
 
@@ -229,13 +232,13 @@ impl ConferenceApi for ConferenceManager {
             .unwrap_or_default()
             .as_secs();
 
-        // Generate comprehensive conference SDP
+        // Generate comprehensive conference SDP using configured local IP
         Ok(format!(
             "v=0\r\n\
-             o=conference_{} {} {} IN IP4 127.0.0.1\r\n\
+             o=conference_{} {} {} IN IP4 {}\r\n\
              s=Conference Room {} ({} participants)\r\n\
              i=Multi-party conference call\r\n\
-             c=IN IP4 127.0.0.1\r\n\
+             c=IN IP4 {}\r\n\
              t=0 0\r\n\
              m=audio {} RTP/AVP 0 8 18 101\r\n\
              a=sendrecv\r\n\
@@ -250,8 +253,10 @@ impl ConferenceApi for ConferenceManager {
             session_id.as_str(),
             timestamp,
             timestamp,
+            self.local_ip,
             conference_id,
             participants.len(),
+            self.local_ip,
             media_port,
             if config.audio_mixing_enabled {
                 "a=conf:audio-mixing\r\n"

@@ -53,7 +53,7 @@ impl ConferenceEventHandler for CountingEventHandler {
 
 #[tokio::test]
 async fn test_event_handler_management() {
-    let manager = ConferenceManager::new();
+    let manager = ConferenceManager::new("127.0.0.1".parse().unwrap());
     
     // Initially no handlers
     assert_eq!(manager.event_handler_count().await, 0);
@@ -96,7 +96,7 @@ async fn test_event_handler_management() {
 
 #[tokio::test]
 async fn test_conference_counting() {
-    let manager = ConferenceManager::new();
+    let manager = ConferenceManager::new("127.0.0.1".parse().unwrap());
     
     // Initially no conferences
     assert_eq!(manager.conference_count(), 0);
@@ -125,7 +125,7 @@ async fn test_conference_counting() {
 
 #[tokio::test]
 async fn test_concurrent_conference_operations() {
-    let manager = Arc::new(ConferenceManager::new());
+    let manager = Arc::new(ConferenceManager::new("127.0.0.1".parse().unwrap()));
     let config = ConferenceConfig::default();
     
     // Create multiple conferences concurrently
@@ -192,7 +192,7 @@ async fn test_concurrent_conference_operations() {
 
 #[tokio::test]
 async fn test_event_ordering() {
-    let manager = ConferenceManager::new();
+    let manager = ConferenceManager::new("127.0.0.1".parse().unwrap());
     let (handler, events) = CountingEventHandler::new();
     
     manager.add_event_handler("test", handler).await;
@@ -235,7 +235,7 @@ async fn test_event_ordering() {
 
 #[tokio::test]
 async fn test_update_conference_config() {
-    let manager = ConferenceManager::new();
+    let manager = ConferenceManager::new("127.0.0.1".parse().unwrap());
     
     // Create conference with initial config
     let mut config = ConferenceConfig::default();
@@ -264,7 +264,7 @@ async fn test_update_conference_config() {
 
 #[tokio::test]
 async fn test_error_handling() {
-    let manager = ConferenceManager::new();
+    let manager = ConferenceManager::new("127.0.0.1".parse().unwrap());
     let fake_conference_id = ConferenceId::new();
     let fake_session_id = SessionId::new();
     

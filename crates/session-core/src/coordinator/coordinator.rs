@@ -80,8 +80,8 @@ impl SessionCoordinator {
             dialog_to_session.clone(),
         ));
 
-        // Create media subsystem
-        let local_bind_addr = "127.0.0.1:0".parse().unwrap();
+        // Create media subsystem - use configured local bind address
+        let local_bind_addr = config.local_bind_addr;
         
         // Create media config from session config
         let media_config = crate::media::types::MediaConfig {
@@ -130,8 +130,8 @@ impl SessionCoordinator {
             media_manager.clone()
         ));
 
-        // Create conference manager
-        let conference_manager = Arc::new(ConferenceManager::new());
+        // Create conference manager with configured local IP
+        let conference_manager = Arc::new(ConferenceManager::new(config.local_bind_addr.ip()));
 
         let coordinator = Arc::new(Self {
             registry,

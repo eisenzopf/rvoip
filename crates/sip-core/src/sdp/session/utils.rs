@@ -27,7 +27,7 @@ pub fn init_session_description() -> SdpSession {
             sess_version: "0".to_string(),
             net_type: "IN".to_string(),
             addr_type: "IP4".to_string(),
-            unicast_address: "127.0.0.1".to_string(),
+            unicast_address: "0.0.0.0".to_string(), // Placeholder - must be configured
         },
         session_name: "-".to_string(),
         session_info: None,

@@ -68,6 +68,7 @@ impl UdpTransport {
 
     /// Create a default dummy UDP transport (used only for creating dummy transaction managers)
     /// This transport doesn't work for real communication
+    #[cfg(test)]
     pub fn default() -> Self {
         // Create a dummy event channel
         let (events_tx, _) = mpsc::channel(1);

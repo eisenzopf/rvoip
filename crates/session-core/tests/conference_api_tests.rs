@@ -16,7 +16,7 @@ use rvoip_session_core::{
 };
 
 async fn create_test_manager() -> ConferenceManager {
-    ConferenceManager::new()
+            ConferenceManager::new("127.0.0.1".parse().unwrap())
 }
 
 fn create_test_config() -> ConferenceConfig {
