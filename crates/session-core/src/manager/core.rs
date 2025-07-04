@@ -93,10 +93,9 @@ impl SessionManager {
             incoming_sdp_offers,
         ));
 
-        // Create media manager with proper configuration
-        let local_bind_addr = "127.0.0.1:0".parse().unwrap(); // Let MediaManager handle port allocation
+        // Create media manager with configured local bind address
         let media_manager = Arc::new(crate::media::manager::MediaManager::with_port_range(
-            local_bind_addr,
+            config.local_bind_addr,
             config.media_port_start,
             config.media_port_end,
         ));
@@ -441,6 +440,11 @@ impl SessionManager {
     /// Get the actual bound address (for testing and discovery)
     pub fn get_bound_address(&self) -> std::net::SocketAddr {
         self.dialog_manager.get_bound_address()
+    }
+
+    /// Get the local bind address for media
+    pub fn get_local_bind_addr(&self) -> std::net::SocketAddr {
+        self.media_manager.get_local_bind_addr()
     }
 
     /// Send a session event

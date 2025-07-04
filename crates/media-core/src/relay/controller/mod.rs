@@ -274,7 +274,7 @@ impl MediaSessionController {
         let global_allocator = GlobalPortAllocator::instance().await;
         let dialog_session_id = format!("dialog_{}", dialog_id);
         let (local_rtp_addr, _) = global_allocator
-            .allocate_port_pair(&dialog_session_id, Some("127.0.0.1".parse().unwrap()))
+            .allocate_port_pair(&dialog_session_id, Some(config.local_addr.ip()))
             .await
             .map_err(|e| Error::config(format!("Failed to allocate RTP port: {}", e)))?;
         

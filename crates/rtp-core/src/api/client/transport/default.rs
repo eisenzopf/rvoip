@@ -117,7 +117,7 @@ impl DefaultMediaTransportClient {
             clock_rate: config.clock_rate,
             payload_type: config.default_payload_type,
             local_addr: "0.0.0.0:0".parse().unwrap(), // Bind to any address/port
-            remote_addr: Some(config.remote_address),
+            remote_addr: config.remote_address,
             
             // Jitter buffer configuration
             jitter_buffer_size: Some(config.jitter_buffer_size as usize),
@@ -267,7 +267,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         let srtp_key = self.config.security_config.srtp_key.clone();
         
         connection::connect(
-            self.config.remote_address,
+            self.config.remote_address.ok_or_else(|| MediaTransportError::ConfigError("Remote address not set".to_string()))?,
             self.config.rtcp_mux,
             &self.security,
             connection::requires_dtls(self.config.security_config.security_mode),
@@ -320,7 +320,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
             &self.transport,
             &self.config,
             &self.sequence_numbers,
-            self.config.remote_address,
+            self.config.remote_address.ok_or_else(|| MediaTransportError::ConfigError("Remote address not set".to_string()))?,
             &self.csrc_manager,
             self.csrc_management_enabled.load(Ordering::SeqCst),
         ).await
@@ -392,7 +392,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
                     jitter_ms: rtp_stats.jitter_ms as f32,
                     rtt_ms: None, // Not available yet
                     mos: None, // Not calculated yet
-                    remote_addr: self.config.remote_address,
+                    remote_addr: self.config.remote_address.unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0))),
                     bitrate_bps: 0, // Would calculate if we tracked time between packets
                     discard_rate: 0.0,
                     quality: QualityLevel::Unknown, // Would be calculated based on stats
@@ -475,7 +475,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         app_packets::send_rtcp_app(
             &self.session,
             &self.transport,
-            self.config.remote_address,
+            self.config.remote_address.ok_or_else(|| MediaTransportError::ConfigError("Remote address not set".to_string()))?,
             self.connected.load(Ordering::SeqCst),
             name,
             data,
@@ -486,7 +486,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         app_packets::send_rtcp_bye(
             &self.session,
             &self.transport,
-            self.config.remote_address,
+            self.config.remote_address.ok_or_else(|| MediaTransportError::ConfigError("Remote address not set".to_string()))?,
             self.connected.load(Ordering::SeqCst),
             reason,
         ).await
@@ -496,7 +496,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         app_packets::send_rtcp_xr_voip_metrics(
             &self.session,
             &self.transport,
-            self.config.remote_address,
+            self.config.remote_address.ok_or_else(|| MediaTransportError::ConfigError("Remote address not set".to_string()))?,
             self.connected.load(Ordering::SeqCst),
             metrics,
         ).await
@@ -838,7 +838,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
             self.config.high_performance_buffers_enabled,
             &self.transmit_buffer,
             &self.transport,
-            self.config.remote_address,
+            self.config.remote_address.ok_or_else(|| MediaTransportError::ConfigError("Remote address not set".to_string()))?,
             fallback_send,
         ).await
     }

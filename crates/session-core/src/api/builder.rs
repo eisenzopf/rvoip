@@ -154,6 +154,9 @@ pub struct SessionManagerConfig {
     /// Local SIP address (e.g., "user@domain")
     pub local_address: String,
     
+    /// Local bind address for media (RTP/RTCP)
+    pub local_bind_addr: std::net::SocketAddr,
+    
     /// Media port range start
     pub media_port_start: u16,
     
@@ -178,6 +181,7 @@ impl Default for SessionManagerConfig {
         Self {
             sip_port: 5060,
             local_address: "sip:user@localhost".to_string(),
+            local_bind_addr: "0.0.0.0:0".parse().unwrap(), // Bind to all interfaces
             media_port_start: 10000,
             media_port_end: 20000,
             enable_stun: false,
@@ -256,6 +260,24 @@ impl SessionManagerBuilder {
     /// ```
     pub fn with_local_address(mut self, address: impl Into<String>) -> Self {
         self.config.local_address = address.into();
+        self
+    }
+    
+    /// Set the local bind address for media (RTP/RTCP)
+    /// 
+    /// This is the IP address that media sessions will bind to.
+    /// Use `0.0.0.0:0` to bind to all interfaces (default).
+    /// 
+    /// # Arguments
+    /// * `addr` - Socket address to bind media sessions to
+    /// 
+    /// # Example
+    /// ```rust
+    /// let builder = SessionManagerBuilder::new()
+    ///     .with_local_bind_addr("192.168.1.100:0".parse().unwrap());
+    /// ```
+    pub fn with_local_bind_addr(mut self, addr: std::net::SocketAddr) -> Self {
+        self.config.local_bind_addr = addr;
         self
     }
     

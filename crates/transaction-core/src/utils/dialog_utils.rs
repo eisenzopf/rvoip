@@ -92,9 +92,17 @@ pub fn create_request_from_dialog_template(
         &local_address.ip().to_string(),
         Some(local_address.port()),
         vec![Param::branch(&generate_branch())]
-    ).unwrap_or_else(|_| {
-        // Fallback Via if creation fails
-        Via::new("SIP", "2.0", "UDP", "127.0.0.1", Some(5060), vec![]).unwrap()
+    ).unwrap_or_else(|e| {
+        // Log the error for debugging
+        eprintln!("Failed to create Via header with local address {}: {}", local_address, e);
+        
+        // Try a simpler fallback without branch parameter
+        Via::new("SIP", "2.0", "UDP", &local_address.ip().to_string(), Some(local_address.port()), vec![])
+            .unwrap_or_else(|_| {
+                // Final fallback: use unspecified address (better than localhost)
+                Via::new("SIP", "2.0", "UDP", "0.0.0.0", Some(local_address.port()), vec![])
+                    .expect("Failed to create even basic Via header")
+            })
     });
     request.headers.push(TypedHeader::Via(via));
     

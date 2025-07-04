@@ -11,7 +11,7 @@ use crate::buffer::{TransmitBufferConfig, BufferLimits};
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Remote address to connect to
-    pub remote_address: SocketAddr,
+    pub remote_address: Option<SocketAddr>,
     /// Local address to connect to
     pub local_address: Option<SocketAddr>,
     /// Default payload type
@@ -82,7 +82,13 @@ impl ClientConfigBuilder {
     
     /// Set the remote address
     pub fn remote_address(mut self, addr: SocketAddr) -> Self {
-        self.config.remote_address = addr;
+        self.config.remote_address = Some(addr);
+        self
+    }
+    
+    /// Set the remote address to localhost (for testing only)
+    pub fn remote_address_localhost(mut self, port: u16) -> Self {
+        self.config.remote_address = Some(SocketAddr::from(([127, 0, 0, 1], port)));
         self
     }
     
@@ -197,7 +203,7 @@ impl ClientConfigBuilder {
 impl Default for ClientConfig {
     fn default() -> Self {
         Self {
-            remote_address: "127.0.0.1:9000".parse().unwrap(),
+            remote_address: None,
             local_address: None,
             default_payload_type: 0,
             clock_rate: 8000,

@@ -49,6 +49,7 @@ impl UdpSender {
     }
     
     /// Creates a default dummy sender (used for testing)
+    #[cfg(test)]
     pub fn default() -> Self {
         let socket = match std::net::UdpSocket::bind("127.0.0.1:0") {
             Ok(std_socket) => {

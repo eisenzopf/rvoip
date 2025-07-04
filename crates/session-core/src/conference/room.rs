@@ -224,13 +224,14 @@ impl ConferenceRoom {
 
     /// Generate basic conference SDP template
     /// TODO: Integrate with proper SDP generation from session-core
-    pub fn generate_base_sdp(&self) -> String {
+    pub fn generate_base_sdp(&self, local_ip: std::net::IpAddr) -> String {
         format!(
             "v=0\r\n\
              s=Conference Room {}\r\n\
-             c=IN IP4 127.0.0.1\r\n\
+             c=IN IP4 {}\r\n\
              t=0 0\r\n",
-            self.id
+            self.id,
+            local_ip
         )
     }
 } 

@@ -40,7 +40,7 @@ struct Args {
     port: u16,
     
     /// Domain name
-    #[arg(short, long, default_value = "127.0.0.1")]
+    #[arg(short, long, default_value = "")]
     domain: String,
     
     /// Call duration in seconds (0 for manual hangup)
