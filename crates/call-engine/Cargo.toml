@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-call-engine"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Call routing and business logic for the rvoip stack"
 license = "MIT OR Apache-2.0"
@@ -78,8 +78,8 @@ collapsible_else_if = "allow"
 
 [dependencies]
 # Workspace crates
-rvoip-sip-core = { path = "../sip-core", version = "0.1.3" }
-rvoip-session-core = { path = "../session-core", version = "0.1.3" }
+rvoip-sip-core = { path = "../sip-core", version = "0.1.4" }
+rvoip-session-core = { path = "../session-core", version = "0.1.4" }
 
 # Database - Modern async approach with sqlx
 # Replace rusqlite/r2d2 with sqlx for true async support

@@ -161,6 +161,33 @@
 //! - **rvoip-media-core**: Audio processing and codec management
 //! - **rvoip-client-core**: Client-side integration for softphones
 //!
+//! ## Network Configuration
+//!
+//! The call engine properly respects and propagates configured bind addresses:
+//!
+//! ```
+//! use rvoip_call_engine::prelude::*;
+//! 
+//! # async fn example() -> Result<()> {
+//! // Configure specific IP addresses for your deployment
+//! let mut config = CallCenterConfig::default();
+//! config.general.local_signaling_addr = "127.0.0.1:5060".parse().unwrap();  // Use localhost for test
+//! config.general.local_media_addr = "127.0.0.1:20000".parse().unwrap();     // Same IP for media
+//! 
+//! // The engine ensures these addresses propagate to all layers
+//! let engine = CallCenterEngine::new(config, None).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Key points:
+//! - Configured IPs propagate through session-core to dialog-core and transport
+//! - No more hardcoded 0.0.0.0 addresses - your specific IP is used everywhere  
+//! - Media port range starts from the configured `local_media_addr` port
+//!
+//! For automatic media port allocation, the engine uses the port from `local_media_addr`
+//! as the base and allocates a range from there (typically +1000 ports).
+//!
 //! ## Production Deployment
 //!
 //! For production deployments, consider:
@@ -169,7 +196,7 @@
 //! - **Monitoring**: Enable real-time monitoring and quality alerts
 //! - **Security**: Configure proper authentication and authorization
 //! - **Scaling**: Monitor agent and call limits, scale horizontally as needed
-//! - **Network**: Ensure proper SIP and RTP port configuration
+//! - **Network**: Ensure proper SIP and RTP port configuration with specific bind addresses
 //!
 //! ## Examples
 //!

@@ -95,6 +95,7 @@ pub trait SipClient: Send + Sync {
     /// 
     /// ```rust,no_run
     /// # use rvoip_session_core::api::*;
+    /// # use std::sync::Arc;
     /// # async fn example(coordinator: Arc<SessionCoordinator>) -> Result<()> {
     /// // Register for 1 hour
     /// let reg = coordinator.register(

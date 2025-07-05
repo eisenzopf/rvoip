@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-media-core"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Core media handling functionality for the RVOIP project"
 authors = ["RVOIP Team"]
@@ -78,7 +78,7 @@ collapsible_else_if = "allow"
 
 [dependencies]
 # Use the rtp-core crate from our workspace
-rvoip-rtp-core = { path = "../rtp-core", version = "0.1.3" }
+rvoip-rtp-core = { path = "../rtp-core", version = "0.1.4" }
 
 # Logging
 tracing = "0.1"

@@ -14,6 +14,21 @@ members = [
     "crates/rvoip",
 ]
 
+# Default members - when you run cargo commands without -p or --workspace,
+# these are the packages that will be affected
+default-members = [
+    "crates/sip-core",
+    "crates/sip-transport",
+    "crates/transaction-core",
+    "crates/dialog-core",
+    "crates/rtp-core",
+    "crates/media-core",
+    "crates/session-core",
+    "crates/call-engine",
+    "crates/client-core",
+    "crates/rvoip",
+]
+
 
 
 # Silence all Rust warnings

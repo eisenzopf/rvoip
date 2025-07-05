@@ -1,6 +1,6 @@
 [package]
 name = "rvoip"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "A comprehensive VoIP library for Rust"
 license = "MIT OR Apache-2.0"
@@ -10,15 +10,15 @@ repository = "https://github.com/eisenzopf/rvoip"
 
 [dependencies]
 # Re-export all the crates in the workspace
-rvoip-sip-core = { path = "../sip-core", version = "0.1.3" }
-rvoip-sip-transport = { path = "../sip-transport", version = "0.1.3" }
-rvoip-transaction-core = { path = "../transaction-core", version = "0.1.3" }
-rvoip-dialog-core = { path = "../dialog-core", version = "0.1.3" }
-rvoip-rtp-core = { path = "../rtp-core", version = "0.1.3" }
-rvoip-media-core = { path = "../media-core", version = "0.1.3" }
-rvoip-session-core = { path = "../session-core", version = "0.1.3" }
-rvoip-call-engine = { path = "../call-engine", version = "0.1.3" }
-rvoip-client-core = { path = "../client-core", version = "0.1.3" }
+rvoip-sip-core = { path = "../sip-core", version = "0.1.4" }
+rvoip-sip-transport = { path = "../sip-transport", version = "0.1.4" }
+rvoip-transaction-core = { path = "../transaction-core", version = "0.1.4" }
+rvoip-dialog-core = { path = "../dialog-core", version = "0.1.4" }
+rvoip-rtp-core = { path = "../rtp-core", version = "0.1.4" }
+rvoip-media-core = { path = "../media-core", version = "0.1.4" }
+rvoip-session-core = { path = "../session-core", version = "0.1.4" }
+rvoip-call-engine = { path = "../call-engine", version = "0.1.4" }
+rvoip-client-core = { path = "../client-core", version = "0.1.4" }
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }

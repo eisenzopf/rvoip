@@ -1,8 +1,98 @@
-// RVOIP Session Core Library
-//
-// This library provides Session Initiation Protocol (SIP) session and dialog management 
-// for the RVOIP stack. It serves as the middle layer between low-level SIP transaction 
-// processing and high-level application logic.
+//! RVOIP Session Core Library
+//!
+//! This library provides Session Initiation Protocol (SIP) session and dialog management 
+//! for the RVOIP stack. It serves as the middle layer between low-level SIP transaction 
+//! processing and high-level application logic.
+//! 
+//! # Overview
+//! 
+//! Session-core coordinates SIP dialogs, media sessions, and call control operations
+//! while integrating with dialog-core (SIP protocol), media-core (audio processing),
+//! and providing APIs for higher-level applications.
+//! 
+//! # Quick Start
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! use std::sync::Arc;
+//! use std::net::SocketAddr;
+//! 
+//! # fn main() {
+//! # let rt = tokio::runtime::Runtime::new().unwrap();
+//! # rt.block_on(async {
+//! // Create a session coordinator
+//! let addr: SocketAddr = "127.0.0.1:15070".parse().unwrap();
+//! let coordinator = SessionManagerBuilder::new()
+//!     .with_sip_port(15070)
+//!     .with_local_bind_addr(addr)
+//!     .with_media_ports(10000, 20000)
+//!     .build()
+//!     .await
+//!     .unwrap();
+//!     
+//! // Start accepting calls
+//! SessionControl::start(&coordinator).await.unwrap();
+//! # });
+//! # }
+//! ```
+//! 
+//! # Network Configuration
+//! 
+//! ## Bind Address Propagation
+//! 
+//! Session-core respects configured bind addresses and propagates them through all layers:
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! use std::net::SocketAddr;
+//! 
+//! # fn main() {
+//! # let rt = tokio::runtime::Runtime::new().unwrap();
+//! # rt.block_on(async {
+//! // Configure specific IP for production deployment
+//! let addr: SocketAddr = "127.0.0.1:15071".parse().unwrap();  // Use localhost for test
+//! let coordinator = SessionManagerBuilder::new()
+//!     .with_sip_port(15071)
+//!     .with_local_bind_addr(addr)
+//!     .with_media_ports(10000, 20000)
+//!     .build()
+//!     .await
+//!     .unwrap();
+//! # });
+//! # }
+//! ```
+//! 
+//! The configured IP propagates to dialog-core and transport layers.
+//! No more hardcoded 0.0.0.0 addresses when you specify an IP.
+//! 
+//! ## Media Port Configuration
+//! 
+//! The library supports automatic port allocation when you use port 0:
+//! 
+//! ```rust
+//! use rvoip_session_core::api::*;
+//! use std::net::SocketAddr;
+//! 
+//! # fn main() {
+//! # let rt = tokio::runtime::Runtime::new().unwrap();
+//! # rt.block_on(async {
+//! // Port 0 signals automatic allocation from the configured range
+//! let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+//! let coordinator = SessionManagerBuilder::new()
+//!     .with_local_bind_addr(addr)  // Port 0 = auto
+//!     .with_media_ports(10000, 20000)
+//!     .build()
+//!     .await
+//!     .unwrap();
+//! # });
+//! # }
+//! ```
+//! 
+//! When port is 0:
+//! - It means "allocate automatically when needed"
+//! - Actual allocation happens when media sessions are created  
+//! - Uses the configured media_port_start to media_port_end range
+//! - Each session gets unique ports from the pool
 
 pub mod api;
 pub mod session;

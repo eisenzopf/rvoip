@@ -279,6 +279,83 @@ impl CallHandler for CallCenterHandler {
 }
 ```
 
+### Network Configuration
+
+#### **Bind Address Configuration**
+
+Session-core respects configured bind addresses and propagates them through all layers:
+
+```rust
+// Configure specific IP addresses for production deployment
+let coordinator = SessionManagerBuilder::new()
+    .with_sip_port(5060)
+    .with_local_bind_addr("173.225.104.102:5060".parse()?)  // Your server's IP
+    .with_media_ports(10000, 20000)
+    .build()
+    .await?;
+```
+
+Key points:
+- The configured IP propagates to dialog-core and transport layers
+- No more hardcoded 0.0.0.0 addresses when you specify an IP
+- Works for both SIP signaling and media (RTP) traffic
+
+#### **Media Port Configuration**
+
+The library supports automatic port allocation when you use port 0:
+
+```rust
+// Port 0 signals automatic allocation from the configured range
+let config = SessionManagerConfig {
+    local_bind_addr: "192.168.1.100:0".parse()?,  // Port 0 = auto
+    media_port_start: 10000,
+    media_port_end: 20000,
+    ..Default::default()
+};
+```
+
+How it works:
+- **Port 0**: Means "allocate automatically when needed"
+- **Actual Allocation**: Happens when media sessions are created
+- **Port Range**: Uses the configured `media_port_start` to `media_port_end`
+- **No Conflicts**: Each session gets unique ports from the pool
+
+#### **Configuration Examples**
+
+```rust
+// Example 1: Production server with specific IP
+let coordinator = SessionManagerBuilder::new()
+    .with_sip_port(5060)
+    .with_local_bind_addr("203.0.113.10:5060".parse()?)
+    .with_media_ports(30000, 40000)  // Custom RTP range
+    .build()
+    .await?;
+
+// Example 2: Development with automatic ports
+let coordinator = SessionManagerBuilder::new()
+    .with_sip_port(0)  // Let OS assign SIP port
+    .with_local_bind_addr("127.0.0.1:0".parse()?)
+    .with_media_ports(10000, 11000)
+    .build()
+    .await?;
+
+// Example 3: Docker/container with all interfaces
+let coordinator = SessionManagerBuilder::new()
+    .with_sip_port(5060)
+    .with_local_bind_addr("0.0.0.0:5060".parse()?)  // Bind all interfaces
+    .with_media_ports(10000, 20000)
+    .build()
+    .await?;
+```
+
+#### **Best Practices**
+
+1. **Production**: Always use specific IP addresses for predictable behavior
+2. **NAT Traversal**: Configure public IP but bind to private interface
+3. **Containers**: Use 0.0.0.0 to work with container networking
+4. **Testing**: Can use 127.0.0.1 or port 0 for flexibility
+5. **Scaling**: Ensure sufficient port range for concurrent calls
+
 ### Advanced Media Control and Quality Monitoring
 
 ```rust

@@ -1,0 +1,234 @@
+    Finished `release` profile [optimized] target(s) in 0.14s
+     Running `/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/target/release/uac_client --port 5061 --target '127.0.0.1:5062' --calls 1 --duration 10 --log-level info`
+[2m2025-07-05T04:36:03.152567Z[0m [32m INFO[0m Starting UAC client on port 5061
+[2m2025-07-05T04:36:03.152641Z[0m [32m INFO[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-07-05T04:36:03.152707Z[0m [32m INFO[0m SIP UDP transport bound to 0.0.0.0:5061
+[2m2025-07-05T04:36:03.152728Z[0m [32m INFO[0m Added UDP transport bound to 0.0.0.0:5061
+[2m2025-07-05T04:36:03.152782Z[0m [32m INFO[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-07-05T04:36:03.152787Z[0m [32m INFO[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 0.0.0.0:5061
+[2m2025-07-05T04:36:03.152803Z[0m [32m INFO[0m Creating new DialogManager with global transaction events and local address 0.0.0.0:5061
+[2m2025-07-05T04:36:03.152858Z[0m [32m INFO[0m 🔄 Starting global transaction event processor for dialog-core
+[2m2025-07-05T04:36:03.152905Z[0m [32m INFO[0m Session event processor started
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+[2m2025-07-05T04:36:03.152916Z[0m [32m INFO[0m SessionCoordinator initialized on port 5061
+[2m2025-07-05T04:36:03.152951Z[0m [32m INFO[0m Starting UnifiedDialogApi
+[2m2025-07-05T04:36:03.152960Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-07-05T04:36:03.152967Z[0m [32m INFO[0m DialogManager starting
+[2m2025-07-05T04:36:03.152974Z[0m [32m INFO[0m DialogManager started successfully
+[2m2025-07-05T04:36:03.152984Z[0m [32m INFO[0m Starting main coordinator event loop
+[2m2025-07-05T04:36:03.152986Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:uac@127.0.0.1:5061"), domain: None, auto_auth: false, auto_options: false
+[2m2025-07-05T04:36:03.153021Z[0m [32m INFO[0m UnifiedDialogManager started successfully
+🎬 SPAWN: Starting session coordination event loop
+[2m2025-07-05T04:36:03.153034Z[0m [32m INFO[0m Cleanup manager started
+[2m2025-07-05T04:36:03.153084Z[0m [32m INFO[0m SessionCoordinator started
+[2m2025-07-05T04:36:03.153097Z[0m [32m INFO[0m Starting UnifiedDialogApi
+[2m2025-07-05T04:36:03.153107Z[0m [32m INFO[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-07-05T04:36:03.153117Z[0m [32m INFO[0m DialogManager starting
+[2m2025-07-05T04:36:03.153125Z[0m [32m INFO[0m DialogManager started successfully
+[2m2025-07-05T04:36:03.153141Z[0m [32m INFO[0m Hybrid mode active - from_uri: Some("sip:uac@127.0.0.1:5061"), domain: None, auto_auth: false, auto_options: false
+[2m2025-07-05T04:36:03.153152Z[0m [32m INFO[0m UnifiedDialogManager started successfully
+[2m2025-07-05T04:36:03.153160Z[0m [32m INFO[0m SessionCoordinator started
+📡 EVENT LOOP: Session coordination event loop started
+[2m2025-07-05T04:36:03.255667Z[0m [32m INFO[0m Starting 1 test calls to 127.0.0.1:5062
+[2m2025-07-05T04:36:03.255786Z[0m [32m INFO[0m Making call 1 of 1
+[2m2025-07-05T04:36:03.255951Z[0m [32m INFO[0m Starting media session for dialog: media-sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:03.256096Z[0m [32m INFO[0m Created global port allocator with range 16384-32767
+[2m2025-07-05T04:36:03.759185Z[0m [32m INFO[0m Started UDP transport receiver tasks
+[2m2025-07-05T04:36:03.759314Z[0m [32m INFO[0m Started RTP session with SSRC=191ddf89
+[2m2025-07-05T04:36:03.759354Z[0m [32m INFO[0m ✅ Created media session with REAL RTP session: media-sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f (port: 26212)
+[2m2025-07-05T04:36:03.759385Z[0m [32m INFO[0m ✅ Created media session: media-sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f for SIP session: sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f with real MediaSessionController + zero-copy enabled
+[2m2025-07-05T04:36:03.759426Z[0m [32m INFO[0m ✅ Generated SDP offer for session: sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f with port: 26212 and codecs: ["PCMU", "PCMA"]
+[2m2025-07-05T04:36:03.759550Z[0m [32m INFO[0m Prepared call with session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f on RTP port 26212
+[2m2025-07-05T04:36:03.759596Z[0m [32m INFO[0m Making outgoing call from sip:uac@127.0.0.1 to sip:uas@127.0.0.1:5062
+Request Via headers before transaction creation:
+  Via[0]: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK-505b0fb500314deea3c76e726f46f325
+Request Via headers after potential modification:
+  Via[0]: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK-505b0fb500314deea3c76e726f46f325
+Creating ClientInviteTransaction: Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Creating new ClientInviteTransaction: Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Created ClientInviteTransaction: Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Created ClientInviteTransaction: Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+ClientInviteTransaction::initiate called for Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Current state is Initial
+Sending TransitionTo(Calling) command for Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Successfully sent TransitionTo command for Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Starting event loop for INVITE Client transaction: Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Transaction loop starting for Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Initial state: Initial
+Received command: TransitionTo(Calling) for transaction Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Processing TransitionTo(Calling) current state: Initial
+Valid state transition: Initial -> Calling
+State successfully changed to: Calling
+Sent StateChanged event result: Success
+[2m2025-07-05T04:36:03.760700Z[0m [32m INFO[0m Sending INVITE message to 127.0.0.1:5062
+State after sending command: Calling
+[2m2025-07-05T04:36:03.872803Z[0m [32m INFO[0m Created outgoing call with dialog ID: 90a20403-64e7-4396-8aab-1e7997d197dc and sent INVITE
+[2m2025-07-05T04:36:03.872895Z[0m [32m INFO[0m Created outgoing call: sip:uac@127.0.0.1 -> sip:uas@127.0.0.1:5062 (dialog: 90a20403-64e7-4396-8aab-1e7997d197dc)
+[2m2025-07-05T04:36:03.872942Z[0m [32m INFO[0m Call sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f initiated successfully
+[2m2025-07-05T04:36:03.872981Z[0m [32m INFO[0m Call active for 10 seconds...
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Trying, reason: Some("Trying"), headers: [From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("56c30068")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("call-b55ad814-8e71-43fe-b66d-741b62bfdd1d")), CSeq(CSeq { seq: 1, method: Invite }), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-505b0fb500314deea3c76e726f46f325")] }]))], body: b"" })) for transaction Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Processing TransitionTo(Proceeding) current state: Calling
+Valid state transition: Calling -> Proceeding
+State successfully changed to: Proceeding
+Sent StateChanged event result: Success
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallProgress { dialog_id: DialogId(90a20403-64e7-4396-8aab-1e7997d197dc), status_code: 100, reason_phrase: "Trying" }
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 100, 53, 102, 99, 98, 102, 52, 54, 55, 55, 97, 53, 52, 102, 100, 49, 56, 100, 50, 99, 55, 102, 56, 55, 100, 101, 56, 49, 102, 55, 100, 48]
+Successfully parsed tag: tag-d5fcbf4677a54fd18d2c7f87de81f7d0
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-505b0fb500314deea3c76e726f46f325")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("56c30068")] })), CallId(CallId("call-b55ad814-8e71-43fe-b66d-741b62bfdd1d")), CSeq(CSeq { seq: 1, method: Invite }), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-d5fcbf4677a54fd18d2c7f87de81f7d0")] })), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("server"), password: None, host: Address(0.0.0.0), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), ContentLength(ContentLength(229)), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} }))], body: b"v=0\r\no=rvoip 1751690164 1751690164 IN IP4 0.0.0.0\r\ns=RVOIP Session\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 27902 RTP/AVP 0 8 9 96\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n" })) for transaction Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client). Final state: Terminated
+Event loop for INVITE Client transaction ended: Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+[2m2025-07-05T04:36:04.267644Z[0m [32m INFO[0m Transaction Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client) received success response 200 OK for dialog 90a20403-64e7-4396-8aab-1e7997d197dc
+[2m2025-07-05T04:36:04.267772Z[0m [32m INFO[0m Updated dialog lookup for confirmed dialog 90a20403-64e7-4396-8aab-1e7997d197dc
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: ResponseReceived { dialog_id: DialogId(90a20403-64e7-4396-8aab-1e7997d197dc), response: Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-505b0fb500314deea3c76e726f46f325")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("56c30068")] })), CallId(CallId("call-b55ad814-8e71-43fe-b66d-741b62bfdd1d")), CSeq(CSeq { seq: 1, method: Invite }), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-d5fcbf4677a54fd18d2c7f87de81f7d0")] })), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("server"), password: None, host: Address(0.0.0.0), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [] } }])])), ContentLength(ContentLength(229)), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} }))], body: b"v=0\r\no=rvoip 1751690164 1751690164 IN IP4 0.0.0.0\r\ns=RVOIP Session\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 27902 RTP/AVP 0 8 9 96\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n" }, transaction_id: z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client }
+[2m2025-07-05T04:36:04.268016Z[0m [32m INFO[0m 🔍 RESPONSE HANDLER: status=200, tx_id='Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)', dialog=90a20403-64e7-4396-8aab-1e7997d197dc
+🎯 SESSION COORDINATION: Received response 200 for dialog 90a20403-64e7-4396-8aab-1e7997d197dc
+🚀 SESSION COORDINATION: This is a 200 OK to INVITE - sending automatic ACK
+[2m2025-07-05T04:36:04.268107Z[0m [32m INFO[0m 📄 SESSION COORDINATION: 200 OK contains SDP body (229 bytes)
+[2m2025-07-05T04:36:04.268252Z[0m [32m INFO[0m Sending ACK message to 0.0.0.0:5062
+✅ SESSION COORDINATION: Successfully sent ACK for 200 OK response
+[2m2025-07-05T04:36:04.268514Z[0m [32m INFO[0m ACK sent successfully for dialog 90a20403-64e7-4396-8aab-1e7997d197dc transaction Key(z9hG4bK-505b0fb500314deea3c76e726f46f325:INVITE:client)
+[2m2025-07-05T04:36:04.268544Z[0m [32m INFO[0m ✅ RFC 3261: ACK SENT for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f - creating media session (UAC side)
+[2m2025-07-05T04:36:04.268569Z[0m [32m INFO[0m 🚀 RFC 3261: Handled ACK sent for UAC side media creation
+📞 SESSION COORDINATION: Updating session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f state to Active for successful outgoing call
+[2m2025-07-05T04:36:04.268609Z[0m [32m INFO[0m 📞 200 OK received for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f - keeping in Initiating state until media ready
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallAnswered { dialog_id: DialogId(90a20403-64e7-4396-8aab-1e7997d197dc), session_answer: "v=0\r\no=rvoip 1751690164 1751690164 IN IP4 0.0.0.0\r\ns=RVOIP Session\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 27902 RTP/AVP 0 8 9 96\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n" }
+[2m2025-07-05T04:36:04.268673Z[0m [32m INFO[0m Call answered for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f: 90a20403-64e7-4396-8aab-1e7997d197dc (awaiting ACK per RFC 3261)
+[2m2025-07-05T04:36:04.268694Z[0m [32m INFO[0m 📞 Call answered for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f - keeping in Initiating state until media ready
+[2m2025-07-05T04:36:04.268708Z[0m [32m INFO[0m 🚫 RFC 3261: NOT creating media session yet - waiting for ACK
+🎯 COORDINATOR: Handling event: SdpEvent { session_id: SessionId("sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f"), event_type: "remote_sdp_answer", sdp: "v=0\r\no=rvoip 1751690164 1751690164 IN IP4 0.0.0.0\r\ns=RVOIP Session\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 27902 RTP/AVP 0 8 9 96\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n" }
+[2m2025-07-05T04:36:04.268815Z[0m [32m INFO[0m Negotiating SDP as UAC for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:04.268841Z[0m [32m INFO[0m Negotiating SDP as UAC for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:04.268868Z[0m [32m INFO[0m Applying negotiated config: codec=PCMU, remote=0.0.0.0:27902
+[2m2025-07-05T04:36:04.268892Z[0m [32m INFO[0m ✅ Updated RTP session remote address for dialog media-sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f: 0.0.0.0:27902
+[2m2025-07-05T04:36:04.268916Z[0m [32m INFO[0m SDP negotiation successful: codec=PCMU, local=0.0.0.0:26212, remote=0.0.0.0:27902
+[2m2025-07-05T04:36:04.268939Z[0m [32m INFO[0m ✅ Updated media session for SIP session: sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f with remote: 0.0.0.0:27902 and codecs: ["PCMU"]
+[2m2025-07-05T04:36:04.268955Z[0m [32m INFO[0m Updated media session with remote SDP for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+🎯 COORDINATOR: Handling event: SdpEvent { session_id: SessionId("sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f"), event_type: "final_negotiated_sdp", sdp: "v=0\r\no=rvoip 1751690164 1751690164 IN IP4 0.0.0.0\r\ns=RVOIP Session\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 27902 RTP/AVP 0 8 9 96\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n" }
+[2m2025-07-05T04:36:04.269023Z[0m [32m INFO[0m ✅ Updated media session for SIP session: sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f with remote: 0.0.0.0:27902 and codecs: ["PCMU"]
+🎯 COORDINATOR: Handling event: MediaEvent { session_id: SessionId("sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f"), event: "rfc_compliant_media_creation_uac" }
+[2m2025-07-05T04:36:04.269059Z[0m [32m INFO[0m Media creation event for sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f: rfc_compliant_media_creation_uac
+🎯 COORDINATOR: Handling event: SdpEvent { session_id: SessionId("sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f"), event_type: "remote_sdp_answer", sdp: "v=0\r\no=rvoip 1751690164 1751690164 IN IP4 0.0.0.0\r\ns=RVOIP Session\r\nc=IN IP4 0.0.0.0\r\nt=0 0\r\nm=audio 27902 RTP/AVP 0 8 9 96\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\na=rtpmap:96 opus/48000/2\r\na=sendrecv\r\n" }
+[2m2025-07-05T04:36:04.269090Z[0m [32m INFO[0m Negotiating SDP as UAC for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:04.269103Z[0m [32m INFO[0m Negotiating SDP as UAC for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:04.269119Z[0m [32m INFO[0m Applying negotiated config: codec=PCMU, remote=0.0.0.0:27902
+[2m2025-07-05T04:36:04.269136Z[0m [32m INFO[0m SDP negotiation successful: codec=PCMU, local=0.0.0.0:26212, remote=0.0.0.0:27902
+[2m2025-07-05T04:36:04.269151Z[0m [32m INFO[0m ✅ Updated media session for SIP session: sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f with remote: 0.0.0.0:27902 and codecs: ["PCMU"]
+[2m2025-07-05T04:36:04.269163Z[0m [32m INFO[0m Updated media session with remote SDP for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+🎯 COORDINATOR: Handling event: MediaNegotiated { session_id: SessionId("sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f"), local_addr: 0.0.0.0:26212, remote_addr: 0.0.0.0:27902, codec: "PCMU" }
+🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f"), old_state: Initiating, new_state: Active }
+[2m2025-07-05T04:36:04.269197Z[0m [32m INFO[0m Session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f state changed: Initiating -> Active
+[2m2025-07-05T04:36:04.269213Z[0m [32m INFO[0m Media info available: true
+[2m2025-07-05T04:36:04.269224Z[0m [32m INFO[0m Local SDP length: Some(229)
+[2m2025-07-05T04:36:04.269232Z[0m [32m INFO[0m Remote SDP length: Some(229)
+[2m2025-07-05T04:36:04.269242Z[0m [32m INFO[0m Notifying handler about call sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f establishment
+[2m2025-07-05T04:36:04.269290Z[0m [32m INFO[0m Call sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f established
+[2m2025-07-05T04:36:04.269309Z[0m [32m INFO[0m Local SDP: Some(229)
+[2m2025-07-05T04:36:04.269318Z[0m [32m INFO[0m Remote SDP: Some(229)
+[2m2025-07-05T04:36:04.269352Z[0m [32m INFO[0m Have coordinator and remote SDP, parsing...
+[2m2025-07-05T04:36:04.269367Z[0m [32m INFO[0m Found IP in SDP: Some("0.0.0.0")
+[2m2025-07-05T04:36:04.269379Z[0m [32m INFO[0m Found port in SDP: Some(27902)
+[2m2025-07-05T04:36:04.269392Z[0m [32m INFO[0m Establishing media flow to 0.0.0.0:27902
+[2m2025-07-05T04:36:04.269403Z[0m [32m INFO[0m 🔗 Establishing media flow for dialog: media-sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f -> 0.0.0.0:27902
+[2m2025-07-05T04:36:04.269415Z[0m [32m INFO[0m ✅ Updated RTP remote address for dialog: media-sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f -> 0.0.0.0:27902
+[2m2025-07-05T04:36:04.269427Z[0m [32m INFO[0m 🎵 Starting audio transmission for dialog: media-sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:04.269466Z[0m [32m INFO[0m 🎵 Started audio transmission (440Hz tone, 20ms packets)
+[2m2025-07-05T04:36:04.269482Z[0m [32m INFO[0m ✅ Audio transmission started for dialog: media-sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:04.269494Z[0m [32m INFO[0m ✅ Media flow established for dialog: media-sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:04.269506Z[0m [32m INFO[0m Established media flow for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f to 0.0.0.0:27902
+[2m2025-07-05T04:36:04.269519Z[0m [32m INFO[0m ✅ Successfully established media flow for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:04.269532Z[0m [32m INFO[0m ✅ Audio transmission (440Hz sine wave) started automatically
+[2m2025-07-05T04:36:04.269562Z[0m [32m INFO[0m 📞 Call sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f established and active
+🎯 COORDINATOR: Handling event: MediaNegotiated { session_id: SessionId("sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f"), local_addr: 0.0.0.0:26212, remote_addr: 0.0.0.0:27902, codec: "PCMU" }
+[2m2025-07-05T04:36:04.270165Z[0m [32m INFO[0m 📊 RTP Statistics - Sent: 0 pkts, Recv: 0 pkts, Lost: 0 pkts, Jitter: 0.0ms
+[2m2025-07-05T04:36:04.270202Z[0m [32m INFO[0m 📈 Quality Metrics - Loss: 0.0%, MOS: 4.5, Effectiveness: 100.0%
+[2m2025-07-05T04:36:09.270739Z[0m [32m INFO[0m 📊 RTP Statistics - Sent: 250 pkts, Recv: 0 pkts, Lost: 0 pkts, Jitter: 0.0ms
+[2m2025-07-05T04:36:09.270829Z[0m [32m INFO[0m 📈 Quality Metrics - Loss: 0.0%, MOS: 4.5, Effectiveness: 100.0%
+[2m2025-07-05T04:36:13.874642Z[0m [32m INFO[0m Terminating call sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:13.874838Z[0m [32m INFO[0m Terminating established dialog for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f in state Active
+[2m2025-07-05T04:36:13.874898Z[0m [32m INFO[0m 📞 BYE-SEND: Attempting to send BYE for established session: sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f (dialog: 90a20403-64e7-4396-8aab-1e7997d197dc)
+Request Via headers before transaction creation:
+  Via[0]: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK-5325c80ab7834d1398de8b02b55842d7
+Request Via headers after potential modification:
+  Via[0]: SIP/2.0/UDP 0.0.0.0:5061;branch=z9hG4bK-5325c80ab7834d1398de8b02b55842d7
+ClientNonInviteTransaction::initiate called for Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client)
+Current state is Initial
+Sending TransitionTo(Trying) command for Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client)
+Successfully sent TransitionTo command for Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client)
+Transaction loop starting for Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client)
+Initial state: Initial
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client)
+Processing TransitionTo(Trying) current state: Initial
+Valid state transition: Initial -> Trying
+State successfully changed to: Trying
+Sent StateChanged event result: Success
+[2m2025-07-05T04:36:13.875896Z[0m [32m INFO[0m Sending BYE message to 127.0.0.1:5062
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 100, 53, 102, 99, 98, 102, 52, 54, 55, 55, 97, 53, 52, 102, 100, 49, 56, 100, 50, 99, 55, 102, 56, 55, 100, 101, 56, 49, 102, 55, 100, 48]
+Successfully parsed tag: tag-d5fcbf4677a54fd18d2c7f87de81f7d0
+State after sending command: Trying
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-5325c80ab7834d1398de8b02b55842d7")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("56c30068")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-d5fcbf4677a54fd18d2c7f87de81f7d0")] })), CallId(CallId("call-b55ad814-8e71-43fe-b66d-741b62bfdd1d")), CSeq(CSeq { seq: 2, method: Bye }), ContentLength(ContentLength(0))], body: b"" })) for transaction Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client)
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client)
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+Sent StateChanged event result: Success
+[2m2025-07-05T04:36:13.887033Z[0m [32m INFO[0m Transaction Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client) received success response 200 OK for dialog 90a20403-64e7-4396-8aab-1e7997d197dc
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: ResponseReceived { dialog_id: DialogId(90a20403-64e7-4396-8aab-1e7997d197dc), response: Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(0.0.0.0), sent_by_port: Some(5061), params: [Branch("z9hG4bK-5325c80ab7834d1398de8b02b55842d7")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uac"), password: None, host: Address(127.0.0.1), port: None, parameters: [], headers: {}, raw_uri: None }, params: [Tag("56c30068")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("uas"), password: None, host: Address(127.0.0.1), port: Some(5062), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-d5fcbf4677a54fd18d2c7f87de81f7d0")] })), CallId(CallId("call-b55ad814-8e71-43fe-b66d-741b62bfdd1d")), CSeq(CSeq { seq: 2, method: Bye }), ContentLength(ContentLength(0))], body: b"" }, transaction_id: z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client }
+[2m2025-07-05T04:36:13.887213Z[0m [32m INFO[0m 🔍 RESPONSE HANDLER: status=200, tx_id='Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client)', dialog=90a20403-64e7-4396-8aab-1e7997d197dc
+🎯 SESSION COORDINATION: Received response 200 for dialog 90a20403-64e7-4396-8aab-1e7997d197dc
+[2m2025-07-05T04:36:13.887248Z[0m [32m INFO[0m 📞 BYE-RESPONSE: Processing response to BYE request (tx: Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client), dialog: 90a20403-64e7-4396-8aab-1e7997d197dc)
+[2m2025-07-05T04:36:13.887263Z[0m [32m INFO[0m ✅ BYE-200OK: Received 200 OK for BYE request (tx: Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client), dialog: 90a20403-64e7-4396-8aab-1e7997d197dc)
+[2m2025-07-05T04:36:13.887276Z[0m [32m INFO[0m 🎯 BYE-COMPLETE: Session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f successfully terminated with 200 OK
+[2m2025-07-05T04:36:13.887289Z[0m [32m INFO[0m 📞 BYE-SUCCESS: Processing successful BYE for dialog 90a20403-64e7-4396-8aab-1e7997d197dc
+📞 BYE-SUCCESS: Processing successful BYE for dialog 90a20403-64e7-4396-8aab-1e7997d197dc
+[2m2025-07-05T04:36:13.887310Z[0m [32m INFO[0m ✅ BYE-SUCCESS: Found session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f for dialog 90a20403-64e7-4396-8aab-1e7997d197dc - termination successful
+[2m2025-07-05T04:36:13.887324Z[0m [32m INFO[0m ⏱️ BYE-TIMING: Session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f BYE completion took 14.833µs
+[2m2025-07-05T04:36:13.887343Z[0m [32m INFO[0m ✅ BYE-SUCCESS: Generated SessionTerminated event for UAC session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f in 33.75µs
+✅ BYE-SUCCESS: Generated SessionTerminated event for UAC session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:13.887371Z[0m [32m INFO[0m 🎉 BYE-FINAL: Session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f termination completed successfully in 61.75µs
+🎯 COORDINATOR: Handling event: SessionTerminated { session_id: SessionId("sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f"), reason: "Call terminated by local BYE" }
+🎯 COORDINATOR: Matched SessionTerminated event for sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f - Call terminated by local BYE
+🔴 COORDINATOR: handle_session_terminated called for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f with reason: Call terminated by local BYE
+[2m2025-07-05T04:36:13.887485Z[0m [32m INFO[0m Session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f terminated: Call terminated by local BYE
+[2m2025-07-05T04:36:13.887505Z[0m [33m WARN[0m No media session found for SIP session: sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+🔔 COORDINATOR: Handler exists, checking for session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+✅ COORDINATOR: Found session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f, calling handler.on_call_ended
+[2m2025-07-05T04:36:13.887550Z[0m [32m INFO[0m Notifying handler about session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f termination
+[2m2025-07-05T04:36:13.887563Z[0m [32m INFO[0m Call sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f ended: Call terminated by local BYE
+[2m2025-07-05T04:36:13.887588Z[0m [32m INFO[0m ✅ Audio transmission was active during the call
+🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f"), old_state: Active, new_state: Terminated }
+[2m2025-07-05T04:36:13.887628Z[0m [32m INFO[0m Session sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f state changed: Active -> Terminated
+[2m2025-07-05T04:36:13.887647Z[0m [33m WARN[0m No media session found for SIP session: sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:13.987977Z[0m [32m INFO[0m ✅ BYE-SEND: Successfully sent BYE for session: sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f (tx: Key(z9hG4bK-5325c80ab7834d1398de8b02b55842d7:BYE:client), dialog: 90a20403-64e7-4396-8aab-1e7997d197dc)
+[2m2025-07-05T04:36:13.988062Z[0m [32m INFO[0m Terminated session: sess_e03c08b8-b07f-41d0-95e4-4d90bce6213f
+[2m2025-07-05T04:36:13.988096Z[0m [32m INFO[0m All calls completed successfully
+[2m2025-07-05T04:36:14.270119Z[0m [32m INFO[0m 📊 RTP Statistics - Sent: 500 pkts, Recv: 0 pkts, Lost: 0 pkts, Jitter: 0.0ms
+[2m2025-07-05T04:36:14.270208Z[0m [32m INFO[0m 📈 Quality Metrics - Loss: 0.0%, MOS: 4.5, Effectiveness: 100.0%
+[2m2025-07-05T04:36:14.489562Z[0m [32m INFO[0m Cleanup manager stopped
+[2m2025-07-05T04:36:14.489682Z[0m [32m INFO[0m Session event processor stopped
+[2m2025-07-05T04:36:14.489725Z[0m [32m INFO[0m Stopping UnifiedDialogApi
+[2m2025-07-05T04:36:14.489752Z[0m [32m INFO[0m Stopping UnifiedDialogManager
+[2m2025-07-05T04:36:14.489794Z[0m [32m INFO[0m DialogManager stopping
+[2m2025-07-05T04:36:14.489857Z[0m [32m INFO[0m DialogManager stopped successfully
+[2m2025-07-05T04:36:14.489897Z[0m [32m INFO[0m UnifiedDialogManager stopped successfully
+[2m2025-07-05T04:36:14.489935Z[0m [32m INFO[0m SessionCoordinator stopped
+[2m2025-07-05T04:36:14.489968Z[0m [32m INFO[0m === Final Statistics ===
+[2m2025-07-05T04:36:14.489909Z[0m [32m INFO[0m 🛑 Global transaction event processor received shutdown signal
+[2m2025-07-05T04:36:14.490074Z[0m [32m INFO[0m 🏁 Global transaction event processor for dialog-core stopped
+[2m2025-07-05T04:36:14.490002Z[0m [32m INFO[0m Calls initiated: 1
+[2m2025-07-05T04:36:14.490189Z[0m [32m INFO[0m Calls connected: 1
+[2m2025-07-05T04:36:14.490229Z[0m [32m INFO[0m Calls failed: 0
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: DialogStateChanged { dialog_id: DialogId(90a20403-64e7-4396-8aab-1e7997d197dc), new_state: "Terminated", previous_state: "Confirmed" }
+[2m2025-07-05T04:36:14.490251Z[0m [32m INFO[0m Total call duration: 10.631758s
+[2m2025-07-05T04:36:14.490383Z[0m [32m INFO[0m UAC client shutdown complete

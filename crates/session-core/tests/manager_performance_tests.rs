@@ -352,8 +352,11 @@ async fn test_burst_load_handling() {
         
         // Perform SIP operations on established dialogs
         for (manager_a, _, session_id) in &dialog_pairs {
-            manager_a.hold_session(session_id).await.unwrap();
+            // Send DTMF while session is active
             manager_a.send_dtmf(session_id, "1").await.unwrap();
+            // Put on hold
+            manager_a.hold_session(session_id).await.unwrap();
+            // Resume from hold
             manager_a.resume_session(session_id).await.unwrap();
         }
         

@@ -26,12 +26,8 @@ impl DialogConfigConverter {
     
     /// Convert session config to dialog-core configuration
     pub fn to_dialog_config(&self) -> DialogResult<rvoip_dialog_core::config::DialogManagerConfig> {
-        // Use 0.0.0.0 as default bind address for the SIP port
-        let bind_addr = format!("0.0.0.0:{}", self.session_config.sip_port);
-        let local_address: SocketAddr = bind_addr.parse()
-            .map_err(|e| DialogError::Configuration {
-                message: format!("Invalid bind address: {}", e),
-            })?;
+        // Use the configured bind address from session config
+        let local_address = self.session_config.local_bind_addr;
         
         let dialog_config = rvoip_dialog_core::config::DialogManagerConfig::hybrid(local_address)
             .build();

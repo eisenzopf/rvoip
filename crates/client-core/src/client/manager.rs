@@ -444,10 +444,15 @@ impl ClientManager {
             custom_sdp_attributes: config.media.custom_sdp_attributes.clone(),
         };
         
+        // Note: If media port is 0, it signals automatic allocation
+        // The actual port will be allocated by session-core when creating media sessions
+        // This is the proper layered approach that respects the architecture
+
         // Create session manager using session-core builder with media preferences
         let coordinator = SessionManagerBuilder::new()
             .with_local_address(&format!("sip:client@{}", config.local_sip_addr.ip()))
             .with_sip_port(config.local_sip_addr.port())
+            .with_local_bind_addr(config.local_sip_addr)  // Add this line to propagate bind address
             .with_media_ports(config.media.rtp_port_start, config.media.rtp_port_end)
             .with_media_config(session_media_config)  // Pass media preferences to session-core
             .with_handler(call_handler.clone() as Arc<dyn CallHandler>)
@@ -458,7 +463,7 @@ impl ClientManager {
                 message: format!("Failed to create session coordinator: {}", e) 
             })?;
             
-        let stats = ClientStats {
+        let mut stats = ClientStats {
             is_running: false,
             local_sip_addr: config.local_sip_addr,
             local_media_addr: config.local_media_addr,
@@ -467,6 +472,8 @@ impl ClientManager {
             total_registrations: 0,
             active_registrations: 0,
                 };
+        
+
         
         Ok(Arc::new(Self {
             coordinator,

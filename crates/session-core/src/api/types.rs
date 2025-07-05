@@ -15,19 +15,25 @@
 //! 
 //! ```rust
 //! use rvoip_session_core::api::*;
+//! use std::time::Instant;
+//! use std::collections::HashMap;
 //! 
 //! // 1. Incoming call arrives
+//! let sdp_offer = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\n";
+//! let sdp_answer = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5006 RTP/AVP 0\r\n";
+//! let headers = HashMap::new();
+//! 
 //! let incoming_call = IncomingCall {
 //!     id: SessionId::new(),
 //!     from: "sip:alice@example.com".to_string(),
 //!     to: "sip:bob@ourserver.com".to_string(),
-//!     sdp: Some(sdp_offer),
+//!     sdp: Some(sdp_offer.to_string()),
 //!     headers: headers,
 //!     received_at: Instant::now(),
 //! };
 //! 
 //! // 2. Handler makes a decision
-//! let decision = CallDecision::Accept(Some(sdp_answer));
+//! let decision = CallDecision::Accept(Some(sdp_answer.to_string()));
 //! 
 //! // 3. Call becomes active
 //! let session = CallSession {
@@ -64,7 +70,8 @@
 //! ```rust
 //! use rvoip_session_core::api::parse_sdp_connection;
 //! 
-//! let sdp = r#"v=0
+//! fn parse_example() -> Result<(), Box<dyn std::error::Error>> {
+//!     let sdp = r#"v=0
 //! o=- 0 0 IN IP4 127.0.0.1
 //! s=-
 //! c=IN IP4 192.168.1.100
@@ -73,11 +80,13 @@
 //! a=rtpmap:0 PCMU/8000
 //! a=rtpmap:8 PCMA/8000
 //! a=rtpmap:101 telephone-event/8000"#;
-//! 
-//! let info = parse_sdp_connection(sdp)?;
-//! assert_eq!(info.ip, "192.168.1.100");
-//! assert_eq!(info.port, 5004);
-//! assert!(info.codecs.contains(&"PCMU".to_string()));
+//!     
+//!     let info = parse_sdp_connection(sdp)?;
+//!     assert_eq!(info.ip, "192.168.1.100");
+//!     assert_eq!(info.port, 5004);
+//!     assert!(info.codecs.contains(&"PCMU".to_string()));
+//!     Ok(())
+//! }
 //! ```
 
 use std::sync::Arc;
