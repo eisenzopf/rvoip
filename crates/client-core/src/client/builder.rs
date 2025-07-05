@@ -267,7 +267,7 @@ impl ClientBuilder {
     /// 
     /// # tokio_test::block_on(async {
     /// let client = ClientBuilder::new()
-    ///     .local_address("192.168.1.100:15060".parse().unwrap())
+    ///     .local_address("127.0.0.1:15060".parse().unwrap())
     ///     .build()
     ///     .await.unwrap();
     /// # })
@@ -290,7 +290,7 @@ impl ClientBuilder {
     /// # Media Network Considerations
     /// 
     /// - **Separate from SIP**: Media traffic is independent of SIP signaling
-    /// - **Port Zero**: Use port 0 for automatic port assignment from the RTP port range
+    /// - **Port Zero**: When set to port 0, uses automatic port allocation via GlobalPortAllocator
     /// - **Firewall**: RTP requires a range of UDP ports to be accessible
     /// - **Quality of Service**: Consider network QoS settings for media traffic
     /// - **NAT Handling**: Media traffic often requires additional NAT traversal
@@ -318,8 +318,8 @@ impl ClientBuilder {
     /// 
     /// # tokio_test::block_on(async {
     /// let client = ClientBuilder::new()
-    ///     .local_address("192.168.1.100:5060".parse().unwrap())
-    ///     .media_address("192.168.1.100:7000".parse().unwrap())
+    ///     .local_address("127.0.0.1:5060".parse().unwrap())
+    ///     .media_address("127.0.0.1:7000".parse().unwrap())
     ///     .rtp_ports(7000, 8000) // Define RTP port range
     ///     .build()
     ///     .await.unwrap();
@@ -332,10 +332,10 @@ impl ClientBuilder {
     /// use rvoip_client_core::ClientBuilder;
     /// 
     /// # tokio_test::block_on(async {
-    /// // SIP on external interface, media on internal
+    /// // SIP on one port, media on another
     /// let client = ClientBuilder::new()
-    ///     .local_address("203.0.113.10:5060".parse().unwrap())
-    ///     .media_address("10.0.1.100:0".parse().unwrap())
+    ///     .local_address("127.0.0.1:5060".parse().unwrap())
+    ///     .media_address("127.0.0.1:0".parse().unwrap())
     ///     .build()
     ///     .await.unwrap();
     /// # })
@@ -1105,7 +1105,14 @@ impl ClientBuilder {
     /// The client automatically manages its resources and will clean up
     /// properly when dropped. For graceful shutdown, use the client's
     /// shutdown methods before dropping.
-    pub async fn build(self) -> ClientResult<Arc<ClientManager>> {
+    pub async fn build(mut self) -> ClientResult<Arc<ClientManager>> {
+        // If media address has default IP (127.0.0.1), update to match SIP IP but keep port
+        let default_media_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        if self.config.local_media_addr.ip() == default_media_addr.ip() {
+            let sip_ip = self.config.local_sip_addr.ip();
+            let media_port = self.config.local_media_addr.port(); // Keep existing port (0 = auto)
+            self.config.local_media_addr = format!("{}:{}", sip_ip, media_port).parse().unwrap();
+        }
         ClientManager::new(self.config).await
     }
 }

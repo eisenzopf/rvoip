@@ -68,10 +68,12 @@ impl DialogBuilder {
         // Get the session configuration details
         let session_config = &self.config_converter;
         
-        // Use 0.0.0.0 as default bind address
-        let bind_addr = format!("0.0.0.0:{}", 
-            session_config.session_config().sip_port
-        );
+        // Use the configured bind address from session config
+        let bind_addr = if session_config.session_config().local_bind_addr.ip().is_unspecified() {
+            format!("0.0.0.0:{}", session_config.session_config().sip_port)
+        } else {
+            session_config.session_config().local_bind_addr.to_string()
+        };
         
         let socket_addr = bind_addr.parse()
             .map_err(|e| DialogError::Configuration {
@@ -132,10 +134,12 @@ impl DialogBuilder {
         // Validate configuration compatibility
         self.config_converter.validate_compatibility()?;
         
-        // Use 0.0.0.0 as default bind address
-        let bind_addr = format!("0.0.0.0:{}", 
-            self.config_converter.session_config().sip_port
-        );
+        // Use the configured bind address from session config
+        let bind_addr = if self.config_converter.session_config().local_bind_addr.ip().is_unspecified() {
+            format!("0.0.0.0:{}", self.config_converter.session_config().sip_port)
+        } else {
+            self.config_converter.session_config().local_bind_addr.to_string()
+        };
         
         let socket_addr = bind_addr.parse()
             .map_err(|e| DialogError::Configuration {
@@ -167,10 +171,18 @@ impl DialogBuilder {
             self.config_converter.session_config().local_address.clone()
         };
         
-        // Parse a local address for client mode (can use any available port)
-        let local_addr = "0.0.0.0:0".parse().map_err(|e| DialogError::Configuration {
-            message: format!("Invalid local address for client mode: {}", e),
-        })?;
+        // Use the configured bind address from session config (with port 0 for client mode)
+        let local_addr = if self.config_converter.session_config().local_bind_addr.ip().is_unspecified() {
+            "0.0.0.0:0".parse().map_err(|e| DialogError::Configuration {
+                message: format!("Invalid local address for client mode: {}", e),
+            })?
+        } else {
+            // Use same IP as configured but with port 0 for dynamic assignment
+            let ip = self.config_converter.session_config().local_bind_addr.ip();
+            format!("{}:0", ip).parse().map_err(|e| DialogError::Configuration {
+                message: format!("Invalid local address for client mode: {}", e),
+            })?
+        };
         
         // Create client-mode dialog configuration
         let dialog_config = DialogManagerConfig::client(local_addr)

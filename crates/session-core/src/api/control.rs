@@ -27,10 +27,16 @@
 //!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
 //!         // Immediate decision in callback
 //!         if call.from.contains("trusted") {
-//!             CallDecision::Accept(Some(generate_sdp_answer()))
+//!             // In a real implementation, you would generate proper SDP based on the offer
+//!             let simple_sdp = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+//!             CallDecision::Accept(Some(simple_sdp.to_string()))
 //!         } else {
 //!             CallDecision::Reject("Untrusted caller".to_string())
 //!         }
+//!     }
+//!     
+//!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
+//!         println!("Call {} ended: {}", call.id(), reason);
 //!     }
 //! }
 //! ```
@@ -39,6 +45,7 @@
 //! 
 //! ```rust
 //! use rvoip_session_core::api::*;
+//! use std::sync::Arc;
 //! 
 //! #[derive(Debug)]
 //! struct DeferHandler;
@@ -49,6 +56,10 @@
 //!         // Defer for async processing
 //!         CallDecision::Defer
 //!     }
+//!     
+//!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
+//!         // Handle call end
+//!     }
 //! }
 //! 
 //! // Later, after async operations:
@@ -57,13 +68,14 @@
 //!     call: IncomingCall
 //! ) -> Result<()> {
 //!     // Check database, apply business rules, etc.
-//!     let allowed = check_caller_permissions(&call.from).await?;
+//!     // In a real implementation, you would check permissions here
+//!     let allowed = !call.from.contains("blocked");
 //!     
 //!     if allowed {
 //!         let sdp_answer = MediaControl::generate_sdp_answer(
 //!             coordinator, 
 //!             &call.id, 
-//!             &call.sdp.unwrap()
+//!             call.sdp.as_ref().unwrap()
 //!         ).await?;
 //!         
 //!         SessionControl::accept_incoming_call(
@@ -88,19 +100,19 @@
 //! ```rust
 //! use rvoip_session_core::api::*;
 //! use std::time::Duration;
+//! use std::sync::Arc;
 //! 
 //! async fn example_call_flow(coordinator: Arc<SessionCoordinator>) -> Result<()> {
 //!     // 1. Make an outgoing call
-//!     let (sdp_offer, rtp_port) = SessionControl::prepare_outgoing_call(
-//!         &coordinator,
-//!         "unique-call-123"  
-//!     ).await?;
-//!     
-//!     let session = SessionControl::create_outgoing_call(
+//!     let prepared = SessionControl::prepare_outgoing_call(
 //!         &coordinator,
 //!         "sip:alice@example.com",
-//!         "sip:bob@myserver.com",
-//!         Some(sdp_offer)
+//!         "sip:bob@myserver.com"
+//!     ).await?;
+//!     
+//!     let session = SessionControl::initiate_prepared_call(
+//!         &coordinator,
+//!         &prepared
 //!     ).await?;
 //!     
 //!     // 2. Wait for answer
@@ -172,7 +184,10 @@ pub trait SessionControl {
     /// * `PreparedCall` containing session ID, SDP offer, and allocated RTP port
     /// 
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
+    /// # use rvoip_session_core::{SessionControl, SessionCoordinator};
+    /// # use std::sync::Arc;
+    /// # async fn example(coordinator: Arc<SessionCoordinator>) -> Result<(), Box<dyn std::error::Error>> {
     /// let prepared = SessionControl::prepare_outgoing_call(
     ///     &coordinator,
     ///     "sip:alice@ourserver.com", 
@@ -186,6 +201,8 @@ pub trait SessionControl {
     ///     &coordinator,
     ///     &prepared
     /// ).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     async fn prepare_outgoing_call(
         &self,
@@ -912,15 +929,21 @@ impl SessionControl for Arc<SessionCoordinator> {
 /// The generated SDP answer string
 /// 
 /// # Example
-/// ```rust
+/// ```rust,no_run
+/// # use rvoip_session_core::{SessionControl, SessionCoordinator, IncomingCall, CallDecision};
+/// # use rvoip_session_core::control::generate_sdp_answer;
+/// # use std::sync::Arc;
+/// # async fn example(coordinator: Arc<SessionCoordinator>, call: IncomingCall) -> Result<(), Box<dyn std::error::Error>> {
 /// // In deferred call handling
 /// let answer = generate_sdp_answer(
 ///     &coordinator,
 ///     &call.id,
-///     &call.sdp.unwrap()
+///     call.sdp.as_ref().unwrap()
 /// ).await?;
 /// 
 /// SessionControl::accept_incoming_call(&coordinator, &call, Some(answer)).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub async fn generate_sdp_answer(
     coordinator: &Arc<SessionCoordinator>,
@@ -944,7 +967,11 @@ pub async fn generate_sdp_answer(
 /// The negotiated configuration if available
 /// 
 /// # Example
-/// ```rust
+/// ```rust,no_run
+/// # use rvoip_session_core::{SessionCoordinator, SessionId};
+/// # use rvoip_session_core::control::get_negotiated_media_config;
+/// # use std::sync::Arc;
+/// # async fn example(coordinator: Arc<SessionCoordinator>, session_id: SessionId) -> Result<(), Box<dyn std::error::Error>> {
 /// if let Some(config) = get_negotiated_media_config(
 ///     &coordinator,
 ///     &session_id
@@ -953,6 +980,8 @@ pub async fn generate_sdp_answer(
 ///     println!("Local RTP: {}", config.local_addr);
 ///     println!("Remote RTP: {}", config.remote_addr);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub async fn get_negotiated_media_config(
     coordinator: &Arc<SessionCoordinator>,

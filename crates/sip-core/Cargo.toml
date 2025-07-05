@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-sip-core"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "SIP protocol implementation for the rvoip stack"
 license = "MIT OR Apache-2.0"

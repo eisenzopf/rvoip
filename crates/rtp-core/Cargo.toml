@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-rtp-core"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "RTP packet encoding/decoding, RTCP support for rvoip"
 authors = ["RVOIP Team"]

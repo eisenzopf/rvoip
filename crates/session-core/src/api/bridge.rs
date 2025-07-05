@@ -13,6 +13,7 @@
 //! 
 //! ```rust
 //! use rvoip_session_core::api::*;
+//! use std::sync::Arc;
 //! 
 //! async fn bridge_calls(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
 //!     // Assume we have two active sessions

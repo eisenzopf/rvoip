@@ -29,8 +29,10 @@
 //! # Example: Complete Call Flow
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::{SessionCoordinator, SessionControl, Result};
+//! use rvoip_session_core::create::{generate_sdp_offer, create_call_with_sdp, parse_sdp_answer};
 //! use std::sync::Arc;
+//! use std::time::Duration;
 //! 
 //! async fn make_call_example(
 //!     coordinator: Arc<SessionCoordinator>
@@ -76,25 +78,35 @@
 //! # SDP Negotiation Example
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::{CallHandler, IncomingCall, CallDecision, CallSession};
+//! use rvoip_session_core::create::generate_sdp_answer;
 //! 
-//! // In your CallHandler implementation
-//! async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-//!     if let Some(offer) = &call.sdp {
-//!         // Generate compatible answer
-//!         match generate_sdp_answer(offer, "192.168.1.100", 20000) {
-//!             Ok(answer) => {
-//!                 println!("Accepting call with SDP answer");
-//!                 CallDecision::Accept(Some(answer))
+//! #[derive(Debug)]
+//! struct MyHandler;
+//! 
+//! #[async_trait::async_trait]
+//! impl CallHandler for MyHandler {
+//!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+//!         if let Some(offer) = &call.sdp {
+//!             // Generate compatible answer
+//!             match generate_sdp_answer(offer, "192.168.1.100", 20000) {
+//!                 Ok(answer) => {
+//!                     println!("Accepting call with SDP answer");
+//!                     CallDecision::Accept(Some(answer))
+//!                 }
+//!                 Err(e) => {
+//!                     println!("SDP negotiation failed: {}", e);
+//!                     CallDecision::Reject("Incompatible media".to_string())
+//!                 }
 //!             }
-//!             Err(e) => {
-//!                 println!("SDP negotiation failed: {}", e);
-//!                 CallDecision::Reject("Incompatible media".to_string())
-//!             }
+//!         } else {
+//!             // No SDP in offer, accept without media
+//!             CallDecision::Accept(None)
 //!         }
-//!     } else {
-//!         // No SDP in offer, accept without media
-//!         CallDecision::Accept(None)
+//!     }
+//!     
+//!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
+//!         println!("Call {} ended: {}", call.id(), reason);
 //!     }
 //! }
 //! ```
@@ -116,7 +128,9 @@ use crate::errors::{Result, SessionError};
 /// 
 /// # Example
 /// ```rust
-/// use rvoip_session_core::api::*;
+/// use rvoip_session_core::{SessionCoordinator, Result};
+/// use rvoip_session_core::create::create_call;
+/// use std::sync::Arc;
 /// 
 /// async fn quick_call(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
 ///     // Simple call with defaults
@@ -158,7 +172,9 @@ pub async fn create_call(
 /// 
 /// # Example
 /// ```rust
-/// use rvoip_session_core::api::*;
+/// use rvoip_session_core::{SessionCoordinator, Result};
+/// use rvoip_session_core::create::{create_call_with_sdp, generate_sdp_offer};
+/// use std::sync::Arc;
 /// 
 /// async fn call_with_specific_media(
 ///     coordinator: &Arc<SessionCoordinator>
@@ -202,9 +218,10 @@ pub async fn create_call_with_sdp(
 /// 
 /// # Example
 /// ```rust
-/// use rvoip_session_core::api::*;
+/// use rvoip_session_core::{SessionManagerBuilder, Result};
+/// use rvoip_session_core::create::{generate_sdp_offer, create_call_with_sdp};
 /// 
-/// # async fn example() -> rvoip_session_core::Result<()> {
+/// # async fn example() -> Result<()> {
 /// let sdp_offer = generate_sdp_offer("127.0.0.1", 10000)?;
 /// let session_mgr = SessionManagerBuilder::new().build().await?;
 /// let call = create_call_with_sdp(&session_mgr, "sip:bob@example.com", None, sdp_offer).await?;
@@ -234,7 +251,8 @@ pub fn generate_sdp_offer(local_ip: &str, local_port: u16) -> Result<String> {
 /// 
 /// # Example
 /// ```rust
-/// use rvoip_session_core::api::*;
+/// use rvoip_session_core::{IncomingCall, CallDecision};
+/// use rvoip_session_core::create::generate_sdp_answer;
 /// 
 /// async fn handle_incoming_call(call: IncomingCall) -> CallDecision {
 ///     if let Some(ref offer) = call.sdp {
@@ -267,9 +285,10 @@ pub fn generate_sdp_answer(offer_sdp: &str, local_ip: &str, local_port: u16) -> 
 /// 
 /// # Example
 /// ```rust
-/// use rvoip_session_core::api::*;
+/// use rvoip_session_core::create::parse_sdp_answer;
+/// use rvoip_session_core::Result;
 /// 
-/// # fn example(answer_sdp: &str) -> rvoip_session_core::Result<()> {
+/// # fn example(answer_sdp: &str) -> Result<()> {
 /// let negotiated = parse_sdp_answer(answer_sdp)?;
 /// println!("Negotiated codec: {}", negotiated.codec.name);
 /// println!("Remote endpoint: {}:{}", negotiated.remote_ip, negotiated.remote_port);
@@ -297,17 +316,19 @@ pub fn parse_sdp_answer(answer_sdp: &str) -> Result<crate::media::config::Negoti
 /// 
 /// # Example
 /// ```rust
-/// use rvoip_session_core::api::*;
+/// use rvoip_session_core::create::create_incoming_call;
 /// use std::collections::HashMap;
 /// 
 /// // Simulate an incoming call for testing
 /// let mut headers = HashMap::new();
 /// headers.insert("User-Agent".to_string(), "TestPhone/1.0".to_string());
 /// 
+/// let sdp_offer = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n";
+/// 
 /// let call = create_incoming_call(
 ///     "sip:alice@example.com",
 ///     "sip:bob@ourserver.com",
-///     Some(sdp_offer),
+///     Some(sdp_offer.to_string()),
 ///     headers
 /// );
 /// ```
@@ -334,7 +355,9 @@ pub fn create_incoming_call(
 /// 
 /// # Example
 /// ```rust
-/// use rvoip_session_core::api::*;
+/// use rvoip_session_core::{IncomingCall, CallSession, SessionCoordinator};
+/// use rvoip_session_core::create::create_call_session;
+/// use std::sync::Arc;
 /// 
 /// fn handle_accepted_call(
 ///     incoming: &IncomingCall,
@@ -364,7 +387,9 @@ pub fn create_call_session(
 /// 
 /// # Example
 /// ```rust
-/// use rvoip_session_core::api::*;
+/// use rvoip_session_core::{SessionCoordinator, Result};
+/// use rvoip_session_core::create::get_session_stats;
+/// use std::sync::Arc;
 /// 
 /// async fn monitor_system(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
 ///     let stats = get_session_stats(coordinator).await?;
@@ -392,7 +417,9 @@ pub async fn get_session_stats(session_manager: &Arc<SessionCoordinator>) -> Res
 /// 
 /// # Example
 /// ```rust
-/// use rvoip_session_core::api::*;
+/// use rvoip_session_core::{SessionCoordinator, Result};
+/// use rvoip_session_core::create::{list_active_sessions, find_session};
+/// use std::sync::Arc;
 /// 
 /// async fn show_active_calls(coordinator: &Arc<SessionCoordinator>) -> Result<()> {
 ///     let sessions = list_active_sessions(coordinator).await?;
@@ -429,7 +456,9 @@ pub async fn list_active_sessions(session_manager: &Arc<SessionCoordinator>) -> 
 /// 
 /// # Example
 /// ```rust
-/// use rvoip_session_core::api::*;
+/// use rvoip_session_core::{SessionCoordinator, SessionId, Result};
+/// use rvoip_session_core::create::find_session;
+/// use std::sync::Arc;
 /// 
 /// async fn check_call_status(
 ///     coordinator: &Arc<SessionCoordinator>,

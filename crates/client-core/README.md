@@ -482,6 +482,79 @@ let call_info = client.get_call(&call_id).await?;
 println!("Call duration: {:?}", call_info.connected_at);
 ```
 
+## 🌐 **Network Configuration**
+
+### **Bind Address Propagation**
+
+When you configure a specific IP address, it propagates through all layers of the stack:
+
+```rust
+// This ensures 192.168.1.100 is used at all layers (no more 0.0.0.0 defaults)
+let client = ClientBuilder::new()
+    .local_address("192.168.1.100:5060".parse()?)
+    .media_address("192.168.1.100:0".parse()?)  // Same IP, auto port
+    .build()
+    .await?;
+```
+
+Key points:
+- ✅ The configured IP address propagates to session-core, dialog-core, and transport layers
+- ✅ No more hardcoded 0.0.0.0 addresses - your specific IP is respected everywhere
+- ✅ Works for both SIP signaling and media (RTP) traffic
+
+### **Automatic Port Allocation**
+
+Set media port to 0 for automatic allocation:
+
+```rust
+// Port 0 = automatic allocation when media session is created
+let client = ClientBuilder::new()
+    .local_address("127.0.0.1:5060".parse()?)      // SIP on standard port 5060
+    .media_address("127.0.0.1:0".parse()?)         // Media port auto-allocated
+    .build()
+    .await?;
+```
+
+How it works:
+- **Port 0**: Signals automatic allocation from the configured RTP port range
+- **Actual Allocation**: Happens when a media session is created (during call setup)
+- **Port Range**: Defaults to 10000-20000, configurable via `rtp_ports()` method
+- **No Conflicts**: Each media session gets a unique port from the pool
+
+### **Configuration Examples**
+
+```rust
+// Example 1: Specific bind address with automatic media ports
+let client = ClientBuilder::new()
+    .local_address("173.225.104.102:5060".parse()?)  // Your server's public IP
+    .media_address("173.225.104.102:0".parse()?)     // Same IP, auto media port
+    .rtp_ports(30000, 40000)                         // Custom RTP range
+    .build()
+    .await?;
+
+// Example 2: Different IPs for SIP and media (multi-homed server)
+let client = ClientBuilder::new()
+    .local_address("203.0.113.10:5060".parse()?)    // External IP for SIP
+    .media_address("10.0.1.100:0".parse()?)          // Internal IP for media
+    .build()
+    .await?;
+
+// Example 3: All interfaces with automatic ports
+let client = ClientBuilder::new()
+    .local_address("0.0.0.0:5060".parse()?)          // Bind to all interfaces
+    .media_address("0.0.0.0:0".parse()?)             // Auto-select interface and port
+    .build()
+    .await?;
+```
+
+### **Best Practices**
+
+1. **Production Servers**: Use specific IP addresses to ensure predictable binding
+2. **Development**: Can use 127.0.0.1 or 0.0.0.0 for flexibility
+3. **NAT Environments**: Configure public IP, but bind to private IP
+4. **Docker/Containers**: Use 0.0.0.0 to allow container networking
+5. **Media Ports**: Always use port 0 unless you need a specific port
+
 ## 📊 **Media Preferences Integration**
 
 Client-core seamlessly integrates with session-core's enhanced media API:

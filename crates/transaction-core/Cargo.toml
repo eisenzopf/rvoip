@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-transaction-core"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Core transaction handling for SIP"
 license = "MIT OR Apache-2.0"
@@ -77,8 +77,8 @@ collapsible_else_if = "allow"
 
 [dependencies]
 # Our own crates
-rvoip-sip-core = { path = "../sip-core", version = "0.1.3" }
-rvoip-sip-transport = { path = "../sip-transport", features = ["udp", "tcp", "tls", "ws"], version = "0.1.3" }
+rvoip-sip-core = { path = "../sip-core", version = "0.1.4" }
+rvoip-sip-transport = { path = "../sip-transport", features = ["udp", "tcp", "tls", "ws"], version = "0.1.4" }
 
 # Async runtime
 tokio = { version = "1.28.2", features = ["full"] }

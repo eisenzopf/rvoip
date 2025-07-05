@@ -588,3 +588,72 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod bind_address_tests {
+    use super::*;
+    use crate::{ClientConfig, ClientManager, ClientBuilder};
+    use std::net::SocketAddr;
+
+    #[tokio::test]
+    async fn test_bind_address_propagation_via_config() {
+        // Test that bind address from ClientConfig propagates correctly
+        // Using a high port that's unlikely to be in use
+        let bind_addr: SocketAddr = "127.0.0.1:25060".parse().unwrap();
+        let config = ClientConfig::new()
+            .with_sip_addr(bind_addr)
+            .with_media_addr("127.0.0.1:0".parse().unwrap());
+        
+        // Create client manager
+        let client_result = ClientManager::new(config).await;
+        
+        // Should succeed without panic
+        assert!(client_result.is_ok(), "ClientManager creation should succeed: {:?}", client_result.err());
+        
+        let client = client_result.unwrap();
+        
+        // Verify the local_sip_addr is set correctly
+        assert_eq!(client.local_sip_addr, bind_addr);
+    }
+
+    #[tokio::test]
+    async fn test_bind_address_propagation_via_builder() {
+        // Test that bind address from ClientBuilder propagates correctly
+        // Using a high port that's unlikely to be in use
+        let bind_addr: SocketAddr = "127.0.0.1:25061".parse().unwrap();
+        
+        let client_result = ClientBuilder::new()
+            .local_address(bind_addr)
+            .build()
+            .await;
+        
+        // Should succeed
+        assert!(client_result.is_ok(), "Client build should succeed: {:?}", client_result.err());
+        
+        let client = client_result.unwrap();
+        
+        // Verify the local_sip_addr is set correctly
+        assert_eq!(client.local_sip_addr, bind_addr);
+    }
+
+    #[tokio::test]
+    async fn test_media_address_inherits_sip_ip() {
+        // Test that media address inherits SIP IP when not explicitly set
+        let sip_addr: SocketAddr = "127.0.0.1:25062".parse().unwrap();
+        
+        let client_result = ClientBuilder::new()
+            .local_address(sip_addr)
+            // Don't set media address explicitly
+            .build()
+            .await;
+        
+        assert!(client_result.is_ok(), "Client build should succeed: {:?}", client_result.err());
+        
+        let client = client_result.unwrap();
+        
+        // Media address should use same IP as SIP but with port 0
+        // Access the local_media_addr from the stats (since it's private)
+        let stats = client.stats.lock().await;
+        assert_eq!(stats.local_media_addr.ip(), sip_addr.ip());
+    }
+}

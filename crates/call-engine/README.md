@@ -445,6 +445,32 @@ cd examples/e2e_test
 # "🎯 All calls completed successfully with proper load balancing"
 ```
 
+### **Network Configuration**
+
+The call engine properly respects and propagates configured bind addresses:
+
+```rust
+// Configure specific IP addresses for your deployment
+let config = CallCenterConfig {
+    general: GeneralConfig {
+        local_signaling_addr: "173.225.104.102:5060".parse()?,  // Your server's public IP
+        local_media_addr: "173.225.104.102:20000".parse()?,     // Same IP for media
+        ..Default::default()
+    },
+    ..Default::default()
+};
+
+// The engine ensures these addresses propagate to all layers
+let engine = CallCenterEngine::new(config).await?;
+```
+
+Key points:
+- ✅ Configured IPs propagate through session-core to dialog-core and transport
+- ✅ No more hardcoded 0.0.0.0 addresses - your specific IP is used everywhere
+- ✅ Media port range starts from the configured `local_media_addr` port
+
+For automatic media port allocation, the engine uses the port from `local_media_addr` as the base and allocates a range from there (typically +1000 ports).
+
 ### **Advanced Configuration**
 
 ```rust

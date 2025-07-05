@@ -39,7 +39,8 @@
 //! Automatically accepts all incoming calls. Useful for testing or simple scenarios.
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::{SessionManagerBuilder, SessionControl, Result};
+//! use rvoip_session_core::handlers::AutoAnswerHandler;
 //! use std::sync::Arc;
 //! 
 //! #[tokio::main]
@@ -63,7 +64,8 @@
 //! you need to process calls asynchronously.
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::{SessionManagerBuilder, SessionControl, MediaControl, Result};
+//! use rvoip_session_core::handlers::QueueHandler;
 //! use tokio::sync::mpsc;
 //! use std::sync::Arc;
 //! 
@@ -88,20 +90,23 @@
 //!     tokio::spawn(async move {
 //!         while let Some(call) = rx.recv().await {
 //!             // Perform async operations (database lookup, etc.)
-//!             let allowed = check_caller_permissions(&call.from).await;
+//!             // In a real application, you would check permissions here
+//!             let allowed = !call.from.contains("blocked");
 //!             
 //!             if allowed {
-//!                 let sdp = MediaControl::generate_sdp_answer(
-//!                     &coord_clone,
-//!                     &call.id,
-//!                     &call.sdp.unwrap()
-//!                 ).await.unwrap();
-//!                 
-//!                 SessionControl::accept_incoming_call(
-//!                     &coord_clone,
-//!                     &call,
-//!                     Some(sdp)
-//!                 ).await.unwrap();
+//!                 if let Some(ref offer) = call.sdp {
+//!                     let sdp = MediaControl::generate_sdp_answer(
+//!                         &coord_clone,
+//!                         &call.id,
+//!                         offer
+//!                     ).await.unwrap();
+//!                     
+//!                     SessionControl::accept_incoming_call(
+//!                         &coord_clone,
+//!                         &call,
+//!                         Some(sdp)
+//!                     ).await.unwrap();
+//!                 }
 //!             } else {
 //!                 SessionControl::reject_incoming_call(
 //!                     &coord_clone,
@@ -122,7 +127,8 @@
 //! default actions for unmatched calls.
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::CallDecision;
+//! use rvoip_session_core::handlers::RoutingHandler;
 //! 
 //! fn create_pbx_router() -> RoutingHandler {
 //!     let mut router = RoutingHandler::new();
@@ -155,32 +161,27 @@
 //! makes a decision (doesn't defer).
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::handlers::{CompositeHandler, QueueHandler, RoutingHandler, CallHandler};
+//! use rvoip_session_core::{CallDecision, IncomingCall, CallSession};
 //! use std::sync::Arc;
+//! use std::time::Duration;
 //! 
-//! async fn create_advanced_handler() -> Arc<CompositeHandler> {
+//! // Example of building advanced handler
+//! // In a real application, you would implement the other handlers
+//! fn create_advanced_handler() -> Arc<CompositeHandler> {
 //!     let composite = CompositeHandler::new()
-//!         // First, check blacklist
-//!         .add_handler(Arc::new(BlacklistHandler::new(vec![
-//!             "sip:spammer@example.com".to_string()
-//!         ])))
-//!         // Then check business hours
-//!         .add_handler(Arc::new(BusinessHoursHandler {
-//!             start_hour: 9,
-//!             end_hour: 17,
-//!             timezone: "America/New_York".to_string(),
-//!         }))
-//!         // Then apply rate limiting
-//!         .add_handler(Arc::new(RateLimitHandler::new(
-//!             10, // max calls per minute
-//!             Duration::from_secs(60)
-//!         )))
-//!         // Then route based on destination
+//!         // Add a simple routing handler
 //!         .add_handler(Arc::new(create_pbx_router()))
 //!         // Finally, queue any remaining calls
 //!         .add_handler(Arc::new(QueueHandler::new(50)));
 //!     
 //!     Arc::new(composite)
+//! }
+//! 
+//! fn create_pbx_router() -> RoutingHandler {
+//!     let mut router = RoutingHandler::new();
+//!     router.add_route("sip:support@", "sip:queue@support.internal");
+//!     router
 //! }
 //! ```
 //! 
@@ -189,7 +190,7 @@
 //! ## Example: Business Hours Handler
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::{CallHandler, IncomingCall, CallDecision, CallSession};
 //! use chrono::{Local, Timelike, Datelike, Weekday};
 //! 
 //! #[derive(Debug)]
@@ -223,7 +224,7 @@
 //!     
 //!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
 //!         // Log for business analytics
-//!         log::info!(
+//!         println!(
 //!             "Call {} ended after {} seconds: {}",
 //!             call.id(),
 //!             call.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
@@ -236,9 +237,32 @@
 //! ## Example: Database-Backed VIP Handler
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::{CallHandler, IncomingCall, CallDecision, CallSession, SessionCoordinator, SessionControl};
 //! use std::sync::Arc;
 //! use tokio::sync::RwLock;
+//! use std::time::Duration;
+//! 
+//! // Example database stub - in real code this would be your actual database
+//! #[derive(Debug)]
+//! struct Database;
+//! 
+//! impl Database {
+//!     async fn get_caller_info(&self, from: &str) -> Result<CallerInfo, Box<dyn std::error::Error>> {
+//!         Ok(CallerInfo { is_vip: from.contains("vip") })
+//!     }
+//!     
+//!     async fn record_vip_call(&self, call: &CallSession, local_sdp: &Option<String>, remote_sdp: &Option<String>) {
+//!         // Record call details
+//!     }
+//!     
+//!     async fn update_vip_call_stats(&self, session_id: &str, reason: &str) {
+//!         // Update statistics
+//!     }
+//! }
+//! 
+//! struct CallerInfo {
+//!     is_vip: bool,
+//! }
 //! 
 //! #[derive(Debug)]
 //! struct VipHandler {
@@ -261,7 +285,7 @@
 //!     
 //!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
 //!         // Update VIP call statistics
-//!         self.db.update_vip_call_stats(&call.id(), reason).await;
+//!         self.db.update_vip_call_stats(&call.id().to_string(), reason).await;
 //!     }
 //! }
 //! 
@@ -280,7 +304,8 @@
 //!             if let Ok(info) = caller_info {
 //!                 if info.is_vip {
 //!                     // VIP gets high-quality codec and priority routing
-//!                     let sdp = generate_hd_audio_sdp(&call.id);
+//!                     // In real code, you would generate proper HD audio SDP
+//!                     let sdp = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5004 RTP/AVP 96\r\na=rtpmap:96 opus/48000/2\r\n".to_string();
 //!                     SessionControl::accept_incoming_call(
 //!                         &coordinator,
 //!                         &call,
@@ -305,6 +330,10 @@
 //! ## Example: Geographic Load Balancer
 //! 
 //! ```rust
+//! use rvoip_session_core::{CallHandler, IncomingCall, CallDecision, CallSession};
+//! use std::collections::HashMap;
+//! use std::sync::{Arc, Mutex};
+//! 
 //! #[derive(Debug)]
 //! struct GeoLoadBalancer {
 //!     regions: HashMap<String, Vec<String>>,

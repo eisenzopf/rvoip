@@ -806,8 +806,8 @@ impl ClientConfig {
     /// 
     /// # Default Values
     /// 
-    /// - **SIP Address**: `127.0.0.1:0` (bind to localhost, OS-assigned port)
-    /// - **Media Address**: `127.0.0.1:0` (bind to localhost, OS-assigned port)
+    /// - **SIP Address**: `127.0.0.1:5060` (bind to localhost, standard SIP port)
+    /// - **Media Address**: `127.0.0.1:0` (port 0 = automatic allocation when media session is created)
     /// - **User Agent**: `rvoip-client-core/0.1.0`
     /// - **Max Calls**: 10 concurrent calls
     /// - **Timeout**: 300 seconds (5 minutes)
@@ -830,7 +830,7 @@ impl ClientConfig {
     /// 
     /// // Verify defaults
     /// assert_eq!(config.local_sip_addr.ip().to_string(), "127.0.0.1");
-    /// assert_eq!(config.local_sip_addr.port(), 0); // OS-assigned
+    /// assert_eq!(config.local_sip_addr.port(), 5060); // Standard SIP port
     /// assert_eq!(config.max_concurrent_calls, 10);
     /// assert_eq!(config.session_timeout_secs, 300);
     /// assert!(config.enable_audio);
@@ -855,8 +855,8 @@ impl ClientConfig {
     /// ```
     pub fn new() -> Self {
         Self {
-            local_sip_addr: "127.0.0.1:0".parse().unwrap(),
-            local_media_addr: "127.0.0.1:0".parse().unwrap(),
+            local_sip_addr: "127.0.0.1:5060".parse().unwrap(),
+            local_media_addr: "127.0.0.1:0".parse().unwrap(), // Port 0 = automatic allocation via GlobalPortAllocator
             user_agent: "rvoip-client-core/0.1.0".to_string(),
             media: MediaConfig::default(),
             max_concurrent_calls: 10,

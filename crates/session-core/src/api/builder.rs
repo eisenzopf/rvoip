@@ -34,9 +34,11 @@
 //! # Advanced Configuration
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::{SessionManagerBuilder, SessionCoordinator};
+//! use rvoip_session_core::examples::RoutingHandler;
+//! use std::sync::Arc;
 //! 
-//! async fn create_pbx_system() -> Result<Arc<SessionCoordinator>> {
+//! async fn create_pbx_system() -> Result<Arc<SessionCoordinator>, Box<dyn std::error::Error>> {
 //!     // Create a routing handler
 //!     let mut router = RoutingHandler::new();
 //!     router.add_route("sip:support@", "sip:queue@support.local");
@@ -69,45 +71,63 @@
 //! ## Softphone Configuration
 //! 
 //! ```rust
-//! let coordinator = SessionManagerBuilder::new()
-//!     .with_sip_port(5060)
-//!     .with_local_address("sip:john@192.168.1.100:5060")
-//!     .with_handler(Arc::new(AutoAnswerHandler))
-//!     .build()
-//!     .await?;
+//! use rvoip_session_core::{SessionManagerBuilder};
+//! use rvoip_session_core::examples::AutoAnswerHandler;
+//! use std::sync::Arc;
+//! 
+//! async fn setup_softphone() -> Result<(), Box<dyn std::error::Error>> {
+//!     let coordinator = SessionManagerBuilder::new()
+//!         .with_sip_port(5060)
+//!         .with_local_address("sip:john@192.168.1.100:5060")
+//!         .with_handler(Arc::new(AutoAnswerHandler))
+//!         .build()
+//!         .await?;
+//!     Ok(())
+//! }
 //! ```
 //! 
 //! ## Call Center Configuration
 //! 
 //! ```rust
-//! // Create queue handler
-//! let queue = Arc::new(QueueHandler::new(100));
+//! use rvoip_session_core::{SessionManagerBuilder};
+//! use rvoip_session_core::api::handlers::{QueueHandler, CompositeHandler, RoutingHandler};
+//! use std::sync::Arc;
 //! 
-//! // Create composite handler with business logic
-//! let composite = CompositeHandler::new()
-//!     .add_handler(Arc::new(BusinessHoursHandler::new(9, 17)))
-//!     .add_handler(queue.clone())
-//!     .add_handler(Arc::new(RoutingHandler::default()));
-//! 
-//! let coordinator = SessionManagerBuilder::new()
-//!     .with_sip_port(5060)
-//!     .with_local_address("sip:callcenter@company.com")
-//!     .with_media_ports(30000, 40000)  // Larger range for many calls
-//!     .with_handler(Arc::new(composite))
-//!     .build()
-//!     .await?;
+//! async fn setup_call_center() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Create queue handler
+//!     let queue = Arc::new(QueueHandler::new(100));
+//!     
+//!     // Create composite handler with multiple handlers
+//!     let composite = CompositeHandler::new()
+//!         .add_handler(queue.clone())
+//!         .add_handler(Arc::new(RoutingHandler::default()));
+//!     
+//!     let coordinator = SessionManagerBuilder::new()
+//!         .with_sip_port(5060)
+//!         .with_local_address("sip:callcenter@company.com")
+//!         .with_media_ports(30000, 40000)  // Larger range for many calls
+//!         .with_handler(Arc::new(composite))
+//!         .build()
+//!         .await?;
+//!     Ok(())
+//! }
 //! ```
 //! 
 //! ## Behind NAT Configuration
 //! 
 //! ```rust
-//! let coordinator = SessionManagerBuilder::new()
-//!     .with_sip_port(5060)
-//!     .with_local_address("sip:user@publicdomain.com")
-//!     .with_stun("stun.stunprotocol.org:3478")  // Enable STUN
-//!     .with_media_ports(50000, 51000)  // Specific port range
-//!     .build()
-//!     .await?;
+//! use rvoip_session_core::{SessionManagerBuilder};
+//! 
+//! async fn setup_nat_config() -> Result<(), Box<dyn std::error::Error>> {
+//!     let coordinator = SessionManagerBuilder::new()
+//!         .with_sip_port(5060)
+//!         .with_local_address("sip:user@publicdomain.com")
+//!         .with_stun("stun.stunprotocol.org:3478")  // Enable STUN
+//!         .with_media_ports(50000, 51000)  // Specific port range
+//!         .build()
+//!         .await?;
+//!     Ok(())
+//! }
 //! ```
 //! 
 //! # Error Handling
@@ -118,19 +138,23 @@
 //! - System resource limitations
 //! 
 //! ```rust
-//! match SessionManagerBuilder::new()
-//!     .with_sip_port(5060)
-//!     .build()
-//!     .await 
-//! {
-//!     Ok(coordinator) => {
-//!         println!("Coordinator created successfully");
-//!     }
-//!     Err(e) => {
-//!         eprintln!("Failed to create coordinator: {}", e);
-//!         // Handle specific error types
-//!         if e.to_string().contains("Address already in use") {
-//!             eprintln!("Port 5060 is already taken, try another port");
+//! use rvoip_session_core::{SessionManagerBuilder};
+//! 
+//! async fn handle_builder_errors() {
+//!     match SessionManagerBuilder::new()
+//!         .with_sip_port(5060)
+//!         .build()
+//!         .await 
+//!     {
+//!         Ok(coordinator) => {
+//!             println!("Coordinator created successfully");
+//!         }
+//!         Err(e) => {
+//!             eprintln!("Failed to create coordinator: {}", e);
+//!             // Handle specific error types
+//!             if e.to_string().contains("Address already in use") {
+//!                 eprintln!("Port 5060 is already taken, try another port");
+//!             }
 //!         }
 //!     }
 //! }
@@ -181,7 +205,7 @@ impl Default for SessionManagerConfig {
         Self {
             sip_port: 5060,
             local_address: "sip:user@localhost".to_string(),
-            local_bind_addr: "0.0.0.0:0".parse().unwrap(), // Bind to all interfaces
+            local_bind_addr: "0.0.0.0:5060".parse().unwrap(), // Bind to all interfaces with standard SIP port
             media_port_start: 10000,
             media_port_end: 20000,
             enable_stun: false,
@@ -200,12 +224,29 @@ impl Default for SessionManagerConfig {
 /// 
 /// # Example
 /// ```rust
-/// let coordinator = SessionManagerBuilder::new()
-///     .with_sip_port(5060)
-///     .with_local_address("sip:alice@example.com")
-///     .with_handler(Arc::new(MyCallHandler))
-///     .build()
-///     .await?;
+/// use rvoip_session_core::{SessionManagerBuilder, CallHandler, CallDecision, IncomingCall, CallSession};
+/// use std::sync::Arc;
+/// 
+/// #[derive(Debug)]
+/// struct MyCallHandler;
+/// 
+/// #[async_trait::async_trait]
+/// impl CallHandler for MyCallHandler {
+///     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+///         CallDecision::Accept(None)
+///     }
+///     async fn on_call_ended(&self, call: CallSession, reason: &str) {}
+/// }
+/// 
+/// async fn example() -> Result<(), Box<dyn std::error::Error>> {
+///     let coordinator = SessionManagerBuilder::new()
+///         .with_sip_port(5060)
+///         .with_local_address("sip:alice@example.com")
+///         .with_handler(Arc::new(MyCallHandler))
+///         .build()
+///         .await?;
+///     Ok(())
+/// }
 /// ```
 pub struct SessionManagerBuilder {
     config: SessionManagerConfig,
@@ -237,6 +278,8 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// 
     /// // Use non-standard port to avoid conflicts
     /// let builder = SessionManagerBuilder::new()
     ///     .with_sip_port(5061);
@@ -255,6 +298,8 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// 
     /// let builder = SessionManagerBuilder::new()
     ///     .with_local_address("sip:alice@company.com:5060");
     /// ```
@@ -273,6 +318,8 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// 
     /// let builder = SessionManagerBuilder::new()
     ///     .with_local_bind_addr("192.168.1.100:0".parse().unwrap());
     /// ```
@@ -292,6 +339,8 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// 
     /// // Reserve ports 30000-31000 for RTP
     /// let builder = SessionManagerBuilder::new()
     ///     .with_media_ports(30000, 31000);
@@ -311,6 +360,8 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// 
     /// let builder = SessionManagerBuilder::new()
     ///     .with_stun("stun.stunprotocol.org:3478");
     /// ```
@@ -335,6 +386,24 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
+    /// use rvoip_session_core::{SessionManagerBuilder, CallHandler, CallDecision, IncomingCall, CallSession};
+    /// use std::sync::Arc;
+    /// 
+    /// #[derive(Debug)]
+    /// struct MyCallHandler;
+    /// 
+    /// impl MyCallHandler {
+    ///     fn new() -> Self { Self }
+    /// }
+    /// 
+    /// #[async_trait::async_trait]
+    /// impl CallHandler for MyCallHandler {
+    ///     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
+    ///         CallDecision::Accept(None)
+    ///     }
+    ///     async fn on_call_ended(&self, call: CallSession, reason: &str) {}
+    /// }
+    /// 
     /// let handler = Arc::new(MyCallHandler::new());
     /// let builder = SessionManagerBuilder::new()
     ///     .with_handler(handler);
@@ -350,19 +419,25 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
-    /// let coordinator = SessionManagerBuilder::new()
-    ///     .with_sip_port(5060)
-    ///     .enable_sip_client()
-    ///     .build()
-    ///     .await?;
+    /// use rvoip_session_core::{SessionManagerBuilder, SipClient};
     /// 
-    /// // Now can use SipClient methods
-    /// let registration = coordinator.register(
-    ///     "sip:registrar.example.com",
-    ///     "sip:alice@example.com",
-    ///     "sip:alice@192.168.1.100:5060",
-    ///     3600
-    /// ).await?;
+    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let coordinator = SessionManagerBuilder::new()
+    ///         .with_sip_port(5060)
+    ///         .enable_sip_client()
+    ///         .build()
+    ///         .await?;
+    ///     
+    ///     // Now can use SipClient methods
+    ///     let registration = coordinator.register(
+    ///         "sip:registrar.example.com",
+    ///         "sip:alice@example.com",
+    ///         "sip:alice@192.168.1.100:5060",
+    ///         3600
+    ///     ).await?;
+    ///     
+    ///     Ok(())
+    /// }
     /// ```
     pub fn enable_sip_client(mut self) -> Self {
         self.config.enable_sip_client = true;
@@ -375,18 +450,24 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
-    /// let media_config = MediaConfig {
-    ///     preferred_codecs: vec!["opus".to_string(), "PCMU".to_string()],
-    ///     echo_cancellation: true,
-    ///     noise_suppression: true,
-    ///     ..Default::default()
-    /// };
+    /// use rvoip_session_core::{SessionManagerBuilder, MediaConfig};
     /// 
-    /// let coordinator = SessionManagerBuilder::new()
-    ///     .with_sip_port(5060)
-    ///     .with_media_config(media_config)
-    ///     .build()
-    ///     .await?;
+    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let media_config = MediaConfig {
+    ///         preferred_codecs: vec!["opus".to_string(), "PCMU".to_string()],
+    ///         echo_cancellation: true,
+    ///         noise_suppression: true,
+    ///         ..Default::default()
+    ///     };
+    ///     
+    ///     let coordinator = SessionManagerBuilder::new()
+    ///         .with_sip_port(5060)
+    ///         .with_media_config(media_config)
+    ///         .build()
+    ///         .await?;
+    ///     
+    ///     Ok(())
+    /// }
     /// ```
     pub fn with_media_config(mut self, media_config: MediaConfig) -> Self {
         self.config.media_config = media_config;
@@ -402,11 +483,16 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
-    /// let coordinator = SessionManagerBuilder::new()
-    ///     .with_sip_port(5060)
-    ///     .with_preferred_codecs(vec!["opus", "G722", "PCMU"])
-    ///     .build()
-    ///     .await?;
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// 
+    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let coordinator = SessionManagerBuilder::new()
+    ///         .with_sip_port(5060)
+    ///         .with_preferred_codecs(vec!["opus", "G722", "PCMU"])
+    ///         .build()
+    ///         .await?;
+    ///     Ok(())
+    /// }
     /// ```
     pub fn with_preferred_codecs<I, S>(mut self, codecs: I) -> Self 
     where
@@ -423,11 +509,16 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
-    /// let coordinator = SessionManagerBuilder::new()
-    ///     .with_sip_port(5060)
-    ///     .with_echo_cancellation(true)
-    ///     .build()
-    ///     .await?;
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// 
+    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let coordinator = SessionManagerBuilder::new()
+    ///         .with_sip_port(5060)
+    ///         .with_echo_cancellation(true)
+    ///         .build()
+    ///         .await?;
+    ///     Ok(())
+    /// }
     /// ```
     pub fn with_echo_cancellation(mut self, enabled: bool) -> Self {
         self.config.media_config.echo_cancellation = enabled;
@@ -443,11 +534,16 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
-    /// let coordinator = SessionManagerBuilder::new()
-    ///     .with_sip_port(5060)
-    ///     .with_audio_processing(true)  // Enables all audio processing
-    ///     .build()
-    ///     .await?;
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// 
+    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let coordinator = SessionManagerBuilder::new()
+    ///         .with_sip_port(5060)
+    ///         .with_audio_processing(true)  // Enables all audio processing
+    ///         .build()
+    ///         .await?;
+    ///     Ok(())
+    /// }
     /// ```
     pub fn with_audio_processing(mut self, enabled: bool) -> Self {
         self.config.media_config.echo_cancellation = enabled;
@@ -473,13 +569,18 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
-    /// let coordinator = SessionManagerBuilder::new()
-    ///     .with_sip_port(5060)
-    ///     .build()
-    ///     .await?;
-    ///     
-    /// // Now ready to make/receive calls
-    /// SessionControl::start(&coordinator).await?;
+    /// use rvoip_session_core::{SessionManagerBuilder, SessionControl};
+    /// 
+    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let coordinator = SessionManagerBuilder::new()
+    ///         .with_sip_port(5060)
+    ///         .build()
+    ///         .await?;
+    ///         
+    ///     // Now ready to make/receive calls
+    ///     SessionControl::start(&coordinator).await?;
+    ///     Ok(())
+    /// }
     /// ```
     pub async fn build(self) -> Result<Arc<SessionCoordinator>> {
         // Create the top-level coordinator with all subsystems
@@ -503,9 +604,14 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
-    /// let tm = Arc::new(TransactionManager::new(...));
-    /// let builder = SessionManagerBuilder::new()
-    ///     .with_transaction_manager(tm);
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// use std::sync::Arc;
+    /// 
+    /// fn example() {
+    ///     // let tm = Arc::new(TransactionManager::new(...));
+    ///     // let builder = SessionManagerBuilder::new()
+    ///     //     .with_transaction_manager(tm);
+    /// }
     /// ```
     pub fn with_transaction_manager(mut self, tm: Arc<rvoip_transaction_core::TransactionManager>) -> Self {
         self.transaction_manager = Some(tm);
@@ -522,13 +628,19 @@ impl SessionManagerBuilder {
     /// 
     /// # Example
     /// ```rust
-    /// let transaction_manager = Arc::new(TransactionManager::new(...));
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// use std::sync::Arc;
     /// 
-    /// let coordinator = SessionManagerBuilder::new()
-    ///     .with_sip_port(5060)
-    ///     .with_local_address("sip:server@example.com")
-    ///     .build_with_transaction_manager(transaction_manager)
-    ///     .await?;
+    /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    ///     // let transaction_manager = Arc::new(TransactionManager::new(...));
+    ///     // 
+    ///     // let coordinator = SessionManagerBuilder::new()
+    ///     //     .with_sip_port(5060)
+    ///     //     .with_local_address("sip:server@example.com")
+    ///     //     .build_with_transaction_manager(transaction_manager)
+    ///     //     .await?;
+    ///     Ok(())
+    /// }
     /// ```
     pub async fn build_with_transaction_manager(
         self,

@@ -108,6 +108,52 @@
 //! # }
 //! ```
 //! 
+//! # Network Configuration
+//! 
+//! ## Bind Address Propagation
+//! 
+//! When you configure a specific IP address, it propagates through all layers:
+//! 
+//! ```rust,no_run
+//! use rvoip_client_core::ClientBuilder;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // This ensures 192.168.1.100 is used at all layers
+//! let client = ClientBuilder::new()
+//!     .local_address("192.168.1.100:5060".parse()?)
+//!     .media_address("192.168.1.100:0".parse()?)  // Same IP, auto port
+//!     .build()
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//! 
+//! The configured IP address propagates to session-core, dialog-core, and transport layers.
+//! No more hardcoded 0.0.0.0 addresses when you specify an IP.
+//! 
+//! ## Automatic Port Allocation
+//! 
+//! Set media port to 0 for automatic allocation:
+//! 
+//! ```rust,no_run
+//! use rvoip_client_core::ClientBuilder;
+//! 
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let client = ClientBuilder::new()
+//!     .local_address("127.0.0.1:5060".parse()?)      // SIP on standard port
+//!     .media_address("127.0.0.1:0".parse()?)         // Port 0 = auto
+//!     .rtp_ports(10000, 20000)                       // RTP port range
+//!     .build()
+//!     .await?;
+//! # Ok(())
+//! # }
+//! ```
+//! 
+//! When port is set to 0:
+//! - It signals automatic allocation from the RTP port range
+//! - Actual allocation happens when media sessions are created
+//! - Each media session gets unique ports from the pool
+//! 
 //! # Features
 //! 
 //! - **Call Management**: Make, receive, hold, transfer calls
@@ -115,6 +161,7 @@
 //! - **Media Control**: Audio mute/unmute, codec selection, SDP handling
 //! - **Event System**: Async event notifications for all operations
 //! - **Clean Architecture**: All complexity handled through session-core
+//! - **Network Flexibility**: Automatic port allocation and bind address control
 //! 
 //! # Error Handling
 //! 

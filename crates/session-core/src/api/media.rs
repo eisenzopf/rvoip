@@ -34,12 +34,13 @@
 //! ## Pattern 1: UAC (Outgoing Call) Flow
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::{SessionCoordinator, SessionControl, MediaControl, parse_sdp_connection};
 //! use std::sync::Arc;
+//! use std::time::Duration;
 //! 
 //! async fn make_outgoing_call(
 //!     coordinator: Arc<SessionCoordinator>
-//! ) -> Result<()> {
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     // 1. Prepare the call (allocates media resources)
 //!     let prepared = SessionControl::prepare_outgoing_call(
 //!         &coordinator,
@@ -85,7 +86,9 @@
 //! ## Pattern 2: UAS (Incoming Call) Flow
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::{SessionCoordinator, SessionControl, MediaControl, CallHandler, CallDecision, 
+//!                           IncomingCall, CallSession, parse_sdp_connection};
+//! use std::sync::Arc;
 //! 
 //! #[derive(Debug)]
 //! struct MyCallHandler;
@@ -106,7 +109,7 @@
 //! async fn handle_incoming_call(
 //!     coordinator: &Arc<SessionCoordinator>,
 //!     call: IncomingCall
-//! ) -> Result<()> {
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     // 1. Analyze the offer
 //!     let offer = call.sdp.as_ref().unwrap();
 //!     let offer_info = parse_sdp_connection(offer)?;
@@ -142,12 +145,14 @@
 //! ## Real-time Quality Metrics
 //! 
 //! ```rust
+//! use std::sync::Arc;
 //! use std::time::Duration;
+//! use rvoip_session_core::{SessionCoordinator, SessionId, MediaControl, SessionControl};
 //! 
 //! async fn monitor_call_quality(
 //!     coordinator: Arc<SessionCoordinator>,
 //!     session_id: SessionId
-//! ) -> Result<()> {
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     // Start automatic monitoring every 5 seconds
 //!     MediaControl::start_statistics_monitoring(
 //!         &coordinator,
@@ -168,9 +173,13 @@
 //!         ).await?;
 //!         
 //!         if let Some(stats) = stats {
-//!             // Check quality metrics
-//!             if let Some(quality) = &stats.quality_metrics {
-//!                 let mos = quality.mos_score.unwrap_or(0.0);
+//!             // Get call statistics which includes quality metrics
+//!             if let Ok(Some(call_stats)) = MediaControl::get_call_statistics(
+//!                 &coordinator,
+//!                 &session_id
+//!             ).await {
+//!                 let quality = &call_stats.quality;
+//!                 let mos = quality.mos_score;
 //!                 
 //!                 println!("Call Quality Report:");
 //!                 println!("  MOS Score: {:.1} ({})", mos, match mos {
@@ -180,28 +189,27 @@
 //!                     x if x >= 2.5 => "Poor",
 //!                     _ => "Bad"
 //!                 });
-//!                 println!("  Packet Loss: {:.1}%", quality.packet_loss_percent);
+//!                 println!("  Packet Loss: {:.1}%", quality.packet_loss_rate);
 //!                 println!("  Jitter: {:.1}ms", quality.jitter_ms);
-//!                 println!("  Round Trip: {:.0}ms", quality.round_trip_time_ms);
+//!                 println!("  Round Trip: {:.0}ms", quality.round_trip_ms);
 //!                 
 //!                 // Alert on poor quality
 //!                 if mos < 3.0 {
 //!                     quality_warnings += 1;
 //!                     if quality_warnings >= 3 {
 //!                         // Sustained poor quality
-//!                         notify_poor_quality(&session_id, mos).await?;
+//!                         println!("Warning: Sustained poor quality - MOS {:.1}", mos);
 //!                     }
 //!                 } else {
 //!                     quality_warnings = 0;
 //!                 }
-//!             }
-//!             
-//!             // Check RTP statistics
-//!             if let Some(rtp_stats) = &stats.rtp_stats {
+//!                 
+//!                 // Check RTP statistics
+//!                 let rtp = &call_stats.rtp;
 //!                 println!("RTP Statistics:");
-//!                 println!("  Packets Sent: {}", rtp_stats.packets_sent);
-//!                 println!("  Packets Received: {}", rtp_stats.packets_received);
-//!                 println!("  Packets Lost: {}", rtp_stats.packets_lost);
+//!                 println!("  Packets Sent: {}", rtp.packets_sent);
+//!                 println!("  Packets Received: {}", rtp.packets_received);
+//!                 println!("  Packets Lost: {}", rtp.packets_lost);
 //!             }
 //!         }
 //!         
@@ -224,10 +232,13 @@
 //! ## Mute/Unmute and Hold Operations
 //! 
 //! ```rust
+//! use std::sync::Arc;
+//! use rvoip_session_core::{SessionCoordinator, SessionId, MediaControl, SessionControl};
+//! 
 //! async fn handle_user_controls(
 //!     coordinator: Arc<SessionCoordinator>,
 //!     session_id: SessionId
-//! ) -> Result<()> {
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     // Mute (stop sending audio)
 //!     MediaControl::stop_audio_transmission(&coordinator, &session_id).await?;
 //!     println!("Microphone muted");
@@ -259,10 +270,13 @@
 //! ## Dynamic Codec Switching
 //! 
 //! ```rust
+//! use std::sync::Arc;
+//! use rvoip_session_core::{SessionCoordinator, SessionId, MediaControl, SessionControl};
+//! 
 //! async fn switch_to_hd_audio(
 //!     coordinator: &Arc<SessionCoordinator>,
 //!     session_id: &SessionId
-//! ) -> Result<()> {
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     // Generate new SDP with HD codec preference
 //!     let new_sdp = r#"v=0
 //! o=- 0 0 IN IP4 127.0.0.1
@@ -284,17 +298,20 @@
 //! ## Network Change Handling
 //! 
 //! ```rust
+//! use std::sync::Arc;
+//! use rvoip_session_core::{SessionCoordinator, SessionId, MediaControl, SessionControl};
+//! 
 //! async fn handle_network_change(
 //!     coordinator: &Arc<SessionCoordinator>,
 //!     session_id: &SessionId,
 //!     new_ip: &str
-//! ) -> Result<()> {
+//! ) -> Result<(), Box<dyn std::error::Error>> {
 //!     // Stop current transmission
 //!     MediaControl::stop_audio_transmission(coordinator, session_id).await?;
 //!     
 //!     // Update with new network info
 //!     let media_info = MediaControl::get_media_info(coordinator, session_id).await?
-//!         .ok_or("No media session")?;
+//!         .ok_or("No media session".to_string())?;
 //!     
 //!     if let Some(remote_port) = media_info.remote_rtp_port {
 //!         // Re-establish with new IP
@@ -320,15 +337,22 @@
 //! # Error Handling
 //! 
 //! ```rust
-//! use rvoip_session_core::errors::SessionError;
+//! use std::sync::Arc;
+//! use rvoip_session_core::{SessionCoordinator, SessionId, MediaControl, SessionError};
 //! 
-//! match MediaControl::establish_media_flow(&coordinator, &session_id, addr).await {
-//!     Ok(_) => println!("Media established"),
-//!     Err(SessionError::MediaIntegration { message }) => {
-//!         eprintln!("Media error: {}", message);
-//!         // Try fallback or notify user
+//! async fn handle_media_errors(
+//!     coordinator: Arc<SessionCoordinator>,
+//!     session_id: SessionId,
+//!     addr: &str
+//! ) {
+//!     match MediaControl::establish_media_flow(&coordinator, &session_id, addr).await {
+//!         Ok(_) => println!("Media established"),
+//!         Err(SessionError::MediaIntegration { message }) => {
+//!             eprintln!("Media error: {}", message);
+//!             // Try fallback or notify user
+//!         }
+//!         Err(e) => eprintln!("Unexpected error: {}", e),
 //!     }
-//!     Err(e) => eprintln!("Unexpected error: {}", e),
 //! }
 //! ```
 

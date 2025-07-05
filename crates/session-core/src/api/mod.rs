@@ -183,14 +183,28 @@
 //! #[derive(Debug)]
 //! struct MyHandler;
 //! 
+//! // Mock helper functions for the example
+//! fn is_business_hours() -> bool { true }
+//! fn is_allowed_number(from: &str) -> bool { !from.contains("spam") }
+//! fn is_blacklisted(from: &str) -> bool { from.contains("blocked") }
+//! fn generate_sdp_answer(offer: &str) -> String {
+//!     // Simple mock answer
+//!     format!("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n")
+//! }
+//! 
 //! #[async_trait::async_trait]
 //! impl CallHandler for MyHandler {
 //!     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
 //!         // Decision made immediately based on simple rules
 //!         if is_business_hours() && is_allowed_number(&call.from) {
 //!             // Accept and generate SDP answer inline
-//!             let sdp = generate_sdp_answer(&call.sdp.unwrap());
-//!             CallDecision::Accept(Some(sdp))
+//!             if let Some(ref offer) = call.sdp {
+//!                 let sdp = generate_sdp_answer(offer);
+//!                 CallDecision::Accept(Some(sdp))
+//!             } else {
+//!                 // No SDP to generate answer from
+//!                 CallDecision::Accept(None)
+//!             }
 //!         } else if is_blacklisted(&call.from) {
 //!             CallDecision::Reject("Blocked number".to_string())
 //!         } else {
@@ -199,7 +213,7 @@
 //!     }
 //!     
 //!     async fn on_call_ended(&self, call: CallSession, reason: &str) {
-//!         log::info!("Call {} ended: {}", call.id(), reason);
+//!         println!("Call {} ended: {}", call.id(), reason);
 //!     }
 //! }
 //! ```
@@ -234,20 +248,22 @@
 //! async fn process_pending_calls(
 //!     coordinator: &Arc<SessionCoordinator>,
 //!     pending: &Arc<Mutex<Vec<IncomingCall>>>
-//! ) -> Result<()> {
+//! ) -> std::result::Result<(), Box<dyn std::error::Error>> {
 //!     let calls = pending.lock().unwrap().drain(..).collect::<Vec<_>>();
 //!     
 //!     for call in calls {
-//!         // Perform async operations
-//!         let user_info = lookup_user_in_database(&call.from).await?;
-//!         let routing_rules = get_routing_rules(&call.to).await?;
+//!         // In a real implementation, you would:
+//!         // 1. Check user permissions/authentication
+//!         // 2. Apply routing rules
+//!         // 3. Check business hours or other policies
 //!         
-//!         if should_accept(&user_info, &routing_rules) {
+//!         // For this example, we'll accept all calls with a simple SDP
+//!         if call.sdp.is_some() {
 //!             // Generate SDP answer using MediaControl
 //!             let answer = MediaControl::generate_sdp_answer(
 //!                 coordinator,
 //!                 &call.id,
-//!                 &call.sdp.unwrap()
+//!                 call.sdp.as_ref().unwrap()
 //!             ).await?;
 //!             
 //!             // Accept the call
@@ -257,11 +273,11 @@
 //!                 Some(answer)
 //!             ).await?;
 //!         } else {
-//!             // Reject with appropriate reason
+//!             // Reject calls without SDP
 //!             SessionControl::reject_incoming_call(
 //!                 coordinator,
 //!                 &call,
-//!                 "Service unavailable"
+//!                 "No SDP offer"
 //!             ).await?;
 //!         }
 //!     }
@@ -274,70 +290,97 @@
 //! 
 //! ## Basic SIP Server/Softphone
 //! ```rust
-//! let coordinator = SessionManagerBuilder::new()
-//!     .with_sip_port(5060)
-//!     .with_handler(Arc::new(AutoAnswerHandler))
-//!     .build()
-//!     .await?;
+//! use rvoip_session_core::{SessionManagerBuilder, SessionControl};
+//! use rvoip_session_core::examples::AutoAnswerHandler;
+//! use std::sync::Arc;
 //! 
-//! SessionControl::start(&coordinator).await?;
+//! async fn setup_basic_server() -> Result<(), Box<dyn std::error::Error>> {
+//!     let coordinator = SessionManagerBuilder::new()
+//!         .with_sip_port(5060)
+//!         .with_handler(Arc::new(AutoAnswerHandler))
+//!         .build()
+//!         .await?;
+//! 
+//!     SessionControl::start(&coordinator).await?;
+//!     Ok(())
+//! }
 //! ```
 //! 
 //! ## Call Center with Queue
 //! ```rust
-//! let queue = Arc::new(QueueHandler::new(100));
-//! let coordinator = SessionManagerBuilder::new()
-//!     .with_sip_port(5060)
-//!     .with_handler(queue.clone())
-//!     .build()
-//!     .await?;
+//! use rvoip_session_core::{SessionManagerBuilder, SessionControl};
+//! use rvoip_session_core::api::handlers::QueueHandler;
+//! use std::sync::Arc;
+//! use std::time::Duration;
 //! 
-//! // Process queued calls in background
-//! tokio::spawn(async move {
-//!     loop {
-//!         process_queue_batch(&coordinator, &queue).await;
-//!         tokio::time::sleep(Duration::from_millis(100)).await;
-//!     }
-//! });
+//! async fn setup_call_center() -> Result<(), Box<dyn std::error::Error>> {
+//!     let queue = Arc::new(QueueHandler::new(100));
+//!     let coordinator = SessionManagerBuilder::new()
+//!         .with_sip_port(5060)
+//!         .with_handler(queue.clone())
+//!         .build()
+//!         .await?;
+//! 
+//!     // In a real implementation, you would process queued calls in background:
+//!     // - Check queue.dequeue() periodically
+//!     // - Accept/reject calls based on agent availability
+//!     // - Use SessionControl::accept_incoming_call() or reject_incoming_call()
+//!     
+//!     Ok(())
+//! }
 //! ```
 //! 
 //! ## PBX with Routing Rules
 //! ```rust
-//! let mut router = RoutingHandler::new();
-//! router.add_route("sip:support@*", "sip:queue@support.local");
-//! router.add_route("sip:sales@*", "sip:queue@sales.local");
-//! router.add_route("sip:*@vip.example.com", "sip:priority@queue.local");
+//! use rvoip_session_core::{SessionManagerBuilder};
+//! use rvoip_session_core::api::handlers::RoutingHandler;
+//! use std::sync::Arc;
 //! 
-//! let coordinator = SessionManagerBuilder::new()
-//!     .with_sip_port(5060)
-//!     .with_handler(Arc::new(router))
-//!     .build()
-//!     .await?;
+//! async fn setup_pbx() -> Result<(), Box<dyn std::error::Error>> {
+//!     let mut router = RoutingHandler::new();
+//!     router.add_route("sip:support@*", "sip:queue@support.local");
+//!     router.add_route("sip:sales@*", "sip:queue@sales.local");
+//!     router.add_route("sip:*@vip.example.com", "sip:priority@queue.local");
+//!     
+//!     let coordinator = SessionManagerBuilder::new()
+//!         .with_sip_port(5060)
+//!         .with_handler(Arc::new(router))
+//!         .build()
+//!         .await?;
+//!     
+//!     Ok(())
+//! }
 //! ```
 //! 
 //! ## SIP Client Operations
 //! ```rust
-//! // Enable SIP client features
-//! let coordinator = SessionManagerBuilder::new()
-//!     .with_sip_port(5061)
-//!     .enable_sip_client()
-//!     .build()
-//!     .await?;
+//! use rvoip_session_core::{SessionManagerBuilder, SipClient};
 //! 
-//! // Register with a SIP server
-//! let registration = coordinator.register(
-//!     "sip:registrar.example.com",
-//!     "sip:alice@example.com",
-//!     "sip:alice@192.168.1.100:5061",
-//!     3600  // 1 hour
-//! ).await?;
-//! 
-//! // Send an instant message
-//! let response = coordinator.send_message(
-//!     "sip:bob@example.com",
-//!     "Hello from session-core!",
-//!     Some("text/plain")
-//! ).await?;
+//! async fn sip_client_example() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Enable SIP client features
+//!     let coordinator = SessionManagerBuilder::new()
+//!         .with_sip_port(5061)
+//!         .enable_sip_client()
+//!         .build()
+//!         .await?;
+//!     
+//!     // Register with a SIP server
+//!     let registration = coordinator.register(
+//!         "sip:registrar.example.com",
+//!         "sip:alice@example.com",
+//!         "sip:alice@192.168.1.100:5061",
+//!         3600  // 1 hour
+//!     ).await?;
+//!     
+//!     // Send an instant message
+//!     let response = coordinator.send_message(
+//!         "sip:bob@example.com",
+//!         "Hello from session-core!",
+//!         Some("text/plain")
+//!     ).await?;
+//!     
+//!     Ok(())
+//! }
 //! ```
 //! 
 //! # Bridge Management (2-Party Conferences)
@@ -345,24 +388,35 @@
 //! Session-core provides bridge management for connecting two calls:
 //! 
 //! ```rust
-//! // Bridge two active sessions (e.g., customer and agent)
-//! let bridge_id = coordinator.bridge_sessions(&session1_id, &session2_id).await?;
+//! use rvoip_session_core::{SessionCoordinator, SessionId, BridgeEvent};
+//! use std::sync::Arc;
 //! 
-//! // Monitor bridge events
-//! let mut events = coordinator.subscribe_to_bridge_events().await;
-//! while let Some(event) = events.recv().await {
-//!     match event.event_type {
-//!         BridgeEventType::ParticipantAdded { .. } => {
-//!             log::info!("Participant joined bridge");
-//!         }
-//!         BridgeEventType::ParticipantRemoved { .. } => {
-//!             log::info!("Participant left bridge");
-//!         }
-//!         BridgeEventType::BridgeDestroyed { .. } => {
-//!             log::info!("Bridge ended");
-//!             break;
+//! async fn bridge_example(
+//!     coordinator: Arc<SessionCoordinator>,
+//!     session1_id: SessionId,
+//!     session2_id: SessionId
+//! ) -> Result<(), Box<dyn std::error::Error>> {
+//!     // Bridge two active sessions (e.g., customer and agent)
+//!     let bridge_id = coordinator.bridge_sessions(&session1_id, &session2_id).await?;
+//!     
+//!     // Monitor bridge events
+//!     let mut events = coordinator.subscribe_to_bridge_events().await;
+//!     while let Some(event) = events.recv().await {
+//!         match event {
+//!             BridgeEvent::ParticipantAdded { bridge_id, session_id } => {
+//!                 println!("Session {} joined bridge {}", session_id, bridge_id);
+//!             }
+//!             BridgeEvent::ParticipantRemoved { bridge_id, session_id, reason } => {
+//!                 println!("Session {} left bridge {}: {}", session_id, bridge_id, reason);
+//!             }
+//!             BridgeEvent::BridgeDestroyed { bridge_id } => {
+//!                 println!("Bridge {} ended", bridge_id);
+//!                 break;
+//!             }
 //!         }
 //!     }
+//!     
+//!     Ok(())
 //! }
 //! ```
 //! 
@@ -380,18 +434,27 @@
 //! All API methods return `Result<T, SessionError>` for consistent error handling:
 //! 
 //! ```rust
-//! match SessionControl::create_outgoing_call(&coordinator, from, to, None).await {
-//!     Ok(session) => {
-//!         log::info!("Call created: {}", session.id());
-//!     }
-//!     Err(SessionError::InvalidUri(uri)) => {
-//!         log::error!("Invalid SIP URI: {}", uri);
-//!     }
-//!     Err(SessionError::TransportError(e)) => {
-//!         log::error!("Network error: {}", e);
-//!     }
-//!     Err(e) => {
-//!         log::error!("Call failed: {}", e);
+//! use rvoip_session_core::{SessionCoordinator, SessionControl, SessionError};
+//! use std::sync::Arc;
+//! 
+//! async fn handle_errors(
+//!     coordinator: Arc<SessionCoordinator>,
+//!     from: &str,
+//!     to: &str
+//! ) {
+//!     match SessionControl::create_outgoing_call(&coordinator, from, to, None).await {
+//!         Ok(session) => {
+//!             println!("Call created: {}", session.id());
+//!         }
+//!         Err(SessionError::InvalidUri(uri)) => {
+//!             eprintln!("Invalid SIP URI: {}", uri);
+//!         }
+//!         Err(SessionError::NetworkError(e)) => {
+//!             eprintln!("Network error: {}", e);
+//!         }
+//!         Err(e) => {
+//!             eprintln!("Call failed: {}", e);
+//!         }
 //!     }
 //! }
 //! ```

@@ -159,6 +159,8 @@ impl CallerInfo {
     /// 
     /// # Example
     /// ```rust
+    /// use rvoip_session_core::CallerInfo;
+    /// 
     /// let caller = CallerInfo::new("sip:alice@example.com", "sip:bob@example.com");
     /// assert_eq!(caller.from_username(), Some("alice"));
     /// ```
@@ -171,6 +173,8 @@ impl CallerInfo {
     /// 
     /// # Example
     /// ```rust
+    /// use rvoip_session_core::CallerInfo;
+    /// 
     /// let caller = CallerInfo::new("sip:alice@example.com", "sip:bob@example.com");
     /// assert_eq!(caller.from_domain(), Some("example.com"));
     /// ```
