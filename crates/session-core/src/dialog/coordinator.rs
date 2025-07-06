@@ -543,14 +543,14 @@ impl SessionDialogCoordinator {
             let session_id = session_id_ref.value().clone();
             tracing::info!("Call answered for session {}: {} (awaiting ACK per RFC 3261)", session_id, dialog_id);
             
-            // Store the remote SDP answer
+            // Store our local SDP answer (as UAS, we generated this answer)
             if !session_answer.trim().is_empty() {
                 self.send_session_event(SessionEvent::SdpEvent {
                     session_id: session_id.clone(),
-                    event_type: "remote_sdp_answer".to_string(),
+                    event_type: "local_sdp_answer".to_string(),
                     sdp: session_answer.clone(),
                 }).await.unwrap_or_else(|e| {
-                    tracing::error!("Failed to send remote SDP event: {}", e);
+                    tracing::error!("Failed to send local SDP event: {}", e);
                 });
             }
             

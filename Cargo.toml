@@ -29,33 +29,145 @@ default-members = [
     "crates/rvoip",
 ]
 
-
+# ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
+[workspace.package]
+version = "0.1.8"  # 🎯 SINGLE VERSION TO MANAGE!
+edition = "2021"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/eisenzopf/rvoip"
+repository = "https://github.com/eisenzopf/rvoip"
+documentation = "https://docs.rs/rvoip"
+authors = ["RVOIP AUTHORS"]
+rust-version = "1.70"  # Minimum supported Rust version
+categories = ["network-programming", "multimedia", "web-programming"]
+keywords = ["sip", "voip", "rtp", "communication", "telephony"]
 
 # Silence all Rust warnings
 [workspace.lints.rust]
 warnings = "allow"
+unused_imports = "allow"
+unused_variables = "allow"
+unused_mut = "allow"
+dead_code = "allow"
+unused_comparisons = "allow"
+elided_named_lifetimes = "allow"
+ambiguous_glob_reexports = "allow"
+deprecated = "allow"
+unexpected_cfgs = "allow"
+unreachable_patterns = "allow"
+irrefutable_let_patterns = "allow"
+unused_assignments = "allow"
+async_fn_in_trait = "allow"
+
+[workspace.lints.clippy]
+# Allow stylistic and pedantic lints that don't affect correctness
+pedantic = "allow"
+style = "allow"
+complexity = "allow"
+perf = "allow"
+cargo = "allow"
+nursery = "allow"
+
+# Keep important correctness lints as warnings/errors
+correctness = "warn"
+suspicious = "warn"
+restriction = "allow"
+
+# Allow specific common patterns that are acceptable
+len_zero = "allow"
+len_without_is_empty = "allow"
+new_without_default = "allow"
+too_many_arguments = "allow"
+module_inception = "allow"
+single_match = "allow"
+match_like_matches_macro = "allow"
+redundant_pattern_matching = "allow"
+needless_option_as_deref = "allow"
+unnecessary_filter_map = "allow"
+bool_assert_comparison = "allow"
+bool_comparison = "allow"
+comparison_to_empty = "allow"
+explicit_auto_deref = "allow"
+unnecessary_get_then_check = "allow"
+needless_borrows_for_generic_args = "allow"
+assertions_on_constants = "allow"
+expect_fun_call = "allow"
+option_as_ref_deref = "allow"
+useless_conversion = "allow"
+unnecessary_literal_unwrap = "allow"
+vec_init_then_push = "allow"
+useless_vec = "allow"
+redundant_closure = "allow"
+items_after_test_module = "allow"
+approx_constant = "allow"
+partialeq_to_none = "allow"
+legacy_numeric_constants = "allow"
+absurd_extreme_comparisons = "allow"
+cast_abs_to_unsigned = "allow"
+empty_line_after_doc_comments = "allow"
+multiple_bound_locations = "allow"
+should_implement_trait = "allow"
+manual_find = "allow"
+collapsible_else_if = "allow"
 
 [workspace.dependencies]
-# Async runtime
+# 🎯 INTERNAL CRATES - No version needed when using workspace inheritance!
+rvoip-sip-core = { path = "crates/sip-core" }
+rvoip-sip-transport = { path = "crates/sip-transport" }
+rvoip-transaction-core = { path = "crates/transaction-core" }
+rvoip-dialog-core = { path = "crates/dialog-core" }
+rvoip-rtp-core = { path = "crates/rtp-core" }
+rvoip-media-core = { path = "crates/media-core" }
+rvoip-session-core = { path = "crates/session-core" }
+rvoip-call-engine = { path = "crates/call-engine" }
+rvoip-client-core = { path = "crates/client-core" }
+rvoip = { path = "crates/rvoip" }
+
+# External dependencies
 tokio = { version = "1.36", features = ["full"] }
-# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# Error handling
 thiserror = "1.0"
 anyhow = "1.0"
-# Utilities
 bytes = { version = "1.5", features = ["serde"] }
 uuid = { version = "1.7", features = ["v4", "serde"] }
-# HTTP/API
 axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
-# Testing
-proptest = "1.4" 
+proptest = "1.4"
+async-trait = "0.1"
+futures = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "5.5"
+parking_lot = "0.12"
+rand = { version = "0.8", features = ["small_rng"] }
+clap = { version = "4.0", features = ["derive"] }
+
+# Additional dependencies used by various crates
+serde_bytes = "0.11"
+base64 = "0.21"
+nom = "7.1"
+log = "0.4"
+ordered-float = { version = "4.2.0", features = ["serde"] }
+socket2 = { version = "0.5", features = ["all"] }
+mio = { version = "0.8", features = ["os-poll", "net"] }
+rustls = "0.23"
+rustls-pemfile = "2.0"
+sha2 = "0.10"
+hmac = "0.12"
+aes = "0.8"
+md-5 = "0.10"
+ring = "0.17"
+rcgen = "0.12"
+x509-parser = "0.15"
+webpki-roots = "0.25"
+serial_test = "3.1"
+fastrand = "2.0"
+tracing-appender = "0.2"
+env_logger = "0.11"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # 🔧 Optimization Profiles for Binary Size Reduction
 

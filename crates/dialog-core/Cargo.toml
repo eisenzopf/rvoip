@@ -1,52 +1,46 @@
 [package]
 name = "rvoip-dialog-core"
-version = "0.1.4"
-edition = "2021"
-authors = ["RVOIP Team"]
+# 🎯 INHERIT VERSION AND METADATA FROM WORKSPACE!
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+# Crate-specific description
 description = "RFC 3261 SIP Dialog Management Layer for RVOIP"
-license = "MIT OR Apache-2.0"
-documentation = "https://docs.rs/rvoip-dialog-core"
-homepage = "https://github.com/eisenzopf/rvoip"
-repository = "https://github.com/eisenzopf/rvoip"
-keywords = ["sip", "voip", "dialog", "rfc3261", "protocol"]
-categories = ["network-programming", "multimedia"]
+
+# ✨ INHERIT LINTS FROM WORKSPACE
+[lints]
+workspace = true
 
 [dependencies]
-# Core SIP and RTP functionality
-rvoip-sip-core = { path = "../sip-core", version = "0.1.4" }
-rvoip-transaction-core = { path = "../transaction-core", version = "0.1.4" }
+# 🎯 INTERNAL CRATES - Use workspace dependencies
+rvoip-sip-core.workspace = true
+rvoip-transaction-core.workspace = true
 
-# Async runtime and utilities
-tokio = { version = "1.0", features = ["full"] }
-async-trait = "0.1"
+# External dependencies from workspace
+tokio.workspace = true
+async-trait.workspace = true
+dashmap.workspace = true
+uuid.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+log.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+rand.workspace = true
 
-# Data structures and synchronization
-dashmap = "5.4"
-uuid = { version = "1.6", features = ["v4", "serde"] }
-bytes = "1.5"
-
-# Serialization and deserialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Logging and tracing
-tracing = "0.1"
-log = "0.4"
-
-# Error handling
-thiserror = "1.0"
-anyhow = "1.0"
-
-# Time and duration utilities
-chrono = { version = "0.4", features = ["serde"] }
-
-# Network utilities
+# Crate-specific dependencies not in workspace
 http = "0.2"
-
-# Random number generation for tags
-rand = "0.8"
-
-# Optional dependencies
 mockall = { version = "0.11", optional = true }
 
 [dev-dependencies]
