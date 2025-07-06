@@ -12,6 +12,7 @@ desktop.ini
 Cargo.lock
 publish_order.sh
 bump_version.sh
+Cargo.toml.backup
 
 ## Editor
 *.swp
