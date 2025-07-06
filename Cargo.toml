@@ -111,17 +111,17 @@ manual_find = "allow"
 collapsible_else_if = "allow"
 
 [workspace.dependencies]
-# 🎯 INTERNAL CRATES - No version needed when using workspace inheritance!
-rvoip-sip-core = { path = "crates/sip-core" }
-rvoip-sip-transport = { path = "crates/sip-transport" }
-rvoip-transaction-core = { path = "crates/transaction-core" }
-rvoip-dialog-core = { path = "crates/dialog-core" }
-rvoip-rtp-core = { path = "crates/rtp-core" }
-rvoip-media-core = { path = "crates/media-core" }
-rvoip-session-core = { path = "crates/session-core" }
-rvoip-call-engine = { path = "crates/call-engine" }
-rvoip-client-core = { path = "crates/client-core" }
-rvoip = { path = "crates/rvoip" }
+# 🎯 INTERNAL CRATES - Include version for publishing to crates.io!
+rvoip-sip-core = { path = "crates/sip-core", version = "0.1.8" }
+rvoip-sip-transport = { path = "crates/sip-transport", version = "0.1.8" }
+rvoip-transaction-core = { path = "crates/transaction-core", version = "0.1.8" }
+rvoip-dialog-core = { path = "crates/dialog-core", version = "0.1.8" }
+rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.8" }
+rvoip-media-core = { path = "crates/media-core", version = "0.1.8" }
+rvoip-session-core = { path = "crates/session-core", version = "0.1.8" }
+rvoip-call-engine = { path = "crates/call-engine", version = "0.1.8" }
+rvoip-client-core = { path = "crates/client-core", version = "0.1.8" }
+rvoip = { path = "crates/rvoip", version = "0.1.8" }
 
 # External dependencies
 tokio = { version = "1.36", features = ["full"] }
