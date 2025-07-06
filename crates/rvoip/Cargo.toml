@@ -1,26 +1,37 @@
 [package]
 name = "rvoip"
-version = "0.1.7"
-edition = "2021"
-description = "A comprehensive VoIP library for Rust"
-license = "MIT OR Apache-2.0"
-documentation = "https://docs.rs/rvoip"
-homepage = "https://github.com/eisenzopf/rvoip"
-repository = "https://github.com/eisenzopf/rvoip"
+# 🎯 INHERIT VERSION AND METADATA FROM WORKSPACE!
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+# Crate-specific description
+description = "Complete VoIP stack - SIP, RTP, media processing, and client/server APIs"
+
+# ✨ INHERIT LINTS FROM WORKSPACE
+[lints]
+workspace = true
 
 [dependencies]
-# Re-export all the crates in the workspace
-rvoip-sip-core = { path = "../sip-core", version = "0.1.4" }
-rvoip-sip-transport = { path = "../sip-transport", version = "0.1.4" }
-rvoip-transaction-core = { path = "../transaction-core", version = "0.1.4" }
-rvoip-dialog-core = { path = "../dialog-core", version = "0.1.4" }
-rvoip-rtp-core = { path = "../rtp-core", version = "0.1.4" }
-rvoip-media-core = { path = "../media-core", version = "0.1.4" }
-rvoip-session-core = { path = "../session-core", version = "0.1.4" }
-rvoip-call-engine = { path = "../call-engine", version = "0.1.4" }
-rvoip-client-core = { path = "../client-core", version = "0.1.4" }
+# 🎯 ALL INTERNAL CRATES - Use workspace dependencies (no version needed!)
+rvoip-sip-core.workspace = true
+rvoip-sip-transport.workspace = true
+rvoip-transaction-core.workspace = true
+rvoip-dialog-core.workspace = true
+rvoip-rtp-core.workspace = true
+rvoip-media-core.workspace = true
+rvoip-session-core.workspace = true
+rvoip-call-engine.workspace = true
+rvoip-client-core.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1.0", features = ["full"] }
-anyhow = "1.0"
-serial_test = "3.0"
+tokio.workspace = true
+anyhow.workspace = true
+serial_test.workspace = true
