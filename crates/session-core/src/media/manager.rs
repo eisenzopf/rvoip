@@ -681,6 +681,36 @@ impl MediaManager {
         Ok(())
     }
     
+    /// Start audio transmission for a session with tone generation
+    pub async fn start_audio_transmission_with_tone(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
+        
+        self.controller.start_audio_transmission_with_tone(&dialog_id).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("✅ Started audio transmission with tone for session: {}", session_id);
+        Ok(())
+    }
+    
+    /// Start audio transmission for a session with custom audio samples
+    pub async fn start_audio_transmission_with_custom_audio(&self, session_id: &SessionId, samples: Vec<u8>, repeat: bool) -> super::MediaResult<()> {
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
+        
+        self.controller.start_audio_transmission_with_custom_audio(&dialog_id, samples, repeat).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("✅ Started audio transmission with custom audio for session: {}", session_id);
+        Ok(())
+    }
+    
     /// Stop audio transmission for a session
     pub async fn stop_audio_transmission(&self, session_id: &SessionId) -> super::MediaResult<()> {
         tracing::debug!("Stopping audio transmission for session: {}", session_id);
@@ -696,6 +726,51 @@ impl MediaManager {
             .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
         
         tracing::info!("✅ Stopped audio transmission for session: {}", session_id);
+        Ok(())
+    }
+    
+    /// Set custom audio samples for an active transmission session
+    pub async fn set_custom_audio(&self, session_id: &SessionId, samples: Vec<u8>, repeat: bool) -> super::MediaResult<()> {
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
+        
+        self.controller.set_custom_audio(&dialog_id, samples, repeat).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("✅ Set custom audio for session: {}", session_id);
+        Ok(())
+    }
+    
+    /// Set tone generation parameters for an active transmission session
+    pub async fn set_tone_generation(&self, session_id: &SessionId, frequency: f64, amplitude: f64) -> super::MediaResult<()> {
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
+        
+        self.controller.set_tone_generation(&dialog_id, frequency, amplitude).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("✅ Set tone generation for session: {}", session_id);
+        Ok(())
+    }
+    
+    /// Enable pass-through mode for an active transmission session
+    pub async fn set_pass_through_mode(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
+        
+        self.controller.set_pass_through_mode(&dialog_id).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("✅ Set pass-through mode for session: {}", session_id);
         Ok(())
     }
     

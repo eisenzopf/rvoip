@@ -365,11 +365,31 @@ use crate::errors::Result;
 /// Extension trait for media control operations
 pub trait MediaControl {
     /// Start audio transmission for a session
-    /// This will begin sending generated audio (440Hz sine wave in G.711 µ-law format)
+    /// This will begin audio transmission in pass-through mode (default)
     async fn start_audio_transmission(&self, session_id: &SessionId) -> Result<()>;
+    
+    /// Start audio transmission for a session with tone generation
+    /// This will begin sending generated audio (440Hz sine wave in G.711 µ-law format)
+    async fn start_audio_transmission_with_tone(&self, session_id: &SessionId) -> Result<()>;
+    
+    /// Start audio transmission for a session with custom audio samples
+    /// This will begin transmitting the provided audio samples (must be in G.711 µ-law format)
+    async fn start_audio_transmission_with_custom_audio(&self, session_id: &SessionId, samples: Vec<u8>, repeat: bool) -> Result<()>;
     
     /// Stop audio transmission for a session
     async fn stop_audio_transmission(&self, session_id: &SessionId) -> Result<()>;
+    
+    /// Set custom audio samples for an active transmission session
+    /// This allows changing the audio source during transmission
+    async fn set_custom_audio(&self, session_id: &SessionId, samples: Vec<u8>, repeat: bool) -> Result<()>;
+    
+    /// Set tone generation parameters for an active transmission session
+    /// This allows changing to tone generation during transmission
+    async fn set_tone_generation(&self, session_id: &SessionId, frequency: f64, amplitude: f64) -> Result<()>;
+    
+    /// Enable pass-through mode for an active transmission session
+    /// This stops audio generation and allows RTP pass-through
+    async fn set_pass_through_mode(&self, session_id: &SessionId) -> Result<()>;
     
     /// Establish media flow by setting remote RTP address and starting audio
     /// The remote address should be in the format "ip:port" (e.g., "127.0.0.1:30000")
@@ -449,6 +469,34 @@ impl MediaControl for Arc<SessionCoordinator> {
         Ok(())
     }
     
+    async fn start_audio_transmission_with_tone(&self, session_id: &SessionId) -> Result<()> {
+        // Get the media manager through the coordinator
+        let media_manager = &self.media_manager;
+        
+        // Start audio transmission with tone generation
+        media_manager.start_audio_transmission_with_tone(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to start audio transmission with tone: {}", e) 
+            })?;
+        
+        tracing::info!("Started audio transmission with tone for session {}", session_id);
+        Ok(())
+    }
+    
+    async fn start_audio_transmission_with_custom_audio(&self, session_id: &SessionId, samples: Vec<u8>, repeat: bool) -> Result<()> {
+        // Get the media manager through the coordinator
+        let media_manager = &self.media_manager;
+        
+        // Start audio transmission with custom audio samples
+        media_manager.start_audio_transmission_with_custom_audio(session_id, samples, repeat).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to start audio transmission with custom audio: {}", e) 
+            })?;
+        
+        tracing::info!("Started audio transmission with custom audio for session {}", session_id);
+        Ok(())
+    }
+    
     async fn stop_audio_transmission(&self, session_id: &SessionId) -> Result<()> {
         // Get the media manager through the coordinator
         let media_manager = &self.media_manager;
@@ -460,6 +508,48 @@ impl MediaControl for Arc<SessionCoordinator> {
             })?;
         
         tracing::info!("Stopped audio transmission for session {}", session_id);
+        Ok(())
+    }
+    
+    async fn set_custom_audio(&self, session_id: &SessionId, samples: Vec<u8>, repeat: bool) -> Result<()> {
+        // Get the media manager through the coordinator
+        let media_manager = &self.media_manager;
+        
+        // Set custom audio samples for an active transmission session
+        media_manager.set_custom_audio(session_id, samples, repeat).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to set custom audio: {}", e) 
+            })?;
+        
+        tracing::info!("Set custom audio for session {}", session_id);
+        Ok(())
+    }
+    
+    async fn set_tone_generation(&self, session_id: &SessionId, frequency: f64, amplitude: f64) -> Result<()> {
+        // Get the media manager through the coordinator
+        let media_manager = &self.media_manager;
+        
+        // Set tone generation parameters for an active transmission session
+        media_manager.set_tone_generation(session_id, frequency, amplitude).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to set tone generation: {}", e) 
+            })?;
+        
+        tracing::info!("Set tone generation for session {}", session_id);
+        Ok(())
+    }
+    
+    async fn set_pass_through_mode(&self, session_id: &SessionId) -> Result<()> {
+        // Get the media manager through the coordinator
+        let media_manager = &self.media_manager;
+        
+        // Enable pass-through mode for an active transmission session
+        media_manager.set_pass_through_mode(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to set pass-through mode: {}", e) 
+            })?;
+        
+        tracing::info!("Set pass-through mode for session {}", session_id);
         Ok(())
     }
     
