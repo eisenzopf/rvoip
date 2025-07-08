@@ -206,6 +206,7 @@ pub mod call;
 pub mod registration;
 pub mod events;
 pub mod error;
+pub mod audio;
 
 // Public API exports (only high-level client-core types)
 pub use client::{
@@ -218,7 +219,6 @@ pub use client::{
     CallCapabilities,
     CallMediaInfo,
     AudioCodecInfo,
-    AudioDirection,
     AudioQualityMetrics,
     MediaCapabilities,
     MediaSessionInfo,
@@ -246,6 +246,17 @@ pub use events::{
     EventEmitter,
 };
 pub use error::{ClientError, ClientResult};
+pub use audio::{
+    AudioDeviceManager, 
+    AudioDevice, 
+    AudioDeviceInfo, 
+    AudioDirection, 
+    AudioFormat, 
+    AudioError, 
+    AudioResult,
+    PlaybackSession,
+    CaptureSession,
+};
 
 // Re-export commonly used types from session-core (for convenience)
 pub use rvoip_session_core::api::types::SessionId;
