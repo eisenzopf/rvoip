@@ -625,29 +625,33 @@ impl MediaControl for Arc<SessionCoordinator> {
             return Err(crate::errors::SessionError::SessionNotFound(session_id.to_string()));
         }
         
-        // Create a channel for audio frames
-        let (sender, receiver) = std::sync::mpsc::channel::<crate::api::types::AudioFrame>();
+        // Create channel for audio frames - tokio mpsc for MediaManager, std mpsc for subscriber
+        let (tokio_sender, mut tokio_receiver) = tokio::sync::mpsc::channel::<crate::api::types::AudioFrame>(100);
+        let (std_sender, std_receiver) = std::sync::mpsc::channel::<crate::api::types::AudioFrame>();
         
-        // Store the sender in the media manager to keep it alive
-        // In a real implementation, this would be used to send decoded frames to the subscriber
-        // For now, we just store it to prevent the receiver from being disconnected
-        {
-            let media_manager = &self.media_manager;
-            // For placeholder implementation, we'll store it in a simple way
-            // In the real implementation, this would be integrated with the RTP receive pipeline
-            std::thread::spawn(move || {
-                // Keep the sender alive by holding it in a thread
-                // In real implementation, this would be handled by the media pipeline
-                let _sender = sender;
-                // Sleep to keep the thread alive during tests
-                std::thread::sleep(std::time::Duration::from_secs(300));
-            });
-        }
+        // Set up the callback through MediaManager
+        let media_manager = &self.media_manager;
+        media_manager.set_audio_frame_callback(session_id, tokio_sender).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to set audio frame callback: {}", e) 
+            })?;
+        
+        // Spawn task to bridge tokio mpsc -> std mpsc for the subscriber
+        let session_id_clone = session_id.clone();
+        tokio::spawn(async move {
+            while let Some(frame) = tokio_receiver.recv().await {
+                if let Err(e) = std_sender.send(frame) {
+                    tracing::warn!("Failed to forward audio frame to subscriber for session {}: {}", session_id_clone, e);
+                    break;
+                }
+            }
+            tracing::debug!("🔊 Audio frame bridging task ended for session: {}", session_id_clone);
+        });
         
         // Create subscriber
         let subscriber = crate::api::types::AudioFrameSubscriber::new(
             session_id.clone(),
-            receiver,
+            std_receiver,
         );
         
         // Publish AudioStreamStarted event
@@ -678,11 +682,11 @@ impl MediaControl for Arc<SessionCoordinator> {
         tracing::debug!("🎤 Sent audio frame for session {} ({} samples, {}Hz)", 
                        session_id, audio_frame.samples.len(), audio_frame.sample_rate);
         
-        // Convert session-core AudioFrame to media-core AudioFrame (respecting type boundaries)
-        let media_frame: rvoip_media_core::AudioFrame = audio_frame.clone().into();
-        
-        // TODO: Send the frame to the media manager for encoding and transmission
-        // For now, this is a placeholder implementation
+        // Send the frame to the media manager for encoding and transmission
+        media_manager.send_audio_frame_for_transmission(session_id, audio_frame.clone()).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to send audio frame for transmission: {}", e) 
+            })?;
         
         // Publish AudioFrameRequested event (indicating we're handling the frame)
         if let Some(event_processor) = self.event_processor() {
@@ -711,9 +715,13 @@ impl MediaControl for Arc<SessionCoordinator> {
             return Err(crate::errors::SessionError::SessionNotFound(session_id.to_string()));
         }
         
-        // TODO: Get actual configuration from media manager
-        // For now, return a default configuration
-        let config = crate::api::types::AudioStreamConfig::default();
+        // Get actual configuration from media manager
+        let media_manager = &self.media_manager;
+        let config = media_manager.get_audio_stream_config_internal(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to get audio stream config: {}", e) 
+            })?
+            .unwrap_or_else(|| crate::api::types::AudioStreamConfig::default());
         
         tracing::debug!("📊 Retrieved audio stream config for session {}: {:?}", session_id, config);
         Ok(Some(config))
@@ -725,8 +733,12 @@ impl MediaControl for Arc<SessionCoordinator> {
             return Err(crate::errors::SessionError::SessionNotFound(session_id.to_string()));
         }
         
-        // TODO: Apply configuration to media manager
-        // For now, this is a placeholder implementation
+        // Apply configuration to media manager
+        let media_manager = &self.media_manager;
+        media_manager.set_audio_stream_config_internal(session_id, config.clone()).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to set audio stream config: {}", e) 
+            })?;
         
         // Publish AudioStreamConfigChanged event
         if let Some(event_processor) = self.event_processor() {
@@ -750,8 +762,12 @@ impl MediaControl for Arc<SessionCoordinator> {
             return Err(crate::errors::SessionError::SessionNotFound(session_id.to_string()));
         }
         
-        // TODO: Start the audio streaming pipeline in the media manager
-        // For now, this is a placeholder implementation
+        // Start the audio streaming pipeline in the media manager
+        let media_manager = &self.media_manager;
+        media_manager.start_audio_streaming(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to start audio streaming: {}", e) 
+            })?;
         
         // Publish AudioStreamStarted event
         if let Some(event_processor) = self.event_processor() {
@@ -774,8 +790,12 @@ impl MediaControl for Arc<SessionCoordinator> {
             return Err(crate::errors::SessionError::SessionNotFound(session_id.to_string()));
         }
         
-        // TODO: Stop the audio streaming pipeline in the media manager
-        // For now, this is a placeholder implementation
+        // Stop the audio streaming pipeline in the media manager
+        let media_manager = &self.media_manager;
+        media_manager.stop_audio_streaming(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to stop audio streaming: {}", e) 
+            })?;
         
         // Publish AudioStreamStopped event
         if let Some(event_processor) = self.event_processor() {
@@ -968,14 +988,11 @@ impl MediaControl for Arc<SessionCoordinator> {
         // Get the media manager through the coordinator
         let media_manager = &self.media_manager;
         
-        // Check if we have a media session
-        if let Ok(Some(_)) = media_manager.get_media_info(session_id).await {
-            // For now, assume audio is active if media session exists
-            // TODO: Add proper check when available in media manager
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        // Check if audio streaming is active using the MediaManager
+        media_manager.is_audio_streaming_active(session_id).await
+            .map_err(|e| crate::errors::SessionError::MediaIntegration { 
+                message: format!("Failed to check audio transmission status: {}", e) 
+            })
     }
     
     async fn get_media_info(&self, session_id: &SessionId) -> Result<Option<MediaInfo>> {

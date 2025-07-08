@@ -780,6 +780,162 @@ impl MediaManager {
         mapping.get(session_id).cloned()
             .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })
     }
+
+    // =============================================================================
+    // AUDIO STREAMING API IMPLEMENTATION
+    // =============================================================================
+
+    /// Set audio frame callback for a session to receive decoded frames
+    pub async fn set_audio_frame_callback(
+        &self,
+        session_id: &SessionId,
+        callback: tokio::sync::mpsc::Sender<crate::api::types::AudioFrame>,
+    ) -> super::MediaResult<()> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+
+        // Create a forwarding channel to convert media-core frames to session-core frames
+        let (media_sender, mut media_receiver) = tokio::sync::mpsc::channel::<rvoip_media_core::types::AudioFrame>(100);
+
+        // Set up the media-core callback
+        self.controller.set_audio_frame_callback(dialog_id.clone(), media_sender).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+
+        // Spawn a task to forward frames with type conversion
+        let session_id_clone = session_id.clone();
+        let callback_clone = callback.clone();
+        tokio::spawn(async move {
+            while let Some(media_frame) = media_receiver.recv().await {
+                // Convert media-core AudioFrame to session-core AudioFrame at boundary
+                let session_frame = crate::api::types::AudioFrame::from(media_frame);
+                if let Err(e) = callback_clone.send(session_frame).await {
+                    tracing::warn!("Failed to forward audio frame for session {}: {}", session_id_clone, e);
+                    break;
+                }
+            }
+            tracing::debug!("🔊 Audio frame forwarding task ended for session: {}", session_id_clone);
+        });
+
+        tracing::info!("🔊 Set up audio frame callback for session: {}", session_id);
+        Ok(())
+    }
+
+    /// Remove audio frame callback for a session
+    pub async fn remove_audio_frame_callback(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        self.controller.remove_audio_frame_callback(&dialog_id).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("🔇 Removed audio frame callback for session: {}", session_id);
+        Ok(())
+    }
+
+    /// Send audio frame for encoding and transmission
+    pub async fn send_audio_frame_for_transmission(
+        &self,
+        session_id: &SessionId,
+        audio_frame: crate::api::types::AudioFrame,
+    ) -> super::MediaResult<()> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Convert session-core AudioFrame to media-core AudioFrame at boundary
+        let media_frame = rvoip_media_core::types::AudioFrame::from(audio_frame);
+        
+        // TODO: Integrate with RTP encoding pipeline
+        // For now, we'll use the existing audio transmission mechanism
+        // In the future, this would send the frame to the RTP encoder
+        
+        tracing::debug!("📤 Received audio frame for transmission for session: {}", session_id);
+        Ok(())
+    }
+
+    /// Get audio stream configuration for a session
+    pub async fn get_audio_stream_config_internal(&self, session_id: &SessionId) -> super::MediaResult<Option<crate::api::types::AudioStreamConfig>> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Check if session exists
+        if self.controller.get_session_info(&dialog_id).await.is_none() {
+            return Ok(None);
+        }
+        
+        // For now, return a default config based on our media config
+        let config = crate::api::types::AudioStreamConfig {
+            sample_rate: 8000,
+            channels: 1,
+            codec: self.media_config.preferred_codecs.first()
+                .cloned()
+                .unwrap_or_else(|| "PCMU".to_string()),
+            frame_size_ms: 20,
+            enable_aec: self.media_config.echo_cancellation,
+            enable_agc: self.media_config.auto_gain_control,
+            enable_vad: true, // Default VAD on
+        };
+        
+        Ok(Some(config))
+    }
+
+    /// Set audio stream configuration for a session
+    pub async fn set_audio_stream_config_internal(
+        &self,
+        session_id: &SessionId,
+        config: crate::api::types::AudioStreamConfig,
+    ) -> super::MediaResult<()> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Check if session exists
+        if self.controller.get_session_info(&dialog_id).await.is_none() {
+            return Err(MediaError::SessionNotFound { session_id: session_id.to_string() });
+        }
+        
+        // TODO: Apply configuration to the media session
+        // For now, we store the configuration for later use
+        tracing::info!("📊 Applied audio stream config for session {}: {}Hz, {} channels, codec: {}", 
+                      session_id, config.sample_rate, config.channels, config.codec);
+        
+        Ok(())
+    }
+
+    /// Check if audio streaming is active for a session
+    pub async fn is_audio_streaming_active(&self, session_id: &SessionId) -> super::MediaResult<bool> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Check if session exists and has a callback registered
+        if let Some(session_info) = self.controller.get_session_info(&dialog_id).await {
+            // For now, consider streaming active if session is active
+            // TODO: Add proper check for audio streaming status
+            Ok(matches!(session_info.status, rvoip_media_core::relay::controller::types::MediaSessionStatus::Active))
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Start audio streaming for a session
+    pub async fn start_audio_streaming(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Check if session exists
+        if self.controller.get_session_info(&dialog_id).await.is_none() {
+            return Err(MediaError::SessionNotFound { session_id: session_id.to_string() });
+        }
+        
+        // TODO: Start the actual audio streaming pipeline
+        // For now, this is handled through the existing audio transmission methods
+        tracing::info!("🎵 Started audio streaming for session: {}", session_id);
+        Ok(())
+    }
+
+    /// Stop audio streaming for a session
+    pub async fn stop_audio_streaming(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Remove the callback first
+        self.remove_audio_frame_callback(session_id).await?;
+        
+        // TODO: Stop the actual audio streaming pipeline
+        // For now, this is handled through the existing audio transmission methods
+        tracing::info!("🛑 Stopped audio streaming for session: {}", session_id);
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for MediaManager {

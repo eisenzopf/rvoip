@@ -102,6 +102,9 @@ pub struct MediaSessionController {
     pub(super) g711_codec: Arc<tokio::sync::Mutex<crate::codec::audio::G711Codec>>,
     /// SIMD processor for audio operations
     pub(super) simd_processor: SimdProcessor,
+    
+    /// Audio frame callbacks for sending decoded frames to session-core
+    pub(super) audio_frame_callbacks: RwLock<HashMap<DialogId, mpsc::Sender<AudioFrame>>>,
 }
 
 impl MediaSessionController {
@@ -169,6 +172,7 @@ impl MediaSessionController {
             default_processor_config,
             g711_codec,
             simd_processor,
+            audio_frame_callbacks: RwLock::new(HashMap::new()),
         }
     }
     
@@ -255,6 +259,7 @@ impl MediaSessionController {
             default_processor_config,
             g711_codec,
             simd_processor,
+            audio_frame_callbacks: RwLock::new(HashMap::new()),
         })
     }
     
@@ -386,6 +391,14 @@ impl MediaSessionController {
             }
         }
 
+        // Clean up audio frame callback if it exists
+        {
+            let mut callbacks = self.audio_frame_callbacks.write().await;
+            if callbacks.remove(dialog_id).is_some() {
+                info!("🧹 Cleaned up audio frame callback for dialog: {}", dialog_id);
+            }
+        }
+
         // Send event
         let _ = self.event_tx.send(MediaSessionEvent::SessionDestroyed {
             dialog_id: dialog_id.clone(),
@@ -457,6 +470,36 @@ impl MediaSessionController {
     pub async fn take_event_receiver(&self) -> Option<mpsc::UnboundedReceiver<MediaSessionEvent>> {
         let mut event_rx = self.event_rx.write().await;
         event_rx.take()
+    }
+    
+    /// Set audio frame callback for a dialog
+    pub async fn set_audio_frame_callback(&self, dialog_id: DialogId, sender: mpsc::Sender<AudioFrame>) -> Result<()> {
+        let mut callbacks = self.audio_frame_callbacks.write().await;
+        callbacks.insert(dialog_id.clone(), sender);
+        debug!("🔊 Set audio frame callback for dialog: {}", dialog_id);
+        Ok(())
+    }
+    
+    /// Remove audio frame callback for a dialog
+    pub async fn remove_audio_frame_callback(&self, dialog_id: &DialogId) -> Result<()> {
+        let mut callbacks = self.audio_frame_callbacks.write().await;
+        if callbacks.remove(dialog_id).is_some() {
+            debug!("🔇 Removed audio frame callback for dialog: {}", dialog_id);
+        }
+        Ok(())
+    }
+    
+    /// Send audio frame to session-core for a dialog
+    pub async fn send_audio_frame(&self, dialog_id: &DialogId, frame: AudioFrame) -> Result<()> {
+        let callbacks = self.audio_frame_callbacks.read().await;
+        if let Some(sender) = callbacks.get(dialog_id) {
+            if let Err(e) = sender.send(frame).await {
+                warn!("Failed to send audio frame to session-core for dialog {}: {}", dialog_id, e);
+                return Err(Error::config(format!("Failed to send audio frame: {}", e)));
+            }
+            debug!("📤 Sent audio frame to session-core for dialog: {}", dialog_id);
+        }
+        Ok(())
     }
 }
 
