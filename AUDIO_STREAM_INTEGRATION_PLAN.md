@@ -367,9 +367,41 @@ pub use audio::{
 5. **Future-ready Design** - Easy to add cpal, ALSA, or other platform implementations
 
 ### **Next Steps:**
-- Task 6.2: Integrate AudioDeviceManager with ClientManager
+- Task 6.2: Integrate AudioDeviceManager with ClientManager ✅ **COMPLETE**
 - Task 6.3: Add platform-specific implementations (cpal)
 - Task 6.4: Add real hardware testing and examples
+
+---
+
+### Task 6.2: Integrate AudioDeviceManager with ClientManager ✅ **COMPLETE**
+- [x] **Status**: ✅ COMPLETE
+- [x] **Dependencies**: Task 6.1 complete
+- [x] **Description**: Add AudioDeviceManager to ClientManager, expose audio device methods through ClientManager API
+- [x] **Implementation**: ✅ COMPLETE
+  - [x] ✅ Added `AudioDeviceManager` as a field in `ClientManager`
+  - [x] ✅ Initialize `AudioDeviceManager` in `ClientManager::new()`
+  - [x] ✅ Added session coordinator integration to `AudioDeviceManager`
+  - [x] ✅ Added comprehensive audio device methods to `ClientManager`:
+    - `list_audio_devices()`, `get_default_audio_device()`
+    - `start_audio_playback()`, `stop_audio_playback()`
+    - `start_audio_capture()`, `stop_audio_capture()`
+    - `is_audio_playback_active()`, `is_audio_capture_active()`
+    - `get_active_audio_sessions()`, `stop_all_audio_sessions()`
+  - [x] ✅ All methods properly handle error cases and provide appropriate error messages
+  - [x] ✅ Created comprehensive integration tests validating all functionality
+  - [x] ✅ Fixed type conflicts between `AudioDirection` types (device vs media)
+  - [x] ✅ All tests passing (6 integration tests + 16 audio device tests)
+
+**Files Updated**:
+- `crates/client-core/src/client/manager.rs` (added AudioDeviceManager field and initialization)
+- `crates/client-core/src/client/media.rs` (added audio device integration methods)
+- `crates/client-core/tests/client_manager_audio_integration.rs` (new integration tests)
+
+**Key Features**:
+- Proper error handling for invalid call IDs
+- Type-safe audio device operations
+- Session-based audio management
+- Full integration with session-core for audio streaming
 
 ---
 
@@ -468,7 +500,7 @@ cargo test audio
 - **Phase 6**: ✅ Complete - Add Audio Device Integration to Client-Core
 
 ### Current Focus
-**Next Task**: Phase 6, Task 6.2 - Integrate AudioDeviceManager with ClientManager
+**Next Task**: Phase 6, Task 6.3 - Add platform-specific implementations (cpal)
 
 ### Key Architectural Decision ✅
 **Avoided Duplication**: Successfully identified and avoided creating duplicate `MediaControllerIntegration` by enhancing existing `MediaManager` instead. This preserves sophisticated features like zero-copy RTP processing, maintains architectural consistency, and avoids resource conflicts. 
