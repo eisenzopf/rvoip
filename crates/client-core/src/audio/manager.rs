@@ -148,6 +148,35 @@ impl AudioDeviceManager {
         self.session_coordinator = Some(coordinator);
     }
     
+    /// Find a supported audio format for the given device
+    async fn find_supported_format(&self, device: &Arc<dyn AudioDevice>) -> AudioResult<AudioFormat> {
+        let info = device.info();
+        
+        // Try common formats in order of preference
+        let test_formats = vec![
+            AudioFormat::default_voip(),    // 8000 Hz
+            AudioFormat::wideband_voip(),   // 16000 Hz  
+            AudioFormat::new(44100, 1, 16, 20),  // 44.1 kHz
+            AudioFormat::new(48000, 1, 16, 20),  // 48 kHz
+            AudioFormat::new(44100, 2, 16, 20),  // 44.1 kHz stereo
+            AudioFormat::new(48000, 2, 16, 20),  // 48 kHz stereo
+        ];
+        
+        for format in test_formats {
+            if device.supports_format(&format) {
+                return Ok(format);
+            }
+        }
+        
+        // If none of the common formats work, create one from device capabilities
+        let sample_rate = info.supported_sample_rates.first()
+            .ok_or_else(|| AudioError::DeviceNotFound { device_id: info.id.clone() })?;
+        let channels = info.supported_channels.first()
+            .ok_or_else(|| AudioError::DeviceNotFound { device_id: info.id.clone() })?;
+        
+        Ok(AudioFormat::new(*sample_rate, *channels, 16, 20))
+    }
+    
     /// List available audio devices
     pub async fn list_devices(&self, direction: AudioDirection) -> AudioResult<Vec<AudioDeviceInfo>> {
         list_platform_devices(direction).await
@@ -167,16 +196,8 @@ impl AudioDeviceManager {
     /// 
     /// This sets up the audio pipeline: session-core → AudioDeviceManager → audio device
     pub async fn start_playback(&self, call_id: &CallId, device: Arc<dyn AudioDevice>) -> AudioResult<()> {
-        // Use default VoIP format
-        let format = AudioFormat::default_voip();
-        
-        // Ensure device supports the format
-        if !device.supports_format(&format) {
-            return Err(AudioError::FormatNotSupported {
-                format: format.clone(),
-                device_id: device.info().id.clone(),
-            });
-        }
+        // Find a supported format
+        let format = self.find_supported_format(&device).await?;
         
         // Start playback on the device
         let frame_sender = device.start_playback(format.clone()).await?;
@@ -248,16 +269,8 @@ impl AudioDeviceManager {
     /// 
     /// This sets up the audio pipeline: audio device → AudioDeviceManager → session-core
     pub async fn start_capture(&self, call_id: &CallId, device: Arc<dyn AudioDevice>) -> AudioResult<()> {
-        // Use default VoIP format
-        let format = AudioFormat::default_voip();
-        
-        // Ensure device supports the format
-        if !device.supports_format(&format) {
-            return Err(AudioError::FormatNotSupported {
-                format: format.clone(),
-                device_id: device.info().id.clone(),
-            });
-        }
+        // Find a supported format
+        let format = self.find_supported_format(&device).await?;
         
         // Start capture on the device
         let frame_receiver = device.start_capture(format.clone()).await?;
