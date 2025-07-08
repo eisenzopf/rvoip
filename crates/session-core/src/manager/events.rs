@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use serde::{Serialize, Deserialize};
-use crate::api::types::{SessionId, CallSession, CallState};
+use crate::api::types::{SessionId, CallSession, CallState, AudioFrame, AudioStreamConfig};
 use crate::media::types::{RtpProcessingType, RtpProcessingMode, RtpProcessingMetrics, RtpBufferPoolStats};
 use crate::errors::Result;
 use chrono;
@@ -208,6 +208,57 @@ pub enum SessionEvent {
     RtpBufferPoolUpdate {
         stats: RtpBufferPoolStats,
     },
+    
+    // ========== AUDIO STREAMING EVENTS ==========
+    
+    /// Decoded audio frame received (for playback)
+    AudioFrameReceived {
+        session_id: SessionId,
+        /// Decoded audio frame ready for playback
+        audio_frame: AudioFrame,
+        /// Stream identifier (multiple streams per session)
+        stream_id: Option<String>,
+    },
+    
+    /// Audio frame requested for capture and encoding
+    AudioFrameRequested {
+        session_id: SessionId,
+        /// Expected audio format for the frame
+        config: AudioStreamConfig,
+        /// Stream identifier (multiple streams per session)
+        stream_id: Option<String>,
+    },
+    
+    /// Audio stream configuration changed
+    AudioStreamConfigChanged {
+        session_id: SessionId,
+        /// Previous configuration
+        old_config: AudioStreamConfig,
+        /// New configuration
+        new_config: AudioStreamConfig,
+        /// Stream identifier
+        stream_id: Option<String>,
+    },
+    
+    /// Audio stream started
+    AudioStreamStarted {
+        session_id: SessionId,
+        /// Stream configuration
+        config: AudioStreamConfig,
+        /// Stream identifier
+        stream_id: String,
+        /// Direction (Send, Receive, Both)
+        direction: MediaFlowDirection,
+    },
+    
+    /// Audio stream stopped
+    AudioStreamStopped {
+        session_id: SessionId,
+        /// Stream identifier
+        stream_id: String,
+        /// Reason for stopping
+        reason: String,
+    },
 }
 
 /// Simple subscriber wrapper for session events
@@ -319,6 +370,56 @@ impl SessionEventProcessor {
                         stats.in_use_buffers,
                         stats.total_buffers,
                         stats.efficiency_percentage
+                    );
+                }
+                // Audio streaming events with detailed logging
+                SessionEvent::AudioFrameReceived { session_id, audio_frame, stream_id } => {
+                    tracing::debug!(
+                        "🎵 Audio frame received for session {}: {} samples, {}Hz, {} channels{}",
+                        session_id,
+                        audio_frame.samples.len(),
+                        audio_frame.sample_rate,
+                        audio_frame.channels,
+                        stream_id.as_ref().map(|s| format!(", stream: {}", s)).unwrap_or_default()
+                    );
+                }
+                SessionEvent::AudioFrameRequested { session_id, config, stream_id } => {
+                    tracing::debug!(
+                        "🎤 Audio frame requested for session {}: {}Hz, {} channels, {}{}",
+                        session_id,
+                        config.sample_rate,
+                        config.channels,
+                        config.codec,
+                        stream_id.as_ref().map(|s| format!(", stream: {}", s)).unwrap_or_default()
+                    );
+                }
+                SessionEvent::AudioStreamConfigChanged { session_id, old_config, new_config, stream_id } => {
+                    tracing::info!(
+                        "🔧 Audio config changed for session {}: {}Hz → {}Hz, {} → {}{}",
+                        session_id,
+                        old_config.sample_rate,
+                        new_config.sample_rate,
+                        old_config.codec,
+                        new_config.codec,
+                        stream_id.as_ref().map(|s| format!(", stream: {}", s)).unwrap_or_default()
+                    );
+                }
+                SessionEvent::AudioStreamStarted { session_id, config, stream_id, direction } => {
+                    tracing::info!(
+                        "▶️ Audio stream started for session {}: {} ({}Hz, {} channels, {:?})",
+                        session_id,
+                        stream_id,
+                        config.sample_rate,
+                        config.channels,
+                        direction
+                    );
+                }
+                SessionEvent::AudioStreamStopped { session_id, stream_id, reason } => {
+                    tracing::info!(
+                        "⏹️ Audio stream stopped for session {}: {} (reason: {})",
+                        session_id,
+                        stream_id,
+                        reason
                     );
                 }
                 _ => {} // Other events use default logging
@@ -510,6 +611,87 @@ impl SessionEventProcessor {
             session_id,
             category,
             message,
+        };
+        self.publish_event(event).await
+    }
+    
+    // ========== AUDIO STREAMING EVENT Publishing Helper Methods ==========
+    
+    /// Publish an audio frame received event
+    pub async fn publish_audio_frame_received(
+        &self,
+        session_id: SessionId,
+        audio_frame: AudioFrame,
+        stream_id: Option<String>,
+    ) -> Result<()> {
+        let event = SessionEvent::AudioFrameReceived {
+            session_id,
+            audio_frame,
+            stream_id,
+        };
+        self.publish_event(event).await
+    }
+    
+    /// Publish an audio frame requested event
+    pub async fn publish_audio_frame_requested(
+        &self,
+        session_id: SessionId,
+        config: AudioStreamConfig,
+        stream_id: Option<String>,
+    ) -> Result<()> {
+        let event = SessionEvent::AudioFrameRequested {
+            session_id,
+            config,
+            stream_id,
+        };
+        self.publish_event(event).await
+    }
+    
+    /// Publish an audio stream configuration changed event
+    pub async fn publish_audio_stream_config_changed(
+        &self,
+        session_id: SessionId,
+        old_config: AudioStreamConfig,
+        new_config: AudioStreamConfig,
+        stream_id: Option<String>,
+    ) -> Result<()> {
+        let event = SessionEvent::AudioStreamConfigChanged {
+            session_id,
+            old_config,
+            new_config,
+            stream_id,
+        };
+        self.publish_event(event).await
+    }
+    
+    /// Publish an audio stream started event
+    pub async fn publish_audio_stream_started(
+        &self,
+        session_id: SessionId,
+        config: AudioStreamConfig,
+        stream_id: String,
+        direction: MediaFlowDirection,
+    ) -> Result<()> {
+        let event = SessionEvent::AudioStreamStarted {
+            session_id,
+            config,
+            stream_id,
+            direction,
+        };
+        self.publish_event(event).await
+    }
+    
+    /// Publish an audio stream stopped event
+    pub async fn publish_audio_stream_stopped(
+        &self,
+        session_id: SessionId,
+        stream_id: String,
+        reason: String,
+    ) -> Result<()> {
+        let event = SessionEvent::AudioStreamStopped {
+            session_id,
+            stream_id,
+            reason,
         };
         self.publish_event(event).await
     }

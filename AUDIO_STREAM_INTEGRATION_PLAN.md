@@ -16,6 +16,20 @@ This plan adds RTP audio stream access to client-core by extending session-core'
 └─────────────┘    └──────────────┘    └─────────────┘
 ```
 
+## Core Architectural Principle: Type Boundaries
+
+**Session-Core uses session-core::AudioFrame throughout:**
+- All events use `session-core::AudioFrame` 
+- All coordinator handlers use `session-core::AudioFrame`
+- All API methods use `session-core::AudioFrame`
+- Client-core receives `session-core::AudioFrame`
+
+**Conversions only happen at boundaries:**
+- **Outbound**: `session-core::AudioFrame → media-core::AudioFrame` when calling media-core
+- **Inbound**: `media-core::AudioFrame → session-core::AudioFrame` in media-core callbacks
+
+This ensures clean layering where each crate uses its own types consistently.
+
 ## Phase 1: Make Media-Core AudioFrame Public
 
 **Status**: ✅ Complete  
@@ -80,106 +94,141 @@ This plan adds RTP audio stream access to client-core by extending session-core'
 
 ## Phase 3: Add AudioFrame Events to Session-Core
 
-**Status**: ⏳ Pending  
+**Status**: ✅ Complete  
 **Goal**: Extend event system with audio-specific events
 
 ### Task 3.1: Extend SessionEvent with Audio Events
-- [ ] **File**: `crates/session-core/src/manager/events.rs`
-- [ ] **Action**: Add audio event variants to SessionEvent enum
-- [ ] **Events to Add**:
-  - [ ] `AudioFrameReceived` - Decoded frame for playback
-  - [ ] `AudioFrameRequested` - Request frame for capture
-  - [ ] `AudioStreamConfigChanged` - Configuration changed
-  - [ ] `AudioStreamStarted` - Stream started
-  - [ ] `AudioStreamStopped` - Stream stopped
+- [x] **File**: `crates/session-core/src/manager/events.rs`
+- [x] **Action**: Added audio event variants to SessionEvent enum (lines 210-260)
+- [x] **Events Added**:
+  - [x] `AudioFrameReceived` - Decoded frame for playback
+  - [x] `AudioFrameRequested` - Request frame for capture
+  - [x] `AudioStreamConfigChanged` - Configuration changed
+  - [x] `AudioStreamStarted` - Stream started
+  - [x] `AudioStreamStopped` - Stream stopped
+- [x] **Additional**: Added proper logging for all audio events in publish_event method
 
 ### Task 3.2: Add Event Publishing Helper Methods
-- [ ] **File**: `crates/session-core/src/manager/events.rs`
-- [ ] **Action**: Add helper methods to SessionEventProcessor
-- [ ] **Methods to Add**:
-  - [ ] `publish_audio_frame_received()`
-  - [ ] `publish_audio_frame_requested()`
-  - [ ] `publish_audio_stream_config_changed()`
-  - [ ] `publish_audio_stream_started()`
-  - [ ] `publish_audio_stream_stopped()`
+- [x] **File**: `crates/session-core/src/manager/events.rs`
+- [x] **Action**: Added helper methods to SessionEventProcessor (lines 518-587)
+- [x] **Methods Added**:
+  - [x] `publish_audio_frame_received()`
+  - [x] `publish_audio_frame_requested()`
+  - [x] `publish_audio_stream_config_changed()`
+  - [x] `publish_audio_stream_started()`
+  - [x] `publish_audio_stream_stopped()`
 
 ### Task 3.3: Test Audio Events
-- [ ] **File**: `crates/session-core/tests/audio_events_test.rs`
-- [ ] **Action**: Test audio event publishing and receiving
-- [ ] **Tests**:
-  - [ ] `test_audio_frame_received_event()` - Publish/receive frame event
-  - [ ] `test_audio_frame_requested_event()` - Publish/receive request event
-  - [ ] `test_audio_stream_config_changed_event()` - Config change event
-  - [ ] `test_audio_stream_lifecycle_events()` - Start/stop events
-- [ ] **Verification**: Run `cargo test -p rvoip-session-core audio_events_test`
+- [x] **File**: `crates/session-core/tests/audio_events_test.rs`
+- [x] **Action**: Created comprehensive test suite for audio event system
+- [x] **Tests**:
+  - [x] `test_audio_frame_received_event()` - Publish/receive frame event
+  - [x] `test_audio_frame_requested_event()` - Publish/receive request event
+  - [x] `test_audio_stream_config_changed_event()` - Config change event
+  - [x] `test_audio_stream_lifecycle_events()` - Start/stop events
+  - [x] `test_multiple_audio_events()` - Multiple events in sequence
+  - [x] `test_audio_events_with_no_stream_id()` - Events without stream ID
+  - [x] `test_audio_events_serialization()` - JSON serialization/deserialization
+  - [x] `test_audio_event_processor_lifecycle()` - Processor start/stop
+  - [x] `test_realistic_audio_streaming_scenario()` - End-to-end scenario
+- [x] **Verification**: Run `cargo test -p rvoip-session-core --test audio_events_test` (✅ All 9 tests pass)
+
+### Task 3.4: Integration with Coordinator
+- [x] **File**: `crates/session-core/src/manager/coordinator.rs`
+- [x] **Action**: Added event handling in SessionCoordinator
+- [x] **Added**: Audio event handlers and match cases for all 5 audio events
+- [x] **Fixed**: Added Serialize/Deserialize derives to AudioFrame and AudioStreamConfig
 
 ---
 
 ## Phase 4: Extend MediaControl with Audio Stream API
 
-**Status**: ⏳ Pending  
+**Status**: ✅ Complete  
 **Goal**: Add audio streaming methods to MediaControl trait
 
 ### Task 4.1: Add Audio Frame Subscriber Type
-- [ ] **File**: `crates/session-core/src/api/types.rs`
-- [ ] **Action**: Add AudioFrameSubscriber for streaming
-- [ ] **Implementation**:
-  - [ ] AudioFrameSubscriber struct with mpsc::Receiver
-  - [ ] `recv()`, `try_recv()`, `session_id()` methods
+- [x] **File**: `crates/session-core/src/api/types.rs`
+- [x] **Action**: Added AudioFrameSubscriber for streaming
+- [x] **Implementation**:
+  - [x] AudioFrameSubscriber struct with mpsc::Receiver
+  - [x] `recv()`, `try_recv()`, `recv_timeout()`, `is_connected()`, `session_id()` methods
+  - [x] Proper error handling for different channel states
 
 ### Task 4.2: Extend MediaControl Trait
-- [ ] **File**: `crates/session-core/src/api/media.rs`
-- [ ] **Action**: Add audio streaming methods to MediaControl trait
-- [ ] **Methods to Add**:
-  - [ ] `subscribe_to_audio_frames()` - Get frame subscriber
-  - [ ] `send_audio_frame()` - Send frame for encoding
-  - [ ] `get_audio_stream_config()` - Get stream config
-  - [ ] `set_audio_stream_config()` - Set stream config
-  - [ ] `start_audio_stream()` - Start stream
-  - [ ] `stop_audio_stream()` - Stop stream
+- [x] **File**: `crates/session-core/src/api/media.rs`
+- [x] **Action**: Added audio streaming methods to MediaControl trait
+- [x] **Methods Added**:
+  - [x] `subscribe_to_audio_frames()` - Get frame subscriber (returns `session-core::AudioFrame`)
+  - [x] `send_audio_frame()` - Send frame for encoding (accepts `session-core::AudioFrame`)
+  - [x] `get_audio_stream_config()` - Get stream config (returns `session-core::AudioStreamConfig`)
+  - [x] `set_audio_stream_config()` - Set stream config (accepts `session-core::AudioStreamConfig`)
+  - [x] `start_audio_stream()` - Start stream
+  - [x] `stop_audio_stream()` - Stop stream
+- [x] **Note**: All API methods use `session-core` types consistently
 
 ### Task 4.3: Implement MediaControl Audio Methods
-- [ ] **File**: `crates/session-core/src/api/media.rs`
-- [ ] **Action**: Add implementation for SessionCoordinator
-- [ ] **Implementation**:
-  - [ ] Placeholder implementations that validate sessions
-  - [ ] Event publishing for stream lifecycle
-  - [ ] Error handling for non-existent sessions
+- [x] **File**: `crates/session-core/src/api/media.rs`
+- [x] **Action**: Added implementation for SessionCoordinator
+- [x] **Implementation**:
+  - [x] Placeholder implementations that validate sessions
+  - [x] Event publishing for stream lifecycle
+  - [x] Error handling for non-existent sessions
+  - [x] Type boundary respect (session-core types throughout)
+  - [x] Proper logging with audio-specific emojis 🎧🎤🎵🛑📊
+  - [x] Channel management for audio frame subscribers
 
 ### Task 4.4: Test MediaControl Audio API
-- [ ] **File**: `crates/session-core/tests/media_control_audio_test.rs`
-- [ ] **Action**: Test the new audio streaming API
-- [ ] **Tests**:
-  - [ ] `test_audio_frame_subscriber_creation()` - Create subscriber
-  - [ ] `test_send_audio_frame_placeholder()` - Send frame validation
-  - [ ] `test_audio_stream_config()` - Config get/set
-  - [ ] `test_audio_stream_lifecycle()` - Start/stop streams
-- [ ] **Verification**: Run `cargo test -p rvoip-session-core media_control_audio_test`
+- [x] **File**: `crates/session-core/tests/media_control_audio_test.rs`
+- [x] **Action**: Created comprehensive test suite for audio streaming API
+- [x] **Tests**:
+  - [x] `test_audio_frame_subscriber_creation()` - Create subscriber
+  - [x] `test_audio_frame_subscriber_invalid_session()` - Error handling
+  - [x] `test_send_audio_frame_placeholder()` - Send frame validation
+  - [x] `test_send_audio_frame_invalid_session()` - Error handling
+  - [x] `test_audio_stream_config()` - Config get/set
+  - [x] `test_audio_stream_config_invalid_session()` - Error handling
+  - [x] `test_audio_stream_lifecycle()` - Start/stop streams
+  - [x] `test_audio_stream_lifecycle_invalid_session()` - Error handling
+  - [x] `test_audio_frame_properties()` - AudioFrame property validation
+  - [x] `test_audio_stream_config_properties()` - AudioStreamConfig validation
+  - [x] `test_audio_frame_subscriber_timeout()` - Channel timeout behavior
+- [x] **Verification**: Run `cargo test -p rvoip-session-core --test media_control_audio_test` (✅ All 11 tests pass)
 
 ---
 
-## Phase 5: Media-Core Integration (Revisited from Phase 1)
+## Phase 5: Media-Core Integration (Boundary Conversions)
 
 **Status**: ⏳ Pending  
-**Goal**: Add callback support to MediaSessionController
+**Goal**: Add callback support to MediaSessionController and implement boundary conversions
 
 ### Task 5.1: Add Audio Frame Callback to MediaSessionController
 - [ ] **File**: `crates/media-core/src/relay/controller/mod.rs`
 - [ ] **Action**: Add callback support for audio frames
 - [ ] **Implementation**:
   - [ ] Add `audio_frame_callbacks` field to MediaSessionController
-  - [ ] `set_audio_frame_callback()` method
+  - [ ] `set_audio_frame_callback()` method (receives `media-core::AudioFrame`)
   - [ ] `remove_audio_frame_callback()` method
-  - [ ] `send_audio_frame()` method for transmission
+  - [ ] `send_audio_frame()` method for transmission (accepts `media-core::AudioFrame`)
   - [ ] Integration with RTP processing pipeline
 
-### Task 5.2: Test Media-Core Callback Integration
+### Task 5.2: Implement Coordinator Boundary Conversions
+- [ ] **File**: `crates/session-core/src/manager/coordinator.rs`
+- [ ] **Action**: Fill out placeholder handlers with real implementations
+- [ ] **Implementation**:
+  - [ ] `handle_audio_frame_received()` - Forward `session-core::AudioFrame` to client subscribers
+  - [ ] `handle_audio_frame_requested()` - Convert to `media-core::AudioFrame` when calling media-core
+  - [ ] `handle_audio_stream_started()` - Set up callbacks with boundary conversions
+  - [ ] Add audio subscriber management (session_id → subscribers mapping)
+  - [ ] Ensure all internal processing uses `session-core::AudioFrame`
+
+### Task 5.3: Test Media-Core Callback Integration
 - [ ] **File**: `crates/media-core/tests/audio_callback_test.rs`
-- [ ] **Action**: Test callback functionality
+- [ ] **Action**: Test callback functionality and boundary conversions
 - [ ] **Tests**:
   - [ ] Test callback registration/removal
-  - [ ] Test audio frame forwarding
+  - [ ] Test audio frame forwarding with proper type conversions
   - [ ] Test multiple callback scenarios
+  - [ ] Test boundary conversion correctness (media-core ↔ session-core)
 
 ---
 
@@ -255,6 +304,7 @@ cargo test audio
 - [ ] Audio events can be published and received
 - [ ] MediaControl API supports audio streaming
 - [ ] Client-core can start/stop audio playback and capture
+- [ ] **Type boundaries are respected**: session-core uses session-core types, conversions only at boundaries
 - [ ] All tests pass
 - [ ] No breaking changes to existing APIs
 - [ ] Documentation is updated
@@ -289,20 +339,21 @@ cargo test audio
 - **Testable**: Each phase should be independently testable
 - **Incremental**: Progress can be made phase by phase
 - **Extensible**: Design should support future audio enhancements
+- **Type Boundaries**: Critical to maintain clean architecture - session-core should use session-core types throughout, with conversions only at media-core boundaries
 
 ---
 
 ## Progress Tracking
 
-**Overall Progress**: 2/6 phases complete
+**Overall Progress**: 4/6 phases complete
 
 ### Phase Status Summary
 - **Phase 1**: ✅ Complete - Make Media-Core AudioFrame Public
 - **Phase 2**: ✅ Complete - Add AudioFrame Type to Session-Core  
-- **Phase 3**: ⏳ Pending - Add AudioFrame Events to Session-Core
-- **Phase 4**: ⏳ Pending - Extend MediaControl with Audio Stream API
+- **Phase 3**: ✅ Complete - Add AudioFrame Events to Session-Core
+- **Phase 4**: ✅ Complete - Extend MediaControl with Audio Stream API
 - **Phase 5**: ⏳ Pending - Media-Core Integration
 - **Phase 6**: ⏳ Pending - Client-Core Integration
 
 ### Current Focus
-**Next Task**: Phase 3, Task 3.1 - Extend SessionEvent with Audio Events 
+**Next Task**: Phase 5, Task 5.1 - Add Audio Frame Callback to MediaSessionController 
