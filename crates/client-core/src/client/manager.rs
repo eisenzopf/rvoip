@@ -22,6 +22,7 @@ use crate::{
     call::{CallId, CallInfo},
     registration::{RegistrationConfig, RegistrationInfo},
     events::{ClientEventHandler, ClientEvent},
+    audio::AudioDeviceManager,
 };
 
 // Import types from our types module
@@ -233,6 +234,9 @@ pub struct ClientManager {
     
     /// Event broadcast channel
     pub(crate) event_tx: tokio::sync::broadcast::Sender<ClientEvent>,
+    
+    /// Audio device manager for audio I/O
+    pub(crate) audio_device_manager: Arc<AudioDeviceManager>,
 }
 
 impl ClientManager {
@@ -428,6 +432,13 @@ impl ClientManager {
             incoming_calls.clone(),
         ).with_event_tx(event_tx.clone()));
         
+        // Create audio device manager
+        let audio_device_manager = Arc::new(AudioDeviceManager::new().await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to create audio device manager: {}", e) 
+            })?
+        );
+        
         // Build session coordinator with media preferences
         // The media preferences will be used by session-core's SDP negotiator
         // to generate offers/answers based on the configured codecs
@@ -462,6 +473,16 @@ impl ClientManager {
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to create session coordinator: {}", e) 
             })?;
+        
+        // Set up audio device manager with session coordinator integration
+        let audio_device_manager = {
+            let mut audio_manager = Arc::try_unwrap(audio_device_manager)
+                .map_err(|_| ClientError::InternalError { 
+                    message: "Failed to configure audio device manager".to_string() 
+                })?;
+            audio_manager.set_session_coordinator(coordinator.clone()).await;
+            Arc::new(audio_manager)
+        };
             
         let mut stats = ClientStats {
             is_running: false,
@@ -486,6 +507,7 @@ impl ClientManager {
             call_info,
             call_handler,
             event_tx,
+            audio_device_manager,
         }))
     }
     

@@ -27,6 +27,7 @@ use crate::{
     ClientResult, ClientError,
     call::CallId,
     events::MediaEventInfo,
+    audio::{AudioDeviceManager, AudioDeviceInfo, AudioDevice},
 };
 
 use super::types::*;
@@ -1536,32 +1537,32 @@ impl super::manager::ClientManager {
     }
     
     /// Helper method to determine audio direction from MediaInfo
-    async fn determine_audio_direction(&self, media_info: &rvoip_session_core::api::types::MediaInfo) -> AudioDirection {
+    async fn determine_audio_direction(&self, media_info: &rvoip_session_core::api::types::MediaInfo) -> crate::client::types::AudioDirection {
         // Simple heuristic based on SDP content
         if let (Some(local_sdp), Some(remote_sdp)) = (&media_info.local_sdp, &media_info.remote_sdp) {
             let local_sendrecv = local_sdp.contains("sendrecv") || (!local_sdp.contains("sendonly") && !local_sdp.contains("recvonly"));
             let remote_sendrecv = remote_sdp.contains("sendrecv") || (!remote_sdp.contains("sendonly") && !remote_sdp.contains("recvonly"));
             
             match (local_sendrecv, remote_sendrecv) {
-                (true, true) => AudioDirection::SendReceive,
+                (true, true) => crate::client::types::AudioDirection::SendReceive,
                 (true, false) => {
                     if remote_sdp.contains("sendonly") {
-                        AudioDirection::ReceiveOnly
+                        crate::client::types::AudioDirection::ReceiveOnly
                     } else {
-                        AudioDirection::SendOnly
+                        crate::client::types::AudioDirection::SendOnly
                     }
                 }
                 (false, true) => {
                     if local_sdp.contains("sendonly") {
-                        AudioDirection::SendOnly
+                        crate::client::types::AudioDirection::SendOnly
                     } else {
-                        AudioDirection::ReceiveOnly
+                        crate::client::types::AudioDirection::ReceiveOnly
                     }
                 }
-                (false, false) => AudioDirection::Inactive,
+                (false, false) => crate::client::types::AudioDirection::Inactive,
             }
         } else {
-            AudioDirection::SendReceive // Default assumption
+            crate::client::types::AudioDirection::SendReceive // Default assumption
         }
     }
     
@@ -3174,5 +3175,381 @@ impl super::manager::ClientManager {
             .map_err(|e| ClientError::InternalError { 
                 message: format!("Failed to get call statistics: {}", e) 
             })
+    }
+    
+    // =============================================================================
+    // AUDIO DEVICE INTEGRATION METHODS
+    // =============================================================================
+    
+    /// List available audio devices
+    /// 
+    /// Returns a list of available audio devices for the specified direction (input/output).
+    /// This allows applications to present device selection options to users.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `direction` - The audio direction (Input for microphones, Output for speakers)
+    /// 
+    /// # Returns
+    /// 
+    /// Returns a vector of `AudioDeviceInfo` containing device details like name, ID, and capabilities.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::audio::AudioDirection;
+    /// # use rvoip_client_core::ClientManager;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>) -> Result<(), Box<dyn std::error::Error>> {
+    /// // List available microphones
+    /// let input_devices = client.list_audio_devices(AudioDirection::Input).await?;
+    /// println!("Available microphones:");
+    /// for device in input_devices {
+    ///     println!("  - {}: {}", device.id, device.name);
+    /// }
+    /// 
+    /// // List available speakers
+    /// let output_devices = client.list_audio_devices(AudioDirection::Output).await?;
+    /// println!("Available speakers:");
+    /// for device in output_devices {
+    ///     println!("  - {}: {}", device.id, device.name);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn list_audio_devices(&self, direction: crate::audio::AudioDirection) -> ClientResult<Vec<AudioDeviceInfo>> {
+        self.audio_device_manager.list_devices(direction).await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to list audio devices: {}", e) 
+            })
+    }
+    
+    /// Get the default audio device for the specified direction
+    /// 
+    /// Returns the system's default audio device for the given direction.
+    /// This is useful for applications that want to use the system defaults.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `direction` - The audio direction (Input for microphones, Output for speakers)
+    /// 
+    /// # Returns
+    /// 
+    /// Returns the default `AudioDeviceInfo` for the specified direction.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::audio::AudioDirection;
+    /// # use rvoip_client_core::ClientManager;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Get default microphone
+    /// let default_mic = client.get_default_audio_device(AudioDirection::Input).await?;
+    /// println!("Default microphone: {}", default_mic.name);
+    /// 
+    /// // Get default speaker
+    /// let default_speaker = client.get_default_audio_device(AudioDirection::Output).await?;
+    /// println!("Default speaker: {}", default_speaker.name);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_default_audio_device(&self, direction: crate::audio::AudioDirection) -> ClientResult<AudioDeviceInfo> {
+        let device = self.audio_device_manager.get_default_device(direction).await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to get default audio device: {}", e) 
+            })?;
+        Ok(device.info().clone())
+    }
+    
+    /// Start audio playback for a call
+    /// 
+    /// Starts audio playback for the specified call using the given audio device.
+    /// This sets up the audio pipeline from session-core to the audio device.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The call to start playback for
+    /// * `device_id` - The ID of the audio device to use (from list_audio_devices)
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if playback started successfully.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::audio::AudioDirection;
+    /// # use rvoip_client_core::ClientManager;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Start playback on default speaker
+    /// let default_speaker = client.get_default_audio_device(AudioDirection::Output).await?;
+    /// client.start_audio_playback(&call_id, &default_speaker.id).await?;
+    /// println!("Audio playback started for call {}", call_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn start_audio_playback(&self, call_id: &CallId, device_id: &str) -> ClientResult<()> {
+        // Validate call exists
+        if !self.call_info.contains_key(call_id) {
+            return Err(ClientError::CallNotFound { call_id: *call_id });
+        }
+        
+        // Get the audio device
+        let device = self.audio_device_manager.create_device(device_id).await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to create audio device: {}", e) 
+            })?;
+        
+        // Start playback
+        self.audio_device_manager.start_playback(call_id, device).await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to start audio playback: {}", e) 
+            })?;
+        
+        tracing::info!("Started audio playback for call {} on device {}", call_id, device_id);
+        Ok(())
+    }
+    
+    /// Stop audio playback for a call
+    /// 
+    /// Stops audio playback for the specified call and cleans up resources.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The call to stop playback for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if playback stopped successfully.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::ClientManager;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Stop playback
+    /// client.stop_audio_playback(&call_id).await?;
+    /// println!("Audio playback stopped for call {}", call_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn stop_audio_playback(&self, call_id: &CallId) -> ClientResult<()> {
+        self.audio_device_manager.stop_playback(call_id).await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to stop audio playback: {}", e) 
+            })?;
+        
+        tracing::info!("Stopped audio playback for call {}", call_id);
+        Ok(())
+    }
+    
+    /// Start audio capture for a call
+    /// 
+    /// Starts audio capture for the specified call using the given audio device.
+    /// This sets up the audio pipeline from the audio device to session-core.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The call to start capture for
+    /// * `device_id` - The ID of the audio device to use (from list_audio_devices)
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if capture started successfully.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::audio::AudioDirection;
+    /// # use rvoip_client_core::ClientManager;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Start capture on default microphone
+    /// let default_mic = client.get_default_audio_device(AudioDirection::Input).await?;
+    /// client.start_audio_capture(&call_id, &default_mic.id).await?;
+    /// println!("Audio capture started for call {}", call_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn start_audio_capture(&self, call_id: &CallId, device_id: &str) -> ClientResult<()> {
+        // Validate call exists
+        if !self.call_info.contains_key(call_id) {
+            return Err(ClientError::CallNotFound { call_id: *call_id });
+        }
+        
+        // Get the audio device
+        let device = self.audio_device_manager.create_device(device_id).await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to create audio device: {}", e) 
+            })?;
+        
+        // Start capture
+        self.audio_device_manager.start_capture(call_id, device).await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to start audio capture: {}", e) 
+            })?;
+        
+        tracing::info!("Started audio capture for call {} on device {}", call_id, device_id);
+        Ok(())
+    }
+    
+    /// Stop audio capture for a call
+    /// 
+    /// Stops audio capture for the specified call and cleans up resources.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The call to stop capture for
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if capture stopped successfully.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::ClientManager;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Stop capture
+    /// client.stop_audio_capture(&call_id).await?;
+    /// println!("Audio capture stopped for call {}", call_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn stop_audio_capture(&self, call_id: &CallId) -> ClientResult<()> {
+        self.audio_device_manager.stop_capture(call_id).await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to stop audio capture: {}", e) 
+            })?;
+        
+        tracing::info!("Stopped audio capture for call {}", call_id);
+        Ok(())
+    }
+    
+    /// Check if audio playback is active for a call
+    /// 
+    /// Returns whether audio playback is currently active for the specified call.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The call to check
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `true` if playback is active, `false` otherwise.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::ClientManager;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// if client.is_audio_playback_active(&call_id).await {
+    ///     println!("Audio playback is active for call {}", call_id);
+    /// } else {
+    ///     println!("Audio playback is not active for call {}", call_id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn is_audio_playback_active(&self, call_id: &CallId) -> bool {
+        self.audio_device_manager.is_playback_active(call_id).await
+    }
+    
+    /// Check if audio capture is active for a call
+    /// 
+    /// Returns whether audio capture is currently active for the specified call.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The call to check
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `true` if capture is active, `false` otherwise.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::ClientManager;
+    /// # use rvoip_client_core::call::CallId;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// if client.is_audio_capture_active(&call_id).await {
+    ///     println!("Audio capture is active for call {}", call_id);
+    /// } else {
+    ///     println!("Audio capture is not active for call {}", call_id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn is_audio_capture_active(&self, call_id: &CallId) -> bool {
+        self.audio_device_manager.is_capture_active(call_id).await
+    }
+    
+    /// Get all active audio sessions
+    /// 
+    /// Returns the call IDs for all currently active audio sessions (both playback and capture).
+    /// 
+    /// # Returns
+    /// 
+    /// Returns a tuple containing (playback_sessions, capture_sessions) as vectors of CallId.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::ClientManager;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>) -> Result<(), Box<dyn std::error::Error>> {
+    /// let (playback_calls, capture_calls) = client.get_active_audio_sessions().await;
+    /// println!("Active playback sessions: {}", playback_calls.len());
+    /// println!("Active capture sessions: {}", capture_calls.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_active_audio_sessions(&self) -> (Vec<CallId>, Vec<CallId>) {
+        let playback_sessions = self.audio_device_manager.get_active_playback_sessions().await;
+        let capture_sessions = self.audio_device_manager.get_active_capture_sessions().await;
+        (playback_sessions, capture_sessions)
+    }
+    
+    /// Stop all audio sessions
+    /// 
+    /// Stops all active audio sessions (both playback and capture) and cleans up resources.
+    /// This is useful for cleanup during shutdown or emergency stop scenarios.
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if all sessions stopped successfully.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::ClientManager;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Emergency stop all audio
+    /// client.stop_all_audio_sessions().await?;
+    /// println!("All audio sessions stopped");
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn stop_all_audio_sessions(&self) -> ClientResult<()> {
+        self.audio_device_manager.stop_all_sessions().await
+            .map_err(|e| ClientError::InternalError { 
+                message: format!("Failed to stop all audio sessions: {}", e) 
+            })?;
+        
+        tracing::info!("Stopped all audio sessions");
+        Ok(())
     }
 }
