@@ -90,7 +90,7 @@
 //! ```
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use crate::errors::Result;
@@ -467,6 +467,164 @@ pub fn parse_sdp_connection(sdp: &str) -> Result<SdpInfo> {
         _ => Err(crate::errors::SessionError::MediaIntegration {
             message: "Failed to parse SDP connection information".to_string()
         }),
+    }
+}
+
+// =============================================================================
+// AUDIO STREAMING TYPES
+// =============================================================================
+
+/// Audio frame for session-core, with conversions to/from media-core::AudioFrame
+#[derive(Debug, Clone)]
+pub struct AudioFrame {
+    /// PCM audio data (interleaved samples)
+    pub samples: Vec<i16>,
+    /// Sample rate in Hz
+    pub sample_rate: u32,
+    /// Number of channels
+    pub channels: u8,
+    /// Frame timestamp (from RTP or local clock)
+    pub timestamp: u32,
+}
+
+impl AudioFrame {
+    /// Create a new audio frame
+    pub fn new(samples: Vec<i16>, sample_rate: u32, channels: u8, timestamp: u32) -> Self {
+        Self {
+            samples,
+            sample_rate,
+            channels,
+            timestamp,
+        }
+    }
+    
+    /// Get the duration of this frame in milliseconds
+    pub fn duration_ms(&self) -> f64 {
+        let sample_count = self.samples.len() / self.channels as usize;
+        (sample_count as f64 * 1000.0) / self.sample_rate as f64
+    }
+    
+    /// Get the number of samples per channel
+    pub fn samples_per_channel(&self) -> usize {
+        self.samples.len() / self.channels as usize
+    }
+    
+    /// Check if frame is mono
+    pub fn is_mono(&self) -> bool {
+        self.channels == 1
+    }
+    
+    /// Check if frame is stereo
+    pub fn is_stereo(&self) -> bool {
+        self.channels == 2
+    }
+    
+    /// Get the duration as a Duration struct
+    pub fn duration(&self) -> Duration {
+        Duration::from_secs_f64(self.duration_ms() / 1000.0)
+    }
+}
+
+/// Convert from media-core::AudioFrame to session-core::AudioFrame
+impl From<rvoip_media_core::AudioFrame> for AudioFrame {
+    fn from(media_frame: rvoip_media_core::AudioFrame) -> Self {
+        Self {
+            samples: media_frame.samples,
+            sample_rate: media_frame.sample_rate,
+            channels: media_frame.channels,
+            timestamp: media_frame.timestamp,
+        }
+    }
+}
+
+/// Convert from session-core::AudioFrame to media-core::AudioFrame
+impl From<AudioFrame> for rvoip_media_core::AudioFrame {
+    fn from(session_frame: AudioFrame) -> Self {
+        Self::new(
+            session_frame.samples,
+            session_frame.sample_rate,
+            session_frame.channels,
+            session_frame.timestamp,
+        )
+    }
+}
+
+/// Configuration for audio streaming
+#[derive(Debug, Clone)]
+pub struct AudioStreamConfig {
+    /// Sample rate in Hz
+    pub sample_rate: u32,
+    /// Number of channels (1 for mono, 2 for stereo)
+    pub channels: u8,
+    /// Preferred codec (e.g., "PCMU", "PCMA", "Opus")
+    pub codec: String,
+    /// Frame size in milliseconds
+    pub frame_size_ms: u32,
+    /// Enable echo cancellation
+    pub enable_aec: bool,
+    /// Enable automatic gain control
+    pub enable_agc: bool,
+    /// Enable voice activity detection
+    pub enable_vad: bool,
+}
+
+impl Default for AudioStreamConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: 8000,     // Standard telephony
+            channels: 1,           // Mono
+            codec: "PCMU".to_string(), // G.711 μ-law
+            frame_size_ms: 20,     // 20ms frames
+            enable_aec: true,
+            enable_agc: true,
+            enable_vad: true,
+        }
+    }
+}
+
+impl AudioStreamConfig {
+    /// Create a new audio stream configuration
+    pub fn new(sample_rate: u32, channels: u8, codec: impl Into<String>) -> Self {
+        Self {
+            sample_rate,
+            channels,
+            codec: codec.into(),
+            ..Default::default()
+        }
+    }
+    
+    /// Get the expected frame size in samples
+    pub fn frame_size_samples(&self) -> usize {
+        (self.sample_rate as usize * self.frame_size_ms as usize) / 1000
+    }
+    
+    /// Get the expected frame size in bytes (for PCM)
+    pub fn frame_size_bytes(&self) -> usize {
+        self.frame_size_samples() * self.channels as usize * 2 // 16-bit samples
+    }
+    
+    /// Create a telephony configuration (mono, 8kHz, G.711)
+    pub fn telephony() -> Self {
+        Self::default()
+    }
+    
+    /// Create a wideband configuration (mono, 16kHz, Opus)
+    pub fn wideband() -> Self {
+        Self {
+            sample_rate: 16000,
+            codec: "Opus".to_string(),
+            ..Default::default()
+        }
+    }
+    
+    /// Create a high-quality configuration (stereo, 48kHz, Opus)
+    pub fn high_quality() -> Self {
+        Self {
+            sample_rate: 48000,
+            channels: 2,
+            codec: "Opus".to_string(),
+            ..Default::default()
+        }
     }
 }
 

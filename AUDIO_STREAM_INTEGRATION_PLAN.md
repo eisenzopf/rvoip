@@ -44,27 +44,37 @@ This plan adds RTP audio stream access to client-core by extending session-core'
 
 ## Phase 2: Add AudioFrame Type to Session-Core
 
-**Status**: ⏳ Pending  
+**Status**: ✅ Complete  
 **Goal**: Create session-core AudioFrame wrapper with conversions
 
 ### Task 2.1: Add AudioFrame to Session-Core Types
-- [ ] **File**: `crates/session-core/src/api/types.rs`
-- [ ] **Action**: Add AudioFrame, AudioStreamConfig types
-- [ ] **Implementation**:
-  - [ ] AudioFrame struct with samples, sample_rate, channels, timestamp
-  - [ ] AudioStreamConfig struct with codec configuration  
-  - [ ] Utility methods (duration_ms, samples_per_channel)
-  - [ ] From/Into conversions with media-core::AudioFrame
+- [x] **File**: `crates/session-core/src/api/types.rs`
+- [x] **Action**: Added AudioFrame, AudioStreamConfig types (lines 480-634)
+- [x] **Implementation**:
+  - [x] AudioFrame struct with samples, sample_rate, channels, timestamp
+  - [x] AudioStreamConfig struct with codec configuration  
+  - [x] Utility methods (duration_ms, samples_per_channel, is_mono, is_stereo, duration)
+  - [x] From/Into conversions with media-core::AudioFrame
+  - [x] AudioStreamConfig presets (telephony, wideband, high_quality)
+- [x] **File**: `crates/session-core/src/lib.rs`
+- [x] **Action**: Added AudioFrame and AudioStreamConfig to prelude exports
 
 ### Task 2.2: Test Session-Core AudioFrame Access
-- [ ] **File**: `crates/session-core/tests/audio_frame_integration.rs`
-- [ ] **Action**: Test AudioFrame creation and conversion
-- [ ] **Tests**:
-  - [ ] `test_session_audio_frame_creation()` - Basic creation
-  - [ ] `test_audio_frame_conversion_media_to_session()` - Media→Session conversion
-  - [ ] `test_audio_frame_conversion_session_to_media()` - Session→Media conversion  
-  - [ ] `test_audio_frame_utility_methods()` - Helper methods
-- [ ] **Verification**: Run `cargo test -p rvoip-session-core audio_frame_integration`
+- [x] **File**: `crates/session-core/tests/audio_frame_integration.rs`
+- [x] **Action**: Created comprehensive test suite for AudioFrame and AudioStreamConfig
+- [x] **Tests**:
+  - [x] `test_session_audio_frame_creation()` - Basic creation
+  - [x] `test_audio_frame_conversion_media_to_session()` - Media→Session conversion
+  - [x] `test_audio_frame_conversion_session_to_media()` - Session→Media conversion  
+  - [x] `test_audio_frame_utility_methods()` - Helper methods
+  - [x] `test_audio_frame_round_trip_conversion()` - Round-trip conversion
+  - [x] `test_audio_stream_config_creation()` - AudioStreamConfig creation
+  - [x] `test_audio_stream_config_presets()` - Preset configurations
+  - [x] `test_audio_stream_config_utility_methods()` - Utility methods
+  - [x] `test_audio_frame_clone_and_debug()` - Clone and Debug traits
+  - [x] `test_audio_stream_config_clone_and_debug()` - Clone and Debug traits
+  - [x] `test_realistic_audio_streaming_scenario()` - Realistic usage scenario
+- [x] **Verification**: Run `cargo test -p rvoip-session-core --test audio_frame_integration` (✅ All 11 tests pass)
 
 ---
 
@@ -284,15 +294,15 @@ cargo test audio
 
 ## Progress Tracking
 
-**Overall Progress**: 1/6 phases complete
+**Overall Progress**: 2/6 phases complete
 
 ### Phase Status Summary
 - **Phase 1**: ✅ Complete - Make Media-Core AudioFrame Public
-- **Phase 2**: ⏳ Pending - Add AudioFrame Type to Session-Core  
+- **Phase 2**: ✅ Complete - Add AudioFrame Type to Session-Core  
 - **Phase 3**: ⏳ Pending - Add AudioFrame Events to Session-Core
 - **Phase 4**: ⏳ Pending - Extend MediaControl with Audio Stream API
 - **Phase 5**: ⏳ Pending - Media-Core Integration
 - **Phase 6**: ⏳ Pending - Client-Core Integration
 
 ### Current Focus
-**Next Task**: Phase 2, Task 2.1 - Add AudioFrame to Session-Core Types 
+**Next Task**: Phase 3, Task 3.1 - Extend SessionEvent with Audio Events 

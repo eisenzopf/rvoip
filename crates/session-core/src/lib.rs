@@ -123,6 +123,9 @@ pub mod prelude {
     pub use crate::manager::SessionManager;
     pub use crate::dialog::DialogManager;  // NEW
     pub use crate::conference::prelude::*; // NEW - Conference functionality
+    
+    // Audio streaming types
+    pub use crate::api::types::{AudioFrame, AudioStreamConfig};
 }
 
 #[cfg(test)]
