@@ -368,8 +368,37 @@ pub use audio::{
 
 ### **Next Steps:**
 - Task 6.2: Integrate AudioDeviceManager with ClientManager ✅ **COMPLETE**
-- Task 6.3: Add platform-specific implementations (cpal)
+- Task 6.3: Add platform-specific implementations (cpal) ✅ **COMPLETE**
 - Task 6.4: Add real hardware testing and examples
+
+---
+
+### Task 6.3: Add platform-specific implementations (cpal) ✅ **COMPLETE**
+- [x] **Status**: ✅ COMPLETE
+- [x] **Dependencies**: Task 6.2 complete
+- [x] **Description**: Add real hardware audio device support using CPAL (Cross-Platform Audio Library)
+- [x] **Implementation**: ✅ COMPLETE
+  - [x] ✅ Added `cpal` dependency with `audio-cpal` feature flag
+  - [x] ✅ Implemented `CpalAudioDevice` with real hardware support
+  - [x] ✅ Added `CpalPlatform` for device enumeration and management
+  - [x] ✅ Implemented threaded stream management (CPAL streams are not Send)
+  - [x] ✅ Added automatic format selection for device compatibility
+  - [x] ✅ Prioritized CPAL devices over mock devices in platform selection
+  - [x] ✅ Updated AudioDeviceManager to handle format compatibility
+  - [x] ✅ Updated tests to work with real devices and flexible formats
+- [x] **Key Features**:
+  - Real microphone and speaker enumeration
+  - Hardware audio capture and playback
+  - Cross-platform support (macOS, Windows, Linux)
+  - Automatic format negotiation (8kHz, 16kHz, 44.1kHz, 48kHz)
+  - Graceful fallback to mock devices for testing
+- [x] **Testing**: ✅ All 16 tests passing with real hardware integration
+- [x] **Files Modified**:
+  - `Cargo.toml` - Added cpal dependency and feature flag
+  - `src/audio/platform/cpal_impl.rs` - New CPAL implementation (528 lines)
+  - `src/audio/platform/mod.rs` - Updated platform selection logic
+  - `src/audio/manager.rs` - Added automatic format selection
+  - `tests/audio_device_integration.rs` - Updated for real device behavior
 
 ---
 
@@ -500,7 +529,7 @@ cargo test audio
 - **Phase 6**: ✅ Complete - Add Audio Device Integration to Client-Core
 
 ### Current Focus
-**Next Task**: Phase 6, Task 6.3 - Add platform-specific implementations (cpal)
+**Next Task**: Phase 6, Task 6.4 - Add real hardware testing and examples
 
 ### Key Architectural Decision ✅
 **Avoided Duplication**: Successfully identified and avoided creating duplicate `MediaControllerIntegration` by enhancing existing `MediaManager` instead. This preserves sophisticated features like zero-copy RTP processing, maintains architectural consistency, and avoids resource conflicts. 
