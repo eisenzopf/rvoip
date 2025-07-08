@@ -189,6 +189,28 @@ impl SessionCoordinator {
                     tracing::debug!("General warning - handled by main coordinator");
                 }
             }
+            
+            // ========== AUDIO STREAMING EVENTS ==========
+            
+            SessionEvent::AudioFrameReceived { session_id, audio_frame, stream_id } => {
+                self.handle_audio_frame_received(session_id, audio_frame, stream_id).await?;
+            }
+            
+            SessionEvent::AudioFrameRequested { session_id, config, stream_id } => {
+                self.handle_audio_frame_requested(session_id, config, stream_id).await?;
+            }
+            
+            SessionEvent::AudioStreamConfigChanged { session_id, old_config, new_config, stream_id } => {
+                self.handle_audio_stream_config_changed(session_id, old_config, new_config, stream_id).await?;
+            }
+            
+            SessionEvent::AudioStreamStarted { session_id, config, stream_id, direction } => {
+                self.handle_audio_stream_started(session_id, config, stream_id, direction).await?;
+            }
+            
+            SessionEvent::AudioStreamStopped { session_id, stream_id, reason } => {
+                self.handle_audio_stream_stopped(session_id, stream_id, reason).await?;
+            }
         }
         
         Ok(())
@@ -665,6 +687,124 @@ impl SessionCoordinator {
                 tracing::warn!("Unknown SDP negotiation role '{}' for session {}", role, session_id);
             }
         }
+        
+        Ok(())
+    }
+    
+    // ========== AUDIO STREAMING EVENT HANDLERS ==========
+    
+    /// Handle audio frame received event
+    async fn handle_audio_frame_received(
+        &self,
+        session_id: crate::api::types::SessionId,
+        audio_frame: crate::api::types::AudioFrame,
+        stream_id: Option<String>,
+    ) -> Result<(), SessionError> {
+        tracing::debug!(
+            "Audio frame received for session {}: {} samples, {}Hz, {} channels{}",
+            session_id,
+            audio_frame.samples.len(),
+            audio_frame.sample_rate,
+            audio_frame.channels,
+            stream_id.as_ref().map(|s| format!(", stream: {}", s)).unwrap_or_default()
+        );
+        
+        // Forward audio frame to media coordinator for processing
+        // This is where decoded RTP audio would be passed to audio devices
+        // For now, just log the event - actual audio device integration will be in Phase 6
+        
+        Ok(())
+    }
+    
+    /// Handle audio frame requested event
+    async fn handle_audio_frame_requested(
+        &self,
+        session_id: crate::api::types::SessionId,
+        config: crate::api::types::AudioStreamConfig,
+        stream_id: Option<String>,
+    ) -> Result<(), SessionError> {
+        tracing::debug!(
+            "Audio frame requested for session {}: {}Hz, {} channels, {}{}",
+            session_id,
+            config.sample_rate,
+            config.channels,
+            config.codec,
+            stream_id.as_ref().map(|s| format!(", stream: {}", s)).unwrap_or_default()
+        );
+        
+        // Request audio frame from audio device for encoding and transmission
+        // This is where captured audio would be requested from microphone
+        // For now, just log the event - actual audio device integration will be in Phase 6
+        
+        Ok(())
+    }
+    
+    /// Handle audio stream configuration changed event
+    async fn handle_audio_stream_config_changed(
+        &self,
+        session_id: crate::api::types::SessionId,
+        old_config: crate::api::types::AudioStreamConfig,
+        new_config: crate::api::types::AudioStreamConfig,
+        stream_id: Option<String>,
+    ) -> Result<(), SessionError> {
+        tracing::info!(
+            "Audio config changed for session {}: {}Hz → {}Hz, {} → {}{}",
+            session_id,
+            old_config.sample_rate,
+            new_config.sample_rate,
+            old_config.codec,
+            new_config.codec,
+            stream_id.as_ref().map(|s| format!(", stream: {}", s)).unwrap_or_default()
+        );
+        
+        // Update media session with new audio configuration
+        // This could trigger codec changes, sample rate changes, etc.
+        // For now, just log the event - actual media session updates will be in Phase 5
+        
+        Ok(())
+    }
+    
+    /// Handle audio stream started event
+    async fn handle_audio_stream_started(
+        &self,
+        session_id: crate::api::types::SessionId,
+        config: crate::api::types::AudioStreamConfig,
+        stream_id: String,
+        direction: crate::manager::events::MediaFlowDirection,
+    ) -> Result<(), SessionError> {
+        tracing::info!(
+            "Audio stream started for session {}: {} ({}Hz, {} channels, {:?})",
+            session_id,
+            stream_id,
+            config.sample_rate,
+            config.channels,
+            direction
+        );
+        
+        // Start audio streaming for the session
+        // This would coordinate with media-core to start RTP audio processing
+        // For now, just log the event - actual streaming coordination will be in Phase 5
+        
+        Ok(())
+    }
+    
+    /// Handle audio stream stopped event
+    async fn handle_audio_stream_stopped(
+        &self,
+        session_id: crate::api::types::SessionId,
+        stream_id: String,
+        reason: String,
+    ) -> Result<(), SessionError> {
+        tracing::info!(
+            "Audio stream stopped for session {}: {} (reason: {})",
+            session_id,
+            stream_id,
+            reason
+        );
+        
+        // Stop audio streaming for the session
+        // This would coordinate with media-core to stop RTP audio processing
+        // For now, just log the event - actual streaming coordination will be in Phase 5
         
         Ok(())
     }
