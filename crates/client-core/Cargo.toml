@@ -68,4 +68,21 @@ advanced-codecs = []
 # Example configurations
 [[example]]
 name = "sipp_integration_sip_test_server"
-path = "examples/sipp_integration/sip_test_server.rs" 
+path = "examples/sipp_integration/sip_test_server.rs"
+
+# Audio examples
+[[example]]
+name = "audio_device_discovery"
+path = "examples/audio_device_discovery.rs"
+
+[[example]]
+name = "audio_loopback"
+path = "examples/audio_loopback.rs"
+
+[[example]]
+name = "voip_audio_demo"
+path = "examples/voip_audio_demo.rs"
+
+[[example]]
+name = "audio_benchmark"
+path = "examples/audio_benchmark.rs" 
