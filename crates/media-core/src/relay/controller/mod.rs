@@ -52,6 +52,7 @@ pub mod advanced_processing;
 pub mod conference;
 pub mod zero_copy;
 pub mod relay;
+pub mod codec_detection;
 
 #[cfg(test)]
 mod tests;
