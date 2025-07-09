@@ -147,7 +147,7 @@ impl AudioDevice for CpalAudioDevice {
             });
         }
 
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(4096);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         
         let supported_config = self.get_supported_config(&format)?;
@@ -246,7 +246,7 @@ impl AudioDevice for CpalAudioDevice {
             });
         }
 
-        let (tx, mut rx) = mpsc::channel::<AudioFrame>(32);
+        let (tx, mut rx) = mpsc::channel::<AudioFrame>(4096);
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         
         let supported_config = self.get_supported_config(&format)?;
