@@ -53,6 +53,7 @@ pub mod conference;
 pub mod zero_copy;
 pub mod relay;
 pub mod codec_detection;
+pub mod codec_fallback;
 
 #[cfg(test)]
 mod tests;
