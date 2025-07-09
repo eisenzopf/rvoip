@@ -37,6 +37,7 @@ pub use rvoip_media_core::MediaSessionState;
 // Import RTP and performance types from correct locations
 use rvoip_rtp_core::RtpPacket;
 use rvoip_media_core::performance::pool::PoolStats;
+use rvoip_media_core::relay::controller::codec_fallback::FallbackMode;
 
 /// Session identifier for media coordination (mapped to DialogId)
 pub type MediaSessionId = DialogId;
@@ -279,6 +280,27 @@ impl From<PoolStats> for RtpBufferPoolStats {
             },
         }
     }
+}
+
+/// Codec processing statistics for monitoring detection and fallback
+#[derive(Debug, Clone)]
+pub struct CodecProcessingStats {
+    /// Session identifier
+    pub session_id: super::super::api::types::SessionId,
+    /// Expected codec based on SDP negotiation
+    pub expected_codec: Option<String>,
+    /// Detected codec from actual RTP packets
+    pub detected_codec: Option<String>,
+    /// Confidence level in codec detection (0.0 to 1.0)
+    pub detection_confidence: f32,
+    /// Number of packets analyzed for detection
+    pub packets_analyzed: u64,
+    /// Current fallback mode
+    pub fallback_mode: FallbackMode,
+    /// Fallback processing efficiency (0.0 to 1.0)
+    pub fallback_efficiency: f32,
+    /// Whether transcoding is currently active
+    pub transcoding_active: bool,
 }
 
 /// Storage for active media sessions

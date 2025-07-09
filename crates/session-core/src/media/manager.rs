@@ -19,6 +19,13 @@ use rvoip_rtp_core::RtpPacket;
 use rvoip_media_core::performance::pool::PoolStats;
 use crate::manager::events::SessionEventProcessor;
 
+// Add integration imports for new codec detection and fallback systems
+use rvoip_media_core::relay::controller::{
+    codec_detection::{CodecDetector, CodecDetectionResult},
+    codec_fallback::{CodecFallbackManager, FallbackMode, FallbackStats},
+};
+use rvoip_media_core::codec::mapping::CodecMapper;
+
 /// Main media manager for session-core using real media-core components
 pub struct MediaManager {
     /// Real MediaSessionController from media-core
@@ -41,6 +48,15 @@ pub struct MediaManager {
     
     /// Media configuration (codec preferences, etc.)
     pub media_config: MediaConfig,
+    
+    /// Codec detection system for handling unexpected codec formats
+    pub codec_detector: Arc<CodecDetector>,
+    
+    /// Codec fallback manager for handling codec mismatches
+    pub fallback_manager: Arc<CodecFallbackManager>,
+    
+    /// Codec mapper for payload type resolution
+    pub codec_mapper: Arc<CodecMapper>,
 }
 
 /// Configuration for zero-copy RTP processing per session
@@ -72,6 +88,14 @@ impl MediaManager {
     pub fn new(local_bind_addr: SocketAddr) -> Self {
         let event_processor = Arc::new(SessionEventProcessor::new());
         
+        // Create codec systems with proper connections
+        let codec_mapper = Arc::new(CodecMapper::new());
+        let codec_detector = Arc::new(CodecDetector::new(codec_mapper.clone()));
+        let fallback_manager = Arc::new(CodecFallbackManager::new(
+            codec_detector.clone(),
+            codec_mapper.clone(),
+        ));
+        
         Self {
             controller: Arc::new(MediaSessionController::new()),
             session_mapping: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -80,12 +104,23 @@ impl MediaManager {
             event_processor,
             sdp_storage: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             media_config: MediaConfig::default(),
+            codec_detector,
+            fallback_manager,
+            codec_mapper,
         }
     }
     
     /// Create a MediaManager with custom port range
     pub fn with_port_range(local_bind_addr: SocketAddr, base_port: u16, max_port: u16) -> Self {
         let event_processor = Arc::new(SessionEventProcessor::new());
+        
+        // Create codec systems with proper connections
+        let codec_mapper = Arc::new(CodecMapper::new());
+        let codec_detector = Arc::new(CodecDetector::new(codec_mapper.clone()));
+        let fallback_manager = Arc::new(CodecFallbackManager::new(
+            codec_detector.clone(),
+            codec_mapper.clone(),
+        ));
         
         Self {
             controller: Arc::new(MediaSessionController::with_port_range(base_port, max_port)),
@@ -95,6 +130,9 @@ impl MediaManager {
             event_processor,
             sdp_storage: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             media_config: MediaConfig::default(),
+            codec_detector,
+            fallback_manager,
+            codec_mapper,
         }
     }
     
@@ -107,6 +145,14 @@ impl MediaManager {
     ) -> Self {
         let event_processor = Arc::new(SessionEventProcessor::new());
         
+        // Create codec systems with proper connections
+        let codec_mapper = Arc::new(CodecMapper::new());
+        let codec_detector = Arc::new(CodecDetector::new(codec_mapper.clone()));
+        let fallback_manager = Arc::new(CodecFallbackManager::new(
+            codec_detector.clone(),
+            codec_mapper.clone(),
+        ));
+        
         Self {
             controller: Arc::new(MediaSessionController::with_port_range(base_port, max_port)),
             session_mapping: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -115,6 +161,9 @@ impl MediaManager {
             event_processor,
             sdp_storage: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             media_config,
+            codec_detector,
+            fallback_manager,
+            codec_mapper,
         }
     }
     
@@ -498,6 +547,11 @@ impl MediaManager {
         
         // Cleanup zero-copy configuration
         self.cleanup_zero_copy_config(session_id).await;
+        
+        // Cleanup codec processing systems
+        if let Err(e) = self.cleanup_codec_processing(session_id).await {
+            tracing::warn!("Failed to cleanup codec processing for session {}: {}", session_id, e);
+        }
         
         // Cleanup SDP storage
         {
@@ -934,6 +988,110 @@ impl MediaManager {
         // TODO: Stop the actual audio streaming pipeline
         // For now, this is handled through the existing audio transmission methods
         tracing::info!("🛑 Stopped audio streaming for session: {}", session_id);
+        Ok(())
+    }
+
+    /// Initialize codec detection for a session with expected codec
+    pub async fn initialize_codec_detection(&self, session_id: &SessionId, expected_codec: Option<String>) -> super::MediaResult<()> {
+        tracing::debug!("Initializing codec detection for session {}: expected codec={:?}", session_id, expected_codec);
+        
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Initialize codec detection
+        self.codec_detector.initialize_detection(dialog_id.clone(), expected_codec.clone()).await;
+        
+        // Initialize fallback handling
+        self.fallback_manager.initialize_fallback(dialog_id, expected_codec).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("✅ Initialized codec detection and fallback for session {}", session_id);
+        Ok(())
+    }
+    
+    /// Get codec detection status for a session
+    pub async fn get_codec_detection_status(&self, session_id: &SessionId) -> super::MediaResult<Option<String>> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        if let Some(result) = self.codec_detector.get_detection_result(&dialog_id).await {
+            match result {
+                CodecDetectionResult::Expected { codec, confidence, .. } => {
+                    Ok(Some(format!("Expected codec confirmed: {:?} (confidence: {:.2})", codec, confidence)))
+                },
+                CodecDetectionResult::UnexpectedCodec { 
+                    expected_codec, detected_codec, confidence, .. 
+                } => {
+                    Ok(Some(format!("Unexpected codec detected: expected {:?}, got {:?} (confidence: {:.2})", 
+                                   expected_codec, detected_codec, confidence)))
+                },
+                CodecDetectionResult::InsufficientData { packets_analyzed } => {
+                    Ok(Some(format!("Insufficient data for detection ({} packets analyzed)", packets_analyzed)))
+                },
+            }
+        } else {
+            Ok(None)
+        }
+    }
+    
+    /// Get fallback status for a session
+    pub async fn get_fallback_status(&self, session_id: &SessionId) -> super::MediaResult<Option<String>> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        if let Some(stats) = self.fallback_manager.get_stats(&dialog_id).await {
+            let status = match &stats.current_mode {
+                FallbackMode::None => "No fallback needed".to_string(),
+                FallbackMode::Transcoding { from_codec, to_codec, .. } => {
+                    format!("Transcoding: {} → {} (efficiency: {:.1}%)", 
+                           from_codec, to_codec, stats.get_efficiency() * 100.0)
+                },
+                FallbackMode::Passthrough { detected_codec, .. } => {
+                    format!("Passthrough mode: {} (efficiency: {:.1}%)", 
+                           detected_codec, stats.get_efficiency() * 100.0)
+                },
+            };
+            Ok(Some(status))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    /// Get comprehensive codec processing statistics for a session
+    pub async fn get_codec_processing_stats(&self, session_id: &SessionId) -> super::MediaResult<Option<super::types::CodecProcessingStats>> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Get detection state
+        let detection_state = self.codec_detector.get_detection_state(&dialog_id).await;
+        
+        // Get fallback stats
+        let fallback_stats = self.fallback_manager.get_stats(&dialog_id).await;
+        
+        if detection_state.is_some() || fallback_stats.is_some() {
+            Ok(Some(super::types::CodecProcessingStats {
+                session_id: session_id.clone(),
+                expected_codec: detection_state.as_ref().and_then(|s| s.expected_codec.clone()),
+                detected_codec: detection_state.as_ref().and_then(|s| s.detected_payload_type)
+                    .and_then(|pt| self.codec_mapper.payload_to_codec(pt)),
+                detection_confidence: detection_state.as_ref().map(|s| s.confidence).unwrap_or(0.0),
+                packets_analyzed: detection_state.as_ref().map(|s| s.packets_analyzed).unwrap_or(0),
+                fallback_mode: fallback_stats.as_ref().map(|s| s.current_mode.clone()).unwrap_or(FallbackMode::None),
+                fallback_efficiency: fallback_stats.as_ref().map(|s| s.get_efficiency()).unwrap_or(1.0),
+                transcoding_active: fallback_stats.as_ref().map(|s| s.transcoding_active).unwrap_or(false),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    /// Clean up codec processing systems for a session
+    async fn cleanup_codec_processing(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Cleanup codec detection
+        self.codec_detector.cleanup_detection(&dialog_id).await;
+        
+        // Cleanup fallback handling
+        self.fallback_manager.cleanup_fallback(&dialog_id).await;
+        
+        tracing::debug!("🧹 Cleaned up codec processing for session {}", session_id);
         Ok(())
     }
 }

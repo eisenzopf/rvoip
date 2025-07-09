@@ -84,6 +84,12 @@ impl SdpNegotiator {
         // Apply the negotiated configuration to media-core
         self.apply_negotiated_config(session_id, &negotiated.codec.name, remote_addr).await?;
         
+        // Initialize codec detection for the negotiated codec
+        self.media_manager.initialize_codec_detection(session_id, Some(negotiated.codec.name.clone())).await
+            .map_err(|e| SessionError::MediaIntegration { 
+                message: format!("Failed to initialize codec detection: {}", e) 
+            })?;
+        
         Ok(NegotiatedMediaConfig {
             codec: negotiated.codec.name,
             local_addr,
@@ -169,6 +175,12 @@ impl SdpNegotiator {
         
         // Apply the negotiated configuration to media-core
         self.apply_negotiated_config(session_id, &selected_codec, remote_addr).await?;
+        
+        // Initialize codec detection for the negotiated codec
+        self.media_manager.initialize_codec_detection(session_id, Some(selected_codec.clone())).await
+            .map_err(|e| SessionError::MediaIntegration { 
+                message: format!("Failed to initialize codec detection: {}", e) 
+            })?;
         
         // Store both SDPs
         {
