@@ -29,7 +29,6 @@ impl CodecMapper {
         // Register standard static payload types (RFC 3551)
         mapper.register_static_codec("PCMU", 0, 8000);
         mapper.register_static_codec("PCMA", 8, 8000);
-        mapper.register_static_codec("G722", 9, 8000); // Note: G.722 uses 8kHz RTP clock despite 16kHz audio
         mapper.register_static_codec("G729", 18, 8000);
         
         // Register common dynamic payload types
@@ -122,7 +121,6 @@ impl CodecMapper {
         // Fallback based on common codec knowledge
         let fallback_rate = match codec_name.to_lowercase().as_str() {
             "pcmu" | "pcma" | "g711" => 8000,
-            "g722" => 8000, // G.722 uses 8kHz RTP clock rate
             "g729" => 8000,
             "opus" => 48000,
             "ilbc" => 8000,
@@ -180,7 +178,7 @@ impl CodecMapper {
     
     /// Clear all dynamic codec registrations (keeps static ones)
     pub fn clear_dynamic_codecs(&mut self) {
-        let static_payload_types = [0u8, 8, 9, 18]; // PCMU, PCMA, G722, G729
+        let static_payload_types = [0u8, 8, 18]; // PCMU, PCMA, G729
         
         // Collect codecs to remove (those not using static payload types)
         let codecs_to_remove: Vec<String> = self.name_to_payload
@@ -259,10 +257,7 @@ mod tests {
         assert_eq!(mapper.payload_to_codec(8), Some("PCMA".to_string()));
         assert_eq!(mapper.get_clock_rate("PCMA"), 8000);
         
-        // Test G722
-        assert_eq!(mapper.codec_to_payload("G722"), Some(9));
-        assert_eq!(mapper.payload_to_codec(9), Some("G722".to_string()));
-        assert_eq!(mapper.get_clock_rate("G722"), 8000); // Important: G.722 uses 8kHz RTP clock
+
         
         // Test G729
         assert_eq!(mapper.codec_to_payload("G729"), Some(18));

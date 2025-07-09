@@ -32,6 +32,7 @@ use crate::processing::audio::{
     AdvancedVadResult, AdvancedAgcResult, AdvancedAecResult
 };
 use crate::codec::audio::{G711Codec, G711Config, G711Variant};
+use crate::codec::mapping::CodecMapper;
 use crate::types::SampleRate;
 
 use rvoip_rtp_core::{RtpSession, RtpSessionConfig};
@@ -105,6 +106,9 @@ pub struct MediaSessionController {
     
     /// Audio frame callbacks for sending decoded frames to session-core
     pub(super) audio_frame_callbacks: RwLock<HashMap<DialogId, mpsc::Sender<AudioFrame>>>,
+    
+    /// Codec mapper for payload type resolution
+    pub(super) codec_mapper: Arc<CodecMapper>,
 }
 
 impl MediaSessionController {
@@ -153,6 +157,9 @@ impl MediaSessionController {
         // Create SIMD processor
         let simd_processor = SimdProcessor::new();
         
+        // Create codec mapper
+        let codec_mapper = Arc::new(CodecMapper::new());
+        
         Self {
             relay: None,
             sessions: RwLock::new(HashMap::new()),
@@ -173,6 +180,7 @@ impl MediaSessionController {
             g711_codec,
             simd_processor,
             audio_frame_callbacks: RwLock::new(HashMap::new()),
+            codec_mapper,
         }
     }
     
@@ -240,6 +248,9 @@ impl MediaSessionController {
         // Create SIMD processor
         let simd_processor = SimdProcessor::new();
         
+        // Create codec mapper
+        let codec_mapper = Arc::new(CodecMapper::new());
+        
         Ok(Self {
             relay: None,
             sessions: RwLock::new(HashMap::new()),
@@ -260,6 +271,7 @@ impl MediaSessionController {
             g711_codec,
             simd_processor,
             audio_frame_callbacks: RwLock::new(HashMap::new()),
+            codec_mapper,
         })
     }
     
@@ -285,13 +297,25 @@ impl MediaSessionController {
         
         let rtp_port = local_rtp_addr.port();
         
+        // Determine payload type from preferred codec
+        let payload_type = config.preferred_codec
+            .as_ref()
+            .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
+            .unwrap_or(0); // Default to PCMU
+        
+        // Determine clock rate based on codec
+        let clock_rate = config.preferred_codec
+            .as_ref()
+            .map(|codec| self.codec_mapper.get_clock_rate(codec))
+            .unwrap_or(8000);
+        
         // Create RTP session configuration
         let rtp_config = RtpSessionConfig {
             local_addr: local_rtp_addr,
             remote_addr: config.remote_addr,
             ssrc: Some(rand::random()), // Generate random SSRC
-            payload_type: 0, // Default to PCMU
-            clock_rate: 8000, // Default to 8kHz
+            payload_type, // Use negotiated payload type
+            clock_rate,   // Use codec-appropriate clock rate
             jitter_buffer_size: Some(50),
             max_packet_age_ms: Some(200),
             enable_jitter_buffer: true,
@@ -341,7 +365,12 @@ impl MediaSessionController {
             session_id: dialog_id.clone(),
         });
 
-        info!("✅ Created media session with REAL RTP session: {} (port: {})", dialog_id, rtp_port);
+        info!("✅ Created media session with REAL RTP session: {} (port: {}, codec: {}, PT: {}, clock: {}Hz)", 
+              dialog_id, 
+              rtp_port, 
+              config.preferred_codec.as_deref().unwrap_or("PCMU"), 
+              payload_type, 
+              clock_rate);
         Ok(())
     }
     
