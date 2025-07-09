@@ -1193,8 +1193,7 @@ impl MediaControl for Arc<SessionCoordinator> {
         
         // Generate answer using MediaConfigConverter with our media config
         use crate::media::config::MediaConfigConverter;
-        let converter = MediaConfigConverter::with_media_config(&media_manager.media_config);
-        
+        let mut converter = MediaConfigConverter::with_media_config(&media_manager.media_config);
         let local_ip = media_manager.local_bind_addr.ip().to_string();
         let answer = converter.generate_sdp_answer(offer, &local_ip, local_port)
             .map_err(|e| crate::errors::SessionError::MediaIntegration { 

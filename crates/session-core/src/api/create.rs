@@ -267,7 +267,7 @@ pub fn generate_sdp_offer(local_ip: &str, local_port: u16) -> Result<String> {
 /// ```
 pub fn generate_sdp_answer(offer_sdp: &str, local_ip: &str, local_port: u16) -> Result<String> {
     use crate::media::config::MediaConfigConverter;
-    let converter = MediaConfigConverter::new();
+    let mut converter = MediaConfigConverter::new();
     converter.generate_sdp_answer(offer_sdp, local_ip, local_port)
         .map_err(|e| SessionError::MediaError(e.to_string()))
 }

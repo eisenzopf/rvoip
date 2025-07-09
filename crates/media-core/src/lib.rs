@@ -198,181 +198,57 @@ impl AudioBuffer {
 
 /// Prelude module with commonly used types
 pub mod prelude {
-    // Core types
-    pub use crate::{
-        Error, 
-        Result,
+    // Re-export basic types for convenience
+    pub use crate::types::{
+        // Basic types
         DialogId,
         MediaSessionId,
         PayloadType,
-        AudioFrame,
-        MediaPacket,
         MediaType,
         MediaDirection,
         SampleRate,
-    };
-    
-    // RTP statistics types
-    pub use rvoip_rtp_core::session::{RtpSessionStats, RtpStreamStats};
-    
-    // Engine components
-    pub use crate::engine::{
-        MediaEngine,
-        MediaEngineConfig,
-        EngineCapabilities,
-        MediaSessionParams,
-        MediaSessionHandle,
-        EngineState,
-    };
-    
-    // NEW: Enhanced configuration and factory from media_engine
-    pub use crate::engine::media_engine::{
-        PerformanceLevel,
-        AdvancedProcessorFactory,
-    };
-    
-    // Session components
-    pub use crate::session::{
-        MediaSession,
-        MediaSessionConfig,
-        MediaSessionState,
-        MediaSessionEvent as SessionEvent, // Rename to avoid conflict
-        MediaSessionEventType,
-    };
-    
-    // Integration components
-    pub use crate::integration::{
-        RtpBridge,
-        RtpBridgeConfig,
-        SessionBridge,
-        SessionBridgeConfig,
-        IntegrationEvent,
-        IntegrationEventType,
-    };
-    
-    // Processing pipeline components
-    pub use crate::processing::{
-        ProcessingPipeline,
-        ProcessingConfig,
-        AudioProcessor,
-        AudioProcessingConfig,
-        AudioProcessingResult,
-        VoiceActivityDetector,
-        VadConfig,
-        VadResult,
-        AutomaticGainControl,
-        AgcConfig,
-        AgcResult,
-        AcousticEchoCanceller,
-        AecConfig,
-        AecResult,
-        FormatConverter,
-        ConversionParams,
-    };
-    
-    // Conference audio mixing components (Phase 5)
-    pub use crate::processing::audio::{
-        AudioMixer,
-        AudioStreamManager,
-        AudioStreamConfig,
-    };
-    
-    // Quality monitoring components
-    pub use crate::quality::{
-        QualityMonitor,
-        QualityMonitorConfig,
+        AudioFrame,
+        VideoFrame,
+        MediaPacket,
+        // Payload types
+        payload_types::{static_types, dynamic_range},
+        // Statistics types
+        MediaStatistics,
+        MediaProcessingStats,
         QualityMetrics,
-        SessionMetrics,
-        OverallMetrics,
-        QualityAdjustment,
-        AdaptationEngine,
-        AdaptationStrategy,
     };
     
-    // Buffer components
-    pub use crate::buffer::{
-        JitterBuffer,
-        JitterBufferConfig,
-        JitterBufferStats,
-        AdaptiveBuffer,
-        AdaptiveConfig,
-        FrameBuffer,
-        FrameBufferConfig,
-        RingBuffer,
-        RingBufferError,
-    };
-    
-    // Audio codec components
-    pub use crate::codec::audio::{
-        G711Codec,
-        G711Config,
-        G711Variant,
-        OpusCodec,
-        OpusConfig,
-        OpusApplication,
-        G729Codec,
-        G729Config,
-        G729Annexes,
-    };
-    
-    // Codec transcoding components
+    // Re-export from codec module
     pub use crate::codec::{
-        Transcoder,
-        TranscodingPath,
-        TranscodingStats,
+        mapping::CodecMapper,
+        audio::AudioCodec,
     };
     
-    // Payload type constants for convenience
-    pub use crate::types::payload_types;
-    
-    // Conference types
-    pub use crate::types::conference::{
-        ParticipantId,
-        AudioStream,
-        ConferenceMixingConfig,
-        MixingQuality,
-        MixedAudioOutput,
-        ConferenceMixingStats,
-        ConferenceError,
-        ConferenceMixingEvent,
-        ConferenceResult,
+    // Re-export from engine module  
+    pub use crate::engine::{
+        media_engine::MediaEngine,
+        config::{
+            MediaEngineConfig,
+            AudioConfig,
+            CodecConfig,
+            QualityConfig,
+            BufferConfig,
+            PerformanceConfig,
+            AdvancedProcessingConfig,
+            EngineCapabilities,
+            AudioCodecCapability,
+            AudioProcessingCapabilities,
+        },
     };
     
-    // Performance optimization components
-    pub use crate::performance::zero_copy::{ZeroCopyAudioFrame, SharedAudioBuffer};
-    pub use crate::performance::pool::{AudioFramePool, PooledAudioFrame, PoolConfig};
-    pub use crate::performance::metrics::{PerformanceMetrics, BenchmarkResults};
-    pub use crate::performance::simd::SimdProcessor;
-    
-    // Advanced v2 processor components (Phase 1.3)
-    pub use crate::processing::audio::{
-        AdvancedVoiceActivityDetector, 
-        AdvancedVadConfig, 
-        AdvancedVadResult,
-        AdvancedAutomaticGainControl, 
-        AdvancedAgcConfig, 
-        AdvancedAgcResult,
-        AdvancedAcousticEchoCanceller, 
-        AdvancedAecConfig, 
-        AdvancedAecResult,
+    // Re-export from RTP core
+    pub use rvoip_rtp_core::{
+        RtpHeader,
+        RtpPacket,
+        RtpSession,
+        RtpSessionConfig,
     };
     
-    // Session controller advanced processing (Phase 1.3)
-    pub use crate::relay::controller::{
-        AdvancedProcessorSet,
-        AdvancedProcessorConfig,
-    };
-    
-    // Legacy types (temporary)
-    pub use crate::codec::{Codec, CodecRegistry};
-    
-    // NEW: Enhanced configuration types
-    pub use crate::engine::config::{
-        PerformanceConfig,
-        AdvancedProcessingConfig,
-        AudioConfig,
-        CodecConfig,
-        QualityConfig,
-        BufferConfig,
-    };
+    // Re-export from error module
+    pub use crate::error::{Error, Result};
 } 

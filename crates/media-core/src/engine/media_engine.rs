@@ -775,7 +775,7 @@ impl MediaEngine {
     fn build_capabilities(config: &MediaEngineConfig) -> EngineCapabilities {
         use crate::types::{SampleRate, payload_types};
         
-        let audio_codecs = config.codecs.enabled_payload_types.iter()
+        let mut audio_codecs: Vec<AudioCodecCapability> = config.codecs.enabled_payload_types.iter()
             .filter_map(|&pt| {
                 match pt {
                     payload_types::PCMU => Some(AudioCodecCapability {
@@ -792,21 +792,27 @@ impl MediaEngine {
                         channels: 1,
                         clock_rate: 8000,
                     }),
-                    payload_types::OPUS => Some(AudioCodecCapability {
-                        payload_type: pt,
-                        name: "opus".to_string(),
-                        sample_rates: vec![
-                            SampleRate::Rate8000,
-                            SampleRate::Rate16000,
-                            SampleRate::Rate48000,
-                        ],
-                        channels: 1, // Mono for now
-                        clock_rate: 48000,
-                    }),
+                    // Note: Opus is a dynamic codec and doesn't have a fixed payload type
+                    // It will be handled during SDP negotiation with the actual negotiated PT
                     _ => None,
                 }
             })
             .collect();
+        
+        // Add dynamic codec capabilities that are always supported
+        
+        // Add Opus capability (dynamic payload type - will be set during SDP negotiation)
+        audio_codecs.push(AudioCodecCapability {
+            payload_type: 0, // Placeholder - will be set during SDP negotiation
+            name: "opus".to_string(),
+            sample_rates: vec![
+                SampleRate::Rate8000,
+                SampleRate::Rate16000,
+                SampleRate::Rate48000,
+            ],
+            channels: 1, // Mono for now
+            clock_rate: 48000,
+        });
         
         EngineCapabilities {
             audio_codecs,

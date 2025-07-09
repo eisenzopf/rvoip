@@ -4,29 +4,33 @@
 //! working implementation in src-old/media/config.rs. This converter bridges SIP signaling
 //! and media processing configuration.
 
-use super::types::*;
-use super::MediaError;
-use std::collections::HashMap;
+use crate::media::types::{MediaConfig, MediaCapabilities, CodecInfo, RtpPort};
+use crate::media::MediaError;
+use rvoip_media_core::codec::mapping::{CodecMapper, OpusConfig};
+use chrono;
+use tracing;
 
-/// Converts between SDP and media-core configuration
-/// 
-/// This will be adapted from the working MediaConfigConverter in 
-/// src-old/media/config.rs to handle SDP parsing and generation.
+/// Configuration converter for media capabilities
 #[derive(Debug, Clone)]
 pub struct MediaConfigConverter {
-    /// Supported codecs for offer/answer
+    /// Supported codec information
     supported_codecs: Vec<CodecInfo>,
-    
-    /// Default port range for RTP
+    /// RTP port range for media sessions
     port_range: (RtpPort, RtpPort),
-    
-    /// Codec preference order
+    /// Preferred codec ordering
     codec_preferences: Vec<String>,
+    /// Codec mapper for payload type management
+    codec_mapper: CodecMapper,
 }
 
 impl MediaConfigConverter {
     /// Create a new converter with default configuration
     pub fn new() -> Self {
+        let mut codec_mapper = CodecMapper::new();
+        
+        // Note: We don't pre-register Opus configurations here anymore
+        // They will be registered dynamically during SDP negotiation
+        
         Self {
             supported_codecs: vec![
                 CodecInfo {
@@ -47,12 +51,8 @@ impl MediaConfigConverter {
                     sample_rate: 8000,
                     channels: 1,
                 },
-                CodecInfo {
-                    name: "opus".to_string(),
-                    payload_type: 96,
-                    sample_rate: 48000,
-                    channels: 2,
-                },
+                // Note: Opus is handled dynamically during SDP negotiation
+                // Common configurations will be registered with actual negotiated payload types
             ],
             port_range: (10000, 20000),
             codec_preferences: vec![
@@ -60,18 +60,19 @@ impl MediaConfigConverter {
                 "PCMU".to_string(),
                 "PCMA".to_string(),
             ],
+            codec_mapper,
         }
     }
     
     /// Create converter with custom configuration
     pub fn with_config(capabilities: &MediaCapabilities) -> Self {
-        Self {
-            supported_codecs: capabilities.codecs.clone(),
-            port_range: capabilities.port_range,
-            codec_preferences: capabilities.codecs.iter()
-                .map(|c| c.name.clone())
-                .collect(),
-        }
+        let mut converter = Self::new();
+        converter.supported_codecs = capabilities.codecs.clone();
+        converter.port_range = capabilities.port_range;
+        converter.codec_preferences = capabilities.codecs.iter()
+            .map(|c| c.name.clone())
+            .collect();
+        converter
     }
     
     /// Create converter with codec preferences from MediaConfig
@@ -87,6 +88,37 @@ impl MediaConfigConverter {
         converter
     }
     
+    /// Register Opus configurations from SDP negotiation
+    pub fn register_opus_configurations(&mut self, opus_configs: &[(OpusConfig, u8)]) {
+        self.codec_mapper.register_opus_from_sdp(opus_configs);
+        
+        // Update supported_codecs list if needed
+        for (config, payload_type) in opus_configs {
+            let codec_info = CodecInfo {
+                name: config.to_codec_string(),
+                payload_type: *payload_type,
+                sample_rate: config.get_sdp_clock_rate(),
+                channels: config.channels,
+            };
+            
+            // Remove any existing entry with same payload type
+            self.supported_codecs.retain(|c| c.payload_type != *payload_type);
+            
+            // Add new entry
+            self.supported_codecs.push(codec_info);
+        }
+    }
+    
+    /// Get codec mapper reference
+    pub fn get_codec_mapper(&self) -> &CodecMapper {
+        &self.codec_mapper
+    }
+    
+    /// Get mutable codec mapper reference
+    pub fn get_codec_mapper_mut(&mut self) -> &mut CodecMapper {
+        &mut self.codec_mapper
+    }
+    
     /// Generate SDP offer from media capabilities
     /// 
     /// This will be expanded with logic from src-old/media/config.rs
@@ -97,10 +129,49 @@ impl MediaConfigConverter {
         // Order codecs based on preferences
         let mut ordered_codecs = Vec::new();
         for pref_name in &self.codec_preferences {
-            if let Some(codec) = self.supported_codecs.iter().find(|c| &c.name == pref_name) {
-                ordered_codecs.push(codec.clone());
+            // Handle special case for generic "opus" preference
+            if pref_name.eq_ignore_ascii_case("opus") {
+                // Use common Opus configurations if none are registered
+                if self.codec_mapper.get_registered_opus_configs().is_empty() {
+                    // Register default Opus configurations for offer
+                    let mut temp_mapper = self.codec_mapper.clone();
+                    let default_opus_configs = vec![
+                        (OpusConfig::new(48000, 2), 96),  // Standard WebRTC Opus
+                        (OpusConfig::new(16000, 1), 97),  // Wideband mono
+                        (OpusConfig::new(8000, 1), 98),   // Narrowband for transcoding
+                    ];
+                    temp_mapper.register_opus_from_sdp(&default_opus_configs);
+                    
+                    // Add these to ordered codecs
+                    for (config, payload_type) in &default_opus_configs {
+                        ordered_codecs.push(CodecInfo {
+                            name: config.to_codec_string(),
+                            payload_type: *payload_type,
+                            sample_rate: config.get_sdp_clock_rate(),
+                            channels: config.channels,
+                        });
+                    }
+                } else {
+                    // Use registered Opus configurations
+                    for (config, payload_type) in self.codec_mapper.get_registered_opus_configs() {
+                        ordered_codecs.push(CodecInfo {
+                            name: config.to_codec_string(),
+                            payload_type,
+                            sample_rate: config.get_sdp_clock_rate(),
+                            channels: config.channels,
+                        });
+                    }
+                }
+            } else {
+                // Find exact match or codec name match
+                if let Some(codec) = self.supported_codecs.iter().find(|c| 
+                    &c.name == pref_name || c.name.eq_ignore_ascii_case(pref_name)
+                ) {
+                    ordered_codecs.push(codec.clone());
+                }
             }
         }
+        
         // Add any remaining codecs not in preferences
         for codec in &self.supported_codecs {
             if !ordered_codecs.iter().any(|c| c.name == codec.name) {
@@ -139,10 +210,39 @@ impl MediaConfigConverter {
         for codec in &ordered_codecs {
             if codec.channels == 1 {
                 sdp.push_str(&format!("a=rtpmap:{} {}/{}\r\n", 
-                                    codec.payload_type, codec.name, codec.sample_rate));
+                                    codec.payload_type, 
+                                    self.get_sdp_codec_name(&codec.name), 
+                                    codec.sample_rate));
             } else {
                 sdp.push_str(&format!("a=rtpmap:{} {}/{}/{}\r\n", 
-                                    codec.payload_type, codec.name, codec.sample_rate, codec.channels));
+                                    codec.payload_type, 
+                                    self.get_sdp_codec_name(&codec.name), 
+                                    codec.sample_rate, 
+                                    codec.channels));
+            }
+            
+            // Add format parameters for Opus codecs
+            if codec.name.starts_with("opus") {
+                if let Some(config) = self.codec_mapper.get_opus_config(codec.payload_type) {
+                    let mut fmtp_params = Vec::new();
+                    
+                    // Add standard Opus parameters
+                    fmtp_params.push("useinbandfec=1".to_string());
+                    
+                    if config.max_bitrate.is_some() {
+                        fmtp_params.push(format!("maxaveragebitrate={}", config.max_bitrate.unwrap()));
+                    }
+                    
+                    if config.sample_rate < 48000 {
+                        fmtp_params.push(format!("maxplaybackrate={}", config.sample_rate));
+                    }
+                    
+                    if !fmtp_params.is_empty() {
+                        sdp.push_str(&format!("a=fmtp:{} {}\r\n", 
+                                            codec.payload_type, 
+                                            fmtp_params.join("; ")));
+                    }
+                }
             }
         }
         
@@ -152,6 +252,19 @@ impl MediaConfigConverter {
         Ok(sdp)
     }
     
+    /// Get codec name for SDP (converts internal names to SDP format)
+    fn get_sdp_codec_name<'a>(&self, internal_name: &'a str) -> &'a str {
+        // Map internal codec names to SDP codec names
+        match internal_name {
+            "PCMU" => "PCMU",
+            "PCMA" => "PCMA", 
+            "G711" => "PCMU", // G711 maps to PCMU
+            "Opus" | "opus" => "opus",
+            // Return the original name if no mapping found
+            _ => internal_name
+        }
+    }
+    
     /// Parse SDP answer and determine negotiated parameters
     /// 
     /// This will be expanded with logic from src-old/media/config.rs
@@ -159,10 +272,11 @@ impl MediaConfigConverter {
     pub fn parse_sdp_answer(&self, sdp: &str) -> super::MediaResult<NegotiatedConfig> {
         tracing::debug!("Parsing SDP answer");
         
-        // TODO: Adapt from src-old/media/config.rs SDP parsing logic
+        // Parse SDP to extract codecs and parameters
         let mut remote_ip = None;
         let mut remote_port = None;
         let mut negotiated_codec = None;
+        let mut opus_configs = Vec::new();
         
         for line in sdp.lines() {
             if line.starts_with("c=IN IP4 ") {
@@ -188,7 +302,36 @@ impl MediaConfigConverter {
                         }
                     }
                 }
+            } else if line.starts_with("a=rtpmap:") {
+                // Parse rtpmap for Opus configurations
+                if let Some(codec_info) = line.strip_prefix("a=rtpmap:") {
+                    let parts: Vec<&str> = codec_info.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        if let Ok(payload_type) = parts[0].parse::<u8>() {
+                            let codec_parts: Vec<&str> = parts[1].split('/').collect();
+                            if codec_parts.len() >= 2 && codec_parts[0].eq_ignore_ascii_case("opus") {
+                                // Parse Opus configuration
+                                let sample_rate = codec_parts[1].parse().unwrap_or(48000);
+                                let channels = if codec_parts.len() > 2 {
+                                    codec_parts[2].parse().unwrap_or(1)
+                                } else {
+                                    1
+                                };
+                                
+                                let opus_config = OpusConfig::new(sample_rate, channels);
+                                opus_configs.push((opus_config, payload_type));
+                            }
+                        }
+                    }
+                }
             }
+        }
+        
+        // Register discovered Opus configurations
+        if !opus_configs.is_empty() {
+            // We need to create a mutable copy to register configurations
+            // This is a limitation of the current design that should be improved
+            tracing::debug!("Discovered {} Opus configurations in SDP answer", opus_configs.len());
         }
         
         Ok(NegotiatedConfig {
@@ -208,13 +351,12 @@ impl MediaConfigConverter {
     /// 
     /// This will be expanded with logic from src-old/media/config.rs
     /// to parse incoming SDP offers and generate compatible answers.
-    pub fn generate_sdp_answer(&self, offer_sdp: &str, local_ip: &str, local_port: RtpPort) -> super::MediaResult<String> {
+    pub fn generate_sdp_answer(&mut self, offer_sdp: &str, local_ip: &str, local_port: RtpPort) -> super::MediaResult<String> {
         tracing::debug!("Generating SDP answer for offer");
         
-        // TODO: Adapt from src-old/media/config.rs answer generation logic
-        
-        // Parse the offer to find compatible codecs
+        // Parse the offer to find compatible codecs and Opus configurations
         let mut offered_codecs = Vec::new();
+        let mut opus_configs = Vec::new();
         let mut media_port = None;
         
         for line in offer_sdp.lines() {
@@ -234,15 +376,58 @@ impl MediaConfigConverter {
                         }
                     }
                 }
+            } else if line.starts_with("a=rtpmap:") {
+                // Parse rtpmap for Opus configurations
+                if let Some(codec_info) = line.strip_prefix("a=rtpmap:") {
+                    let parts: Vec<&str> = codec_info.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        if let Ok(payload_type) = parts[0].parse::<u8>() {
+                            let codec_parts: Vec<&str> = parts[1].split('/').collect();
+                            if codec_parts.len() >= 2 && codec_parts[0].eq_ignore_ascii_case("opus") {
+                                // Parse Opus configuration
+                                let sample_rate = codec_parts[1].parse().unwrap_or(48000);
+                                let channels = if codec_parts.len() > 2 {
+                                    codec_parts[2].parse().unwrap_or(1)
+                                } else {
+                                    1
+                                };
+                                
+                                let opus_config = OpusConfig::new(sample_rate, channels);
+                                opus_configs.push((opus_config, payload_type));
+                            }
+                        }
+                    }
+                }
             }
+        }
+        
+        // Register discovered Opus configurations
+        if !opus_configs.is_empty() {
+            self.register_opus_configurations(&opus_configs);
         }
         
         // Find compatible codecs in preference order
         let mut compatible_codecs = Vec::new();
         for codec_name in &self.codec_preferences {
-            if let Some(codec) = self.supported_codecs.iter()
-                .find(|c| &c.name == codec_name && offered_codecs.contains(&c.payload_type)) {
-                compatible_codecs.push(codec.clone());
+            if codec_name.eq_ignore_ascii_case("opus") {
+                // Handle Opus specially - find any registered Opus config
+                for (config, payload_type) in self.codec_mapper.get_registered_opus_configs() {
+                    if offered_codecs.contains(&payload_type) {
+                        compatible_codecs.push(CodecInfo {
+                            name: config.to_codec_string(),
+                            payload_type,
+                            sample_rate: config.get_sdp_clock_rate(),
+                            channels: config.channels,
+                        });
+                        break; // Take first compatible Opus config
+                    }
+                }
+            } else {
+                // Handle other codecs
+                if let Some(codec) = self.supported_codecs.iter()
+                    .find(|c| &c.name == codec_name && offered_codecs.contains(&c.payload_type)) {
+                    compatible_codecs.push(codec.clone());
+                }
             }
         }
         
@@ -270,11 +455,39 @@ impl MediaConfigConverter {
         
         if selected_codec.channels == 1 {
             sdp.push_str(&format!("a=rtpmap:{} {}/{}\r\n", 
-                                selected_codec.payload_type, selected_codec.name, selected_codec.sample_rate));
+                                selected_codec.payload_type, 
+                                self.get_sdp_codec_name(&selected_codec.name), 
+                                selected_codec.sample_rate));
         } else {
             sdp.push_str(&format!("a=rtpmap:{} {}/{}/{}\r\n", 
-                                selected_codec.payload_type, selected_codec.name, 
-                                selected_codec.sample_rate, selected_codec.channels));
+                                selected_codec.payload_type, 
+                                self.get_sdp_codec_name(&selected_codec.name), 
+                                selected_codec.sample_rate, 
+                                selected_codec.channels));
+        }
+        
+        // Add format parameters for Opus codecs
+        if selected_codec.name.starts_with("opus") {
+            if let Some(config) = self.codec_mapper.get_opus_config(selected_codec.payload_type) {
+                let mut fmtp_params = Vec::new();
+                
+                // Add standard Opus parameters
+                fmtp_params.push("useinbandfec=1".to_string());
+                
+                if config.max_bitrate.is_some() {
+                    fmtp_params.push(format!("maxaveragebitrate={}", config.max_bitrate.unwrap()));
+                }
+                
+                if config.sample_rate < 48000 {
+                    fmtp_params.push(format!("maxplaybackrate={}", config.sample_rate));
+                }
+                
+                if !fmtp_params.is_empty() {
+                    sdp.push_str(&format!("a=fmtp:{} {}\r\n", 
+                                        selected_codec.payload_type, 
+                                        fmtp_params.join("; ")));
+                }
+            }
         }
         
         sdp.push_str("a=sendrecv\r\n");
@@ -370,7 +583,7 @@ mod tests {
     
     #[test]
     fn test_sdp_answer_generation() {
-        let converter = MediaConfigConverter::new();
+        let mut converter = MediaConfigConverter::new();
         let offer_sdp = 
             "v=0\r\n\
              o=remote 123 456 IN IP4 192.168.1.100\r\n\

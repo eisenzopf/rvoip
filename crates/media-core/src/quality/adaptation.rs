@@ -135,7 +135,9 @@ impl AdaptationEngine {
         }
         
         // Sort by priority and filter by confidence
-        adjustments.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        adjustments.sort_by(|a: &QualityAdjustment, b: &QualityAdjustment| {
+            b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal)
+        });
         let filtered: Vec<_> = adjustments
             .into_iter()
             .filter(|adj| adj.confidence >= self.config.min_confidence)
