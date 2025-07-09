@@ -118,6 +118,14 @@ pub enum MediaSessionEvent {
         dialog_id: DialogId,
         remote_addr: SocketAddr,
     },
+    /// Codec changed during session update (e.g., re-INVITE)
+    CodecChanged {
+        dialog_id: DialogId,
+        old_codec: Option<String>,
+        new_codec: Option<String>,
+        new_payload_type: u8,
+        new_clock_rate: u32,
+    },
     /// Statistics updated
     StatisticsUpdated {
         dialog_id: DialogId,
