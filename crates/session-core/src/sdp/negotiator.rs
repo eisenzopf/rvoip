@@ -147,7 +147,7 @@ impl SdpNegotiator {
             })?;
         
         // Generate answer based on offer and our preferences
-        let converter = MediaConfigConverter::with_media_config(&self.media_config);
+        let mut converter = MediaConfigConverter::with_media_config(&self.media_config);
         let local_ip = self.media_manager.local_bind_addr.ip().to_string();
         let our_answer = converter.generate_sdp_answer(their_offer, &local_ip, local_port)
             .map_err(|e| SessionError::MediaIntegration { 

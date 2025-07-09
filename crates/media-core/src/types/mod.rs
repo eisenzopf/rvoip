@@ -73,16 +73,54 @@ pub type PayloadType = u8;
 pub mod payload_types {
     use super::PayloadType;
     
-    /// G.711 μ-law (PCMU)
-    pub const PCMU: PayloadType = 0;
-    /// G.711 A-law (PCMA)
-    pub const PCMA: PayloadType = 8;
-    /// G.722 wideband
-    pub const G722: PayloadType = 9;
-    /// Telephone event (DTMF)
-    pub const TELEPHONE_EVENT: PayloadType = 101;
-    /// Opus (dynamic)
-    pub const OPUS: PayloadType = 111;
+    /// Static payload types (RFC 3551)
+    pub mod static_types {
+        use super::PayloadType;
+        
+        /// G.711 μ-law (PCMU)
+        pub const PCMU: PayloadType = 0;
+        /// G.711 A-law (PCMA)
+        pub const PCMA: PayloadType = 8;
+        /// G.722 wideband (16kHz sampling, 8kHz RTP clock)
+        pub const G722: PayloadType = 9;
+        /// G.729 low-bitrate codec
+        pub const G729: PayloadType = 18;
+        /// Telephone event (DTMF)
+        pub const TELEPHONE_EVENT: PayloadType = 101;
+    }
+    
+    /// Dynamic payload type range (RFC 3551)
+    pub mod dynamic_range {
+        /// Dynamic payload type range start (RFC 3551)
+        pub const DYNAMIC_START: u8 = 96;
+        
+        /// Dynamic payload type range end (RFC 3551)
+        pub const DYNAMIC_END: u8 = 127;
+        
+        /// Check if a payload type is in the dynamic range
+        pub fn is_dynamic(payload_type: u8) -> bool {
+            payload_type >= DYNAMIC_START && payload_type <= DYNAMIC_END
+        }
+        
+        /// Get all dynamic payload types
+        pub fn all_dynamic() -> Vec<u8> {
+            (DYNAMIC_START..=DYNAMIC_END).collect()
+        }
+    }
+    
+    // Re-export static types for convenience
+    pub use static_types::*;
+    
+    /// NOTE: Dynamic codecs like Opus do NOT have fixed payload types!
+    /// They are assigned during SDP negotiation and can be any value in the range 96-127.
+    /// The actual payload type for Opus depends on what was negotiated in the SDP offer/answer.
+    /// 
+    /// Examples of dynamic payload types (these are NOT fixed):
+    /// - Opus: Often 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114
+    /// - G.726: Often 112, but varies
+    /// - iLBC: Often 113, but varies
+    /// - Speex: Often 114, but varies
+    pub const DYNAMIC_PAYLOAD_TYPES_NOTE: &str = "Dynamic payload types are assigned during SDP negotiation";
 }
 
 /// Media packet containing RTP payload and metadata

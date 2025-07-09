@@ -203,7 +203,7 @@ impl MediaSessionController {
         let (conference_event_tx, conference_event_rx) = mpsc::unbounded_channel();
         
         // Create audio mixer with the provided configuration
-        let audio_mixer = Arc::new(AudioMixer::new(conference_config.clone()).await?);
+        let audio_mixer: Arc<AudioMixer> = Arc::new(AudioMixer::new(conference_config.clone()).await?);
         
         // Set up conference event forwarding
         audio_mixer.set_event_sender(conference_event_tx.clone()).await;
