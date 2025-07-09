@@ -5,6 +5,7 @@
 
 pub mod audio;
 pub mod transcoding;  // Add transcoding module
+pub mod mapping;      // Add codec mapping utilities
 
 // Re-export audio codec types
 pub use audio::common::*;
@@ -14,6 +15,9 @@ pub use crate::relay::{G711PcmuCodec, G711PcmaCodec};
 
 // Re-export transcoding types
 pub use transcoding::{Transcoder, TranscodingPath, TranscodingStats};
+
+// Re-export codec mapping types
+pub use mapping::{CodecMapper, CodecCapability};
 
 /// Basic codec trait for RTP payload processing
 pub trait Codec: Send + Sync {

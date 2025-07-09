@@ -30,11 +30,11 @@ This document tracks the implementation of fixes for the critical codec negotiat
 
 ## 🗂️ Phase 1: Core Codec Mapping Infrastructure
 
-### Task 1: Create Codec Mapping Utilities ⏳
+### Task 1: Create Codec Mapping Utilities ✅
 **File**: `crates/media-core/src/codec/mapping.rs` (new file)  
 **Dependencies**: None  
 **Estimated Time**: 4 hours  
-**Status**: ⏳ Pending
+**Status**: ✅ Complete
 
 **Implementation Details**:
 ```rust
@@ -60,12 +60,12 @@ impl CodecMapper {
 ```
 
 **Testing Requirements**:
-- [ ] Unit tests for all codec mappings
-- [ ] Test dynamic codec registration
-- [ ] Test edge cases (unknown codecs, case sensitivity)
-- [ ] Test clock rate mappings
+- [x] Unit tests for all codec mappings
+- [x] Test dynamic codec registration
+- [x] Test edge cases (unknown codecs, case sensitivity)
+- [x] Test clock rate mappings
 
-**Notes**: Foundation for all other codec-related functionality.
+**Notes**: Foundation for all other codec-related functionality. ✅ **COMPLETED** - All 9 tests passing, including comprehensive coverage of bidirectional mapping, case-insensitive lookup, dynamic registration, and edge cases.
 
 ---
 
@@ -324,8 +324,16 @@ fallback_success_rate: fallback_stats.map(|s| s.success_rate).unwrap_or(1.0),
 
 ## 📝 Progress Log
 
-### [Date] - [Task] - [Status Change]
-_Progress updates will be added here as work progresses..._
+### 2024-12-28 - Task 1 - ✅ COMPLETED
+**Create Codec Mapping Utilities**: Successfully implemented `CodecMapper` with bidirectional mapping between codec names and payload types. Added comprehensive test suite (9 tests) covering:
+- Static codec mappings (PCMU, PCMA, G722, G729)
+- Dynamic codec registration (Opus)
+- Case-insensitive lookups
+- Clock rate mapping with fallbacks
+- Codec capability information
+- Edge case handling
+
+All 116 tests in media-core continue to pass. Foundation ready for next phase.
 
 ---
 
