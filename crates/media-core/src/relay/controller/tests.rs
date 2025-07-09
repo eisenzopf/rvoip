@@ -446,4 +446,111 @@ mod tests {
         println!("✅ Comprehensive codec matrix test completed");
         println!("   All RFC 3551 static codecs and Opus tested successfully!");
     }
+
+    #[tokio::test]
+    async fn test_update_media_codec_change() {
+        println!("🧪 Testing codec change in update_media");
+        
+        let controller = MediaSessionController::new();
+        
+        // Start session with PCMU
+        let initial_config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        let dialog_id = DialogId::new("codec_change_dialog");
+        let result = controller.start_media(dialog_id.clone(), initial_config).await;
+        assert!(result.is_ok(), "Should successfully start session with PCMU");
+        
+        // Verify initial codec
+        let session_info = controller.get_session_info(&dialog_id).await;
+        assert!(session_info.is_some());
+        assert_eq!(session_info.unwrap().config.preferred_codec, Some("PCMU".to_string()));
+        
+        // Update to Opus codec
+        let updated_config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: Some("opus".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        let result = controller.update_media(dialog_id.clone(), updated_config).await;
+        assert!(result.is_ok(), "Should successfully update codec to Opus");
+        
+        // Verify codec was updated
+        let session_info = controller.get_session_info(&dialog_id).await;
+        assert!(session_info.is_some());
+        assert_eq!(session_info.unwrap().config.preferred_codec, Some("opus".to_string()));
+        
+        println!("✅ Codec change test completed successfully!");
+    }
+    
+    #[tokio::test]
+    async fn test_update_media_combined_changes() {
+        println!("🧪 Testing combined remote address and codec change");
+        
+        let controller = MediaSessionController::new();
+        
+        // Start session with no remote address and PCMU
+        let initial_config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        let dialog_id = DialogId::new("combined_change_dialog");
+        let result = controller.start_media(dialog_id.clone(), initial_config).await;
+        assert!(result.is_ok(), "Should successfully start session");
+        
+        // Update both remote address and codec
+        let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 5060);
+        let updated_config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: Some(remote_addr),
+            preferred_codec: Some("opus".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        let result = controller.update_media(dialog_id.clone(), updated_config).await;
+        assert!(result.is_ok(), "Should successfully update both address and codec");
+        
+        // Verify both changes were applied
+        let session_info = controller.get_session_info(&dialog_id).await;
+        assert!(session_info.is_some());
+        let info = session_info.unwrap();
+        assert_eq!(info.config.remote_addr, Some(remote_addr));
+        assert_eq!(info.config.preferred_codec, Some("opus".to_string()));
+        
+        println!("✅ Combined change test completed successfully!");
+    }
+    
+    #[tokio::test]
+    async fn test_update_media_no_changes() {
+        println!("🧪 Testing update_media with no actual changes");
+        
+        let controller = MediaSessionController::new();
+        
+        // Start session
+        let config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), 5060)),
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        let dialog_id = DialogId::new("no_change_dialog");
+        let result = controller.start_media(dialog_id.clone(), config.clone()).await;
+        assert!(result.is_ok(), "Should successfully start session");
+        
+        // Update with same config (no changes)
+        let result = controller.update_media(dialog_id.clone(), config).await;
+        assert!(result.is_ok(), "Should successfully handle no-change update");
+        
+        println!("✅ No-change update test completed successfully!");
+    }
 } 

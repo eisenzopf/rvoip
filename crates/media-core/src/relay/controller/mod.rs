@@ -437,24 +437,28 @@ impl MediaSessionController {
         Ok(())
     }
     
-    /// Update media configuration (e.g., when remote address becomes known)
+    /// Update media configuration (e.g., when remote address becomes known or codec changes during re-INVITE)
     pub async fn update_media(&self, dialog_id: DialogId, config: MediaConfig) -> Result<()> {
-        debug!("Updating media session for dialog: {}", dialog_id);
+        info!("Updating media session for dialog: {}", dialog_id);
         
         let mut sessions = self.sessions.write().await;
         let session_info = sessions.get_mut(&dialog_id)
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
         
-        // Update configuration
+        // Store old configuration for change detection
         let old_remote = session_info.config.remote_addr;
+        let old_codec = session_info.config.preferred_codec.clone();
+        
+        // Update configuration
         session_info.config = config.clone();
         
-        // If remote address was set/changed, update the RTP session
-        if config.remote_addr != old_remote {
-            if let Some(remote_addr) = config.remote_addr {
-                // Update the RTP session's remote address
-                let mut rtp_sessions = self.rtp_sessions.write().await;
-                if let Some(rtp_wrapper) = rtp_sessions.get_mut(&dialog_id) {
+        let mut rtp_sessions = self.rtp_sessions.write().await;
+        if let Some(rtp_wrapper) = rtp_sessions.get_mut(&dialog_id) {
+            let mut updates_made = false;
+            
+            // Handle remote address changes
+            if config.remote_addr != old_remote {
+                if let Some(remote_addr) = config.remote_addr {
                     // Update the wrapper's remote address
                     rtp_wrapper.remote_addr = Some(remote_addr);
                     
@@ -463,17 +467,91 @@ impl MediaSessionController {
                     rtp_session.set_remote_addr(remote_addr).await;
                     
                     info!("✅ Updated RTP session remote address for dialog {}: {}", dialog_id, remote_addr);
+                    updates_made = true;
+                    
+                    // Emit remote address update event
+                    let _ = self.event_tx.send(MediaSessionEvent::RemoteAddressUpdated {
+                        dialog_id: dialog_id.clone(),
+                        remote_addr,
+                    });
+                }
+            }
+            
+            // Handle codec changes
+            if config.preferred_codec != old_codec {
+                // Determine new payload type and clock rate from codec
+                let new_payload_type = config.preferred_codec
+                    .as_ref()
+                    .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
+                    .unwrap_or(0); // Default to PCMU
+                
+                let new_clock_rate = config.preferred_codec
+                    .as_ref()
+                    .map(|codec| self.codec_mapper.get_clock_rate(codec))
+                    .unwrap_or(8000); // Default to 8kHz
+                
+                // Update the RTP session with new codec parameters
+                {
+                    let mut rtp_session = rtp_wrapper.session.lock().await;
+                    
+                    // Update payload type (synchronous method available)
+                    rtp_session.set_payload_type(new_payload_type);
+                    
+                    // Note: Clock rate updates require more complex changes to the session
+                    // since they affect scheduler timing and jitter buffer calculations.
+                    // For now, we log the intended change. Full implementation would require
+                    // recreating the session or adding clock rate update methods to rtp-core.
+                    if rtp_session.get_payload_type() != new_payload_type {
+                        warn!("Failed to update payload type for dialog {}", dialog_id);
+                    } else {
+                        debug!("Successfully updated payload type to {} for dialog {}", new_payload_type, dialog_id);
+                    }
+                    
+                    // TODO: Implement clock rate updates in rtp-core session
+                    // This would require updating the scheduler, jitter buffers, and timing calculations
+                    debug!("Clock rate change noted for dialog {} ({}Hz), but full update requires rtp-core enhancement", 
+                           dialog_id, new_clock_rate);
                 }
                 
-                // Emit event
-                let _ = self.event_tx.send(MediaSessionEvent::RemoteAddressUpdated {
+                updates_made = true;
+                
+                // Log codec change with detailed information
+                let old_codec_name = old_codec.as_deref().unwrap_or("PCMU");
+                let new_codec_name = config.preferred_codec.as_deref().unwrap_or("PCMU");
+                let old_payload_type = old_codec
+                    .as_ref()
+                    .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
+                    .unwrap_or(0);
+                let old_clock_rate = old_codec
+                    .as_ref()
+                    .map(|codec| self.codec_mapper.get_clock_rate(codec))
+                    .unwrap_or(8000);
+                
+                info!("🔄 Codec changed for dialog {}: {} -> {} (PT: {} -> {}, Clock: {}Hz -> {}Hz)", 
+                      dialog_id, 
+                      old_codec_name, new_codec_name,
+                      old_payload_type, new_payload_type,
+                      old_clock_rate, new_clock_rate);
+                
+                // Emit codec change event
+                let _ = self.event_tx.send(MediaSessionEvent::CodecChanged {
                     dialog_id: dialog_id.clone(),
-                    remote_addr,
+                    old_codec: old_codec.clone(),
+                    new_codec: config.preferred_codec.clone(),
+                    new_payload_type,
+                    new_clock_rate,
                 });
             }
+            
+            if updates_made {
+                info!("✅ Media session successfully updated for dialog: {}", dialog_id);
+            } else {
+                debug!("No RTP session updates needed for dialog: {}", dialog_id);
+            }
+        } else {
+            warn!("No RTP session found for dialog {} during update", dialog_id);
         }
         
-        debug!("Media session updated for dialog: {}", dialog_id);
         Ok(())
     }
     
