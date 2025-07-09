@@ -22,7 +22,9 @@ use rvoip_media_core::{
     prelude::{G711Codec, G711Variant, G711Config, Transcoder},
     integration::{RtpBridge, RtpBridgeConfig, events::RtpParameters},
     processing::format::FormatConverter,
-    codec::AudioCodec,
+    codec::{AudioCodec, mapping::CodecMapper},
+    relay::controller::codec_detection::CodecDetector,
+    relay::controller::codec_fallback::CodecFallbackManager,
 };
 
 /// Test helper to create a configured media engine
@@ -49,6 +51,21 @@ async fn create_test_rtp_client() -> Box<dyn MediaTransportClient> {
         .expect("Failed to create RTP client"))
 }
 
+/// Test helper to create RtpBridge with all required components
+fn create_test_rtp_bridge(event_tx: mpsc::UnboundedSender<rvoip_media_core::integration::events::IntegrationEvent>) -> RtpBridge {
+    let codec_mapper = Arc::new(CodecMapper::new());
+    let codec_detector = Arc::new(CodecDetector::new(codec_mapper.clone()));
+    let codec_fallback_manager = Arc::new(CodecFallbackManager::new(codec_detector.clone(), codec_mapper.clone()));
+    
+    RtpBridge::new(
+        RtpBridgeConfig::default(),
+        event_tx,
+        codec_mapper,
+        codec_detector,
+        codec_fallback_manager,
+    )
+}
+
 #[tokio::test]
 async fn test_basic_rtp_transport_integration() {
     // Setup: Create media engine and RTP client
@@ -65,7 +82,7 @@ async fn test_basic_rtp_transport_integration() {
     
     // Test: Set up RTP bridge integration
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    let rtp_bridge = RtpBridge::new(RtpBridgeConfig::default(), event_tx);
+    let rtp_bridge = create_test_rtp_bridge(event_tx);
     
     // Test: Register RTP session
     let session_id = MediaSessionId::new("rtp-session-001");
@@ -178,7 +195,7 @@ async fn test_rtp_bridge_packet_routing() {
     // Test that RtpBridge correctly routes packets between media-core and rtp-core
     
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
-    let rtp_bridge = RtpBridge::new(RtpBridgeConfig::default(), event_tx);
+    let rtp_bridge = create_test_rtp_bridge(event_tx);
     
     // Set up packet channels (simulation)
     let (incoming_packet_tx, incoming_packet_rx) = mpsc::unbounded_channel();
@@ -270,7 +287,7 @@ async fn test_integration_cleanup() {
     // Test that resources are properly cleaned up in integration scenarios
     
     let (event_tx, _event_rx) = mpsc::unbounded_channel();
-    let rtp_bridge = RtpBridge::new(RtpBridgeConfig::default(), event_tx);
+    let rtp_bridge = create_test_rtp_bridge(event_tx);
     
     // Create multiple sessions
     for i in 0..5 {

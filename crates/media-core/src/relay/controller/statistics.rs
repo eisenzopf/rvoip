@@ -55,6 +55,11 @@ impl MediaSessionController {
         // Get stream statistics
         let stream_stats = self.get_stream_statistics(dialog_id).await;
         
+        // Get actual codec from session configuration
+        let current_codec = session_info.config.preferred_codec.clone()
+            .or_else(|| Some("PCMU".to_string())); // Default to PCMU if none set
+
+        
         // Calculate quality metrics from RTP stats
         let quality_metrics = rtp_stats.as_ref().map(|stats| {
             QualityMetrics {
@@ -83,7 +88,7 @@ impl MediaSessionController {
                 frames_decoded: 0, // TODO: Track in media processing
                 processing_errors: 0,
                 codec_changes: 0,
-                current_codec: Some("PCMU".to_string()),
+                current_codec,
             },
             quality_metrics,
             session_start: session_info.created_at,
@@ -134,10 +139,13 @@ impl MediaSessionController {
     pub async fn start_statistics_monitoring(&self, dialog_id: DialogId, interval_duration: Duration) -> Result<()> {
         info!("📊 Starting statistics monitoring for dialog: {} (interval: {:?})", dialog_id, interval_duration);
         
-        // Verify session exists
-        if !self.sessions.read().await.contains_key(&dialog_id) {
-            return Err(Error::session_not_found(dialog_id.as_str()));
-        }
+        // Verify session exists and get codec information
+        let session_codec = {
+            let sessions = self.sessions.read().await;
+            let session_info = sessions.get(&dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            session_info.config.preferred_codec.clone()
+        };
         
         let event_tx = self.event_tx.clone();
         let dialog_id_clone = dialog_id.clone();
@@ -152,6 +160,9 @@ impl MediaSessionController {
         tokio::spawn(async move {
             let mut interval_timer = interval(interval_duration);
             let mut last_quality_alert = Instant::now();
+            
+            // Use the captured codec information
+            let current_codec = session_codec.clone().or_else(|| Some("PCMU".to_string()));
             
             loop {
                 interval_timer.tick().await;
@@ -195,7 +206,7 @@ impl MediaSessionController {
                         frames_decoded: 0,
                         processing_errors: 0,
                         codec_changes: 0,
-                        current_codec: Some("PCMU".to_string()),
+                        current_codec: current_codec.clone(),
                     },
                     quality_metrics: Some(quality_metrics.clone()),
                     session_start: Instant::now(), // We don't have access to wrapper.created_at
@@ -236,5 +247,217 @@ impl MediaSessionController {
         });
         
         Ok(())
+    }
+
+} 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::DialogId;
+    use crate::relay::controller::types::MediaConfig;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tokio::time::{sleep, Duration};
+    use std::collections::HashMap;
+    
+    async fn create_test_controller() -> MediaSessionController {
+        MediaSessionController::new()
+    }
+    
+    #[tokio::test]
+    async fn test_codec_statistics_pcmu() {
+        let controller = create_test_controller().await;
+        let dialog_id = DialogId::new("test-dialog-pcmu");
+        
+        // Configure session with PCMU codec
+        let config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        // Start media session
+        controller.start_media(dialog_id.clone(), config).await.unwrap();
+        
+        // Get statistics
+        let stats = controller.get_media_statistics(&dialog_id).await.unwrap();
+        
+        // Verify codec is correctly tracked
+        assert_eq!(stats.media_stats.current_codec, Some("PCMU".to_string()));
+        
+        // Cleanup
+        controller.stop_media(&dialog_id).await.unwrap();
+    }
+    
+    #[tokio::test]
+    async fn test_codec_statistics_opus() {
+        let controller = create_test_controller().await;
+        let dialog_id = DialogId::new("test-dialog-opus");
+        
+        // Configure session with Opus codec
+        let config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: Some("Opus".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        // Start media session
+        controller.start_media(dialog_id.clone(), config).await.unwrap();
+        
+        // Get statistics
+        let stats = controller.get_media_statistics(&dialog_id).await.unwrap();
+        
+        // Verify codec is correctly tracked
+        assert_eq!(stats.media_stats.current_codec, Some("Opus".to_string()));
+        
+        // Cleanup
+        controller.stop_media(&dialog_id).await.unwrap();
+    }
+    
+    #[tokio::test]
+    async fn test_codec_statistics_default() {
+        let controller = create_test_controller().await;
+        let dialog_id = DialogId::new("test-dialog-default");
+        
+        // Configure session with no preferred codec (should default to PCMU)
+        let config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: None,
+            parameters: HashMap::new(),
+        };
+        
+        // Start media session
+        controller.start_media(dialog_id.clone(), config).await.unwrap();
+        
+        // Get statistics
+        let stats = controller.get_media_statistics(&dialog_id).await.unwrap();
+        
+        // Verify codec defaults to PCMU
+        assert_eq!(stats.media_stats.current_codec, Some("PCMU".to_string()));
+        
+        // Cleanup
+        controller.stop_media(&dialog_id).await.unwrap();
+    }
+    
+    #[tokio::test]
+    async fn test_codec_statistics_after_update() {
+        let controller = create_test_controller().await;
+        let dialog_id = DialogId::new("test-dialog-update");
+        
+        // Start with PCMU codec
+        let initial_config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        controller.start_media(dialog_id.clone(), initial_config).await.unwrap();
+        
+        // Verify initial codec
+        let initial_stats = controller.get_media_statistics(&dialog_id).await.unwrap();
+        assert_eq!(initial_stats.media_stats.current_codec, Some("PCMU".to_string()));
+        
+        // Update to Opus codec
+        let updated_config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: Some("Opus".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        controller.update_media(dialog_id.clone(), updated_config).await.unwrap();
+        
+        // Verify updated codec
+        let updated_stats = controller.get_media_statistics(&dialog_id).await.unwrap();
+        assert_eq!(updated_stats.media_stats.current_codec, Some("Opus".to_string()));
+        
+        // Cleanup
+        controller.stop_media(&dialog_id).await.unwrap();
+    }
+    
+    #[tokio::test]
+    async fn test_statistics_monitoring_codec_tracking() {
+        let controller = create_test_controller().await;
+        let dialog_id = DialogId::new("test-dialog-monitoring");
+        
+        // Configure session with Opus codec
+        let config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: Some("Opus".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        // Start media session
+        controller.start_media(dialog_id.clone(), config).await.unwrap();
+        
+        // Get event receiver
+        let mut event_receiver = controller.take_event_receiver().await.unwrap();
+        
+        // Start statistics monitoring
+        let monitoring_interval = Duration::from_millis(100);
+        controller.start_statistics_monitoring(dialog_id.clone(), monitoring_interval).await.unwrap();
+        
+        // Wait for at least one statistics update
+        sleep(Duration::from_millis(150)).await;
+        
+        // Check for statistics update events
+        let mut found_stats_event = false;
+        while let Ok(event) = event_receiver.try_recv() {
+            if let MediaSessionEvent::StatisticsUpdated { stats, .. } = event {
+                // Verify the statistics contain the correct codec
+                assert_eq!(stats.media_stats.current_codec, Some("Opus".to_string()));
+                found_stats_event = true;
+                break;
+            }
+        }
+        
+        assert!(found_stats_event, "Should have received statistics update event");
+        
+        // Cleanup
+        controller.stop_media(&dialog_id).await.unwrap();
+    }
+    
+    #[tokio::test]
+    async fn test_codec_statistics_multiple_sessions() {
+        let controller = create_test_controller().await;
+        let dialog_id_1 = DialogId::new("test-dialog-1");
+        let dialog_id_2 = DialogId::new("test-dialog-2");
+        
+        // Configure first session with PCMU
+        let config_1 = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        // Configure second session with Opus
+        let config_2 = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
+            remote_addr: None,
+            preferred_codec: Some("Opus".to_string()),
+            parameters: HashMap::new(),
+        };
+        
+        // Start both sessions
+        controller.start_media(dialog_id_1.clone(), config_1).await.unwrap();
+        controller.start_media(dialog_id_2.clone(), config_2).await.unwrap();
+        
+        // Get statistics for both sessions
+        let stats_1 = controller.get_media_statistics(&dialog_id_1).await.unwrap();
+        let stats_2 = controller.get_media_statistics(&dialog_id_2).await.unwrap();
+        
+        // Verify each session has the correct codec
+        assert_eq!(stats_1.media_stats.current_codec, Some("PCMU".to_string()));
+        assert_eq!(stats_2.media_stats.current_codec, Some("Opus".to_string()));
+        
+        // Cleanup
+        controller.stop_media(&dialog_id_1).await.unwrap();
+        controller.stop_media(&dialog_id_2).await.unwrap();
     }
 } 
