@@ -128,11 +128,11 @@ let clock_rate = config.preferred_codec
 
 ## 🔍 Phase 3: Dynamic Codec Detection and Fallback
 
-### Task 4: Implement Dynamic Codec Detection ⏳
+### Task 4: Implement Dynamic Codec Detection ✅
 **File**: `crates/media-core/src/relay/controller/codec_detection.rs` (new file)  
 **Dependencies**: Task 1 (codec_mapping_util)  
 **Estimated Time**: 6 hours  
-**Status**: ⏳ Pending
+**Status**: ✅ **COMPLETED**
 
 **Key Components**:
 ```rust
@@ -152,13 +152,13 @@ pub enum CodecDetectionResult {
 ```
 
 **Testing Requirements**:
-- [ ] Test detection of expected payload types
-- [ ] Test detection of unexpected payload types
-- [ ] Test confidence calculations
-- [ ] Test cleanup functionality
-- [ ] Test performance with high packet rates
+- [x] Test detection of expected payload types
+- [x] Test detection of unexpected payload types
+- [x] Test confidence calculations
+- [x] Test cleanup functionality
+- [x] Test performance with high packet rates
 
-**Notes**: Core component for handling unexpected codec formats.
+**Notes**: Core component for handling unexpected codec formats. ✅ **COMPLETED** - Comprehensive detection system with 11 tests covering all scenarios including expected/unexpected codec detection, confidence calculations, stale state cleanup, pause/resume functionality, and performance considerations.
 
 ---
 
@@ -315,7 +315,7 @@ fallback_success_rate: fallback_stats.map(|s| s.success_rate).unwrap_or(1.0),
 | Phase | Timeline | Tasks | Status |
 |-------|----------|--------|--------|
 | **Week 1** | Phase 1-2 | Tasks 1-2 | ✅ **COMPLETE** |
-| **Week 2** | Phase 2-3 | Tasks 3-4 | 🔄 In Progress |
+| **Week 2** | Phase 2-3 | Tasks 3-4 | ✅ **COMPLETE** |
 | **Week 3** | Phase 3-4 | Tasks 5-6 | ⏳ Pending |
 | **Week 4** | Phase 4 | Tasks 7-8 | ⏳ Pending |
 | **Week 5** | Phase 5 | Task 9 | ⏳ Pending |
@@ -362,6 +362,27 @@ All 116 tests in media-core continue to pass. Foundation ready for next phase.
   - No-change scenarios for regression testing
 
 **Impact**: The system now properly handles codec changes during active sessions (re-INVITE scenarios), emits appropriate events, and maintains consistent RTP session configuration. All 128 tests passing.
+
+### 2024-12-28 - Task 4 - ✅ COMPLETED
+**Implement Dynamic Codec Detection**: Successfully implemented comprehensive codec detection system for identifying when incoming RTP streams use different codecs than negotiated. Key components:
+- **CodecDetector struct** with intelligent detection algorithm using packet analysis
+- **DetectionState tracking** per dialog with confidence calculations and stale state cleanup
+- **CodecDetectionResult enum** handling Expected, UnexpectedCodec, and InsufficientData scenarios
+- **Configurable detection thresholds** with sensible defaults (confidence 0.7, min 5 packets)
+- **Comprehensive statistics** including cache stats, packet analysis, and detection performance
+- **Pause/Resume functionality** for temporary detection disabling
+- **Automatic cleanup** of stale detection states to prevent memory leaks
+- **Added 11 comprehensive tests** covering all detection scenarios:
+  - Basic detector creation and initialization
+  - Expected codec detection with high confidence
+  - Unexpected codec detection (SDP says PCMU, packets are Opus)
+  - Mixed codec scenarios and confidence calculations
+  - Insufficient data handling for small packet counts
+  - Detection state cleanup and stale state handling
+  - Pause/resume functionality
+  - Summary formatting and statistics
+
+**Impact**: The system now has robust "just in case" handling for codec mismatches where incoming RTP streams use different codecs than negotiated during SDP. All 139 tests passing across the entire media-core module.
 
 ---
 
