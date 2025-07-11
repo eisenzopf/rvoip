@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use rvoip_client_core::audio::{
     AudioDeviceManager, AudioDirection, AudioFormat, AudioDevice,
+    device::AudioFrame,
 };
 
 #[tokio::main]
@@ -36,19 +37,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎤 Input Device: {} ({})", input_device.info().name, input_device.info().id);
     println!("🔊 Output Device: {} ({})", output_device.info().name, output_device.info().id);
     
-    // Find a compatible format for both devices
-    println!("\n🔧 Finding compatible audio format...");
-    let format = find_compatible_format(&input_device, &output_device).await?;
-    println!("✅ Using format: {}Hz, {} channels, {}ms frames", 
-             format.sample_rate, format.channels, format.frame_size_ms);
+    // Find compatible formats for input and output devices
+    println!("\n🔧 Finding compatible audio formats...");
+    let (input_format, output_format) = find_compatible_formats(&input_device, &output_device).await?;
     
     // Start audio capture
     println!("\n🎙️  Starting audio capture...");
-    let mut audio_receiver = input_device.start_capture(format.clone()).await?;
+    let mut audio_receiver = input_device.start_capture(input_format.clone()).await?;
     
     // Start audio playback
     println!("🔊 Starting audio playback...");
-    let audio_sender = output_device.start_playback(format.clone()).await?;
+    let audio_sender = output_device.start_playback(output_format.clone()).await?;
     
     println!("\n▶️  Audio loopback is now active!");
     println!("   Press Ctrl+C to stop...");
@@ -64,13 +63,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Receive audio frame from microphone
         match timeout(Duration::from_millis(100), audio_receiver.recv()).await {
             Ok(Some(audio_frame)) => {
+                // Convert channel format if needed (e.g., mono mic → stereo speakers)
+                let converted_frame = convert_audio_channels(audio_frame.clone(), output_format.channels);
+                
                 // Send the frame to speakers
-                if let Err(e) = audio_sender.send(audio_frame.clone()).await {
+                if let Err(e) = audio_sender.send(converted_frame).await {
                     eprintln!("❌ Failed to send audio frame: {}", e);
                     break;
                 }
                 
-                // Update statistics
+                // Update statistics (use original frame for stats)
                 frames_processed += 1;
                 total_samples += audio_frame.samples.len() as u64;
                 
@@ -114,46 +116,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Find a compatible audio format that both devices support
-async fn find_compatible_format(
+/// Find compatible audio formats for input and output devices
+/// Returns (input_format, output_format) that are compatible with each device
+async fn find_compatible_formats(
     input_device: &Arc<dyn AudioDevice>, 
     output_device: &Arc<dyn AudioDevice>
-) -> Result<AudioFormat, Box<dyn std::error::Error>> {
-    let test_formats = vec![
-        AudioFormat::new(48000, 1, 16, 20),     // 48kHz mono
-        AudioFormat::new(44100, 1, 16, 20),     // 44.1kHz mono
-        AudioFormat::wideband_voip(),           // 16kHz mono
-        AudioFormat::default_voip(),            // 8kHz mono
-        AudioFormat::new(48000, 2, 16, 20),     // 48kHz stereo
-        AudioFormat::new(44100, 2, 16, 20),     // 44.1kHz stereo
-    ];
-    
-    for format in test_formats {
-        if input_device.supports_format(&format) && output_device.supports_format(&format) {
-            return Ok(format);
-        }
-    }
-    
-    // If no common format found, create one from device capabilities
+) -> Result<(AudioFormat, AudioFormat), Box<dyn std::error::Error>> {
     let input_info = input_device.info();
     let output_info = output_device.info();
     
-    // Find common sample rate
+    // Find common sample rate (this MUST match for audio sync)
     let common_sample_rate = input_info.supported_sample_rates.iter()
         .find(|&rate| output_info.supported_sample_rates.contains(rate))
         .copied()
         .ok_or("No common sample rate found between input and output devices")?;
     
-    // Find common channel count (prefer mono for VoIP)
-    let common_channels = if input_info.supported_channels.contains(&1) && 
-                            output_info.supported_channels.contains(&1) {
-        1
+    // Input format: Use best supported channel count for input device
+    let input_channels = if input_info.supported_channels.contains(&1) {
+        1  // Prefer mono for microphones
     } else {
-        input_info.supported_channels.iter()
-            .find(|&channels| output_info.supported_channels.contains(channels))
-            .copied()
-            .ok_or("No common channel count found between input and output devices")?
+        *input_info.supported_channels.first()
+            .ok_or("Input device has no supported channels")?
     };
     
-    Ok(AudioFormat::new(common_sample_rate, common_channels, 16, 20))
+    // Output format: Use best supported channel count for output device  
+    let output_channels = if output_info.supported_channels.contains(&2) {
+        2  // Prefer stereo for speakers
+    } else if output_info.supported_channels.contains(&1) {
+        1  // Fall back to mono
+    } else {
+        *output_info.supported_channels.first()
+            .ok_or("Output device has no supported channels")?
+    };
+    
+    let input_format = AudioFormat::new(common_sample_rate, input_channels, 16, 20);
+    let output_format = AudioFormat::new(common_sample_rate, output_channels, 16, 20);
+    
+    println!("🔧 Using different formats for optimal quality:");
+    println!("   Input:  {}Hz, {} channel(s) (microphone)", input_format.sample_rate, input_format.channels);
+    println!("   Output: {}Hz, {} channel(s) (speakers)", output_format.sample_rate, output_format.channels);
+    
+    Ok((input_format, output_format))
+}
+
+/// Convert audio frame between different channel counts
+fn convert_audio_channels(frame: AudioFrame, target_channels: u16) -> AudioFrame {
+    
+    if frame.format.channels == target_channels {
+        return frame; // No conversion needed
+    }
+    
+    let converted_samples = if frame.format.channels == 1 && target_channels == 2 {
+        // Mono to Stereo: duplicate each sample to both channels
+        let mut stereo_samples = Vec::with_capacity(frame.samples.len() * 2);
+        for sample in &frame.samples {
+            stereo_samples.push(*sample); // Left channel
+            stereo_samples.push(*sample); // Right channel
+        }
+        stereo_samples
+    } else if frame.format.channels == 2 && target_channels == 1 {
+        // Stereo to Mono: average left and right channels
+        let mut mono_samples = Vec::with_capacity(frame.samples.len() / 2);
+        for chunk in frame.samples.chunks_exact(2) {
+            let left = chunk[0] as i32;
+            let right = chunk[1] as i32;
+            let mono = ((left + right) / 2) as i16;
+            mono_samples.push(mono);
+        }
+        mono_samples
+    } else {
+        // Unsupported conversion, just return original
+        frame.samples
+    };
+    
+    let mut converted_format = frame.format.clone();
+    converted_format.channels = target_channels;
+    
+    AudioFrame::new(converted_samples, converted_format, frame.timestamp_ms)
 } 

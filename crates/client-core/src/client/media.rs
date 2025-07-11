@@ -3552,4 +3552,278 @@ impl super::manager::ClientManager {
         tracing::info!("Stopped all audio sessions");
         Ok(())
     }
+    
+    // =============================================================================
+    // REAL-TIME AUDIO STREAMING API
+    // =============================================================================
+    
+    /// Subscribe to audio frames from a call for real-time playback
+    /// 
+    /// Returns a subscriber that receives decoded audio frames from the RTP stream
+    /// for the specified call. These frames can be played through speakers or
+    /// processed for audio analysis.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to subscribe to
+    /// 
+    /// # Returns
+    /// 
+    /// Returns an `AudioFrameSubscriber` that can be used to receive audio frames.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::{ClientManager, call::CallId};
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Subscribe to incoming audio frames
+    /// let subscriber = client.subscribe_to_audio_frames(&call_id).await?;
+    /// 
+    /// // Process frames in a background task
+    /// tokio::spawn(async move {
+    ///     while let Ok(frame) = subscriber.recv() {
+    ///         // Play frame through speakers or process it
+    ///         println!("Received audio frame: {} samples at {}Hz", 
+    ///                  frame.samples.len(), frame.sample_rate);
+    ///     }
+    /// });
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn subscribe_to_audio_frames(&self, call_id: &CallId) -> ClientResult<rvoip_session_core::api::types::AudioFrameSubscriber> {
+        let session_id = self.session_mapping.get(call_id)
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+            .clone();
+            
+        // Use session-core to subscribe to audio frames
+        MediaControl::subscribe_to_audio_frames(&self.coordinator, &session_id)
+            .await
+            .map_err(|e| ClientError::CallSetupFailed { 
+                reason: format!("Failed to subscribe to audio frames: {}", e) 
+            })
+    }
+    
+    /// Send an audio frame for encoding and transmission
+    /// 
+    /// Sends an audio frame to be encoded and transmitted via RTP for the specified call.
+    /// This is typically used for microphone input or generated audio content.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call to send audio on
+    /// * `audio_frame` - The audio frame to send
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if the frame was sent successfully.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::{ClientManager, call::CallId};
+    /// # use rvoip_session_core::api::types::AudioFrame;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Create an audio frame (typically from microphone)
+    /// let samples = vec![0; 160]; // 20ms of silence at 8kHz
+    /// let frame = AudioFrame::new(samples, 8000, 1, 12345);
+    /// 
+    /// // Send the frame for transmission
+    /// client.send_audio_frame(&call_id, frame).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_audio_frame(&self, call_id: &CallId, audio_frame: rvoip_session_core::api::types::AudioFrame) -> ClientResult<()> {
+        let session_id = self.session_mapping.get(call_id)
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+            .clone();
+            
+        // Use session-core to send audio frame
+        MediaControl::send_audio_frame(&self.coordinator, &session_id, audio_frame)
+            .await
+            .map_err(|e| ClientError::CallSetupFailed { 
+                reason: format!("Failed to send audio frame: {}", e) 
+            })
+    }
+    
+    /// Get current audio stream configuration for a call
+    /// 
+    /// Returns the current audio streaming configuration for the specified call,
+    /// including sample rate, channels, codec, and processing settings.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call
+    /// 
+    /// # Returns
+    /// 
+    /// Returns the current `AudioStreamConfig` or `None` if no stream is configured.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::{ClientManager, call::CallId};
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// if let Some(config) = client.get_audio_stream_config(&call_id).await? {
+    ///     println!("Audio stream: {}Hz, {} channels, codec: {}", 
+    ///              config.sample_rate, config.channels, config.codec);
+    /// } else {
+    ///     println!("No audio stream configured for call");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_audio_stream_config(&self, call_id: &CallId) -> ClientResult<Option<rvoip_session_core::api::types::AudioStreamConfig>> {
+        let session_id = self.session_mapping.get(call_id)
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+            .clone();
+            
+        // Use session-core to get audio stream config
+        MediaControl::get_audio_stream_config(&self.coordinator, &session_id)
+            .await
+            .map_err(|e| ClientError::CallSetupFailed { 
+                reason: format!("Failed to get audio stream config: {}", e) 
+            })
+    }
+    
+    /// Set audio stream configuration for a call
+    /// 
+    /// Configures the audio streaming parameters for the specified call,
+    /// including sample rate, channels, codec preferences, and audio processing settings.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call
+    /// * `config` - The audio stream configuration to apply
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if the configuration was applied successfully.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::{ClientManager, call::CallId};
+    /// # use rvoip_session_core::api::types::AudioStreamConfig;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Configure high-quality audio stream
+    /// let config = AudioStreamConfig {
+    ///     sample_rate: 48000,
+    ///     channels: 1,
+    ///     codec: "Opus".to_string(),
+    ///     frame_size_ms: 20,
+    ///     enable_aec: true,
+    ///     enable_agc: true,
+    ///     enable_vad: true,
+    /// };
+    /// 
+    /// client.set_audio_stream_config(&call_id, config).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_audio_stream_config(&self, call_id: &CallId, config: rvoip_session_core::api::types::AudioStreamConfig) -> ClientResult<()> {
+        let session_id = self.session_mapping.get(call_id)
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+            .clone();
+            
+        // Use session-core to set audio stream config
+        MediaControl::set_audio_stream_config(&self.coordinator, &session_id, config)
+            .await
+            .map_err(|e| ClientError::CallSetupFailed { 
+                reason: format!("Failed to set audio stream config: {}", e) 
+            })
+    }
+    
+    /// Start audio streaming for a call
+    /// 
+    /// Begins the audio streaming pipeline for the specified call, enabling
+    /// real-time audio frame processing. This must be called before audio frames
+    /// can be sent or received.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if the audio stream started successfully.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::{ClientManager, call::CallId};
+    /// # use rvoip_session_core::api::types::AudioStreamConfig;
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Configure and start audio streaming
+    /// let config = AudioStreamConfig {
+    ///     sample_rate: 8000,
+    ///     channels: 1,
+    ///     codec: "PCMU".to_string(),
+    ///     frame_size_ms: 20,
+    ///     enable_aec: true,
+    ///     enable_agc: true,
+    ///     enable_vad: true,
+    /// };
+    /// 
+    /// client.set_audio_stream_config(&call_id, config).await?;
+    /// client.start_audio_stream(&call_id).await?;
+    /// println!("Audio streaming started for call {}", call_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn start_audio_stream(&self, call_id: &CallId) -> ClientResult<()> {
+        let session_id = self.session_mapping.get(call_id)
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+            .clone();
+            
+        // Use session-core to start audio stream
+        MediaControl::start_audio_stream(&self.coordinator, &session_id)
+            .await
+            .map_err(|e| ClientError::CallSetupFailed { 
+                reason: format!("Failed to start audio stream: {}", e) 
+            })
+    }
+    
+    /// Stop audio streaming for a call
+    /// 
+    /// Stops the audio streaming pipeline for the specified call, disabling
+    /// real-time audio frame processing. This cleans up resources and stops
+    /// audio transmission.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `call_id` - The unique identifier of the call
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if the audio stream stopped successfully.
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// # use rvoip_client_core::{ClientManager, call::CallId};
+    /// # use std::sync::Arc;
+    /// # async fn example(client: Arc<ClientManager>, call_id: CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Stop audio streaming
+    /// client.stop_audio_stream(&call_id).await?;
+    /// println!("Audio streaming stopped for call {}", call_id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn stop_audio_stream(&self, call_id: &CallId) -> ClientResult<()> {
+        let session_id = self.session_mapping.get(call_id)
+            .ok_or(ClientError::CallNotFound { call_id: *call_id })?
+            .clone();
+            
+        // Use session-core to stop audio stream
+        MediaControl::stop_audio_stream(&self.coordinator, &session_id)
+            .await
+            .map_err(|e| ClientError::CallSetupFailed { 
+                reason: format!("Failed to stop audio stream: {}", e) 
+            })
+    }
 }
