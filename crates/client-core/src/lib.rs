@@ -261,6 +261,13 @@ pub use audio::{
 // Re-export commonly used types from session-core (for convenience)
 pub use rvoip_session_core::api::types::SessionId;
 
+// Re-export streaming audio types from session-core
+pub use rvoip_session_core::api::types::{
+    AudioFrame, 
+    AudioFrameSubscriber, 
+    AudioStreamConfig
+};
+
 /// Client-core version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

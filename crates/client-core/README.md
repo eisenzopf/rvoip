@@ -109,6 +109,18 @@ Clean separation of concerns across the client interface:
   - ✅ `get_call_quality()` for comprehensive call quality reporting
   - ✅ Custom SDP attribute support for advanced media configuration
 
+#### **Real-Time Audio Streaming API**
+- ✅ **Frame-Level Audio Processing**: Direct access to RTP audio streams
+  - ✅ `subscribe_to_audio_frames()` - Receive decoded audio frames for playback
+  - ✅ `send_audio_frame()` - Send audio frames for encoding and transmission
+  - ✅ `set_audio_stream_config()` - Configure sample rate, codec, and processing
+  - ✅ `start_audio_stream()` / `stop_audio_stream()` - Control streaming pipeline
+- ✅ **Real-Time Integration**: Perfect for audio device integration
+  - ✅ Microphone capture with frame-by-frame processing
+  - ✅ Speaker playback with real-time audio delivery
+  - ✅ Audio effects and processing pipelines
+  - ✅ Custom audio sources and sinks
+
 #### **Event-Driven Architecture**
 - ✅ **Comprehensive Event System**: Complete client event infrastructure
   - ✅ `ClientEvent` enum with all client lifecycle events
@@ -480,6 +492,72 @@ client.transfer_call(&call_id, "sip:charlie@example.com").await?;
 // Get call information
 let call_info = client.get_call(&call_id).await?;
 println!("Call duration: {:?}", call_info.connected_at);
+```
+
+### **Real-Time Audio Streaming**
+
+```rust
+use rvoip_client_core::{AudioFrame, AudioStreamConfig};
+
+// Start real-time audio streaming for a call
+let call_id = client.make_call("sip:alice@example.com").await?;
+
+// Configure high-quality audio stream
+let config = AudioStreamConfig {
+    sample_rate: 48000,
+    channels: 1,
+    codec: "Opus".to_string(),
+    frame_size_ms: 20,
+    enable_aec: true,      // Echo cancellation
+    enable_agc: true,      // Auto gain control
+    enable_vad: true,      // Voice activity detection
+};
+
+client.set_audio_stream_config(&call_id, config).await?;
+client.start_audio_stream(&call_id).await?;
+
+// Subscribe to incoming audio frames (for speaker playback)
+let audio_subscriber = client.subscribe_to_audio_frames(&call_id).await?;
+tokio::spawn(async move {
+    while let Ok(frame) = audio_subscriber.recv() {
+        // Process incoming audio frame (play through speakers)
+        play_audio_frame_to_speaker(frame).await;
+    }
+});
+
+// Send outgoing audio frames (from microphone)
+let client_clone = client.clone();
+let call_id_clone = call_id.clone();
+tokio::spawn(async move {
+    loop {
+        // Capture audio frame from microphone
+        if let Some(frame) = capture_audio_frame_from_microphone().await {
+            // Send frame for encoding and transmission
+            let _ = client_clone.send_audio_frame(&call_id_clone, frame).await;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+    }
+});
+
+// Audio frame processing example
+async fn play_audio_frame_to_speaker(frame: AudioFrame) {
+    // Send to audio device (speakers/headphones)
+    println!("Playing {} samples at {}Hz", frame.samples.len(), frame.sample_rate);
+    // Integrate with audio libraries like cpal, portaudio, etc.
+}
+
+async fn capture_audio_frame_from_microphone() -> Option<AudioFrame> {
+    // Capture from microphone using audio libraries
+    // Return AudioFrame with captured samples
+    let samples = vec![0i16; 480]; // 20ms at 24kHz (example)
+    Some(AudioFrame::new(samples, 24000, 1, get_timestamp()))
+}
+
+fn get_timestamp() -> u32 {
+    // Return current RTP timestamp
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u32
+}
 ```
 
 ## 🌐 **Network Configuration**
