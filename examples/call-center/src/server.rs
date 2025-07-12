@@ -12,7 +12,7 @@ use tracing::{info, error};
 use clap::Parser;
 use std::net::SocketAddr;
 
-use rvoip_call_engine::{prelude::*, CallCenterServerBuilder, CallCenterConfig};
+use rvoip::call_engine::{prelude::*, CallCenterServerBuilder, CallCenterConfig};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Call Center Server", long_about = None)]

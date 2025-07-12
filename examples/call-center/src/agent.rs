@@ -14,13 +14,15 @@ use tracing::{info, warn, error, debug};
 use clap::Parser;
 use std::net::SocketAddr;
 
-use rvoip_client_core::{
-    ClientConfig, ClientEventHandler, ClientError, ClientManager,
-    IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
-    CallAction, CallId, CallState, MediaConfig,
-    registration::{RegistrationConfig, RegistrationStatus},
-    audio::{AudioDeviceManager, AudioDirection},
-    AudioStreamConfig,
+use rvoip::{
+    client_core::{
+        ClientConfig, ClientEventHandler, ClientError, ClientManager,
+        IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
+        CallAction, CallId, CallState, MediaConfig,
+        registration::{RegistrationConfig, RegistrationStatus},
+        audio::{AudioDeviceManager, AudioDirection},
+        AudioStreamConfig,
+    },
 };
 use async_trait::async_trait;
 
