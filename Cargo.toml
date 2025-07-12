@@ -12,7 +12,6 @@ members = [
     "crates/call-engine",
     "crates/client-core",
     "crates/rvoip",
-    "crates/call-engine/examples/agent-customer-client",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,
@@ -28,7 +27,6 @@ default-members = [
     "crates/call-engine",
     "crates/client-core",
     "crates/rvoip",
-    "crates/call-engine/examples/agent-customer-client",
 ]
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
