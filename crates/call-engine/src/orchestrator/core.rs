@@ -277,8 +277,12 @@ impl CallCenterEngine {
         });
         
         // Create session coordinator with our CallHandler
+        // CRITICAL: Configure both SIP address and media bind address to use the configured IP
+        let sip_uri = format!("sip:call-center@{}", config.general.local_ip);
         let session_coordinator = SessionManagerBuilder::new()
             .with_sip_port(config.general.local_signaling_addr.port())
+            .with_local_address(sip_uri)  // Use configured IP for SIP URIs
+            .with_local_bind_addr(config.general.local_signaling_addr)  // Use configured IP for binding
             .with_media_ports(
                 config.general.local_media_addr.port(),
                 config.general.local_media_addr.port() + 1000
