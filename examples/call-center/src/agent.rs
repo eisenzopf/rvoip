@@ -37,7 +37,7 @@ struct Args {
     #[arg(short, long, default_value = "127.0.0.1:5060")]
     server: String,
     
-    /// Server domain/IP for SIP URIs
+    /// Local IP address for this agent (used for SIP binding and signaling)
     #[arg(short, long, default_value = "127.0.0.1")]
     domain: String,
     
@@ -220,18 +220,9 @@ impl ClientEventHandler for AgentHandler {
         info!("📞 [{}] Incoming call from {} (call_id: {})", 
             self.name, call_info.caller_uri, call_info.call_id);
         
-        // Set up audio configuration BEFORE accepting the call
-        // This ensures the SDP answer can be generated with proper audio capabilities
-        info!("🔧 [{}] Setting up audio for incoming call {}", self.name, call_info.call_id);
-        
-        if let Err(e) = self.setup_audio_for_call(&call_info.call_id).await {
-            error!("❌ [{}] Failed to setup audio for incoming call: {}", self.name, e);
-            info!("🚫 [{}] Rejecting call {} due to audio setup failure", self.name, call_info.call_id);
-            return CallAction::Reject;
-        }
-        
-        // Accept the call now that audio is configured
-        info!("✅ [{}] Accepting call {} with audio configured", self.name, call_info.call_id);
+        // Just accept the call - we'll set up audio when Connected
+        // The client-core will handle SDP generation automatically
+        info!("✅ [{}] Accepting call {} - audio will be set up when connected", self.name, call_info.call_id);
         CallAction::Accept
     }
     
@@ -250,15 +241,14 @@ impl ClientEventHandler for AgentHandler {
         
         match status_info.new_state {
             CallState::Connected => {
-                info!("🎉 [{}] Call {} connected! Audio should already be configured.", self.name, status_info.call_id);
+                info!("🎉 [{}] Call {} connected! Setting up real audio...", self.name, status_info.call_id);
                 
-                // Audio was already set up in on_incoming_call, but verify it's working
-                // by checking if we can get the client (this is mainly for logging)
-                let client_guard = self.client.read().await;
-                if let Some(_client) = client_guard.as_ref() {
-                    info!("🎵 [{}] Audio configuration verified for connected call", self.name);
+                // Setup real audio streaming now that the call is connected
+                // This is when the microphone should actually start recording
+                if let Err(e) = self.setup_audio_for_call(&status_info.call_id).await {
+                    error!("❌ [{}] Failed to setup audio: {}", self.name, e);
                 } else {
-                    error!("❌ [{}] Client not available for audio verification", self.name);
+                    info!("🎵 [{}] Real audio setup successful - microphone should now be active", self.name);
                 }
                 
                 // Auto-hangup after call duration if specified
@@ -403,7 +393,7 @@ async fn main() -> Result<(), anyhow::Error> {
     
     info!("🤖 Starting agent: {}", args.name);
     info!("🏢 Call center server: {}", args.server);
-    info!("🌐 Domain: {}", args.domain);
+    info!("🌐 Local IP address: {}", args.domain);
     info!("📱 Local SIP port: {}", args.port);
     info!("⏰ Call duration: {}s", if args.call_duration > 0 { args.call_duration.to_string() } else { "indefinite".to_string() });
     
@@ -453,8 +443,9 @@ async fn main() -> Result<(), anyhow::Error> {
     let server_uri = format!("sip:{}", args.server);
     
     // Create client configuration
-    let local_sip_addr = format!("0.0.0.0:{}", args.port).parse()?;
-    let local_media_addr = format!("0.0.0.0:{}", args.port + 1000).parse()?;
+    // Use the domain IP as the local binding address to ensure proper SIP signaling
+    let local_sip_addr = format!("{}:{}", args.domain, args.port).parse()?;
+    let local_media_addr = format!("{}:{}", args.domain, args.port + 1000).parse()?;
     
     let config = ClientConfig::new()
         .with_sip_addr(local_sip_addr)
