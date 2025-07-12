@@ -168,8 +168,8 @@ cargo run --bin server -- --verbose
 
 **Usage**:
 ```bash
-# Basic usage with real audio
-cargo run --bin agent -- --name alice --server 192.168.1.100:5060 --domain 192.168.1.100
+# Basic usage with real audio (use agent's own IP for --domain)
+cargo run --bin agent -- --name alice --server 192.168.1.100:5060 --domain 192.168.1.101
 
 # List available audio devices
 cargo run --bin agent -- --list-devices
@@ -194,8 +194,8 @@ cargo run --bin agent -- --name alice --verbose --audio-debug
 
 **Usage**:
 ```bash
-# Basic usage with real audio
-cargo run --bin customer -- --server 192.168.1.100:5060 --domain 192.168.1.100
+# Basic usage with real audio (use customer's own IP for --domain)
+cargo run --bin customer -- --server 192.168.1.100:5060 --domain 192.168.1.102
 
 # Extended call duration
 cargo run --bin customer -- --call-duration 60
@@ -217,13 +217,15 @@ cargo run --bin server -- --bind-addr 0.0.0.0:5060 --domain 192.168.1.100
 
 **Agent (192.168.1.101)**:
 ```bash
-cargo run --bin agent -- --name alice --server 192.168.1.100:5060 --domain 192.168.1.100 --port 5071
+cargo run --bin agent -- --name alice --server 192.168.1.100:5060 --domain 192.168.1.101 --port 5071
 ```
 
 **Customer (192.168.1.102)**:
 ```bash
-cargo run --bin customer -- --server 192.168.1.100:5060 --domain 192.168.1.100 --port 5080
+cargo run --bin customer -- --server 192.168.1.100:5060 --domain 192.168.1.102 --port 5080
 ```
+
+**Important**: Each machine should use its **own IP address** for the `--domain` parameter. This ensures proper SIP signaling and prevents `0.0.0.0` addresses in Contact headers and SDP.
 
 ### Audio Device Configuration
 
