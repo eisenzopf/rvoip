@@ -17,10 +17,8 @@ name = "customer"
 path = "src/customer.rs"
 
 [dependencies]
-# Core RVOIP dependencies with audio support
-rvoip-call-engine = { path = "../../crates/call-engine" }
-rvoip-client-core = { path = "../../crates/client-core", features = ["audio-cpal"] }
-rvoip-session-core = { path = "../../crates/session-core" }
+# Core RVOIP umbrella crate
+rvoip = "0.1.13"
 
 # Runtime and async
 tokio = { version = "1.0", features = ["full"] }
