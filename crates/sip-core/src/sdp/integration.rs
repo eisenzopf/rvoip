@@ -26,8 +26,8 @@ use crate::types::sdp::SdpSession;
 
 /// Helper for extracting host and IP information from SIP URIs and headers
 fn extract_ip_from_uri(uri: &Uri) -> Option<String> {
-    // Get the host part of the URI - fixed to proper accessor
-    uri.host.to_string().into()
+    // Get the host part of the URI - proper implementation
+    Some(uri.host.to_string())
 }
 
 /// Generate a default session ID for SDP

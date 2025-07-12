@@ -98,10 +98,10 @@ pub fn create_request_from_dialog_template(
         
         // Try a simpler fallback without branch parameter
         Via::new("SIP", "2.0", "UDP", &local_address.ip().to_string(), Some(local_address.port()), vec![])
-            .unwrap_or_else(|_| {
-                // Final fallback: use unspecified address (better than localhost)
-                Via::new("SIP", "2.0", "UDP", "0.0.0.0", Some(local_address.port()), vec![])
-                    .expect("Failed to create even basic Via header")
+            .unwrap_or_else(|e2| {
+                // Log the second error and panic - we should never reach this point
+                eprintln!("Critical error: Failed to create Via header even without branch parameter: {}", e2);
+                panic!("Unable to create Via header with local address {}", local_address);
             })
     });
     request.headers.push(TypedHeader::Via(via));
