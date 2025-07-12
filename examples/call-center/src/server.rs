@@ -118,15 +118,30 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("📞 Ready to accept customer calls on sip:support@{}", args.domain);
     info!("🎯 CALL CENTER IS READY");
 
-    // Step 5: Run the server (this will run indefinitely)
+    // Step 5: Start the server in the background
     // The server handles all SIP signaling, agent registration, and call routing
-    match server.run().await {
-        Ok(_) => info!("🏁 Server completed successfully"),
-        Err(e) => {
-            error!("❌ Server error: {}", e);
-            return Err(Box::new(e) as Box<dyn std::error::Error>);
+    let server_handle = tokio::spawn(async move {
+        match server.run().await {
+            Ok(_) => info!("🏁 Server completed successfully"),
+            Err(e) => {
+                error!("❌ Server error: {}", e);
+            }
         }
-    }
+    });
+
+    // Step 6: Keep the server running until Ctrl+C
+    info!("📡 Server is now running and listening for SIP traffic...");
+    info!("   - Agent registrations: sip:REGISTER");
+    info!("   - Customer calls: sip:support@{}", args.domain);
+    info!("   - Press Ctrl+C to shutdown");
+    
+    // Wait for shutdown signal
+    tokio::signal::ctrl_c().await?;
+    
+    // Cleanup
+    info!("🔚 Shutting down call center server...");
+    server_handle.abort();
+    info!("👋 Call center server shutdown complete");
 
     Ok(())
 } 

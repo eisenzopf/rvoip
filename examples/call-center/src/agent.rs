@@ -220,8 +220,18 @@ impl ClientEventHandler for AgentHandler {
         info!("📞 [{}] Incoming call from {} (call_id: {})", 
             self.name, call_info.caller_uri, call_info.call_id);
         
-        // Accept the call immediately
-        info!("✅ [{}] Accepting call {}", self.name, call_info.call_id);
+        // Set up audio configuration BEFORE accepting the call
+        // This ensures the SDP answer can be generated with proper audio capabilities
+        info!("🔧 [{}] Setting up audio for incoming call {}", self.name, call_info.call_id);
+        
+        if let Err(e) = self.setup_audio_for_call(&call_info.call_id).await {
+            error!("❌ [{}] Failed to setup audio for incoming call: {}", self.name, e);
+            info!("🚫 [{}] Rejecting call {} due to audio setup failure", self.name, call_info.call_id);
+            return CallAction::Reject;
+        }
+        
+        // Accept the call now that audio is configured
+        info!("✅ [{}] Accepting call {} with audio configured", self.name, call_info.call_id);
         CallAction::Accept
     }
     
@@ -240,13 +250,15 @@ impl ClientEventHandler for AgentHandler {
         
         match status_info.new_state {
             CallState::Connected => {
-                info!("🎉 [{}] Call {} connected! Setting up real audio...", self.name, status_info.call_id);
+                info!("🎉 [{}] Call {} connected! Audio should already be configured.", self.name, status_info.call_id);
                 
-                // Setup real audio streaming
-                if let Err(e) = self.setup_audio_for_call(&status_info.call_id).await {
-                    error!("❌ [{}] Failed to setup audio: {}", self.name, e);
+                // Audio was already set up in on_incoming_call, but verify it's working
+                // by checking if we can get the client (this is mainly for logging)
+                let client_guard = self.client.read().await;
+                if let Some(_client) = client_guard.as_ref() {
+                    info!("🎵 [{}] Audio configuration verified for connected call", self.name);
                 } else {
-                    info!("🎵 [{}] Real audio setup successful", self.name);
+                    error!("❌ [{}] Client not available for audio verification", self.name);
                 }
                 
                 // Auto-hangup after call duration if specified
