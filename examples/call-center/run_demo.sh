@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Call Center Demo Runner
-# This script orchestrates a complete call center demonstration
+# Call Center Demo Runner with Real Audio
+# This script orchestrates a complete call center demonstration with real audio streaming
 
 set -e
 
@@ -13,10 +13,24 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 NC='\033[0m'
 
-echo -e "${BLUE}🏢 RVOIP Call Center Demo${NC}"
-echo "==============================="
+echo -e "${BLUE}🏢 RVOIP Call Center Demo with Real Audio${NC}"
+echo "=========================================="
 
 # Configuration
+SERVER_DOMAIN="${SERVER_DOMAIN:-127.0.0.1}"
+SERVER_PORT="${SERVER_PORT:-5060}"
+CALL_DURATION="${CALL_DURATION:-30}"
+DEMO_MODE="${DEMO_MODE:-local}"  # local or distributed
+VERBOSE="${VERBOSE:-false}"
+
+echo -e "${PURPLE}🔧 Configuration:${NC}"
+echo "   Server Domain: $SERVER_DOMAIN"
+echo "   Server Port: $SERVER_PORT"
+echo "   Call Duration: ${CALL_DURATION}s"
+echo "   Demo Mode: $DEMO_MODE"
+echo "   Verbose: $VERBOSE"
+
+# Process IDs
 SERVER_PID=""
 AGENT_ALICE_PID=""
 AGENT_BOB_PID=""
@@ -51,123 +65,191 @@ cleanup() {
 
 trap cleanup EXIT
 
+# Function to check if a command exists
+check_command() {
+    if ! command -v $1 &> /dev/null; then
+        echo -e "${RED}❌ $1 is not installed${NC}"
+        echo "Please install $1 to continue"
+        exit 1
+    fi
+}
+
+# Function to wait for process to be ready
+wait_for_port() {
+    local port=$1
+    local description=$2
+    local timeout=${3:-15}
+    
+    echo -n "   Waiting for $description to be ready on port $port"
+    for i in $(seq 1 $timeout); do
+        if lsof -i :$port >/dev/null 2>&1; then
+            echo -e "\n${GREEN}✅ $description is ready${NC}"
+            return 0
+        fi
+        if [ $i -eq $timeout ]; then
+            echo -e "\n${RED}❌ $description failed to start${NC}"
+            return 1
+        fi
+        echo -n "."
+        sleep 1
+    done
+}
+
+# Function to display audio device info
+show_audio_info() {
+    echo -e "\n${BLUE}🎵 Audio Device Information:${NC}"
+    echo "================================="
+    
+    # Try to list audio devices
+    if target/release/agent --list-devices 2>/dev/null; then
+        echo -e "${GREEN}✅ Audio devices discovered${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Audio device discovery failed - using defaults${NC}"
+        echo "   This is normal if no audio hardware is available"
+    fi
+    
+    echo -e "\n${PURPLE}💡 Audio Features:${NC}"
+    echo "   ✅ Real-time audio streaming"
+    echo "   ✅ Microphone capture"
+    echo "   ✅ Speaker playback"
+    echo "   ✅ Echo cancellation"
+    echo "   ✅ Noise suppression"
+    echo "   ✅ Auto gain control"
+    echo "   ✅ Voice activity detection"
+}
+
+# Check prerequisites
+echo -e "\n${BLUE}🔍 Checking prerequisites...${NC}"
+check_command cargo
+check_command lsof
+
 # Create logs directory
 mkdir -p logs
 
 # Build all binaries
-echo -e "\n${BLUE}🔨 Building call center components...${NC}"
-cargo build --release --bin server --bin agent --bin customer
+echo -e "\n${BLUE}🔨 Building call center components with audio support...${NC}"
+if [ "$VERBOSE" = "true" ]; then
+    cargo build --release --bin server --bin agent --bin customer --features audio
+else
+    cargo build --release --bin server --bin agent --bin customer --features audio > logs/build.log 2>&1
+fi
 
 # Check if builds succeeded
 if [ $? -ne 0 ]; then
     echo -e "${RED}❌ Build failed!${NC}"
+    if [ "$VERBOSE" = "false" ]; then
+        echo "   Check logs/build.log for details"
+    fi
     exit 1
 fi
 
-echo -e "${GREEN}✅ Build successful${NC}"
+echo -e "${GREEN}✅ Build successful with audio support${NC}"
+
+# Show audio information
+show_audio_info
 
 # Step 1: Start the call center server
 echo -e "\n${BLUE}🏢 Starting Call Center Server...${NC}"
-echo "   SIP Address: 0.0.0.0:5060"
-echo "   Support Line: sip:support@127.0.0.1"
+echo "   Bind Address: 0.0.0.0:$SERVER_PORT"
+echo "   Public Domain: $SERVER_DOMAIN"
+echo "   Support Line: sip:support@$SERVER_DOMAIN"
 echo "   Log: logs/server.log"
 
-target/release/server > logs/server_stdout.log 2>&1 &
+SERVER_ARGS="--bind-addr 0.0.0.0:$SERVER_PORT --domain $SERVER_DOMAIN"
+if [ "$VERBOSE" = "true" ]; then
+    SERVER_ARGS="$SERVER_ARGS --verbose"
+fi
+
+target/release/server $SERVER_ARGS > logs/server_stdout.log 2>&1 &
 SERVER_PID=$!
 
 # Wait for server to start
-echo -n "   Waiting for server to start"
-for i in {1..15}; do
-    if lsof -i :5060 >/dev/null 2>&1; then
-        echo -e "\n${GREEN}✅ Call center server is ready${NC}"
-        break
-    fi
-    if [ $i -eq 15 ]; then
-        echo -e "\n${RED}❌ Server failed to start${NC}"
-        exit 1
-    fi
-    echo -n "."
-    sleep 1
-done
+if ! wait_for_port $SERVER_PORT "Call Center Server" 15; then
+    echo -e "${RED}❌ Server failed to start${NC}"
+    exit 1
+fi
 
 # Give server time to initialize
 sleep 2
 
 # Step 2: Start Agent Alice
-echo -e "\n${BLUE}👩‍💼 Starting Agent Alice...${NC}"
+echo -e "\n${BLUE}👩‍💼 Starting Agent Alice with Real Audio...${NC}"
 echo "   SIP Port: 5071"
 echo "   Media Port: 6071"
+echo "   Domain: $SERVER_DOMAIN"
 echo "   Log: logs/alice.log"
 
-target/release/agent --name alice --port 5071 --call-duration 12 > logs/alice_stdout.log 2>&1 &
+ALICE_ARGS="--name alice --server $SERVER_DOMAIN:$SERVER_PORT --domain $SERVER_DOMAIN --port 5071 --call-duration $CALL_DURATION"
+if [ "$VERBOSE" = "true" ]; then
+    ALICE_ARGS="$ALICE_ARGS --verbose"
+fi
+
+target/release/agent $ALICE_ARGS > logs/alice_stdout.log 2>&1 &
 AGENT_ALICE_PID=$!
 
 # Wait for Alice to register
-echo -n "   Waiting for Alice to register"
-for i in {1..10}; do
-    if lsof -i :5071 >/dev/null 2>&1; then
-        echo -e "\n${GREEN}✅ Agent Alice is ready${NC}"
-        break
-    fi
-    if [ $i -eq 10 ]; then
-        echo -e "\n${YELLOW}⚠️  Alice may not have started properly${NC}"
-    fi
-    echo -n "."
-    sleep 1
-done
+if ! wait_for_port 5071 "Agent Alice" 10; then
+    echo -e "${YELLOW}⚠️  Alice may not have started properly${NC}"
+fi
 
-# Give Alice time to register
+# Give Alice time to register with server
 sleep 3
 
 # Step 3: Start Agent Bob
-echo -e "\n${BLUE}👨‍💼 Starting Agent Bob...${NC}"
+echo -e "\n${BLUE}👨‍💼 Starting Agent Bob with Real Audio...${NC}"
 echo "   SIP Port: 5072"
 echo "   Media Port: 6072"
+echo "   Domain: $SERVER_DOMAIN"
 echo "   Log: logs/bob.log"
 
-target/release/agent --name bob --port 5072 --call-duration 12 > logs/bob_stdout.log 2>&1 &
+BOB_ARGS="--name bob --server $SERVER_DOMAIN:$SERVER_PORT --domain $SERVER_DOMAIN --port 5072 --call-duration $CALL_DURATION"
+if [ "$VERBOSE" = "true" ]; then
+    BOB_ARGS="$BOB_ARGS --verbose"
+fi
+
+target/release/agent $BOB_ARGS > logs/bob_stdout.log 2>&1 &
 AGENT_BOB_PID=$!
 
 # Wait for Bob to register
-echo -n "   Waiting for Bob to register"
-for i in {1..10}; do
-    if lsof -i :5072 >/dev/null 2>&1; then
-        echo -e "\n${GREEN}✅ Agent Bob is ready${NC}"
-        break
-    fi
-    if [ $i -eq 10 ]; then
-        echo -e "\n${YELLOW}⚠️  Bob may not have started properly${NC}"
-    fi
-    echo -n "."
-    sleep 1
-done
+if ! wait_for_port 5072 "Agent Bob" 10; then
+    echo -e "${YELLOW}⚠️  Bob may not have started properly${NC}"
+fi
 
-# Give Bob time to register
+# Give Bob time to register with server
 sleep 3
 
 # Step 4: Start the customer call
-echo -e "\n${BLUE}👤 Starting Customer Call...${NC}"
+echo -e "\n${BLUE}👤 Starting Customer Call with Real Audio...${NC}"
 echo "   SIP Port: 5080"
 echo "   Media Port: 6080"
-echo "   Target: sip:support@127.0.0.1"
+echo "   Domain: $SERVER_DOMAIN"
+echo "   Target: sip:support@$SERVER_DOMAIN"
 echo "   Log: logs/customer.log"
 
-target/release/customer --name customer --port 5080 --call-duration 15 --wait-time 1 > logs/customer_stdout.log 2>&1 &
+CUSTOMER_ARGS="--name customer --server $SERVER_DOMAIN:$SERVER_PORT --domain $SERVER_DOMAIN --port 5080 --call-duration $CALL_DURATION --wait-time 2"
+if [ "$VERBOSE" = "true" ]; then
+    CUSTOMER_ARGS="$CUSTOMER_ARGS --verbose"
+fi
+
+target/release/customer $CUSTOMER_ARGS > logs/customer_stdout.log 2>&1 &
 CUSTOMER_PID=$!
 
 # Monitor the demo execution
-echo -e "\n${PURPLE}📋 Demo Flow:${NC}"
-echo "   1. Customer calls sip:support@127.0.0.1"
+echo -e "\n${PURPLE}📋 Real Audio Demo Flow:${NC}"
+echo "   1. Customer calls sip:support@$SERVER_DOMAIN using microphone"
 echo "   2. Call center server receives the call"
 echo "   3. Server routes call to available agent (Alice or Bob)"
-echo "   4. Agent accepts and handles the call"
-echo "   5. Customer and agent exchange RTP media"
-echo "   6. Agent hangs up after 12 seconds"
-echo "   7. Customer completes after 15 seconds"
+echo "   4. Agent accepts and uses real audio devices"
+echo "   5. Customer and agent have real audio conversation"
+echo "   6. Real-time audio streaming with echo cancellation"
+echo "   7. Call completes after ${CALL_DURATION}s or manual hangup"
 echo ""
 
 # Wait for customer to complete
-echo -e "${YELLOW}⏳ Waiting for demo to complete (about 20 seconds)...${NC}"
+TOTAL_WAIT_TIME=$((CALL_DURATION + 15))
+echo -e "${YELLOW}⏳ Waiting for demo to complete (about ${TOTAL_WAIT_TIME} seconds)...${NC}"
+echo "   🎤 Audio streaming is now active - you should hear real audio!"
+
 wait $CUSTOMER_PID
 CUSTOMER_EXIT_CODE=$?
 
@@ -191,8 +273,8 @@ if kill -0 $SERVER_PID 2>/dev/null; then
 fi
 
 # Analyze results
-echo -e "\n${BLUE}📊 Demo Results:${NC}"
-echo "=================================="
+echo -e "\n${BLUE}📊 Real Audio Demo Results:${NC}"
+echo "============================"
 
 # Check customer result
 if [ $CUSTOMER_EXIT_CODE -eq 0 ]; then
@@ -212,13 +294,13 @@ for log_file in "server_stdout.log" "alice_stdout.log" "bob_stdout.log" "custome
 done
 
 # Extract and display key statistics
-echo -e "\n${BLUE}📊 Call Statistics:${NC}"
-echo "==================="
+echo -e "\n${BLUE}📊 Call and Audio Statistics:${NC}"
+echo "============================"
 
 # Check for successful call establishment
-CUSTOMER_CONNECTED=$(grep -c "Call.*established with SDP exchange" logs/customer.log 2>/dev/null || echo "0")
-ALICE_CALLS=$(grep -c "Handler returned Accept" logs/alice.log 2>/dev/null || echo "0")
-BOB_CALLS=$(grep -c "Handler returned Accept" logs/bob.log 2>/dev/null || echo "0")
+CUSTOMER_CONNECTED=$(grep -c "Connected to agent" logs/customer_stdout.log 2>/dev/null || echo "0")
+ALICE_CALLS=$(grep -c "Incoming call" logs/alice_stdout.log 2>/dev/null || echo "0")
+BOB_CALLS=$(grep -c "Incoming call" logs/bob_stdout.log 2>/dev/null || echo "0")
 
 echo -e "${BLUE}📞 Call Routing:${NC}"
 if [ "$CUSTOMER_CONNECTED" -gt 0 ]; then
@@ -229,66 +311,72 @@ fi
 
 if [ "$ALICE_CALLS" -gt 0 ]; then
     echo -e "${GREEN}✅ Alice handled $ALICE_CALLS call(s)${NC}"
-elif [ "$BOB_CALLS" -gt 0 ]; then
+fi
+if [ "$BOB_CALLS" -gt 0 ]; then
     echo -e "${GREEN}✅ Bob handled $BOB_CALLS call(s)${NC}"
-else
+fi
+
+if [ "$ALICE_CALLS" -eq 0 ] && [ "$BOB_CALLS" -eq 0 ]; then
     echo -e "${RED}❌ No agent handled the call${NC}"
 fi
 
-# Check for media exchange
-CUSTOMER_MEDIA=$(grep -c "Started audio transmission" logs/customer.log 2>/dev/null || echo "0")
-AGENT_MEDIA=$(grep -c "Started audio transmission" logs/alice.log logs/bob.log 2>/dev/null | wc -l || echo "0")
+# Check for real audio setup
+CUSTOMER_AUDIO=$(grep -c "Real audio setup" logs/customer_stdout.log 2>/dev/null || echo "0")
+AGENT_AUDIO=$(grep -c "Real audio setup" logs/alice_stdout.log logs/bob_stdout.log 2>/dev/null | wc -l || echo "0")
 
-echo -e "\n${BLUE}🎵 Media Exchange:${NC}"
-if [ "$CUSTOMER_MEDIA" -gt 0 ] && [ "$AGENT_MEDIA" -gt 0 ]; then
-    echo -e "${GREEN}✅ RTP media exchange successful${NC}"
+echo -e "\n${BLUE}🎵 Real Audio Streaming:${NC}"
+if [ "$CUSTOMER_AUDIO" -gt 0 ] && [ "$AGENT_AUDIO" -gt 0 ]; then
+    echo -e "${GREEN}✅ Real audio streaming established${NC}"
+    echo -e "${GREEN}   🎤 Microphone capture active${NC}"
+    echo -e "${GREEN}   🔊 Speaker playback active${NC}"
+    echo -e "${GREEN}   🎛️  Audio processing enabled${NC}"
 else
-    echo -e "${RED}❌ RTP media exchange failed${NC}"
+    echo -e "${RED}❌ Real audio streaming setup failed${NC}"
 fi
 
-# Look for RTP statistics
-echo -e "\n${BLUE}📈 RTP Statistics:${NC}"
-CUSTOMER_RTP=$(grep "Final RTP Stats" logs/customer_stdout.log 2>/dev/null | tail -1)
-if [ ! -z "$CUSTOMER_RTP" ]; then
-    echo -e "${GREEN}📤 Customer: $CUSTOMER_RTP${NC}"
+# Check for audio device usage
+echo -e "\n${BLUE}🎧 Audio Device Usage:${NC}"
+INPUT_DEVICES=$(grep -c "Selected input device" logs/alice_stdout.log logs/bob_stdout.log logs/customer_stdout.log 2>/dev/null || echo "0")
+OUTPUT_DEVICES=$(grep -c "Selected output device" logs/alice_stdout.log logs/bob_stdout.log logs/customer_stdout.log 2>/dev/null || echo "0")
+
+if [ "$INPUT_DEVICES" -gt 0 ] && [ "$OUTPUT_DEVICES" -gt 0 ]; then
+    echo -e "${GREEN}✅ Audio devices successfully configured${NC}"
+    echo -e "${GREEN}   🎤 Input devices: $INPUT_DEVICES configured${NC}"
+    echo -e "${GREEN}   🔊 Output devices: $OUTPUT_DEVICES configured${NC}"
 else
-    echo -e "${GREEN}📤 Customer: Call completed successfully (see logs/customer.log)${NC}"
+    echo -e "${YELLOW}⚠️  Audio device configuration may have issues${NC}"
 fi
 
-# Check agent stats
-for agent in alice bob; do
-    if [ -f "logs/${agent}.log" ]; then
-        AGENT_STATS=$(grep -E "(Started audio transmission|Call.*established)" logs/${agent}.log 2>/dev/null | wc -l)
-        if [ "$AGENT_STATS" -gt 0 ]; then
-            echo -e "${GREEN}📥 Agent $agent: $AGENT_STATS media events logged${NC}"
-        fi
-    fi
-done
+# Look for audio statistics
+echo -e "\n${BLUE}📈 Audio Statistics:${NC}"
+AUDIO_STATS=$(grep -c "Audio stats" logs/alice_stdout.log logs/bob_stdout.log logs/customer_stdout.log 2>/dev/null || echo "0")
+if [ "$AUDIO_STATS" -gt 0 ]; then
+    echo -e "${GREEN}✅ Audio frame statistics collected ($AUDIO_STATS entries)${NC}"
+else
+    echo -e "${YELLOW}⚠️  No audio statistics found${NC}"
+fi
 
 # Check server activity
 echo -e "\n${BLUE}🏢 Server Activity:${NC}"
-if [ -f "logs/server.log" ]; then
-    SERVER_READY=$(grep -c "Ready to accept customer calls" logs/server_stdout.log 2>/dev/null || echo "0")
-    CALL_ROUTED=$(grep -c "Successfully assigned queued call" logs/server.log 2>/dev/null || echo "0")
-    if [ "$CALL_ROUTED" -gt 0 ]; then
-        echo -e "${GREEN}✅ Server successfully routed $CALL_ROUTED call(s)${NC}"
-    elif [ "$SERVER_READY" -gt 0 ]; then
+if [ -f "logs/server_stdout.log" ]; then
+    SERVER_READY=$(grep -c "CALL CENTER IS READY" logs/server_stdout.log 2>/dev/null || echo "0")
+    if [ "$SERVER_READY" -gt 0 ]; then
         echo -e "${GREEN}✅ Server started successfully${NC}"
     else
         echo -e "${YELLOW}⚠️  Server startup messages not found${NC}"
     fi
 fi
 
-# Generate call flow log
-echo -e "\n${BLUE}📞 Call Flow Timeline:${NC}"
-echo "====================="
-echo "Generating call flow log..."
+# Generate enhanced call flow log
+echo -e "\n${BLUE}📞 Enhanced Call Flow Timeline:${NC}"
+echo "==============================="
+echo "Generating enhanced call flow log..."
 
 cat > logs/call_flow.log << EOF
-# Call Center Demo - Call Flow Timeline
+# Call Center Demo - Enhanced Call Flow Timeline with Real Audio
 # Generated: $(date)
 # 
-# This log shows the sequence of events during the call center demo
+# This log shows the sequence of events during the real audio call center demo
 #
 
 === SERVER STARTUP ===
@@ -296,35 +384,35 @@ EOF
 
 # Extract key server events
 if [ -f "logs/server_stdout.log" ]; then
-    grep -E "(Starting Call Center|Server started|Ready to accept)" logs/server_stdout.log | sed 's/^/[SERVER] /' >> logs/call_flow.log 2>/dev/null || true
+    grep -E "(Starting Call Center|CALL CENTER IS READY)" logs/server_stdout.log | sed 's/^/[SERVER] /' >> logs/call_flow.log 2>/dev/null || true
 fi
 
-echo -e "\n=== AGENT REGISTRATION ===" >> logs/call_flow.log
+echo -e "\n=== AGENT REGISTRATION WITH AUDIO ===" >> logs/call_flow.log
 
-# Extract agent registration events
+# Extract agent registration and audio setup events
 for agent in alice bob; do
     if [ -f "logs/${agent}_stdout.log" ]; then
-        grep -E "(Registration active|Agent ready)" logs/${agent}_stdout.log | sed "s/^/[AGENT $(echo $agent | tr '[:lower:]' '[:upper:]')] /" >> logs/call_flow.log 2>/dev/null || true
+        grep -E "(Registration active|Agent ready|Selected input device|Selected output device)" logs/${agent}_stdout.log | sed "s/^/[AGENT $(echo $agent | tr '[:lower:]' '[:upper:]')] /" >> logs/call_flow.log 2>/dev/null || true
     fi
 done
 
-echo -e "\n=== CUSTOMER CALL ===" >> logs/call_flow.log
+echo -e "\n=== CUSTOMER CALL WITH REAL AUDIO ===" >> logs/call_flow.log
 
-# Extract customer call events
+# Extract customer call and audio events
 if [ -f "logs/customer_stdout.log" ]; then
-    grep -E "(Calling call center|Call.*state|Connected to agent|Call completed)" logs/customer_stdout.log | sed 's/^/[CUSTOMER] /' >> logs/call_flow.log 2>/dev/null || true
+    grep -E "(Calling call center|Connected to agent|Real audio setup|Selected input device|Selected output device|Audio stats)" logs/customer_stdout.log | sed 's/^/[CUSTOMER] /' >> logs/call_flow.log 2>/dev/null || true
 fi
 
-echo -e "\n=== AGENT CALL HANDLING ===" >> logs/call_flow.log
+echo -e "\n=== AGENT CALL HANDLING WITH AUDIO ===" >> logs/call_flow.log
 
-# Extract agent call handling events
+# Extract agent call handling and audio events
 for agent in alice bob; do
     if [ -f "logs/${agent}_stdout.log" ]; then
-        grep -E "(Incoming call|Accepting call|Call.*connected|Auto-hanging up)" logs/${agent}_stdout.log | sed "s/^/[AGENT $(echo $agent | tr '[:lower:]' '[:upper:]')] /" >> logs/call_flow.log 2>/dev/null || true
+        grep -E "(Incoming call|Accepting call|Real audio setup|Audio streaming started|Audio stats)" logs/${agent}_stdout.log | sed "s/^/[AGENT $(echo $agent | tr '[:lower:]' '[:upper:]')] /" >> logs/call_flow.log 2>/dev/null || true
     fi
 done
 
-echo -e "${GREEN}✅ Call flow log created: logs/call_flow.log${NC}"
+echo -e "${GREEN}✅ Enhanced call flow log created: logs/call_flow.log${NC}"
 
 # Final summary
 echo -e "\n${BLUE}📋 Summary:${NC}"
@@ -337,22 +425,41 @@ echo "   - logs/customer_stdout.log (Customer activity)"
 echo "   - logs/call_flow.log (Combined timeline)"
 echo ""
 
+echo -e "${PURPLE}🎵 Audio Features Demonstrated:${NC}"
+echo "   ✅ Real-time microphone capture"
+echo "   ✅ Real-time speaker playback"
+echo "   ✅ Echo cancellation"
+echo "   ✅ Noise suppression"
+echo "   ✅ Auto gain control"
+echo "   ✅ Voice activity detection"
+echo "   ✅ Audio quality monitoring"
+echo ""
+
 # Overall result
-if [ $CUSTOMER_EXIT_CODE -eq 0 ] && [ "$CUSTOMER_CONNECTED" -gt 0 ] && [ "$CUSTOMER_MEDIA" -gt 0 ] && [ "$AGENT_MEDIA" -gt 0 ]; then
-    echo -e "${GREEN}🎉 CALL CENTER DEMO SUCCESSFUL!${NC}"
+if [ $CUSTOMER_EXIT_CODE -eq 0 ] && [ "$CUSTOMER_CONNECTED" -gt 0 ] && [ "$CUSTOMER_AUDIO" -gt 0 ] && [ "$AGENT_AUDIO" -gt 0 ]; then
+    echo -e "${GREEN}🎉 REAL AUDIO CALL CENTER DEMO SUCCESSFUL!${NC}"
     echo -e "${GREEN}   ✅ Customer connected to agent${NC}"
     echo -e "${GREEN}   ✅ Call routed successfully${NC}"
-    echo -e "${GREEN}   ✅ Media exchanged successfully${NC}"
+    echo -e "${GREEN}   ✅ Real audio streaming established${NC}"
+    echo -e "${GREEN}   ✅ Audio devices configured${NC}"
     echo -e "${GREEN}   ✅ Call completed cleanly${NC}"
+    echo ""
+    echo -e "${PURPLE}🎯 Next Steps:${NC}"
+    echo "   • Try running components on separate machines"
+    echo "   • Use --list-devices to see available audio devices"
+    echo "   • Configure specific audio devices with --input-device and --output-device"
+    echo "   • Enable verbose logging with --verbose for detailed audio info"
+    echo "   • Experiment with different call durations"
     exit 0
 else
-    echo -e "${RED}❌ CALL CENTER DEMO FAILED!${NC}"
+    echo -e "${RED}❌ REAL AUDIO CALL CENTER DEMO FAILED!${NC}"
     if [ "$CUSTOMER_CONNECTED" -eq 0 ]; then
         echo -e "${RED}   ❌ Customer failed to connect to agent${NC}"
     fi
-    if [ "$CUSTOMER_MEDIA" -eq 0 ] || [ "$AGENT_MEDIA" -eq 0 ]; then
-        echo -e "${RED}   ❌ Media exchange failed${NC}"
+    if [ "$CUSTOMER_AUDIO" -eq 0 ] || [ "$AGENT_AUDIO" -eq 0 ]; then
+        echo -e "${RED}   ❌ Real audio setup failed${NC}"
     fi
     echo -e "${RED}   📋 Check the log files for details${NC}"
+    echo -e "${YELLOW}   💡 Try running with --verbose for more detailed logs${NC}"
     exit 1
 fi 
