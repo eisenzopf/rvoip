@@ -21,7 +21,7 @@ struct Args {
     #[arg(short, long, default_value = "0.0.0.0:5060")]
     bind_addr: String,
     
-    /// Public domain/IP for SIP communication
+    /// Server IP address for SIP communication (used in SIP URIs and contact headers)
     #[arg(short, long, default_value = "127.0.0.1")]
     domain: String,
     
@@ -81,6 +81,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut config = CallCenterConfig::default();
     config.general.local_signaling_addr = bind_addr;
     config.general.domain = args.domain.clone();
+    config.general.local_ip = args.domain.clone(); // CRITICAL: Use domain IP for SIP URIs and contact headers
+    
+    // Set media address to use the domain IP as well
+    let media_addr = format!("{}:10000", args.domain).parse()
+        .map_err(|e| format!("Invalid media address: {}", e))?;
+    config.general.local_media_addr = media_addr;
+    
     config.agents.default_max_concurrent_calls = args.max_calls_per_agent;
     
     // Set queue parameters
@@ -90,6 +97,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("⚙️  Server configuration:");
     info!("   Domain: {}", config.general.domain);
     info!("   Bind Address: {}", config.general.local_signaling_addr);
+    info!("   Local IP (for SIP URIs): {}", config.general.local_ip);
+    info!("   Media Address: {}", config.general.local_media_addr);
     info!("   Max calls per agent: {}", config.agents.default_max_concurrent_calls);
     info!("   Queue max wait time: {}s", config.queues.default_max_wait_time);
     info!("   Max queue size: {}", config.queues.max_queue_size);
