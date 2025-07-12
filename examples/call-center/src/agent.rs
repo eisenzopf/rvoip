@@ -24,6 +24,7 @@ use rvoip::{
         AudioStreamConfig,
     },
 };
+use uuid;
 use async_trait::async_trait;
 
 #[derive(Parser, Debug)]
@@ -101,6 +102,50 @@ impl AgentHandler {
         *self.audio_manager.write().await = Some(audio_manager);
     }
     
+    async fn initialize_audio_devices(&self) -> Result<(), anyhow::Error> {
+        let client_guard = self.client.read().await;
+        let audio_guard = self.audio_manager.read().await;
+        
+        if let (Some(client), Some(audio_manager)) = (client_guard.as_ref(), audio_guard.as_ref()) {
+            // Get audio devices
+            let input_device = audio_manager.get_default_device(AudioDirection::Input).await?;
+            info!("🎤 [{}] Activating input device: {}", self.name, input_device.info().name);
+            
+            let output_device = audio_manager.get_default_device(AudioDirection::Output).await?;
+            info!("🔊 [{}] Activating output device: {}", self.name, output_device.info().name);
+            
+            // Create a "standby" call ID for keeping audio devices active
+            let standby_call_id = uuid::Uuid::new_v4();
+            
+            // Configure audio stream for standby mode
+            let config = AudioStreamConfig {
+                sample_rate: 8000,  // Standard VoIP sample rate
+                channels: 1,        // Mono for VoIP
+                codec: "PCMU".to_string(),  // G.711 μ-law
+                frame_size_ms: 20,  // 20ms frames (160 samples at 8kHz)
+                enable_aec: true,   // Echo cancellation
+                enable_agc: true,   // Auto gain control
+                enable_vad: true,   // Voice activity detection
+            };
+            
+            // Set audio stream configuration for standby
+            client.set_audio_stream_config(&standby_call_id, config).await?;
+            
+            // Start audio streaming in standby mode
+            client.start_audio_stream(&standby_call_id).await?;
+            
+            // Start audio capture (this should show microphone indicator)
+            client.start_audio_capture(&standby_call_id, &input_device.info().id).await?;
+            
+            // Start audio playback (ready for incoming audio)
+            client.start_audio_playback(&standby_call_id, &output_device.info().id).await?;
+            
+            info!("✅ [{}] Audio devices active - microphone recording, ready for calls", self.name);
+        }
+        
+        Ok(())
+    }
+
     async fn setup_audio_for_call(&self, call_id: &CallId) -> Result<(), anyhow::Error> {
         let client_guard = self.client.read().await;
         let audio_guard = self.audio_manager.read().await;
@@ -241,14 +286,14 @@ impl ClientEventHandler for AgentHandler {
         
         match status_info.new_state {
             CallState::Connected => {
-                info!("🎉 [{}] Call {} connected! Setting up real audio...", self.name, status_info.call_id);
+                info!("🎉 [{}] Call {} connected! Activating audio for this call...", self.name, status_info.call_id);
                 
-                // Setup real audio streaming now that the call is connected
-                // This is when the microphone should actually start recording
+                // Audio devices were initialized during registration
+                // Now activate audio streaming for this specific call
                 if let Err(e) = self.setup_audio_for_call(&status_info.call_id).await {
                     error!("❌ [{}] Failed to setup audio: {}", self.name, e);
                 } else {
-                    info!("🎵 [{}] Real audio setup successful - microphone should now be active", self.name);
+                    info!("🎵 [{}] Call audio streaming active - microphone and speaker ready", self.name);
                 }
                 
                 // Auto-hangup after call duration if specified
@@ -471,7 +516,7 @@ async fn main() -> Result<(), anyhow::Error> {
     
     handler.set_client(client.clone()).await;
     handler.set_audio_manager(audio_manager).await;
-    client.set_event_handler(handler).await;
+    client.set_event_handler(handler.clone()).await;
     
     // Start the client
     client.start().await?;
@@ -489,6 +534,17 @@ async fn main() -> Result<(), anyhow::Error> {
     let registration_id = client.register(reg_config).await?;
     info!("✅ [{}] Successfully registered with ID: {}", args.name, registration_id);
     
+    // Initialize audio devices immediately after registration
+    // This ensures the agent is ready for incoming calls without delay
+    info!("🎵 [{}] Initializing audio devices for call readiness...", args.name);
+    
+    if let Err(e) = handler.initialize_audio_devices().await {
+        error!("❌ [{}] Failed to initialize audio devices: {}", args.name, e);
+        return Err(anyhow::anyhow!("Audio initialization failed: {}", e));
+    }
+    
+    info!("🎤 [{}] Microphone active and ready", args.name);
+    info!("🔊 [{}] Speaker active and ready", args.name);
     info!("👂 [{}] Agent ready to receive calls with real audio!", args.name);
     
     // Keep the agent running
