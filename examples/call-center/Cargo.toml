@@ -2,7 +2,7 @@
 name = "call-center-demo"
 version = "0.1.0"
 edition = "2021"
-description = "Call center demo using call-engine and client-core"
+description = "Call center demo with real audio streaming using call-engine and client-core"
 
 [[bin]]
 name = "server"
@@ -17,16 +17,24 @@ name = "customer"
 path = "src/customer.rs"
 
 [dependencies]
-rvoip = { path = "../../crates/rvoip" }
+# Core RVOIP dependencies with audio support
+rvoip-call-engine = { path = "../../crates/call-engine" }
+rvoip-client-core = { path = "../../crates/client-core", features = ["audio-cpal"] }
+rvoip-session-core = { path = "../../crates/session-core" }
 
+# Runtime and async
 tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+
+# Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-anyhow = "1.0"
-uuid = { version = "1.0", features = ["v4"] }
-async-trait = "0.1"
-serde_json = "1.0"
+
+# CLI and utilities
 clap = { version = "4.0", features = ["derive"] }
+uuid = { version = "1.0", features = ["v4"] }
+anyhow = "1.0"
+serde_json = "1.0"
 
 [workspace] 
