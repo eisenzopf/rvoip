@@ -36,7 +36,7 @@ struct Args {
     #[arg(short, long, default_value = "127.0.0.1:5060")]
     server: String,
     
-    /// Server domain/IP for SIP URIs
+    /// Local IP address for this customer (used for SIP binding and signaling)
     #[arg(short, long, default_value = "127.0.0.1")]
     domain: String,
     
@@ -415,7 +415,7 @@ async fn main() -> Result<(), anyhow::Error> {
     
     info!("👤 Starting customer: {}", args.name);
     info!("🏢 Call center server: {}", args.server);
-    info!("🌐 Domain: {}", args.domain);
+    info!("🌐 Local IP address: {}", args.domain);
     info!("📱 Local SIP port: {}", args.port);
     info!("📞 Support line: {}", args.support_line);
     info!("⏰ Call duration: {}s", args.call_duration);
@@ -463,8 +463,9 @@ async fn main() -> Result<(), anyhow::Error> {
     info!("🔊 Selected output device: {}", output_device.name);
     
     // Create client configuration
-    let local_sip_addr = format!("0.0.0.0:{}", args.port).parse()?;
-    let local_media_addr = format!("0.0.0.0:{}", args.port + 1000).parse()?;
+    // Use the domain IP as the local binding address to ensure proper SIP signaling
+    let local_sip_addr = format!("{}:{}", args.domain, args.port).parse()?;
+    let local_media_addr = format!("{}:{}", args.domain, args.port + 1000).parse()?;
     
     let config = ClientConfig::new()
         .with_sip_addr(local_sip_addr)
