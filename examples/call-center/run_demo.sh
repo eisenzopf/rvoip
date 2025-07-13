@@ -150,12 +150,13 @@ show_audio_info
 
 # Step 1: Start the call center server
 echo -e "\n${BLUE}🏢 Starting Call Center Server...${NC}"
-echo "   Bind Address: 0.0.0.0:$SERVER_PORT"
+echo "   Bind Address: $SERVER_DOMAIN:$SERVER_PORT (FIXED: Using domain IP instead of 0.0.0.0)"
 echo "   Public Domain: $SERVER_DOMAIN"
 echo "   Support Line: sip:support@$SERVER_DOMAIN"
 echo "   Log: logs/server.log"
+echo "   🔧 IMPORTANT: Using domain IP for signaling to fix SDP generation"
 
-SERVER_ARGS="--bind-addr 0.0.0.0:$SERVER_PORT --domain $SERVER_DOMAIN"
+SERVER_ARGS="--bind-addr $SERVER_DOMAIN:$SERVER_PORT --domain $SERVER_DOMAIN"
 if [ "$VERBOSE" = "true" ]; then
     SERVER_ARGS="$SERVER_ARGS --verbose"
 fi

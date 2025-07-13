@@ -1,0 +1,33 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+logs/*.log
+logs/*.txt
+
+# Audio files (if any are generated)
+*.wav
+*.mp3
+*.ogg
+*.flac
+
+# Temporary files
+*.tmp
+*.temp
+
+# Local configuration (if any)
+local_config.toml
+.env.local 

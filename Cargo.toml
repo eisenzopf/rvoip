@@ -11,6 +11,7 @@ members = [
     "crates/session-core",
     "crates/call-engine",
     "crates/client-core",
+    "crates/audio-core",
     "crates/rvoip",
 ]
 
@@ -26,6 +27,7 @@ default-members = [
     "crates/session-core",
     "crates/call-engine",
     "crates/client-core",
+    "crates/audio-core",
     "crates/rvoip",
 ]
 
