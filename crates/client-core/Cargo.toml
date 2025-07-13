@@ -45,9 +45,6 @@ thiserror = "1.0"
 # Random number generation for jitter
 rand = "0.8"
 
-# Audio platform support
-cpal = { version = "0.15", optional = true }
-
 [dev-dependencies]
 tokio-test = "0.4"
 tracing-test = "0.2"
@@ -55,11 +52,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serial_test = "3.1"
 
 [features]
-default = ["audio-cpal"]
-# Enable audio device integration (future)
-audio-devices = []
-# Enable CPAL-based audio devices
-audio-cpal = ["cpal"]
+default = []
 # Enable video support (future)  
 video = []
 # Enable advanced codecs (future)
@@ -68,21 +61,4 @@ advanced-codecs = []
 # Example configurations
 [[example]]
 name = "sipp_integration_sip_test_server"
-path = "examples/sipp_integration/sip_test_server.rs"
-
-# Audio examples
-[[example]]
-name = "audio_device_discovery"
-path = "examples/audio_device_discovery.rs"
-
-[[example]]
-name = "audio_loopback"
-path = "examples/audio_loopback.rs"
-
-[[example]]
-name = "voip_audio_demo"
-path = "examples/voip_audio_demo.rs"
-
-[[example]]
-name = "audio_benchmark"
-path = "examples/audio_benchmark.rs" 
+path = "examples/sipp_integration/sip_test_server.rs" 

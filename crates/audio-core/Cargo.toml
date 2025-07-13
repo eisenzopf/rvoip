@@ -1,0 +1,100 @@
+[package]
+name = "rvoip-audio-core"
+# 🎯 INHERIT VERSION AND METADATA FROM WORKSPACE!
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+# Crate-specific description
+description = "Comprehensive audio handling for VoIP applications with device management, format conversion, and codec processing"
+
+# ✨ INHERIT LINTS FROM WORKSPACE
+[lints]
+workspace = true
+
+[dependencies]
+# Integration with other rvoip crates
+rvoip-session-core = { path = "../session-core", version = "0.1.4" }
+rvoip-rtp-core = { path = "../rtp-core", version = "0.1.4" }
+rvoip-client-core = { path = "../client-core", version = "0.1.4", optional = true }
+
+# Audio device access
+cpal = { version = "0.15", optional = true }
+
+# Audio processing and format conversion
+samplerate = { version = "0.2", optional = true }
+rubato = { version = "0.15", optional = true }
+dasp = { version = "0.11", optional = true }
+
+# For MP3 decoding in tests
+minimp3 = { version = "0.5", optional = true }
+
+# Codecs
+audiopus = { version = "0.2", optional = true }
+
+# Async runtime and utilities
+tokio = { version = "1.0", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# Data structures and utilities
+uuid = { version = "1.0", features = ["v4", "serde"] }
+bytes = "1.0"
+dashmap = "5.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+parking_lot = "0.12"
+
+# Logging and error handling
+tracing = "0.1"
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Time and synchronization
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+tracing-test = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serial_test = "3.1"
+
+[features]
+default = ["device-cpal", "format-conversion", "codec-g711"]
+
+# Device backend features
+device-cpal = ["cpal"]
+device-mock = []
+
+# Format conversion features
+format-conversion = ["samplerate", "rubato"]
+format-advanced = ["format-conversion", "dasp"]
+
+# Codec features
+codec-g711 = []
+codec-g722 = []
+codec-opus = ["audiopus"]
+codec-all = ["codec-g711", "codec-g722", "codec-opus"]
+
+# Client integration features
+client-integration = ["rvoip-client-core", "minimp3"]
+
+# Audio processing features (future)
+processing-aec = []
+processing-agc = []
+processing-noise = []
+processing-vad = []
+processing-all = ["processing-aec", "processing-agc", "processing-noise", "processing-vad"]
+
+# All features
+full = ["device-cpal", "format-advanced", "codec-all", "processing-all"]
+
+# Example configurations
+# Examples will be implemented in future phases 

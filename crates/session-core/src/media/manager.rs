@@ -890,16 +890,73 @@ impl MediaManager {
         session_id: &SessionId,
         audio_frame: crate::api::types::AudioFrame,
     ) -> super::MediaResult<()> {
-        let dialog_id = self.get_dialog_id(session_id).await?;
+        tracing::debug!("📤 Received audio frame for transmission for session: {}", session_id);
+        
+        let dialog_id = match self.get_dialog_id(session_id).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!("❌ Failed to get dialog ID for session {}: {}", session_id, e);
+                return Err(e);
+            }
+        };
+        
+        tracing::debug!("✅ Got dialog ID {} for session {}", dialog_id, session_id);
         
         // Convert session-core AudioFrame to media-core AudioFrame at boundary
-        let media_frame = rvoip_media_core::types::AudioFrame::from(audio_frame);
+        let media_frame = rvoip_media_core::types::AudioFrame::from(audio_frame.clone());
         
-        // TODO: Integrate with RTP encoding pipeline
-        // For now, we'll use the existing audio transmission mechanism
-        // In the future, this would send the frame to the RTP encoder
+        // Calculate RTP timestamp (8kHz clock rate for G.711)
+        let timestamp = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u32 * 8) % u32::MAX; // Convert to 8kHz RTP clock
         
-        tracing::debug!("📤 Received audio frame for transmission for session: {}", session_id);
+        // Encode audio frame to G.711 μ-law (PCMU) format
+        let encoded_payload = {
+            // Use simple linear PCM to μ-law conversion
+            media_frame.samples.iter().map(|&sample| {
+                // Convert i16 to μ-law u8
+                let sign = if sample < 0 { 0x80u8 } else { 0x00u8 };
+                let magnitude = sample.abs() as u16;
+                
+                // Find the segment (simplified μ-law encoding)
+                let mut segment = 0u8;
+                let mut temp = magnitude >> 5;
+                while temp != 0 && segment < 7 {
+                    segment += 1;
+                    temp >>= 1;
+                }
+                
+                // Calculate quantization value
+                let quantization = if segment == 0 {
+                    (magnitude >> 1) as u8
+                } else {
+                    (((magnitude >> (segment + 1)) & 0x0F) + 0x10) as u8
+                };
+                
+                // Combine sign, segment, and quantization
+                sign | (segment << 4) | (quantization & 0x0F)
+            }).collect::<Vec<u8>>()
+        };
+        
+        // Send the encoded payload via RTP
+        let payload_len = encoded_payload.len();
+        
+        tracing::info!("🔧 [DEBUG] About to send RTP packet for session: {} (dialog: {}, payload: {} bytes)", 
+                      session_id, dialog_id, payload_len);
+        
+        match self.controller.send_rtp_packet(&dialog_id, encoded_payload, timestamp).await {
+            Ok(()) => {
+                tracing::info!("✅ [SUCCESS] RTP packet sent successfully for session: {}", session_id);
+            }
+            Err(e) => {
+                tracing::error!("❌ [ERROR] Failed to send RTP packet for session: {}: {}", session_id, e);
+                return Err(MediaError::MediaEngine { source: Box::new(e) });
+            }
+        }
+        
+        tracing::debug!("📡 Sent audio frame as RTP packet for session: {} ({} samples → {} bytes, timestamp: {})", 
+                       session_id, audio_frame.samples.len(), payload_len, timestamp);
         Ok(())
     }
 

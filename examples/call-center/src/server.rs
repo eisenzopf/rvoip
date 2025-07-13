@@ -79,7 +79,13 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Step 1: Configure the call center
     let mut config = CallCenterConfig::default();
-    config.general.local_signaling_addr = bind_addr;
+    
+    // CRITICAL FIX: Use domain IP for signaling address to fix SDP generation
+    // Instead of using 0.0.0.0, use the domain IP with the specified port
+    let signaling_addr = format!("{}:{}", args.domain, bind_addr.port()).parse()
+        .map_err(|e| format!("Invalid signaling address: {}", e))?;
+    config.general.local_signaling_addr = signaling_addr;
+    
     config.general.domain = args.domain.clone();
     config.general.local_ip = args.domain.clone(); // CRITICAL: Use domain IP for SIP URIs and contact headers
     
@@ -102,6 +108,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("   Max calls per agent: {}", config.agents.default_max_concurrent_calls);
     info!("   Queue max wait time: {}s", config.queues.default_max_wait_time);
     info!("   Max queue size: {}", config.queues.max_queue_size);
+    
+    info!("🔧 IMPORTANT: Using domain IP {} for both SIP signaling and media to fix SDP generation", args.domain);
 
     // Step 2: Create the call center server
     let mut server = CallCenterServerBuilder::new()

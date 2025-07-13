@@ -10,7 +10,7 @@ The `client-core` library provides high-level SIP client capabilities for buildi
 
 ### ✅ **Core Responsibilities**
 - **Call Management**: Handle outgoing and incoming calls with full lifecycle control
-- **Media Operations**: Manage audio sessions, codecs, and quality monitoring
+- **Media Operations**: Manage audio streaming, codecs, and quality monitoring
 - **Event System**: Provide comprehensive event notifications for UI integration
 - **Client Configuration**: Simplify SIP client setup with sensible defaults
 - **Developer Experience**: Offer intuitive APIs for rapid VoIP application development
@@ -49,7 +49,7 @@ The Client Core sits at the application interface layer, providing high-level cl
 
 1. **ClientManager**: High-level client interface with lifecycle management
 2. **Call Operations**: Comprehensive call management (make, answer, hold, transfer)
-3. **Media Controls**: Audio controls, codec management, and quality monitoring
+3. **Media Controls**: Audio streaming controls, codec management, and quality monitoring
 4. **Event System**: Rich event notifications for application integration
 5. **Configuration Builder**: Intuitive configuration with sensible defaults
 6. **Error Handling**: Comprehensive error management with user-friendly messages
@@ -104,7 +104,7 @@ Clean separation of concerns across the client interface:
   - ✅ Media session lifecycle management with RTP coordination
   - ✅ Audio processing controls (echo cancellation, noise suppression, AGC)
 - ✅ **Media Controls API**: Production-ready media operations
-  - ✅ `set_microphone_mute()` and `set_speaker_mute()` audio controls
+  - ✅ `set_microphone_mute()` and `set_speaker_mute()` software audio controls
   - ✅ `get_media_statistics()` for real-time quality metrics
   - ✅ `get_call_quality()` for comprehensive call quality reporting
   - ✅ Custom SDP attribute support for advanced media configuration
@@ -115,11 +115,11 @@ Clean separation of concerns across the client interface:
   - ✅ `send_audio_frame()` - Send audio frames for encoding and transmission
   - ✅ `set_audio_stream_config()` - Configure sample rate, codec, and processing
   - ✅ `start_audio_stream()` / `stop_audio_stream()` - Control streaming pipeline
-- ✅ **Real-Time Integration**: Perfect for audio device integration
-  - ✅ Microphone capture with frame-by-frame processing
-  - ✅ Speaker playback with real-time audio delivery
+- ✅ **Real-Time Integration**: Perfect for custom audio application integration
+  - ✅ Frame-by-frame audio processing for microphone input
+  - ✅ Real-time audio delivery for speaker output
   - ✅ Audio effects and processing pipelines
-  - ✅ Custom audio sources and sinks
+  - ✅ Custom audio sources and sinks via external libraries
 
 #### **Event-Driven Architecture**
 - ✅ **Comprehensive Event System**: Complete client event infrastructure
