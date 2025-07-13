@@ -2,13 +2,13 @@
 //!
 //! This test creates two actual SIP clients using client-core that communicate
 //! over real network RTP transmission. Client A reads from jocofullinterview41.mp3,
-//! encodes it with G.729, and sends it over the network. Client B receives the
+//! encodes it with G.711, and sends it over the network. Client B receives the
 //! RTP packets, decodes them, and saves the audio as a WAV file.
 //!
 //! This test demonstrates:
 //! - Real SIP client creation with client-core
 //! - Actual MP3 file reading and decoding
-//! - Real G.729 codec encoding/decoding
+//! - Real G.711 codec encoding/decoding
 //! - Network RTP packet transmission
 //! - WAV file generation from received audio
 //! - No mocks, hacks, or shortcuts
@@ -31,7 +31,7 @@ use rvoip_client_core::{
     MediaConfig,
 };
 
-use rvoip_audio_core::codec::g729::G729Encoder;
+use rvoip_audio_core::codec::g711::G711Encoder;
 use rvoip_audio_core::codec::{CodecType, AudioCodecTrait, CodecConfig};
 use rvoip_audio_core::types::{AudioFrame, AudioFormat};
 
@@ -76,7 +76,7 @@ impl Default for TestStats {
 struct ClientAEventHandler {
     client_manager: Arc<RwLock<Option<Arc<ClientManager>>>>,
     call_id: Arc<RwLock<Option<CallId>>>,
-    g729_encoder: Arc<Mutex<G729Encoder>>,
+    g711_encoder: Arc<Mutex<G711Encoder>>,
     audio_data: Arc<Mutex<Vec<i16>>>,
     audio_position: Arc<Mutex<usize>>,
     stats: Arc<RwLock<TestStats>>,
@@ -88,7 +88,7 @@ impl ClientAEventHandler {
         Self {
             client_manager: Arc::new(RwLock::new(None)),
             call_id: Arc::new(RwLock::new(None)),
-            g729_encoder: Arc::new(Mutex::new(G729Encoder::new(CodecConfig::default()).expect("Failed to create G729 encoder"))),
+            g711_encoder: Arc::new(Mutex::new(G711Encoder::new(CodecConfig::default(), true).expect("Failed to create G711 encoder"))),
             audio_data: Arc::new(Mutex::new(Vec::new())),
             audio_position: Arc::new(Mutex::new(0)),
             stats: Arc::new(RwLock::new(TestStats::default())),
@@ -204,7 +204,7 @@ impl ClientAEventHandler {
         client.start_audio_transmission(&call_id).await?;
         
         // Start the audio encoding and sending loop
-        let encoder: Arc<Mutex<G729Encoder>> = Arc::clone(&self.g729_encoder);
+        let encoder: Arc<Mutex<G711Encoder>> = Arc::clone(&self.g711_encoder);
         let audio_data = Arc::clone(&self.audio_data);
         let audio_position = Arc::clone(&self.audio_position);
         let stats = Arc::clone(&self.stats);
@@ -218,9 +218,9 @@ impl ClientAEventHandler {
                 let audio_samples = audio_data.lock().await;
                 let mut position = audio_position.lock().await;
                 
-                // Check if we have enough samples for a G.729 frame (80 samples)
+                // Check if we have enough samples for a G.711 frame (80 samples)
                 if *position + 80 <= audio_samples.len() {
-                    // Extract 80 samples for G.729 encoding
+                    // Extract 80 samples for G.711 encoding
                     let frame_samples: Vec<i16> = audio_samples[*position..*position + 80].to_vec();
                     *position += 80;
                     
@@ -229,7 +229,7 @@ impl ClientAEventHandler {
                     let format = AudioFormat::new(8000, 1, 16, 10); // 8kHz, mono, 16-bit, 10ms frames
                     let audio_frame = AudioFrame::new(frame_samples, format, timestamp);
                     
-                    // Encode with G.729
+                    // Encode with G.711
                     let mut encoder = encoder.lock().await;
                     match encoder.encode(&audio_frame) {
                         Ok(encoded_data) => {
@@ -255,7 +255,7 @@ impl ClientAEventHandler {
                             }
                         }
                         Err(e) => {
-                            eprintln!("❌ G.729 encoding failed: {}", e);
+                            eprintln!("❌ G.711 encoding failed: {}", e);
                             break;
                         }
                     }
@@ -265,7 +265,7 @@ impl ClientAEventHandler {
                     println!("🔄 Looping audio from beginning");
                 }
                 
-                // G.729 frame duration is 10ms (80 samples at 8kHz)
+                // G.711 frame duration is 10ms (80 samples at 8kHz)
                 sleep(Duration::from_millis(10)).await;
             }
             
@@ -340,7 +340,7 @@ impl ClientEventHandler for ClientAEventHandler {
 struct ClientBEventHandler {
     client_manager: Arc<RwLock<Option<Arc<ClientManager>>>>,
     call_id: Arc<RwLock<Option<CallId>>>,
-    g729_encoder: Arc<Mutex<G729Encoder>>, // Also used for decoding
+    g711_encoder: Arc<Mutex<G711Encoder>>, // Also used for decoding
     received_audio: Arc<Mutex<Vec<i16>>>,
     stats: Arc<RwLock<TestStats>>,
     wav_writer: Arc<Mutex<Option<BufWriter<File>>>>,
@@ -351,7 +351,7 @@ impl ClientBEventHandler {
         Self {
             client_manager: Arc::new(RwLock::new(None)),
             call_id: Arc::new(RwLock::new(None)),
-            g729_encoder: Arc::new(Mutex::new(G729Encoder::new(CodecConfig::default()).expect("Failed to create G729 encoder"))),
+            g711_encoder: Arc::new(Mutex::new(G711Encoder::new(CodecConfig::default(), true).expect("Failed to create G711 encoder"))),
             received_audio: Arc::new(Mutex::new(Vec::new())),
             stats: Arc::new(RwLock::new(TestStats::default())),
             wav_writer: Arc::new(Mutex::new(None)),
@@ -396,8 +396,8 @@ impl ClientBEventHandler {
     }
 
     async fn process_received_audio(&self, encoded_data: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        // Decode with G.729
-        let mut encoder = self.g729_encoder.lock().await;
+        // Decode with G.711
+        let mut encoder = self.g711_encoder.lock().await;
         match encoder.decode(encoded_data) {
             Ok(decoded_frame) => {
                 // Write to WAV file
@@ -418,7 +418,7 @@ impl ClientBEventHandler {
                 Ok(())
             }
             Err(e) => {
-                eprintln!("❌ G.729 decoding failed: {}", e);
+                eprintln!("❌ G.711 decoding failed: {}", e);
                 Err(e.into())
             }
         }
@@ -592,7 +592,7 @@ async fn test_real_network_peer_to_peer_audio_transmission() {
         .domain("test.local".to_string())
         .user_agent("RealNetworkTestClientA/1.0".to_string())
         .with_media(|m| m
-            .codecs(vec!["G729".to_string()])
+            .codecs(vec!["PCMU".to_string()])
             .require_srtp(false)
             .echo_cancellation(false)
             .noise_suppression(false)
@@ -616,7 +616,7 @@ async fn test_real_network_peer_to_peer_audio_transmission() {
         .domain("test.local".to_string())
         .user_agent("RealNetworkTestClientB/1.0".to_string())
         .with_media(|m| m
-            .codecs(vec!["G729".to_string()])
+            .codecs(vec!["PCMU".to_string()])
             .require_srtp(false)
             .echo_cancellation(false)
             .noise_suppression(false)
