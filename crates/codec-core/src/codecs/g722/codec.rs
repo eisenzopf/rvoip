@@ -96,7 +96,7 @@ impl G722Codec {
     }
     
     /// Encode a single sample pair
-    fn encode_sample_pair(&mut self, samples: [i16; 2]) -> u8 {
+    pub fn encode_sample_pair(&mut self, samples: [i16; 2]) -> u8 {
         // QMF analysis - split into low and high bands
         let (xl, xh) = qmf::qmf_analysis(samples[0], samples[1], self.encoder_state.state_mut());
         
@@ -109,7 +109,7 @@ impl G722Codec {
     }
     
     /// Decode a single byte to sample pair
-    fn decode_byte(&mut self, byte: u8) -> [i16; 2] {
+    pub fn decode_byte(&mut self, byte: u8) -> [i16; 2] {
         // Unpack bits: 6 bits for low band + 2 bits for high band
         let low_bits = byte & 0x3F;
         let high_bits = (byte >> 6) & 0x03;
