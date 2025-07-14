@@ -172,6 +172,82 @@ pub fn lsbdec(ilr: i16, mode: u8, state: &mut G722State) -> i16 {
     rl
 }
 
+/// ITU-T quantl function - Low-band quantization 
+/// 
+/// Exact implementation from ITU-T G.722 reference funcg722.c
+pub fn quantl(el: i16, detl: i16) -> i16 {
+    // Table to read IL from SIL and MIL: misil(sil(0,1),mil(1,31))
+    const MISIL: [[i16; 32]; 2] = [
+        [0x0000, 0x003F, 0x003E, 0x001F, 0x001E, 0x001D, 0x001C, 0x001B,
+         0x001A, 0x0019, 0x0018, 0x0017, 0x0016, 0x0015, 0x0014, 0x0013,
+         0x0012, 0x0011, 0x0010, 0x000F, 0x000E, 0x000D, 0x000C, 0x000B,
+         0x000A, 0x0009, 0x0008, 0x0007, 0x0006, 0x0005, 0x0004, 0x0000],
+        [0x0000, 0x003D, 0x003C, 0x003B, 0x003A, 0x0039, 0x0038, 0x0037,
+         0x0036, 0x0035, 0x0034, 0x0033, 0x0032, 0x0031, 0x0030, 0x002F,
+         0x002E, 0x002D, 0x002C, 0x002B, 0x002A, 0x0029, 0x0028, 0x0027,
+         0x0026, 0x0025, 0x0024, 0x0023, 0x0022, 0x0021, 0x0020, 0x0000]
+    ];
+
+    // 6 levels quantizer level decision table
+    const Q6: [i16; 31] = [
+        0, 35, 72, 110, 150, 190, 233, 276,
+        323, 370, 422, 473, 530, 587, 650, 714,
+        786, 858, 940, 1023, 1121, 1219, 1339, 1458,
+        1612, 1765, 1980, 2195, 2557, 2919, 3200
+    ];
+
+    // ITU-T reference algorithm:
+    let sil = el >> 15;  // shr(el, 15)
+    
+    let mut wd = if sil == 0 {
+        el
+    } else {
+        (!el) & 0x7FFF  // sub(MAX_16, s_and(el, MAX_16)) where MAX_16 = 0x7FFF
+    };
+
+    let mut mil = 0i16;
+    let mut val = ((Q6[mil as usize] << 3) as i32 * detl as i32) >> 15;  // mult(shl(q6[mil], 3), detl)
+    
+    while val <= (wd as i32) {
+        if mil >= 30 {
+            break;
+        }
+        mil += 1;
+        val = ((Q6[mil as usize] << 3) as i32 * detl as i32) >> 15;
+    }
+
+    let sil_index = if sil == 0 { 0 } else { 1 };
+    MISIL[sil_index][mil as usize]
+}
+
+/// ITU-T quanth function - High-band quantization
+/// 
+/// Exact implementation from ITU-T G.722 reference funcg722.c
+pub fn quanth(eh: i16, deth: i16) -> i16 {
+    const MISIH: [[i16; 3]; 2] = [
+        [0, 1, 0],
+        [0, 3, 2]
+    ];
+    const Q2: i16 = 564;
+
+    // ITU-T reference algorithm:
+    let sih = eh >> 15;  // shr(eh, 15)
+    
+    let wd = if sih == 0 {
+        eh
+    } else {
+        (!eh) & 0x7FFF  // sub(MAX_16, s_and(eh, MAX_16)) where MAX_16 = 0x7FFF
+    };
+
+    let mut mih = 1i16;
+    if ((Q2 << 3) as i32 * deth as i32) >> 15 <= (wd as i32) {  // mult(shl(q2, 3), deth)
+        mih = 2;
+    }
+
+    let sih_index = if sih == 0 { 0 } else { 1 };
+    MISIH[sih_index][mih as usize]
+}
+
 /// 5-bit quantization (quantl5b)
 /// 
 /// This function implements the ITU-T reference quantl5b function.
@@ -432,6 +508,134 @@ pub fn upzero(dlt: &mut [i16], bl: &mut [i16]) {
     for i in (1..len).rev() {
         dlt[i] = dlt[i-1];
     }
+}
+
+/// ITU-T invqbl function - Mode-dependent inverse quantization for low-band
+/// 
+/// Exact implementation from ITU-T G.722 reference funcg722.c
+pub fn invqbl(ilr: i16, detl: i16, mode: i16) -> i16 {
+    // Inverse quantizer 4, 5, and 6 bit tables for the decoder
+    const RIL4: [i16; 16] = [0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0];
+    const RISI4: [i16; 16] = [0, -1, -1, -1, -1, -1, -1, -1, 
+                              0, 0, 0, 0, 0, 0, 0, 0];
+    const OQ4: [i16; 8] = [0, 150, 323, 530, 786, 1121, 1612, 2557];
+    
+    const RIL5: [i16; 32] = [
+        1, 1, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2,
+        15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 1
+    ];
+    const RISI5: [i16; 32] = [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1
+    ];
+    const OQ5: [i16; 16] = [
+        0, 35, 110, 190, 276, 370, 473, 587,
+        714, 858, 1023, 1219, 1458, 1765, 2195, 2919
+    ];
+    
+    const RIL6: [i16; 64] = [
+        1, 1, 1, 1, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20,
+        19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3,
+        30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20,
+        19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 2, 1
+    ];
+    const RISI6: [i16; 64] = [
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1
+    ];
+    const OQ6: [i16; 31] = [
+        0, 17, 54, 91, 130, 170, 211, 254, 300, 347, 396, 447, 501,
+        558, 618, 682, 750, 822, 899, 982, 1072, 1170, 1279, 1399,
+        1535, 1689, 1873, 2088, 2376, 2738, 3101
+    ];
+
+    // ITU-T reference algorithm:
+    let wd2 = match mode {
+        0 | 1 => {
+            // Mode 0/1: 6-bit quantization
+            let ril = ilr;
+            let wd1 = OQ6[RIL6[ril as usize] as usize] << 3;  // shl(oq6[ril6[ril]], 3)
+            if RISI6[ril as usize] == 0 {
+                wd1
+            } else {
+                -wd1  // sub(0, wd1)
+            }
+        },
+        2 => {
+            // Mode 2: 5-bit quantization
+            let ril = ilr >> 1;  // shr(ilr, 1)
+            let wd1 = OQ5[RIL5[ril as usize] as usize] << 3;  // shl(oq5[ril5[ril]], 3)
+            if RISI5[ril as usize] == 0 {
+                wd1
+            } else {
+                -wd1  // sub(0, wd1)
+            }
+        },
+        3 => {
+            // Mode 3: 4-bit quantization
+            let ril = ilr >> 2;  // shr(ilr, 2)
+            let wd1 = OQ4[RIL4[ril as usize] as usize] << 3;  // shl(oq4[ril4[ril]], 3)
+            if RISI4[ril as usize] == 0 {
+                wd1
+            } else {
+                -wd1  // sub(0, wd1)
+            }
+        },
+        _ => {
+            // Default to mode 3
+            let ril = ilr >> 2;
+            let wd1 = OQ4[RIL4[ril as usize] as usize] << 3;
+            if RISI4[ril as usize] == 0 {
+                wd1
+            } else {
+                -wd1
+            }
+        }
+    };
+
+    ((detl as i32 * wd2 as i32) >> 15) as i16  // mult(detl, wd2)
+}
+
+/// Inverse quantization for high-band (invqah)
+/// 
+/// Exact implementation from ITU-T G.722 reference funcg722.c
+pub fn invqah(ih: i16, deth: i16) -> i16 {
+    const IH2: [i16; 4] = [2, 1, 2, 1];
+    const SIH: [i16; 4] = [-1, -1, 0, 0];
+    const OQ2: [i16; 3] = [0, 202, 926];
+
+    // ITU-T reference algorithm:
+    let wd1 = OQ2[IH2[ih as usize] as usize] << 3;  // shl(oq2[ih2[ih]], 3)
+    let wd2 = if SIH[ih as usize] == 0 {
+        wd1
+    } else {
+        -wd1  // negate(wd1)
+    };
+
+    ((wd2 as i32 * deth as i32) >> 15) as i16  // mult(wd2, deth)
+}
+
+/// Inverse quantization for low-band (invqal) - Used in encoding
+/// 
+/// Exact implementation from ITU-T G.722 reference funcg722.c
+pub fn invqal(il: i16, detl: i16) -> i16 {
+    // Inverse quantizer 4 bits for encoder or decoder
+    const RIL4: [i16; 16] = [0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0];
+    const RISIL: [i16; 16] = [0, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0];
+    const OQ4: [i16; 8] = [0, 150, 323, 530, 786, 1121, 1612, 2557];
+
+    // ITU-T reference algorithm:
+    let ril = il >> 2;  // shr(il, 2)
+    let wd1 = OQ4[RIL4[ril as usize] as usize] << 3;  // shl(oq4[ril4[ril]], 3)
+    let wd2 = if RISIL[ril as usize] == 0 {
+        wd1
+    } else {
+        -wd1  // negate(wd1)
+    };
+
+    ((detl as i32 * wd2 as i32) >> 15) as i16  // mult(detl, wd2)
 }
 
 #[cfg(test)]

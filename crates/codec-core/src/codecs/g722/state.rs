@@ -55,14 +55,21 @@ pub struct AdpcmState {
 }
 
 impl AdpcmState {
-    /// Create a new ADPCM state with default initialization
+    /// Create a new ADPCM state with default initialization for low band
     /// 
-    /// Initialize with ITU-T reference default values
+    /// Initialize with ITU-T reference default values: DETL = 32
     pub fn new() -> Self {
+        Self::new_low_band()
+    }
+    
+    /// Create a new ADPCM state for low band with ITU-T reference defaults
+    /// 
+    /// Initialize with ITU-T reference default values: DETL = 32
+    pub fn new_low_band() -> Self {
         Self {
             a: [0; 3],
             b: [0; 7],
-            det: 32,      // Initial quantizer scale factor
+            det: 32,      // Initial quantizer scale factor for low band (DETL = 32)
             dlt: [0; 7],
             nb: 0,
             plt: [0; 3],
@@ -77,11 +84,56 @@ impl AdpcmState {
         }
     }
     
-    /// Reset the ADPCM state to initial values
+    /// Create a new ADPCM state for high band with ITU-T reference defaults
+    /// 
+    /// Initialize with ITU-T reference default values: DETH = 8
+    pub fn new_high_band() -> Self {
+        Self {
+            a: [0; 3],
+            b: [0; 7],
+            det: 8,       // Initial quantizer scale factor for high band (DETH = 8)
+            dlt: [0; 7],
+            nb: 0,
+            plt: [0; 3],
+            rlt: [0; 3],
+            s: 0,
+            sp: 0,
+            sz: 0,
+            // New ITU-T reference fields
+            sl: 0,
+            spl: 0,
+            szl: 0,
+        }
+    }
+    
+    /// Reset the ADPCM state to initial values (default: low band)
     pub fn reset(&mut self) {
+        self.reset_low_band();
+    }
+    
+    /// Reset the ADPCM state to initial values for low band (DETL = 32)
+    pub fn reset_low_band(&mut self) {
         self.a = [0; 3];
         self.b = [0; 7];
-        self.det = 32;
+        self.det = 32;    // ITU-T reference: DETL = 32
+        self.dlt = [0; 7];
+        self.nb = 0;
+        self.plt = [0; 3];
+        self.rlt = [0; 3];
+        self.s = 0;
+        self.sp = 0;
+        self.sz = 0;
+        // Reset new ITU-T reference fields
+        self.sl = 0;
+        self.spl = 0;
+        self.szl = 0;
+    }
+    
+    /// Reset the ADPCM state to initial values for high band (DETH = 8)
+    pub fn reset_high_band(&mut self) {
+        self.a = [0; 3];
+        self.b = [0; 7];
+        self.det = 8;     // ITU-T reference: DETH = 8
         self.dlt = [0; 7];
         self.nb = 0;
         self.plt = [0; 3];
@@ -128,11 +180,11 @@ pub struct G722State {
 impl G722State {
     /// Create a new G.722 state with default initialization
     /// 
-    /// Initialize with ITU-T reference default values
+    /// Initialize with ITU-T reference default values: DETL = 32, DETH = 8
     pub fn new() -> Self {
         Self {
-            low_band: AdpcmState::new(),
-            high_band: AdpcmState::new(),
+            low_band: AdpcmState::new_low_band(),
+            high_band: AdpcmState::new_high_band(),
             qmf_tx_delay: [0; 24],
             qmf_rx_delay: [0; 24],
         }
@@ -140,8 +192,8 @@ impl G722State {
     
     /// Reset the G.722 state to initial values
     pub fn reset(&mut self) {
-        self.low_band.reset();
-        self.high_band.reset();
+        self.low_band.reset_low_band();
+        self.high_band.reset_high_band();
         self.qmf_tx_delay = [0; 24];
         self.qmf_rx_delay = [0; 24];
     }

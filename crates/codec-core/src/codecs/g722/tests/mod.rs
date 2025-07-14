@@ -2,6 +2,7 @@
 //!
 //! This module organizes the test suite for the G.722 codec implementation.
 
-pub mod unit_tests;
-pub mod integration_tests;
-pub mod reference_tests; 
+mod integration_tests;
+mod reference_tests;
+mod unit_tests;
+mod itu_testvectors; 
