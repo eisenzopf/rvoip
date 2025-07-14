@@ -2,11 +2,13 @@
 //!
 //! This module defines the state structures used by the G.722 codec.
 //! Based on the ITU-T G.722 reference implementation.
+//! Updated to match ITU-T G.722 Annex E (Release 3.00, 2014-11) exactly.
 
 /// ADPCM state for a single sub-band (low or high)
 /// 
 /// This structure contains all the state variables needed for ADPCM 
 /// encoding and decoding in one sub-band.
+/// Updated to match ITU-T reference implementation g722_state structure.
 #[derive(Debug, Clone)]
 pub struct AdpcmState {
     /// Predictor coefficients (poles): a[0] unused, a[1] = a1, a[2] = a2
@@ -30,18 +32,32 @@ pub struct AdpcmState {
     /// Reconstructed signal: rlt[0] = current, rlt[1] = previous, etc.
     pub rlt: [i16; 3],
     
-    /// Signal estimate
+    /// Signal estimate (from ITU-T reference: sl/sh for low/high band)
     pub s: i16,
     
-    /// Slow part of signal estimate
+    /// Slow part of signal estimate (from ITU-T reference: spl/sph for low/high band)
     pub sp: i16,
     
-    /// Fast part of signal estimate  
+    /// Fast part of signal estimate (from ITU-T reference: szl/szh for low/high band)
     pub sz: i16,
+    
+    // ================ NEW FIELDS FOR ITU-T COMPLIANCE ================
+    
+    /// Signal estimate for low-band (sl) or high-band (sh)
+    /// This is the main signal estimate used in the reference implementation
+    pub sl: i16,
+    
+    /// Slow part of signal estimate for low-band (spl) or high-band (sph)
+    pub spl: i16,
+    
+    /// Fast part of signal estimate for low-band (szl) or high-band (szh)
+    pub szl: i16,
 }
 
 impl AdpcmState {
     /// Create a new ADPCM state with default initialization
+    /// 
+    /// Initialize with ITU-T reference default values
     pub fn new() -> Self {
         Self {
             a: [0; 3],
@@ -54,6 +70,10 @@ impl AdpcmState {
             s: 0,
             sp: 0,
             sz: 0,
+            // New ITU-T reference fields
+            sl: 0,
+            spl: 0,
+            szl: 0,
         }
     }
     
@@ -69,6 +89,10 @@ impl AdpcmState {
         self.s = 0;
         self.sp = 0;
         self.sz = 0;
+        // Reset new ITU-T reference fields
+        self.sl = 0;
+        self.spl = 0;
+        self.szl = 0;
     }
 }
 
@@ -83,6 +107,7 @@ impl Default for AdpcmState {
 /// This structure contains all the state variables needed for G.722 
 /// encoding and decoding, including ADPCM states for both sub-bands
 /// and QMF filter delay lines.
+/// Updated to match ITU-T reference implementation g722_state structure.
 #[derive(Debug, Clone)]
 pub struct G722State {
     /// Low-band ADPCM state
@@ -92,14 +117,18 @@ pub struct G722State {
     pub high_band: AdpcmState,
     
     /// QMF transmit (analysis) delay line - 24 samples
+    /// (ITU-T reference: qmf_tx_delayx[24])
     pub qmf_tx_delay: [i16; 24],
     
     /// QMF receive (synthesis) delay line - 24 samples
+    /// (ITU-T reference: qmf_rx_delayx[24])
     pub qmf_rx_delay: [i16; 24],
 }
 
 impl G722State {
     /// Create a new G.722 state with default initialization
+    /// 
+    /// Initialize with ITU-T reference default values
     pub fn new() -> Self {
         Self {
             low_band: AdpcmState::new(),
@@ -273,6 +302,9 @@ mod tests {
         assert_eq!(state.s, 0);
         assert_eq!(state.sp, 0);
         assert_eq!(state.sz, 0);
+        assert_eq!(state.sl, 0);
+        assert_eq!(state.spl, 0);
+        assert_eq!(state.szl, 0);
     }
 
     #[test]
@@ -280,11 +312,15 @@ mod tests {
         let mut state = AdpcmState::new();
         state.s = 1000;
         state.det = 100;
+        state.sl = 500;
+        state.szl = 200;
         
         state.reset();
         
         assert_eq!(state.det, 32);
         assert_eq!(state.s, 0);
+        assert_eq!(state.sl, 0);
+        assert_eq!(state.szl, 0);
     }
 
     #[test]
@@ -302,25 +338,29 @@ mod tests {
         state.low_band.s = 1000;
         state.high_band.s = 2000;
         state.qmf_tx_delay[0] = 500;
+        state.low_band.sl = 300;
+        state.high_band.szl = 400;
         
         state.reset();
         
         assert_eq!(state.low_band.s, 0);
         assert_eq!(state.high_band.s, 0);
         assert_eq!(state.qmf_tx_delay[0], 0);
+        assert_eq!(state.low_band.sl, 0);
+        assert_eq!(state.high_band.szl, 0);
     }
 
     #[test]
     fn test_encoder_state_creation() {
-        let encoder = G722EncoderState::new();
-        assert_eq!(encoder.buffer_index, 0);
-        assert_eq!(encoder.input_buffer, [0; 2]);
+        let state = G722EncoderState::new();
+        assert_eq!(state.state.low_band.det, 32);
+        assert_eq!(state.buffer_index, 0);
     }
 
     #[test]
     fn test_decoder_state_creation() {
-        let decoder = G722DecoderState::new();
-        assert_eq!(decoder.buffer_index, 0);
-        assert_eq!(decoder.output_buffer, [0; 2]);
+        let state = G722DecoderState::new();
+        assert_eq!(state.state.low_band.det, 32);
+        assert_eq!(state.buffer_index, 0);
     }
 } 
