@@ -12,6 +12,7 @@ members = [
     "crates/call-engine",
     "crates/client-core",
     "crates/audio-core",
+    "crates/codec-core",
     "crates/rvoip",
 ]
 
@@ -28,6 +29,7 @@ default-members = [
     "crates/call-engine",
     "crates/client-core",
     "crates/audio-core",
+    "crates/codec-core",
     "crates/rvoip",
 ]
 
@@ -123,6 +125,7 @@ rvoip-media-core = { path = "crates/media-core", version = "0.1.14" }
 rvoip-session-core = { path = "crates/session-core", version = "0.1.14" }
 rvoip-call-engine = { path = "crates/call-engine", version = "0.1.14" }
 rvoip-client-core = { path = "crates/client-core", version = "0.1.14" }
+rvoip-codec-core = { path = "crates/codec-core", version = "0.1.14" }
 rvoip = { path = "crates/rvoip", version = "0.1.8" }
 
 # External dependencies
