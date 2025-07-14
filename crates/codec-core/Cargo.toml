@@ -1,0 +1,74 @@
+[package]
+name = "rvoip-codec-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+description = "High-performance audio codec library for VoIP applications"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Core dependencies
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+bytes = "1.5"
+
+# Performance optimizations
+once_cell = "1.19"           # Lazy static initialization for lookup tables
+bytemuck = "1.0"             # Safe transmutation between types
+rayon = "1.7"                # Parallel processing
+
+# Signal processing
+rustfft = "6.1"              # Fast Fourier transforms
+num-complex = "0.4"          # Complex number support
+apodize = "1.0"              # Windowing functions
+
+# External codec libraries (optional)
+opus = { version = "0.3", optional = true }
+# g729 = { version = "0.3", optional = true }  # Commented out - licensing required
+
+# Testing dependencies
+[dev-dependencies]
+tokio = { version = "1.35", features = ["full"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.4"             # Property-based testing
+rand = "0.8"                 # Random number generation for tests
+
+# Feature flags
+[features]
+default = ["g711", "g722", "g729-sim", "opus-sim"]
+
+# Individual codec features
+g711 = []                    # Always available - no external dependencies
+g722 = []                    # Always available - no external dependencies
+g729 = []                    # Real G.729 - requires external library
+g729-sim = []                # G.729 simulation - no external dependencies
+opus = ["dep:opus"]          # Real Opus - requires external library
+opus-sim = []                # Opus simulation - no external dependencies
+
+# Performance features
+simd = []                    # SIMD optimizations
+lut = []                     # Pre-computed lookup tables (enabled by default)
+
+# All codecs
+all-codecs = ["g711", "g722", "g729", "opus"]
+all-sim = ["g711", "g722", "g729-sim", "opus-sim"]
+
+# Benchmarking
+bench = []
+
+# Uncomment to enable benchmarks (requires creating benches/codec_benchmarks.rs)
+# [[bench]]
+# name = "codec_benchmarks"
+# harness = false
+# required-features = ["bench"] 
