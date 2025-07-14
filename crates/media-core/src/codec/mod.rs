@@ -6,12 +6,16 @@
 pub mod audio;
 pub mod transcoding;  // Add transcoding module
 pub mod mapping;      // Add codec mapping utilities
+pub mod g711;         // Export G.711 codec module
 
 // Re-export audio codec types
 pub use audio::common::*;
 
 // Re-export G.711 codecs from our relay module
 pub use crate::relay::{G711PcmuCodec, G711PcmaCodec};
+
+// Re-export G.711 codec types and functions
+pub use g711::{G711Codec, G711Variant, encode_ulaw, decode_ulaw, encode_alaw, decode_alaw};
 
 // Re-export transcoding types
 pub use transcoding::{Transcoder, TranscodingPath, TranscodingStats};

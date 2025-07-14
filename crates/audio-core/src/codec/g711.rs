@@ -113,110 +113,156 @@ impl AudioCodecTrait for G711Encoder {
 
 /// Convert linear PCM sample to μ-law
 fn linear_to_mu_law(sample: i16) -> u8 {
-    // Use i16 sample directly
-    let pcm = sample;
+    const BIAS: i16 = 0x84;
+    const CLIP: i16 = 32635;
     
-    // Convert to μ-law
-    let mask = if pcm < 0 { 0x7F } else { 0xFF };
-    let pcm = if pcm < 0 { (-pcm) as u16 } else { pcm as u16 };
-    let pcm = pcm + 33;
-    
-    let exp = if pcm > 0x1FFF {
-        7
-    } else if pcm > 0x0FFF {
-        6
-    } else if pcm > 0x07FF {
-        5
-    } else if pcm > 0x03FF {
-        4
-    } else if pcm > 0x01FF {
-        3
-    } else if pcm > 0x00FF {
-        2
-    } else if pcm > 0x007F {
-        1
-    } else {
-        0
+    // Get sign and make sample positive
+    let sign = if sample < 0 { 0x7F } else { 0xFF };
+    let mut sample = if sample < 0 { 
+        if sample == i16::MIN { i16::MAX } else { -sample }
+    } else { 
+        sample 
     };
     
-    let mantissa = (pcm >> (exp + 3)) & 0x0F;
-    let mu_law = !((exp << 4) | mantissa);
+    // Apply bias and clipping
+    sample = sample.saturating_add(BIAS);
+    if sample > CLIP {
+        sample = CLIP;
+    }
     
-    (mu_law & mask) as u8
+    // Find the exponent
+    let exp = if sample < 256 {
+        0
+    } else if sample < 512 {
+        1
+    } else if sample < 1024 {
+        2
+    } else if sample < 2048 {
+        3
+    } else if sample < 4096 {
+        4
+    } else if sample < 8192 {
+        5
+    } else if sample < 16384 {
+        6
+    } else {
+        7
+    };
+    
+    // Calculate mantissa
+    let mantissa = (sample >> (exp + 3)) & 0x0F;
+    
+    // Combine to form μ-law byte
+    let mu_law = (exp << 4) | mantissa;
+    
+    // Apply complement and sign
+    ((!mu_law) & sign) as u8
 }
 
 /// Convert μ-law to linear PCM sample
 fn mu_law_to_linear(mu_law: u8) -> i16 {
+    const BIAS: i16 = 0x84;
+    
+    // Get sign and invert the μ-law byte
+    let sign = (mu_law & 0x80) == 0;
     let mu_law = !mu_law;
-    let sign = (mu_law & 0x80) != 0;
+    
+    // Extract exponent and mantissa
     let exp = (mu_law >> 4) & 0x07;
     let mantissa = mu_law & 0x0F;
     
-    let mut pcm = ((mantissa << 3) + 0x84) << exp;
-    pcm -= 0x84;
-    
-    if sign {
-        -(pcm as i16)
+    // Calculate linear value
+    let linear = ((mantissa as i16) << 3) + BIAS;
+    let linear = if exp == 0 {
+        linear
     } else {
-        pcm as i16
+        (linear << exp) - BIAS
+    };
+    
+    // Apply sign
+    if sign {
+        -linear
+    } else {
+        linear
     }
 }
 
 /// Convert linear PCM sample to A-law
 fn linear_to_a_law(sample: i16) -> u8 {
-    // Use i16 sample directly
-    let mut pcm = sample;
+    // Get sign and make sample positive
+    let sign = if sample >= 0 { 0x80 } else { 0x00 };
+    let mut sample = if sample >= 0 { 
+        sample 
+    } else { 
+        if sample == i16::MIN { i16::MAX } else { -sample }
+    };
     
-    let mask = if pcm >= 0 { 0xD5 } else { 0x55 };
-    if pcm < 0 {
-        pcm = -pcm;
-    }
-    let pcm = pcm as u16;
-    
-    let exp = if pcm > 0x0FFF {
-        7
-    } else if pcm > 0x07FF {
-        6
-    } else if pcm > 0x03FF {
-        5
-    } else if pcm > 0x01FF {
-        4
-    } else if pcm > 0x00FF {
-        3
-    } else if pcm > 0x007F {
-        2
-    } else if pcm > 0x003F {
-        1
-    } else {
+    // Find the exponent
+    let exp = if sample < 16 {
         0
-    };
-    
-    let mantissa = if exp == 0 {
-        (pcm >> 1) & 0x0F
+    } else if sample < 32 {
+        1
+    } else if sample < 64 {
+        2
+    } else if sample < 128 {
+        3
+    } else if sample < 256 {
+        4
+    } else if sample < 512 {
+        5
+    } else if sample < 1024 {
+        6
+    } else if sample < 2048 {
+        7
     } else {
-        (pcm >> exp) & 0x0F
+        sample >>= 4; // Scale down for higher values
+        if sample < 16 {
+            4
+        } else if sample < 32 {
+            5
+        } else if sample < 64 {
+            6
+        } else {
+            7
+        }
     };
     
-    (((exp << 4) | mantissa) ^ mask) as u8
+    // Calculate mantissa
+    let mantissa = if exp < 4 {
+        (sample >> (exp + 1)) & 0x0F
+    } else {
+        (sample >> (exp - 3)) & 0x0F
+    };
+    
+    // Combine sign, exponent, and mantissa
+    let a_law = sign | (exp << 4) | mantissa;
+    
+    // Apply A-law XOR mask
+    (a_law ^ 0x55) as u8
 }
 
 /// Convert A-law to linear PCM sample
 fn a_law_to_linear(a_law: u8) -> i16 {
+    // Remove A-law XOR mask
     let a_law = a_law ^ 0x55;
+    
+    // Extract sign, exponent, and mantissa
     let sign = (a_law & 0x80) != 0;
     let exp = (a_law >> 4) & 0x07;
     let mantissa = a_law & 0x0F;
     
-    let pcm = if exp == 0 {
-        (mantissa << 1) + 1
+    // Calculate linear value
+    let linear = if exp < 4 {
+        (mantissa << (exp + 1)) | (1 << exp)
     } else {
-        ((mantissa << 1) + 33) << (exp - 1)
+        ((mantissa << (exp - 3)) | (1 << (exp - 4))) << 4
     };
     
+    // Apply sign
     if sign {
-        -(pcm as i16)
+        linear as i16
     } else {
-        pcm as i16
+        -(linear as i16)
     }
 }
 
