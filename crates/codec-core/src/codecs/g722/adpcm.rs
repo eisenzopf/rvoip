@@ -1,14 +1,13 @@
-//! G.722 ADPCM Implementation
+//! ADPCM (Adaptive Differential Pulse Code Modulation) Implementation
 //!
-//! This module implements the ADPCM encoding and decoding algorithms for G.722.
-//! Based on the ITU-T G.722 reference implementation.
-//! Updated to use ITU-T reference functions for compliance.
+//! This module provides the core ADPCM encoding and decoding functionality for G.722.
+//! Updated to use exact ITU-T reference implementation functions.
 
-use crate::codecs::g722::state::AdpcmState;
-use crate::codecs::g722::tables::*;
+use crate::codecs::g722::state::*;
 use crate::codecs::g722::reference::*;
+use crate::codecs::g722::tables::*;
 
-/// Low-band ADPCM encoder (6-bit quantization)
+/// Encode low-band signal using ADPCM
 /// 
 /// Encodes the low-band signal using ADPCM with 6-bit quantization.
 /// Updated to follow exact ITU-T reference implementation sequence.
@@ -24,7 +23,7 @@ pub fn low_band_encode(xl: i16, state: &mut AdpcmState, mode: u8) -> u8 {
     // ITU-T reference sequence from lsbcod function:
     
     // 1. el = sub(xl, SL) - compute difference
-    let el = saturated_sub(xl, state.sl);
+    let el = sub(xl, state.sl);
     
     // 2. il = quantl(el, DETL) - quantize difference
     // ITU-T reference always uses quantl() regardless of mode
@@ -33,7 +32,7 @@ pub fn low_band_encode(xl: i16, state: &mut AdpcmState, mode: u8) -> u8 {
     // 3. DLT[0] = invqal(il, DETL) - inverse quantize
     state.dlt[0] = invqal(il, state.det);
     
-    // 4. nbpl = logscl(il, NBL) - logarithmic scaling
+    // 4. nbpl = logscl(il, NBL) - update log scale factor
     let nbpl = logscl(il, state.nb);
     
     // 5. NBL = nbpl - update scale factor
@@ -43,10 +42,10 @@ pub fn low_band_encode(xl: i16, state: &mut AdpcmState, mode: u8) -> u8 {
     state.det = scalel(nbpl);
     
     // 7. PLT[0] = add(DLT[0], SZL) - parrec
-    state.plt[0] = saturated_add(state.dlt[0], state.szl);
+    state.plt[0] = add(state.dlt[0], state.szl);
     
-    // 8. RLT[0] = add(SL, DLT[0]) - recons
-    state.rlt[0] = saturated_add(state.sl, state.dlt[0]);
+    // 8. RLT[0] = add(SL, DLT[0]) - recons (CRITICAL: NOT rl!)
+    state.rlt[0] = add(state.sl, state.dlt[0]);
     
     // 9. upzero(DLT, BL) - update zero coefficients
     upzero(&mut state.dlt, &mut state.b);
@@ -61,11 +60,12 @@ pub fn low_band_encode(xl: i16, state: &mut AdpcmState, mode: u8) -> u8 {
     state.szl = filtez(&state.dlt, &state.b);
     
     // 13. SPL = filtep(RLT, AL) - pole filter
-    state.spl = filtep(&state.rlt, &state.a);
+    state.spl = filtep(&mut state.rlt, &state.a);
     
     // 14. SL = add(SPL, SZL) - prediction
-    state.sl = saturated_add(state.spl, state.szl);
+    state.sl = add(state.spl, state.szl);
     
+    // Return encoded sample (ITU-T always returns il directly)
     il as u8
 }
 
@@ -81,49 +81,49 @@ pub fn low_band_encode(xl: i16, state: &mut AdpcmState, mode: u8) -> u8 {
 /// # Returns
 /// * Quantized 2-bit code (0-3)
 pub fn high_band_encode(xh: i16, state: &mut AdpcmState) -> u8 {
-    // ITU-T reference sequence from hsbcod function:
+    // ITU-T hsbcod function exact implementation:
     
-    // 1. eh = sub(xh, SH) - compute difference
-    let eh = saturated_sub(xh, state.s);  // Using state.s for high band SH
+    // eh = sub(xh, SH)
+    let eh = sub(xh, state.sl);
     
-    // 2. ih = quanth(eh, DETH) - quantize difference
+    // ih = quanth(eh, DETH)
     let ih = quanth(eh, state.det);
     
-    // 3. DH[0] = invqah(ih, DETH) - inverse quantize
+    // DH[0] = invqah(ih, DETH)
     state.dlt[0] = invqah(ih, state.det);
     
-    // 4. nbph = logsch(ih, NBH) - logarithmic scaling
+    // nbph = logsch(ih, NBH)
     let nbph = logsch(ih, state.nb);
     
-    // 5. NBH = nbph - update scale factor
+    // NBH = nbph
     state.nb = nbph;
     
-    // 6. DETH = scaleh(nbph) - compute new scale factor
+    // DETH = scaleh(nbph)
     state.det = scaleh(nbph);
     
-    // 7. PH[0] = add(DH[0], SZH) - parrec
-    state.plt[0] = saturated_add(state.dlt[0], state.sz);  // Using state.sz for high band SZH
+    // PH[0] = add(DH[0], SZH)
+    state.plt[0] = add(state.dlt[0], state.szl);
     
-    // 8. RH[0] = add(SH, DH[0]) - recons
-    state.rlt[0] = saturated_add(state.s, state.dlt[0]);
+    // RH[0] = add(SH, DH[0])
+    state.rlt[0] = add(state.sl, state.dlt[0]);
     
-    // 9. upzero(DH, BH) - update zero coefficients
+    // upzero(DH, BH)
     upzero(&mut state.dlt, &mut state.b);
     
-    // 10. uppol2(AH, PH) - update pole coefficients
+    // uppol2(AH, PH)
     uppol2(&mut state.a, &state.plt);
     
-    // 11. uppol1(AH, PH) - update pole coefficients
+    // uppol1(AH, PH)
     uppol1(&mut state.a, &state.plt);
     
-    // 12. SZH = filtez(DH, BH) - zero filter
-    state.sz = filtez(&state.dlt, &state.b);
+    // SZH = filtez(DH, BH)
+    state.szl = filtez(&state.dlt, &state.b);
     
-    // 13. SPH = filtep(RH, AH) - pole filter
-    state.sp = filtep(&state.rlt, &state.a);
+    // SPH = filtep(RH, AH)
+    state.spl = filtep(&mut state.rlt, &state.a);
     
-    // 14. SH = add(SPH, SZH) - prediction
-    state.s = saturated_add(state.sp, state.sz);
+    // SH = add(SPH, SZH)
+    state.sl = add(state.spl, state.szl);
     
     ih as u8
 }
@@ -147,7 +147,7 @@ pub fn low_band_decode(ilr: u8, mode: u8, state: &mut AdpcmState) -> i16 {
     let dl = invqbl(ilr as i16, state.det, mode as i16);
     
     // 2. rl = add(SL, dl) - reconstructed signal
-    let rl = saturated_add(state.sl, dl);
+    let rl = add(state.sl, dl);
     
     // 3. yl = limit(rl) - output sample (limited)
     let yl = limit(rl as i32);
@@ -165,10 +165,10 @@ pub fn low_band_decode(ilr: u8, mode: u8, state: &mut AdpcmState) -> i16 {
     state.det = scalel(nbpl);
     
     // 8. PLT[0] = add(DLT[0], SZL) - parrec
-    state.plt[0] = saturated_add(state.dlt[0], state.szl);
+    state.plt[0] = add(state.dlt[0], state.szl);
     
-    // 9. RLT[0] = rl - store reconstructed signal
-    state.rlt[0] = rl;
+    // 9. RLT[0] = add(SL, DLT[0]) - recons (CRITICAL: NOT the same as rl!)
+    state.rlt[0] = add(state.sl, state.dlt[0]);
     
     // 10. upzero(DLT, BL) - update zero coefficients
     upzero(&mut state.dlt, &mut state.b);
@@ -183,10 +183,10 @@ pub fn low_band_decode(ilr: u8, mode: u8, state: &mut AdpcmState) -> i16 {
     state.szl = filtez(&state.dlt, &state.b);
     
     // 14. SPL = filtep(RLT, AL) - pole filter
-    state.spl = filtep(&state.rlt, &state.a);
+    state.spl = filtep(&mut state.rlt, &state.a);
     
     // 15. SL = add(SPL, SZL) - prediction
-    state.sl = saturated_add(state.spl, state.szl);
+    state.sl = add(state.spl, state.szl);
     
     yl
 }
@@ -203,42 +203,48 @@ pub fn low_band_decode(ilr: u8, mode: u8, state: &mut AdpcmState) -> i16 {
 /// # Returns
 /// * Reconstructed high-band sample
 pub fn high_band_decode(ih: u8, state: &mut AdpcmState) -> i16 {
-    // Compute quantized difference signal
-    let dh = if (ih as usize) < QTAB2.len() {
-        let tmp32 = ((state.det as i32) * (QTAB2[ih as usize] as i32)) >> 15;
-        saturate2(tmp32, -32768, 32767)
-    } else {
-        0
-    };
+    // ITU-T hsbdec function exact implementation:
     
-    // Store quantized difference
-    state.dlt[0] = dh;
+    // DH[0] = invqah(ih, DETH)
+    state.dlt[0] = invqah(ih as i16, state.det);
     
-    // Compute prediction using ITU-T reference functions
-    state.szl = filtez(&state.dlt, &state.b);
-    let spl = filtep(&state.rlt, &state.a);
+    // nbph = logsch(ih, NBH)
+    let nbph = logsch(ih as i16, state.nb);
     
-    let tmp32 = (spl as i32) + (state.szl as i32);
-    state.sl = saturate2(tmp32, -32768, 32767);
+    // NBH = nbph
+    state.nb = nbph;
     
-    // Compute reconstructed signal
-    let tmp32 = (state.sl as i32) + (dh as i32);
-    let rh = saturate2(tmp32, -32768, 32767);
+    // DETH = scaleh(nbph)
+    state.det = scaleh(nbph);
     
-    // Update state
-    state.plt[0] = saturate2((state.szl as i32) + (dh as i32), -32768, 32767);
-    state.rlt[0] = rh;
+    // PH[0] = add(DH[0], SZH)
+    state.plt[0] = add(state.dlt[0], state.szl);
     
-    // Update predictors using ITU-T reference functions
+    // RH[0] = add(SH, DH[0])
+    state.rlt[0] = add(state.sl, state.dlt[0]);
+    
+    // upzero(DH, BH)
     upzero(&mut state.dlt, &mut state.b);
+    
+    // uppol2(AH, PH)
     uppol2(&mut state.a, &state.plt);
+    
+    // uppol1(AH, PH)
     uppol1(&mut state.a, &state.plt);
     
-    // Update logarithmic scale factor and quantizer scale factor
-    state.nb = logsch(ih as i16, state.nb);
-    state.det = scaleh(state.nb);
+    // SZH = filtez(DH, BH)
+    state.szl = filtez(&state.dlt, &state.b);
     
-    rh
+    // SPH = filtep(RH, AH)
+    state.spl = filtep(&mut state.rlt, &state.a);
+    
+    // SH = add(SPH, SZH)
+    state.sl = add(state.spl, state.szl);
+    
+    // yh = limit(RH[0])
+    let yh = limit(state.rlt[0] as i32);
+    
+    yh
 }
 
 /// 6-bit quantization for low-band
@@ -286,21 +292,8 @@ fn quantl6b_local(el: i16, detl: i16) -> i16 {
 /// # Returns
 /// * 2-bit quantization index
 fn quanth_local(eh: i16, deth: i16) -> i16 {
-    let mih = ((eh.abs() as i32) * 32) / (deth.max(1) as i32);
-    let mih = mih.min(32767) as i16;
-    
-    // Find quantization level (3 levels for 2-bit)
-    let mut ih = 0;
-    if mih >= Q2 {
-        ih = 1;
-    }
-    
-    // Apply sign
-    if eh >= 0 {
-        ih
-    } else {
-        (3 - ih) as i16
-    }
+    // Use exact ITU-T quanth function
+    quanth(eh, deth)
 }
 
 /// Compute ADPCM prediction - DEPRECATED
@@ -310,7 +303,7 @@ fn quanth_local(eh: i16, deth: i16) -> i16 {
 #[deprecated(note = "Use filtez and filtep reference functions instead")]
 fn predict(state: &AdpcmState) -> i16 {
     // Pole predictor (2 poles)
-    let mut sl = state.sp + state.sz;
+    let mut sl = state.spl + state.szl;
     
     // Add pole prediction
     sl = saturated_add(sl, multiply_q15(state.a[1], state.rlt[1]));
@@ -470,7 +463,7 @@ mod tests {
         for mode in 1..=3 {
             let encoded = low_band_encode(1000, &mut state, mode);
             let decoded = low_band_decode(encoded, mode, &mut state);
-            
+        
             // Should produce reasonable output for all modes
             assert!(decoded.abs() < 32767, "Mode {} decode out of range: {}", mode, decoded);
         }

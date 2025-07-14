@@ -1,0 +1,15 @@
+Copyright Notice:
+{
+France Telecom
+Contact: M. Luc Savage, FT/RD/RD/PIV, Intellectual Property and Licensing Director
+Address: 38-40 rue du Général Leclerc,  F-92794 Cedex 9 ISSY LES MOULINEAUX,  France
+Tel: +33 1 45 29 61 58
+Fax: +33 1 45 29 65 60
+}
+(hereinafter the "Owner") holds or has the right to license copyright with respect to the accompanying electronic material (hereinafter the "Software").  The Owner has agreed to grant a license to an unrestricted number of applicants on a worldwide, non-discriminatory basis and on reasonable terms and conditions to reproduce, modify, use and/or distribute the Software for the limited purpose of implementing the related ITU-T Recommendation. To apply for such license, please contact the Owner at the address indicated above.
+
+ITU draws attention to the possibility that the practice or implementation of this Recommendation may involve the use of a claimed Intellectual Property Right. ITU takes no position concerning the evidence, validity or applicability of claimed Intellectual Property Rights, whether asserted by ITU members or others outside of the Recommendation development process. As of the date of approval of this Recommendation, ITU had received notice of intellectual property, protected by patents, which may be required to implement this Recommendation. However, implementors are cautioned that this may not represent the latest information and are therefore strongly urged to consult the TSB patent database.
+
+Disclaimer: In no event shall the ITU be liable for any damages whatsoever (including, without limitation, damages for loss of profits, business interruption, loss of information, or any other pecuniary loss) arising out of or related to the use of or inability to use the accompanying Software. The ITU disclaims all warranties, express or implied, including but not limited to, warranties of merchantability and fitness for a particular purpose.
+
+Statement Date: 2006-10-10 (Form: 2003-02)

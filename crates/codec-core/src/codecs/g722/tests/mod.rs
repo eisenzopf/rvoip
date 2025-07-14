@@ -1,8 +1,11 @@
-//! G.722 Test Modules
+//! G.722 Test Suite
 //!
-//! This module organizes the test suite for the G.722 codec implementation.
+//! This module provides comprehensive testing for the G.722 codec implementation.
+//! Tests are organized into logical groups for better maintainability.
 
-mod integration_tests;
-mod reference_tests;
-mod unit_tests;
-mod itu_testvectors; 
+pub mod basic_tests;
+pub mod encoder_tests;
+pub mod decoder_tests;
+pub mod itu_vector_tests;
+pub mod g192_compliance_tests;
+pub mod utils; 

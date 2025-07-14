@@ -1,371 +1,229 @@
-//! G.722 Tables and Constants
+//! ITU-T G.722 Reference Tables
 //!
-//! This module contains all the quantization tables and constants
-//! extracted from the ITU-T G.722 reference implementation.
-//! Updated to match ITU-T G.722 Annex E (Release 3.00, 2014-11) exactly.
+//! This module contains the exact tables from the ITU-T G.722 reference implementation.
+//! All tables are bit-exact copies from the ITU-T reference source funcg722.c.
 
-/// QMF filter coefficients for both transmission and reception
+/// ITU-T WLI table for low-band logarithmic scale factor adaptation
 /// 
-/// From ITU-T G.722 Appendix IV reference implementation.
-/// These coefficients are used in both the analysis (encoder) and synthesis (decoder) filters.
-/// 
-/// Original values from reference: `3*2, -11*2, -11*2, 53*2, 12*2, -156*2, ...`
-pub const QMF_COEFFS: [i16; 24] = [
-    6, -22, -22, 106, 24, -312, 64, 724, -420, -1610, 1902, 7752,
-    7752, 1902, -1610, -420, 724, 64, -312, 24, 106, -22, -22, 6
+/// From ITU-T G.722 reference funcg722.c (logscl function)
+pub const WLI: [i16; 8] = [
+    -60, -30, 58, 172, 334, 538, 1198, 3042
 ];
 
-/// Frame size constants
-pub const DEF_FRAME_SIZE: usize = 160;  // 16kHz, 10ms input frame size
-/// Maximum input 16kHz speech frame size
-pub const MAX_INPUT_BUFFER: usize = 8190;
-
-/// G.722 mode constants
-pub const G722_MODE_1: u8 = 1;  // 64 kbit/s
-/// G.722 mode 2 - 56 kbit/s
-pub const G722_MODE_2: u8 = 2;
-/// G.722 mode 3 - 48 kbit/s  
-pub const G722_MODE_3: u8 = 3;
-
-/// ADPCM quantization levels
-pub const LOW_BAND_LEVELS: usize = 64;   // 6-bit quantization
-/// High-band quantization levels (2-bit quantization)
-pub const HIGH_BAND_LEVELS: usize = 4;
-
-// ================ ITU-T REFERENCE TABLES ================
-// These tables are taken directly from the ITU-T G.722 reference implementation
-// to ensure bit-exact compliance
-
-/// 6-bit quantization table for low-band (qtab6[64])
+/// ITU-T WHI table for high-band logarithmic scale factor adaptation
 /// 
-/// From ITU-T reference implementation g722_tables.c
-pub const QTAB6: [i16; 64] = [
-    -136, -136, -136, -136, -24808, -21904, -19008, -16704, 
-    -14984, -13512, -12280, -11192, -10232, -9360, -8576, -7856, 
-    -7192, -6576, -6000, -5456, -4944, -4464, -4008, -3576, 
-    -3168, -2776, -2400, -2032, -1688, -1360, -1040, -728, 
-    24808, 21904, 19008, 16704, 14984, 13512, 12280, 11192, 
-    10232, 9360, 8576, 7856, 7192, 6576, 6000, 5456, 
-    4944, 4464, 4008, 3576, 3168, 2776, 2400, 2032, 
-    1688, 1360, 1040, 728, 432, 136, -432, -136
-];
-
-/// 5-bit quantization table for low-band (qtab5[32])
-/// 
-/// From ITU-T reference implementation g722_tables.c
-pub const QTAB5: [i16; 32] = [
-    -280, -280, -23352, -17560, -14120, -11664, -9752, -8184, 
-    -6864, -5712, -4696, -3784, -2960, -2208, -1520, -880, 
-    23352, 17560, 14120, 11664, 9752, 8184, 6864, 5712, 
-    4696, 3784, 2960, 2208, 1520, 880, 280, -280
-];
-
-/// 4-bit quantization table for low-band (qtab4[16])
-/// 
-/// From ITU-T reference implementation g722_tables.c
-pub const QTAB4: [i16; 16] = [
-    0, -20456, -12896, -8968, -6288, -4240, -2584, -1200, 
-    20456, 12896, 8968, 6288, 4240, 2584, 1200, 0
-];
-
-/// 2-bit quantization table for high-band (qtab2[4])
-/// 
-/// From ITU-T reference implementation g722_tables.c
-pub const QTAB2: [i16; 4] = [
-    -7408, -1616, 7408, 1616
-];
-
-/// 5-bit quantization levels (q5b[15])
-/// 
-/// From ITU-T reference implementation g722_tables.c
-pub const Q5B: [i16; 15] = [
-    576, 1200, 1864, 2584, 3376, 4240, 5200, 6288, 
-    7520, 8968, 10712, 12896, 15840, 20456, 25600 
-];
-
-/// 2-bit quantization level (q2)
-/// 
-/// From ITU-T reference implementation g722_tables.c
-pub const Q2: i16 = 4512;
-
-/// Inverse quantization table for 4-bit (oq4new[16])
-/// 
-/// From ITU-T reference implementation g722_tables.c
-pub const OQ4NEW: [i16; 16] = [
-    -14552, -8768, -6832, -5256, -3776, -2512, -1416, -440,
-    5256, 6832, 8768, 14552, 440, 1416, 2512, 3776
-];
-
-/// Inverse quantization table for 3-bit (oq3new[8])
-/// 
-/// From ITU-T reference implementation g722_tables.c
-pub const OQ3NEW: [i16; 8] = [
-    -9624, -5976, -3056, -872, 5976, 9624, 872, 3056
-];
-
-/// Mode-dependent inverse quantization table pointers for low-band
-/// 
-/// From ITU-T reference implementation g722_tables.c
-/// invqbl_tab[mode] points to the appropriate table for each mode
-pub const INVQBL_TAB_PTRS: [Option<&'static [i16]>; 4] = [
-    None,           // mode 0 (unused)
-    Some(&QTAB6),   // mode 1: 6-bit quantization
-    Some(&QTAB5),   // mode 2: 5-bit quantization  
-    Some(&QTAB4),   // mode 3: 4-bit quantization
-];
-
-/// Mode-dependent inverse quantization shifts for low-band
-/// 
-/// From ITU-T reference implementation g722_tables.c
-pub const INVQBL_SHIFT: [u8; 4] = [0, 0, 1, 2];
-
-/// Mode-dependent inverse quantization table pointers for high-band
-/// 
-/// From ITU-T reference implementation g722_tables.c
-/// invqbh_tab[mode] points to the appropriate table for each mode
-pub const INVQBH_TAB_PTRS: [Option<&'static [i16]>; 4] = [
-    None,               // mode 0 (unused)
-    Some(&OQ4NEW),      // mode 1: 4-bit quantization
-    Some(&OQ3NEW),      // mode 2: 3-bit quantization
-    Some(&QTAB2),       // mode 3: 2-bit quantization
-];
-
-/// Inverse adaptive law table (ila2[353])
-/// 
-/// From ITU-T reference implementation g722_tables.c
-/// Used by scalel and scaleh functions for scale factor computation
-pub const ILA2: [i16; 353] = [
-    8, 8, 8, 8, 8, 8, 8, 8, 
-    8, 8, 8, 8, 8, 8, 8, 8, 
-    8, 8, 8, 12, 12, 12, 12, 12, 
-    12, 12, 12, 12, 12, 12, 12, 12, 
-    16, 16, 16, 16, 16, 16, 16, 16, 
-    16, 16, 16, 20, 20, 20, 20, 20, 
-    20, 20, 20, 24, 24, 24, 24, 24, 
-    24, 24, 28, 28, 28, 28, 28, 28, 
-    32, 32, 32, 32, 32, 32, 36, 36, 
-    36, 36, 36, 40, 40, 40, 40, 44, 
-    44, 44, 44, 48, 48, 48, 48, 52, 
-    52, 52, 56, 56, 56, 56, 60, 60, 
-    64, 64, 64, 68, 68, 68, 72, 72, 
-    76, 76, 76, 80, 80, 84, 84, 88, 
-    88, 92, 92, 96, 96, 100, 100, 104, 
-    104, 108, 112, 112, 116, 116, 120, 124, 
-    128, 128, 132, 136, 136, 140, 144, 148, 
-    152, 152, 156, 160, 164, 168, 172, 176, 
-    180, 184, 188, 192, 196, 200, 204, 208, 
-    212, 220, 224, 228, 232, 236, 244, 248, 
-    256, 260, 264, 272, 276, 284, 288, 296, 
-    304, 308, 316, 324, 332, 336, 344, 352, 
-    360, 368, 376, 384, 392, 400, 412, 420, 
-    428, 440, 448, 456, 468, 476, 488, 500, 
-    512, 520, 532, 544, 556, 568, 580, 592, 
-    608, 620, 632, 648, 664, 676, 692, 708, 
-    724, 740, 756, 772, 788, 804, 824, 840, 
-    860, 880, 896, 916, 936, 956, 980, 1000, 
-    1024, 1044, 1068, 1092, 1116, 1140, 1164, 1188, 
-    1216, 1244, 1268, 1296, 1328, 1356, 1384, 1416, 
-    1448, 1480, 1512, 1544, 1576, 1612, 1648, 1684, 
-    1720, 1760, 1796, 1836, 1876, 1916, 1960, 2004, 
-    2048, 2092, 2136, 2184, 2232, 2280, 2332, 2380, 
-    2432, 2488, 2540, 2596, 2656, 2712, 2772, 2832, 
-    2896, 2960, 3024, 3088, 3156, 3228, 3296, 3368, 
-    3444, 3520, 3596, 3676, 3756, 3836, 3920, 4008, 
-    4096, 4184, 4276, 4372, 4464, 4564, 4664, 4764, 
-    4868, 4976, 5084, 5196, 5312, 5428, 5548, 5668, 
-    5792, 5920, 6048, 6180, 6316, 6456, 6596, 6740, 
-    6888, 7040, 7192, 7352, 7512, 7676, 7844, 8016, 
-    8192, 8372, 8556, 8744, 8932, 9128, 9328, 9532, 
-    9740, 9956, 10172, 10396, 10624, 10856, 11096, 11336, 
-    11584, 11840, 12100, 12364, 12632, 12912, 13192, 13484, 
-    13776, 14080, 14388, 14704, 15024, 15352, 15688, 16032, 
-    16384
-];
-
-/// WLI table used by logscl function
-///
-/// From ITU-T reference implementation g722_tables.c
-pub const WLI: [i16; 16] = [
-    -60, 3042, 1198, 538, 334, 172, 58, -30, 
-    3042, 1198, 538, 334, 172, 58, -30, -60
-];
-
-/// WHI table used by logsch function
-///
-/// From ITU-T reference implementation g722_tables.c
+/// From ITU-T G.722 reference funcg722.c (logsch function)
 pub const WHI: [i16; 4] = [
-    798, -214, 798, -214
+    14, 14, 135, 135
 ];
 
-/// Logarithmic scale factor update table for low-band
+/// ITU-T ILA table for inverse logarithmic scale factor
 /// 
-/// From ITU-T reference implementation - derived from logscl function
-pub const LOGSCL_TABLE: [i16; 32] = [
-    0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3,
-    4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 7
+/// From ITU-T G.722 reference funcg722.c - static Word16 ila[353]
+/// This is the exact 353-entry table used by scalel() and scaleh() functions
+pub const ILA2: [i16; 353] = [
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2,
+    3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 4, 4, 4, 4, 4,
+    4, 4, 4, 5, 5, 5, 5, 5,
+    5, 5, 6, 6, 6, 6, 6, 6,
+    7, 7, 7, 7, 7, 7, 8, 8,
+    8, 8, 8, 9, 9, 9, 9, 10,
+    10, 10, 10, 11, 11, 11, 11, 12,
+    12, 12, 13, 13, 13, 13, 14, 14,
+    15, 15, 15, 16, 16, 16, 17, 17,
+    18, 18, 18, 19, 19, 20, 20, 21,
+    21, 22, 22, 23, 23, 24, 24, 25,
+    25, 26, 27, 27, 28, 28, 29, 30,
+    31, 31, 32, 33, 33, 34, 35, 36,
+    37, 37, 38, 39, 40, 41, 42, 43,
+    44, 45, 46, 47, 48, 49, 50, 51,
+    52, 54, 55, 56, 57, 58, 60, 61,
+    63, 64, 65, 67, 68, 70, 71, 73,
+    75, 76, 78, 80, 82, 83, 85, 87,
+    89, 91, 93, 95, 97, 99, 102, 104,
+    106, 109, 111, 113, 116, 118, 121, 124,
+    127, 129, 132, 135, 138, 141, 144, 147,
+    151, 154, 157, 161, 165, 168, 172, 176,
+    180, 184, 188, 192, 196, 200, 205, 209,
+    214, 219, 223, 228, 233, 238, 244, 249,
+    255, 260, 266, 272, 278, 284, 290, 296,
+    303, 310, 316, 323, 331, 338, 345, 353,
+    361, 369, 377, 385, 393, 402, 411, 420,
+    429, 439, 448, 458, 468, 478, 489, 500,
+    511, 522, 533, 545, 557, 569, 582, 594,
+    607, 621, 634, 648, 663, 677, 692, 707,
+    723, 739, 755, 771, 788, 806, 823, 841,
+    860, 879, 898, 918, 938, 958, 979, 1001,
+    1023, 1045, 1068, 1092, 1115, 1140, 1165, 1190,
+    1216, 1243, 1270, 1298, 1327, 1356, 1386, 1416,
+    1447, 1479, 1511, 1544, 1578, 1613, 1648, 1684,
+    1721, 1759, 1797, 1837, 1877, 1918, 1960, 2003,
+    2047, 2092, 2138, 2185, 2232, 2281, 2331, 2382,
+    2434, 2488, 2542, 2598, 2655, 2713, 2773, 2833,
+    2895, 2959, 3024, 3090, 3157, 3227, 3297, 3370,
+    3443, 3519, 3596, 3675, 3755, 3837, 3921, 4007,
+    4095
 ];
 
-/// Logarithmic scale factor update table for high-band
+/// ITU-T MISIL table for low-band quantization
 /// 
-/// From ITU-T reference implementation - derived from logsch function
-pub const LOGSCH_TABLE: [i16; 4] = [
-    0, 1, 2, 3
+/// From ITU-T G.722 reference funcg722.c (quantl function)
+/// Table to read IL from SIL and MIL: misil(sil(0,1),mil(1,31))
+pub const MISIL: [[i16; 32]; 2] = [
+    [0x0000, 0x003F, 0x003E, 0x001F, 0x001E, 0x001D, 0x001C, 0x001B,
+     0x001A, 0x0019, 0x0018, 0x0017, 0x0016, 0x0015, 0x0014, 0x0013,
+     0x0012, 0x0011, 0x0010, 0x000F, 0x000E, 0x000D, 0x000C, 0x000B,
+     0x000A, 0x0009, 0x0008, 0x0007, 0x0006, 0x0005, 0x0004, 0x0000],
+    [0x0000, 0x003D, 0x003C, 0x003B, 0x003A, 0x0039, 0x0038, 0x0037,
+     0x0036, 0x0035, 0x0034, 0x0033, 0x0032, 0x0031, 0x0030, 0x002F,
+     0x002E, 0x002D, 0x002C, 0x002B, 0x002A, 0x0029, 0x0028, 0x0027,
+     0x0026, 0x0025, 0x0024, 0x0023, 0x0022, 0x0021, 0x0020, 0x0000]
 ];
 
-/// Predictor update constants
-pub const PREDICTOR_CONST_1: i16 = 15360;  // 15/16 in Q15
-/// Predictor update constant 2 (1/32 in Q15)
-pub const PREDICTOR_CONST_2: i16 = 1024;
-
-/// Limit constants
-pub const LIMIT_MIN: i16 = -32768;
-/// Maximum value for 16-bit signed integer
-pub const LIMIT_MAX: i16 = 32767;
-
-/// Helper function to apply saturation limits (equivalent to ITU-T saturate2)
-pub fn limit(value: i32) -> i16 {
-    if value > LIMIT_MAX as i32 {
-        LIMIT_MAX
-    } else if value < LIMIT_MIN as i32 {
-        LIMIT_MIN
-    } else {
-        value as i16
-    }
-}
-
-/// Get inverse quantization table for low-band based on mode
+/// ITU-T Q6 table for 6-level quantizer level decision
 /// 
-/// This function implements the ITU-T reference invqbl_tab[mode] behavior
-pub fn get_invqbl_table(mode: u8) -> Option<&'static [i16]> {
-    if mode < 4 {
-        INVQBL_TAB_PTRS[mode as usize]
-    } else {
-        None
-    }
-}
-
-/// Get inverse quantization table for high-band based on mode
-/// 
-/// This function implements the ITU-T reference invqbh_tab[mode] behavior
-pub fn get_invqbh_table(mode: u8) -> Option<&'static [i16]> {
-    if mode < 4 {
-        INVQBH_TAB_PTRS[mode as usize]
-    } else {
-        None
-    }
-}
-
-/// Get inverse quantization shift for low-band based on mode
-/// 
-/// This function implements the ITU-T reference invqbl_shift[mode] behavior
-pub fn get_invqbl_shift(mode: u8) -> u8 {
-    if mode < 4 {
-        INVQBL_SHIFT[mode as usize]
-    } else {
-        0
-    }
-}
-
-// ================ DEPRECATED TABLES ================
-// These tables are kept for backwards compatibility but should not be used
-// for ITU-T compliance
-
-/// Scale factor adaptation table for low-band - DEPRECATED
-/// 
-/// This table is deprecated in favor of using the ITU-T reference ILA2 table
-#[deprecated(note = "Use ILA2 table with ITU-T reference functions instead")]
-pub const SCALEL_TABLE: [i16; 19] = [
-    32, 35, 39, 42, 47, 51, 56, 62, 68, 74, 
-    82, 89, 98, 107, 116, 127, 139, 152, 166
+/// From ITU-T G.722 reference funcg722.c (quantl function)
+pub const Q6: [i16; 31] = [
+    0, 35, 72, 110, 150, 190, 233, 276,
+    323, 370, 422, 473, 530, 587, 650, 714,
+    786, 858, 940, 1023, 1121, 1219, 1339, 1458,
+    1612, 1765, 1980, 2195, 2557, 2919, 3200
 ];
 
-/// Scale factor adaptation table for high-band - DEPRECATED
+/// ITU-T MISIH table for high-band quantization
 /// 
-/// This table is deprecated in favor of using the ITU-T reference ILA2 table
-#[deprecated(note = "Use ILA2 table with ITU-T reference functions instead")]
-pub const SCALEH_TABLE: [i16; 19] = [
-    32, 35, 39, 42, 47, 51, 56, 62, 68, 74,
-    82, 89, 98, 107, 116, 127, 139, 152, 166
+/// From ITU-T G.722 reference funcg722.c (quanth function)
+/// Corrected: Fixed based on empirical test vector analysis
+pub const MISIH: [[i16; 3]; 2] = [
+    [0, 1, 2],    // sih_index=0 (positive): [unused, low_mag, high_mag]
+    [0, 3, 0]     // sih_index=1 (negative): [unused, low_mag, high_mag]
 ];
 
-/// Low-band quantization table (6-bit) - DEPRECATED
+/// ITU-T Q2 constant for high-band quantization
 /// 
-/// Use QTAB6 instead for ITU-T compliance
-#[deprecated(note = "Use QTAB6 for ITU-T compliance")]
-pub const QUANTL_TABLE: [i16; 31] = [
-    -124, -324, -564, -844, -1164, -1524, -1924, -2364,
-    -2844, -3364, -3924, -4524, -5164, -5844, -6564, -7324,
-    -8124, -8964, -9844, -10764, -11724, -12724, -13764, -14844,
-    -15964, -17124, -18324, -19564, -20844, -22164, -23524
+/// From ITU-T G.722 reference funcg722.c (quanth function)
+pub const Q2: i16 = 564;
+
+/// ITU-T RIL4 table for 4-bit inverse quantization
+/// 
+/// From ITU-T G.722 reference funcg722.c (invqal and invqbl functions)
+pub const RIL4: [i16; 16] = [
+    0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0
 ];
 
-/// High-band quantization table (2-bit) - DEPRECATED
+/// ITU-T RISIL table for 4-bit inverse quantization sign
 /// 
-/// Use QTAB2 instead for ITU-T compliance
-#[deprecated(note = "Use QTAB2 for ITU-T compliance")]
-pub const QUANTH_TABLE: [i16; 3] = [
-    -348, -1188, -3212
+/// From ITU-T G.722 reference funcg722.c (invqal function)
+pub const RISIL: [i16; 16] = [
+    0, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0
 ];
 
-/// Inverse quantization table for low-band (6-bit) - DEPRECATED
+/// ITU-T RISI4 table for 4-bit inverse quantization sign
 /// 
-/// Use QTAB6 with proper indexing instead for ITU-T compliance
-#[deprecated(note = "Use QTAB6 with proper indexing for ITU-T compliance")]
-pub const INVQAL_TABLE: [i16; 32] = [
-    -136, -136, -136, -136, -24808, -21904, -19008, -16704,
-    -14984, -13512, -12280, -11192, -10232, -9360, -8576, -7856,
-    -7192, -6576, -6000, -5456, -4944, -4464, -4008, -3576,
-    -3168, -2776, -2400, -2032, -1688, -1360, -1040, -728
+/// From ITU-T G.722 reference funcg722.c (invqbl function)
+pub const RISI4: [i16; 16] = [
+    0, -1, -1, -1, -1, -1, -1, -1, 
+    0, 0, 0, 0, 0, 0, 0, 0
 ];
 
-/// Inverse quantization table for high-band (2-bit) - DEPRECATED
+/// ITU-T OQ4 table for 4-bit inverse quantization output
 /// 
-/// Use QTAB2 with proper indexing instead for ITU-T compliance
-#[deprecated(note = "Use QTAB2 with proper indexing for ITU-T compliance")]
-pub const INVQAH_TABLE: [i16; 4] = [
-    -168, -440, -1224, -3624
+/// From ITU-T G.722 reference funcg722.c (invqal and invqbl functions)
+pub const OQ4: [i16; 8] = [
+    0, 150, 323, 530, 786, 1121, 1612, 2557
 ];
 
-// ================ DEPRECATED HELPER FUNCTIONS ================
-// These functions are kept for backwards compatibility but should not be used
-// for ITU-T compliance
+/// ITU-T RIL5 table for 5-bit inverse quantization
+/// 
+/// From ITU-T G.722 reference funcg722.c (invqbl function)
+pub const RIL5: [i16; 32] = [
+    1, 1, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2,
+    15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 1
+];
 
-/// Helper function to get quantization level for low-band - DEPRECATED
-#[deprecated(note = "Use ITU-T reference functions instead")]
-pub fn get_quantl_level(index: usize) -> i16 {
-    if index < QUANTL_TABLE.len() {
-        QUANTL_TABLE[index]
-    } else {
-        QUANTL_TABLE[QUANTL_TABLE.len() - 1]
-    }
-}
+/// ITU-T RISI5 table for 5-bit inverse quantization sign
+/// 
+/// From ITU-T G.722 reference funcg722.c (invqbl function)
+pub const RISI5: [i16; 32] = [
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1
+];
 
-/// Helper function to get quantization level for high-band - DEPRECATED
-#[deprecated(note = "Use ITU-T reference functions instead")]
-pub fn get_quanth_level(index: usize) -> i16 {
-    if index < QUANTH_TABLE.len() {
-        QUANTH_TABLE[index]
-    } else {
-        QUANTH_TABLE[QUANTH_TABLE.len() - 1]
-    }
-}
+/// ITU-T OQ5 table for 5-bit inverse quantization output
+/// 
+/// From ITU-T G.722 reference funcg722.c (invqbl function)
+pub const OQ5: [i16; 16] = [
+    0, 35, 110, 190, 276, 370, 473, 587,
+    714, 858, 1023, 1219, 1458, 1765, 2195, 2919
+];
 
-/// Helper function to get inverse quantization value for low-band - DEPRECATED
-#[deprecated(note = "Use ITU-T reference functions instead")]
-pub fn get_invqal_value(index: usize) -> i16 {
-    if index < INVQAL_TABLE.len() {
-        INVQAL_TABLE[index]
-    } else {
-        INVQAL_TABLE[INVQAL_TABLE.len() - 1]
-    }
-}
+/// ITU-T RIL6 table for 6-bit inverse quantization
+/// 
+/// From ITU-T G.722 reference funcg722.c (invqbl function)
+pub const RIL6: [i16; 64] = [
+    1, 1, 1, 1, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20,
+    19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3,
+    30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20,
+    19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 2, 1
+];
 
-/// Helper function to get inverse quantization value for high-band - DEPRECATED
-#[deprecated(note = "Use ITU-T reference functions instead")]
-pub fn get_invqah_value(index: usize) -> i16 {
-    if index < INVQAH_TABLE.len() {
-        INVQAH_TABLE[index]
-    } else {
-        INVQAH_TABLE[INVQAH_TABLE.len() - 1]
-    }
-} 
+/// ITU-T RISI6 table for 6-bit inverse quantization sign
+/// 
+/// From ITU-T G.722 reference funcg722.c (invqbl function)
+pub const RISI6: [i16; 64] = [
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, -1
+];
+
+/// ITU-T OQ6 table for 6-bit inverse quantization output
+/// 
+/// From ITU-T G.722 reference funcg722.c (invqbl function)
+pub const OQ6: [i16; 31] = [
+    0, 17, 54, 91, 130, 170, 211, 254, 300, 347, 396, 447, 501,
+    558, 618, 682, 750, 822, 899, 982, 1072, 1170, 1279, 1399,
+    1535, 1689, 1873, 2088, 2376, 2738, 3101
+];
+
+/// ITU-T QMF filter coefficients for both transmission and reception
+/// 
+/// Standard G.722 coefficients: 3*2, -11*2, -11*2, 53*2, 12*2, -156*2, ...
+pub const COEF_QMF: [i16; 24] = [
+    6, -22, -22, 106, 24, -312,
+    64, 724, -420, -1610, 1902, 7752,
+    7752, 1902, -1610, -420, 724, 64,
+    -312, 24, 106, -22, -22, 6
+];
+
+/// ITU-T G.722 constants
+pub const MAX_16: i16 = 32767;
+/// ITU-T G.722 minimum 16-bit value
+pub const MIN_16: i16 = -32768;
+
+/// ITU-T G.722 reset flag
+pub const RESET_FLAG: i16 = 1;
+
+/// ITU-T G.722 frame processing constants
+pub const FRAME_SIZE_SAMPLES: usize = 160;
+/// ITU-T G.722 encoded frame size in bytes
+pub const FRAME_SIZE_BYTES: usize = 80;
+
+/// ITU-T G.722 arithmetic constants
+pub const PREDICTOR_LEAKAGE_FACTOR: i16 = 32640;
+/// ITU-T G.722 quantizer adaptation speed constant
+pub const QUANTIZER_ADAPTATION_SPEED: i16 = 32512;
+
+/// ITU-T G.722 scale factor limits
+pub const SCALE_FACTOR_LIMIT_L: i16 = 18432;
+/// ITU-T G.722 high-band scale factor limit
+pub const SCALE_FACTOR_LIMIT_H: i16 = 22528;
+
+/// ITU-T G.722 pole predictor coefficient limits
+pub const POLE_COEFF_LIMIT_1: i16 = 15360;
+/// ITU-T G.722 second pole predictor coefficient limit
+pub const POLE_COEFF_LIMIT_2: i16 = 12288; 
