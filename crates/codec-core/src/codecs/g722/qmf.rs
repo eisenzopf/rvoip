@@ -1,171 +1,149 @@
-//! G.722 QMF (Quadrature Mirror Filter) Implementation
+//! QMF (Quadrature Mirror Filter) Implementation
 //!
-//! This module implements the QMF analysis and synthesis filters used in G.722.
-//! Based on the ITU-T G.722 reference implementation.
+//! This module implements the QMF analysis and synthesis filters for G.722.
+//! Updated to use exact ITU-T reference implementation functions.
 
-use crate::codecs::g722::tables::{QMF_COEFFS, limit};
 use crate::codecs::g722::state::G722State;
+use crate::codecs::g722::reference::{limit, add, sub, l_mult, l_mac, l_shr, l_shl, l_add, l_sub, extract_h};
 
-/// QMF analysis filter (encoder)
+/// QMF filter coefficients for both transmission and reception
 /// 
-/// Splits the input signal into low and high frequency bands.
-/// Processes two input samples and produces one low-band and one high-band sample.
+/// Exact values from ITU-T G.722 reference implementation g722_tables.c
+/// Original: coef_qmf[24] = {3*2, -11*2, -11*2, 53*2, 12*2, -156*2, ...}
+const COEF_QMF: [i16; 24] = [
+    6, -22, -22, 106, 24, -312,
+    64, 724, -420, -1610, 1902, 7752,
+    7752, 1902, -1610, -420, 724, 64,
+    -312, 24, 106, -22, -22, 6
+];
+
+/// ITU-T qmf_tx_buf function - QMF analysis (encoder) filter
+/// 
+/// Exact implementation from ITU-T G.722 reference funcg722.c
 /// 
 /// # Arguments
 /// * `xin0` - First input sample
 /// * `xin1` - Second input sample  
-/// * `state` - G.722 state containing the QMF delay line
-/// 
-/// # Returns
-/// * `(xl, xh)` - Low-band and high-band samples
-pub fn qmf_analysis(xin0: i16, xin1: i16, state: &mut G722State) -> (i16, i16) {
-    let delay = state.qmf_tx_delay_mut();
+/// * `xl` - Output low-band sample
+/// * `xh` - Output high-band sample
+/// * `state` - G.722 state containing delay line
+pub fn qmf_tx_buf(xin0: i16, xin1: i16, xl: &mut i16, xh: &mut i16, state: &mut G722State) {
+    // ITU-T reference algorithm:
     
-    // Shift delay line first (move older samples towards the end)
-    for i in 0..22 {
-        delay[23 - i] = delay[21 - i];
+    // Saving past samples in delay line (shift and insert new samples)
+    // *--(*delayx) = *(*xin)++; *--(*delayx) = *(*xin)++;
+    for i in (2..24).rev() {
+        state.qmf_tx_delay[i] = state.qmf_tx_delay[i - 2];
     }
-    
-    // Insert new samples at the beginning
-    delay[0] = xin0;
-    delay[1] = xin1;
+    state.qmf_tx_delay[1] = xin0;
+    state.qmf_tx_delay[0] = xin1;
     
     // QMF filtering
-    let mut accum_a = 0i64;
-    let mut accum_b = 0i64;
+    let mut accuma = 0i32;
+    let mut accumb = 0i32;
     
-    for i in 0..12 {
-        accum_a += (delay[i * 2] as i64) * (QMF_COEFFS[i * 2] as i64);
-        accum_b += (delay[i * 2 + 1] as i64) * (QMF_COEFFS[i * 2 + 1] as i64);
+    // ITU-T exact multiply-accumulate operations
+    accuma = l_mult(COEF_QMF[0], state.qmf_tx_delay[0]);
+    accumb = l_mult(COEF_QMF[1], state.qmf_tx_delay[1]);
+    
+    // FOR (i = 1; i < 12; i++) - ITU-T exact MAC operations
+    for i in 1..12 {
+        let coef_idx = i * 2;
+        let delay_idx = i * 2;
+        accuma = l_mac(accuma, COEF_QMF[coef_idx], state.qmf_tx_delay[delay_idx]);
+        accumb = l_mac(accumb, COEF_QMF[coef_idx + 1], state.qmf_tx_delay[delay_idx + 1]);
     }
     
-    // Compute low and high band outputs
-    let comp_low = (accum_a + accum_b) * 2;
-    let comp_high = (accum_a - accum_b) * 2;
+    // ITU-T exact 32-bit add/sub operations with doubling
+    let mut comp_low = l_add(accuma, accumb);
+    comp_low = l_add(comp_low, comp_low);  // Double the result
     
-    let xl = limit((comp_low >> 16) as i32);
-    let xh = limit((comp_high >> 16) as i32);
+    // ITU-T exact 32-bit sub and add operations  
+    let mut comp_high = l_sub(accuma, accumb);
+    comp_high = l_add(comp_high, comp_high);  // Double the result
     
+    // ITU-T exact right shift and limit operations
+    *xl = limit(l_shr(comp_low, 16));
+    *xh = limit(l_shr(comp_high, 16));
+}
+
+/// ITU-T qmf_rx_buf function - QMF synthesis (decoder) filter
+/// 
+/// Exact implementation from ITU-T G.722 reference funcg722.c
+/// 
+/// # Arguments
+/// * `rl` - Low-band input sample
+/// * `rh` - High-band input sample
+/// * `xout0` - Output first reconstructed sample
+/// * `xout1` - Output second reconstructed sample
+/// * `state` - G.722 state containing delay line
+pub fn qmf_rx_buf(rl: i16, rh: i16, xout0: &mut i16, xout1: &mut i16, state: &mut G722State) {
+    // ITU-T reference algorithm:
+    
+    // compute sum and difference from lower-band (rl) and higher-band (rh) signals
+    // update delay line
+    // *--(*delayx) = add (rl, rh); *--(*delayx) = sub (rl, rh);
+    for i in (2..24).rev() {
+        state.qmf_rx_delay[i] = state.qmf_rx_delay[i - 2];
+    }
+    state.qmf_rx_delay[1] = add(rl, rh);  // ITU-T saturated add
+    state.qmf_rx_delay[0] = sub(rl, rh);  // ITU-T saturated sub
+    
+    // qmf_rx filtering
+    let mut accuma = 0i32;
+    let mut accumb = 0i32;
+    
+    // ITU-T exact multiply-accumulate operations
+    accuma = l_mult(COEF_QMF[0], state.qmf_rx_delay[0]);
+    accumb = l_mult(COEF_QMF[1], state.qmf_rx_delay[1]);
+    
+    // FOR (i = 1; i < 12; i++) - ITU-T exact MAC operations
+    for i in 1..12 {
+        let coef_idx = i * 2;
+        let delay_idx = i * 2;
+        accuma = l_mac(accuma, COEF_QMF[coef_idx], state.qmf_rx_delay[delay_idx]);
+        accumb = l_mac(accumb, COEF_QMF[coef_idx + 1], state.qmf_rx_delay[delay_idx + 1]);
+    }
+    
+    // ITU-T exact left shift operations
+    let comp_low = l_shl(accuma, 4);
+    let comp_high = l_shl(accumb, 4);
+    
+    // ITU-T exact high word extraction
+    *xout0 = extract_h(comp_low);
+    *xout1 = extract_h(comp_high);
+}
+
+/// QMF analysis for encoding (wrapper for ITU-T function)
+/// 
+/// # Arguments
+/// * `sample0` - First input sample
+/// * `sample1` - Second input sample  
+/// * `state` - G.722 state
+/// 
+/// # Returns
+/// * Tuple of (low_band, high_band) samples
+pub fn qmf_analysis(sample0: i16, sample1: i16, state: &mut G722State) -> (i16, i16) {
+    let mut xl = 0i16;
+    let mut xh = 0i16;
+    qmf_tx_buf(sample0, sample1, &mut xl, &mut xh, state);
     (xl, xh)
 }
 
-/// QMF synthesis filter (decoder)
-/// 
-/// Reconstructs the time-domain signal from low and high frequency bands.
-/// Processes one low-band and one high-band sample and produces two output samples.
+/// QMF synthesis for decoding (wrapper for ITU-T function)
 /// 
 /// # Arguments
-/// * `rl` - Low-band sample
-/// * `rh` - High-band sample
-/// * `state` - G.722 state containing the QMF delay line
+/// * `xl` - Low-band sample
+/// * `xh` - High-band sample
+/// * `state` - G.722 state
 /// 
 /// # Returns
-/// * `(xout1, xout2)` - Two reconstructed output samples
-pub fn qmf_synthesis(rl: i16, rh: i16, state: &mut G722State) -> (i16, i16) {
-    let delay = state.qmf_rx_delay_mut();
-    
-    // Shift delay line first (move older samples towards the end)
-    for i in 0..22 {
-        delay[23 - i] = delay[21 - i];
-    }
-    
-    // Compute sum and difference from lower-band (rl) and higher-band (rh) signals
-    delay[0] = saturated_sub(rl, rh);
-    delay[1] = saturated_add(rl, rh);
-    
-    // QMF filtering
-    let mut accum_a = 0i64;
-    let mut accum_b = 0i64;
-    
-    for i in 0..12 {
-        accum_a += (delay[i * 2] as i64) * (QMF_COEFFS[i * 2] as i64);
-        accum_b += (delay[i * 2 + 1] as i64) * (QMF_COEFFS[i * 2 + 1] as i64);
-    }
-    
-    // Compute output samples with right shift by 10 for proper scaling
-    let comp_low = accum_a >> 10;
-    let comp_high = accum_b >> 10;
-    
-    let xout1 = limit(comp_low as i32);
-    let xout2 = limit(comp_high as i32);
-    
-    (xout1, xout2)
-}
-
-/// QMF synthesis filter optimized version (decoder)
-/// 
-/// Alternative implementation that doesn't shift the delay line in memory.
-/// Used for performance optimization in some cases.
-/// 
-/// # Arguments
-/// * `rl` - Low-band sample
-/// * `rh` - High-band sample
-/// * `delay` - QMF delay line (external management)
-/// * `output` - Output buffer for the two samples
-pub fn qmf_synthesis_buf(rl: i16, rh: i16, delay: &mut [i16], output: &mut [i16]) {
-    if delay.len() < 24 || output.len() < 2 {
-        return;
-    }
-    
-    // Shift delay line first (move older samples towards the end)
-    for i in 0..22 {
-        delay[23 - i] = delay[21 - i];
-    }
-    
-    // Compute sum and difference from lower-band (rl) and higher-band (rh) signals
-    delay[0] = saturated_sub(rl, rh);
-    delay[1] = saturated_add(rl, rh);
-    
-    // QMF filtering
-    let mut accum_a = 0i64;
-    let mut accum_b = 0i64;
-    
-    for i in 0..12 {
-        accum_a += (delay[i * 2] as i64) * (QMF_COEFFS[i * 2] as i64);
-        accum_b += (delay[i * 2 + 1] as i64) * (QMF_COEFFS[i * 2 + 1] as i64);
-    }
-    
-    // Compute output samples with right shift by 10 for proper scaling
-    let comp_low = accum_a >> 10;
-    let comp_high = accum_b >> 10;
-    
-    output[0] = limit(comp_low as i32);
-    output[1] = limit(comp_high as i32);
-}
-
-/// Saturated addition of two i16 values
-fn saturated_add(a: i16, b: i16) -> i16 {
-    limit((a as i32) + (b as i32))
-}
-
-/// Saturated subtraction of two i16 values
-fn saturated_sub(a: i16, b: i16) -> i16 {
-    limit((a as i32) - (b as i32))
-}
-
-/// Extract high 16 bits from 32-bit value (equivalent to right shift by 16)
-fn extract_high(value: i64) -> i16 {
-    // Cast to i32 first to handle 32-bit values properly, then extract high 16 bits
-    let val32 = value as i32;
-    (val32 >> 16) as i16
-}
-
-/// Reset QMF delay lines
-pub fn reset_qmf_delays(state: &mut G722State) {
-    state.qmf_tx_delay = [0; 24];
-    state.qmf_rx_delay = [0; 24];
-}
-
-/// Get frequency response of QMF filter (for testing/validation)
-pub fn get_qmf_response(frequency: f32, sample_rate: f32) -> f32 {
-    let omega = 2.0 * std::f32::consts::PI * frequency / sample_rate;
-    let mut response = 0.0f32;
-    
-    for (i, &coeff) in QMF_COEFFS.iter().enumerate() {
-        response += (coeff as f32) * (omega * (i as f32)).cos();
-    }
-    
-    response.abs()
+/// * Tuple of (sample0, sample1) reconstructed samples
+pub fn qmf_synthesis(xl: i16, xh: i16, state: &mut G722State) -> (i16, i16) {
+    let mut xout0 = 0i16;
+    let mut xout1 = 0i16;
+    qmf_rx_buf(xl, xh, &mut xout0, &mut xout1, state);
+    (xout0, xout1)
 }
 
 #[cfg(test)]
@@ -174,128 +152,42 @@ mod tests {
     use crate::codecs::g722::state::G722State;
 
     #[test]
-    fn test_qmf_analysis_basic() {
-        let mut state = G722State::new();
-        
-        // Test with simple input
-        let (xl, xh) = qmf_analysis(1000, 2000, &mut state);
-        
-        // QMF should produce some output (exact values depend on filter)
-        assert_ne!(xl, 0);
-        assert_ne!(xh, 0);
-    }
-
-    #[test]
-    fn test_qmf_synthesis_basic() {
-        let mut state = G722State::new();
-        
-        // Prime the filter with some samples first
-        let _ = qmf_synthesis(500, 300, &mut state);
-        let _ = qmf_synthesis(400, 200, &mut state);
-        let _ = qmf_synthesis(300, 100, &mut state);
-        
-        // Now test with simple input - should produce some output
-        let (xout1, xout2) = qmf_synthesis(500, 300, &mut state);
-        
-        // QMF should produce some output after priming
-        assert_ne!(xout1, 0);
-        assert_ne!(xout2, 0);
-    }
-
-    #[test]
-    fn test_qmf_delay_line_shift() {
-        let mut state = G722State::new();
-        
-        // Fill delay line with test pattern
-        for i in 0..24 {
-            state.qmf_tx_delay[i] = i as i16;
-        }
-        
-        // Process samples
-        let _ = qmf_analysis(100, 200, &mut state);
-        
-        // Check that delay line was shifted correctly
-        assert_eq!(state.qmf_tx_delay[0], 100);
-        assert_eq!(state.qmf_tx_delay[1], 200);
-        assert_eq!(state.qmf_tx_delay[2], 0);  // Should be shifted from position 0
-        assert_eq!(state.qmf_tx_delay[3], 1);  // Should be shifted from position 1
-    }
-
-    #[test]
-    fn test_qmf_synthesis_buf() {
-        let mut delay = [0i16; 24];
-        let mut output = [0i16; 2];
-        
-        // Prime the filter with some samples first
-        qmf_synthesis_buf(500, 300, &mut delay, &mut output);
-        qmf_synthesis_buf(400, 200, &mut delay, &mut output);
-        qmf_synthesis_buf(300, 100, &mut delay, &mut output);
-        
-        // Now test with simple input - should produce some output
-        qmf_synthesis_buf(500, 300, &mut delay, &mut output);
-        
-        // Should produce non-zero output after priming
-        assert_ne!(output[0], 0);
-        assert_ne!(output[1], 0);
-    }
-
-    #[test]
-    fn test_saturated_add() {
-        assert_eq!(saturated_add(1000, 2000), 3000);
-        assert_eq!(saturated_add(32000, 1000), 32767);  // Should saturate
-        assert_eq!(saturated_add(-32000, -1000), -32768);  // Should saturate
-    }
-
-    #[test]
-    fn test_saturated_sub() {
-        assert_eq!(saturated_sub(2000, 1000), 1000);
-        assert_eq!(saturated_sub(-32000, 1000), -32768);  // Should saturate
-        assert_eq!(saturated_sub(32000, -1000), 32767);   // Should saturate
-    }
-
-    #[test]
-    fn test_extract_high() {
-        assert_eq!(extract_high(0x12345678), 0x1234);
-        assert_eq!(extract_high(0x0000FFFF), 0x0000);
-        assert_eq!(extract_high(0xFFFF0000), -1);  // Sign extension
-    }
-
-    #[test]
-    fn test_reset_qmf_delays() {
-        let mut state = G722State::new();
-        
-        // Fill delays with non-zero values
-        state.qmf_tx_delay[0] = 100;
-        state.qmf_rx_delay[0] = 200;
-        
-        reset_qmf_delays(&mut state);
-        
-        // Should be reset to zero
-        assert_eq!(state.qmf_tx_delay[0], 0);
-        assert_eq!(state.qmf_rx_delay[0], 0);
-    }
-
-    #[test]
     fn test_qmf_coefficients() {
-        // Test that QMF coefficients are symmetric (property of QMF filters)
-        let len = QMF_COEFFS.len();
-        for i in 0..len/2 {
-            assert_eq!(QMF_COEFFS[i], QMF_COEFFS[len - 1 - i]);
-        }
+        // Test that coefficients match ITU-T reference
+        assert_eq!(COEF_QMF.len(), 24);
+        assert_eq!(COEF_QMF[0], 6);    // 3*2
+        assert_eq!(COEF_QMF[1], -22);  // -11*2
+        assert_eq!(COEF_QMF[11], 7752); // 3876*2
+        assert_eq!(COEF_QMF[12], 7752); // 3876*2
     }
 
     #[test]
-    fn test_qmf_frequency_response() {
-        // Test frequency response at DC (should be non-zero)
-        let dc_response = get_qmf_response(0.0, 16000.0);
-        assert!(dc_response > 0.0);
+    fn test_qmf_analysis_synthesis() {
+        let mut state = G722State::new();
         
-        // Test frequency response at 1/4 Nyquist (should be non-zero)
-        let quarter_nyquist_response = get_qmf_response(2000.0, 16000.0);
-        assert!(quarter_nyquist_response > 0.0);
+        // Test with some sample values
+        let (xl, xh) = qmf_analysis(1000, 2000, &mut state);
+        let (out0, out1) = qmf_synthesis(xl, xh, &mut state);
         
-        // Test frequency response at 1/2 Nyquist (should be non-zero)
-        let half_nyquist_response = get_qmf_response(4000.0, 16000.0);
-        assert!(half_nyquist_response > 0.0);
+        // The values should be reasonable (QMF is not perfect reconstruction)
+        assert!(xl.abs() < 32767);
+        assert!(xh.abs() < 32767);
+        assert!(out0.abs() < 32767);
+        assert!(out1.abs() < 32767);
+    }
+
+    #[test]
+    fn test_qmf_delay_line_management() {
+        let mut state = G722State::new();
+        
+        // Fill delay line with known values
+        qmf_analysis(100, 200, &mut state);
+        qmf_analysis(300, 400, &mut state);
+        
+        // Check that delay line is properly shifted
+        assert_eq!(state.qmf_tx_delay[0], 400);
+        assert_eq!(state.qmf_tx_delay[1], 300);
+        assert_eq!(state.qmf_tx_delay[2], 200);
+        assert_eq!(state.qmf_tx_delay[3], 100);
     }
 } 

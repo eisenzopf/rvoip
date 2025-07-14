@@ -1,352 +1,311 @@
-# Codec-Core Implementation Plan
+# Codec-Core G.722 ITU-T Compliance Implementation Plan
 
-## Overview
+## Current Status: G.722 ITU-T Reference Implementation
 
-The `codec-core` library is a high-performance, unified audio codec implementation that consolidates and improves upon the existing codec implementations scattered across the RVOIP codebase. This library serves as the single source of truth for audio codec operations across all RVOIP components.
+### Overview
 
-## Problem Statement
+The primary goal is to achieve **100% ITU-T G.722 compliance** by implementing the exact reference algorithm from the official ITU-T G.722 specification (T-REC-G.722-201209). No shortcuts, no approximations, no mocks - this is about bit-exact compliance with the international standard.
 
-Currently, the RVOIP codebase has multiple implementations of the same codecs:
-- **G.711**: 3 different implementations (basic, advanced, mock)
-- **G.722**: 2 different implementations (media-core, audio-core)
-- **G.729**: 2 different implementations (media-core, audio-core)
-- **Opus**: 2 different implementations (media-core, audio-core)
+### Problem Statement
 
-This leads to:
-- ❌ Code duplication and maintenance overhead
-- ❌ Inconsistent behavior between components
-- ❌ Difficulty in ensuring quality and performance
-- ❌ Architectural confusion and tight coupling
+Current G.722 implementation has:
+- ❌ **93 compilation errors** preventing any testing
+- ❌ **API incompatibility** - G722Codec doesn't implement AudioCodec trait  
+- ❌ **Broken test framework** - integration tests fail to compile
+- ❌ **No ITU-T test vector integration** - not using official compliance tests
+- ❌ **Unknown compliance level** - cannot verify against ITU-T reference
 
-## Solution
+### Reference Implementation Sources
 
-Create a dedicated `codec-core` library that:
-- ✅ Consolidates all codec implementations
-- ✅ Provides consistent, high-performance APIs
-- ✅ Eliminates code duplication
-- ✅ Enables shared improvements and optimizations
-- ✅ Offers both real and simulation modes for testing
+1. **Primary Reference**: `T-REC-G.722-201209/Software/G.722-Appendix-IV_v3.0/`
+   - **Source**: `funcg722.c` - Complete ITU-T G.722 reference implementation
+   - **Headers**: `g722.h`, `funcg722.h` - ITU-T data structures and prototypes
+   - **Test Vectors**: `testvectors/TV/` - Official ITU-T compliance test files
+   - **Documentation**: `00Readme-G.722-App.IV-v3.00.txt` - Implementation notes
 
-## Architecture
+2. **Secondary Reference**: `ezk-media/crates/ezk-g722/`
+   - **Proven Implementation**: Based on SpanDSP/libg722 (battle-tested)
+   - **Clean Architecture**: Proper encoder/decoder separation
+   - **Working API**: Functional integration patterns
 
-### Core Design Principles
+### Solution Strategy
 
-1. **Performance First**: SIMD optimizations, lookup tables, zero-copy APIs
-2. **Flexibility**: Support both real and simulation modes
-3. **Testability**: Comprehensive test coverage with property-based testing
-4. **Maintainability**: Clean APIs, clear documentation, modular design
-5. **Compatibility**: Easy integration with existing media-core and audio-core
+**Phase 1: Fix Compilation and API Integration**
+- Fix all 93 compilation errors
+- Implement proper AudioCodec trait
+- Create working test framework
+- Establish baseline functionality
 
-### Module Structure
+**Phase 2: ITU-T Reference Implementation**
+- Implement exact ITU-T algorithm from funcg722.c
+- Use official ITU-T tables and constants
+- Maintain bit-exact compliance
+- Comprehensive state management
+
+**Phase 3: ITU-T Test Vector Validation**
+- Integrate official test vectors (test10.bst, test20.bst, ovfl.bst)
+- Achieve 100% compliance on all test cases
+- Debug and fix any precision differences
+- Validate across all G.722 modes (1, 2, 3)
+
+**Phase 4: Performance and Extensions**
+- Add PLC (Packet Loss Concealment) from ITU-T reference
+- Support super-wideband extensions if needed
+- Performance optimizations while maintaining compliance
+
+## Detailed G.722 Architecture
+
+### ITU-T G.722 Algorithm Components
+
+Based on the official ITU-T reference implementation:
 
 ```
-codec-core/
-├── src/
-│   ├── lib.rs                 # Public API and re-exports
-│   ├── types.rs               # Common types and traits
-│   ├── error.rs               # Error handling
-│   ├── codecs/
-│   │   ├── mod.rs            # Codec registry and factory
-│   │   ├── g711/
-│   │   │   ├── mod.rs        # G.711 public API
-│   │   │   ├── encoder.rs    # μ-law/A-law encoding
-│   │   │   ├── decoder.rs    # μ-law/A-law decoding
-│   │   │   ├── tables.rs     # Pre-computed lookup tables
-│   │   │   └── simd.rs       # SIMD optimizations
-│   │   ├── g722/
-│   │   │   ├── mod.rs        # G.722 public API
-│   │   │   ├── encoder.rs    # Sub-band ADPCM encoding
-│   │   │   ├── decoder.rs    # Sub-band ADPCM decoding
-│   │   │   ├── qmf.rs        # QMF analysis/synthesis
-│   │   │   └── adpcm.rs      # ADPCM implementation
-│   │   ├── g729/
-│   │   │   ├── mod.rs        # G.729 public API
-│   │   │   ├── encoder.rs    # ACELP encoding
-│   │   │   ├── decoder.rs    # ACELP decoding
-│   │   │   ├── lpc.rs        # LPC analysis/synthesis
-│   │   │   ├── pitch.rs      # Pitch analysis
-│   │   │   ├── codebook.rs   # Algebraic codebook
-│   │   │   └── simulation.rs # Simulation mode
-│   │   └── opus/
-│   │       ├── mod.rs        # Opus public API
-│   │       ├── encoder.rs    # Real Opus encoding
-│   │       ├── decoder.rs    # Real Opus decoding
-│   │       └── simulation.rs # Simulation mode
-│   └── utils/
-│       ├── simd.rs           # SIMD utilities
-│       ├── tables.rs         # Table generation utilities
-│       └── validation.rs     # Input validation
-├── tests/
-│   ├── integration/
-│   │   ├── g711_tests.rs     # G.711 integration tests
-│   │   ├── g722_tests.rs     # G.722 integration tests
-│   │   ├── g729_tests.rs     # G.729 integration tests
-│   │   ├── opus_tests.rs     # Opus integration tests
-│   │   └── interop_tests.rs  # Cross-codec tests
-│   ├── property/
-│   │   ├── roundtrip.rs      # Property-based roundtrip tests
-│   │   ├── quality.rs        # Quality preservation tests
-│   │   └── performance.rs    # Performance regression tests
-│   └── compatibility/
-│       ├── media_core.rs     # Media-core compatibility
-│       └── audio_core.rs     # Audio-core compatibility
-└── benches/
-    └── codec_benchmarks.rs   # Performance benchmarks
+G.722 Encoder:
+Input PCM (16kHz) -> QMF Analysis -> Low/High Band Split
+                                   -> ADPCM Encode (Low) -> 6-bit quantization
+                                   -> ADPCM Encode (High) -> 2-bit quantization
+                                   -> Bit Packing -> G.722 Bitstream
+
+G.722 Decoder:  
+G.722 Bitstream -> Bit Unpacking -> Low/High Band Codes
+                                 -> ADPCM Decode (Low) -> Low Band Signal
+                                 -> ADPCM Decode (High) -> High Band Signal
+                                 -> QMF Synthesis -> Reconstructed PCM
 ```
 
-## Codec Implementations
+### Core ITU-T Functions (from funcg722.c)
 
-### G.711 (PCMU/PCMA)
-**Source**: Best features from `media-core/src/codec/audio/g711.rs`
+1. **QMF Functions**:
+   - `qmf_tx()` - QMF analysis filter (encoder)
+   - `qmf_rx()` - QMF synthesis filter (decoder)
+   - `qmf_rx_buf()` - Optimized synthesis with buffer management
 
-#### Features:
-- ✅ **High Performance**: Pre-computed lookup tables for O(1) conversion
-- ✅ **SIMD Optimizations**: x86_64 SSE2 and AArch64 NEON support
-- ✅ **Zero-Copy APIs**: Pre-allocated buffer support
-- ✅ **ITU-T Compliance**: Fully compliant μ-law and A-law implementations
-- ✅ **Quality Validation**: Comprehensive SNR and distortion testing
+2. **Low-Band ADPCM**:
+   - `lsbcod()` - Low sub-band encoding
+   - `lsbdec()` - Low sub-band decoding
+   - `quantl()` - Low-band quantization
+   - `invqal()` - Inverse quantization (encoder)
+   - `invqbl()` - Mode-dependent inverse quantization (decoder)
 
-#### Key Optimizations:
-- Pre-computed 65536-element lookup tables for encoding
-- Pre-computed 256-element lookup tables for decoding
-- SIMD processing for 8-16 samples at once
-- Automatic fallback to scalar implementation
+3. **High-Band ADPCM**:
+   - `hsbcod()` - High sub-band encoding  
+   - `hsbdec()` - High sub-band decoding
+   - `quanth()` - High-band quantization
+   - `invqah()` - High-band inverse quantization
 
-### G.722 (Wideband)
-**Source**: Enhanced version of `audio-core/src/codec/g722.rs`
+4. **Prediction and Adaptation**:
+   - `filtep()` - Pole predictor filter
+   - `filtez()` - Zero predictor filter
+   - `uppol1()` - First-order pole coefficient update
+   - `uppol2()` - Second-order pole coefficient update
+   - `upzero()` - Zero predictor coefficient update
+   - `logscl()` - Low-band scale factor adaptation
+   - `logsch()` - High-band scale factor adaptation
+   - `scalel()` - Low-band scale factor computation
+   - `scaleh()` - High-band scale factor computation
 
-#### Features:
-- ✅ **Sub-band Coding**: Proper QMF analysis and synthesis
-- ✅ **ADPCM Implementation**: ITU-T G.722 compliant ADPCM for each band
-- ✅ **16kHz Support**: Wideband audio at 64kbps
-- ✅ **Quality Optimization**: Improved quantization and prediction
-
-#### Key Components:
-- QMF filter bank with proper coefficients
-- ADPCM encoders/decoders for low and high bands
-- Optimized bit packing/unpacking
-- Proper state management for continuous processing
-
-### G.729 (Low-bitrate)
-**Source**: Enhanced version of `media-core/src/codec/audio/g729.rs`
-
-#### Features:
-- ✅ **ACELP Implementation**: Algebraic Code Excited Linear Prediction
-- ✅ **Dual Mode**: Real G.729 (with external library) and simulation
-- ✅ **Annex Support**: Annex A (reduced complexity) and Annex B (VAD/CNG)
-- ✅ **8kbps Compression**: Excellent voice quality at low bitrate
-
-#### Key Components:
-- LPC analysis with windowing and autocorrelation
-- Pitch analysis (open-loop and closed-loop)
-- Algebraic codebook search
-- Gain quantization and LSP conversion
-- Voice Activity Detection (VAD)
-- Comfort Noise Generation (CNG)
-
-### Opus (Modern)
-**Source**: Enhanced version of `media-core/src/codec/audio/opus.rs`
-
-#### Features:
-- ✅ **Flexible Bitrate**: 6-510 kbps with VBR/CBR support
-- ✅ **Wide Sample Rate**: 8-48kHz support
-- ✅ **Low Latency**: Optimized for real-time applications
-- ✅ **Quality Modes**: Voice and audio application modes
-- ✅ **Dual Mode**: Real Opus (with external library) and simulation
-
-#### Key Components:
-- Proper Opus encoder/decoder initialization
-- Bitrate adaptation and complexity control
-- Frame size flexibility (2.5-60ms)
-- FEC (Forward Error Correction) support
-- Packet loss concealment simulation
-
-## API Design
-
-### Core Traits
+### ITU-T State Structure (from g722.h)
 
 ```rust
-/// Primary codec trait for encoding/decoding operations
-pub trait AudioCodec: Send + Sync {
-    type Config: Clone + Send + Sync;
-    type Error: std::error::Error + Send + Sync + 'static;
+pub struct G722State {
+    // Low-band ADPCM state
+    al: [i16; 3],      // Pole predictor coefficients
+    bl: [i16; 7],      // Zero predictor coefficients  
+    detl: i16,         // Low-band scale factor
+    dlt: [i16; 7],     // Low-band difference signal history
+    nbl: i16,          // Low-band scale factor (log domain)
+    plt: [i16; 3],     // Low-band predictor signals
+    rlt: [i16; 3],     // Low-band reconstructed signals
+    sl: i16,           // Low-band predictor output
+    spl: i16,          // Low-band predictor output (previous)
+    szl: i16,          // Low-band zero predictor output
     
-    /// Create a new codec instance
-    fn new(config: Self::Config) -> Result<Self, Self::Error> where Self: Sized;
+    // High-band ADPCM state  
+    ah: [i16; 3],      // High-band pole predictor coefficients
+    bh: [i16; 7],      // High-band zero predictor coefficients
+    deth: i16,         // High-band scale factor
+    dh: [i16; 7],      // High-band difference signal history
+    ph: [i16; 3],      // High-band predictor signals
+    rh: [i16; 3],      // High-band reconstructed signals
+    nbh: i16,          // High-band scale factor (log domain)
+    sh: i16,           // High-band predictor output
+    sph: i16,          // High-band predictor output (previous)
+    szh: i16,          // High-band zero predictor output
     
-    /// Encode audio samples to compressed data
-    fn encode(&mut self, samples: &[i16]) -> Result<Vec<u8>, Self::Error>;
-    
-    /// Decode compressed data to audio samples
-    fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>, Self::Error>;
-    
-    /// Get codec information
-    fn info(&self) -> CodecInfo;
-    
-    /// Reset codec state
-    fn reset(&mut self) -> Result<(), Self::Error>;
-}
-
-/// Codec capability information
-#[derive(Debug, Clone)]
-pub struct CodecInfo {
-    pub name: &'static str,
-    pub sample_rate: u32,
-    pub channels: u8,
-    pub bitrate: u32,
-    pub frame_size: usize,
-}
-
-/// Audio frame for processing
-#[derive(Debug, Clone)]
-pub struct AudioFrame {
-    pub samples: Vec<i16>,
-    pub sample_rate: u32,
-    pub channels: u8,
-    pub timestamp: u64,
+    // QMF delay lines
+    qmf_tx_delayx: [i16; 24],  // QMF analysis delay line
+    qmf_rx_delayx: [i16; 24],  // QMF synthesis delay line
 }
 ```
 
-### Codec Factory
+### ITU-T Tables and Constants
 
-```rust
-/// Codec factory for creating codec instances
-pub struct CodecFactory;
+All tables implemented exactly as specified in funcg722.c:
 
-impl CodecFactory {
-    /// Create a codec by name
-    pub fn create_by_name(name: &str, config: CodecConfig) -> Result<Box<dyn AudioCodec>, CodecError>;
-    
-    /// Create a codec by payload type
-    pub fn create_by_payload_type(pt: u8, config: CodecConfig) -> Result<Box<dyn AudioCodec>, CodecError>;
-    
-    /// Get all supported codecs
-    pub fn supported_codecs() -> Vec<CodecInfo>;
-}
-```
+- **ILA2[353]** - Inverse logarithmic scale factor table
+- **MISIL[2][32]** - Low-band quantization mapping  
+- **MISIH[2][3]** - High-band quantization mapping
+- **Q6[31]** - 6-level quantizer decision levels
+- **WLI[8]** - Low-band logarithmic scale factor weights
+- **WHI[4]** - High-band logarithmic scale factor weights
+- **RIL4/5/6[...]** - Inverse quantization index tables
+- **OQ4/5/6[...]** - Quantization output tables
+- **COEF_QMF[24]** - QMF filter coefficients
 
-## Performance Targets
+## Implementation Phases
 
-### Benchmark Goals
-- **G.711**: < 100ns per sample (encode/decode)
-- **G.722**: < 500ns per sample (encode/decode)
-- **G.729**: < 2μs per frame (80 samples, 10ms)
-- **Opus**: < 5μs per frame (variable size)
+### Phase 1: Fix Compilation (IMMEDIATE)
 
-### Memory Usage
-- **G.711**: < 1KB state per codec instance
-- **G.722**: < 2KB state per codec instance
-- **G.729**: < 8KB state per codec instance
-- **Opus**: < 16KB state per codec instance
+**Goal**: Get code compiling and tests running
 
-### Quality Targets
-- **G.711**: SNR > 20dB for sine waves
-- **G.722**: SNR > 25dB for wideband content
-- **G.729**: MOS > 3.9 for voice content
-- **Opus**: MOS > 4.2 for voice content
+**Tasks**:
+1. **Fix AudioCodec Trait Implementation**
+   ```rust
+   impl AudioCodec for G722Codec {
+       fn encode(&mut self, samples: &[i16]) -> Result<Vec<u8>, CodecError> {
+           // Frame-based encoding (160 samples -> 80 bytes)
+       }
+       
+       fn decode(&mut self, data: &[u8]) -> Result<Vec<i16>, CodecError> {
+           // Frame-based decoding (80 bytes -> 160 samples)
+       }
+       
+       fn frame_size(&self) -> usize { 160 } // 10ms at 16kHz
+       fn reset(&mut self) { /* Reset ITU-T state */ }
+   }
+   ```
 
-## Testing Strategy
+2. **Fix Constructor Compatibility**
+   ```rust
+   impl G722Codec {
+       pub fn new(config: CodecConfig) -> Result<Self, CodecError> {
+           let mode = extract_mode_from_config(config)?;
+           Self::new_with_mode(mode)
+       }
+   }
+   ```
 
-### Test Categories
+3. **Error Handling Integration**
+   ```rust
+   impl From<&str> for CodecError {
+       fn from(s: &str) -> Self {
+           CodecError::InvalidInput(s.to_string())
+       }
+   }
+   ```
 
-1. **Unit Tests**: Individual component testing
-2. **Integration Tests**: Full codec pipeline testing
-3. **Property Tests**: Roundtrip and invariant testing
-4. **Compatibility Tests**: Integration with existing codebase
-5. **Performance Tests**: Benchmark regression testing
-6. **Quality Tests**: Audio quality validation
+### Phase 2: ITU-T Algorithm Implementation (PRIORITY)
 
-### Test Coverage Goals
-- **Line Coverage**: > 90%
-- **Branch Coverage**: > 85%
-- **Integration Coverage**: 100% of public APIs
+**Goal**: Exact ITU-T reference implementation
 
-### Property-Based Testing
-- **Roundtrip Properties**: encode(decode(x)) ≈ x
-- **Monotonicity**: Consistent behavior with similar inputs
-- **Boundary Testing**: Edge cases and error conditions
+**Tasks**:
+1. **Direct C-to-Rust Translation**
+   - Translate each ITU-T function exactly from funcg722.c
+   - Maintain exact arithmetic precision
+   - Use exact ITU-T variable names and logic flow
 
-## Integration Plan
+2. **State Management**
+   - Implement exact G722State structure from g722.h
+   - Proper initialization as per ITU-T reset behavior
+   - State consistency across encode/decode operations
 
-### Phase 1: Core Implementation (Week 1)
-- ✅ Create library structure and build system
-- ✅ Implement core traits and types
-- ✅ Implement G.711 with full optimizations
-- ✅ Basic test suite for G.711
+3. **Bit-Exact Operations**
+   - Use ITU-T arithmetic functions (add, mult, shr, shl, etc.)
+   - Maintain exact overflow and saturation behavior
+   - Preserve ITU-T rounding and precision
 
-### Phase 2: Extended Codecs (Week 2)
-- ✅ Implement G.722 with sub-band coding
-- ✅ Implement G.729 with simulation mode
-- ✅ Implement Opus with simulation mode
-- ✅ Comprehensive test suite for all codecs
+### Phase 3: ITU-T Test Vector Integration (VALIDATION)
 
-### Phase 3: Performance Optimization (Week 3)
-- ✅ SIMD optimizations for all codecs
-- ✅ Lookup table optimizations
-- ✅ Zero-copy API implementations
-- ✅ Performance benchmarking and validation
+**Goal**: 100% compliance with official ITU-T test vectors
 
-### Phase 4: Integration and Migration (Week 4)
-- ✅ Update media-core to use codec-core
-- ✅ Update audio-core to use codec-core
-- ✅ Remove duplicate codec implementations
-- ✅ Final testing and validation
+**Tasks**:
+1. **Test Vector Parser**
+   ```rust
+   fn load_g192_bitstream(path: &str) -> Result<Vec<u8>, Error> {
+       // Parse G.192 format bitstream files
+   }
+   
+   fn load_reference_output(path: &str) -> Result<Vec<i16>, Error> {
+       // Load 16-bit little-endian reference output
+   }
+   ```
 
-## Migration Strategy
+2. **Compliance Test Framework**
+   ```rust
+   #[test]
+   fn test_itu_compliance_test10() {
+       let input = load_g192_bitstream("test10.bst").unwrap();
+       let expected = load_reference_output("test10.out").unwrap();
+       
+       let mut codec = G722Codec::new_with_mode(1).unwrap();
+       let decoded = codec.decode(&input).unwrap();
+       
+       assert_eq!(decoded, expected, "Failed ITU-T test10 compliance");
+   }
+   ```
 
-### Backward Compatibility
-- Maintain existing API compatibility where possible
-- Provide migration guides for breaking changes
-- Gradual migration with feature flags
+3. **Debug Framework**
+   ```rust
+   fn compare_sample_by_sample(our: &[i16], reference: &[i16]) -> ComparisonReport {
+       // Detailed sample-by-sample analysis
+       // Identify exact point of divergence
+       // State debugging and arithmetic tracing
+   }
+   ```
 
-### Rollout Plan
-1. **Parallel Implementation**: codec-core alongside existing codecs
-2. **Feature Flag Migration**: Optional use of codec-core
-3. **Default Switch**: Make codec-core the default
-4. **Cleanup**: Remove old implementations
+### Phase 4: Advanced Features (EXTENSIONS)
 
-## Success Metrics
+**Goal**: Complete ITU-T G.722 feature support
 
-### Performance Metrics
-- **Encoding Speed**: > 100x real-time for all codecs
-- **Memory Usage**: < 50MB for 1000 concurrent codec instances
-- **Latency**: < 1ms additional latency over existing implementations
+**Tasks**:
+1. **PLC Implementation** (from g722_plc.c)
+2. **Super-wideband Extensions** (Annexes B, C, D)
+3. **Performance Optimizations** (while maintaining compliance)
 
-### Quality Metrics
-- **No Regression**: Audio quality equal or better than existing
-- **Consistency**: Identical behavior across all consumers
-- **Robustness**: Handle edge cases and error conditions gracefully
+## Success Criteria
 
-### Maintainability Metrics
-- **Code Reduction**: > 50% reduction in codec-related code
-- **Test Coverage**: > 90% line coverage
-- **Documentation**: 100% of public APIs documented
+### Phase 1 Success
+- ✅ Zero compilation errors
+- ✅ All tests compile and run
+- ✅ Basic encode/decode functionality works
+
+### Phase 2 Success  
+- ✅ Bit-exact ITU-T algorithm implementation
+- ✅ Proper state management and initialization
+- ✅ All ITU-T functions translated correctly
+
+### Phase 3 Success
+- ✅ **100% ITU-T compliance** on test10.bst
+- ✅ **100% ITU-T compliance** on test20.bst  
+- ✅ **100% ITU-T compliance** on ovfl.bst
+- ✅ All G.722 modes (1, 2, 3) pass compliance tests
+
+### Phase 4 Success
+- ✅ PLC functionality working
+- ✅ Extended features as needed
+- ✅ Performance meets requirements
 
 ## Risk Mitigation
 
-### Technical Risks
-- **Performance Regression**: Comprehensive benchmarking
-- **Quality Degradation**: Extensive A/B testing
-- **Integration Issues**: Gradual migration with feature flags
+1. **Compilation Failures**: Use ezk-media patterns for API design
+2. **Arithmetic Precision**: Use ITU-T exact arithmetic operations
+3. **State Management**: Follow ITU-T reference exactly  
+4. **Test Vector Failures**: Debug sample-by-sample with reference
+5. **Performance Issues**: Optimize after compliance is achieved
 
-### Licensing Risks
-- **G.729**: Use simulation mode by default
-- **Opus**: MIT licensed, no issues
-- **Patents**: Stick to well-established, patent-free implementations
+## Timeline
 
-### Timeline Risks
-- **Scope Creep**: Focus on core functionality first
-- **Quality Issues**: Prioritize correctness over performance
-- **Integration Complexity**: Maintain backward compatibility
+- **Week 1**: Fix compilation, implement basic API
+- **Week 2**: ITU-T algorithm implementation 
+- **Week 3**: Test vector integration and debugging
+- **Week 4**: Achieve 100% ITU-T compliance
+- **Week 5**: Advanced features and optimizations
 
-## Conclusion
+## Resources
 
-The `codec-core` library represents a significant architectural improvement to the RVOIP codebase. By consolidating codec implementations, we achieve:
+- **ITU-T Reference**: T-REC-G.722-201209/Software/G.722-Appendix-IV_v3.0/
+- **Proven Implementation**: ezk-media/crates/ezk-g722/
+- **Test Vectors**: Official ITU-T compliance test files
+- **Documentation**: ITU-T G.722 specification and appendices
 
-1. **Reduced Complexity**: Single source of truth for all codecs
-2. **Improved Performance**: SIMD optimizations and lookup tables
-3. **Better Quality**: Comprehensive testing and validation
-4. **Enhanced Maintainability**: Clean APIs and documentation
-5. **Future Flexibility**: Easy addition of new codecs
-
-This implementation plan provides a roadmap for creating a production-ready, high-performance codec library that serves as the foundation for all RVOIP audio processing needs. 
+This plan prioritizes **correctness over speed**, **compliance over convenience**, and **precision over approximation**. The goal is to create the definitive ITU-T G.722 implementation that serves as the gold standard for all G.722 needs in the RVOIP ecosystem. 

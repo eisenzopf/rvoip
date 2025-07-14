@@ -13,6 +13,10 @@ keywords.workspace = true
 
 description = "High-performance audio codec library for VoIP applications"
 
+[[bin]]
+name = "g722_compliance_test"
+path = "src/bin/g722_compliance_test.rs"
+
 [lints]
 workspace = true
 
@@ -43,6 +47,7 @@ tokio = { version = "1.35", features = ["full"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"             # Property-based testing
 rand = "0.8"                 # Random number generation for tests
+temp-dir = "0.1"
 
 # Feature flags
 [features]

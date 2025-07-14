@@ -289,6 +289,22 @@ impl From<std::num::ParseFloatError> for CodecError {
     }
 }
 
+impl From<&str> for CodecError {
+    fn from(s: &str) -> Self {
+        Self::InvalidConfig {
+            details: s.to_string(),
+        }
+    }
+}
+
+impl From<String> for CodecError {
+    fn from(s: String) -> Self {
+        Self::InvalidConfig {
+            details: s,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

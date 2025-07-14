@@ -32,25 +32,13 @@ pub struct AdpcmState {
     /// Reconstructed signal: rlt[0] = current, rlt[1] = previous, etc.
     pub rlt: [i16; 3],
     
-    /// Signal estimate (from ITU-T reference: sl/sh for low/high band)
-    pub s: i16,
-    
-    /// Slow part of signal estimate (from ITU-T reference: spl/sph for low/high band)
-    pub sp: i16,
-    
-    /// Fast part of signal estimate (from ITU-T reference: szl/szh for low/high band)
-    pub sz: i16,
-    
-    // ================ NEW FIELDS FOR ITU-T COMPLIANCE ================
-    
-    /// Signal estimate for low-band (sl) or high-band (sh)
-    /// This is the main signal estimate used in the reference implementation
+    /// Signal estimate (sl for low-band, sh for high-band)
     pub sl: i16,
     
-    /// Slow part of signal estimate for low-band (spl) or high-band (sph)
+    /// Slow part of signal estimate (spl for low-band, sph for high-band)
     pub spl: i16,
     
-    /// Fast part of signal estimate for low-band (szl) or high-band (szh)
+    /// Fast part of signal estimate (szl for low-band, szh for high-band)
     pub szl: i16,
 }
 
@@ -74,10 +62,6 @@ impl AdpcmState {
             nb: 0,
             plt: [0; 3],
             rlt: [0; 3],
-            s: 0,
-            sp: 0,
-            sz: 0,
-            // New ITU-T reference fields
             sl: 0,
             spl: 0,
             szl: 0,
@@ -96,10 +80,6 @@ impl AdpcmState {
             nb: 0,
             plt: [0; 3],
             rlt: [0; 3],
-            s: 0,
-            sp: 0,
-            sz: 0,
-            // New ITU-T reference fields
             sl: 0,
             spl: 0,
             szl: 0,
@@ -120,10 +100,6 @@ impl AdpcmState {
         self.nb = 0;
         self.plt = [0; 3];
         self.rlt = [0; 3];
-        self.s = 0;
-        self.sp = 0;
-        self.sz = 0;
-        // Reset new ITU-T reference fields
         self.sl = 0;
         self.spl = 0;
         self.szl = 0;
@@ -138,10 +114,6 @@ impl AdpcmState {
         self.nb = 0;
         self.plt = [0; 3];
         self.rlt = [0; 3];
-        self.s = 0;
-        self.sp = 0;
-        self.sz = 0;
-        // Reset new ITU-T reference fields
         self.sl = 0;
         self.spl = 0;
         self.szl = 0;
@@ -351,9 +323,6 @@ mod tests {
     fn test_adpcm_state_creation() {
         let state = AdpcmState::new();
         assert_eq!(state.det, 32);
-        assert_eq!(state.s, 0);
-        assert_eq!(state.sp, 0);
-        assert_eq!(state.sz, 0);
         assert_eq!(state.sl, 0);
         assert_eq!(state.spl, 0);
         assert_eq!(state.szl, 0);
@@ -362,16 +331,16 @@ mod tests {
     #[test]
     fn test_adpcm_state_reset() {
         let mut state = AdpcmState::new();
-        state.s = 1000;
+        state.sl = 1000;
         state.det = 100;
-        state.sl = 500;
+        state.spl = 500;
         state.szl = 200;
         
         state.reset();
         
         assert_eq!(state.det, 32);
-        assert_eq!(state.s, 0);
         assert_eq!(state.sl, 0);
+        assert_eq!(state.spl, 0);
         assert_eq!(state.szl, 0);
     }
 
@@ -387,18 +356,18 @@ mod tests {
     #[test]
     fn test_g722_state_reset() {
         let mut state = G722State::new();
-        state.low_band.s = 1000;
-        state.high_band.s = 2000;
+        state.low_band.sl = 1000;
+        state.high_band.sl = 2000;
         state.qmf_tx_delay[0] = 500;
-        state.low_band.sl = 300;
+        state.low_band.spl = 300;
         state.high_band.szl = 400;
         
         state.reset();
         
-        assert_eq!(state.low_band.s, 0);
-        assert_eq!(state.high_band.s, 0);
-        assert_eq!(state.qmf_tx_delay[0], 0);
         assert_eq!(state.low_band.sl, 0);
+        assert_eq!(state.high_band.sl, 0);
+        assert_eq!(state.qmf_tx_delay[0], 0);
+        assert_eq!(state.low_band.spl, 0);
         assert_eq!(state.high_band.szl, 0);
     }
 

@@ -1,0 +1,82 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: g722demo - Win32 Release--------------------
+</h3>
+<h3>Command Lines</h3>
+Creating temporary file "C:\Temp\RSPE4.tmp" with contents
+[
+/nologo /ML /W3 /GX /O2 /I "..\..\src\stl2005_basop" /I "..\..\src\g722plc" /I "..\..\src" /D "WIN32" /D "NDEBUG" /D "_CONSOLE" /D "_MBCS" /D "G722DEMO" /FR"..\..\Release/" /Fp"..\..\Release/g722demo.pch" /YX /Fo"..\..\Release/" /Fd"..\..\Release/" /FD /c 
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\stl2005_basop\basop32.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\stl2005_basop\control.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\stl2005_basop\count.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\stl2005_basop\enh1632.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\funcg722.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722demo.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\g722plc.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\softbit.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\table.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\utility.c"
+]
+Creating command line "cl.exe @C:\Temp\RSPE4.tmp" 
+Creating temporary file "C:\Temp\RSPE5.tmp" with contents
+[
+kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /nologo /subsystem:console /incremental:no /pdb:"..\..\Release/g722demo.pdb" /machine:I386 /out:"..\..\Release/g722demo.exe" 
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\basop32.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\control.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\count.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\enh1632.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\funcg722.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\g722.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\g722demo.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\g722plc.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\softbit.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\table.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\utility.obj
+]
+Creating command line "link.exe @C:\Temp\RSPE5.tmp"
+<h3>Output Window</h3>
+Compiling...
+basop32.c
+control.c
+count.c
+enh1632.c
+funcg722.c
+g722.c
+g722demo.c
+C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722demo.c(289) : warning C4244: '=' : conversion from 'double ' to 'long ', possible loss of data
+C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722demo.c(409) : warning C4018: '!=' : signed/unsigned mismatch
+g722plc.c
+C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722demo.c(395) : warning C4761: integral size mismatch in argument; conversion supplied
+softbit.c
+table.c
+utility.c
+Linking...
+Creating temporary file "C:\Temp\RSPE7.tmp" with contents
+[
+/nologo /o"..\..\Release/g722demo.bsc" 
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\basop32.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\control.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\count.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\enh1632.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\funcg722.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\g722.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\g722demo.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\g722plc.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\softbit.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\table.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\utility.sbr]
+Creating command line "bscmake.exe @C:\Temp\RSPE7.tmp"
+Creating browse info file...
+<h3>Output Window</h3>
+
+
+
+<h3>Results</h3>
+g722demo.exe - 0 error(s), 3 warning(s)
+</pre>
+</body>
+</html>

@@ -1,0 +1,123 @@
+<html>
+<body>
+<pre>
+<h1>Build Log</h1>
+<h3>
+--------------------Configuration: decg722 - Win32 Release--------------------
+</h3>
+<h3>Command Lines</h3>
+Creating temporary file "C:\Temp\RSP25C.tmp" with contents
+[
+/nologo /ML /W3 /GX /Od /I "..\..\src\stl2005_basop" /I "..\..\src\g722plc" /I "..\..\src" /D "WIN32" /D "NDEBUG" /D "_CONSOLE" /D "_MBCS" /D DMEM=1 /D WMOPS=1 /Fr"..\..\Release/" /Fp"..\..\Release/decg722.pch" /YX /Fo"..\..\Release/" /Fd"..\..\Release/" /FD /c 
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\stl2005_basop\basop32.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\stl2005_basop\control.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\stl2005_basop\count.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\stl2005_basop\enh1632.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\apfilter.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\autocor.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\azfilter.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\coarptch.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\decim.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\dspfunc.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\g722plc.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\levinson.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\memutil.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\merit.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\ppchange.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\prfn.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\table.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722plc\utility.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\decg722.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\funcg722.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\g722.c"
+"C:\ITU_Work\G722_PLC_BRCM_TSB_v1.3\src\softbit.c"
+]
+Creating command line "cl.exe @C:\Temp\RSP25C.tmp" 
+Creating temporary file "C:\Temp\RSP25D.tmp" with contents
+[
+kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib kernel32.lib user32.lib gdi32.lib winspool.lib comdlg32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib odbc32.lib odbccp32.lib /nologo /subsystem:console /incremental:no /pdb:"..\..\Release/decg722.pdb" /machine:I386 /out:"..\..\Release/decg722.exe" 
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\basop32.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\control.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\count.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\enh1632.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\apfilter.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\autocor.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\azfilter.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\coarptch.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\decim.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\dspfunc.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\g722plc.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\levinson.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\memutil.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\merit.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\ppchange.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\prfn.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\table.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\utility.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\decg722.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\funcg722.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\g722.obj
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\softbit.obj
+]
+Creating command line "link.exe @C:\Temp\RSP25D.tmp"
+<h3>Output Window</h3>
+Compiling...
+basop32.c
+control.c
+count.c
+enh1632.c
+apfilter.c
+autocor.c
+azfilter.c
+coarptch.c
+decim.c
+dspfunc.c
+g722plc.c
+levinson.c
+memutil.c
+merit.c
+ppchange.c
+prfn.c
+table.c
+utility.c
+decg722.c
+funcg722.c
+g722.c
+softbit.c
+Linking...
+Creating temporary file "C:\Temp\RSP25F.tmp" with contents
+[
+/nologo /o"..\..\Release/decg722.bsc" 
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\basop32.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\control.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\count.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\enh1632.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\apfilter.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\autocor.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\azfilter.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\coarptch.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\decim.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\dspfunc.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\g722plc.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\levinson.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\memutil.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\merit.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\ppchange.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\prfn.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\table.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\utility.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\decg722.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\funcg722.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\g722.sbr
+\ITU_Work\G722_PLC_BRCM_TSB_v1.3\Release\softbit.sbr]
+Creating command line "bscmake.exe @C:\Temp\RSP25F.tmp"
+Creating browse info file...
+<h3>Output Window</h3>
+
+
+
+<h3>Results</h3>
+decg722.exe - 0 error(s), 0 warning(s)
+</pre>
+</body>
+</html>

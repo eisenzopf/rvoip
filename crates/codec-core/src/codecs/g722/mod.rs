@@ -21,15 +21,13 @@
 pub mod codec;
 pub mod qmf;
 pub mod adpcm;
-pub mod tables;
 pub mod state;
 pub mod reference;
+pub mod tables;
 
+// Tests are organized in the tests/ directory
 #[cfg(test)]
-mod tests;
-
-#[cfg(test)]
-mod itu_reference_tests;
+pub mod tests;
 
 // Re-export the main codec struct
 pub use codec::G722Codec;
