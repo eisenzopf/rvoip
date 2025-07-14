@@ -100,8 +100,8 @@ impl G722Codec {
         // QMF analysis - split into low and high bands
         let (xl, xh) = qmf::qmf_analysis(samples[0], samples[1], self.encoder_state.state_mut());
         
-        // ADPCM encode both bands
-        let low_bits = adpcm::low_band_encode(xl, self.encoder_state.state_mut().low_band_mut());
+        // ADPCM encode both bands with proper mode support
+        let low_bits = adpcm::low_band_encode(xl, self.encoder_state.state_mut().low_band_mut(), self.mode);
         let high_bits = adpcm::high_band_encode(xh, self.encoder_state.state_mut().high_band_mut());
         
         // Pack bits: 6 bits for low band + 2 bits for high band
