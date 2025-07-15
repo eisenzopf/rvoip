@@ -123,6 +123,15 @@ impl G722Codec {
             });
         }
         
+        // Validate input samples are in valid range
+        for (i, &sample) in samples.iter().enumerate() {
+            if sample < -32768 || sample > 32767 {
+                return Err(CodecError::EncodingFailed {
+                    reason: format!("Input sample {} out of range: {} (must be -32768 to 32767)", i, sample),
+                });
+            }
+        }
+        
         let mut encoded = Vec::with_capacity(G722_ENCODED_FRAME_SIZE);
         
         // ITU-T reference: process sample pairs
@@ -187,6 +196,15 @@ impl G722Codec {
             
             decoded.push(sample0);
             decoded.push(sample1);
+        }
+        
+        // Validate output samples are in valid range
+        for (i, &sample) in decoded.iter().enumerate() {
+            if sample < -32768 || sample > 32767 {
+                return Err(CodecError::DecodingFailed {
+                    reason: format!("Output sample {} out of range: {} (must be -32768 to 32767)", i, sample),
+                });
+            }
         }
         
         Ok(decoded)

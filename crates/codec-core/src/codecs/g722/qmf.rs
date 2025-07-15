@@ -3,8 +3,9 @@
 //! This module implements the QMF analysis and synthesis filters for G.722.
 //! Updated to use exact ITU-T reference implementation functions.
 
+use crate::codecs::g722::reference::*;
+use crate::codecs::g722::tables::*;
 use crate::codecs::g722::state::G722State;
-use crate::codecs::g722::reference::{limit, add, sub, l_mult, l_mac, l_shr, l_shl, l_add, l_sub, extract_h};
 
 /// QMF filter coefficients for both transmission and reception
 /// 
@@ -170,10 +171,10 @@ mod tests {
         let (out0, out1) = qmf_synthesis(xl, xh, &mut state);
         
         // The values should be reasonable (QMF is not perfect reconstruction)
-        assert!(xl.abs() < 32767);
-        assert!(xh.abs() < 32767);
-        assert!(out0.abs() < 32767);
-        assert!(out1.abs() < 32767);
+        assert!(abs_s(xl) < 32767);
+        assert!(abs_s(xh) < 32767);
+        assert!(abs_s(out0) < 32767);
+        assert!(abs_s(out1) < 32767);
     }
 
     #[test]
