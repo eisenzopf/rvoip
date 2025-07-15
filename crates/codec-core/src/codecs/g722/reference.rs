@@ -810,7 +810,14 @@ pub fn l_msu(l_var3: i32, var1: i16, var2: i16) -> i32 {
 /// * Rounded value (Word16)
 pub fn round(l_var1: i32) -> i16 {
     let rounded = l_add(l_var1, 32768);
-    extract_h(rounded)
+    
+    // ITU-T rounding: handle boundary case where -0.5 should round to -1
+    // This occurs when input is exactly -32768 (0xFFFF8000)
+    if l_var1 < 0 && rounded == 0 {
+        -1
+    } else {
+        extract_h(rounded)
+    }
 }
 
 /// ITU-T abs_s function - exact implementation
