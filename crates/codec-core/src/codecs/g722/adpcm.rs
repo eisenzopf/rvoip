@@ -3,9 +3,10 @@
 //! This module provides the core ADPCM encoding and decoding functionality for G.722.
 //! Updated to use exact ITU-T reference implementation functions.
 
-use crate::codecs::g722::state::*;
 use crate::codecs::g722::reference::*;
 use crate::codecs::g722::tables::*;
+use crate::codecs::g722::state::AdpcmState;
+use crate::codecs::g722::reference::abs_s;
 
 /// Encode low-band signal using ADPCM
 /// 
@@ -259,7 +260,7 @@ pub fn high_band_decode(ih: u8, state: &mut AdpcmState) -> i16 {
 /// # Returns
 /// * 6-bit quantization index
 fn quantl6b_local(el: i16, detl: i16) -> i16 {
-    let mil = ((el.abs() as i32) * 32) / (detl.max(1) as i32);
+    let mil = ((abs_s(el) as i32) * 32) / (detl.max(1) as i32);
     let mil = mil.min(32767) as i16;
     
     // Find quantization level (63 levels for 6-bit)
@@ -420,7 +421,7 @@ mod tests {
         let decoded = low_band_decode(encoded, 1, &mut decoder_state);
         
         // Should be reasonably close (ADPCM is lossy)
-        let error = (input - decoded).abs();
+        let error = abs_s(input - decoded);
         assert!(error < 5000, "Error too large: {}", error);
     }
 
@@ -434,7 +435,7 @@ mod tests {
         let decoded = high_band_decode(encoded, &mut decoder_state);
         
         // Should be reasonably close (ADPCM is lossy)
-        let error = (input - decoded).abs();
+        let error = abs_s(input - decoded);
         assert!(error < 2000, "Error too large: {}", error);
     }
 
@@ -465,7 +466,7 @@ mod tests {
             let decoded = low_band_decode(encoded, mode, &mut state);
         
             // Should produce reasonable output for all modes
-            assert!(decoded.abs() < 32767, "Mode {} decode out of range: {}", mode, decoded);
+            assert!(abs_s(decoded) < 32767, "Mode {} decode out of range: {}", mode, decoded);
         }
     }
 

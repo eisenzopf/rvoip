@@ -3,10 +3,13 @@
 //! This module contains basic unit tests for the G.722 codec implementation.
 //! Tests cover codec creation, state management, and fundamental operations.
 
-use crate::codecs::g722::{G722Codec, G722State, AdpcmState};
+use super::utils::*;
+use crate::codecs::g722::*;
+use crate::codecs::g722::state::{G722State, AdpcmState};
+use crate::codecs::g722::reference::abs_s;
 use crate::codecs::g722::codec::{G722_FRAME_SIZE, G722_ENCODED_FRAME_SIZE};
-use crate::codecs::g722::reference::*;
-use crate::codecs::g722::tables::*;
+use crate::codecs::g722::adpcm;
+use crate::codecs::g722::qmf;
 use crate::types::AudioCodec;
 
 /// Test codec creation with different modes
@@ -189,12 +192,12 @@ fn test_bit_packing_modes() {
     let decoded3 = codec3.decode_byte(byte3);
     
     // All should produce valid 16-bit samples
-    assert!(decoded1[0].abs() <= 32767);
-    assert!(decoded1[1].abs() <= 32767);
-    assert!(decoded2[0].abs() <= 32767);
-    assert!(decoded2[1].abs() <= 32767);
-    assert!(decoded3[0].abs() <= 32767);
-    assert!(decoded3[1].abs() <= 32767);
+    assert!(abs_s(decoded1[0]) <= 32767);
+    assert!(abs_s(decoded1[1]) <= 32767);
+    assert!(abs_s(decoded2[0]) <= 32767);
+    assert!(abs_s(decoded2[1]) <= 32767);
+    assert!(abs_s(decoded3[0]) <= 32767);
+    assert!(abs_s(decoded3[1]) <= 32767);
 }
 
 /// Test basic encode/decode round trip
@@ -253,4 +256,30 @@ fn test_frame_size_validation() {
 fn test_default_codec() {
     let codec = G722Codec::default();
     assert_eq!(codec.mode(), 1);
+} 
+
+/// Test validation edge cases
+#[test]
+fn test_sample_validation() {
+    let mut codec = G722Codec::new_with_mode(1).unwrap();
+    
+    // Test with valid samples (should work)
+    let valid_samples = vec![0i16; G722_FRAME_SIZE];
+    assert!(codec.encode_frame(&valid_samples).is_ok());
+    
+    // Test with extreme but valid samples (should work)
+    let mut extreme_samples = vec![0i16; G722_FRAME_SIZE];
+    extreme_samples[0] = i16::MIN;
+    extreme_samples[1] = i16::MAX;
+    extreme_samples[2] = -32767;
+    extreme_samples[3] = 32767;
+    
+    // These should work since they're valid i16 values
+    assert!(codec.encode_frame(&extreme_samples).is_ok());
+    
+    // Test encoded frame validation with valid data
+    let encoded = vec![0u8; G722_ENCODED_FRAME_SIZE];
+    assert!(codec.decode_frame(&encoded).is_ok());
+    
+    println!("✓ Sample validation tests passed");
 } 
