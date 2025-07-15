@@ -22,7 +22,7 @@ pub const G722_ENCODED_FRAME_SIZE: usize = 80;
 /// ```
 /// use rvoip_codec_core::codecs::g722::G722Codec;
 /// 
-/// let mut codec = G722Codec::new(1).unwrap(); // Mode 1 (64 kbit/s)
+/// let mut codec = G722Codec::new_with_mode(1).unwrap(); // Mode 1 (64 kbit/s)
 /// 
 /// // Encode a frame of 160 samples
 /// let input_frame = vec![0i16; 160];
