@@ -348,7 +348,7 @@ mod tests {
     fn test_g722_state_creation() {
         let state = G722State::new();
         assert_eq!(state.low_band.det, 32);
-        assert_eq!(state.high_band.det, 32);
+        assert_eq!(state.high_band.det, 8);  // Fixed: high band initializes to 8, not 32
         assert_eq!(state.qmf_tx_delay.len(), 24);
         assert_eq!(state.qmf_rx_delay.len(), 24);
     }
