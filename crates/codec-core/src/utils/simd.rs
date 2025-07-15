@@ -21,40 +21,40 @@ static SIMD_SUPPORT: OnceLock<SimdSupport> = OnceLock::new();
 
 /// Initialize SIMD support detection
 pub fn init_simd_support() {
-    SIMD_SUPPORT.get_or_init(|| {
-        #[cfg(target_arch = "x86_64")]
-        {
-            SimdSupport {
-                sse2: is_x86_feature_detected!("sse2"),
-                avx2: is_x86_feature_detected!("avx2"),
-                neon: false,
-            }
+    SIMD_SUPPORT.get_or_init(|| detect_simd_support());
+}
+
+/// Internal function to detect SIMD support
+fn detect_simd_support() -> SimdSupport {
+    #[cfg(target_arch = "x86_64")]
+    {
+        SimdSupport {
+            sse2: is_x86_feature_detected!("sse2"),
+            avx2: is_x86_feature_detected!("avx2"),
+            neon: false,
         }
-        #[cfg(target_arch = "aarch64")]
-        {
-            SimdSupport {
-                sse2: false,
-                avx2: false,
-                neon: std::arch::is_aarch64_feature_detected!("neon"),
-            }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        SimdSupport {
+            sse2: false,
+            avx2: false,
+            neon: std::arch::is_aarch64_feature_detected!("neon"),
         }
-        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-        {
-            SimdSupport {
-                sse2: false,
-                avx2: false,
-                neon: false,
-            }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        SimdSupport {
+            sse2: false,
+            avx2: false,
+            neon: false,
         }
-    });
+    }
 }
 
 /// Get SIMD support information
 pub fn get_simd_support() -> SimdSupport {
-    *SIMD_SUPPORT.get_or_init(|| {
-        init_simd_support();
-        *SIMD_SUPPORT.get().unwrap()
-    })
+    *SIMD_SUPPORT.get_or_init(|| detect_simd_support())
 }
 
 /// Check if any SIMD support is available
@@ -211,7 +211,12 @@ pub fn linear_to_mulaw_scalar(sample: i16) -> u8 {
     
     let mut sample = sample;
     let sign = if sample < 0 {
-        sample = -sample;
+        // Handle i16::MIN case to avoid overflow
+        sample = if sample == i16::MIN {
+            i16::MAX
+        } else {
+            -sample
+        };
         0x80
     } else {
         0x00
@@ -254,7 +259,12 @@ pub fn linear_to_alaw_scalar(sample: i16) -> u8 {
     
     let mut sample = sample;
     let sign = if sample < 0 {
-        sample = -sample;
+        // Handle i16::MIN case to avoid overflow
+        sample = if sample == i16::MIN {
+            i16::MAX
+        } else {
+            -sample
+        };
         0x80
     } else {
         0x00
