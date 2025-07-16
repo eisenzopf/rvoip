@@ -10,6 +10,9 @@ use crate::types::{AudioCodec, AudioCodecExt, CodecConfig, CodecInfo};
 use crate::utils::{validate_g729_frame};
 use tracing::{debug, trace, warn};
 
+// Include the new G.729 implementation
+pub mod src;
+
 /// G.729 codec implementation
 pub struct G729Codec {
     /// Sample rate (fixed at 8kHz)
