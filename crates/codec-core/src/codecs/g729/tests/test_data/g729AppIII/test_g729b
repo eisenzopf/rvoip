@@ -1,0 +1,22 @@
+echo "Verification of G.729 Annex B + Appendix III" > g729b_III.log
+../g729b_v14/coder tstseq1.bin tstseq1.bit.tst_III 1
+cmp tstseq1.bit.tst_III tstseq1.bit_III >> g729b_III.log
+../g729b_v14/coder tstseq2.bin tstseq2.bit.tst_III 1
+cmp tstseq2.bit.tst_III tstseq2.bit_III >> g729b_III.log
+../g729b_v14/coder tstseq3.bin tstseq3.bit.tst_III 1
+cmp tstseq3.bit.tst_III tstseq3.bit_III >> g729b_III.log
+../g729b_v14/coder tstseq4.bin tstseq4.bit.tst_III 1
+cmp tstseq4.bit.tst_III tstseq4.bit_III >> g729b_III.log
+
+../g729b_v14/decoder tstseq1.bit_III tstseq1.out.tst_III
+cmp tstseq1.out.tst_III tstseq1.out_III >> g729b_III.log
+../g729b_v14/decoder tstseq2.bit_III tstseq2.out.tst_III
+cmp tstseq2.out.tst_III tstseq2.out_III >> g729b_III.log
+../g729b_v14/decoder tstseq3.bit_III tstseq3.out.tst_III
+cmp tstseq3.out.tst_III tstseq3.out_III >> g729b_III.log
+../g729b_v14/decoder tstseq4.bit_III tstseq4.out.tst_III
+cmp tstseq4.out.tst_III tstseq4.out_III >> g729b_III.log
+../g729b_v14/decoder tstseq5.bit tstseq5.out.tst
+cmp tstseq5.out.tst tstseq5.out >> g729b_III.log
+../g729b_v14/decoder tstseq6.bit tstseq6.out.tst
+cmp tstseq6.out.tst tstseq6.out >> g729b_III.log
