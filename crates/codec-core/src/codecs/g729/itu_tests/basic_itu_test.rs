@@ -217,7 +217,7 @@ fn test_basic_roundtrip() {
         assert_eq!(output_signal.len(), 80, "Output should have correct length");
         
         // Calculate basic similarity
-        let similarity = calculate_sample_similarity(input_signal, &output_signal);
+        let similarity = calculate_signal_similarity(input_signal, &output_signal);
         println!("    Similarity: {:.1}%", similarity * 100.0);
         
         // For synthetic signals, we expect some similarity (not perfect due to lossy compression)
