@@ -200,6 +200,40 @@ pub fn l_negate(l_var1: Word32) -> Word32 {
     }
 }
 
+/// Round a 32-bit value to 16-bit with saturation
+/// 
+/// This function rounds a 32-bit value to 16-bit by adding 0x8000
+/// (for rounding) and then extracting the high 16 bits.
+/// 
+/// # Arguments
+/// * `l_var1` - 32-bit input value
+/// 
+/// # Returns
+/// Rounded 16-bit result
+pub fn round_word32(l_var1: Word32) -> Word16 {
+    let rounded = l_add(l_var1, 0x8000);
+    extract_h(rounded)
+}
+
+/// Saturate a 32-bit value to 16-bit range
+/// 
+/// This function limits a 32-bit value to the 16-bit signed range.
+/// 
+/// # Arguments
+/// * `l_var1` - 32-bit input value
+/// 
+/// # Returns
+/// Saturated 16-bit result
+pub fn saturate(l_var1: Word32) -> Word16 {
+    if l_var1 > MAX_16 as Word32 {
+        MAX_16
+    } else if l_var1 < MIN_16 as Word32 {
+        MIN_16
+    } else {
+        l_var1 as Word16
+    }
+}
+
 /// 16-bit multiplication with rounding
 pub fn mult_r(var1: Word16, var2: Word16) -> Word16 {
     let l_product = l_mult(var1, var2);

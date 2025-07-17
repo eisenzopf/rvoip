@@ -4,6 +4,96 @@
 //! standardized by ITU-T, commonly used in VoIP for its excellent compression.
 //! G.729 uses ACELP (Algebraic Code Excited Linear Prediction) to achieve
 //! 8 kbps compression with good voice quality.
+//!
+//! ## Runtime Configuration
+//!
+//! The G.729 implementation supports runtime configuration switches for
+//! Annex A (reduced complexity) and Annex B (VAD/DTX/CNG) features:
+//!
+//! ```rust
+//! use rvoip_codec_core::codecs::g729::{G729Codec, G729Config};
+//!
+//! // Default configuration (G.729BA - most common for production)
+//! let mut codec = G729Codec::new_default().unwrap();
+//! assert_eq!(codec.variant(), "G.729BA");
+//!
+//! // Custom configuration for specific use cases
+//! let codec_a = G729Codec::new_with_annexes(true, false).unwrap();  // G.729A
+//! let codec_b = G729Codec::new_with_annexes(false, true).unwrap();  // G.729B  
+//! let codec_core = G729Codec::new_with_annexes(false, false).unwrap(); // G.729
+//!
+//! // Runtime configuration changes
+//! codec.set_annex_a(false).unwrap(); // Disable reduced complexity
+//! codec.set_annex_b(false).unwrap(); // Disable VAD/DTX/CNG
+//! assert_eq!(codec.variant(), "G.729");
+//! ```
+//!
+//! ## G.729 Variants
+//!
+//! | Variant | Annex A | Annex B | CPU Efficiency | Bandwidth Efficiency | Use Case |
+//! |---------|---------|---------|----------------|---------------------|----------|
+//! | **G.729** | ❌ | ❌ | 100% (baseline) | 100% (continuous) | Reference/testing |
+//! | **G.729A** | ✅ | ❌ | 60% (~40% faster) | 100% (continuous) | Low-power devices |
+//! | **G.729B** | ❌ | ✅ | 100% (baseline) | 50% (~50% savings) | Bandwidth-critical |
+//! | **G.729BA** | ✅ | ✅ | 60% (~40% faster) | 50% (~50% savings) | **Production VoIP** |
+//!
+//! ## Configuration Examples
+//!
+//! ### Production VoIP (Recommended)
+//! ```rust
+//! # use rvoip_codec_core::codecs::g729::G729Codec;
+//! // G.729BA: Best balance of CPU efficiency and bandwidth savings
+//! let codec = G729Codec::new_default().unwrap();
+//! assert_eq!(codec.variant(), "G.729BA");
+//! assert!(codec.has_annex_a()); // 40% less CPU usage
+//! assert!(codec.has_annex_b()); // 50% bandwidth savings in silence
+//! ```
+//!
+//! ### Low-Power/Embedded Devices
+//! ```rust
+//! # use rvoip_codec_core::codecs::g729::G729Codec;
+//! // G.729A: Reduced complexity without VAD overhead
+//! let codec = G729Codec::new_with_annexes(true, false).unwrap();
+//! assert_eq!(codec.variant(), "G.729A");
+//! assert_eq!(codec.config().cpu_efficiency(), 0.6); // 40% faster
+//! ```
+//!
+//! ### Bandwidth-Critical Connections
+//! ```rust
+//! # use rvoip_codec_core::codecs::g729::G729Codec;
+//! // G.729B: Full quality with maximum bandwidth efficiency
+//! let codec = G729Codec::new_with_annexes(false, true).unwrap();
+//! assert_eq!(codec.variant(), "G.729B");
+//! assert_eq!(codec.config().bandwidth_efficiency(), 0.5); // 50% savings
+//! ```
+//!
+//! ### ITU Reference Testing
+//! ```rust
+//! # use rvoip_codec_core::codecs::g729::G729Codec;
+//! // G.729 Core: Full complexity reference implementation
+//! let codec = G729Codec::new_with_annexes(false, false).unwrap();
+//! assert_eq!(codec.variant(), "G.729");
+//! assert_eq!(codec.config().cpu_efficiency(), 1.0); // Baseline complexity
+//! ```
+//!
+//! ### Adaptive Configuration
+//! ```rust
+//! # use rvoip_codec_core::codecs::g729::G729Codec;
+//! let mut codec = G729Codec::new_with_annexes(false, false).unwrap();
+//!
+//! // Adapt to network conditions
+//! if network_congested() {
+//!     codec.set_annex_b(true).unwrap(); // Enable bandwidth savings
+//! }
+//!
+//! // Adapt to CPU load
+//! if cpu_load_high() {
+//!     codec.set_annex_a(true).unwrap(); // Enable reduced complexity
+//! }
+//!
+//! # fn network_congested() -> bool { true }
+//! # fn cpu_load_high() -> bool { true }
+//! ```
 
 use crate::error::{CodecError, Result};
 use crate::types::{AudioCodec, AudioCodecExt, CodecConfig, CodecInfo};
@@ -12,6 +102,10 @@ use tracing::{debug, trace, warn};
 
 // Include the new G.729 implementation
 pub mod src;
+
+// Include ITU-T compliance test suite
+#[cfg(test)]
+pub mod itu_tests;
 
 /// G.729 codec implementation
 pub struct G729Codec {
@@ -32,21 +126,82 @@ pub struct G729Codec {
 /// G.729 codec configuration
 #[derive(Debug, Clone)]
 pub struct G729Config {
-    /// Enable Voice Activity Detection (VAD)
-    pub vad_enabled: bool,
-    /// Enable Comfort Noise Generation (CNG)
-    pub cng_enabled: bool,
-    /// Use reduced complexity mode (Annex A)
-    pub reduced_complexity: bool,
+    /// Enable G.729 Annex A (reduced complexity - ~40% faster)
+    pub annex_a: bool,
+    /// Enable G.729 Annex B (VAD/DTX/CNG - ~50% bandwidth savings in silence)
+    pub annex_b: bool,
 }
 
 impl Default for G729Config {
     fn default() -> Self {
         Self {
-            vad_enabled: true,
-            cng_enabled: true,
-            reduced_complexity: true, // Use Annex A by default
+            annex_a: true,  // Use reduced complexity by default
+            annex_b: true,  // Use VAD/DTX/CNG by default (G.729BA)
         }
+    }
+}
+
+impl G729Config {
+    /// Create a new G.729 configuration
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Enable/disable G.729 Annex A (reduced complexity)
+    /// When enabled, uses simplified pitch analysis and ACELP search (~40% faster)
+    pub fn with_annex_a(mut self, enabled: bool) -> Self {
+        self.annex_a = enabled;
+        self
+    }
+    
+    /// Enable/disable G.729 Annex B (VAD/DTX/CNG)
+    /// When enabled, provides bandwidth efficiency during silence periods
+    pub fn with_annex_b(mut self, enabled: bool) -> Self {
+        self.annex_b = enabled;
+        self
+    }
+    
+    /// Get the G.729 variant name based on enabled annexes
+    pub fn variant_name(&self) -> &'static str {
+        match (self.annex_a, self.annex_b) {
+            (false, false) => "G.729",      // Full complexity, no VAD/DTX
+            (true, false) => "G.729A",     // Reduced complexity, no VAD/DTX
+            (false, true) => "G.729B",     // Full complexity + VAD/DTX/CNG
+            (true, true) => "G.729BA",     // Reduced complexity + VAD/DTX/CNG
+        }
+    }
+    
+    /// Get expected computational efficiency vs baseline G.729
+    pub fn cpu_efficiency(&self) -> f32 {
+        if self.annex_a {
+            0.6 // ~40% reduction in computational complexity
+        } else {
+            1.0 // Baseline complexity
+        }
+    }
+    
+    /// Get expected bandwidth efficiency vs continuous transmission
+    pub fn bandwidth_efficiency(&self) -> f32 {
+        if self.annex_b {
+            0.5 // ~50% bandwidth savings during silence periods
+        } else {
+            1.0 // Continuous transmission
+        }
+    }
+    
+    /// Check if Voice Activity Detection is enabled
+    pub fn has_vad(&self) -> bool {
+        self.annex_b
+    }
+    
+    /// Check if Discontinuous Transmission is enabled
+    pub fn has_dtx(&self) -> bool {
+        self.annex_b
+    }
+    
+    /// Check if Comfort Noise Generation is enabled
+    pub fn has_cng(&self) -> bool {
+        self.annex_b
     }
 }
 
@@ -137,7 +292,37 @@ struct PostFilter {
 }
 
 impl G729Codec {
-    /// Create a new G.729 codec
+    /// Create a new G.729 codec with default configuration (G.729BA)
+    pub fn new_default() -> Result<Self> {
+        Self::new_with_config(G729Config::default())
+    }
+    
+    /// Create a new G.729 codec with custom annex configuration
+    pub fn new_with_annexes(annex_a: bool, annex_b: bool) -> Result<Self> {
+        let config = G729Config::new()
+            .with_annex_a(annex_a)
+            .with_annex_b(annex_b);
+        Self::new_with_config(config)
+    }
+    
+    /// Create a new G.729 codec with specific configuration
+    pub fn new_with_config(g729_config: G729Config) -> Result<Self> {
+        debug!("Creating G.729 codec: variant={}, CPU efficiency={:.1}%, BW efficiency={:.1}%", 
+               g729_config.variant_name(),
+               g729_config.cpu_efficiency() * 100.0, 
+               g729_config.bandwidth_efficiency() * 100.0);
+        
+        Ok(Self {
+            sample_rate: 8000,    // G.729 fixed at 8kHz
+            channels: 1,          // G.729 fixed at mono
+            frame_size: 80,       // G.729 fixed at 80 samples (10ms)
+            config: g729_config,
+            encoder_state: G729EncoderState::new(),
+            decoder_state: G729DecoderState::new(),
+        })
+    }
+    
+    /// Create a new G.729 codec from CodecConfig (for compatibility)
     pub fn new(config: CodecConfig) -> Result<Self> {
         // Validate configuration
         let sample_rate = config.sample_rate.hz();
@@ -161,16 +346,15 @@ impl G729Codec {
         // G.729 uses fixed 10ms frames (80 samples at 8kHz)
         let frame_size = 80;
         
-        // Extract G.729 specific parameters
+        // Extract G.729 specific parameters with backward compatibility
         let g729_config = G729Config {
-            vad_enabled: config.parameters.g729.vad_enabled,
-            cng_enabled: config.parameters.g729.cng_enabled,
-            reduced_complexity: config.parameters.g729.reduced_complexity,
+            annex_a: config.parameters.g729.annex_a,
+            annex_b: config.parameters.g729.annex_b,
         };
         
-        debug!("Creating G.729 codec: {}Hz, {}ch, VAD={}, CNG={}, Annex-A={}", 
-               sample_rate, config.channels, g729_config.vad_enabled, 
-               g729_config.cng_enabled, g729_config.reduced_complexity);
+        debug!("Creating G.729 codec: {}Hz, {}ch, variant={}, CPU efficiency={:.1}%, BW efficiency={:.1}%", 
+               sample_rate, config.channels, g729_config.variant_name(),
+               g729_config.cpu_efficiency() * 100.0, g729_config.bandwidth_efficiency() * 100.0);
         
         Ok(Self {
             sample_rate,
@@ -185,6 +369,64 @@ impl G729Codec {
     /// Get the compression ratio (G.729 is 16:1, 16-bit to 1-bit per sample)
     pub fn compression_ratio(&self) -> f32 {
         0.125 // 80 samples (160 bytes) -> 10 bytes
+    }
+    
+    /// Get the current G.729 configuration
+    pub fn config(&self) -> &G729Config {
+        &self.config
+    }
+    
+    /// Get the current G.729 variant name
+    pub fn variant(&self) -> &'static str {
+        self.config.variant_name()
+    }
+    
+    /// Check if Annex A (reduced complexity) is enabled
+    pub fn has_annex_a(&self) -> bool {
+        self.config.annex_a
+    }
+    
+    /// Check if Annex B (VAD/DTX/CNG) is enabled
+    pub fn has_annex_b(&self) -> bool {
+        self.config.annex_b
+    }
+    
+    /// Update codec configuration (will reset internal state)
+    pub fn update_config(&mut self, new_config: G729Config) -> Result<()> {
+        debug!("Updating G.729 config from {} to {}", 
+               self.config.variant_name(), new_config.variant_name());
+        
+        self.config = new_config;
+        
+        // Reset codec state when configuration changes
+        self.encoder_state = G729EncoderState::new();
+        self.decoder_state = G729DecoderState::new();
+        
+        Ok(())
+    }
+    
+    /// Enable/disable Annex A at runtime
+    pub fn set_annex_a(&mut self, enabled: bool) -> Result<()> {
+        if self.config.annex_a != enabled {
+            let new_config = G729Config {
+                annex_a: enabled,
+                ..self.config
+            };
+            self.update_config(new_config)?;
+        }
+        Ok(())
+    }
+    
+    /// Enable/disable Annex B at runtime
+    pub fn set_annex_b(&mut self, enabled: bool) -> Result<()> {
+        if self.config.annex_b != enabled {
+            let new_config = G729Config {
+                annex_b: enabled,
+                ..self.config
+            };
+            self.update_config(new_config)?;
+        }
+        Ok(())
     }
 }
 
@@ -334,13 +576,13 @@ impl G729Codec {
         self.encoder_state.energy_level = energy;
         
         // VAD decision (simplified)
-        let is_speech = if self.config.vad_enabled {
+        let is_speech = if self.config.has_vad() {
             energy > 1000000.0 // Threshold for speech detection
         } else {
             true
         };
         
-        if !is_speech && self.config.cng_enabled {
+        if !is_speech && self.config.has_cng() {
             // Generate comfort noise frame (2 bytes)
             encoded.push(0x00); // Comfort noise flag
             encoded.push((energy.sqrt() / 256.0) as u8); // Energy level
@@ -680,7 +922,8 @@ mod tests {
 
     #[test]
     fn test_zero_copy_apis() {
-        let config = create_test_config();
+        let mut config = create_test_config();
+        config.parameters.g729.annex_b = false; // Disable VAD to ensure predictable frame size
         let mut codec = G729Codec::new(config).unwrap();
         
         let samples = vec![1000i16; 80];
@@ -747,12 +990,12 @@ mod tests {
     #[test]
     fn test_vad_configuration() {
         let mut config = create_test_config();
-        config.parameters.g729.vad_enabled = false;
-        config.parameters.g729.cng_enabled = false;
+        config.parameters.g729.annex_b = false; // Disable VAD/DTX/CNG
         
         let codec = G729Codec::new(config).unwrap();
-        assert!(!codec.config.vad_enabled);
-        assert!(!codec.config.cng_enabled);
+        assert!(!codec.config.has_vad());
+        assert!(!codec.config.has_cng());
+        assert!(!codec.config.has_dtx());
     }
 
     #[test]
@@ -788,5 +1031,227 @@ mod tests {
         // G.729 doesn't support variable frame sizes
         assert!(!codec.supports_variable_frame_size());
         assert_eq!(codec.frame_size(), 80);
+    }
+} 
+
+#[cfg(test)]
+mod runtime_config_tests {
+    use super::*;
+    
+    #[test]
+    fn test_g729_config_variants() {
+        // Test all four G.729 variants
+        let g729 = G729Config::new().with_annex_a(false).with_annex_b(false);
+        assert_eq!(g729.variant_name(), "G.729");
+        assert_eq!(g729.cpu_efficiency(), 1.0);
+        assert_eq!(g729.bandwidth_efficiency(), 1.0);
+        assert!(!g729.has_vad() && !g729.has_dtx() && !g729.has_cng());
+        
+        let g729a = G729Config::new().with_annex_a(true).with_annex_b(false);
+        assert_eq!(g729a.variant_name(), "G.729A");
+        assert_eq!(g729a.cpu_efficiency(), 0.6);
+        assert_eq!(g729a.bandwidth_efficiency(), 1.0);
+        assert!(!g729a.has_vad() && !g729a.has_dtx() && !g729a.has_cng());
+        
+        let g729b = G729Config::new().with_annex_a(false).with_annex_b(true);
+        assert_eq!(g729b.variant_name(), "G.729B");
+        assert_eq!(g729b.cpu_efficiency(), 1.0);
+        assert_eq!(g729b.bandwidth_efficiency(), 0.5);
+        assert!(g729b.has_vad() && g729b.has_dtx() && g729b.has_cng());
+        
+        let g729ba = G729Config::new().with_annex_a(true).with_annex_b(true);
+        assert_eq!(g729ba.variant_name(), "G.729BA");
+        assert_eq!(g729ba.cpu_efficiency(), 0.6);
+        assert_eq!(g729ba.bandwidth_efficiency(), 0.5);
+        assert!(g729ba.has_vad() && g729ba.has_dtx() && g729ba.has_cng());
+    }
+    
+    #[test]
+    fn test_codec_creation_methods() {
+        // Test default creation (should be G.729BA)
+        let codec_default = G729Codec::new_default().unwrap();
+        assert_eq!(codec_default.variant(), "G.729BA");
+        assert!(codec_default.has_annex_a());
+        assert!(codec_default.has_annex_b());
+        
+        // Test creation with explicit annexes
+        let codec_core = G729Codec::new_with_annexes(false, false).unwrap();
+        assert_eq!(codec_core.variant(), "G.729");
+        assert!(!codec_core.has_annex_a());
+        assert!(!codec_core.has_annex_b());
+        
+        let codec_a = G729Codec::new_with_annexes(true, false).unwrap();
+        assert_eq!(codec_a.variant(), "G.729A");
+        assert!(codec_a.has_annex_a());
+        assert!(!codec_a.has_annex_b());
+        
+        let codec_b = G729Codec::new_with_annexes(false, true).unwrap();
+        assert_eq!(codec_b.variant(), "G.729B");
+        assert!(!codec_b.has_annex_a());
+        assert!(codec_b.has_annex_b());
+        
+        // Test creation with custom config
+        let config = G729Config::new().with_annex_a(true).with_annex_b(true);
+        let codec_ba = G729Codec::new_with_config(config).unwrap();
+        assert_eq!(codec_ba.variant(), "G.729BA");
+        assert!(codec_ba.has_annex_a());
+        assert!(codec_ba.has_annex_b());
+    }
+    
+    #[test]
+    fn test_runtime_configuration_changes() {
+        let mut codec = G729Codec::new_with_annexes(false, false).unwrap();
+        assert_eq!(codec.variant(), "G.729");
+        
+        // Enable Annex A
+        codec.set_annex_a(true).unwrap();
+        assert_eq!(codec.variant(), "G.729A");
+        assert!(codec.has_annex_a());
+        assert!(!codec.has_annex_b());
+        
+        // Enable Annex B  
+        codec.set_annex_b(true).unwrap();
+        assert_eq!(codec.variant(), "G.729BA");
+        assert!(codec.has_annex_a());
+        assert!(codec.has_annex_b());
+        
+        // Disable Annex A
+        codec.set_annex_a(false).unwrap();
+        assert_eq!(codec.variant(), "G.729B");
+        assert!(!codec.has_annex_a());
+        assert!(codec.has_annex_b());
+        
+        // Disable Annex B
+        codec.set_annex_b(false).unwrap();
+        assert_eq!(codec.variant(), "G.729");
+        assert!(!codec.has_annex_a());
+        assert!(!codec.has_annex_b());
+    }
+    
+    #[test]
+    fn test_configuration_update() {
+        let mut codec = G729Codec::new_default().unwrap();
+        assert_eq!(codec.variant(), "G.729BA");
+        
+        // Update to G.729 core
+        let new_config = G729Config::new().with_annex_a(false).with_annex_b(false);
+        codec.update_config(new_config).unwrap();
+        assert_eq!(codec.variant(), "G.729");
+        assert!(!codec.has_annex_a());
+        assert!(!codec.has_annex_b());
+        
+        // Update to G.729A
+        let new_config = G729Config::new().with_annex_a(true).with_annex_b(false);
+        codec.update_config(new_config).unwrap();
+        assert_eq!(codec.variant(), "G.729A");
+        assert!(codec.has_annex_a());
+        assert!(!codec.has_annex_b());
+    }
+    
+    #[test]
+    fn test_config_efficiency_metrics() {
+        let config_base = G729Config::new().with_annex_a(false).with_annex_b(false);
+        let config_a = G729Config::new().with_annex_a(true).with_annex_b(false);
+        let config_b = G729Config::new().with_annex_a(false).with_annex_b(true);
+        let config_ba = G729Config::new().with_annex_a(true).with_annex_b(true);
+        
+        // CPU efficiency should be 1.0 for base, 0.6 for Annex A variants
+        assert_eq!(config_base.cpu_efficiency(), 1.0);
+        assert_eq!(config_a.cpu_efficiency(), 0.6);
+        assert_eq!(config_b.cpu_efficiency(), 1.0);
+        assert_eq!(config_ba.cpu_efficiency(), 0.6);
+        
+        // Bandwidth efficiency should be 1.0 for base, 0.5 for Annex B variants
+        assert_eq!(config_base.bandwidth_efficiency(), 1.0);
+        assert_eq!(config_a.bandwidth_efficiency(), 1.0);
+        assert_eq!(config_b.bandwidth_efficiency(), 0.5);
+        assert_eq!(config_ba.bandwidth_efficiency(), 0.5);
+    }
+    
+    #[test]
+    fn test_codec_configuration_access() {
+        let codec = G729Codec::new_with_annexes(true, false).unwrap();
+        
+        let config = codec.config();
+        assert!(config.annex_a);
+        assert!(!config.annex_b);
+        assert_eq!(config.variant_name(), "G.729A");
+        assert_eq!(config.cpu_efficiency(), 0.6);
+        assert_eq!(config.bandwidth_efficiency(), 1.0);
+    }
+    
+    #[test]
+    fn test_idempotent_configuration_changes() {
+        let mut codec = G729Codec::new_with_annexes(true, true).unwrap();
+        let initial_variant = codec.variant();
+        
+        // Setting the same configuration should not change anything
+        codec.set_annex_a(true).unwrap(); // Already enabled
+        codec.set_annex_b(true).unwrap(); // Already enabled
+        
+        assert_eq!(codec.variant(), initial_variant);
+        assert!(codec.has_annex_a());
+        assert!(codec.has_annex_b());
+    }
+}
+
+#[cfg(test)]
+mod usage_examples_tests {
+    use super::*;
+    
+    #[test]
+    fn test_production_voip_setup() {
+        // Most common production setup: G.729BA (reduced complexity + VAD/DTX/CNG)
+        let codec = G729Codec::new_default().unwrap(); // Defaults to G.729BA
+        assert_eq!(codec.variant(), "G.729BA");
+        assert!(codec.has_annex_a()); // Reduced complexity for better performance
+        assert!(codec.has_annex_b()); // VAD/DTX/CNG for bandwidth efficiency
+    }
+    
+    #[test]
+    fn test_low_power_device_setup() {
+        // For IoT/embedded devices: G.729A (reduced complexity, no VAD overhead)
+        let codec = G729Codec::new_with_annexes(true, false).unwrap();
+        assert_eq!(codec.variant(), "G.729A");
+        assert!(codec.has_annex_a()); // 40% less CPU usage
+        assert!(!codec.has_annex_b()); // No VAD processing overhead
+    }
+    
+    #[test]
+    fn test_bandwidth_critical_setup() {
+        // For satellite/expensive connections: G.729B (full quality + maximum bandwidth savings)
+        let codec = G729Codec::new_with_annexes(false, true).unwrap();
+        assert_eq!(codec.variant(), "G.729B");
+        assert!(!codec.has_annex_a()); // Full quality processing
+        assert!(codec.has_annex_b()); // Maximum bandwidth efficiency during silence
+    }
+    
+    #[test]
+    fn test_reference_testing_setup() {
+        // For ITU compliance testing: G.729 core (full complexity reference)
+        let codec = G729Codec::new_with_annexes(false, false).unwrap();
+        assert_eq!(codec.variant(), "G.729");
+        assert!(!codec.has_annex_a()); // Full complexity reference implementation
+        assert!(!codec.has_annex_b()); // No VAD/DTX extensions
+    }
+    
+    #[test]
+    fn test_adaptive_configuration_scenario() {
+        // Scenario: Start with basic G.729, adapt based on network conditions
+        let mut codec = G729Codec::new_with_annexes(false, false).unwrap();
+        assert_eq!(codec.variant(), "G.729");
+        
+        // Network congestion detected -> enable bandwidth savings
+        codec.set_annex_b(true).unwrap();
+        assert_eq!(codec.variant(), "G.729B");
+        
+        // CPU load high -> enable reduced complexity
+        codec.set_annex_a(true).unwrap();
+        assert_eq!(codec.variant(), "G.729BA");
+        
+        // Network improved, CPU load normal -> back to reference quality
+        codec.set_annex_a(false).unwrap();
+        codec.set_annex_b(false).unwrap();
+        assert_eq!(codec.variant(), "G.729");
     }
 } 

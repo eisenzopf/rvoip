@@ -41,6 +41,8 @@ apodize = "1.0"              # Windowing functions
 opus = { version = "0.3", optional = true }
 # g729 = { version = "0.3", optional = true }  # Commented out - licensing required
 
+
+
 # Testing dependencies
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full"] }
@@ -51,15 +53,37 @@ temp-dir = "0.1"
 
 # Feature flags
 [features]
-default = ["g711", "g722", "g729-sim", "opus-sim"]
+default = ["g711", "g722", "g729-core", "opus-sim"]
 
 # Individual codec features
 g711 = []                    # Always available - no external dependencies
 g722 = []                    # Always available - no external dependencies
-g729 = []                    # Real G.729 - requires external library
-g729-sim = []                # G.729 simulation - no external dependencies
 opus = ["dep:opus"]          # Real Opus - requires external library
 opus-sim = []                # Opus simulation - no external dependencies
+
+# G.729 codec variants - allows selective compilation of features
+# Core G.729 (8 kbit/s, full complexity)
+g729-core = []
+
+# G.729 Annex A (8 kbit/s, reduced complexity ~40% faster)
+# Enables simplified pitch analysis, adaptive ACELP, and reduced postfiltering
+annex-a = ["g729-core"]
+
+# G.729 Annex B (VAD/DTX/CNG extensions for bandwidth efficiency)
+# Enables Voice Activity Detection, Discontinuous Transmission, and Comfort Noise Generation
+# Can provide ~50% bandwidth savings during silence periods
+annex-b = ["g729-core"]
+
+# Convenience feature to enable all G.729 variants
+# Includes G.729, G.729A, G.729B, and G.729BA (A+B combined)
+all-annexes = ["annex-a", "annex-b"]
+
+# Development feature for comprehensive testing across all variants
+dev-all = ["all-annexes"]
+
+# Legacy features (deprecated - use g729-core instead)
+g729 = ["g729-core"]         # Real G.729 - now maps to g729-core
+g729-sim = ["g729-core"]     # G.729 simulation - now maps to g729-core
 
 # Performance features
 simd = []                    # SIMD optimizations

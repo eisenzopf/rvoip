@@ -6,36 +6,62 @@
 pub mod types;
 pub mod math;
 pub mod dsp;
+pub mod lpc;
+
+pub use types::*;
+pub use math::*;
+pub use dsp::*;
+pub use lpc::*;
 
 // Planned modules (will be implemented in later phases)
-// pub mod encoder;
-// pub mod decoder; 
-// pub mod lpc;
-// pub mod pitch;
-// pub mod codebook;
-// pub mod tables;
-// pub mod bitstream;
-// pub mod preprocess;
-// pub mod postprocess;
+// 
+// Planned modules for future implementation:
 
-// Re-export commonly used types
-pub use types::{
-    Word16, Word32, Flag, Result as G729Result,
-    G729Config, G729EncoderState, G729DecoderState,
-    AnalysisParams, SynthesisParams, G729Error,
-    L_FRAME, L_SUBFR, M, PIT_MIN, PIT_MAX,
-};
+// Core G.729 (full complexity) - enabled by default via g729-core feature
+#[cfg(feature = "g729-core")]
+pub mod pitch;
+#[cfg(feature = "g729-core")]
+pub mod acelp;
+#[cfg(feature = "g729-core")]
+pub mod quantization;
+#[cfg(feature = "g729-core")]
+pub mod encoder;
+#[cfg(feature = "g729-core")]
+pub mod decoder;
 
-// Re-export math operations
-pub use math::{
-    add, sub, mult, l_mult, abs_s, negate,
-    shl, shr, extract_h, extract_l, round,
-    l_mac, l_msu, l_add, l_sub, norm_s, norm_l,
-    set_zero_16, copy_16,
-};
+// G.729A (reduced complexity) - enabled by annex-a feature
+// pub mod pitch_a;    // #[cfg(feature = "annex-a")]
+// pub mod acelp_a;    // #[cfg(feature = "annex-a")]
+// pub mod encoder_a;  // #[cfg(feature = "annex-a")]
+// pub mod decoder_a;  // #[cfg(feature = "annex-a")]
 
-// Re-export DSP functions
-pub use dsp::{
-    pow2, log2, inv_sqrt,
-    autocorrelation, convolution, apply_window, compute_energy,
-}; 
+// G.729B (VAD/DTX/CNG extensions) - enabled by annex-b feature  
+// pub mod vad;        // #[cfg(feature = "annex-b")]
+// pub mod dtx;        // #[cfg(feature = "annex-b")]
+// pub mod cng;        // #[cfg(feature = "annex-b")]
+
+// G.729BA (combined A+B) - enabled when both annex-a and annex-b are active
+// pub mod encoder_ba; // #[cfg(all(feature = "annex-a", feature = "annex-b"))]
+// pub mod decoder_ba; // #[cfg(all(feature = "annex-a", feature = "annex-b"))]
+
+// Re-export main codec API based on available features
+// Re-exports will be uncommented when the modules are implemented
+// #[cfg(feature = "g729-core")]
+// pub use encoder::G729Encoder;
+
+// #[cfg(feature = "g729-core")]
+// pub use decoder::G729Decoder;
+
+// #[cfg(feature = "annex-a")]
+// pub use encoder_a::G729AEncoder;
+
+// #[cfg(feature = "annex-a")]
+// pub use decoder_a::G729ADecoder;
+
+// #[cfg(all(feature = "annex-a", feature = "annex-b"))]
+// pub use encoder_ba::G729BAEncoder;
+
+// #[cfg(all(feature = "annex-a", feature = "annex-b"))]
+// pub use decoder_ba::G729BADecoder;
+
+ 

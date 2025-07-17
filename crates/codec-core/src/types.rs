@@ -529,14 +529,38 @@ pub struct G722Parameters {
 }
 
 /// G.729 codec parameters
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct G729Parameters {
-    /// Use reduced complexity mode (Annex A)
+    /// Enable G.729 Annex A (reduced complexity - ~40% faster)
+    pub annex_a: bool,
+    /// Enable G.729 Annex B (VAD/DTX/CNG - ~50% bandwidth savings)
+    pub annex_b: bool,
+    
+    // Legacy fields for backward compatibility (deprecated)
+    /// Use reduced complexity mode (Annex A) - DEPRECATED: use annex_a instead
+    #[deprecated(since = "0.1.14", note = "use annex_a instead")]
     pub reduced_complexity: bool,
-    /// Enable Voice Activity Detection (VAD)
+    /// Enable Voice Activity Detection (VAD) - DEPRECATED: use annex_b instead  
+    #[deprecated(since = "0.1.14", note = "use annex_b instead")]
     pub vad_enabled: bool,
-    /// Enable Comfort Noise Generation (CNG)
+    /// Enable Comfort Noise Generation (CNG) - DEPRECATED: use annex_b instead
+    #[deprecated(since = "0.1.14", note = "use annex_b instead")]
     pub cng_enabled: bool,
+}
+
+impl Default for G729Parameters {
+    fn default() -> Self {
+        Self {
+            annex_a: true,  // Default to reduced complexity
+            annex_b: true,  // Default to VAD/DTX/CNG enabled (G.729BA)
+            #[allow(deprecated)]
+            reduced_complexity: true,
+            #[allow(deprecated)]
+            vad_enabled: true,
+            #[allow(deprecated)]
+            cng_enabled: true,
+        }
+    }
 }
 
 /// Opus codec parameters
