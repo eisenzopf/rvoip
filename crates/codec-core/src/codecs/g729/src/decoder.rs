@@ -266,25 +266,33 @@ impl G729Decoder {
     /// Automatic gain control for output level normalization
     fn automatic_gain_control(&self, speech: &mut [Word16]) {
         // Compute frame energy
-        let mut energy = 0i32;
+        let mut energy = 0i64; // Use i64 to prevent overflow
         for &sample in speech.iter() {
-            energy = l_add(energy, l_mult(sample, sample));
+            let sample_i64 = sample as i64;
+            energy += sample_i64 * sample_i64;
         }
 
         if energy > 0 {
-            // Target energy level (simplified)
-            let target_energy = 1000000i32; // Arbitrary target
-            let current_energy = energy / speech.len() as i32;
-
-            if current_energy > 0 {
-                let gain_factor = (target_energy / current_energy.max(1)).min(32767) as Word16;
-                let limited_gain = gain_factor.min(8192).max(1024); // Limit gain range
-
-                // Apply gain
+            // Calculate RMS energy
+            let rms_energy = ((energy / speech.len() as i64) as f64).sqrt();
+            
+            // Target RMS level (reasonable speech level)
+            let target_rms = 2000.0; // About 1/8 of full scale
+            
+            if rms_energy > 1.0 { // Avoid division by very small numbers
+                let gain_factor = (target_rms / rms_energy).min(4.0).max(0.25); // Limit gain range
+                let gain_q15 = (gain_factor * 32768.0) as Word16;
+                let limited_gain = gain_q15.max(8192).min(32767); // Ensure reasonable gain
+                
+                // Apply gain with saturation
                 for sample in speech.iter_mut() {
-                    *sample = mult(*sample, limited_gain);
+                    let gained = mult(*sample, limited_gain);
+                    *sample = gained;
                 }
             }
+        } else {
+            // If input energy is zero, leave signal as-is (don't force to zero)
+            // This preserves any small signals that might be important
         }
     }
 
