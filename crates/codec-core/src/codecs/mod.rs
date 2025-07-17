@@ -11,7 +11,7 @@ pub mod g711;
 #[cfg(feature = "g722")]
 pub mod g722;
 
-#[cfg(any(feature = "g729", feature = "g729-sim"))]
+#[cfg(any(feature = "g729", feature = "g729-sim", feature = "g729-core"))]
 pub mod g729;
 
 #[cfg(any(feature = "opus", feature = "opus-sim"))]
