@@ -87,12 +87,19 @@ impl G729Encoder {
     pub fn encode_frame(&mut self, speech: &[Word16]) -> G729Frame {
         assert_eq!(speech.len(), L_FRAME);
         
+        // Input validation and clamping to prevent overflow
+        let mut validated_speech = [0i16; L_FRAME];
+        for (i, &sample) in speech.iter().enumerate() {
+            // Clamp to reasonable range to prevent overflow in subsequent processing
+            validated_speech[i] = sample.max(-16000).min(16000);
+        }
+        
         self.frame_count += 1;
 
         // Step 1: LPC Analysis
         let mut lpc_coeffs = [0i16; M + 1];
         let mut lsp = [0i16; M];
-        self.lpc_analyzer.analyze_frame(speech, &mut lpc_coeffs, &mut lsp);
+        self.lpc_analyzer.analyze_frame(&validated_speech, &mut lpc_coeffs, &mut lsp);
 
         // Step 2: LSP Quantization  
         let mut lsp_q = [0i16; M];
@@ -105,7 +112,7 @@ impl G729Encoder {
         // Step 4: Compute weighted speech and impulse response
         let mut weighted_speech = [0i16; L_FRAME];
         let mut impulse_response = [0i16; L_SUBFR];
-        self.compute_weighted_speech(speech, &lpc_q, &mut weighted_speech);
+        self.compute_weighted_speech(&validated_speech, &lpc_q, &mut weighted_speech);
         self.compute_impulse_response(&lpc_q, &mut impulse_response);
 
         // Step 5: Open-loop pitch analysis
@@ -119,7 +126,7 @@ impl G729Encoder {
             let start_idx = subframe * L_SUBFR;
             let end_idx = start_idx + L_SUBFR;
             
-            let speech_subfr = &speech[start_idx..end_idx];
+            let speech_subfr = &validated_speech[start_idx..end_idx];
             let weighted_subfr = &weighted_speech[start_idx..end_idx];
             
             // Step 6a: Closed-loop pitch analysis
@@ -172,7 +179,7 @@ impl G729Encoder {
         }
 
         // Update old speech for next frame
-        self.old_speech.copy_from_slice(speech);
+        self.old_speech.copy_from_slice(&validated_speech);
 
         G729Frame {
             lsp_indices,

@@ -178,14 +178,30 @@ pub fn l_msu(l_var3: Word32, var1: Word16, var2: Word16) -> Word32 {
 /// 32-bit addition with saturation
 pub fn l_add(l_var1: Word32, l_var2: Word32) -> Word32 {
     let result = l_var1.saturating_add(l_var2);
-    set_overflow(if result == l_var1 + l_var2 { 0 } else { 1 });
+    
+    // Check for overflow without causing overflow
+    let overflow_occurred = if l_var2 > 0 {
+        l_var1 > Word32::MAX - l_var2
+    } else {
+        l_var1 < Word32::MIN - l_var2
+    };
+    
+    set_overflow(if overflow_occurred { 1 } else { 0 });
     result
 }
 
 /// 32-bit subtraction with saturation
 pub fn l_sub(l_var1: Word32, l_var2: Word32) -> Word32 {
     let result = l_var1.saturating_sub(l_var2);
-    set_overflow(if result == l_var1 - l_var2 { 0 } else { 1 });
+    
+    // Check for overflow without causing overflow
+    let overflow_occurred = if l_var2 < 0 {
+        l_var1 > Word32::MAX + l_var2
+    } else {
+        l_var1 < Word32::MIN + l_var2
+    };
+    
+    set_overflow(if overflow_occurred { 1 } else { 0 });
     result
 }
 
