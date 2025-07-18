@@ -1,10 +1,9 @@
-//! ITU-T G.729A (Annex A) Compliance Tests
+//! ITU-T G.729 Annex A Compliance Tests
 //!
-//! This module tests the G.729A reduced complexity implementation against ITU test vectors.
-//! G.729A provides approximately 40% complexity reduction while maintaining quality.
+//! Tests for G.729 Annex A (reduced complexity variant) using official ITU test vectors
 
 use super::itu_test_utils::*;
-use crate::codecs::g729::src::encoder::G729Encoder;
+use crate::codecs::g729::src::encoder::{G729Encoder, G729Variant};
 use crate::codecs::g729::src::decoder::G729Decoder;
 
 /// Test G.729A encoder compliance with reduced complexity requirements
@@ -20,11 +19,12 @@ fn test_g729a_encoder_compliance() {
     // G.729A test vectors from the g729AnnexA directory
     let test_cases = [
         ("algthm.in", "algthm.bit", "Algorithm conditional parts"),
-        ("fixed.in", "fixed.bit", "Fixed codebook search - reduced complexity"),
+        ("fixed.in", "fixed.bit", "Fixed codebook - reduced complexity"),
         ("lsp.in", "lsp.bit", "LSP quantization"),
-        ("pitch.in", "pitch.bit", "Pitch search - simplified algorithm"),
+        ("pitch.in", "pitch.bit", "Pitch search - simplified"),
         ("speech.in", "speech.bit", "Speech processing"),
         ("tame.in", "tame.bit", "Taming procedure"),
+        ("test.in", "test.bit", "G.729A specific test sequence"), // Added G.729A specific test
     ];
     
     let mut total_tests = 0;

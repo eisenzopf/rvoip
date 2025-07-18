@@ -86,18 +86,33 @@ pub fn parse_16bit_samples(data: &[u8]) -> io::Result<Vec<i16>> {
 
 /// Get test data path for specific G.729 variant
 pub fn get_variant_test_data_path(variant: G729Variant, filename: &str) -> io::Result<std::path::PathBuf> {
-    let variant_dir = match variant {
-        G729Variant::Core => "g729",
-        G729Variant::AnnexA => "g729AnnexA", 
-        G729Variant::AnnexB => "g729AnnexB",
-        G729Variant::AnnexBA => "g729AnnexB", // AnnexBA test vectors are in g729AnnexB/c_codeBA
+    let (variant_dir, actual_filename) = match variant {
+        G729Variant::Core => ("g729", filename.to_string()),
+        G729Variant::AnnexA => ("g729AnnexA", filename.to_string()), 
+        G729Variant::AnnexB => ("g729AnnexB", filename.to_string()),
+        G729Variant::AnnexBA => {
+            // AnnexBA uses same directory as AnnexB but with 'a' suffix in filenames
+            let annexba_filename = if filename.starts_with("tstseq") {
+                // Transform tstseq1.bit -> tstseq1a.bit, tstseq1.out -> tstseq1a.out
+                if let Some(dot_pos) = filename.rfind('.') {
+                    let (base, ext) = filename.split_at(dot_pos);
+                    format!("{}a{}", base, ext)
+                } else {
+                    format!("{}a", filename)
+                }
+            } else {
+                // For non-tstseq files, try as-is first, then with 'a' suffix
+                filename.to_string()
+            };
+            ("g729AnnexB", annexba_filename)
+        },
     };
     
     let search_paths = [
-        format!("src/codecs/g729/itu_tests/test_data/{}/{}", variant_dir, filename),
-        format!("T-REC-G.729-201206/Software/G729_Release3/{}/test_vectors/{}", variant_dir, filename),
-        format!("T-REC-G.729-201206/Software/G729_Release3/{}/c_codeBA/test_vectors/{}", variant_dir, filename), // AnnexBA specific
-        format!("{}/{}", variant_dir, filename),
+        format!("src/codecs/g729/itu_tests/test_data/{}/{}", variant_dir, actual_filename),
+        format!("T-REC-G.729-201206/Software/G729_Release3/{}/test_vectors/{}", variant_dir, actual_filename),
+        format!("T-REC-G.729-201206/Software/G729_Release3/{}/c_codeBA/test_vectors/{}", variant_dir, actual_filename), // For c_codeBA specific files
+        format!("{}/{}", variant_dir, actual_filename),
     ];
     
     for path_str in &search_paths {
@@ -107,9 +122,25 @@ pub fn get_variant_test_data_path(variant: G729Variant, filename: &str) -> io::R
         }
     }
     
+    // For AnnexBA, if 'a' suffix version not found, try original filename as fallback
+    if matches!(variant, G729Variant::AnnexBA) && actual_filename != filename {
+        let fallback_paths = [
+            format!("src/codecs/g729/itu_tests/test_data/{}/{}", variant_dir, filename),
+            format!("T-REC-G.729-201206/Software/G729_Release3/{}/test_vectors/{}", variant_dir, filename),
+            format!("{}/{}", variant_dir, filename),
+        ];
+        
+        for path_str in &fallback_paths {
+            let path = std::path::Path::new(path_str);
+            if path.exists() {
+                return Ok(path.to_path_buf());
+            }
+        }
+    }
+    
     Err(io::Error::new(
         io::ErrorKind::NotFound,
-        format!("Test data file not found for {:?}: {}", variant, filename)
+        format!("Test data file not found for {:?}: {} (tried: {})", variant, filename, actual_filename)
     ))
 }
 
