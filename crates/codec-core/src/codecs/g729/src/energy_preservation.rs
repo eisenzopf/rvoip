@@ -206,11 +206,19 @@ impl EnergyPreservationManager {
     /// ```
     fn check_and_handle_overflow(&mut self, speech: &mut [Word16], excitation: &[Word16]) {
         // Check for potential overflow in speech signal
-        let max_abs = speech.iter().map(|&x| x.abs()).max().unwrap_or(0);
+        // Use safe absolute value to prevent overflow when x == i16::MIN
+        let max_abs = speech.iter().map(|&x| {
+            if x == i16::MIN {
+                32767 // Max safe value for i16
+            } else {
+                x.abs()
+            }
+        }).max().unwrap_or(0);
         
-        // FIXED: Increase overflow threshold and use gentler scaling to preserve energy
-        // Original threshold of 16000 was too conservative, causing energy loss for high-level signals
-        if max_abs > 28000 {  // Much higher threshold - closer to saturation point (32767)
+        // ITU-compliant overflow protection: Only trigger on actual arithmetic overflow risk
+        // G.729 is designed to handle full-scale signals (±32767) without degradation
+        // Only apply protection when accumulation could cause 32-bit overflow
+        if max_abs >= 32767 && self.global_scale > 10 {  // Only if signal is saturated AND scale accumulated
             // Apply gentler scaling to preserve more energy
             self.global_scale = add(self.global_scale, 1);
             

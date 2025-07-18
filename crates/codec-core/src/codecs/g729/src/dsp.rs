@@ -59,8 +59,9 @@ pub fn pow2(exponent: Word16, fraction: Word16) -> Word32 {
     let a = extract_l(l_x) & 0x7fff;
     
     // Table lookup with linear interpolation
-    let mut l_result = l_deposit_h(TABPOW[i]);
-    let tmp = sub(TABPOW[i], TABPOW[i + 1]);
+    let i_safe = i.min(31); // Ensure we don't exceed array bounds
+    let mut l_result = l_deposit_h(TABPOW[i_safe]);
+    let tmp = sub(TABPOW[i_safe], TABPOW[i_safe + 1]);
     l_result = l_msu(l_result, tmp, a);
     
     // Denormalize by shifting right (30-exponent) with rounding
