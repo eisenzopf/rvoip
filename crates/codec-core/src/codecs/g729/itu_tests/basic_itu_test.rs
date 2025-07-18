@@ -224,7 +224,10 @@ fn test_basic_roundtrip() {
         if *test_name == "Silence" {
             // Silence should decode to very low levels
             let max_abs = output_signal.iter().map(|&x| x.abs()).max().unwrap_or(0);
-            assert!(max_abs < 1000, "Silence should decode to low levels");
+            let energy: i64 = output_signal.iter().map(|&x| (x as i64) * (x as i64)).sum();
+            println!("    Silence debug: max_abs={}, energy={}, first_10={:?}", 
+                    max_abs, energy, &output_signal[..10.min(output_signal.len())]);
+            assert!(max_abs < 1000, "Silence should decode to low levels, got max_abs={}", max_abs);
         }
     }
     

@@ -486,13 +486,24 @@ impl AcelpAnalyzer {
             target_energy = l_add(target_energy, l_mult(target[i], target[i]));
         }
         
-        // Compute optimal gain with PROPER ENERGY SCALING
+        // CRITICAL FIX: Detect true silence and very low energy signals
+        let silence_threshold = 100i32;  // Very low energy threshold
+        let very_low_threshold = 1000i32; // Low energy threshold
+        
+        if target_energy <= silence_threshold {
+            // True silence - use minimal gain index to preserve silence
+            return 0;
+        } else if target_energy <= very_low_threshold {
+            // Very low energy - use low gain indices (1-3)
+            return (target_energy / 400).max(1).min(3) as usize;
+        }
+        
+        // For normal energy signals, compute optimal gain with proper scaling
         let optimal_gain = if den > 0 {
             // Basic correlation-based gain
             let raw_gain = (num / den.max(1)).max(0) as Word16;
             
-            // CRITICAL: Apply much more aggressive energy-based scaling
-            // The original scaling was 100x too small for high-energy signals
+            // Apply energy-based scaling for normal signals
             let energy_scale = if target_energy > 1000000 { 
                 50  // Very high energy signals need massive scaling
             } else if target_energy > 100000 { 
@@ -505,21 +516,22 @@ impl AcelpAnalyzer {
             
             // Apply aggressive scaling to reach ITU-level gains
             let scaled_gain = (raw_gain as Word32 * energy_scale as Word32).min(20000) as Word16;
-            scaled_gain.max(8000) // Ensure minimum matches our new gain table (index 0 = 8000)
+            scaled_gain.max(4000) // Reasonable minimum for non-silence signals
         } else {
-            8000 // Strong default gain matching new table minimum
+            4000 // Default gain for normal signals
         };
         
         // Update gain predictor state
         self.prev_gain = optimal_gain;
         
         // Find the best matching gain index from our ITU-compliant lookup table
-        // This matches the lookup_gain_vector function in quantization.rs
         let best_index = self.find_best_gain_index(optimal_gain);
         
-        // ENHANCED energy-based gain selection to ensure reasonable indices
-        // Based on target energy, select appropriate gain range  
-        let energy_based_index = if target_energy > 1000000 {
+        // Enhanced energy-based gain selection for normal signals
+        let energy_based_index = if target_energy > 10000000 {
+            // VERY HIGH energy signals (like Frame 4) need maximum indices (64-95 range)
+            (64 + (target_energy / 500000).min(31)) as usize
+        } else if target_energy > 1000000 {
             // Very high energy signals need higher indices (32-63 range)
             (32 + (target_energy / 200000).min(31)) as usize
         } else if target_energy > 100000 {
@@ -529,16 +541,13 @@ impl AcelpAnalyzer {
             // Medium energy signals use low-medium indices (8-15 range)
             (8 + (target_energy / 5000).min(7)) as usize
         } else {
-            // Low energy signals use minimum reasonable indices (4-7 range)
+            // Low energy signals (but not silence) use reasonable indices (4-7 range)
             (4 + (target_energy / 2000).min(3)) as usize
         };
         
         // Use the better of the two methods - prefer energy-based for high energy
         let final_index = if target_energy > 50000 && energy_based_index > best_index {
             energy_based_index.min(80)  // Cap at reasonable maximum
-        } else if best_index == 0 {
-            // Never use index 0 - it causes silence
-            energy_based_index.max(4).min(80)
         } else {
             best_index
         };

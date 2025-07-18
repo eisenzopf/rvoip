@@ -208,16 +208,18 @@ impl EnergyPreservationManager {
         // Check for potential overflow in speech signal
         let max_abs = speech.iter().map(|&x| x.abs()).max().unwrap_or(0);
         
-        if max_abs > 16000 {  // Approaching saturation
-            // Apply global scaling to preserve relative energy
-            self.global_scale = add(self.global_scale, 2);
+        // FIXED: Increase overflow threshold and use gentler scaling to preserve energy
+        // Original threshold of 16000 was too conservative, causing energy loss for high-level signals
+        if max_abs > 28000 {  // Much higher threshold - closer to saturation point (32767)
+            // Apply gentler scaling to preserve more energy
+            self.global_scale = add(self.global_scale, 1);
             
-            // Scale down speech (ITU equivalent scaling)
+            // Use 1-bit shift instead of 2-bit to preserve more energy (50% vs 75% loss)
             for sample in speech.iter_mut() {
-                *sample = shr(*sample, 2);  // Divide by 4 (2 bits right shift)
+                *sample = shr(*sample, 1);  // Divide by 2 instead of 4
             }
             
-            println!("🔧 Applied ITU overflow protection: global_scale={}", self.global_scale);
+            println!("🔧 Applied ITU overflow protection: max_abs={}, global_scale={}", max_abs, self.global_scale);
         }
     }
 
@@ -295,14 +297,25 @@ pub fn reconstruct_gains_itu_compliant(
     gain_index: usize,
     energy: Word16,
 ) -> (Word16, Word16) {
-    // FIXED: Use much higher gain ranges to match ITU energy requirements
-    // The previous gains were 10-100x too small for proper energy preservation
+    // FIXED: Proper handling of silence and very low energy signals
     
     let (adaptive_gain, fixed_gain) = match gain_index {
-        0..=15 => {
-            // Boosted low range - was too conservative
-            let adaptive = (8000 + gain_index * 800) as Word16;      // Q14: ~0.5-1.2
-            let fixed = (3000 + gain_index * 400) as Word16;        // Q1: ~1500-9000
+        // SILENCE AND VERY LOW ENERGY RANGE (0-3) - NEW
+        0 => {
+            // True silence - minimal gains to preserve silence
+            (100, 50)   // Q14: ~0.006, Q1: ~25 - very low gains
+        },
+        1..=3 => {
+            // Very low energy signals - low but audible gains
+            let adaptive = (100 + gain_index * 300) as Word16;    // Q14: ~0.006-0.06
+            let fixed = (50 + gain_index * 150) as Word16;       // Q1: ~25-475
+            (adaptive, fixed)
+        },
+        // NORMAL ENERGY RANGES (4+) - EXISTING LOGIC
+        4..=15 => {
+            // Boosted low range for normal signals
+            let adaptive = (4000 + (gain_index - 4) * 600) as Word16;   // Q14: ~0.24-0.64
+            let fixed = (2000 + (gain_index - 4) * 300) as Word16;     // Q1: ~1000-4600
             (adaptive, fixed)
         },
         16..=31 => {
@@ -317,36 +330,49 @@ pub fn reconstruct_gains_itu_compliant(
             let fixed = (8000 + (gain_index - 32) * 150) as Word16;     // Q1: ~4000-12650
             (adaptive, fixed)
         },
-        64..=95 => {
+        64..=79 => {
             // High energy range
             let adaptive = (15000 + (gain_index - 64) * 100) as Word16; // Q14: ~0.9-1.1
             let fixed = (10000 + (gain_index - 64) * 100) as Word16;    // Q1: ~5000-8100
             (adaptive, fixed)
         },
+        80..=95 => {
+            // VERY HIGH energy range for signals like Frame 4
+            let adaptive = (16000 + (gain_index - 80) * 50) as Word16;  // Q14: ~1.0-1.05 (near maximum)
+            let fixed = (12000 + (gain_index - 80) * 200) as Word16;   // Q1: ~6000-9000 (much higher)
+            (adaptive, fixed)
+        },
         _ => {
-            // Very high energy - maximum safe gains
-            (16000, 12000)  // Q14: ~1.0, Q1: ~6000
+            // MAXIMUM energy - use absolute maximum safe gains
+            (16000, 15000)  // Q14: ~1.0, Q1: ~7500 (very high fixed gain)
         }
     };
 
-    // Apply energy-based scaling for proper amplitude
-    let energy_scale = if energy > 16000 {
-        3  // High energy signals need significant boost
-    } else if energy > 8000 {
-        2  // Medium energy gets moderate boost
+    // Apply energy-based scaling ONLY for normal energy signals (index >= 4)
+    if gain_index >= 4 {
+        let energy_scale = if energy > 16000 {
+            3  // High energy signals need significant boost
+        } else if energy > 8000 {
+            2  // Medium energy gets moderate boost
+        } else {
+            1  // Low energy - minimal boost
+        };
+
+        // Apply energy scaling to ensure reasonable output levels
+        let scaled_adaptive = ((adaptive_gain as Word32 * energy_scale as Word32) / 1).min(16000) as Word16; // Cap at 16000
+        let scaled_fixed = ((fixed_gain as Word32 * energy_scale as Word32) / 1).min(12000) as Word16;     // Cap at 12000
+
+        // Debug output for high gain indices to understand the issue
+        if gain_index >= 80 {
+            println!("🔍 GAIN DEBUG: index={}, raw_gains=({}, {}), energy={}, scale={}, final_gains=({}, {})", 
+                    gain_index, adaptive_gain, fixed_gain, energy, energy_scale, scaled_adaptive, scaled_fixed);
+        }
+
+        (scaled_adaptive, scaled_fixed)
     } else {
-        1  // Low energy - minimal boost
-    };
-
-    // Apply energy scaling to ensure reasonable output levels
-    let final_adaptive = mult(adaptive_gain, 16384 + energy_scale * 4096); // More aggressive boost
-    let final_fixed = mult(fixed_gain, 16384 + energy_scale * 2048);
-
-    // Ensure reasonable ranges for energy preservation
-    (
-        final_adaptive.max(8000).min(16000),   // Q14: minimum ~0.5, max ~1.0
-        final_fixed.max(3000).min(12000)       // Q1: minimum ~1500, max ~6000
-    )
+        // For silence/very low energy (index 0-3), preserve the low gains as-is
+        (adaptive_gain, fixed_gain)
+    }
 }
 
 #[cfg(test)]

@@ -297,6 +297,22 @@ fn test_energy_preservation_across_multiple_frames() {
         total_output_energy += output_energy;
         
         let ratio = output_energy / input_energy;
+        
+        // Debug output for Frame 4 to understand the energy degradation
+        if frame_num == 4 {
+            println!("🔍 FRAME 4 DEBUG:");
+            println!("  Input amplitude: {} -> signal range: ±{}", 
+                    2000.0 + 1000.0 * frame_num as f32, 
+                    test_signal.iter().map(|&x| x.abs()).max().unwrap_or(0));
+            println!("  Input energy: {:.1}", input_energy);
+            println!("  Subframe 0: gain_index={}, positions={:?}, signs={:?}", 
+                    frame.subframes[0].gain_index, frame.subframes[0].positions, frame.subframes[0].signs);
+            println!("  Subframe 1: gain_index={}, positions={:?}, signs={:?}", 
+                    frame.subframes[1].gain_index, frame.subframes[1].positions, frame.subframes[1].signs);
+            println!("  Output energy: {:.1}", output_energy);
+            println!("  Energy ratio: {:.3}", ratio);
+        }
+        
         println!("Frame {}: input={:.1}, output={:.1}, ratio={:.3}", 
                 frame_num, input_energy, output_energy, ratio);
         
