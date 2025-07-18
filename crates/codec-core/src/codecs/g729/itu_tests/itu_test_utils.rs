@@ -90,11 +90,13 @@ pub fn get_variant_test_data_path(variant: G729Variant, filename: &str) -> io::R
         G729Variant::Core => "g729",
         G729Variant::AnnexA => "g729AnnexA", 
         G729Variant::AnnexB => "g729AnnexB",
+        G729Variant::AnnexBA => "g729AnnexB", // AnnexBA test vectors are in g729AnnexB/c_codeBA
     };
     
     let search_paths = [
         format!("src/codecs/g729/itu_tests/test_data/{}/{}", variant_dir, filename),
         format!("T-REC-G.729-201206/Software/G729_Release3/{}/test_vectors/{}", variant_dir, filename),
+        format!("T-REC-G.729-201206/Software/G729_Release3/{}/c_codeBA/test_vectors/{}", variant_dir, filename), // AnnexBA specific
         format!("{}/{}", variant_dir, filename),
     ];
     
