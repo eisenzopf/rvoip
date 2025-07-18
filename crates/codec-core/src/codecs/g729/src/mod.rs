@@ -28,6 +28,8 @@ pub mod quantization;
 pub mod encoder;
 #[cfg(feature = "g729-core")]
 pub mod decoder;
+#[cfg(feature = "g729-core")]
+pub mod energy_preservation;
 
 // G.729A (reduced complexity) - enabled by annex-a feature
 // pub mod pitch_a;    // #[cfg(feature = "annex-a")]

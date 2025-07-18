@@ -15,7 +15,8 @@ use super::lpc::LpcAnalyzer;
 use super::pitch::PitchAnalyzer;
 use super::acelp::AcelpAnalyzer;
 use super::quantization::{LspQuantizer, GainQuantizer};
-use super::encoder::{G729Frame, G729SubframeParams};
+use super::encoder::{G729Frame, G729SubframeParams, G729Variant};
+use super::energy_preservation::{EnergyPreservationManager, reconstruct_gains_itu_compliant};
 
 /// G.729 frame size in samples (10ms at 8kHz)
 const L_FRAME: usize = 80;
@@ -39,6 +40,10 @@ pub struct G729Decoder {
     lsp_quantizer: LspQuantizer,
     /// Gain quantizer/dequantizer
     gain_quantizer: GainQuantizer,
+    /// Current G.729 variant
+    variant: G729Variant,
+    /// ITU-compliant energy preservation manager
+    energy_manager: EnergyPreservationManager,
     /// Synthesis filter memory
     syn_mem: [Word16; M],
     /// Excitation memory for pitch synthesis
@@ -52,20 +57,32 @@ pub struct G729Decoder {
 }
 
 impl G729Decoder {
-    /// Create a new G.729 decoder
+    /// Create a new G.729 decoder with Core variant
     pub fn new() -> Self {
+        Self::new_with_variant(G729Variant::Core)
+    }
+
+    /// Create a new G.729 decoder with specified variant
+    pub fn new_with_variant(variant: G729Variant) -> Self {
         Self {
             lpc_analyzer: LpcAnalyzer::new(),
             pitch_analyzer: PitchAnalyzer::new(),
             acelp_analyzer: AcelpAnalyzer::new(),
             lsp_quantizer: LspQuantizer::new(),
             gain_quantizer: GainQuantizer::new(),
+            variant,
+            energy_manager: EnergyPreservationManager::new(),
             syn_mem: [0; M],
             exc_mem: [0; 154],
             prev_subframe: [0; L_SUBFR],
             frame_count: 0,
             bad_frame: false,
         }
+    }
+
+    /// Get the current variant
+    pub fn variant(&self) -> G729Variant {
+        self.variant
     }
 
     /// Reset decoder state
@@ -75,6 +92,7 @@ impl G729Decoder {
         self.acelp_analyzer.reset();
         self.lsp_quantizer.reset();
         self.gain_quantizer.reset();
+        self.energy_manager.reset();
         self.syn_mem = [0; M];
         self.exc_mem = [0; 154];
         self.prev_subframe = [0; L_SUBFR];
@@ -116,29 +134,30 @@ impl G729Decoder {
             let mut fixed_exc = [0i16; L_SUBFR];
             self.decode_fixed_codebook(subframe, &mut fixed_exc);
 
-            // Step 3c: Dequantize gains
+            // Step 3c: ITU-Compliant Gain Dequantization
             let energy = self.estimate_subframe_energy(&adaptive_exc, &fixed_exc);
-            let (adaptive_gain, fixed_gain) = self.gain_quantizer.dequantize_gains(
+            let (adaptive_gain, fixed_gain) = reconstruct_gains_itu_compliant(
                 subframe.gain_index, energy
             );
-            
-            // CRITICAL FIX: Ensure minimum reasonable gains to prevent silence
-            let min_adaptive_gain = 1000; // Minimum reasonable adaptive gain
-            let min_fixed_gain = 1000;    // Minimum reasonable fixed gain
-            let final_adaptive_gain = adaptive_gain.max(min_adaptive_gain);
-            let final_fixed_gain = fixed_gain.max(min_fixed_gain);
 
-            // Step 3d: Combine excitations
+            // Step 3d: ITU-Compliant Excitation Reconstruction  
             let mut combined_exc = [0i16; L_SUBFR];
-            for i in 0..L_SUBFR {
-                let adaptive_contrib = mult(adaptive_exc[i], final_adaptive_gain);
-                let fixed_contrib = mult(fixed_exc[i], final_fixed_gain);
-                combined_exc[i] = add(adaptive_contrib, fixed_contrib);
-            }
+            self.energy_manager.reconstruct_excitation_itu_compliant(
+                &adaptive_exc,
+                &fixed_exc,
+                adaptive_gain,
+                fixed_gain,
+                &mut combined_exc,
+            );
 
-            // Step 3e: Synthesis filtering
+            // Step 3e: ITU-Compliant Synthesis Filtering
             let mut subframe_speech = [0i16; L_SUBFR];
-            self.synthesis_filter(&lpc_coeffs, &combined_exc, &mut subframe_speech);
+            self.energy_manager.synthesis_filter_itu_compliant(
+                &lpc_coeffs, 
+                &combined_exc, 
+                &mut subframe_speech, 
+                &mut self.syn_mem
+            );
 
             // Step 3f: Update excitation memory and store results
             self.update_excitation_memory(&combined_exc);
@@ -161,11 +180,10 @@ impl G729Decoder {
 
     /// Decode fixed codebook (ACELP synthesis)  
     fn decode_fixed_codebook(&self, subframe: &G729SubframeParams, fixed_exc: &mut [Word16]) {
-        // Reconstruct innovation sequence from positions, signs, and gain
-        self.acelp_analyzer.build_innovation(
+        // Use ITU-compliant ACELP innovation reconstruction
+        self.energy_manager.build_acelp_innovation_itu_compliant(
             &subframe.positions,
             &subframe.signs,
-            subframe.gain_index,
             fixed_exc,
         );
     }
@@ -185,50 +203,8 @@ impl G729Decoder {
         normalized_energy.max(1).min(32767) as Word16
     }
 
-    /// Synthesis filter: reconstruct speech from excitation
-    /// 
-    /// Implements the IIR synthesis filter: H(z) = 1 / A(z)
-    /// y[n] = x[n] - sum(a[k] * y[n-k])
-    /// 
-    /// Based on ITU-T G.729 reference DEC_LD8K.C and SYN_FILT.C
-    fn synthesis_filter(&mut self, lpc: &[Word16], excitation: &[Word16], speech: &mut [Word16]) {
-        for n in 0..L_SUBFR {
-            // Use 32-bit intermediate for energy preservation
-            let mut sum = l_mult(excitation[n], 32767); // Full scale gain (1.0 in Q15)
-
-            // Apply feedback from previous speech samples using proper indexing
-            for k in 1..=M {
-                if k < lpc.len() {
-                    if k <= n {
-                        // Use current subframe samples
-                        sum = l_sub(sum, l_mult(lpc[k], speech[n - k]));
-                    } else {
-                        // Use synthesis memory with correct indexing
-                        let mem_idx = n + M - k;
-                        if mem_idx < self.syn_mem.len() {
-                            sum = l_sub(sum, l_mult(lpc[k], self.syn_mem[mem_idx]));
-                        }
-                    }
-                }
-            }
-
-            // Apply saturation and convert to Word16 with energy preservation
-            speech[n] = round_word32(sum);
-        }
-
-        // Update synthesis memory correctly 
-        // Since M (10) < L_SUBFR (40), we store the last M samples from speech
-        let speech_len = speech.len().min(L_SUBFR);
-        for i in 0..M {
-            if speech_len > i {
-                // Store last M samples (most recent)
-                let speech_idx = speech_len - M + i;
-                if speech_idx < speech_len {
-                    self.syn_mem[i] = speech[speech_idx];
-                }
-            }
-        }
-    }
+    // Note: synthesis_filter is now replaced by energy_manager.synthesis_filter_itu_compliant()
+    // which implements the exact ITU reference energy preservation mechanisms
 
     /// Update excitation memory for pitch prediction
     fn update_excitation_memory(&mut self, excitation: &[Word16]) {
@@ -437,6 +413,11 @@ impl G729Decoder {
             },
         }
     }
+
+    /// Get energy preservation status for debugging
+    pub fn get_energy_status(&self) -> super::energy_preservation::EnergyStatus {
+        self.energy_manager.get_energy_status()
+    }
 }
 
 /// Decoder statistics
@@ -504,16 +485,17 @@ mod tests {
     }
 
     #[test]
-    fn test_synthesis_filter() {
+    fn test_itu_synthesis_filter() {
         let mut decoder = G729Decoder::new();
         let lpc = vec![4096i16; M + 1]; // Simple LPC coefficients
         let excitation = vec![1000i16; L_SUBFR];
         let mut speech = vec![0i16; L_SUBFR];
+        let mut syn_mem = [0i16; M];
 
-        decoder.synthesis_filter(&lpc, &excitation, &mut speech);
+        decoder.energy_manager.synthesis_filter_itu_compliant(&lpc, &excitation, &mut speech, &mut syn_mem);
 
-        // Output should be non-zero
-        assert!(speech.iter().any(|&x| x != 0));
+        // Output should be non-zero with proper energy
+        assert!(speech.iter().any(|&x| x.abs() > 100));
     }
 
     #[test]

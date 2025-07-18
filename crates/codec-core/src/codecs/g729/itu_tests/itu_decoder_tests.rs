@@ -471,7 +471,7 @@ fn test_decoder_postfilter() {
     println!("🧪 G.729 Decoder Postfilter Test");
     
     // Use a clean speech test vector
-    let bitstream = match parse_g729_bitstream("speech.bit") {
+    let bitstream: Vec<u8> = match parse_g729_bitstream("speech.bit") {
         Ok(data) => data.into_iter().take(50).collect(), // First 5 frames
         Err(e) => {
             println!("Skipping test - could not load speech.bit: {}", e);

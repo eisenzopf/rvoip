@@ -407,13 +407,13 @@ fn generate_sine_wave_signal(frequency: f32, sample_rate: f32, length: usize) ->
 /// Generate speech-like test signal with varying characteristics
 fn generate_speech_like_signal(length: usize) -> Vec<i16> {
     let mut signal = Vec::with_capacity(length);
-    let mut phase = 0.0;
+    let mut phase: f32 = 0.0;
     
     for i in 0..length {
         // Simulate speech-like formant structure
-        let f1 = 700.0; // First formant
-        let f2 = 1220.0; // Second formant
-        let f3 = 2600.0; // Third formant
+        let f1: f32 = 700.0; // First formant
+        let f2: f32 = 1220.0; // Second formant
+        let f3: f32 = 2600.0; // Third formant
         
         let sample = (
             2000.0 * (phase).sin() +

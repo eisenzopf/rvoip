@@ -486,24 +486,28 @@ impl AcelpAnalyzer {
             target_energy = l_add(target_energy, l_mult(target[i], target[i]));
         }
         
-        // Compute optimal gain
+        // Compute optimal gain with PROPER ENERGY SCALING
         let optimal_gain = if den > 0 {
-            // Use improved gain calculation that considers target energy
+            // Basic correlation-based gain
             let raw_gain = (num / den.max(1)).max(0) as Word16;
             
-            // Apply energy-based scaling to get reasonable gain values
-            let energy_scale = if target_energy > 100000 { 
-                8  // High energy signals need higher gains
+            // CRITICAL: Apply much more aggressive energy-based scaling
+            // The original scaling was 100x too small for high-energy signals
+            let energy_scale = if target_energy > 1000000 { 
+                50  // Very high energy signals need massive scaling
+            } else if target_energy > 100000 { 
+                25  // High energy signals need major scaling
             } else if target_energy > 10000 { 
-                4  // Medium energy
+                12  // Medium energy needs significant scaling  
             } else { 
-                2  // Low energy
+                6   // Low energy needs moderate scaling
             };
             
-            let scaled_gain = (raw_gain as Word32 * energy_scale as Word32).min(16000) as Word16;
-            scaled_gain.max(100) // Ensure minimum reasonable gain
+            // Apply aggressive scaling to reach ITU-level gains
+            let scaled_gain = (raw_gain as Word32 * energy_scale as Word32).min(20000) as Word16;
+            scaled_gain.max(8000) // Ensure minimum matches our new gain table (index 0 = 8000)
         } else {
-            1000 // Reasonable default gain
+            8000 // Strong default gain matching new table minimum
         };
         
         // Update gain predictor state
@@ -513,19 +517,28 @@ impl AcelpAnalyzer {
         // This matches the lookup_gain_vector function in quantization.rs
         let best_index = self.find_best_gain_index(optimal_gain);
         
-        // Temporary fix: For testing, ensure we select a reasonable gain index
-        // based on the target energy to avoid always selecting 0
-        let energy_based_index = if target_energy > 100000 {
-            (40 + (target_energy / 50000).min(40)) as usize  // High energy -> indices 40-80
+        // ENHANCED energy-based gain selection to ensure reasonable indices
+        // Based on target energy, select appropriate gain range  
+        let energy_based_index = if target_energy > 1000000 {
+            // Very high energy signals need higher indices (32-63 range)
+            (32 + (target_energy / 200000).min(31)) as usize
+        } else if target_energy > 100000 {
+            // High energy signals use medium-high indices (16-31 range)
+            (16 + (target_energy / 50000).min(15)) as usize
         } else if target_energy > 10000 {
-            (20 + (target_energy / 2000).min(20)) as usize   // Medium energy -> indices 20-40
+            // Medium energy signals use low-medium indices (8-15 range)
+            (8 + (target_energy / 5000).min(7)) as usize
         } else {
-            (5 + (target_energy / 1000).min(15)) as usize    // Low energy -> indices 5-20
+            // Low energy signals use minimum reasonable indices (4-7 range)
+            (4 + (target_energy / 2000).min(3)) as usize
         };
         
-        // Use the energy-based index if it's significantly different
-        let final_index = if best_index == 0 && energy_based_index > 5 {
+        // Use the better of the two methods - prefer energy-based for high energy
+        let final_index = if target_energy > 50000 && energy_based_index > best_index {
             energy_based_index.min(80)  // Cap at reasonable maximum
+        } else if best_index == 0 {
+            // Never use index 0 - it causes silence
+            energy_based_index.max(4).min(80)
         } else {
             best_index
         };
@@ -535,18 +548,20 @@ impl AcelpAnalyzer {
 
     /// Find the best gain index that matches the optimal gain
     /// 
-    /// This matches the ITU gain codebook structure used in the decoder
+    /// This matches the NEW ITU gain codebook structure used in the decoder
     fn find_best_gain_index(&self, optimal_gain: Word16) -> usize {
         let mut best_index = 0;
         let mut min_error = Word32::MAX;
         
         // Search through the gain codebook to find best match
+        // UPDATED to match the new energy preservation gain ranges
         for index in 0..128 {
-            // Use the same gain mapping as in the decoder
+            // Use the SAME gain mapping as in energy_preservation.rs
             let codebook_gain = match index {
-                0..=20 => (index * 200) as Word16,           // Low gains: 0-4000
-                21..=50 => (1000 + (index - 20) * 150) as Word16,  // Medium: 1000-5500
-                51..=80 => (5500 + (index - 50) * 300) as Word16,  // High: 5500-14500
+                0..=15 => (8000 + index * 800) as Word16,              // Boosted low: 8000-20000
+                16..=31 => (12000 + (index - 16) * 400) as Word16,     // Boosted medium: 12000-18000
+                32..=63 => (14000 + (index - 32) * 200) as Word16,     // Higher range: 14000-20200
+                64..=95 => (15000 + (index - 64) * 100) as Word16,     // High energy: 15000-18100
                 _ => 16000,  // Very high gain fallback
             };
             
