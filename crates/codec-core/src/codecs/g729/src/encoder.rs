@@ -26,6 +26,8 @@ pub enum G729Variant {
     AnnexA,
     /// G.729 Annex B (VAD/DTX/CNG)
     AnnexB,
+    /// G.729 Annex BA (reduced complexity + VAD/DTX/CNG)
+    AnnexBA,
 }
 
 /// G.729 frame size in samples (10ms at 8kHz)
