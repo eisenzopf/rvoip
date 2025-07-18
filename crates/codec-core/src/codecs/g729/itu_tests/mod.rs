@@ -16,15 +16,13 @@ pub mod gain_debug_test;
 pub mod debug_gain_computation_test;
 
 // G.729 Annex A (reduced complexity) compliance tests
-// TODO: Fix import issues
-// pub mod itu_annex_a_tests;
+pub mod itu_annex_a_tests;
 
 // G.729 Annex B (VAD/DTX/CNG) compliance tests  
-// TODO: Fix import issues and implement missing features
-// pub mod itu_annex_b_tests;
+pub mod itu_annex_b_tests;
 
 // Comprehensive ITU integration tests (encoder, decoder, variants)
-// TODO: Fix import issues  
+// TODO: Fix remaining import issues  
 // pub mod itu_encoder_tests;
 // pub mod itu_decoder_tests;
 // pub mod itu_integration_tests; 
