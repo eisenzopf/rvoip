@@ -17,6 +17,7 @@ use super::acelp::AcelpAnalyzer;
 use super::quantization::{LspQuantizer, GainQuantizer};
 use super::encoder::{G729Frame, G729SubframeParams, G729Variant};
 use super::energy_preservation::{EnergyPreservationManager, reconstruct_gains_itu_compliant};
+use super::postfilter::SynthesisPostfilter;
 
 /// G.729 frame size in samples (10ms at 8kHz)
 const L_FRAME: usize = 80;
@@ -44,6 +45,8 @@ pub struct G729Decoder {
     variant: G729Variant,
     /// ITU-compliant energy preservation manager
     energy_manager: EnergyPreservationManager,
+    /// ITU-compliant synthesis postfilter
+    postfilter: SynthesisPostfilter,
     /// Synthesis filter memory
     syn_mem: [Word16; M],
     /// Excitation memory for pitch synthesis
@@ -69,9 +72,10 @@ impl G729Decoder {
             pitch_analyzer: PitchAnalyzer::new(),
             acelp_analyzer: AcelpAnalyzer::new(),
             lsp_quantizer: LspQuantizer::new(),
-            gain_quantizer: GainQuantizer::new(),
+            gain_quantizer: GainQuantizer::new_with_variant(variant),
             variant,
             energy_manager: EnergyPreservationManager::new(),
+            postfilter: SynthesisPostfilter::new_with_variant(variant),
             syn_mem: [0; M],
             exc_mem: [0; 154],
             prev_subframe: [0; L_SUBFR],
@@ -93,6 +97,7 @@ impl G729Decoder {
         self.lsp_quantizer.reset();
         self.gain_quantizer.reset();
         self.energy_manager.reset();
+        self.postfilter.reset();
         self.syn_mem = [0; M];
         self.exc_mem = [0; 154];
         self.prev_subframe = [0; L_SUBFR];
@@ -165,8 +170,23 @@ impl G729Decoder {
             decoded_speech[start_idx..end_idx].copy_from_slice(&subframe_speech);
         }
 
-        // Step 4: Post-processing (adaptive postfilter)
-        self.adaptive_postfilter(&mut decoded_speech, &lsp_q);
+        // Step 4: ITU-compliant synthesis postfiltering (per subframe)
+        for (subframe_idx, subframe) in frame.subframes.iter().enumerate() {
+            let start_idx = subframe_idx * L_SUBFR;
+            let end_idx = start_idx + L_SUBFR;
+            
+            // Apply ITU postfilter to each subframe
+            let mut postfiltered_subframe = [0i16; L_SUBFR];
+            let _vo = self.postfilter.post_filter(
+                subframe.pitch_lag as Word16,
+                &decoded_speech[start_idx..end_idx],
+                &lpc_coeffs,
+                &mut postfiltered_subframe
+            );
+            
+            // Replace original speech with postfiltered version
+            decoded_speech[start_idx..end_idx].copy_from_slice(&postfiltered_subframe);
+        }
 
         decoded_speech
     }

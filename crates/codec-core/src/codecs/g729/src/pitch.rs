@@ -357,6 +357,115 @@ impl PitchAnalyzer {
         pred
     }
 
+    /// ITU Pitch_ol_fast() - Reduced complexity open-loop pitch for Annex A (PITCH_A.C)
+    /// 
+    /// This implements the reduced complexity open-loop pitch estimation for G.729 Annex A.
+    /// The algorithm uses simplified correlation computation and reduced search range to achieve
+    /// ~10% complexity reduction.
+    /// 
+    /// Key differences from full search:
+    /// - 3-section search: 20-39 (full), 40-79 (every 2nd), 80-143 (every 4th)
+    /// - Simplified correlation computation
+    /// - Reduced search resolution for longer lags
+    /// 
+    /// # Arguments
+    /// * `wsp` - Weighted speech signal [L_FRAME]
+    /// * `t0_min` - Minimum pitch lag to search
+    /// * `t0_max` - Maximum pitch lag to search
+    /// 
+    /// # Returns
+    /// Best integer pitch lag
+    pub fn pitch_ol_fast(&mut self, wsp: &[Word16], t0_min: usize, t0_max: usize) -> Word16 {
+        // Update weighted speech buffer (same as full complexity)
+        for i in 0..PIT_MAX {
+            self.old_wsp[i] = self.old_wsp[i + L_FRAME];
+        }
+        for i in 0..L_FRAME {
+            self.old_wsp[PIT_MAX + i] = wsp[i];
+        }
+
+        let mut best_lag = t0_min as Word16;
+        let mut max_normalized_corr = 0i32;
+
+        // Annex A Section 1: Full resolution search for short lags (20-39)
+        let section1_min = t0_min.max(20);
+        let section1_max = t0_max.min(39);
+        
+        if section1_min <= section1_max {
+            for lag in section1_min..=section1_max {
+                let corr = self.cor_max_fast(&self.old_wsp[PIT_MAX..PIT_MAX + L_FRAME], 
+                                           &self.old_wsp[PIT_MAX - lag..PIT_MAX - lag + L_FRAME]);
+                
+                if corr > max_normalized_corr {
+                    max_normalized_corr = corr;
+                    best_lag = lag as Word16;
+                }
+            }
+        }
+
+        // Annex A Section 2: Half resolution search for medium lags (40-79, every 2nd sample)
+        let section2_min = t0_min.max(40);
+        let section2_max = t0_max.min(79);
+        
+        if section2_min <= section2_max {
+            for lag in (section2_min..=section2_max).step_by(2) {
+                let corr = self.cor_max_fast(&self.old_wsp[PIT_MAX..PIT_MAX + L_FRAME], 
+                                           &self.old_wsp[PIT_MAX - lag..PIT_MAX - lag + L_FRAME]);
+                
+                if corr > max_normalized_corr {
+                    max_normalized_corr = corr;
+                    best_lag = lag as Word16;
+                }
+            }
+        }
+
+        // Annex A Section 3: Quarter resolution search for long lags (80-143, every 4th sample)
+        let section3_min = t0_min.max(80);
+        let section3_max = t0_max;
+        
+        if section3_min <= section3_max {
+            for lag in (section3_min..=section3_max).step_by(4) {
+                let corr = self.cor_max_fast(&self.old_wsp[PIT_MAX..PIT_MAX + L_FRAME], 
+                                           &self.old_wsp[PIT_MAX - lag..PIT_MAX - lag + L_FRAME]);
+                
+                if corr > max_normalized_corr {
+                    max_normalized_corr = corr;
+                    best_lag = lag as Word16;
+                }
+            }
+        }
+
+        best_lag
+    }
+
+    /// Fast correlation for Annex A (simplified computation)
+    /// 
+    /// Uses simplified correlation computation to reduce complexity.
+    fn cor_max_fast(&self, x: &[Word16], y: &[Word16]) -> Word32 {
+        let mut s_xy = 0i32;
+        let mut s_yy = 0i32;
+
+        let length = x.len().min(y.len()).min(L_FRAME);
+
+        // Annex A: Simplified correlation (use every 2nd sample for speed)
+        for i in (0..length).step_by(2) {
+            s_xy = l_add(s_xy, l_mult(x[i], y[i]));
+            s_yy = l_add(s_yy, l_mult(y[i], y[i]));
+        }
+
+        // Avoid division by zero
+        if s_yy == 0 {
+            return 0;
+        }
+
+        // Simplified normalization (no square root approximation)
+        if s_yy > s_xy.abs() {
+            (s_xy / (s_yy >> 8).max(1)) as Word32
+        } else {
+            s_xy
+        }
+    }
+
     /// Apply pitch postfilter (for decoder enhancement)
     /// 
     /// This function applies a pitch-based postfilter to enhance
