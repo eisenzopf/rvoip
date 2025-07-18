@@ -267,6 +267,16 @@ impl G729Decoder {
             energy = l_add(energy, l_mult(sample, sample));
         }
 
+        // CRITICAL FIX: Add silence detection threshold
+        // If energy is below silence threshold, preserve the silence
+        let silence_threshold = 1000i32; // Very low energy threshold for silence detection
+        
+        if energy <= silence_threshold {
+            // Preserve silence - do not apply AGC boost to very low energy signals
+            // This prevents silence from being boosted to audible levels
+            return;
+        }
+
         if energy > 0 {
             // Use simple energy-based scaling instead of complex RMS calculation
             // This preserves energy better and avoids floating-point operations
@@ -276,7 +286,7 @@ impl G729Decoder {
             
             // Compute gain factor using fixed-point arithmetic
             if energy < target_energy {
-                // Boost low-energy signals
+                // Boost low-energy signals (but not silence)
                 let gain_factor = (target_energy / energy.max(1)).min(8).max(1) as Word16;
                 let limited_gain = gain_factor.min(32767); // Ensure no overflow
                 
