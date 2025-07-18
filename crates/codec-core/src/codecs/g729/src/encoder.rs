@@ -17,6 +17,17 @@ use super::pitch::PitchAnalyzer;
 use super::acelp::AcelpAnalyzer;
 use super::quantization::{LspQuantizer, GainQuantizer};
 
+/// G.729 variant types
+#[derive(Debug, Clone, Copy)]
+pub enum G729Variant {
+    /// Core G.729 (full complexity)
+    Core,
+    /// G.729 Annex A (reduced complexity)
+    AnnexA,
+    /// G.729 Annex B (VAD/DTX/CNG)
+    AnnexB,
+}
+
 /// G.729 frame size in samples (10ms at 8kHz)
 const L_FRAME: usize = 80;
 
@@ -42,6 +53,8 @@ pub struct G729Encoder {
     lsp_quantizer: LspQuantizer,
     /// Gain quantizer
     gain_quantizer: GainQuantizer,
+    /// Current G.729 variant
+    variant: G729Variant,
     /// Previous synthesis filter memory
     syn_mem: [Word16; M],
     /// Previous speech for lookahead analysis
@@ -51,18 +64,29 @@ pub struct G729Encoder {
 }
 
 impl G729Encoder {
-    /// Create a new G.729 encoder
+    /// Create a new G.729 encoder with Core variant
     pub fn new() -> Self {
+        Self::new_with_variant(G729Variant::Core)
+    }
+
+    /// Create a new G.729 encoder with specified variant
+    pub fn new_with_variant(variant: G729Variant) -> Self {
         Self {
             lpc_analyzer: LpcAnalyzer::new(),
             pitch_analyzer: PitchAnalyzer::new(),
             acelp_analyzer: AcelpAnalyzer::new(),
             lsp_quantizer: LspQuantizer::new(),
             gain_quantizer: GainQuantizer::new(),
+            variant,
             syn_mem: [0; M],
             old_speech: [0; L_FRAME],
             frame_count: 0,
         }
+    }
+
+    /// Get the current variant
+    pub fn variant(&self) -> G729Variant {
+        self.variant
     }
 
     /// Reset encoder state
@@ -160,8 +184,13 @@ impl G729Encoder {
             // Step 6f: Gain quantization
             let energy = self.compute_subframe_energy(speech_subfr);
             let fixed_gain = self.compute_optimal_gain(&target, &fixed_filtered);
-            let (gain_index_final, quant_adaptive_gain, quant_fixed_gain) = 
+            let (gain_quantizer_index, quant_adaptive_gain, quant_fixed_gain) = 
                 self.gain_quantizer.quantize_gains(adaptive_gain, fixed_gain, energy);
+            
+            // CRITICAL FIX: Use ACELP gain_index instead of GainQuantizer index
+            // The ACELP gain_index has proper energy-based selection (like index 63)
+            // while GainQuantizer always returns 0 for our current implementation
+            let final_gain_index = gain_index; // Use ACELP's computed index
             
             // Step 6g: Update synthesis filter memory and residual
             self.update_synthesis_memory(speech_subfr, &adaptive_exc, &fixed_code, 
@@ -174,7 +203,7 @@ impl G729Encoder {
                 positions,
                 signs,
                 fixed_gain: quant_fixed_gain,
-                gain_index: gain_index_final,
+                gain_index: final_gain_index,  // Use ACELP index, not GainQuantizer
             });
         }
 

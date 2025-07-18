@@ -13,6 +13,7 @@
 use std::fs;
 use std::io;
 use std::path::Path;
+use super::super::src::encoder::G729Variant;
 
 /// Parse 16-bit PCM samples from G.729 test input files (*.in)
 /// 
@@ -56,6 +57,58 @@ pub fn parse_g729_pcm_samples(filename: &str) -> io::Result<Vec<i16>> {
 pub fn parse_g729_bitstream(filename: &str) -> io::Result<Vec<u8>> {
     let path = get_test_data_path(filename)?;
     fs::read(&path)
+}
+
+/// Parse G.729 reference output from .pst/.out files
+/// 
+/// Same format as input files - 16-bit little-endian samples
+pub fn parse_g729_reference_output(filename: &str) -> io::Result<Vec<i16>> {
+    parse_g729_pcm_samples(filename)
+}
+
+/// Parse 16-bit samples from raw byte data
+pub fn parse_16bit_samples(data: &[u8]) -> io::Result<Vec<i16>> {
+    if data.len() % 2 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Data has odd number of bytes, expected 16-bit samples"
+        ));
+    }
+    
+    let mut samples = Vec::with_capacity(data.len() / 2);
+    for chunk in data.chunks_exact(2) {
+        let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
+        samples.push(sample);
+    }
+    
+    Ok(samples)
+}
+
+/// Get test data path for specific G.729 variant
+pub fn get_variant_test_data_path(variant: G729Variant, filename: &str) -> io::Result<std::path::PathBuf> {
+    let variant_dir = match variant {
+        G729Variant::Core => "g729",
+        G729Variant::AnnexA => "g729AnnexA", 
+        G729Variant::AnnexB => "g729AnnexB",
+    };
+    
+    let search_paths = [
+        format!("src/codecs/g729/itu_tests/test_data/{}/{}", variant_dir, filename),
+        format!("T-REC-G.729-201206/Software/G729_Release3/{}/test_vectors/{}", variant_dir, filename),
+        format!("{}/{}", variant_dir, filename),
+    ];
+    
+    for path_str in &search_paths {
+        let path = std::path::Path::new(path_str);
+        if path.exists() {
+            return Ok(path.to_path_buf());
+        }
+    }
+    
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("Test data file not found for {:?}: {}", variant, filename)
+    ))
 }
 
 /// Get the full path to a test data file
@@ -106,34 +159,61 @@ pub fn calculate_signal_similarity(signal1: &[i16], signal2: &[i16]) -> f64 {
         return 0.0;
     }
     
-    let min_len = signal1.len().min(signal2.len());
-    let sig1 = &signal1[..min_len];
-    let sig2 = &signal2[..min_len];
+    let len = signal1.len().min(signal2.len());
+    if len == 0 {
+        return 0.0;
+    }
     
     // Calculate means
-    let mean1: f64 = sig1.iter().map(|&x| x as f64).sum::<f64>() / min_len as f64;
-    let mean2: f64 = sig2.iter().map(|&x| x as f64).sum::<f64>() / min_len as f64;
+    let mean1 = signal1[..len].iter().map(|&x| x as f64).sum::<f64>() / len as f64;
+    let mean2 = signal2[..len].iter().map(|&x| x as f64).sum::<f64>() / len as f64;
     
     // Calculate correlation coefficient
     let mut numerator = 0.0;
     let mut sum_sq1 = 0.0;
     let mut sum_sq2 = 0.0;
     
-    for i in 0..min_len {
-        let diff1 = sig1[i] as f64 - mean1;
-        let diff2 = sig2[i] as f64 - mean2;
+    for i in 0..len {
+        let x1 = signal1[i] as f64 - mean1;
+        let x2 = signal2[i] as f64 - mean2;
         
-        numerator += diff1 * diff2;
-        sum_sq1 += diff1 * diff1;
-        sum_sq2 += diff2 * diff2;
+        numerator += x1 * x2;
+        sum_sq1 += x1 * x1;
+        sum_sq2 += x2 * x2;
     }
     
     let denominator = (sum_sq1 * sum_sq2).sqrt();
-    if denominator > 0.0 {
-        (numerator / denominator).abs()
-    } else {
-        0.0
+    if denominator == 0.0 {
+        return if numerator == 0.0 { 1.0 } else { 0.0 };
     }
+    
+    (numerator / denominator).abs()
+}
+
+/// Alias for calculate_signal_similarity for compatibility
+pub fn calculate_sample_similarity(signal1: &[i16], signal2: &[i16]) -> f64 {
+    calculate_signal_similarity(signal1, signal2)
+}
+
+/// Calculate similarity between bitstreams
+pub fn calculate_bitstream_similarity(stream1: &[u8], stream2: &[u8]) -> f64 {
+    if stream1.is_empty() || stream2.is_empty() {
+        return 0.0;
+    }
+    
+    let len = stream1.len().min(stream2.len());
+    if len == 0 {
+        return 0.0;
+    }
+    
+    let mut matches = 0;
+    for i in 0..len {
+        if stream1[i] == stream2[i] {
+            matches += 1;
+        }
+    }
+    
+    matches as f64 / len as f64
 }
 
 /// Calculate signal-to-noise ratio between reference and test signals
