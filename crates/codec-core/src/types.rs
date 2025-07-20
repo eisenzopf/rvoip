@@ -120,6 +120,10 @@ pub enum CodecType {
     G722,
     /// G.729 low-bitrate
     G729,
+    /// G.729A reduced complexity
+    G729A,
+    /// G.729BA reduced complexity with VAD/DTX/CNG
+    G729BA,
     /// Opus modern codec
     Opus,
 }
@@ -132,6 +136,8 @@ impl CodecType {
             Self::G711Pcma => "PCMA",
             Self::G722 => "G722",
             Self::G729 => "G729",
+            Self::G729A => "G729A",
+            Self::G729BA => "G729BA",
             Self::Opus => "opus",
         }
     }
@@ -141,7 +147,7 @@ impl CodecType {
         match self {
             Self::G711Pcmu | Self::G711Pcma => 8000,
             Self::G722 => 16000,
-            Self::G729 => 8000,
+            Self::G729 | Self::G729A | Self::G729BA => 8000,
             Self::Opus => 48000,
         }
     }
@@ -151,7 +157,7 @@ impl CodecType {
         match self {
             Self::G711Pcmu | Self::G711Pcma => 64000,
             Self::G722 => 64000,
-            Self::G729 => 8000,
+            Self::G729 | Self::G729A | Self::G729BA => 8000,
             Self::Opus => 64000,
         }
     }
@@ -162,7 +168,7 @@ impl CodecType {
             Self::G711Pcmu => Some(0),
             Self::G711Pcma => Some(8),
             Self::G722 => Some(9),
-            Self::G729 => Some(18),
+            Self::G729 | Self::G729A | Self::G729BA => Some(18),
             Self::Opus => None, // Dynamic payload type
         }
     }
@@ -172,7 +178,7 @@ impl CodecType {
         match self {
             Self::G711Pcmu | Self::G711Pcma => &[8000],
             Self::G722 => &[16000],
-            Self::G729 => &[8000],
+            Self::G729 | Self::G729A | Self::G729BA => &[8000],
             Self::Opus => &[8000, 12000, 16000, 24000, 48000],
         }
     }
@@ -180,7 +186,7 @@ impl CodecType {
     /// Get supported channel counts
     pub fn supported_channels(self) -> &'static [u8] {
         match self {
-            Self::G711Pcmu | Self::G711Pcma | Self::G722 | Self::G729 => &[1],
+            Self::G711Pcmu | Self::G711Pcma | Self::G722 | Self::G729 | Self::G729A | Self::G729BA => &[1],
             Self::Opus => &[1, 2],
         }
     }
@@ -495,7 +501,7 @@ impl CodecType {
         match self {
             Self::G711Pcmu | Self::G711Pcma => (64000, 64000),
             Self::G722 => (64000, 64000),
-            Self::G729 => (8000, 8000),
+            Self::G729 | Self::G729A | Self::G729BA => (8000, 8000),
             Self::Opus => (6000, 510000),
         }
     }
@@ -647,7 +653,7 @@ impl CodecType {
         match self {
             Self::G711Pcmu | Self::G711Pcma => 70,
             Self::G722 => 80,
-            Self::G729 => 85,
+            Self::G729 | Self::G729A | Self::G729BA => 85,
             Self::Opus => 95,
         }
     }

@@ -11,8 +11,12 @@ pub mod g711;
 #[cfg(feature = "g722")]
 pub mod g722;
 
-#[cfg(any(feature = "g729", feature = "g729-sim", feature = "g729-core"))]
-pub mod g729;
+// #[cfg(any(feature = "g729", feature = "g729-sim", feature = "g729-core"))]
+// pub mod g729; // TODO: Implement base G.729 (currently using G.729A)
+
+pub mod g729a;
+
+pub mod g729ba;
 
 #[cfg(any(feature = "opus", feature = "opus-sim"))]
 pub mod opus;
@@ -49,6 +53,20 @@ impl CodecFactory {
             CodecType::G729 => {
                 let codec = g729::G729Codec::new(config)?;
                 Ok(Box::new(codec))
+            }
+            
+            CodecType::G729A => {
+                // G729A codec doesn't need feature gate - always available
+                Err(CodecError::unsupported_codec(
+                    "G.729A codec implementation in progress"
+                ))
+            }
+            
+            CodecType::G729BA => {
+                // G729BA codec doesn't need feature gate - always available
+                Err(CodecError::unsupported_codec(
+                    "G.729BA codec implementation in progress"
+                ))
             }
             
             #[cfg(any(feature = "opus", feature = "opus-sim"))]
