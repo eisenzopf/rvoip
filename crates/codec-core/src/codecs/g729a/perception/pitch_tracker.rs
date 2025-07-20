@@ -27,13 +27,20 @@ impl LowPassFilter {
     }
     
     /// Process signal through low-pass filter
-    /// H(z) = 1 / (1 - 0.7z^-1)
+    /// G.729A uses: H(z) = 1 / (1 - 0.7z^-1)
+    /// which is equivalent to y[n] = x[n] + 0.7*y[n-1]
     pub fn process(&mut self, signal: &[Q15]) -> Vec<Q15> {
-        let b0 = Q15::ONE;
-        let b1 = Q15::ZERO;
-        let a1 = Q15::from_f32(-0.7);
+        let mut output = Vec::with_capacity(signal.len());
+        let a1 = Q15::from_f32(0.7); // Positive for feedback
         
-        iir_filter_1st_order(signal, b0, b1, a1, &mut self.state)
+        for &sample in signal {
+            // y[n] = x[n] + 0.7 * y[n-1]
+            let y = sample.saturating_add(a1.saturating_mul(self.state.0));
+            output.push(y);
+            self.state.0 = y;
+        }
+        
+        output
     }
 }
 
@@ -53,70 +60,74 @@ impl PitchTracker {
     /// Estimate open-loop pitch from weighted speech
     /// Returns the best pitch candidate
     pub fn estimate_open_loop_pitch(&mut self, weighted_speech: &[Q15]) -> PitchCandidate {
-        // 1. Apply low-pass filter for decimation
-        let filtered = self.decimation_filter.process(weighted_speech);
+        // G.729A uses specific window for pitch detection
+        // Only use 80 samples (2 subframes) for correlation
+        let pitch_window = &weighted_speech[..80];
         
-        // 2. Search in three delay ranges
-        let candidates = [
-            self.search_range(&filtered, 20, 39, 2),   // Short delays
-            self.search_range(&filtered, 40, 79, 2),   // Medium delays  
-            self.search_range(&filtered, 80, 143, 4),  // Long delays (more decimation)
-        ];
+        // 1. Apply low-pass filter for decimation
+        let filtered = self.decimation_filter.process(pitch_window);
+        
+        // 2. Search in three delay ranges per ITU-T G.729A
+        let mut candidates = vec![];
+        
+        // Range 1: 20-39 (no decimation)
+        let best1 = self.search_range_729a(&filtered, 20, 39, 1);
+        candidates.push(best1);
+        
+        // Range 2: 40-79 (no decimation) 
+        let best2 = self.search_range_729a(&filtered, 40, 79, 1);
+        candidates.push(best2);
+        
+        // Range 3: 80-143 (decimation by 2)
+        let best3 = self.search_range_729a(&filtered, 80, 143, 2);
+        candidates.push(best3);
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("Pitch candidates: [{}, {}, {}] with corr: [{}, {}, {}]",
+                candidates[0].delay, candidates[1].delay, candidates[2].delay,
+                candidates[0].correlation.0, candidates[1].correlation.0, candidates[2].correlation.0);
+        }
         
         // 3. Select best with pitch doubling/halving checks
-        self.select_best_pitch(&candidates)
+        let best = self.select_best_pitch_729a(&candidates);
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("Selected pitch: {} (corr: {})", best.delay, best.correlation.0);
+        }
+        
+        best
     }
     
-    /// Search for best pitch in a given range
-    fn search_range(&self, signal: &[Q15], min: u16, max: u16, decimation: usize) -> PitchCandidate {
+    /// Search for best pitch in a given range (ITU-T G.729A algorithm)
+    fn search_range_729a(&self, signal: &[Q15], min: u16, max: u16, decimation: usize) -> PitchCandidate {
         let mut best_delay = min;
         let mut best_corr = Q15(i16::MIN);
         
-        // For G.729A, use decimated correlation
-        for delay in min..=max {
-            // Skip odd delays in third range for efficiency
-            if min >= 80 && delay % 2 == 1 {
-                continue;
-            }
+        // For range 3, only test even delays first
+        let step = if min >= 80 { 2 } else { 1 };
+        
+        for delay in (min..=max).step_by(step) {
+            // Compute correlation R(k) = sum(sw[n] * sw[n-k])
+            let corr = self.compute_normalized_correlation(signal, delay as usize, decimation);
             
-            let corr = if decimation > 1 {
-                decimated_correlation(signal, delay as usize, decimation)
-            } else {
-                decimated_correlation(signal, delay as usize, 1)
-            };
-            
-            // Normalize by energy
-            let energy_at_delay = self.compute_energy_at_delay(signal, delay as usize);
-            
-            if energy_at_delay.0 > 0 {
-                // Approximate normalized correlation
-                let norm_corr = Q15((corr.0 / (energy_at_delay.0 >> 15).max(1)) as i16);
-                
-                if norm_corr.0 > best_corr.0 {
-                    best_corr = norm_corr;
-                    best_delay = delay;
-                }
+            if corr.0 > best_corr.0 {
+                best_corr = corr;
+                best_delay = delay;
             }
         }
         
-        // For the third range, refine around the best even delay
-        if min >= 80 && best_delay < max {
-            // Check adjacent odd delays
-            let delay_minus = best_delay.saturating_sub(1).max(min);
-            let delay_plus = (best_delay + 1).min(max);
-            
-            for &delay in &[delay_minus, delay_plus] {
-                if delay != best_delay {
-                    let corr = decimated_correlation(signal, delay as usize, decimation);
-                    let energy_at_delay = self.compute_energy_at_delay(signal, delay as usize);
-                    
-                    if energy_at_delay.0 > 0 {
-                        let norm_corr = Q15((corr.0 / (energy_at_delay.0 >> 15).max(1)) as i16);
-                        
-                        if norm_corr.0 > best_corr.0 {
-                            best_corr = norm_corr;
-                            best_delay = delay;
-                        }
+        // For range 3, refine around best delay
+        if min >= 80 && best_delay > min && best_delay < max {
+            // Test ±1 around best
+            for offset in [-1i16, 1] {
+                let test_delay = (best_delay as i16 + offset) as u16;
+                if test_delay >= min && test_delay <= max {
+                    let corr = self.compute_normalized_correlation(signal, test_delay as usize, decimation);
+                    if corr.0 > best_corr.0 {
+                        best_corr = corr;
+                        best_delay = test_delay;
                     }
                 }
             }
@@ -128,49 +139,105 @@ impl PitchTracker {
         }
     }
     
-    /// Compute energy at a given delay
-    fn compute_energy_at_delay(&self, signal: &[Q15], delay: usize) -> Q31 {
-        if delay >= signal.len() {
-            return Q31::ZERO;
+    /// Compute normalized correlation per ITU-T G.729A
+    fn compute_normalized_correlation(&self, signal: &[Q15], delay: usize, decimation: usize) -> Q15 {
+        // Use only 80 samples for correlation
+        let len = 80usize.min(signal.len()).saturating_sub(delay);
+        if len == 0 {
+            return Q15::ZERO;
         }
         
-        let segment = &signal[..signal.len() - delay];
-        energy(segment)
+        // Compute R(k) using decimation
+        let r_k = if decimation == 2 {
+            // Use every other sample for decimation by 2
+            let mut sum = Q31::ZERO;
+            for i in (0..len).step_by(2) {
+                let prod = signal[i].to_q31().saturating_mul(signal[i + delay].to_q31());
+                sum = sum.saturating_add(prod);
+            }
+            sum
+        } else {
+            // No decimation
+            let mut sum = Q31::ZERO;
+            for i in 0..len {
+                let prod = signal[i].to_q31().saturating_mul(signal[i + delay].to_q31());
+                sum = sum.saturating_add(prod);
+            }
+            sum
+        };
+        
+        // Compute energy E(k) = sum(sw[n-k]^2)
+        let e_k = if decimation == 2 {
+            let mut sum = Q31::ZERO;
+            for i in (0..len).step_by(2) {
+                let val = signal[i + delay];
+                let prod = val.to_q31().saturating_mul(val.to_q31());
+                sum = sum.saturating_add(prod);
+            }
+            sum
+        } else {
+            let mut sum = Q31::ZERO;
+            for i in 0..len {
+                let val = signal[i + delay];
+                let prod = val.to_q31().saturating_mul(val.to_q31());
+                sum = sum.saturating_add(prod);
+            }
+            sum
+        };
+        
+        // Normalize: R'(k) = R(k) / sqrt(E(k))
+        if e_k.0 <= 0 {
+            return Q15::ZERO;
+        }
+        
+        // Approximate normalization
+        // Use shifts to approximate division by sqrt
+        let e_k_shifted = (e_k.0 >> 15).max(1);
+        let normalized = (r_k.0 / e_k_shifted) as i16;
+        Q15(normalized)
     }
     
-    /// Select best pitch candidate with pitch doubling/halving checks
-    fn select_best_pitch(&self, candidates: &[PitchCandidate; 3]) -> PitchCandidate {
-        let mut best = candidates[0];
-        
-        // Favor lower delays with bonus factor
-        let bonuses = [1.2, 1.1, 1.0]; // Bonus for short, medium, long delays
-        
+    /// Select best pitch candidate with pitch doubling/halving checks (ITU-T G.729A)
+    fn select_best_pitch_729a(&self, candidates: &[PitchCandidate]) -> PitchCandidate {
+        let mut r_prime = [Q15::ZERO; 3];
         for i in 0..3 {
-            let mut score = candidates[i].correlation.0 as f32;
-            
-            // Apply bonus
-            score *= bonuses[i];
-            
-            // Check for pitch doubling/halving relationships
-            for j in 0..i {
-                let ratio = candidates[i].delay as f32 / candidates[j].delay as f32;
-                
-                // If current delay is roughly double a previous one
-                if (ratio - 2.0).abs() < 0.1 {
-                    score *= 1.15; // Boost score
-                }
-                // If current delay is roughly half a previous one
-                else if (ratio - 0.5).abs() < 0.05 {
-                    score *= 1.15; // Boost score
-                }
-            }
-            
-            if score > best.correlation.0 as f32 * bonuses[0] {
-                best = candidates[i];
+            r_prime[i] = candidates[i].correlation;
+        }
+        
+        // Favor lower delays by weighting
+        // Check for multiples between ranges
+        
+        // Check if range2 is multiple of range3
+        let t2 = candidates[1].delay;
+        let t3 = candidates[2].delay;
+        
+        if (t3 as i32 - 2 * t2 as i32).abs() <= 5 {
+            r_prime[1] = Q15(r_prime[1].0.saturating_add((r_prime[2].0 >> 2))); // Add 0.25 * R'(t3)
+        } else if (t3 as i32 - 3 * t2 as i32).abs() <= 7 {
+            r_prime[1] = Q15(r_prime[1].0.saturating_add((r_prime[2].0 >> 2))); // Add 0.25 * R'(t3)
+        }
+        
+        // Check if range1 is multiple of range2
+        let t1 = candidates[0].delay;
+        
+        if (t2 as i32 - 2 * t1 as i32).abs() <= 5 {
+            r_prime[0] = Q15(r_prime[0].0.saturating_add((r_prime[1].0 / 5))); // Add 0.2 * R'(t2)
+        } else if (t2 as i32 - 3 * t1 as i32).abs() <= 7 {
+            r_prime[0] = Q15(r_prime[0].0.saturating_add((r_prime[1].0 / 5))); // Add 0.2 * R'(t2)
+        }
+        
+        // Find maximum
+        let mut best_idx = 0;
+        let mut best_corr = r_prime[0];
+        
+        for i in 1..3 {
+            if r_prime[i].0 > best_corr.0 {
+                best_corr = r_prime[i];
+                best_idx = i;
             }
         }
         
-        best
+        candidates[best_idx]
     }
     
     /// Get pitch search range for closed-loop search
@@ -257,7 +324,7 @@ mod tests {
         }
         
         // Search in medium range
-        let candidate = tracker.search_range(&signal, 35, 45, 1);
+        let candidate = tracker.search_range_729a(&signal, 35, 45, 1);
         
         // Should find delay close to 40
         assert!((candidate.delay as i32 - 40).abs() <= 2);
@@ -290,7 +357,7 @@ mod tests {
             PitchCandidate { delay: 120, correlation: Q15::from_f32(0.6) },
         ];
         
-        let best = tracker.select_best_pitch(&candidates);
+        let best = tracker.select_best_pitch_729a(&candidates);
         
         // Should prefer the second one due to doubling relationship and good correlation
         // But first one might win due to short delay bonus

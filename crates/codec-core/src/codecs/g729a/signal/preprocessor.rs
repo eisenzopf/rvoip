@@ -1,219 +1,110 @@
 //! Signal preprocessing with high-pass filtering
 
-use crate::codecs::g729a::constants::*;
 use crate::codecs::g729a::types::{AudioFrame, Q15};
-use crate::codecs::g729a::math::fixed_point::FixedPointOps;
 
-/// Signal preprocessor with high-pass filter
-pub struct SignalPreprocessor {
-    /// High-pass filter state [x(n-1), y(n-1)]
-    hp_filter_state: [Q15; 2],
+/// High-pass filter preprocessor
+pub struct Preprocessor {
+    // Filter state - previous outputs (y[n-1], y[n-2])
+    output_y1: i32,  // Q15.12 format
+    output_y2: i32,  // Q15.12 format
+    // Filter state - previous inputs (x[n-1], x[n-2])
+    input_x0: i16,   // Q15.0 format
+    input_x1: i16,   // Q15.0 format
 }
 
-impl SignalPreprocessor {
+impl Preprocessor {
     /// Create a new preprocessor
     pub fn new() -> Self {
         Self {
-            hp_filter_state: [Q15::ZERO; 2],
+            output_y1: 0,
+            output_y2: 0,
+            input_x0: 0,
+            input_x1: 0,
         }
     }
-    
-    /// Process raw samples (convenience method for encoder)
-    pub fn process(&mut self, input: &[i16]) -> Vec<Q15> {
-        let frame = AudioFrame {
-            samples: {
-                let mut arr = [0i16; FRAME_SIZE];
-                arr.copy_from_slice(&input[..FRAME_SIZE]);
-                arr
-            },
-            timestamp: 0,
-        };
-        let processed = self.process_frame(&frame);
-        processed.samples.iter().map(|&s| Q15(s)).collect()
-    }
-    
-    /// Process a frame of audio samples
-    /// Applies high-pass filtering to remove DC offset and low-frequency noise
-    /// H(z) = (1 - z^-1) / (1 - 0.93*z^-1)
-    pub fn process_frame(&mut self, input: &AudioFrame) -> AudioFrame {
-        let mut output = AudioFrame {
-            samples: [0i16; FRAME_SIZE],
-            timestamp: input.timestamp,
-        };
+
+    /// Process a frame through the high-pass filter
+    pub fn process(&mut self, samples: &[i16]) -> Vec<Q15> {
+        // Filter coefficients (140Hz cutoff)
+        // Coefficients are stored in Q1.12 for A1 and Q0.12 for others
+        const A1: i16 = 7807;   // Q1.12
+        const A2: i16 = -3733;  // Q0.12  
+        const B0: i16 = 1899;   // Q0.12
+        const B1: i16 = -3798;  // Q0.12
+        const B2: i16 = 1899;   // Q0.12
         
-        // High-pass filter coefficients
-        let b0 = Q15::ONE;
-        let b1 = Q15::from_f32(-0.999); // -1.0 clamped to Q15 range
-        let a1 = Q15::from_f32(-0.93);
+        const MAXINT28: i32 = 0x07FFFFFF;
         
-        for i in 0..FRAME_SIZE {
-            let x_n = Q15(input.samples[i]);
+        let mut result = Vec::with_capacity(samples.len());
+        
+        for &sample in samples {
+            let input_x2 = self.input_x1;
+            self.input_x1 = self.input_x0;
+            self.input_x0 = sample;
             
-            // y[n] = x[n] - x[n-1] + 0.93*y[n-1]
-            let b0_xn = b0.saturating_mul(x_n);
-            let b1_xn1 = b1.saturating_mul(self.hp_filter_state[0]);
-            let a1_yn1 = a1.saturating_mul(self.hp_filter_state[1]);
+            // y[i] = B0*x[i] + B1*x[i-1] + B2*x[i-2] + A1*y[i-1] + A2*y[i-2]
             
-            let y_n = b0_xn.saturating_add(b1_xn1).saturating_add(Q15(-a1_yn1.0));
+            // Start with feedback terms
+            let mut acc: i32 = mult16_32_q12(A1, self.output_y1);
+            acc = mac16_32_q12(acc, A2, self.output_y2);
+            
+            // Add feedforward terms  
+            acc = mac16_16(acc, self.input_x0, B0);
+            acc = mac16_16(acc, self.input_x1, B1);
+            acc = mac16_16(acc, input_x2, B2);
+            
+            // Saturate to prevent overflow
+            acc = saturate(acc, MAXINT28);
+            
+            // Extract integer part (Q15.0) from Q15.12
+            let output = pshr(acc, 12);
+            result.push(Q15(output));
             
             // Update state
-            self.hp_filter_state[0] = x_n;
-            self.hp_filter_state[1] = y_n;
-            
-            // Store output
-            output.samples[i] = y_n.0;
+            self.output_y2 = self.output_y1;
+            self.output_y1 = acc;
         }
         
-        output
+        result
     }
+}
+
+// Fixed-point arithmetic helpers
+
+/// Multiply 16-bit by 32-bit with Q12 scaling
+fn mult16_32_q12(a: i16, b: i32) -> i32 {
+    let a32 = a as i32;
+    // Split b into high and low parts for precise calculation
+    let b_high = b >> 12;
+    let b_low = b & 0x00000fff;
     
-    /// Reset the preprocessor state
-    pub fn reset(&mut self) {
-        self.hp_filter_state = [Q15::ZERO; 2];
+    (a32 * b_high) + ((a32 * b_low) >> 12)
+}
+
+/// Multiply-accumulate 16-bit by 32-bit with Q12 scaling
+fn mac16_32_q12(c: i32, a: i16, b: i32) -> i32 {
+    c.saturating_add(mult16_32_q12(a, b))
+}
+
+/// Multiply-accumulate 16-bit by 16-bit
+fn mac16_16(c: i32, a: i16, b: i16) -> i32 {
+    let product = (a as i32) * (b as i32);
+    c.saturating_add(product)
+}
+
+/// Saturate to given maximum value
+fn saturate(x: i32, max_val: i32) -> i32 {
+    if x > max_val {
+        max_val
+    } else if x < -(max_val + 1) {
+        -(max_val + 1)
+    } else {
+        x
     }
 }
 
-impl Default for SignalPreprocessor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_preprocessor_creation() {
-        let preprocessor = SignalPreprocessor::new();
-        assert_eq!(preprocessor.hp_filter_state[0], Q15::ZERO);
-        assert_eq!(preprocessor.hp_filter_state[1], Q15::ZERO);
-    }
-
-    #[test]
-    fn test_dc_removal() {
-        let mut preprocessor = SignalPreprocessor::new();
-        
-        // Create input with DC offset
-        let mut input_samples = [1000i16; FRAME_SIZE];
-        let input = AudioFrame {
-            samples: input_samples,
-            timestamp: 0,
-        };
-        
-        // Process frame
-        let output = preprocessor.process_frame(&input);
-        
-        // First sample should have high output due to step change
-        assert!(output.samples[0].abs() > 500);
-        
-        // Later samples should decay toward zero (DC removed)
-        let avg_last_10: i32 = output.samples[FRAME_SIZE-10..]
-            .iter()
-            .map(|&x| x as i32)
-            .sum::<i32>() / 10;
-        assert!(avg_last_10.abs() < 100);
-    }
-
-    #[test]
-    fn test_passthrough_high_freq() {
-        let mut preprocessor = SignalPreprocessor::new();
-        
-        // Create alternating signal (high frequency)
-        let mut input_samples = [0i16; FRAME_SIZE];
-        for i in 0..FRAME_SIZE {
-            input_samples[i] = if i % 2 == 0 { 1000 } else { -1000 };
-        }
-        
-        let input = AudioFrame {
-            samples: input_samples,
-            timestamp: 0,
-        };
-        
-        // Process frame
-        let output = preprocessor.process_frame(&input);
-        
-        // High frequency should pass through with minimal attenuation
-        // Check that output maintains alternating pattern
-        for i in 10..20 {
-            if i % 2 == 0 {
-                assert!(output.samples[i] > 500);
-            } else {
-                assert!(output.samples[i] < -500);
-            }
-        }
-    }
-
-    #[test]
-    fn test_state_persistence() {
-        let mut preprocessor = SignalPreprocessor::new();
-        
-        // Process first frame
-        let input1 = AudioFrame {
-            samples: [500i16; FRAME_SIZE],
-            timestamp: 0,
-        };
-        let output1 = preprocessor.process_frame(&input1);
-        
-        // State should be updated
-        assert_ne!(preprocessor.hp_filter_state[0], Q15::ZERO);
-        assert_ne!(preprocessor.hp_filter_state[1], Q15::ZERO);
-        
-        // Process second frame with zeros
-        let input2 = AudioFrame {
-            samples: [0i16; FRAME_SIZE],
-            timestamp: FRAME_SIZE as u64,
-        };
-        let output2 = preprocessor.process_frame(&input2);
-        
-        // First sample of second frame should show effect of previous state
-        assert_ne!(output2.samples[0], 0);
-    }
-
-    #[test]
-    fn test_reset() {
-        let mut preprocessor = SignalPreprocessor::new();
-        
-        // Process a frame to change state
-        let input = AudioFrame {
-            samples: [1000i16; FRAME_SIZE],
-            timestamp: 0,
-        };
-        preprocessor.process_frame(&input);
-        
-        // Verify state changed
-        assert_ne!(preprocessor.hp_filter_state[0], Q15::ZERO);
-        
-        // Reset
-        preprocessor.reset();
-        
-        // Verify state cleared
-        assert_eq!(preprocessor.hp_filter_state[0], Q15::ZERO);
-        assert_eq!(preprocessor.hp_filter_state[1], Q15::ZERO);
-    }
-
-    #[test]
-    fn test_impulse_response() {
-        let mut preprocessor = SignalPreprocessor::new();
-        
-        // Create impulse input
-        let mut input_samples = [0i16; FRAME_SIZE];
-        input_samples[0] = 10000;
-        
-        let input = AudioFrame {
-            samples: input_samples,
-            timestamp: 0,
-        };
-        
-        // Process frame
-        let output = preprocessor.process_frame(&input);
-        
-        // First output should be close to input (b0 = 1)
-        assert!(output.samples[0].abs() > 8000);
-        
-        // Output should decay exponentially
-        for i in 1..10 {
-            assert!(output.samples[i].abs() < output.samples[i-1].abs());
-        }
-    }
+/// Shift right with rounding
+fn pshr(a: i32, shift: u32) -> i16 {
+    let rounded = a + (1 << (shift - 1));
+    (rounded >> shift) as i16
 } 

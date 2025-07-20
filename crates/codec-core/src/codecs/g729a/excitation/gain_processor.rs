@@ -27,9 +27,14 @@ impl GainPredictor {
             .collect::<Vec<_>>()
             .try_into()
             .unwrap();
+        
+        // Initialize with past quantized energies
+        // ITU-T G.729A uses initial energy of -14 dB in Q14
+        // which is approximately 0.2 linear, or 6554 in Q15
+        let initial_gain = Q15(6554);
             
         Self {
-            past_gains: VecDeque::from(vec![Q15::ZERO; 4]),
+            past_gains: VecDeque::from(vec![initial_gain; 4]),
             ma_coeffs,
         }
     }
@@ -76,6 +81,12 @@ impl GainQuantizer {
         fixed_vector: &[Q15],
         target: &[Q15],
     ) -> QuantizedGains {
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("Gain Quantization Debug:");
+            eprintln!("  Target gains: adaptive={}, fixed={}", adaptive_gain.0, fixed_gain.0);
+        }
+        
         // 1. Compute correlations needed for quantization
         let corr_xh = dot_product(target, adaptive_vector);
         let corr_xf = dot_product(target, fixed_vector);
@@ -83,8 +94,19 @@ impl GainQuantizer {
         let energy_h = energy(adaptive_vector);
         let energy_f = energy(fixed_vector);
         
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  Correlations: xh={}, xf={}, hf={}", corr_xh.0, corr_xf.0, corr_hf.0);
+            eprintln!("  Energies: h={}, f={}", energy_h.0, energy_f.0);
+        }
+        
         // 2. Get prediction
         let predicted_gain = self.predictor.predict();
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  Predicted gain: {}", predicted_gain.0);
+        }
         
         // 3. Search codebook (simplified - using dummy quantization)
         // In real G.729A, this would search a 7-bit MA-predictive VQ table
@@ -98,6 +120,19 @@ impl GainQuantizer {
             energy_h,
             energy_f,
         );
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  Selected indices: ga={}, gc={}", ga_index, gc_index);
+            let decoded_ga = self.decode_adaptive_gain(ga_index);
+            let decoded_gc = self.decode_fixed_gain(gc_index, predicted_gain);
+            eprintln!("  Decoded gains: ga={}, gc={} (targets: ga={}, gc={})", 
+                decoded_ga.0, decoded_gc.0, adaptive_gain.0, fixed_gain.0);
+            
+            // Show what index 0 would give for comparison
+            let alt_gc = self.decode_fixed_gain(0, predicted_gain);
+            eprintln!("  Alternative gc=0 would decode to: {}", alt_gc.0);
+        }
         
         // 4. Reconstruct quantized gains
         let quantized_adaptive = self.decode_adaptive_gain(ga_index);
@@ -133,6 +168,12 @@ impl GainQuantizer {
         let mut best_gc_idx = 0u8;
         let mut best_criterion = Q31(i32::MIN);
         
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("    Searching {} x {} gain combinations", 8, 16);
+            eprintln!("    Target gains: ga={}, gc={}, pred={}", ga_target.0, gc_target.0, gc_pred.0);
+        }
+        
         // Precompute some terms for efficiency
         let energy_x = corr_xh.saturating_add(corr_xf); // Simplified
         
@@ -150,7 +191,7 @@ impl GainQuantizer {
                 // Numerator
                 let term1 = (ga.to_q31().0 as i64 * corr_xh.0 as i64 >> 31) as i32;
                 let term2 = (gc.to_q31().0 as i64 * corr_xf.0 as i64 >> 31) as i32;
-                let numerator = Q31(term1 + term2);
+                let numerator = Q31(term1.saturating_add(term2));
                 
                 // Denominator
                 let ga_sq = (ga.0 as i32 * ga.0 as i32) >> 15;
@@ -160,7 +201,7 @@ impl GainQuantizer {
                 let denom_term1 = (ga_sq as i64 * energy_h.0 as i64 >> 31) as i32;
                 let denom_term2 = (gc_sq as i64 * energy_f.0 as i64 >> 31) as i32;
                 let denom_term3 = (ga_gc as i64 * corr_hf.0 as i64 >> 31) as i32;
-                let denominator = Q31(denom_term1 + denom_term2 + denom_term3);
+                let denominator = Q31(denom_term1.saturating_add(denom_term2).saturating_add(denom_term3));
                 
                 // Compute criterion (avoid division)
                 if denominator.0 > 0 {
@@ -182,25 +223,27 @@ impl GainQuantizer {
     
     /// Decode adaptive gain from index
     fn decode_adaptive_gain(&self, index: u8) -> Q15 {
-        // Use actual gain codebook from tables
+        // In G.729A, adaptive gain is NOT predicted
+        // The table directly contains the gain values
+        // GBK1[i][0] is the adaptive gain in Q14 format
         let mapped_idx = IMAP1[(index & 0x7) as usize] as usize;
-        let gbk1_val = GBK1[mapped_idx][0]; // Q14 correction factor
         
-        // Convert Q14 to Q15
-        Q15((gbk1_val as i32 * 2) as i16)
+        // Get gain value from table and convert Q14 to Q15
+        let gain_q14 = GBK1[mapped_idx][0];
+        Q15((gain_q14 as i32 * 2) as i16)
     }
     
     /// Decode fixed gain from index and prediction
     fn decode_fixed_gain(&self, index: u8, prediction: Q15) -> Q15 {
-        // Use actual gain codebook from tables
+        // Fixed gain uses predictive quantization
+        // gc = gbk2_correction * predicted_gain
         let mapped_idx = IMAP2[(index & 0xF) as usize] as usize;
-        let gbk2_val = GBK2[mapped_idx][0]; // Q14 correction factor
+        let correction_q14 = GBK2[mapped_idx][0];
         
-        // Apply correction factor to prediction
-        // gc = gbk2 * predicted_gain
-        let correction = Q14(gbk2_val);
-        let result = (prediction.0 as i32 * correction.0 as i32) >> 14;
-        Q15(result as i16)
+        // Apply correction to prediction: gc = correction * prediction
+        // Both are in similar Q format, result in Q15
+        let result = ((correction_q14 as i64 * prediction.0 as i64) >> 14) as i32;
+        Q15(result.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
     }
     
     /// Decode gains from indices (for decoder)

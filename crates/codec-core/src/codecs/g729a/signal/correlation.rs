@@ -47,10 +47,22 @@ pub fn normalized_cross_correlation(x: &[Q15], y: &[Q15], lag: usize) -> Q15 {
 /// Compute decimated correlation for efficient pitch search
 pub fn decimated_correlation(signal: &[Q15], lag: usize, decimation: usize) -> Q31 {
     let len = signal.len().saturating_sub(lag);
-    let mut sum = Q31::ZERO;
     
-    // Only use samples at decimation intervals
+    if decimation == 1 {
+        // No decimation - standard correlation
+        let mut sum = Q31::ZERO;
+        for i in 0..len {
+            let prod = signal[i].to_q31().saturating_mul(signal[i + lag].to_q31());
+            sum = sum.saturating_add(prod);
+        }
+        return sum;
+    }
+    
+    // For G.729A, decimation by 2 uses every other sample
+    // This is the simplified approach used in the standard
+    let mut sum = Q31::ZERO;
     let mut i = 0;
+    
     while i < len {
         let prod = signal[i].to_q31().saturating_mul(signal[i + lag].to_q31());
         sum = sum.saturating_add(prod);
