@@ -1,14 +1,12 @@
 //! G.722 State Management
 //!
 //! This module defines the state structures used by the G.722 codec.
-//! Based on the ITU-T G.722 reference implementation.
 //! Updated to match ITU-T G.722 Annex E (Release 3.00, 2014-11) exactly.
 
 /// ADPCM state for a single sub-band (low or high)
 /// 
 /// This structure contains all the state variables needed for ADPCM 
 /// encoding and decoding in one sub-band.
-/// Updated to match ITU-T reference implementation g722_state structure.
 #[derive(Debug, Clone)]
 pub struct AdpcmState {
     /// Predictor coefficients (poles): a[0] unused, a[1] = a1, a[2] = a2
@@ -131,7 +129,6 @@ impl Default for AdpcmState {
 /// This structure contains all the state variables needed for G.722 
 /// encoding and decoding, including ADPCM states for both sub-bands
 /// and QMF filter delay lines.
-/// Updated to match ITU-T reference implementation g722_state structure.
 #[derive(Debug, Clone)]
 pub struct G722State {
     /// Low-band ADPCM state

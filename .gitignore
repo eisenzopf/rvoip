@@ -13,7 +13,7 @@ Cargo.lock
 publish_order.sh
 bump_version.sh
 Cargo.toml.backup
-T-REC*
+test_vectors/
 
 ## Editor
 *.swp

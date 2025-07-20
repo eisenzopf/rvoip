@@ -1,7 +1,6 @@
 //! QMF (Quadrature Mirror Filter) Implementation
 //!
 //! This module implements the QMF analysis and synthesis filters for G.722.
-//! Updated to use exact ITU-T reference implementation functions.
 
 use crate::codecs::g722::reference::*;
 use crate::codecs::g722::tables::*;
@@ -9,8 +8,6 @@ use crate::codecs::g722::state::G722State;
 
 /// QMF filter coefficients for both transmission and reception
 /// 
-/// Exact values from ITU-T G.722 reference implementation g722_tables.c
-/// Original: coef_qmf[24] = {3*2, -11*2, -11*2, 53*2, 12*2, -156*2, ...}
 const COEF_QMF: [i16; 24] = [
     6, -22, -22, 106, 24, -312,
     64, 724, -420, -1610, 1902, 7752,
@@ -19,8 +16,6 @@ const COEF_QMF: [i16; 24] = [
 ];
 
 /// ITU-T qmf_tx_buf function - QMF analysis (encoder) filter
-/// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 /// 
 /// # Arguments
 /// * `xin0` - First input sample
@@ -69,8 +64,6 @@ pub fn qmf_tx_buf(xin0: i16, xin1: i16, xl: &mut i16, xh: &mut i16, state: &mut 
 }
 
 /// ITU-T qmf_rx_buf function - QMF synthesis (decoder) filter
-/// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 /// 
 /// # Arguments
 /// * `rl` - Low-band input sample
@@ -154,7 +147,6 @@ mod tests {
 
     #[test]
     fn test_qmf_coefficients() {
-        // Test that coefficients match ITU-T reference
         assert_eq!(COEF_QMF.len(), 24);
         assert_eq!(COEF_QMF[0], 6);    // 3*2
         assert_eq!(COEF_QMF[1], -22);  // -11*2

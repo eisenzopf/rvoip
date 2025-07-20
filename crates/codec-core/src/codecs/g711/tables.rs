@@ -1,8 +1,7 @@
 //! G.711 Lookup Tables
 //!
 //! This module contains pre-computed lookup tables for G.711 μ-law and A-law
-//! encoding and decoding. The tables are generated using the ITU-T reference
-//! algorithms to ensure bit-exact compatibility.
+//! encoding and decoding.
 //!
 //! ## Performance
 //!
@@ -39,7 +38,6 @@ static MULAW_ENCODE_TABLE: LazyLock<[u8; 65536]> = LazyLock::new(|| {
 /// Pre-computed μ-law decoding table (8-bit μ-law → 16-bit linear)
 ///
 /// This table covers all possible 8-bit μ-law encoded values (0 to 255).
-/// Generated using the ITU-T reference implementation.
 static MULAW_DECODE_TABLE: LazyLock<[i16; 256]> = LazyLock::new(|| {
     let mut table = [0i16; 256];
     
@@ -54,7 +52,6 @@ static MULAW_DECODE_TABLE: LazyLock<[i16; 256]> = LazyLock::new(|| {
 /// Pre-computed A-law encoding table (16-bit linear → 8-bit A-law)
 ///
 /// This table covers the full 16-bit signed input range (-32768 to 32767).
-/// Generated using the ITU-T reference implementation.
 static ALAW_ENCODE_TABLE: LazyLock<[u8; 65536]> = LazyLock::new(|| {
     let mut table = [0u8; 65536];
     
@@ -70,7 +67,6 @@ static ALAW_ENCODE_TABLE: LazyLock<[u8; 65536]> = LazyLock::new(|| {
 /// Pre-computed A-law decoding table (8-bit A-law → 16-bit linear)
 ///
 /// This table covers all possible 8-bit A-law encoded values (0 to 255).
-/// Generated using the ITU-T reference implementation.
 static ALAW_DECODE_TABLE: LazyLock<[i16; 256]> = LazyLock::new(|| {
     let mut table = [0i16; 256];
     

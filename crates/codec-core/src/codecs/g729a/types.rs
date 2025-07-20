@@ -1,315 +1,286 @@
-//! ITU-T G.729A Types and Constants
-//!
-//! This module defines the types and constants used in the G.729A implementation,
-//! directly based on the ITU reference code LD8A.H and typedef.h
+//! Core types and structures for G.729A codec
 
-/// 16-bit signed integer (ITU Word16)
-pub type Word16 = i16;
+use crate::codecs::g729a::constants::*;
+use std::ops::{Add, Sub, Mul, Div, Neg};
 
-/// 32-bit signed integer (ITU Word32)  
-pub type Word32 = i32;
-
-/// Flag type (ITU Flag)
-pub type Flag = i32;
-
-/// Unsigned 16-bit integer
-pub type UWord16 = u16;
-
-/// Unsigned 32-bit integer
-pub type UWord32 = u32;
-
-// G.729A Constants from LD8A.H
-
-/// Total size of speech buffer
-pub const L_TOTAL: usize = 240;
-
-/// Window size in LP analysis
-pub const L_WINDOW: usize = 240;
-
-/// Lookahead in LP analysis
-pub const L_NEXT: usize = 40;
-
-/// Frame size (10ms at 8kHz)
-pub const L_FRAME: usize = 80;
-
-/// Subframe size (5ms at 8kHz)
-pub const L_SUBFR: usize = 40;
-
-/// Order of LP filter
-pub const M: usize = 10;
-
-/// Order of LP filter + 1
-pub const MP1: usize = M + 1;
-
-/// Minimum pitch lag
-pub const PIT_MIN: usize = 20;
-
-/// Maximum pitch lag  
-pub const PIT_MAX: usize = 143;
-
-/// Length of filter for interpolation
-pub const L_INTERPOL: usize = 11;
-
-/// Bandwidth factor = 0.75 in Q15
-pub const GAMMA1: Word16 = 24576;
-
-/// Size of vector of analysis parameters
-pub const PRM_SIZE: usize = 11;
-
-/// BFI + number of speech bits
-pub const SERIAL_SIZE: usize = 82;
-
-/// Maximum value of pitch sharpening (0.8 in Q14)
-pub const SHARPMAX: Word16 = 13017;
-
-/// Minimum value of pitch sharpening (0.2 in Q14)
-pub const SHARPMIN: Word16 = 3277;
-
-/// Maximum pitch gain if taming is needed (Q14)
-pub const GPCLIP: Word16 = 15564;
-
-/// Maximum pitch gain if taming is needed (Q9)
-pub const GPCLIP2: Word16 = 481;
-
-/// Maximum pitch gain if taming is needed
-pub const GP0999: Word16 = 16383;
-
-/// Error threshold taming 16384. * 60000.
-pub const L_THRESH_ERR: Word32 = 983040000;
-
-// Additional G.729A specific constants
-
-/// Number of subframes per frame
-pub const N_SUBFR: usize = 2;
-
-/// Size of fixed codebook in bits
-pub const ACELP_BITS: usize = 17;
-
-/// Size of gain codebook in bits  
-pub const GAIN_BITS: usize = 7;
-
-/// Size of LSP codebook in bits (stage 1)
-pub const LSP_BITS_1: usize = 7;
-
-/// Size of LSP codebook in bits (stage 2)  
-pub const LSP_BITS_2: usize = 6;
-
-/// Total bits per frame
-pub const TOTAL_BITS: usize = 80;
-
-// LSP processing constants already defined earlier
-
-// Q-format constants
-
-/// Q0 format (integer)
-pub const Q0: i32 = 0;
-
-/// Q12 format (12 fractional bits)
-pub const Q12: i32 = 12;
-
-/// Q13 format (13 fractional bits)
-pub const Q13: i32 = 13;
-
-/// Q14 format (14 fractional bits)
-pub const Q14: i32 = 14;
-
-/// Q15 format (15 fractional bits)
-pub const Q15: i32 = 15;
-
-/// Q31 format (31 fractional bits)
-pub const Q31: i32 = 31;
-
-// Mathematical constants in fixed point
-
-/// Maximum 16-bit value
-pub const MAX_16: Word16 = 0x7fff;
-
-/// Minimum 16-bit value
-pub const MIN_16: Word16 = -32768;
-
-/// Maximum 32-bit value
-pub const MAX_32: Word32 = 0x7fffffff;
-
-/// Minimum 32-bit value
-pub const MIN_32: Word32 = -2147483648;
-
-/// Encoder state structure
-#[derive(Debug, Clone)]
-pub struct G729AEncoderState {
-    /// Old speech buffer
-    pub old_speech: [Word16; L_TOTAL],
-    /// Old weighted speech buffer  
-    pub old_wsp: [Word16; L_FRAME + PIT_MAX],
-    /// Old excitation buffer
-    pub old_exc: [Word16; L_FRAME + PIT_MAX + L_INTERPOL],
-    /// Old LSP values
-    pub lsp_old: [Word16; M],
-    /// Old quantized LSP values
-    pub lsp_old_q: [Word16; M],
-    /// Synthesis filter memory
-    pub mem_syn: [Word16; M],
-    /// Weighting filter memory
-    pub mem_w0: [Word16; M],
-    /// Weighting filter memory
-    pub mem_w: [Word16; M],
-    /// Error filter memory
-    pub mem_err: [Word16; M + L_SUBFR],
-    /// Pitch sharpening factor
-    pub sharp: Word16,
+/// Frame of audio samples
+#[derive(Debug, Clone, Copy)]
+pub struct AudioFrame {
+    pub samples: [i16; FRAME_SIZE],
+    pub timestamp: u64,
 }
 
-/// Decoder state structure
-#[derive(Debug, Clone)]
-pub struct G729ADecoderState {
-    /// Old excitation buffer
-    pub old_exc: [Word16; L_FRAME + PIT_MAX + L_INTERPOL],
-    /// Old LSP values
-    pub lsp_old: [Word16; M],
-    /// Synthesis filter memory
-    pub mem_syn: [Word16; M],
-    /// Pitch sharpening factor
-    pub sharp: Word16,
-    /// Previous integer pitch lag
-    pub old_t0: Word16,
-    /// Previous pitch gain
-    pub gain_pitch: Word16,
-    /// Previous code gain
-    pub gain_code: Word16,
-    /// Bad LSF indicator
-    pub bad_lsf: Word16,
-}
-
-/// Analysis parameters structure
-#[derive(Debug, Clone)]
-pub struct AnalysisParams {
-    /// LPC coefficients for 2 subframes
-    pub a_t: [Word16; MP1 * 2],
-    /// LSP quantization indices
-    pub lsp_indices: [Word16; 2],
-    /// Pitch parameters for 2 subframes
-    pub pitch_params: [PitchParams; 2],
-    /// Fixed codebook parameters for 2 subframes
-    pub fixed_cb_params: [FixedCbParams; 2],
-    /// Gain parameters for 2 subframes
-    pub gain_params: [GainParams; 2],
-}
-
-/// Pitch parameters for one subframe
-#[derive(Debug, Clone)]
-pub struct PitchParams {
-    /// Pitch lag
-    pub lag: Word16,
-    /// Fractional pitch lag
-    pub frac: Word16,
-    /// Pitch gain index
-    pub gain_index: Word16,
-}
-
-/// Fixed codebook parameters for one subframe
-#[derive(Debug, Clone)]
-pub struct FixedCbParams {
-    /// Fixed codebook index
-    pub index: Word32,
-    /// Fixed codebook gain index
-    pub gain_index: Word16,
-}
-
-/// Gain parameters for one subframe
-#[derive(Debug, Clone)]
-pub struct GainParams {
-    /// Pitch gain
-    pub pitch_gain: Word16,
-    /// Code gain
-    pub code_gain: Word16,
-    /// Combined gain index
-    pub gain_index: Word16,
-}
-
-impl Default for G729AEncoderState {
-    fn default() -> Self {
-        Self {
-            old_speech: [0; L_TOTAL],
-            old_wsp: [0; L_FRAME + PIT_MAX],
-            old_exc: [0; L_FRAME + PIT_MAX + L_INTERPOL],
-            // Default LSP values (30000, 26000, 21000, 15000, 8000, 0, -8000, -15000, -21000, -26000)
-            lsp_old: [30000, 26000, 21000, 15000, 8000, 0, -8000, -15000, -21000, -26000],
-            lsp_old_q: [0; M],
-            mem_syn: [0; M],
-            mem_w0: [0; M],
-            mem_w: [0; M],
-            mem_err: [0; M + L_SUBFR],
-            sharp: SHARPMIN,
+impl AudioFrame {
+    /// Create a new audio frame from PCM samples
+    pub fn from_pcm(samples: &[i16]) -> Result<Self, CodecError> {
+        if samples.len() != FRAME_SIZE {
+            return Err(CodecError::InvalidFrameSize {
+                expected: FRAME_SIZE,
+                actual: samples.len(),
+            });
         }
+        
+        let mut frame_samples = [0i16; FRAME_SIZE];
+        frame_samples.copy_from_slice(samples);
+        
+        Ok(Self {
+            samples: frame_samples,
+            timestamp: 0,
+        })
     }
 }
 
-impl Default for G729ADecoderState {
-    fn default() -> Self {
-        Self {
-            old_exc: [0; L_FRAME + PIT_MAX + L_INTERPOL],
-            // Default LSP values
-            lsp_old: [30000, 26000, 21000, 15000, 8000, 0, -8000, -15000, -21000, -26000],
-            mem_syn: [0; M],
-            sharp: SHARPMIN,
-            old_t0: 60,
-            gain_pitch: 0,
-            gain_code: 0,
-            bad_lsf: 0,
-        }
+/// Subframe of audio samples
+#[derive(Debug, Clone, Copy)]
+pub struct SubFrame {
+    pub samples: [i16; SUBFRAME_SIZE],
+}
+
+/// Q15 fixed-point type (0.15 format)
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Q15(pub i16);
+
+impl Q15 {
+    pub const ZERO: Q15 = Q15(0);
+    pub const ONE: Q15 = Q15(Q15_ONE);
+    pub const HALF: Q15 = Q15(Q15_HALF);
+    
+    /// Create from floating point value
+    pub fn from_f32(val: f32) -> Self {
+        let clamped = val.clamp(-1.0, 0.999969);
+        Q15((clamped * Q15_ONE as f32) as i16)
+    }
+    
+    /// Convert to floating point
+    pub fn to_f32(self) -> f32 {
+        self.0 as f32 / Q15_ONE as f32
+    }
+    
+    /// Saturating multiplication
+    pub fn saturating_mul(self, other: Q15) -> Q15 {
+        let result = ((self.0 as i32 * other.0 as i32) >> 15) as i16;
+        Q15(result)
+    }
+    
+    /// Saturating addition
+    pub fn saturating_add(self, other: Q15) -> Q15 {
+        Q15(self.0.saturating_add(other.0))
+    }
+}
+
+/// Q14 fixed-point type (2.14 format)
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Q14(pub i16);
+
+impl Q14 {
+    /// Zero value
+    pub const ZERO: Q14 = Q14(0);
+    /// One value in Q14 format
+    pub const ONE: Q14 = Q14(16384);
+    
+    /// Convert to Q15
+    pub fn to_q15(self) -> Q15 {
+        Q15((self.0 as i32 * 2) as i16)
+    }
+    
+    /// Convert to Q31
+    pub fn to_q31(self) -> Q31 {
+        Q31((self.0 as i32) << 17)
+    }
+}
+
+/// Q31 fixed-point type (0.31 format)
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Q31(pub i32);
+
+impl Q31 {
+    pub const ZERO: Q31 = Q31(0);
+    pub const ONE: Q31 = Q31(i32::MAX);
+    
+    /// Create from floating point value
+    pub fn from_f32(val: f32) -> Self {
+        let clamped = val.clamp(-1.0, 0.9999999995);
+        Q31((clamped * i32::MAX as f32) as i32)
+    }
+    
+    /// Convert to floating point
+    pub fn to_f32(self) -> f32 {
+        self.0 as f32 / i32::MAX as f32
+    }
+    
+    /// Convert to Q15
+    pub fn to_q15(self) -> Q15 {
+        Q15((self.0 >> 16) as i16)
+    }
+    
+    /// Saturating addition
+    pub fn saturating_add(self, other: Q31) -> Q31 {
+        Q31(self.0.saturating_add(other.0))
+    }
+}
+
+/// Linear prediction coefficients
+#[derive(Debug, Clone)]
+pub struct LPCoefficients {
+    pub values: [Q15; LP_ORDER],
+    pub reflection_coeffs: [Q15; LP_ORDER],
+}
+
+/// Line Spectral Pair parameters
+#[derive(Debug, Clone)]
+pub struct LSPParameters {
+    pub frequencies: [Q15; LP_ORDER],
+}
+
+/// Quantized LSP parameters
+#[derive(Debug, Clone)]
+pub struct QuantizedLSP {
+    pub indices: [u8; 4],
+    pub reconstructed: LSPParameters,
+}
+
+/// Quantized gains
+#[derive(Debug, Clone, Copy)]
+pub struct QuantizedGains {
+    pub adaptive_gain: Q15,
+    pub fixed_gain: Q15,
+    pub gain_indices: [u8; 2],
+}
+
+/// Spectral parameters for a frame
+#[derive(Debug, Clone)]
+pub struct SpectralParameters {
+    pub lsp_coefficients: [Q15; LP_ORDER],
+    pub quantized_indices: [u8; 4],
+}
+
+/// Excitation parameters for a subframe
+#[derive(Debug, Clone)]
+pub struct ExcitationParameters {
+    pub pitch_delay: f32,
+    pub pitch_gain: Q15,
+    pub codebook_index: u32,
+    pub codebook_gain: Q15,
+}
+
+/// Encoded frame (80 bits packed)
+#[derive(Debug, Clone, Copy)]
+pub struct EncodedFrame {
+    pub lsp_indices: [u8; 4],
+    pub pitch_delay_int: [u8; 2],
+    pub pitch_delay_frac: [u8; 2],
+    pub fixed_codebook_idx: [u32; 2],
+    pub gain_indices: [[u8; 2]; 2],
+}
+
+/// Decoded parameters from bitstream
+#[derive(Debug, Clone)]
+pub struct DecodedParameters {
+    pub lsp_indices: [u8; 4],
+    pub pitch_delays: [f32; 2],
+    pub fixed_codebook_indices: [u32; 2],
+    pub gain_indices: [[u8; 2]; 2],
+}
+
+/// Parameters for a single subframe
+#[derive(Debug, Clone)]
+pub struct SubframeParameters {
+    pub pitch_delay: f32,
+    pub pitch_index: u8,
+    pub codebook_index: u32,
+    pub gain_indices: [u8; 2],
+}
+
+/// Codec error types
+#[derive(Debug, thiserror::Error)]
+pub enum CodecError {
+    #[error("Invalid frame size: expected {expected}, got {actual}")]
+    InvalidFrameSize { expected: usize, actual: usize },
+    
+    #[error("Invalid sample rate: {0} Hz (expected 8000 Hz)")]
+    InvalidSampleRate(u32),
+    
+    #[error("Bitstream corruption detected")]
+    BitstreamCorruption,
+    
+    #[error("Overflow in fixed-point arithmetic")]
+    ArithmeticOverflow,
+    
+    #[error("Invalid codec state")]
+    InvalidState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_q15_conversions() {
+        // Test zero
+        assert_eq!(Q15::from_f32(0.0).to_f32(), 0.0);
+        
+        // Test one (almost)
+        let one = Q15::from_f32(0.999);
+        assert!((one.to_f32() - 0.999).abs() < 0.001);
+        
+        // Test negative one
+        let neg_one = Q15::from_f32(-1.0);
+        assert_eq!(neg_one.to_f32(), -1.0);
+        
+        // Test clamping
+        assert_eq!(Q15::from_f32(2.0).to_f32(), Q15::from_f32(0.999969).to_f32());
+        assert_eq!(Q15::from_f32(-2.0).to_f32(), -1.0);
+    }
+
+    #[test]
+    fn test_q15_arithmetic() {
+        let half = Q15::HALF;
+        let quarter = Q15::from_f32(0.25);
+        
+        // Test multiplication: 0.5 * 0.5 = 0.25
+        let result = half.saturating_mul(half);
+        assert!((result.to_f32() - 0.25).abs() < 0.001);
+        
+        // Test addition: 0.25 + 0.25 = 0.5
+        let result = quarter.saturating_add(quarter);
+        assert!((result.to_f32() - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_q31_conversions() {
+        // Test conversions
+        assert_eq!(Q31::from_f32(0.0).to_f32(), 0.0);
+        
+        let half = Q31::from_f32(0.5);
+        assert!((half.to_f32() - 0.5).abs() < 0.0001);
+        
+        // Test Q31 to Q15 conversion
+        let q15_half = half.to_q15();
+        assert!((q15_half.to_f32() - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_audio_frame_creation() {
+        let samples = vec![100i16; FRAME_SIZE];
+        let frame = AudioFrame::from_pcm(&samples).unwrap();
+        assert_eq!(frame.samples.len(), FRAME_SIZE);
+        assert_eq!(frame.samples[0], 100);
+        
+        // Test invalid size
+        let bad_samples = vec![0i16; FRAME_SIZE - 1];
+        assert!(AudioFrame::from_pcm(&bad_samples).is_err());
+    }
+
+    #[test]
+    fn test_encoded_frame_size() {
+        let frame = EncodedFrame {
+            lsp_indices: [0; 4],
+            pitch_delay_int: [0; 2],
+            pitch_delay_frac: [0; 2],
+            fixed_codebook_idx: [0; 2],
+            gain_indices: [[0; 2]; 2],
+        };
+        // EncodedFrame represents 80 bits of data
+        assert_eq!(ENCODED_FRAME_SIZE * 8, 80); // 80 bits total
     }
 } 
-
-// Additional constants for LSP processing
-/// NC = M/2 for LSP polynomial processing
-pub const NC: usize = 5;
-
-/// Grid points for LSP root finding 
-pub const GRID_POINTS: usize = 50;
-
-/// LSP search grid for Chebyshev polynomial evaluation (Q15)
-pub const LSP_GRID: [Word16; GRID_POINTS + 1] = [
-    32760, 32703, 32509, 32187, 31738, 31164, 30466, 29649, 28714, 27666,
-    26509, 25248, 23886, 22431, 20887, 19260, 17557, 15786, 13951, 12062,
-    10125,  8149,  6140,  4106,  2057,     0, -2057, -4106, -6140, -8149,
-   -10125,-12062,-13951,-15786,-17557,-19260,-20887,-22431,-23886,-25248,
-   -26509,-27666,-28714,-29649,-30466,-31164,-31738,-32187,-32509,-32703,
-   -32760
-];
-
-// LSP quantization constants (from ITU G.729A LD8A.H)
-/// LSP VQ first stage dimension
-pub const NC0: usize = 256;
-
-/// LSP VQ first stage number of bits  
-pub const NC0_B: usize = 8;
-
-/// LSP VQ second stage dimension
-pub const NC1: usize = 256;
-
-/// LSP VQ second stage number of bits
-pub const NC1_B: usize = 8;
-
-/// LSP MA prediction order
-pub const MA_NP: usize = 4;
-
-/// LSP VQ modes
-pub const MODE: usize = 2;
-
-/// LSP to LSF conversion constant  
-pub const LSP_PRED_FAC_1: Word16 = 0x5000; // 0.625 in Q15
-/// LSP to LSF conversion constant
-pub const LSP_PRED_FAC_2: Word16 = 0x1999; // 0.2 in Q15
-
-/// LSP quantization limits and gaps (ITU-T G.729A constants)
-/// Minimum LSP value (Q13: 0.005)
-pub const L_LIMIT: Word16 = 40;  
-/// Maximum LSP value (Q13: 3.135) 
-pub const M_LIMIT: Word16 = 25681;
-/// LSP expansion gap 1 (Q13)
-pub const GAP1: Word16 = 10;     
-/// LSP expansion gap 2 (Q13)
-pub const GAP2: Word16 = 5;      
-/// LSP expansion gap 3 (Q13)
-pub const GAP3: Word16 = 321;    
-
-// Note: MAX_16, MIN_16, MAX_32, MIN_32 constants already defined above 

@@ -1,26 +1,15 @@
 //! ITU-T G.722 Reference Tables
-//!
-//! This module contains the exact tables from the ITU-T G.722 reference implementation.
-//! All tables are bit-exact copies from the ITU-T reference source funcg722.c.
-
 /// ITU-T WLI table for low-band logarithmic scale factor adaptation
-/// 
-/// From ITU-T G.722 reference funcg722.c (logscl function)
 pub const WLI: [i16; 8] = [
     -60, -30, 58, 172, 334, 538, 1198, 3042
 ];
 
 /// ITU-T WHI table for high-band logarithmic scale factor adaptation
-/// 
-/// From ITU-T G.722 reference funcg722.c (logsch function)
 pub const WHI: [i16; 4] = [
     14, 14, 135, 135
 ];
 
 /// ITU-T ILA table for inverse logarithmic scale factor
-/// 
-/// From ITU-T G.722 reference funcg722.c - static Word16 ila[353]
-/// This is the exact 353-entry table used by scalel() and scaleh() functions
 pub const ILA2: [i16; 353] = [
     1, 1, 1, 1, 1, 1, 1, 1,
     1, 1, 1, 1, 1, 1, 1, 1,
@@ -70,9 +59,6 @@ pub const ILA2: [i16; 353] = [
 ];
 
 /// ITU-T MISIL table for low-band quantization
-/// 
-/// From ITU-T G.722 reference funcg722.c (quantl function)
-/// Table to read IL from SIL and MIL: misil(sil(0,1),mil(1,31))
 pub const MISIL: [[i16; 32]; 2] = [
     [0x0000, 0x003F, 0x003E, 0x001F, 0x001E, 0x001D, 0x001C, 0x001B,
      0x001A, 0x0019, 0x0018, 0x0017, 0x0016, 0x0015, 0x0014, 0x0013,
@@ -85,8 +71,6 @@ pub const MISIL: [[i16; 32]; 2] = [
 ];
 
 /// ITU-T Q6 table for 6-level quantizer level decision
-/// 
-/// From ITU-T G.722 reference funcg722.c (quantl function)
 pub const Q6: [i16; 31] = [
     0, 35, 72, 110, 150, 190, 233, 276,
     323, 370, 422, 473, 530, 587, 650, 714,
@@ -95,8 +79,6 @@ pub const Q6: [i16; 31] = [
 ];
 
 /// ITU-T MISIH table for high-band quantization
-/// 
-/// From ITU-T G.722 reference funcg722.c (quanth function)
 /// Corrected: Fixed based on empirical test vector analysis
 pub const MISIH: [[i16; 3]; 2] = [
     [0, 1, 2],    // sih_index=0 (positive): [unused, low_mag, high_mag]
@@ -104,66 +86,48 @@ pub const MISIH: [[i16; 3]; 2] = [
 ];
 
 /// ITU-T Q2 constant for high-band quantization
-/// 
-/// From ITU-T G.722 reference funcg722.c (quanth function)
 pub const Q2: i16 = 564;
 
 /// ITU-T RIL4 table for 4-bit inverse quantization
-/// 
-/// From ITU-T G.722 reference funcg722.c (invqal and invqbl functions)
 pub const RIL4: [i16; 16] = [
     0, 7, 6, 5, 4, 3, 2, 1, 7, 6, 5, 4, 3, 2, 1, 0
 ];
 
 /// ITU-T RISIL table for 4-bit inverse quantization sign
-/// 
-/// From ITU-T G.722 reference funcg722.c (invqal function)
 pub const RISIL: [i16; 16] = [
     0, -1, -1, -1, -1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0
 ];
 
 /// ITU-T RISI4 table for 4-bit inverse quantization sign
-/// 
-/// From ITU-T G.722 reference funcg722.c (invqbl function)
 pub const RISI4: [i16; 16] = [
     0, -1, -1, -1, -1, -1, -1, -1, 
     0, 0, 0, 0, 0, 0, 0, 0
 ];
 
 /// ITU-T OQ4 table for 4-bit inverse quantization output
-/// 
-/// From ITU-T G.722 reference funcg722.c (invqal and invqbl functions)
 pub const OQ4: [i16; 8] = [
     0, 150, 323, 530, 786, 1121, 1612, 2557
 ];
 
 /// ITU-T RIL5 table for 5-bit inverse quantization
-/// 
-/// From ITU-T G.722 reference funcg722.c (invqbl function)
 pub const RIL5: [i16; 32] = [
     1, 1, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2,
     15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 1
 ];
 
 /// ITU-T RISI5 table for 5-bit inverse quantization sign
-/// 
-/// From ITU-T G.722 reference funcg722.c (invqbl function)
 pub const RISI5: [i16; 32] = [
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1
 ];
 
 /// ITU-T OQ5 table for 5-bit inverse quantization output
-/// 
-/// From ITU-T G.722 reference funcg722.c (invqbl function)
 pub const OQ5: [i16; 16] = [
     0, 35, 110, 190, 276, 370, 473, 587,
     714, 858, 1023, 1219, 1458, 1765, 2195, 2919
 ];
 
 /// ITU-T RIL6 table for 6-bit inverse quantization
-/// 
-/// From ITU-T G.722 reference funcg722.c (invqbl function)
 pub const RIL6: [i16; 64] = [
     1, 1, 1, 1, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20,
     19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3,
@@ -172,8 +136,6 @@ pub const RIL6: [i16; 64] = [
 ];
 
 /// ITU-T RISI6 table for 6-bit inverse quantization sign
-/// 
-/// From ITU-T G.722 reference funcg722.c (invqbl function)
 pub const RISI6: [i16; 64] = [
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -182,8 +144,6 @@ pub const RISI6: [i16; 64] = [
 ];
 
 /// ITU-T OQ6 table for 6-bit inverse quantization output
-/// 
-/// From ITU-T G.722 reference funcg722.c (invqbl function)
 pub const OQ6: [i16; 31] = [
     0, 17, 54, 91, 130, 170, 211, 254, 300, 347, 396, 447, 501,
     558, 618, 682, 750, 822, 899, 982, 1072, 1170, 1279, 1399,
