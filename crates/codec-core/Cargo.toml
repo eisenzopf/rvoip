@@ -16,6 +16,21 @@ name = "g729a_compliance"
 path = "src/codecs/g729a/run_compliance_tests.rs"
 required-features = []
 
+[[bin]]
+name = "g729a_bit_inspector"
+path = "src/bin/g729a_bit_inspector.rs"
+required-features = []
+
+[[bin]]
+name = "g729a_bitstream_analyzer"
+path = "src/bin/g729a_bitstream_analyzer.rs"
+required-features = []
+
+[[bin]]
+name = "g729a_param_inspector"
+path = "src/bin/g729a_param_inspector.rs"
+required-features = []
+
 [lints]
 workspace = true
 

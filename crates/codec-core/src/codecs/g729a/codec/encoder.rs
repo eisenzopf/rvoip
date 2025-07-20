@@ -2,7 +2,7 @@
 
 use crate::codecs::g729a::constants::*;
 use crate::codecs::g729a::types::{AudioFrame, EncodedFrame, Q15, Q31, CodecError, LSPParameters, LPCoefficients};
-use crate::codecs::g729a::signal::{SignalPreprocessor, HammingWindow};
+use crate::codecs::g729a::signal::{Preprocessor, HammingWindow};
 use crate::codecs::g729a::spectral::{
     LinearPredictor, LSPConverter, LSPQuantizer, LSPInterpolator
 };
@@ -12,12 +12,12 @@ use crate::codecs::g729a::excitation::{
 };
 use crate::codecs::g729a::synthesis::SynthesisFilter;
 use crate::codecs::g729a::codec::bitstream::pack_frame;
-use crate::codecs::g729a::math::FixedPointOps;
+use crate::codecs::g729a::math::{FixedPointOps, dot_product, energy};
 
 /// G.729A encoder state
 pub struct G729AEncoder {
     // Signal processing
-    preprocessor: SignalPreprocessor,
+    preprocessor: Preprocessor,
     window: HammingWindow,
     
     // Spectral analysis
@@ -46,8 +46,13 @@ pub struct G729AEncoder {
 impl G729AEncoder {
     /// Create a new G.729A encoder
     pub fn new() -> Self {
+        // Initialize previous LSP with ITU-T specified values
+        let initial_lsp = LSPParameters {
+            frequencies: INITIAL_LSP_Q15.map(Q15),
+        };
+        
         Self {
-            preprocessor: SignalPreprocessor::new(),
+            preprocessor: Preprocessor::new(),
             window: HammingWindow::new_asymmetric(),
             lp_analyzer: LinearPredictor::new(),
             lsp_converter: LSPConverter::new(),
@@ -58,7 +63,7 @@ impl G729AEncoder {
             algebraic_codebook: AlgebraicCodebook::new(),
             gain_quantizer: GainQuantizer::new(),
             synthesis_filter: SynthesisFilter::new(),
-            prev_lsp: None,
+            prev_lsp: Some(initial_lsp),
             lookahead_buffer: vec![Q15::ZERO; LOOK_AHEAD],
             history_buffer: vec![Q15::ZERO; 120],
         }
@@ -76,28 +81,25 @@ impl G729AEncoder {
         
         // Preprocess current frame and add to buffer
         let processed_frame = self.preprocessor.process(&current_frame.samples);
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("Raw input frame [0..10]: {:?}", 
+                &current_frame.samples[..10]);
+            eprintln!("Preprocessed frame [0..10]: {:?}", 
+                &processed_frame[..10].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         analysis_buffer[120..200].copy_from_slice(&processed_frame);
         
         // Preprocess look-ahead from next frame
         if next_frame_preview.len() >= LOOK_AHEAD {
-            // Create AudioFrame for lookahead
-            let mut lookahead_samples = [0i16; FRAME_SIZE];
-            lookahead_samples[..LOOK_AHEAD].copy_from_slice(&next_frame_preview[..LOOK_AHEAD]);
-            let lookahead_frame = AudioFrame {
-                samples: lookahead_samples,
-                timestamp: 0,
-            };
-            let lookahead_processed = self.preprocessor.process_frame(&lookahead_frame);
-            
-            // Extract only the lookahead portion
-            let lookahead_q15: Vec<Q15> = lookahead_processed.samples[..LOOK_AHEAD]
-                .iter()
-                .map(|&s| Q15(s))
-                .collect();
-            analysis_buffer[200..240].copy_from_slice(&lookahead_q15);
+            // Process lookahead samples directly
+            let lookahead_processed = self.preprocessor.process(&next_frame_preview[..LOOK_AHEAD]);
+            analysis_buffer[200..240].copy_from_slice(&lookahead_processed);
             
             // Store for next frame
-            self.lookahead_buffer = lookahead_q15;
+            self.lookahead_buffer = lookahead_processed;
         } else {
             // Use zeros if not enough look-ahead available
             analysis_buffer[200..240].fill(Q15::ZERO);
@@ -107,16 +109,58 @@ impl G729AEncoder {
         self.history_buffer.clear();
         self.history_buffer.extend_from_slice(&analysis_buffer[120..240]);
         
+        #[cfg(debug_assertions)]
+        {
+            let buffer_energy: i32 = analysis_buffer[..240].iter()
+                .map(|&x| (x.0 as i32).pow(2) >> 15)
+                .sum();
+            eprintln!("Analysis buffer energy: {}", buffer_energy);
+            eprintln!("Analysis buffer [115..125]: {:?}", 
+                &analysis_buffer[115..125].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         // 2. Perform LP analysis on windowed signal with look-ahead
         let windowed = self.window.apply(&analysis_buffer);
+        
+        #[cfg(debug_assertions)]
+        {
+            let windowed_energy: i32 = windowed[..240].iter()
+                .map(|&x| (x.0 as i32).pow(2) >> 15)
+                .sum();
+            eprintln!("Windowed signal energy: {}", windowed_energy);
+            eprintln!("First 10 windowed samples: {:?}", 
+                &windowed[..10].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         let lp_coeffs = self.lp_analyzer.analyze(&windowed);
         
         // 3. Convert to LSP and quantize
         let lsp = self.lsp_converter.lp_to_lsp(&lp_coeffs);
         let quantized_lsp = self.lsp_quantizer.quantize(&lsp);
         
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("LP coeffs: {:?}", &lp_coeffs.values[..5].iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("LSP freqs: {:?}", &lsp.frequencies[..5].iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("Quantized LSP: {:?}", &quantized_lsp.reconstructed.frequencies[..5].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
+        // Convert quantized LSP back to LP for weighted speech (G.729A requirement)
+        let quantized_lp = self.lsp_converter.lsp_to_lp(&quantized_lsp.reconstructed);
+        
         // 4. Open-loop pitch analysis
-        let weighted_speech = self.compute_weighted_speech(&analysis_buffer, &lp_coeffs);
+        let weighted_speech = self.compute_weighted_speech(&analysis_buffer, &quantized_lp);
+        
+        #[cfg(debug_assertions)]
+        {
+            let energy: i32 = weighted_speech[..80].iter()
+                .map(|&x| (x.0 as i32).pow(2) >> 15)
+                .sum();
+            eprintln!("Weighted speech energy (first 80 samples): {}", energy);
+            eprintln!("First 10 weighted samples: {:?}", 
+                &weighted_speech[..10].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         let open_loop_pitch = self.pitch_tracker.estimate_open_loop_pitch(&weighted_speech);
         
         // 5. Process subframes
@@ -191,6 +235,13 @@ impl G729AEncoder {
         let weighted_filter = self.weighting_filter.create_filter(lp_coeffs);
         let h = self.weighting_filter.compute_impulse_response(&weighted_filter);
         
+        #[cfg(debug_assertions)]
+        {
+            let h_energy: i32 = h.iter().map(|&x| (x.0 as i32).pow(2) >> 15).sum();
+            eprintln!("Impulse response h energy: {}", h_energy);
+            eprintln!("First 5 h values: {:?}", h[..5].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         // 2. Compute target signal for adaptive codebook search
         // (simplified - using weighted speech as target)
         let target = weighted_speech;
@@ -204,7 +255,7 @@ impl G729AEncoder {
         for i in 0..SUBFRAME_SIZE {
             // Convolve adaptive codebook with h
             let filtered_adaptive = self.convolve_with_h(&adaptive_contrib.vector, &h);
-            fixed_target[i] = target[i].saturating_add(Q15(-filtered_adaptive[i].0));
+            fixed_target[i] = target[i].saturating_add(Q15(filtered_adaptive[i].0.saturating_neg()));
         }
         
         // 5. Fixed codebook search
@@ -215,9 +266,39 @@ impl G729AEncoder {
         );
         
         // 6. Gain quantization
+        // Compute optimal gains for adaptive and fixed codebooks
+        let filtered_adaptive = self.convolve_with_h(&adaptive_contrib.vector, &h);
+        let filtered_fixed = self.convolve_with_h(&algebraic_contrib.vector, &h);
+        
+        // Compute correlations
+        let corr_target_adaptive = dot_product(target, &filtered_adaptive);
+        let corr_target_fixed = dot_product(target, &filtered_fixed);
+        let corr_adaptive_fixed = dot_product(&filtered_adaptive, &filtered_fixed);
+        let energy_adaptive = energy(&filtered_adaptive);
+        let energy_fixed = energy(&filtered_fixed);
+        
+        // Estimate gains (simplified - real G.729A uses more complex estimation)
+        let adaptive_gain_est = if energy_adaptive.0 > 0 {
+            let correlation_based_gain = Q15(((corr_target_adaptive.0 as i64 * (1 << 15) as i64) / energy_adaptive.0 as i64) as i16);
+            // G.729A clips negative adaptive gains to zero (like bcg729)
+            if correlation_based_gain.0 <= 0 {
+                Q15::ZERO
+            } else {
+                correlation_based_gain
+            }
+        } else {
+            Q15::ZERO
+        };
+        
+        let fixed_gain_est = if energy_fixed.0 > 0 {
+            Q15(((corr_target_fixed.0 as i64 * (1 << 15) as i64) / energy_fixed.0 as i64) as i16)
+        } else {
+            Q15::ZERO
+        };
+        
         let gains = self.gain_quantizer.quantize(
-            Q15::from_f32(0.8), // Simplified adaptive gain
-            Q15::from_f32(0.3), // Simplified fixed gain
+            adaptive_gain_est,
+            fixed_gain_est,
             &adaptive_contrib.vector,
             &algebraic_contrib.vector,
             target,
@@ -265,7 +346,7 @@ impl G729AEncoder {
     
     /// Reset encoder state
     pub fn reset(&mut self) {
-        self.preprocessor = SignalPreprocessor::new();
+        self.preprocessor = Preprocessor::new();
         self.lsp_quantizer = LSPQuantizer::new();
         self.pitch_tracker = PitchTracker::new();
         self.adaptive_codebook = AdaptiveCodebook::new();

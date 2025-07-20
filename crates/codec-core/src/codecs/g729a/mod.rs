@@ -1,20 +1,23 @@
-//! G.729A speech codec implementation
-//! 
-//! This module provides a complete implementation of the ITU-T G.729 Annex A
-//! speech codec, operating at 8 kbit/s with reduced complexity.
+//! G.729A codec implementation
 
-#![warn(missing_docs)]
+#![allow(missing_docs)]
 
-pub mod constants;
-pub mod types;
-pub mod math;
-pub mod signal;
-pub mod spectral;
-pub mod perception;
-pub mod excitation;
-pub mod synthesis;
+// Public API modules
 pub mod codec;
-pub mod tables;
+pub mod types;
+pub mod constants;
+
+// Public utilities for testing tools
+pub mod bitstream_utils;
+
+// Internal modules
+mod math;
+mod signal;
+mod spectral;
+mod perception;
+mod excitation;
+mod synthesis;
+mod tables;
 
 // Re-export main codec interfaces
 pub use codec::{G729AEncoder, G729ADecoder};

@@ -153,12 +153,12 @@ impl AlgebraicCodebook {
         existing_pulses: &[PulsePosition; 4],
     ) -> Q31 {
         let pos = position as usize;
-        let pulse_value = if sign { Q15::ONE } else { Q15(-Q15_ONE) };
+        let pulse_value = if sign { Q15::ONE } else { Q15(Q15_ONE.saturating_neg()) };
         
         // Numerator: correlation with target
         let mut numerator = backward_filtered[pos].to_q31();
         if !sign {
-            numerator = Q31(-numerator.0);
+            numerator = Q31(numerator.0.saturating_neg());
         }
         
         // Consider correlation with existing pulses
@@ -336,9 +336,9 @@ mod tests {
         
         // Check pulses are at correct positions
         assert_eq!(vector[5], Q15(Q15_ONE));
-        assert_eq!(vector[11], Q15(-Q15_ONE));
-        assert_eq!(vector[17], Q15(Q15_ONE));
-        assert_eq!(vector[23], Q15(-Q15_ONE));
+        assert_eq!(vector[11], Q15(Q15_ONE.saturating_neg()));
+        assert_eq!(vector[17], Q15::ONE);
+        assert_eq!(vector[23], Q15(Q15_ONE.saturating_neg()));
         
         // Check other positions are zero
         assert_eq!(vector[0], Q15::ZERO);

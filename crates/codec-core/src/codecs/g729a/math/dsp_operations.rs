@@ -88,7 +88,18 @@ pub fn cross_correlation(x: &[Q15], y: &[Q15], lag: usize) -> Q31 {
 
 /// Compute energy of a signal
 pub fn energy(signal: &[Q15]) -> Q31 {
-    dot_product(signal, signal)
+    let mut sum = Q31::ZERO;
+    
+    for &sample in signal {
+        // Compute sample^2 with proper Q-format scaling
+        // Q15 * Q15 = Q30, but we want Q31 result  
+        let sample_i32 = sample.0 as i32;
+        let square_q30 = sample_i32 * sample_i32; // Q15*Q15 = Q30
+        let square_q31 = Q31(square_q30 >> 1); // Convert Q30 to Q31 (divide by 2)
+        sum = sum.saturating_add(square_q31);
+    }
+    
+    sum
 }
 
 /// Normalize a vector by its energy

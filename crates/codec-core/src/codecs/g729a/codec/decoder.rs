@@ -32,6 +32,11 @@ pub struct G729ADecoder {
 impl G729ADecoder {
     /// Create a new G.729A decoder
     pub fn new() -> Self {
+        // Initialize previous LSP with ITU-T specified values
+        let initial_lsp = LSPParameters {
+            frequencies: INITIAL_LSP_Q15.map(Q15),
+        };
+        
         Self {
             lsp_decoder: LSPDecoder::new(),
             lsp_converter: LSPConverter::new(),
@@ -40,7 +45,7 @@ impl G729ADecoder {
             gain_decoder: GainQuantizer::new(),
             synthesis_filter: SynthesisFilter::new(),
             postfilter: AdaptivePostfilter::new(),
-            prev_lsp: None,
+            prev_lsp: Some(initial_lsp),
             prev_pitch: 50.0, // Default pitch
         }
     }

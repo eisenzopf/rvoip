@@ -61,6 +61,54 @@ impl FixedPointOps for Q31 {
     }
 }
 
+// Additional Q-format operations required by G.729A
+
+/// Multiply Q15 x Q15 -> Q15 with rounding
+pub fn mult_q15_round(a: Q15, b: Q15) -> Q15 {
+    let result = ((a.0 as i32 * b.0 as i32 + 0x4000) >> 15) as i16;
+    Q15(result)
+}
+
+/// Multiply 16-bit x 16-bit -> 32-bit in Q12 format
+pub fn mult16_16_q12(a: i16, b: i16) -> i32 {
+    (a as i32 * b as i32) >> 12
+}
+
+/// Multiply 16-bit x 16-bit -> 32-bit in Q13 format
+pub fn mult16_16_q13(a: i16, b: i16) -> i32 {
+    (a as i32 * b as i32) >> 13
+}
+
+/// Multiply 16-bit x 16-bit -> 32-bit in Q14 format
+pub fn mult16_16_q14(a: i16, b: i16) -> i32 {
+    (a as i32 * b as i32) >> 14
+}
+
+/// Shift right with rounding (PSHR)
+pub fn pshr(x: i32, shift: i32) -> i32 {
+    if shift > 0 {
+        let rounding = 1 << (shift - 1);
+        (x + rounding) >> shift
+    } else {
+        x << (-shift)
+    }
+}
+
+/// Saturating add for i32
+pub fn l_add(a: i32, b: i32) -> i32 {
+    a.saturating_add(b)
+}
+
+/// Saturating subtract for i32
+pub fn l_sub(a: i32, b: i32) -> i32 {
+    a.saturating_sub(b)
+}
+
+/// Saturate i32 to i16 range
+pub fn saturate(x: i32) -> i16 {
+    x.saturating_to_i16()
+}
+
 /// Compute inverse square root using Newton-Raphson method
 /// Input: Q31 value (must be positive)
 /// Output: Q15 inverse square root
@@ -309,7 +357,7 @@ pub fn pow2_g729a(exp: i16, frac: Q15) -> Q31 {
 /// Computes num/den in Q15
 pub fn div_q15(num: Q15, den: Q15) -> Q15 {
     if den.0 == 0 {
-        return if num.0 >= 0 { Q15(Q15_ONE) } else { Q15(-Q15_ONE) };
+        return if num.0 >= 0 { Q15(Q15_ONE) } else { Q15(Q15_ONE.saturating_neg()) };
     }
     
     // For small denominators, use direct division

@@ -1,5 +1,5 @@
-use rvoip_codec_core::codecs::g722::codec::G722Codec;
-use rvoip_codec_core::codecs::g722::reference::*;
+use codec_core::codecs::g722::codec::G722Codec;
+use codec_core::codecs::g722::reference::*;
 
 fn main() {
     println!("=== ITU-T G.722 Compliance Test ===\n");
@@ -140,8 +140,8 @@ fn test_mode_compliance() {
 fn test_qmf_functionality() {
     println!("5. Testing QMF Functionality...");
     
-    use rvoip_codec_core::codecs::g722::qmf;
-    use rvoip_codec_core::codecs::g722::state::G722State;
+    use codec_core::codecs::g722::qmf;
+    use codec_core::codecs::g722::state::G722State;
     
     let mut state = G722State::new();
     

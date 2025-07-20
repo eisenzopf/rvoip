@@ -1,20 +1,41 @@
 //! Constants and parameters for G.729A codec
 
-// Frame and subframe sizes
-pub const FRAME_SIZE: usize = 80;        // 10ms at 8kHz
-pub const SUBFRAME_SIZE: usize = 40;     // 5ms at 8kHz
-pub const LOOK_AHEAD: usize = 40;        // 5ms look-ahead
-pub const SAMPLE_RATE: u32 = 8000;       // 8kHz sampling rate
+// Frame parameters
+pub const SAMPLE_RATE: u32 = 8000;
+pub const FRAME_SIZE: usize = 80;       // 10ms at 8kHz
+pub const SUBFRAME_SIZE: usize = 40;    // 5ms subframes
+pub const LOOK_AHEAD: usize = 40;       // Look-ahead for pitch analysis
 
 // Linear prediction parameters
-pub const LP_ORDER: usize = 10;          // 10th order LP filter
-pub const WINDOW_SIZE: usize = 240;      // Analysis window size
-pub const L_TOTAL: usize = 240;          // Total buffer size
+pub const LP_ORDER: usize = 10;         // LP analysis order
+pub const LSP_ORDER: usize = 10;        // LSP order (same as LP)
+pub const WINDOW_SIZE: usize = 240;     // Analysis window (30ms)
+pub const L_TOTAL: usize = 240;         // Total analysis buffer size
+
+// ITU-T G.729A Initial LSP values in Q15 format
+// These are critical for proper codec initialization
+// Using MEAN_LSP values converted from Q13 to Q15 (multiply by 4)
+pub const INITIAL_LSP_Q15: [i16; 10] = [
+    3016,  // 754 * 4 = 0.0919 in Q15
+    5376,  // 1344 * 4 = 0.1640 in Q15
+    9240,  // 2310 * 4 = 0.2818 in Q15
+    13684, // 3421 * 4 = 0.4175 in Q15
+    17728, // 4432 * 4 = 0.5408 in Q15
+    21908, // 5477 * 4 = 0.6682 in Q15
+    25812, // 6453 * 4 = 0.7873 in Q15
+    29264, // 7316 * 4 = 0.8923 in Q15
+    31576, // 7894 * 4 = 0.9633 in Q15
+    32508, // 8127 * 4 = 0.9915 in Q15
+];
 
 // Pitch parameters
-pub const PIT_MIN: u16 = 20;             // Minimum pitch delay
-pub const PIT_MAX: u16 = 143;            // Maximum pitch delay
-pub const L_INTERPOL: usize = 11;        // Interpolation filter length
+pub const PITCH_MIN: usize = 20;        // 2.5ms (400 Hz)
+pub const PITCH_MAX: usize = 143;       // 17.875ms (55.8 Hz)
+pub const PITCH_FRAC: usize = 3;        // Fractional pitch resolution
+
+// Compatibility aliases for old names
+pub const PIT_MIN: u16 = PITCH_MIN as u16;
+pub const PIT_MAX: u16 = PITCH_MAX as u16;
 
 // Fixed-point constants
 pub const Q15_ONE: i16 = 32767;          // 1.0 in Q15 format
@@ -50,9 +71,9 @@ mod tests {
 
     #[test]
     fn test_pitch_range() {
-        assert!(PIT_MIN < PIT_MAX);
-        assert!(PIT_MIN >= 20); // Minimum physiological pitch period
-        assert!(PIT_MAX <= 144); // Maximum for 8kHz sampling
+        assert!(PITCH_MIN < PITCH_MAX);
+        assert!(PITCH_MIN >= 20); // Minimum physiological pitch period
+        assert!(PITCH_MAX <= 144); // Maximum for 8kHz sampling
     }
 
     #[test]

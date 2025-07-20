@@ -157,7 +157,7 @@ fn test_decoder_compliance(test_name: &str, bits_path: &Path, reference_output_p
     let mut decoded_samples = Vec::new();
     let mut frames_tested = 0;
     let mut total_mse = 0.0;
-    let mut max_mse = 0.0;
+    let mut max_mse: f64 = 0.0;
     
     // Process bitstream in 10-byte frames
     for (frame_idx, chunk) in bitstream.chunks(10).enumerate() {
@@ -165,7 +165,10 @@ fn test_decoder_compliance(test_name: &str, bits_path: &Path, reference_output_p
             break; // Skip incomplete frames
         }
         
-        let decoded = decoder.decode_frame(chunk).expect("Decoding failed");
+        let mut frame_bytes = [0u8; 10];
+        frame_bytes.copy_from_slice(chunk);
+        
+        let decoded = decoder.decode_frame(&frame_bytes).expect("Decoding failed");
         decoded_samples.extend_from_slice(&decoded.samples);
         frames_tested += 1;
         
@@ -226,7 +229,7 @@ fn test_codec_chain_compliance(test_name: &str, input_path: &Path, reference_out
     let mut decoded_samples = Vec::new();
     let mut frames_tested = 0;
     let mut total_mse = 0.0;
-    let mut max_mse = 0.0;
+    let mut max_mse: f64 = 0.0;
     
     // Process in 80-sample frames
     for (frame_idx, chunk) in input_samples.chunks(80).enumerate() {
