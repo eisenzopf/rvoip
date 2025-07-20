@@ -27,11 +27,29 @@ impl LinearPredictor {
         // 1. Compute autocorrelation
         let correlations = autocorrelation(windowed_signal, LP_ORDER + 1);
         
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("Autocorrelation debug:");
+            eprintln!("  R[0] (energy): {}", correlations[0].0);
+            eprintln!("  R[1..5]: {:?}", &correlations[1..6].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         // 2. Apply lag windowing for numerical stability
         let windowed_corr = self.lag_window.apply_to_correlation(&correlations);
         
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("After lag windowing:");
+            eprintln!("  R[0]: {}, R[1]: {}", windowed_corr[0].0, windowed_corr[1].0);
+        }
+        
         // 3. Levinson-Durbin recursion
         let (coefficients, reflection_coeffs) = self.levinson_durbin(&windowed_corr);
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("LP coefficients: {:?}", coefficients.iter().map(|x| x.0).collect::<Vec<_>>());
+        }
         
         // 4. Bandwidth expansion (done in quantization stage for G.729A)
         LPCoefficients {

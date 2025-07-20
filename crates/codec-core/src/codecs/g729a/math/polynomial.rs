@@ -106,9 +106,9 @@ pub fn form_difference_polynomial(lp_coeffs: &[Q15]) -> Vec<Q15> {
     // F2 has order M/2
     for i in 0..m/2 {
         let diff = if i == 0 {
-            Q15::ONE.saturating_add(Q15(-lp_coeffs[m - 1].0))
+            Q15::ONE.saturating_add(Q15(lp_coeffs[m - 1].0.saturating_neg()))
         } else {
-            lp_coeffs[i - 1].saturating_add(Q15(-lp_coeffs[m - i - 1].0))
+            lp_coeffs[i - 1].saturating_add(Q15(lp_coeffs[m - i - 1].0.saturating_neg()))
         };
         f2[i] = diff;
     }

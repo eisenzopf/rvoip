@@ -14,19 +14,15 @@ pub fn autocorrelation(signal: &[Q15], order: usize) -> Vec<Q31> {
         let mut sum = Q31::ZERO;
         
         for n in k..len {
-            let prod = signal[n].to_q31().saturating_mul(signal[n - k].to_q31());
-            sum = sum.saturating_add(prod);
+            // Compute product properly: Q15 * Q15 = Q30, then convert to Q31
+            let sample1 = signal[n].0 as i32;
+            let sample2 = signal[n - k].0 as i32;
+            let prod_q30 = sample1 * sample2; // Q15 * Q15 = Q30
+            let prod_q31 = Q31(prod_q30 >> 1); // Convert Q30 to Q31 (divide by 2)
+            sum = sum.saturating_add(prod_q31);
         }
         
-        // Apply lag windowing to improve numerical stability
-        // window[k] = exp(-0.5 * (2*pi*k*f0/fs)^2) approximated
-        let window_factor = if k == 0 {
-            Q15::ONE
-        } else {
-            Q15::from_f32(1.0 - 0.0001 * k as f32)
-        };
-        
-        corr.push(Q31((sum.0 >> 1).saturating_mul(window_factor.to_q31().0 >> 15)));
+        corr.push(sum);
     }
     
     corr

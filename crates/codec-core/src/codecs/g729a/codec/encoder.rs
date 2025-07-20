@@ -130,6 +130,10 @@ impl G729AEncoder {
             eprintln!("Windowed signal energy: {}", windowed_energy);
             eprintln!("First 10 windowed samples: {:?}", 
                 &windowed[..10].iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("Window values [120..130]: {:?}", 
+                &self.window.coefficients()[120..130].iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("Windowed samples [120..130]: {:?}", 
+                &windowed[120..130].iter().map(|x| x.0).collect::<Vec<_>>());
         }
         
         let lp_coeffs = self.lp_analyzer.analyze(&windowed);
