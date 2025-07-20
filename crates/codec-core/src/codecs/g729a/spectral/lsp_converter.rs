@@ -23,16 +23,39 @@ impl LSPConverter {
     
     /// Convert LP coefficients to LSP frequencies
     pub fn lp_to_lsp(&self, lp_coeffs: &LPCoefficients) -> LSPParameters {
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("LSP Conversion Debug:");
+            eprintln!("  Input LP coeffs: {:?}", &lp_coeffs.values[..5].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         // 1. Form sum and difference polynomials
         let f1 = form_sum_polynomial(&lp_coeffs.values);
         let f2 = form_difference_polynomial(&lp_coeffs.values);
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  F1 polynomial: {:?}", f1.iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("  F2 polynomial: {:?}", f2.iter().map(|x| x.0).collect::<Vec<_>>());
+        }
         
         // 2. Find roots using Chebyshev polynomial evaluation
         let f1_roots = find_polynomial_roots(&f1, &self.chebyshev_grid, LP_ORDER / 2);
         let f2_roots = find_polynomial_roots(&f2, &self.chebyshev_grid, LP_ORDER / 2);
         
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  F1 roots: {:?}", f1_roots.iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("  F2 roots: {:?}", f2_roots.iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         // 3. Convert roots to LSP frequencies and sort
         let lsp_freqs = self.roots_to_lsp(&f1_roots, &f2_roots);
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  Final LSP freqs: {:?}", lsp_freqs.iter().map(|x| x.0).collect::<Vec<_>>());
+        }
         
         LSPParameters {
             frequencies: lsp_freqs,
