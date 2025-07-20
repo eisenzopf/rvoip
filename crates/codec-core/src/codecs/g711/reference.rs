@@ -3,13 +3,10 @@
 //! This module contains the reference implementation of G.711 μ-law and A-law
 //! encoding and decoding algorithms as specified in ITU-T Recommendation G.711.
 //!
-//! The implementation is based on the official ITU-T reference implementation
-//! from the STL (Software Tools Library) and maintains bit-exact compatibility.
 //!
 //! ## Reference
 //!
 //! - ITU-T Recommendation G.711: "Pulse code modulation (PCM) of voice frequencies"
-//! - ITU-T Software Tools Library (STL) - G.711 module
 //!
 //! ## Algorithm Details
 //!
@@ -117,7 +114,7 @@ pub fn alaw_expand(compressed: u8) -> i16 {
 ///
 /// # Algorithm
 ///
-/// Based on ITU-T G.711 specification and reference implementation.
+/// Based on ITU-T G.711 specification.
 pub fn ulaw_compress(sample: i16) -> u8 {
     let absno = if sample < 0 {
         (((!sample) as u16) >> 2) as i16 + 33
@@ -159,7 +156,7 @@ pub fn ulaw_compress(sample: i16) -> u8 {
 ///
 /// # Algorithm
 ///
-/// Based on ITU-T G.711 specification and reference implementation.
+/// Based on ITU-T G.711 specification.
 pub fn ulaw_expand(compressed: u8) -> i16 {
     let sign = if compressed < 0x0080 { -1 } else { 1 };
     let mantissa = (!compressed) as i16;

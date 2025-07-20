@@ -12,11 +12,10 @@
 //! - `adpcm`: ADPCM encoding/decoding algorithms
 //! - `tables`: Quantization tables and constants
 //! - `state`: State management structures
-//! - `reference`: ITU-T reference functions for compliance
 //!
 //! # Reference
 //!
-//! Based on ITU-T G.722 Annex E (Release 3.00, 2014-11) reference implementation.
+//! Based on ITU-T G.722 Annex E (Release 3.00, 2014-11).
 
 pub mod codec;
 pub mod qmf;

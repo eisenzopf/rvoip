@@ -1,7 +1,6 @@
 //! ADPCM (Adaptive Differential Pulse Code Modulation) Implementation
 //!
 //! This module provides the core ADPCM encoding and decoding functionality for G.722.
-//! Updated to use exact ITU-T reference implementation functions.
 
 use crate::codecs::g722::reference::*;
 use crate::codecs::g722::tables::*;
@@ -11,7 +10,6 @@ use crate::codecs::g722::reference::abs_s;
 /// Encode low-band signal using ADPCM
 /// 
 /// Encodes the low-band signal using ADPCM with 6-bit quantization.
-/// Updated to follow exact ITU-T reference implementation sequence.
 /// 
 /// # Arguments
 /// * `xl` - Low-band input sample
@@ -73,7 +71,6 @@ pub fn low_band_encode(xl: i16, state: &mut AdpcmState, mode: u8) -> u8 {
 /// High-band ADPCM encoder (2-bit quantization)
 /// 
 /// Encodes the high-band signal using ADPCM with 2-bit quantization.
-/// Updated to follow exact ITU-T reference implementation sequence.
 /// 
 /// # Arguments
 /// * `xh` - High-band input sample
@@ -132,7 +129,6 @@ pub fn high_band_encode(xh: i16, state: &mut AdpcmState) -> u8 {
 /// Low-band ADPCM decoder (6-bit quantization)
 /// 
 /// Decodes the low-band signal from ADPCM codes.
-/// Updated to follow exact ITU-T reference implementation sequence.
 /// 
 /// # Arguments
 /// * `ilr` - Received low-band code
@@ -195,7 +191,6 @@ pub fn low_band_decode(ilr: u8, mode: u8, state: &mut AdpcmState) -> i16 {
 /// High-band ADPCM decoder (2-bit quantization)
 /// 
 /// Decodes the high-band signal from ADPCM with 2-bit quantization.
-/// Updated to use ITU-T reference functions for better compliance.
 /// 
 /// # Arguments
 /// * `ih` - Received 2-bit code (0-3)
@@ -251,7 +246,6 @@ pub fn high_band_decode(ih: u8, state: &mut AdpcmState) -> i16 {
 /// 6-bit quantization for low-band
 /// 
 /// This function implements 6-bit quantization for the low-band signal.
-/// Based on the ITU-T reference implementation.
 /// 
 /// # Arguments
 /// * `el` - Input signal to quantize
@@ -284,7 +278,6 @@ fn quantl6b_local(el: i16, detl: i16) -> i16 {
 /// 2-bit quantization for high-band
 /// 
 /// This function implements 2-bit quantization for the high-band signal.
-/// Based on the ITU-T reference implementation.
 /// 
 /// # Arguments
 /// * `eh` - Input signal to quantize

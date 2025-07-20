@@ -1,7 +1,6 @@
 //! G.722 Codec Implementation
 //!
 //! This module provides the main G.722 codec interface.
-//! Updated to match ITU-T reference implementation exactly with frame-based processing.
 
 use crate::codecs::g722::{qmf, adpcm, state::*};
 use crate::codecs::g722::reference::*;
@@ -16,7 +15,6 @@ pub const G722_ENCODED_FRAME_SIZE: usize = 80;
 
 /// G.722 Codec with exact ITU-T reference implementation
 /// 
-/// This codec implements frame-based processing to exactly match the ITU-T reference.
 /// 
 /// # Example
 /// ```
@@ -319,7 +317,7 @@ impl AudioCodec for G722Codec {
     }
 }
 
-/// ITU-T G.722 encoder function (exact reference implementation)
+/// ITU-T G.722 encoder function
 /// 
 /// Encodes a frame of 160 input samples to 80 output bytes
 /// 
@@ -368,7 +366,7 @@ pub fn g722_encode_frame(
     Ok(G722_ENCODED_FRAME_SIZE)
 }
 
-/// ITU-T G.722 decoder function (exact reference implementation)
+/// ITU-T G.722 decoder function
 /// 
 /// Decodes 80 input bytes to 160 output samples
 /// 
@@ -417,76 +415,3 @@ pub fn g722_decode_frame(
     
     Ok(G722_FRAME_SIZE)
 }
-
-//#[cfg(test)]
-/*mod tests {
-    use super::*;
-
-    #[test]
-    fn test_codec_creation() {
-        let codec = G722Codec::new(1);
-        assert!(codec.is_ok());
-        
-        let codec = G722Codec::new(4);
-        assert!(codec.is_err());
-    }
-
-    #[test]
-    fn test_frame_encoding_decoding() {
-        let mut codec = G722Codec::new(1).unwrap();
-        
-        // Create test frame
-        let input_frame: Vec<i16> = (0..160).map(|i| (i as i16) * 100).collect();
-        
-        // Encode frame
-        let encoded = codec.encode_frame(&input_frame).unwrap();
-        assert_eq!(encoded.len(), 80);
-        
-        // Decode frame
-        let decoded = codec.decode_frame(&encoded).unwrap();
-        assert_eq!(decoded.len(), 160);
-    }
-
-    #[test]
-    fn test_frame_size_validation() {
-        let mut codec = G722Codec::new(1).unwrap();
-        
-        // Wrong input size
-        let wrong_input = vec![0i16; 100];
-        assert!(codec.encode_frame(&wrong_input).is_err());
-        
-        // Wrong encoded size
-        let wrong_encoded = vec![0u8; 50];
-        assert!(codec.decode_frame(&wrong_encoded).is_err());
-    }
-
-    #[test]
-    fn test_mode_specific_encoding() {
-        for mode in 1..=3 {
-            let mut codec = G722Codec::new(mode).unwrap();
-            let input_frame = vec![1000i16; 160];
-            
-            let encoded = codec.encode_frame(&input_frame).unwrap();
-            let decoded = codec.decode_frame(&encoded).unwrap();
-            
-            assert_eq!(encoded.len(), 80);
-            assert_eq!(decoded.len(), 160);
-        }
-    }
-
-    #[test]
-    fn test_reset_functionality() {
-        let mut codec = G722Codec::new(1).unwrap();
-        
-        // Process some data
-        let input_frame = vec![1000i16; 160];
-        let _ = codec.encode_frame(&input_frame).unwrap();
-        
-        // Reset
-        codec.reset();
-        
-        // State should be reset to initial values
-        assert_eq!(codec.encoder_state.state().low_band().det, 32);
-        assert_eq!(codec.encoder_state.state().high_band().det, 8);
-    }
-}*/ 

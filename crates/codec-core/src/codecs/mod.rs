@@ -16,7 +16,7 @@ pub mod g722;
 
 pub mod g729a;
 
-pub mod g729ba;
+// pub mod g729ba;
 
 #[cfg(any(feature = "opus", feature = "opus-sim"))]
 pub mod opus;

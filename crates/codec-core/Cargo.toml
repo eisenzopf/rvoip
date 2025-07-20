@@ -1,21 +1,20 @@
 [package]
-name = "rvoip-codec-core"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-homepage.workspace = true
-repository.workspace = true
-documentation.workspace = true
-authors.workspace = true
-rust-version.workspace = true
-categories.workspace = true
-keywords.workspace = true
+name = "codec-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["RVoIP Contributors"]
+description = "Audio codec implementations for RVoIP"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/your-org/rvoip"
 
-description = "High-performance audio codec library for VoIP applications"
+[lib]
+name = "codec_core"
+path = "src/lib.rs"
 
 [[bin]]
-name = "g722_compliance_test"
-path = "src/bin/g722_compliance_test.rs"
+name = "g729a_compliance"
+path = "src/codecs/g729a/run_compliance_tests.rs"
+required-features = []
 
 [lints]
 workspace = true

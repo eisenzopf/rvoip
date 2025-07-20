@@ -1,7 +1,4 @@
-//! ITU-T G.722 Reference Implementation Functions
-//!
-//! This module contains exact implementations of ITU-T G.722 reference functions.
-//! All functions match the ITU-T G.722 reference implementation bit-for-bit.
+//! ITU-T G.722 Reference Functions
 
 use crate::codecs::g722::tables::*;
 
@@ -74,7 +71,6 @@ pub fn quantl(el: i16, detl: i16) -> i16 {
 
 /// ITU-T quanth function - High-band quantization
 /// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 /// Added special handling for saturation case
 pub fn quanth(eh: i16, deth: i16) -> i16 {
     // Special case: ITU-T reference has special handling for maximum positive value
@@ -101,8 +97,6 @@ pub fn quanth(eh: i16, deth: i16) -> i16 {
 }
 
 /// ITU-T invqal function - Inverse quantization for low-band (Used in encoding)
-/// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 pub fn invqal(il: i16, detl: i16) -> i16 {
     // ITU-T reference algorithm:
     let ril = il >> 2;  // shr(il, 2)
@@ -187,8 +181,6 @@ pub fn invqbl(ilr: i16, detl: i16, mode: i16) -> i16 {
 }
 
 /// ITU-T logscl function - Low-band logarithmic scale factor update
-/// 
-/// This function implements the ITU-T reference logscl function exactly.
 pub fn logscl(il: i16, nbl: i16) -> i16 {
     let ril = il >> 2;
     let ril_index = (ril as usize) % WLI.len();
@@ -203,8 +195,6 @@ pub fn logscl(il: i16, nbl: i16) -> i16 {
 }
 
 /// ITU-T logsch function - High-band logarithmic scale factor update
-/// 
-/// This function implements the ITU-T reference logsch function exactly.
 pub fn logsch(ih: i16, nbh: i16) -> i16 {
     let ih_index = (ih as usize) % WHI.len();
     let nbph = (((nbh as i32) * 32512) >> 15) + (WHI[ih_index] as i32);
@@ -217,8 +207,6 @@ pub fn logsch(ih: i16, nbh: i16) -> i16 {
 }
 
 /// ITU-T scalel function - Low-band scale factor
-/// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 /// return (shl(add(ila[wd2], 1), 2));
 pub fn scalel(nbpl: i16) -> i16 {
     let wd1 = (nbpl >> 6) & 511;  // s_and(shr(nbpl, 6), 511)
@@ -232,8 +220,6 @@ pub fn scalel(nbpl: i16) -> i16 {
 }
 
 /// ITU-T scaleh function - High-band scale factor
-/// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 /// return (shl(add(ila[wd], 1), 2));
 pub fn scaleh(nbph: i16) -> i16 {
     let wd = (nbph >> 6) & 511;  // s_and(shr(nbph, 6), 511)
@@ -246,8 +232,6 @@ pub fn scaleh(nbph: i16) -> i16 {
 }
 
 /// ITU-T filtep function - Pole predictor filter
-/// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 /// This function MODIFIES the rlt array by shifting it!
 pub fn filtep(rlt: &mut [i16], al: &[i16]) -> i16 {
     if rlt.len() < 3 || al.len() < 3 {
@@ -269,8 +253,6 @@ pub fn filtep(rlt: &mut [i16], al: &[i16]) -> i16 {
 }
 
 /// ITU-T filtez function - Zero predictor filter
-/// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 pub fn filtez(dlt: &[i16], bl: &[i16]) -> i16 {
     let mut szl = 0i16;
     
@@ -287,8 +269,6 @@ pub fn filtez(dlt: &[i16], bl: &[i16]) -> i16 {
 }
 
 /// ITU-T upzero function - Update zero predictor coefficients
-/// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 pub fn upzero(dlt: &mut [i16], bl: &mut [i16]) {
     if dlt.len() < 7 || bl.len() < 7 {
         return;
@@ -321,8 +301,6 @@ pub fn upzero(dlt: &mut [i16], bl: &mut [i16]) {
 }
 
 /// ITU-T uppol1 function - Update first pole predictor coefficient
-/// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 pub fn uppol1(al: &mut [i16], plt: &[i16]) {
     if al.len() < 3 || plt.len() < 3 {
         return;
@@ -357,8 +335,6 @@ pub fn uppol1(al: &mut [i16], plt: &[i16]) {
 }
 
 /// ITU-T uppol2 function - Update second pole predictor coefficient
-/// 
-/// Exact implementation from ITU-T G.722 reference funcg722.c
 pub fn uppol2(al: &mut [i16], plt: &[i16]) {
     if al.len() < 3 || plt.len() < 3 {
         return;
@@ -439,8 +415,6 @@ pub fn adpcm_adapt_h(_ind: i16, _state: &mut crate::codecs::g722::state::AdpcmSt
     // This is a placeholder - the actual adaptation is done inline in the ADPCM functions
 }
 
-/// ITU-T add function - exact implementation
-/// 
 /// Adds two Word16 values with saturation
 /// ITU-T: Word16 add (Word16 var1, Word16 var2)
 /// 
@@ -455,8 +429,6 @@ pub fn add(var1: i16, var2: i16) -> i16 {
     limit(sum)
 }
 
-/// ITU-T sub function - exact implementation
-/// 
 /// Subtracts two Word16 values with saturation
 /// ITU-T: Word16 sub (Word16 var1, Word16 var2)
 /// 
@@ -471,8 +443,6 @@ pub fn sub(var1: i16, var2: i16) -> i16 {
     limit(diff)
 }
 
-/// ITU-T mult function - exact implementation
-/// 
 /// Multiplies two Word16 values with 15-bit fractional format
 /// ITU-T: Word16 mult (Word16 var1, Word16 var2)
 /// 
@@ -487,8 +457,6 @@ pub fn mult(var1: i16, var2: i16) -> i16 {
     limit(product >> 15)
 }
 
-/// ITU-T shr function - exact implementation
-/// 
 /// Arithmetic right shift with saturation
 /// ITU-T: Word16 shr (Word16 var1, Word16 var2)
 /// 
@@ -508,8 +476,6 @@ pub fn shr(var1: i16, var2: i16) -> i16 {
     }
 }
 
-/// ITU-T shl function - exact implementation
-/// 
 /// Arithmetic left shift with saturation
 /// ITU-T: Word16 shl (Word16 var1, Word16 var2)
 /// 
@@ -534,8 +500,6 @@ pub fn shl(var1: i16, var2: i16) -> i16 {
     }
 }
 
-/// ITU-T L_add function - exact implementation
-/// 
 /// Adds two Word32 values with saturation
 /// ITU-T: Word32 L_add (Word32 L_var1, Word32 L_var2)
 /// 
@@ -556,8 +520,6 @@ pub fn l_add(l_var1: i32, l_var2: i32) -> i32 {
     }
 }
 
-/// ITU-T L_sub function - exact implementation
-/// 
 /// Subtracts two Word32 values with saturation
 /// ITU-T: Word32 L_sub (Word32 L_var1, Word32 L_var2)
 /// 
@@ -578,8 +540,6 @@ pub fn l_sub(l_var1: i32, l_var2: i32) -> i32 {
     }
 }
 
-/// ITU-T L_mult function - exact implementation
-/// 
 /// Multiplies two Word16 values to produce Word32 result
 /// ITU-T: Word32 L_mult (Word16 var1, Word16 var2)
 /// 
@@ -594,8 +554,6 @@ pub fn l_mult(var1: i16, var2: i16) -> i32 {
     l_add(product, product)  // L_mult doubles the product
 }
 
-/// ITU-T L_mult0 function - exact implementation
-/// 
 /// Multiplies two Word16 values to produce Word32 result (no doubling)
 /// ITU-T: Word32 L_mult0 (Word16 var1, Word16 var2)
 /// 
@@ -609,8 +567,6 @@ pub fn l_mult0(var1: i16, var2: i16) -> i32 {
     (var1 as i32) * (var2 as i32)
 }
 
-/// ITU-T L_shr function - exact implementation
-/// 
 /// Arithmetic right shift for Word32 values
 /// ITU-T: Word32 L_shr (Word32 L_var1, Word16 var2)
 /// 
@@ -630,8 +586,6 @@ pub fn l_shr(l_var1: i32, var2: i16) -> i32 {
     }
 }
 
-/// ITU-T L_shl function - exact implementation
-/// 
 /// Arithmetic left shift for Word32 values with saturation
 /// ITU-T: Word32 L_shl (Word32 L_var1, Word16 var2)
 /// 
@@ -662,8 +616,6 @@ pub fn l_shl(l_var1: i32, var2: i16) -> i32 {
     }
 }
 
-/// ITU-T extract_h function - exact implementation
-/// 
 /// Extracts the high 16 bits from a Word32 value
 /// ITU-T: Word16 extract_h (Word32 L_var1)
 /// 
@@ -676,8 +628,6 @@ pub fn extract_h(l_var1: i32) -> i16 {
     (l_var1 >> 16) as i16
 }
 
-/// ITU-T extract_l function - exact implementation
-/// 
 /// Extracts the low 16 bits from a Word32 value
 /// ITU-T: Word16 extract_l (Word32 L_var1)
 /// 
@@ -690,8 +640,6 @@ pub fn extract_l(l_var1: i32) -> i16 {
     (l_var1 & 0xFFFF) as i16
 }
 
-/// ITU-T norm_s function - exact implementation
-/// 
 /// Produces the number of left shifts needed to normalize a Word16 value
 /// ITU-T: Word16 norm_s (Word16 var1)
 /// 
@@ -720,8 +668,6 @@ pub fn norm_s(var1: i16) -> i16 {
     norm
 }
 
-/// ITU-T norm_l function - exact implementation
-/// 
 /// Produces the number of left shifts needed to normalize a Word32 value
 /// ITU-T: Word16 norm_l (Word32 L_var1)
 /// 
@@ -750,8 +696,6 @@ pub fn norm_l(l_var1: i32) -> i16 {
     norm
 }
 
-/// ITU-T saturate function - exact implementation
-/// 
 /// Saturates a Word32 value to Word16 range
 /// ITU-T: Word16 saturate (Word32 L_var1)
 /// 
@@ -764,8 +708,6 @@ pub fn saturate(l_var1: i32) -> i16 {
     limit(l_var1)
 }
 
-/// ITU-T mac function - exact implementation
-/// 
 /// Multiply-accumulate with Word16 inputs and Word32 accumulator
 /// ITU-T: Word32 L_mac (Word32 L_var3, Word16 var1, Word16 var2)
 /// 
@@ -781,8 +723,6 @@ pub fn l_mac(l_var3: i32, var1: i16, var2: i16) -> i32 {
     l_add(l_var3, product)
 }
 
-/// ITU-T msu function - exact implementation
-/// 
 /// Multiply-subtract with Word16 inputs and Word32 accumulator
 /// ITU-T: Word32 L_msu (Word32 L_var3, Word16 var1, Word16 var2)
 /// 
@@ -798,8 +738,6 @@ pub fn l_msu(l_var3: i32, var1: i16, var2: i16) -> i32 {
     l_sub(l_var3, product)
 }
 
-/// ITU-T round function - exact implementation
-/// 
 /// Rounds a Word32 value to Word16 with proper rounding
 /// ITU-T: Word16 round (Word32 L_var1)
 /// 
@@ -820,8 +758,6 @@ pub fn round(l_var1: i32) -> i16 {
     }
 }
 
-/// ITU-T abs_s function - exact implementation
-/// 
 /// Absolute value of Word16 with saturation
 /// ITU-T: Word16 abs_s (Word16 var1)
 /// 
@@ -840,8 +776,6 @@ pub fn abs_s(var1: i16) -> i16 {
     }
 }
 
-/// ITU-T L_abs function - exact implementation
-/// 
 /// Absolute value of Word32 with saturation
 /// ITU-T: Word32 L_abs (Word32 L_var1)
 /// 
