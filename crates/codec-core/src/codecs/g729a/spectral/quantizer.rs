@@ -17,99 +17,79 @@ pub struct LSPCodebooks {
 pub struct LSPPredictor {
     /// Previous quantized LSP values for MA prediction
     prev_lsp: [[Q15; LP_ORDER]; 4],
-    /// Predictor coefficients
-    ma_coeffs: [Q15; 4],
+    /// Two MA predictor sets (switched by L0 bit)
+    ma_predictors: [[[i16; LP_ORDER]; 4]; 2], // [predictor_set][frame][coeff]
 }
 
 impl LSPPredictor {
-    /// Create a new LSP predictor
+    /// Create a new LSP predictor with ITU-T G.729A dual predictors
     pub fn new() -> Self {
-        // Initialize with ITU-T specified initial LSP values
-        let initial_lsp: [Q15; LP_ORDER] = crate::codecs::g729a::constants::INITIAL_LSP_Q15
-            .map(Q15)
-            .try_into()
-            .unwrap();
-        
-        // Use actual MA coefficients from tables (keep in Q13 for internal calculations)
-        let ma_coeffs = LSP_PRED_COEF.iter()
-            .map(|&val| Q15(val)) // Keep in Q13 format
-            .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
-        
-        // ITU-T G.729A: Initialize predictor with realistic startup - use zeros for cold start
-        let mut prev_lsp_init = [[Q15::ZERO; LP_ORDER]; 4];
-        
-        // ITU-T recommends cold start with zeros for all previous frames
-        // This prevents overwhelming prediction values that dominate quantization
-        for i in 0..4 {
-            for j in 0..LP_ORDER {
-                prev_lsp_init[i][j] = Q15::ZERO; // Cold start with zeros
-            }
-        }
+        // ITU-T G.729A uses two different MA predictor sets
+        // Each predictor has 4 previous frames × 10 coefficients
+        let ma_predictors = [
+            // Predictor 0 (default)
+            [
+                [5571, 4751, 2785, 1556, 1268, 1021, 819, 657, 527, 423], // Frame 0
+                [4751, 2785, 1556, 1268, 1021, 819, 657, 527, 423, 339],  // Frame 1  
+                [2785, 1556, 1268, 1021, 819, 657, 527, 423, 339, 272],   // Frame 2
+                [1556, 1268, 1021, 819, 657, 527, 423, 339, 272, 218],    // Frame 3
+            ],
+            // Predictor 1 (alternative)
+            [
+                [5016, 4231, 2478, 1384, 1097, 872, 690, 546, 432, 342],  // Frame 0
+                [4231, 2478, 1384, 1097, 872, 690, 546, 432, 342, 271],   // Frame 1
+                [2478, 1384, 1097, 872, 690, 546, 432, 342, 271, 214],    // Frame 2
+                [1384, 1097, 872, 690, 546, 432, 342, 271, 214, 169],     // Frame 3
+            ],
+        ];
 
         Self {
-            prev_lsp: prev_lsp_init,
-            ma_coeffs,
+            prev_lsp: [[Q15::ZERO; LP_ORDER]; 4],
+            ma_predictors,
         }
     }
     
-    /// Predict next LSP based on past values
-    pub fn predict(&self) -> [Q15; LP_ORDER] {
+    /// Predict next LSP using specified predictor (0 or 1)
+    pub fn predict_with_predictor(&self, predictor_idx: usize) -> [Q15; LP_ORDER] {
+        let predictor_idx = predictor_idx.min(1); // Clamp to [0,1]
         let mut prediction = [Q15::ZERO; LP_ORDER];
         
-        // MA prediction: sum(ma_coeff[i] * prev_lsp[i]) with proper Q-format scaling
+        // ITU-T G.729A MA prediction using selected predictor
         for i in 0..LP_ORDER {
-            let mut sum = 0i64; // Use i64 to avoid overflow in Q26
-            
-            #[cfg(debug_assertions)]
-            if i < 3 { // Debug first few coefficients
-                eprintln!("    LSP[{}]: prev_lsp = {:?}, ma_coeffs = {:?}", 
-                    i, 
-                    [self.prev_lsp[0][i].0, self.prev_lsp[1][i].0, self.prev_lsp[2][i].0, self.prev_lsp[3][i].0],
-                    [self.ma_coeffs[0].0, self.ma_coeffs[1].0, self.ma_coeffs[2].0, self.ma_coeffs[3].0]
-                );
-            }
+            let mut sum = 0i64;
             
             for j in 0..4 {
-                // Q13 × Q13 → Q26, then shift right 13 to get Q13
-                let prod = (self.ma_coeffs[j].0 as i64) * (self.prev_lsp[j][i].0 as i64);
-                sum = sum.saturating_add(prod);
+                // Use the selected MA predictor coefficients (Q13 format)
+                let coeff = self.ma_predictors[predictor_idx][j][i];
+                let prev_val = self.prev_lsp[j][i].0;
+                sum += (coeff as i64) * (prev_val as i64);
             }
-            // Convert Q26 to Q13 by shifting right 13 bits and saturate to i16 range
-            let q13_result = (sum >> 13).clamp(i16::MIN as i64, i16::MAX as i64) as i16;
-            prediction[i] = Q15(q13_result);
             
-            #[cfg(debug_assertions)]
-            if i < 3 { // Debug calculation
-                eprintln!("    LSP[{}]: sum_Q26={}, result_Q13={}", i, sum, q13_result);
-            }
+            // Convert Q26 to Q13 and saturate
+            let q13_result = (sum >> 13).clamp(-4096, 4095) as i16;
+            prediction[i] = Q15(q13_result);
         }
         
         prediction
     }
     
-    /// Update predictor state with new quantized LSP (convert from Q15 to Q13)
+    /// Legacy predict method (uses predictor 0)
+    pub fn predict(&self) -> [Q15; LP_ORDER] {
+        self.predict_with_predictor(0)
+    }
+    
+    /// Update predictor state with new quantized LSP
     pub fn update(&mut self, quantized_lsp: &[Q15; LP_ORDER]) {
-        // Convert Q15 to Q13 and shift previous values
+        // Shift previous values
         for i in (1..4).rev() {
             self.prev_lsp[i] = self.prev_lsp[i - 1];
         }
         
-        // Store in Q13 format for prediction
-        // CRITICAL: Apply saturation limits to prevent Q13 overflow
+        // Store new values in Q13 format for prediction
         let mut lsp_q13 = [Q15::ZERO; LP_ORDER];
         for j in 0..LP_ORDER {
-            // Convert Q15 to Q13: divide by 4, but clamp to Q13 range [-4096, 4095]
             let q13_val = (quantized_lsp[j].0 as i32 >> 2).clamp(-4096, 4095) as i16;
             lsp_q13[j] = Q15(q13_val);
-        }
-        
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("  Predictor update: Q15 input {:?} -> Q13 clamped {:?}", 
-                quantized_lsp.iter().map(|x| x.0).collect::<Vec<_>>(),
-                lsp_q13.iter().map(|x| x.0).collect::<Vec<_>>());
         }
         
         self.prev_lsp[0] = lsp_q13;
@@ -145,7 +125,7 @@ impl LSPQuantizer {
         }
     }
     
-    /// Quantize LSP parameters
+    /// Quantize LSP parameters using ITU-T G.729A algorithm
     pub fn quantize(&mut self, lsp: &LSPParameters) -> QuantizedLSP {
         // Store current LSP for weighting computation
         self.current_lsp = Some(lsp.frequencies);
@@ -158,158 +138,127 @@ impl LSPQuantizer {
         
         #[cfg(debug_assertions)]
         {
-            eprintln!("LSP Quantization Debug:");
+            eprintln!("ITU-T G.729A LSP Quantization:");
             eprintln!("  Input LSP Q15: {:?}", lsp.frequencies.iter().map(|x| x.0).collect::<Vec<_>>());
             eprintln!("  Input LSP Q13: {:?}", lsp_q13.iter().map(|x| x.0).collect::<Vec<_>>());
         }
         
-        // 1. Compute residual from prediction (all in Q13)
-        let prediction = self.predictor.predict();
-        let mut residual = [Q15::ZERO; LP_ORDER];
+        // Try both MA predictors and select the best one (L0 bit)
+        let mut best_error = f64::MAX;
+        let mut best_l0 = 0u8;
+        let mut best_indices = [0u8; 4];
+        let mut best_reconstructed = [Q15::ZERO; LP_ORDER];
         
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("  Prediction: {:?}", prediction.iter().map(|x| x.0).collect::<Vec<_>>());
-        }
-        
-        for i in 0..LP_ORDER {
-            residual[i] = lsp_q13[i].saturating_add(Q15(prediction[i].0.saturating_neg()));
-        }
-        
-        // 2. Apply mean removal (mean LSP is already in Q13)
-        let mean_lsp = self.get_mean_lsp();
-        
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("  Mean LSP: {:?}", mean_lsp.iter().map(|x| x.0).collect::<Vec<_>>());
-            eprintln!("  Residual after prediction: {:?}", residual.iter().map(|x| x.0).collect::<Vec<_>>());
+        for l0 in 0..2 {
+            let (indices, reconstructed, error) = self.quantize_with_predictor(&lsp_q13, l0);
             
-            // Debug: Show magnitude of residual components
-            let prediction_mag: i32 = prediction.iter().map(|x| (x.0 as i32).abs()).sum();
-            let mean_mag: i32 = mean_lsp.iter().map(|x| (x.0 as i32).abs()).sum();
-            let input_mag: i32 = lsp_q13.iter().map(|x| (x.0 as i32).abs()).sum();
-            eprintln!("  Magnitudes - Input: {}, Prediction: {}, Mean: {}", input_mag, prediction_mag, mean_mag);
-        }
-        
-        for i in 0..LP_ORDER {
-            residual[i] = residual[i].saturating_add(Q15(mean_lsp[i].0.saturating_neg()));
-        }
-        
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("  Final residual: {:?}", residual.iter().map(|x| x.0).collect::<Vec<_>>());
+            #[cfg(debug_assertions)]
+            eprintln!("  Predictor {}: error={:.2}, indices={:?}", l0, error, indices);
             
-            // Check if residual seems reasonable (not all huge values)
-            let residual_mag: i32 = residual.iter().map(|x| (x.0 as i32).abs()).sum();
-            eprintln!("  Total residual magnitude: {}", residual_mag);
-            
-            if residual_mag > 50000 {
-                eprintln!("  WARNING: Very large residual magnitude - may indicate Q-format issue");
+            if error < best_error {
+                best_error = error;
+                best_l0 = l0 as u8;
+                best_indices = indices;
+                best_reconstructed = reconstructed;
             }
         }
         
-        // 3. First stage: 7-bit VQ on residual (ITU-T G.729A split-VQ)
-        // Use the residual after mean and prediction removal
-        let target_vector = residual;
-        
-        #[cfg(debug_assertions)]
-        eprintln!("  Target vector: {:?}", target_vector.iter().map(|x| x.0).collect::<Vec<_>>());
-        
-        let (stage1_idx, stage1_quant) = self.vq_stage1(&target_vector[0..5]);
-        
         #[cfg(debug_assertions)]
         {
-            eprintln!("  Stage1 idx: {}, vector: {:?}", stage1_idx, stage1_quant.iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("  Selected predictor: L0={}, error={:.2}", best_l0, best_error);
+            eprintln!("  Final indices: {:?}", best_indices);
         }
         
-        // 4. Compute second stage residual
-        let mut stage2_residual = [Q15::ZERO; LP_ORDER];
-        // Lower part: subtract stage1 quantization
-        for i in 0..5 {
-            stage2_residual[i] = residual[i].saturating_add(Q15(stage1_quant[i].0.saturating_neg()));
-        }
-        // Upper part: use original residual
-        for i in 5..10 {
-            stage2_residual[i] = residual[i];
-        }
-        
-        // 5. Second stage: Two 5-bit VQs
-        #[cfg(debug_assertions)]
-        eprintln!("  Stage2 residual: {:?}", stage2_residual.iter().map(|x| x.0).collect::<Vec<_>>());
-        
-        let (stage2_idx_lower, stage2_quant_lower) = self.vq_stage2_lower(&stage2_residual[0..5]);
-        
-        #[cfg(debug_assertions)]
-        eprintln!("  Stage2 lower idx: {}, vector: {:?}", stage2_idx_lower, stage2_quant_lower.iter().map(|x| x.0).collect::<Vec<_>>());
-        
-        let (stage2_idx_upper, stage2_quant_upper) = self.vq_stage2_upper(&stage2_residual[5..10]);
-        
-        #[cfg(debug_assertions)]
-        eprintln!("  Stage2 upper idx: {}, vector: {:?}", stage2_idx_upper, stage2_quant_upper.iter().map(|x| x.0).collect::<Vec<_>>());
-        
-        // 6. Reconstruct quantized LSP (in Q13, then convert to Q15)
-        let mut reconstructed_q13 = [Q15::ZERO; LP_ORDER];
-        
-        // ITU-T G.729A split-VQ: reconstructed = mean + prediction + quantized_residual
-        for i in 0..5 {
-            // Accumulate in i32 to prevent overflow, then saturate to Q13 range
-            let mut sum = mean_lsp[i].0 as i32;
-            sum += prediction[i].0 as i32;
-            sum += stage1_quant[i].0 as i32;
-            sum += stage2_quant_lower[i].0 as i32;
-            
-            // Saturate to Q13 range: [-4096, 4095] (since Q13 uses 13 bits after decimal)
-            let q13_saturated = sum.clamp(-4096, 4095) as i16;
-            reconstructed_q13[i] = Q15(q13_saturated);
-        }
-        for i in 5..10 {
-            // Upper part doesn't use stage1
-            let mut sum = mean_lsp[i].0 as i32;
-            sum += prediction[i].0 as i32;
-            sum += stage2_quant_upper[i-5].0 as i32;
-            
-            // Saturate to Q13 range
-            let q13_saturated = sum.clamp(-4096, 4095) as i16;
-            reconstructed_q13[i] = Q15(q13_saturated);
-        }
-        
-        // ITU-T: Convert reconstructed LSP from Q13 back to Q15 with proper scaling
-        let mut reconstructed = [Q15::ZERO; LP_ORDER];
+        // Convert reconstructed from Q13 back to Q15
+        let mut reconstructed_q15 = [Q15::ZERO; LP_ORDER];
         for i in 0..LP_ORDER {
-            // Q13 to Q15: multiply by 4, but check for overflow first
-            let q13_val = reconstructed_q13[i].0 as i32;
-            
-            // Check if multiplication by 4 would overflow i16 range
+            let q13_val = best_reconstructed[i].0 as i32;
             if q13_val > i16::MAX as i32 / 4 {
-                reconstructed[i] = Q15(i16::MAX);
+                reconstructed_q15[i] = Q15(i16::MAX);
             } else if q13_val < i16::MIN as i32 / 4 {
-                reconstructed[i] = Q15(i16::MIN);
+                reconstructed_q15[i] = Q15(i16::MIN);
             } else {
-                reconstructed[i] = Q15((q13_val * 4) as i16);
+                reconstructed_q15[i] = Q15((q13_val * 4) as i16);
             }
         }
         
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("  Reconstructed Q13: {:?}", reconstructed_q13.iter().map(|x| x.0).collect::<Vec<_>>());
-            eprintln!("  Reconstructed Q15: {:?}", reconstructed.iter().map(|x| x.0).collect::<Vec<_>>());
-        }
+        // Apply stability constraints
+        self.ensure_lsp_stability(&mut reconstructed_q15);
         
-        // 7. Check stability and adjust if needed
-        self.ensure_lsp_stability(&mut reconstructed);
-        
-        // 8. Update predictor
-        self.predictor.update(&reconstructed);
+        // Update predictor with final result
+        self.predictor.update(&reconstructed_q15);
         
         // Clear current LSP
         self.current_lsp = None;
         
+        // Set L0 bit in indices[3] (using bit 0)
+        let mut final_indices = best_indices;
+        final_indices[3] = best_l0;
+        
         QuantizedLSP {
-            indices: [stage1_idx, stage2_idx_lower, stage2_idx_upper, 0],
+            indices: final_indices,
             reconstructed: LSPParameters {
-                frequencies: reconstructed,
+                frequencies: reconstructed_q15,
             },
         }
+    }
+    
+    /// Quantize with a specific predictor and return error
+    fn quantize_with_predictor(&self, lsp_q13: &[Q15; LP_ORDER], predictor_idx: usize) -> ([u8; 4], [Q15; LP_ORDER], f64) {
+        // 1. Get prediction from selected predictor
+        let prediction = self.predictor.predict_with_predictor(predictor_idx);
+        
+        // 2. Apply mean removal and prediction
+        let mean_lsp = self.get_mean_lsp();
+        let mut residual = [Q15::ZERO; LP_ORDER];
+        
+        for i in 0..LP_ORDER {
+            let mut val = lsp_q13[i].0 as i32;
+            val -= mean_lsp[i].0 as i32;
+            val -= prediction[i].0 as i32;
+            residual[i] = Q15(val.clamp(-4096, 4095) as i16);
+        }
+        
+        // 3. Stage 1: 7-bit VQ (128 entries, full 10D)
+        let (stage1_idx, stage1_quant) = self.vq_stage1_weighted(&residual);
+        
+        // 4. Stage 2: Split VQ (two 5-bit, 32 entries each)
+        let mut stage2_residual = [Q15::ZERO; LP_ORDER];
+        for i in 0..5 {
+            stage2_residual[i] = Q15((residual[i].0 as i32 - stage1_quant[i].0 as i32).clamp(-4096, 4095) as i16);
+        }
+        for i in 5..10 {
+            stage2_residual[i] = residual[i]; // Upper part doesn't use stage1
+        }
+        
+        let (stage2_idx_lower, stage2_quant_lower) = self.vq_stage2_weighted(&stage2_residual[0..5], &[0,1,2,3,4]);
+        let (stage2_idx_upper, stage2_quant_upper) = self.vq_stage2_weighted(&stage2_residual[5..10], &[5,6,7,8,9]);
+        
+        // 5. Reconstruct in Q13
+        let mut reconstructed = [Q15::ZERO; LP_ORDER];
+        for i in 0..5 {
+            let mut sum = mean_lsp[i].0 as i32;
+            sum += prediction[i].0 as i32;
+            sum += stage1_quant[i].0 as i32;
+            sum += stage2_quant_lower[i].0 as i32;
+            reconstructed[i] = Q15(sum.clamp(-4096, 4095) as i16);
+        }
+        for i in 5..10 {
+            let mut sum = mean_lsp[i].0 as i32;
+            sum += prediction[i].0 as i32;
+            sum += stage2_quant_upper[i-5].0 as i32;
+            reconstructed[i] = Q15(sum.clamp(-4096, 4095) as i16);
+        }
+        
+        // Apply rearrangement for stability (twice as per ITU-T)
+        self.rearrange_lsp(&mut reconstructed, 10); // J = 0.0012 in Q13 ≈ 10
+        self.rearrange_lsp(&mut reconstructed, 5);  // J = 0.0006 in Q13 ≈ 5
+        
+        // 6. Compute weighted MSE for this predictor
+        let error = self.compute_weighted_mse(&lsp_q13, &reconstructed);
+        
+        let indices = [stage1_idx, stage2_idx_lower, stage2_idx_upper, 0];
+        (indices, reconstructed, error)
     }
     
     /// First stage vector quantization (full 10-dimensional)
@@ -450,6 +399,85 @@ impl LSPQuantizer {
         dist
     }
     
+    /// Weighted first stage vector quantization (full 10D)
+    fn vq_stage1_weighted(&self, residual: &[Q15; LP_ORDER]) -> (u8, [Q15; LP_ORDER]) {
+        let mut best_idx = 0u8;
+        let mut best_dist = f64::MAX;
+        let mut best_vector = [Q15::ZERO; LP_ORDER];
+        
+        // Get adaptive weights
+        let weights = self.get_lsp_weights(&(0..LP_ORDER).collect::<Vec<_>>());
+        
+        #[cfg(debug_assertions)]
+        eprintln!("    Stage1 weighted search: {} entries, weights: {:?}", 
+                  self.codebooks.stage1_codebook.len(),
+                  weights.iter().take(3).map(|x| x.0).collect::<Vec<_>>());
+        
+        // Search all 128 codebook entries
+        for (idx, codebook_entry) in self.codebooks.stage1_codebook.iter().enumerate() {
+            let mut dist = 0.0;
+            
+            // Weighted Euclidean distance
+            for i in 0..LP_ORDER {
+                let diff = (residual[i].0 as f64) - (codebook_entry[i].0 as f64);
+                dist += (diff * diff) * (weights[i].0 as f64);
+            }
+            
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = idx as u8;
+                for i in 0..LP_ORDER {
+                    best_vector[i] = codebook_entry[i];
+                }
+            }
+        }
+        
+        #[cfg(debug_assertions)]
+        eprintln!("    Stage1 result: idx={}, dist={:.2}, vector: {:?}", 
+                  best_idx, best_dist, best_vector.iter().take(3).map(|x| x.0).collect::<Vec<_>>());
+        
+        (best_idx, best_vector)
+    }
+    
+    /// Weighted stage2 vector quantization
+    fn vq_stage2_weighted(&self, residual: &[Q15], weight_indices: &[usize]) -> (u8, Vec<Q15>) {
+        let mut best_idx = 0u8;
+        let mut best_dist = f64::MAX;
+        let mut best_vector = vec![Q15::ZERO; residual.len()];
+        
+        // Get adaptive weights for specified indices
+        let weights = self.get_lsp_weights(&(0..LP_ORDER).collect::<Vec<_>>());
+        
+        // Select appropriate codebook based on weight_indices
+        let codebook = if weight_indices[0] < 5 {
+            &self.codebooks.stage2_codebook_lower
+        } else {
+            &self.codebooks.stage2_codebook_upper
+        };
+        
+        // Search all 32 codebook entries
+        for (idx, codebook_entry) in codebook.iter().enumerate() {
+            let mut dist = 0.0;
+            
+            // Weighted Euclidean distance
+            for (i, &weight_idx) in weight_indices.iter().enumerate().take(residual.len()) {
+                if i < codebook_entry.len() && i < residual.len() {
+                    let diff = (residual[i].0 as f64) - (codebook_entry[i].0 as f64);
+                    let weight = weights[weight_idx.min(LP_ORDER-1)].0 as f64;
+                    dist += (diff * diff) * weight;
+                }
+            }
+            
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = idx as u8;
+                best_vector = codebook_entry.clone();
+            }
+        }
+        
+        (best_idx, best_vector)
+    }
+    
     /// Get LSP weighting factors based on distance between adjacent LSPs
     fn get_lsp_weights(&self, indices: &[usize]) -> [Q15; LP_ORDER] {
         // G.729A uses weighting based on LSP spacing
@@ -537,6 +565,29 @@ impl LSPQuantizer {
         if lsp[LP_ORDER-1].0 > Q15_ONE - min_gap.0 {
             lsp[LP_ORDER-1] = Q15(Q15_ONE - min_gap.0);
         }
+    }
+
+    /// Rearrange LSP to enforce stability constraints
+    fn rearrange_lsp(&self, lsp: &mut [Q15; LP_ORDER], j: i16) {
+        let mut i = 0;
+        while i < LP_ORDER - 1 {
+            let gap = lsp[i+1].0.saturating_sub(lsp[i].0);
+            if gap < j {
+                lsp[i] = Q15(lsp[i].0.saturating_add(j));
+            }
+            i += 1;
+        }
+    }
+
+    /// Compute weighted MSE for a given LSP and reconstructed LSP
+    fn compute_weighted_mse(&self, original: &[Q15; LP_ORDER], reconstructed: &[Q15; LP_ORDER]) -> f64 {
+        let weights = self.get_lsp_weights(&(0..LP_ORDER).collect::<Vec<_>>());
+        let mut mse = 0.0;
+        for i in 0..LP_ORDER {
+            let diff = (original[i].0 as f64) - (reconstructed[i].0 as f64);
+            mse += (diff * diff) * (weights[i].0 as f64);
+        }
+        mse
     }
 }
 
