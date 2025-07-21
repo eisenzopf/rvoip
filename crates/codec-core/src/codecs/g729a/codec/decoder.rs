@@ -102,20 +102,20 @@ impl G729ADecoder {
             eprintln!("Pre-postfilter energy: {}", pre_postfilter_energy);
         }
         
-        // TEMPORARY: Disable postfilter to test core codec
-        let postprocessed = output; // Skip postfilter
-        /*
+        // TEMPORARY: Re-enable postfilter to debug amplification
         let postprocessed = self.postfilter.process(
             &output,
             &self.lsp_converter.lsp_to_lp(&current_lsp),
             self.prev_pitch,
         );
+        /*
+        let postprocessed = output; // Skip postfilter
         */
         
         #[cfg(debug_assertions)]
         {
             let post_postfilter_energy: i64 = postprocessed.iter().map(|&x| (x.0 as i64).pow(2)).sum();
-            eprintln!("Post-postfilter energy (no filter): {}", post_postfilter_energy);
+            eprintln!("Post-postfilter energy: {}", post_postfilter_energy);
         }
         
         // 5. Update state

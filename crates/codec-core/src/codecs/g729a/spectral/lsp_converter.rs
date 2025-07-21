@@ -75,17 +75,18 @@ impl LSPConverter {
         
         // Use a reasonable set of LP coefficients that won't cause instability
         // These are based on a stable all-pole filter with moderate spectral shaping
+        // Increased magnitude for more realistic speech synthesis gain
         let lp_values = [
-            Q15(-8192),  // a[0] = -0.25
-            Q15(4096),   // a[1] =  0.125
-            Q15(-2048),  // a[2] = -0.0625
-            Q15(1024),   // a[3] =  0.03125
-            Q15(-512),   // a[4] = -0.015625
-            Q15(256),    // a[5] =  0.0078125
-            Q15(-128),   // a[6] = -0.00390625
-            Q15(64),     // a[7] =  0.001953125
-            Q15(-32),    // a[8] = -0.0009765625
-            Q15(16),     // a[9] =  0.00048828125
+            Q15(-12000), // a[0] = -0.366 (increased from -0.25)
+            Q15(8000),   // a[1] =  0.244 (increased) 
+            Q15(-4000),  // a[2] = -0.122
+            Q15(2000),   // a[3] =  0.061
+            Q15(-1000),  // a[4] = -0.031
+            Q15(500),    // a[5] =  0.015
+            Q15(-250),   // a[6] = -0.008
+            Q15(125),    // a[7] =  0.004
+            Q15(-62),    // a[8] = -0.002
+            Q15(31),     // a[9] =  0.001
         ];
         
         #[cfg(debug_assertions)]
