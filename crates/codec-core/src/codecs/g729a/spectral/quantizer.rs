@@ -119,38 +119,27 @@ pub fn g729_sqrt_q0q7(x: u32) -> i32 {
     if x == 0 { return 0; }
     
     // Set x in Q14 in range [0.25, 1[
+    // For x in Q30 (like 1073741824 = 1.0), clz will be 1
+    // k = (19-1)/2 = 9
     let clz = unsigned_count_leading_zeros(x);
-    let k = if clz > 19 { 0 } else { ((19 - clz) >> 1) as i32 };
-    let x_scaled = if k > 0 {
-        (x >> (k * 2)) as i32
-    } else {
-        x as i32
-    };
+    let k = ((19_i32.saturating_sub(clz as i32)) >> 1).max(0);
     
-    // Input needs to be scaled to Q14 for polynomial
-    let shift = 14 - 2*k;
-    let x_q14 = if shift >= 0 {
-        x_scaled << shift
-    } else {
-        x_scaled >> (-shift)
-    };
+    // x = x.2^-2k to put it in range [0.25, 1[
+    let x_q14 = (x >> (k * 2)) as i32;
     
     // sqrt(x) ~= 0.22178 + 1.29227*x - 0.77070*x^2 + 0.25659*x^3
-    let x2 = ((x_q14 as i64 * x_q14 as i64) >> 14) as i32;
-    let x3 = ((x2 as i64 * x_q14 as i64) >> 14) as i32;
-    
-    let poly = C0 + ((C1 as i64 * x_q14 as i64) >> 14) as i32
-                  + ((C2 as i64 * x2 as i64) >> 14) as i32
-                  + ((C3 as i64 * x3 as i64) >> 14) as i32;
+    // Using nested form for better precision
+    let inner = C2 + ((C3 as i64 * x_q14 as i64) >> 14) as i32;
+    let middle = C1 + ((inner as i64 * x_q14 as i64) >> 14) as i32;
+    let rt = C0 + ((middle as i64 * x_q14 as i64) >> 14) as i32;
     
     // rt = sqrt(x).2^(7-k)
-    let rt = if k >= 0 {
-        poly >> k
+    // Shift to get result in Q7
+    if k >= 0 {
+        rt << k
     } else {
-        poly << (-k)
-    };
-    
-    rt
+        rt >> (-k)
+    }
 }
 
 /// Arctangent in Q15 -> Q13
@@ -212,8 +201,11 @@ fn g729_atan_q15q13(x: i32) -> i16 {
 /// Arcsine in Q15 -> Q13
 fn g729_asin_q15q13(x: i16) -> i16 {
     // asin(x) = atan(x/sqrt(1-x²))
-    let x_sq = (x as i32 * x as i32) as i64; // x² in Q30
-    let one_minus_x_sq = ONE_IN_Q30 - x_sq; // 1-x² in Q30
+    // Following bcg729: g729Atan_Q15Q13(DIV32(SSHL(x,15), PSHR(g729Sqrt_Q0Q7(SUB32(ONE_IN_Q30, MULT16_16(x,x))),7)))
+    
+    // Calculate 1 - x²
+    let x_sq = (x as i32 * x as i32); // x² in Q30
+    let one_minus_x_sq = (ONE_IN_Q30 as i32) - x_sq; // 1-x² in Q30
     
     if one_minus_x_sq <= 0 {
         // Handle edge cases
@@ -224,11 +216,21 @@ fn g729_asin_q15q13(x: i16) -> i16 {
         }
     }
     
-    let sqrt_val = g729_sqrt_q0q7(one_minus_x_sq as u32); // sqrt in Q7
-    let x_scaled = (x as i32) << 15; // x in Q30
-    let ratio = (x_scaled as i64 * (1 << 8)) / (sqrt_val as i64); // Division gives Q15
+    // sqrt(1-x²) in Q7
+    let sqrt_val = g729_sqrt_q0q7(one_minus_x_sq as u32);
     
-    g729_atan_q15q13(ratio.clamp(-2147483647, 2147483647) as i32)
+    // x << 15 to get Q30, then divide by (sqrt >> 7) to get back to Q15
+    // This is equivalent to: (x << 15) / (sqrt_val >> 7)
+    let numerator = (x as i32) << 15; // x in Q30
+    let denominator = sqrt_val >> 7;   // sqrt in Q0
+    
+    if denominator == 0 {
+        return if x >= 0 { HALF_PI_Q13 } else { -(HALF_PI_Q13 as i16) };
+    }
+    
+    let ratio = numerator / denominator; // Result in Q15
+    
+    g729_atan_q15q13(ratio)
 }
 
 /// bcg729-exact arccos function: LSP (Q15) -> LSF (Q13)
@@ -377,7 +379,10 @@ impl LSPQuantizer {
                 let mut error = 0i64;
                 for j in 0..LP_ORDER {
                     let diff = (target_vector[j] as i32) - (self.get_l1_codebook(l1, j) as i32);
-                    error += (diff as i64) * (diff as i64);
+                    let ma_sum = self.get_ma_predictor_sum(l0, j);
+                    let scaled_diff = ((diff as i32 * ma_sum as i32) >> 15) as i16;
+                    let weighted_diff = ((scaled_diff as i32 * weights[j] as i32) >> 11) as i16;
+                    error += (scaled_diff as i64) * (weighted_diff as i64);
                 }
                 if error < best_l1_error {
                     best_l1_error = error;
@@ -581,7 +586,7 @@ impl LSPQuantizer {
         }
     }
     
-    fn get_l1_codebook(&self, index: u8, coeff: usize) -> i16 {
+    pub fn get_l1_codebook(&self, index: u8, coeff: usize) -> i16 {
         if (index as usize) < LSP_CB1.len() && coeff < LSP_CB1[0].len() {
             LSP_CB1[index as usize][coeff]
         } else {
@@ -621,11 +626,11 @@ impl LSPDecoder {
         // Reconstruct quantizer output from codebooks
         let mut quantizer_output = [0i16; LP_ORDER];
         for i in 0..5 {
-            quantizer_output[i] = self.get_l1_codebook(l1 as u8, i) + 
+            quantizer_output[i] = LSP_CB1[l1 as usize][i] + 
                                   self.get_l2l3_codebook(l2 as u8, i);
         }
         for i in 5..LP_ORDER {
-            quantizer_output[i] = self.get_l1_codebook(l1 as u8, i) + 
+            quantizer_output[i] = LSP_CB1[l1 as usize][i] + 
                                   self.get_l2l3_codebook(l3 as u8, i);
         }
         
@@ -726,14 +731,6 @@ impl LSPDecoder {
             sums[l0][coeff]
         } else {
             16384 // Default Q15 value
-        }
-    }
-    
-    fn get_l1_codebook(&self, index: u8, coeff: usize) -> i16 {
-        if (index as usize) < LSP_CB1.len() && coeff < LSP_CB1[0].len() {
-            LSP_CB1[index as usize][coeff]
-        } else {
-            0
         }
     }
     
