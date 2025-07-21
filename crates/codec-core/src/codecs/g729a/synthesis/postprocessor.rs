@@ -42,6 +42,12 @@ impl AdaptivePostfilter {
     ) -> Vec<Q15> {
         let mut output = Vec::with_capacity(synthesized.len());
         
+        #[cfg(debug_assertions)]
+        {
+            let input_energy: i64 = synthesized.iter().map(|&x| (x.0 as i64).pow(2)).sum();
+            eprintln!("Postfilter input energy: {}", input_energy);
+        }
+        
         // Process in subframes
         for i in 0..2 {
             let start = i * SUBFRAME_SIZE;
@@ -51,17 +57,49 @@ impl AdaptivePostfilter {
             // 1. Long-term postfiltering (pitch enhancement)
             let pitch_enhanced = self.long_term_postfilter(subframe, pitch_delay);
             
+            #[cfg(debug_assertions)]
+            {
+                let pitch_energy: i64 = pitch_enhanced.iter().map(|&x| (x.0 as i64).pow(2)).sum();
+                eprintln!("  After pitch filter: {}", pitch_energy);
+            }
+            
             // 2. Short-term postfiltering (formant enhancement)
             let formant_enhanced = self.short_term_postfilter(&pitch_enhanced, lp_coeffs);
+            
+            #[cfg(debug_assertions)]
+            {
+                let formant_energy: i64 = formant_enhanced.iter().map(|&x| (x.0 as i64).pow(2)).sum();
+                eprintln!("  After formant filter: {}", formant_energy);
+            }
             
             // 3. Gain control to match original energy
             let gain_controlled = self.apply_gain_control(&formant_enhanced, subframe);
             
+            #[cfg(debug_assertions)]
+            {
+                let gain_energy: i64 = gain_controlled.iter().map(|&x| (x.0 as i64).pow(2)).sum();
+                eprintln!("  After gain control: {}", gain_energy);
+            }
+            
             output.extend_from_slice(&gain_controlled);
         }
         
+        #[cfg(debug_assertions)]
+        {
+            let pre_hp_energy: i64 = output.iter().map(|&x| (x.0 as i64).pow(2)).sum();
+            eprintln!("Before high-pass filter: {}", pre_hp_energy);
+        }
+        
         // 4. High-pass filtering
-        self.hp_filter.filter(&output)
+        let final_output = self.hp_filter.filter(&output);
+        
+        #[cfg(debug_assertions)]
+        {
+            let final_energy: i64 = final_output.iter().map(|&x| (x.0 as i64).pow(2)).sum();
+            eprintln!("Final postfilter output energy: {}", final_energy);
+        }
+        
+        final_output
     }
     
     /// Long-term postfilter for pitch enhancement
@@ -251,15 +289,18 @@ impl AdaptivePostfilter {
 
 /// High-pass filter for final output
 pub struct HighPassFilter {
-    /// Filter state
-    state: [Q15; 2],
+    /// Input delay line
+    x_state: [Q15; 2],
+    /// Output delay line  
+    y_state: [Q15; 2],
 }
 
 impl HighPassFilter {
     /// Create new high-pass filter
     pub fn new() -> Self {
         Self {
-            state: [Q15::ZERO; 2],
+            x_state: [Q15::ZERO; 2],
+            y_state: [Q15::ZERO; 2],
         }
     }
     
@@ -272,28 +313,31 @@ impl HighPassFilter {
         const B0: Q15 = Q15(15183);  // 0.46363718
         const B1: Q15 = Q15(-30367); // -0.92724705
         const B2: Q15 = Q15(15183);  // 0.46363718
-        const A1: Q15 = Q15(-31259); // -1.9059465 (negated for addition)
-        const A2: Q15 = Q15(29837);  // 0.9114024
+        const A1: Q15 = Q15(31259);  // 1.9059465 (positive for subtraction)
+        const A2: Q15 = Q15(-29837); // -0.9114024 (negative for subtraction)
         
         let mut output = vec![Q15::ZERO; input.len()];
         
         for i in 0..input.len() {
-            // Compute output
-            let mut y = B0.to_q31().saturating_mul(input[i].to_q31());
-            y = y.saturating_add(B1.to_q31().saturating_mul(self.state[0].to_q31()));
-            y = y.saturating_add(B2.to_q31().saturating_mul(self.state[1].to_q31()));
+            let x = input[i];
             
-            // Add feedback
-            y = y.saturating_add(A1.to_q31().saturating_mul(output[i.saturating_sub(1)].to_q31()));
-            if i >= 2 {
-                y = y.saturating_add(A2.to_q31().saturating_mul(output[i - 2].to_q31()));
-            }
+            // Compute numerator: b0*x[n] + b1*x[n-1] + b2*x[n-2]
+            let mut y = B0.to_q31().saturating_mul(x.to_q31());
+            y = y.saturating_add(B1.to_q31().saturating_mul(self.x_state[0].to_q31()));
+            y = y.saturating_add(B2.to_q31().saturating_mul(self.x_state[1].to_q31()));
             
-            output[i] = y.to_q15();
+            // Subtract denominator: - a1*y[n-1] - a2*y[n-2] 
+            y = y.saturating_add(A1.to_q31().saturating_mul(self.y_state[0].to_q31()));
+            y = y.saturating_add(A2.to_q31().saturating_mul(self.y_state[1].to_q31()));
             
-            // Update state
-            self.state[1] = self.state[0];
-            self.state[0] = input[i];
+            let y_out = y.to_q15();
+            output[i] = y_out;
+            
+            // Update delay lines
+            self.x_state[1] = self.x_state[0];
+            self.x_state[0] = x;
+            self.y_state[1] = self.y_state[0];
+            self.y_state[0] = y_out;
         }
         
         output
