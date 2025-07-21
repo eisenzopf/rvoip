@@ -163,10 +163,15 @@ impl G729AEncoder {
         let quantized_lp = self.lsp_converter.lsp_to_lp(&quantized_lsp.reconstructed);
         
         // 4. Open-loop pitch analysis
+        // TEMPORARY WORKAROUND: Use unweighted signal for pitch analysis 
+        // TODO: Fix weighting filter that produces mostly zeros
         // Apply weighting filter to a larger region including history for pitch context
         // ITU-T requires access to past samples for correlation computation
         let pitch_analysis_region = &analysis_buffer[0..240]; // Full buffer with history
         let weighted_full = self.compute_weighted_speech(pitch_analysis_region, &lp_coeffs);
+        
+        // WORKAROUND: Use unweighted signal for pitch analysis
+        let pitch_signal = pitch_analysis_region; // Use unweighted signal instead of weighted_full
         
         // Extract the current frame + lookahead portion for other processing
         let speech_region = &analysis_buffer[120..240]; // 80 + 40 = 120 samples
@@ -186,8 +191,8 @@ impl G729AEncoder {
                 &weighted_speech[..10].iter().map(|x| x.0).collect::<Vec<_>>());
         }
         
-        // Pass the full weighted signal (with history) to pitch tracker
-        let open_loop_pitch = self.pitch_tracker.estimate_open_loop_pitch(&weighted_full);
+        // Pass the unweighted signal (with history) to pitch tracker as workaround
+        let open_loop_pitch = self.pitch_tracker.estimate_open_loop_pitch(pitch_signal);
         
         // 5. Process subframes
         let mut encoded = EncodedFrame {

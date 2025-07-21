@@ -2,7 +2,7 @@
 
 use crate::codecs::g729a::constants::*;
 use crate::codecs::g729a::types::Q15;
-use crate::codecs::g729a::tables::{HAMMING_WINDOW, get_hamming_window};
+use crate::codecs::g729a::tables::window_tables::get_hamming_window;
 
 /// Hamming window for LP analysis
 pub struct HammingWindow {

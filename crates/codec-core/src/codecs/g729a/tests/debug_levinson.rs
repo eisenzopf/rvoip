@@ -1748,3 +1748,1264 @@ fn test_decoder_reference_reconstruction() {
         println!("❌ Round-trip failed. This indicates encoder/decoder mismatch.");
     }
 }
+
+#[test]
+fn test_quantizer_with_exact_reference_lsp() {
+    println!("=== TEST QUANTIZER WITH EXACT REFERENCE LSP ===");
+    
+    // From the decoder test, we know reference indices [16,22,22,1] decode to:
+    // LSP frequencies: [5105, 9458, 17860, 28222, 32767, 23040, 29359, 32451, 32136, 32411]
+    let reference_lsp_frequencies = [5105, 9458, 17860, 28222, 32767, 23040, 29359, 32451, 32136, 32411];
+    let reference_indices = [16u8, 22u8, 22u8, 1u8];
+    
+    println!("Testing with exact reference LSP frequencies: {:?}", &reference_lsp_frequencies[..5]);
+    
+    // Create LSP parameters with these exact frequencies
+    let reference_lsp = crate::codecs::g729a::types::LSPParameters {
+        frequencies: reference_lsp_frequencies.map(|f| crate::codecs::g729a::types::Q15(f)),
+    };
+    
+    // Create a fresh quantizer
+    let mut quantizer = crate::codecs::g729a::spectral::quantizer::LSPQuantizer::new();
+    
+    // Quantize these exact reference LSP frequencies
+    let quantized = quantizer.quantize(&reference_lsp);
+    
+    println!("Our quantized indices: {:?}", quantized.indices);
+    println!("Reference indices:     {:?}", reference_indices);
+    
+    // Check for perfect match
+    let mut matches = 0;
+    for i in 0..4 {
+        if quantized.indices[i] == reference_indices[i] {
+            matches += 1;
+            println!("✓ Index[{}]: {} (PERFECT)", i, quantized.indices[i]);
+        } else {
+            println!("✗ Index[{}]: {} vs {} (reference)", i, quantized.indices[i], reference_indices[i]);
+        }
+    }
+    
+    let compliance = (matches as f64 / 4.0) * 100.0;
+    println!("\n🎯 EXACT LSP COMPLIANCE: {:.1}% ({}/{} indices match)", 
+        compliance, matches, 4);
+    
+    if matches == 4 {
+        println!("🎉 PERFECT! Our quantizer is 100% accurate when given exact reference LSP!");
+        println!("    This confirms the issue is in our LP analysis → LSP conversion pipeline.");
+    } else {
+        println!("❌ Quantizer error: Even with exact reference LSP, we don't get perfect indices.");
+        println!("    This indicates a bug in our quantization implementation.");
+    }
+}
+
+#[test]
+fn test_reverse_engineer_reference() {
+    println!("=== REVERSE ENGINEER REFERENCE ===");
+    
+    // The ITU-T expects indices [1, 105, 17, 0]
+    // Let's see what codebook values these correspond to
+    use crate::codecs::g729a::tables::{LSP_CB1, LSP_CB2};
+    
+    let l0 = 1;
+    let l1 = 105;
+    let l2 = 17; 
+    let l3 = 0;
+    
+    println!("Reference indices: L0={}, L1={}, L2={}, L3={}", l0, l1, l2, l3);
+    
+    // Codebook values
+    println!("\nCodebook entries:");
+    println!("L1[{}]: {:?}", l1, LSP_CB1[l1]);
+    println!("L2[{}]: {:?}", l2, &LSP_CB2[l2][0..5]);
+    println!("L3[{}]: {:?}", l3, &LSP_CB2[l3][5..10]);
+    
+    // Quantizer output (before MA prediction)
+    let mut quantizer_output = [0i16; 10];
+    for i in 0..5 {
+        quantizer_output[i] = LSP_CB1[l1][i] + LSP_CB2[l2][i];
+    }
+    for i in 5..10 {
+        quantizer_output[i] = LSP_CB1[l1][i] + LSP_CB2[l3][i];
+    }
+    
+    println!("\nQuantizer output (sum of codebooks): {:?}", quantizer_output);
+    
+    // This is the LSF that should be found by subtracting MA prediction from input LSF
+    // So: input_LSF = quantizer_output + MA_prediction
+    
+    // Initial prev_lsf values
+    let prev_lsf = [2339, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396];
+    
+    // MA predictors for L0=1
+    let ma_pred = [
+        [7733, 7880, 8188, 8175, 8247, 8490, 8637, 8601, 8359, 7569],
+        [4210, 3031, 2552, 3473, 3876, 3853, 4184, 4154, 3909, 3968],
+        [3214, 1930, 1313, 2143, 2493, 2385, 2755, 2706, 2542, 2919],
+        [3024, 1592, 940, 1631, 1723, 1579, 2034, 2084, 1913, 2601],
+    ];
+    
+    println!("\nWhat input LSF would produce these indices?");
+    for i in 0..5 {
+        let mut ma_sum = 0i64;
+        for j in 0..4 {
+            ma_sum += (prev_lsf[i] as i64) * (ma_pred[j][i] as i64);
+        }
+        // The input LSF should satisfy:
+        // (input_LSF << 15) - ma_sum = quantizer_output * MAPredictorSum
+        let ma_pred_sum = 14585i32; // For L0=1, coeff 0
+        let target_acc = (quantizer_output[i] as i32) * ma_pred_sum;
+        let input_lsf = ((target_acc as i64 + ma_sum) >> 15) as i16;
+        
+        println!("  LSF[{}]: quantizer_out={} -> needs input_lsf≈{}", 
+            i, quantizer_output[i], input_lsf);
+    }
+}
+
+#[test]
+fn test_encoder_against_correct_algthm_reference() {
+    println!("=== TEST ENCODER AGAINST CORRECT ALGTHM.BIT FRAME 0 ===");
+    
+    // Read ALGTHM.IN 
+    let mut file = File::open("src/codecs/g729a/tests/test_vectors/ALGTHM.IN")
+        .expect("Failed to open ALGTHM.IN");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read ALGTHM.IN");
+    
+    let mut all_samples = Vec::new();
+    for i in 0..buffer.len()/2 {
+        let sample_idx = i * 2;
+        if sample_idx + 1 < buffer.len() {
+            let sample = i16::from_le_bytes([buffer[sample_idx], buffer[sample_idx + 1]]);
+            all_samples.push(sample);
+        }
+    }
+    
+    // CORRECT ITU-T reference from ALGTHM.BIT Frame 0: [1, 105, 17, 0]
+    let correct_reference_indices = [1u8, 105u8, 17u8, 0u8];
+    
+    println!("CORRECT ALGTHM.BIT Frame 0 LSP indices: {:?}", correct_reference_indices);
+    
+    // Create encoder and encode Frame 0
+    use crate::codecs::g729a::{G729AEncoder, AudioFrame};
+    
+    let mut encoder = G729AEncoder::new();
+    
+    // Build Frame 0 (samples 0-79) and Frame 1 lookahead (samples 80-119)
+    let mut frame_0 = [0i16; 80];
+    let mut lookahead = [0i16; 40];
+    
+    for i in 0..80 {
+        if i < all_samples.len() {
+            frame_0[i] = all_samples[i];
+        }
+    }
+    for i in 0..40 {
+        if 80 + i < all_samples.len() {
+            lookahead[i] = all_samples[80 + i];
+        }
+    }
+    
+    let audio_frame = AudioFrame {
+        samples: frame_0,
+        timestamp: 0,
+    };
+    
+    // Encode Frame 0
+    match encoder.encode_frame_with_lookahead(&audio_frame, &lookahead) {
+        Ok(encoded_bytes) => {
+            println!("Successfully encoded Frame 0: {:02X?}", encoded_bytes);
+            
+            // Parse our encoded output to extract LSP indices
+            use crate::codecs::g729a::codec::bitstream::unpack_frame;
+            let decoded_params = unpack_frame(&encoded_bytes);
+            
+            println!("Our LSP indices: {:?}", decoded_params.lsp_indices);
+            println!("Correct reference: {:?}", correct_reference_indices);
+            
+            // Check individual matches
+            let mut matches = 0;
+            for i in 0..4 {
+                if decoded_params.lsp_indices[i] == correct_reference_indices[i] {
+                    matches += 1;
+                    println!("  ✅ Index {}: {} matches", i, decoded_params.lsp_indices[i]);
+                } else {
+                    println!("  ❌ Index {}: {} ≠ {}", i, decoded_params.lsp_indices[i], correct_reference_indices[i]);
+                }
+            }
+            
+            let compliance = (matches as f64 / 4.0) * 100.0;
+            println!("\n🎯 TRUE COMPLIANCE: {:.1}% ({}/4 LSP indices match)", compliance, matches);
+            
+            if matches == 4 {
+                println!("🎉 PERFECT MATCH! Our encoder produces the correct ALGTHM.BIT Frame 0!");
+            } else if matches >= 2 {
+                println!("🔶 SIGNIFICANT PROGRESS - LSP core working, need fine-tuning");
+            } else {
+                println!("❌ Still fundamental LSP issues to resolve");
+            }
+        }
+        Err(e) => {
+            println!("❌ Encoding failed: {:?}", e);
+        }
+    }
+}
+
+#[test]
+fn test_reference_lsp_to_lp_vs_our_lp() {
+    println!("=== COMPARE REFERENCE LSP→LP vs OUR LP ANALYSIS ===");
+    
+    // Decode the correct ALGTHM.BIT Frame 0 LSP indices [16, 22, 22, 1]
+    let reference_indices = [16u8, 22u8, 22u8, 1u8];
+    
+    use crate::codecs::g729a::spectral::{LSPDecoder, LSPConverter};
+    let mut decoder = LSPDecoder::new();
+    let reference_lsp = decoder.decode(&reference_indices);
+    
+    println!("ITU-T Reference LSP indices: {:?}", reference_indices);
+    println!("ITU-T Reference LSP frequencies: {:?}", 
+        reference_lsp.frequencies.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Convert reference LSP to LP coefficients using our converter
+    let converter = LSPConverter::new();
+    let reference_lp = converter.lsp_to_lp(&reference_lsp);
+    
+    println!("ITU-T Reference LP coefficients (from LSP): {:?}", 
+        reference_lp.values.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Now run our LP analysis on Frame 0 and compare
+    let mut file = File::open("src/codecs/g729a/tests/test_vectors/ALGTHM.IN")
+        .expect("Failed to open ALGTHM.IN");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read ALGTHM.IN");
+    
+    let mut all_samples = Vec::new();
+    for i in 0..buffer.len()/2 {
+        let sample_idx = i * 2;
+        if sample_idx + 1 < buffer.len() {
+            let sample = i16::from_le_bytes([buffer[sample_idx], buffer[sample_idx + 1]]);
+            all_samples.push(sample);
+        }
+    }
+    
+    // Build Frame 0 analysis buffer exactly like the encoder
+    let mut analysis_buffer = vec![0i16; 240];
+    
+    // Current frame: 80 samples starting at frame_idx * 80
+    for i in 0..80 {
+        if i < all_samples.len() {
+            analysis_buffer[120 + i] = all_samples[i];
+        }
+    }
+    // Lookahead: 40 samples  
+    for i in 0..40 {
+        if 80 + i < all_samples.len() {
+            analysis_buffer[200 + i] = all_samples[80 + i];
+        }
+    }
+    
+    // Apply preprocessing exactly like encoder
+    use crate::codecs::g729a::signal::Preprocessor;
+    let mut preprocessor = Preprocessor::new();
+    let processed_samples = preprocessor.process(&analysis_buffer);
+    
+    // Apply windowing and LP analysis
+    use crate::codecs::g729a::tables::window_tables::{get_hamming_window, get_lag_window};
+    use crate::codecs::g729a::math::dsp_operations::{autocorrelation, apply_lag_window};
+    use crate::codecs::g729a::spectral::LinearPredictor;
+    use crate::codecs::g729a::types::Q15;
+    use crate::codecs::g729a::constants::LP_ORDER;
+    
+    let hamming_window = get_hamming_window();
+    let lag_window = get_lag_window();
+    
+    // Apply Hamming window
+    let mut windowed = Vec::new();
+    for i in 0..240 {
+        let sample = crate::codecs::g729a::math::fixed_point::mult(processed_samples[i].0, hamming_window[i].0);
+        windowed.push(Q15(sample));
+    }
+    
+    // Compute autocorrelation and apply lag window
+    let mut correlations = autocorrelation(&windowed, LP_ORDER);
+    apply_lag_window(&mut correlations, &lag_window);
+    
+    // Run Levinson-Durbin
+    let predictor = LinearPredictor::new();
+    let our_lp = predictor.analyze(&windowed);
+    
+    println!("Our LP coefficients (from signal): {:?}", 
+        our_lp.values.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Compare the differences
+    println!("\n=== LP COEFFICIENT COMPARISON ===");
+    let mut total_diff = 0i64;
+    for i in 0..LP_ORDER {
+        let diff = (our_lp.values[i].0 as i64) - (reference_lp.values[i].0 as i64);
+        total_diff += diff.abs();
+        println!("  LP[{}]: Our={:6}, Ref={:6}, Diff={:6}", 
+            i, our_lp.values[i].0, reference_lp.values[i].0, diff);
+    }
+    
+    println!("Total absolute difference: {}", total_diff);
+    
+    if total_diff < 1000 {
+        println!("✅ LP coefficients are very close - quantization might be the issue");
+    } else if total_diff < 10000 {
+        println!("🔶 LP coefficients differ moderately - check windowing/preprocessing");
+    } else {
+        println!("❌ LP coefficients are very different - fundamental signal processing issue");
+    }
+    
+    // Now check what LSP indices our LP coefficients would produce
+    let our_lsp = converter.lp_to_lsp(&our_lp);
+    
+    use crate::codecs::g729a::spectral::LSPQuantizer;
+    let mut quantizer = LSPQuantizer::new();
+    let our_quantized = quantizer.quantize(&our_lsp);
+    
+    println!("\n=== LSP QUANTIZATION COMPARISON ===");
+    println!("Our LP→LSP→Quantize: {:?}", our_quantized.indices);
+    println!("ITU-T Reference:     {:?}", reference_indices);
+    
+    let mut index_matches = 0;
+    for i in 0..4 {
+        if our_quantized.indices[i] == reference_indices[i] {
+            index_matches += 1;
+            println!("  ✅ Index {}: {} matches", i, our_quantized.indices[i]);
+        } else {
+            println!("  ❌ Index {}: {} ≠ {}", i, our_quantized.indices[i], reference_indices[i]);
+        }
+    }
+    
+    if index_matches == 4 {
+        println!("🎉 Perfect match! The issue is elsewhere in the encoder");
+    } else if index_matches >= 2 {
+        println!("🔶 Partial match - close but need fine-tuning");
+    } else {
+        println!("❌ No match - fundamental LP analysis or quantization issue");
+    }
+}
+
+#[test]
+fn test_frame0_signal_content() {
+    println!("=== VERIFY FRAME 0 SIGNAL CONTENT ===");
+    
+    // Read ALGTHM.IN 
+    let mut file = File::open("src/codecs/g729a/tests/test_vectors/ALGTHM.IN")
+        .expect("Failed to open ALGTHM.IN");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read ALGTHM.IN");
+    
+    let mut all_samples = Vec::new();
+    for i in 0..buffer.len()/2 {
+        let sample_idx = i * 2;
+        if sample_idx + 1 < buffer.len() {
+            let sample = i16::from_le_bytes([buffer[sample_idx], buffer[sample_idx + 1]]);
+            all_samples.push(sample);
+        }
+    }
+    
+    println!("Total samples in ALGTHM.IN: {}", all_samples.len());
+    println!("Total frames: {}", all_samples.len() / 80);
+    
+    // Analyze first few frames
+    for frame_idx in 0..4 {
+        let start = frame_idx * 80;
+        let end = start + 80;
+        
+        if end <= all_samples.len() {
+            let frame_samples = &all_samples[start..end];
+            
+            let non_zero_count = frame_samples.iter().filter(|&&x| x != 0).count();
+            let energy: i64 = frame_samples.iter().map(|&x| (x as i64) * (x as i64)).sum();
+            let max_abs = frame_samples.iter().map(|&x| x.abs()).max().unwrap_or(0);
+            let first_nonzero = frame_samples.iter().position(|&x| x != 0);
+            
+            println!("Frame {}: {} non-zero samples, energy={}, max_abs={}, first_nonzero={:?}",
+                frame_idx, non_zero_count, energy, max_abs, first_nonzero);
+            
+            if non_zero_count > 0 {
+                println!("  First 10 samples: {:?}", &frame_samples[0..10]);
+                if let Some(pos) = first_nonzero {
+                    let start_idx = pos.saturating_sub(2);
+                    let end_idx = (pos + 3).min(frame_samples.len());
+                    println!("  Around first non-zero [{}..{}]: {:?}", 
+                        start_idx, end_idx, &frame_samples[start_idx..end_idx]);
+                }
+            }
+        }
+    }
+    
+    // **CRITICAL QUESTION**: Since Frame 0 is mostly silent, how does the ITU-T reference
+    // produce meaningful LSP indices [16, 22, 22, 1]? 
+    
+    // **HYPOTHESIS 1**: G.729A uses a default/initialization LSP for silent frames
+    // **HYPOTHESIS 2**: Our frame alignment is wrong - maybe Frame 0 isn't the first 80 samples
+    // **HYPOTHESIS 3**: There's an initialization or state management issue
+    
+    println!("\n=== TESTING HYPOTHESIS: SILENT FRAME HANDLING ===");
+    
+    // Test what our LP analysis produces for a completely silent frame
+    let silent_frame = vec![0i16; 240]; // 240-sample analysis window
+    
+    use crate::codecs::g729a::signal::Preprocessor;
+    use crate::codecs::g729a::spectral::{LinearPredictor, LSPConverter, LSPQuantizer};
+    use crate::codecs::g729a::types::Q15;
+    
+    let mut preprocessor = Preprocessor::new();
+    let processed = preprocessor.process(&silent_frame);
+    
+    let predictor = LinearPredictor::new();
+    let silent_lp = predictor.analyze(&processed);
+    
+    println!("LP coefficients for silent frame: {:?}", 
+        silent_lp.values.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Convert to LSP and quantize
+    let converter = LSPConverter::new();
+    let silent_lsp = converter.lp_to_lsp(&silent_lp);
+    
+    let mut quantizer = LSPQuantizer::new();
+    let silent_quantized = quantizer.quantize(&silent_lsp);
+    
+    println!("Silent frame LSP indices: {:?}", silent_quantized.indices);
+    
+    // Compare with ITU-T reference
+    let reference_indices = [16u8, 22u8, 22u8, 1u8];
+    println!("ITU-T Frame 0 reference: {:?}", reference_indices);
+    
+    if silent_quantized.indices == reference_indices {
+        println!("🎉 MATCH! ITU-T Frame 0 uses default quantization for silent frames");
+    } else {
+        println!("❌ No match - the issue is more complex");
+        
+        // Maybe we need to check the default initialization values
+        println!("\n=== CHECKING DEFAULT/INITIALIZATION VALUES ===");
+        
+        // What does a fresh quantizer with no input produce?
+        // (This might reveal the default state behavior)
+    }
+}
+
+#[test]
+fn test_debug_signal_placement_in_analysis_buffer() {
+    println!("=== DEBUG SIGNAL PLACEMENT IN 240-SAMPLE ANALYSIS BUFFER ===");
+    
+    // Read ALGTHM.IN Frame 0
+    let mut file = File::open("src/codecs/g729a/tests/test_vectors/ALGTHM.IN")
+        .expect("Failed to open ALGTHM.IN");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read ALGTHM.IN");
+    
+    let mut all_samples = Vec::new();
+    for i in 0..buffer.len()/2 {
+        let sample_idx = i * 2;
+        if sample_idx + 1 < buffer.len() {
+            let sample = i16::from_le_bytes([buffer[sample_idx], buffer[sample_idx + 1]]);
+            all_samples.push(sample);
+        }
+    }
+    
+    // Extract Frame 0 (samples 0-79) and Frame 1 lookahead (samples 80-119)
+    println!("Frame 0 samples [0..80]: {:?}", &all_samples[0..10]);
+    println!("Frame 0 samples [30..40]: {:?}", &all_samples[30..40]); // Where non-zero starts
+    println!("Frame 1 lookahead [80..90]: {:?}", &all_samples[80..90]);
+    
+    // Build the 240-sample analysis buffer exactly like the encoder does
+    let mut analysis_buffer = vec![0i16; 240];
+    
+    // History: For frame 0, use zeros (no previous frames) - positions 0-119
+    // analysis_buffer[0..120] = zeros (already initialized)
+    
+    // Current frame: 80 samples starting at frame_idx * 80 - positions 120-199
+    for i in 0..80 {
+        if i < all_samples.len() {
+            analysis_buffer[120 + i] = all_samples[i];
+        }
+    }
+    
+    // Lookahead: 40 samples - positions 200-239
+    for i in 0..40 {
+        if 80 + i < all_samples.len() {
+            analysis_buffer[200 + i] = all_samples[80 + i];
+        }
+    }
+    
+    println!("\n=== ANALYSIS BUFFER CONTENT ===");
+    println!("Total energy: {}", analysis_buffer.iter().map(|&x| (x as i64) * (x as i64)).sum::<i64>());
+    println!("Non-zero count: {}", analysis_buffer.iter().filter(|&&x| x != 0).count());
+    
+    // Check where Frame 0's non-zero samples appear in the analysis buffer
+    println!("Analysis buffer [115..125]: {:?}", &analysis_buffer[115..125]); // Around Frame 0 start
+    println!("Analysis buffer [145..155]: {:?}", &analysis_buffer[145..155]); // Around sample 30 area
+    println!("Analysis buffer [195..205]: {:?}", &analysis_buffer[195..205]); // Around Frame 0 end/lookahead start
+    
+    // Now check preprocessing step by step
+    println!("\n=== PREPROCESSING DEBUG ===");
+    
+    use crate::codecs::g729a::signal::Preprocessor;
+    let mut preprocessor = Preprocessor::new();
+    let processed_samples = preprocessor.process(&analysis_buffer);
+    
+    println!("After preprocessing:");
+    println!("Total energy: {}", processed_samples.iter().map(|&x| (x.0 as i64) * (x.0 as i64)).sum::<i64>());
+    println!("Non-zero count: {}", processed_samples.iter().filter(|&&x| x.0 != 0).count());
+    println!("Processed [115..125]: {:?}", processed_samples[115..125].iter().map(|x| x.0).collect::<Vec<_>>());
+    println!("Processed [145..155]: {:?}", processed_samples[145..155].iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Check Hamming windowing
+    println!("\n=== HAMMING WINDOWING DEBUG ===");
+    
+    use crate::codecs::g729a::tables::window_tables::get_hamming_window;
+    use crate::codecs::g729a::math::fixed_point::mult;
+    
+    let hamming_window = get_hamming_window();
+    
+    // Apply Hamming window manually to see what happens
+    let mut windowed = Vec::new();
+    for i in 0..240 {
+        let sample = mult(processed_samples[i].0, hamming_window[i].0);
+        windowed.push(sample);
+    }
+    
+    println!("After Hamming windowing:");
+    println!("Total energy: {}", windowed.iter().map(|&x| (x as i64) * (x as i64)).sum::<i64>());
+    println!("Non-zero count: {}", windowed.iter().filter(|&&x| x != 0).count());
+    println!("Windowed [115..125]: {:?}", &windowed[115..125]);
+    println!("Windowed [145..155]: {:?}", &windowed[145..155]);
+    
+    // Check where the maximum energy is in the windowed signal
+    let mut max_energy = 0i64;
+    let mut max_pos = 0;
+    for i in 0..240 {
+        let energy = (windowed[i] as i64) * (windowed[i] as i64);
+        if energy > max_energy {
+            max_energy = energy;
+            max_pos = i;
+        }
+    }
+    
+    println!("Maximum energy {} at position {}", max_energy, max_pos);
+    println!("Window values around max pos [{}..{}]: {:?}", 
+        max_pos.saturating_sub(5), max_pos + 5,
+        &hamming_window[max_pos.saturating_sub(5)..max_pos + 5].iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // **KEY INSIGHT CHECK**: The Hamming window has its peak around sample 120 (center of 240 samples)
+    // If Frame 0's signal starts at sample 30 (relative), it appears at position 150 in our buffer
+    // The Hamming window value at position 150 should be reasonably high, not zero
+    
+    println!("\n=== WINDOW VALUE ANALYSIS ===");
+    println!("Window center (120): {}", hamming_window[120].0);
+    println!("Window at pos 150 (Frame 0 signal area): {}", hamming_window[150].0);
+    println!("Window at pos 30 (where signal would be if no offset): {}", hamming_window[30].0);
+    
+    // Check if our window implementation is wrong
+    println!("First 10 window values: {:?}", hamming_window[0..10].iter().map(|x| x.0).collect::<Vec<_>>());
+    println!("Window values [115..125]: {:?}", hamming_window[115..125].iter().map(|x| x.0).collect::<Vec<_>>());
+    println!("Window values [145..155]: {:?}", hamming_window[145..155].iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // **HYPOTHESIS**: If preprocessing or windowing is zeroing out our signal,
+    // the issue might be in:
+    // 1. Preprocessor high-pass filter removing the signal
+    // 2. Wrong window coefficients
+    // 3. Signal placement in wrong buffer positions
+    
+    println!("\n=== CONCLUSION ===");
+    if windowed.iter().any(|&x| x.abs() > 1000) {
+        println!("✅ Windowed signal has significant values - issue might be elsewhere");
+    } else {
+        println!("❌ Windowed signal is too small - preprocessing or windowing issue confirmed");
+    }
+}
+
+#[test]
+fn test_bypass_preprocessing_to_fix_compliance() {
+    println!("=== TEST: BYPASS PREPROCESSING TO FIX COMPLIANCE ===");
+    
+    // Read ALGTHM.IN Frame 0
+    let mut file = File::open("src/codecs/g729a/tests/test_vectors/ALGTHM.IN")
+        .expect("Failed to open ALGTHM.IN");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read ALGTHM.IN");
+    
+    let mut all_samples = Vec::new();
+    for i in 0..buffer.len()/2 {
+        let sample_idx = i * 2;
+        if sample_idx + 1 < buffer.len() {
+            let sample = i16::from_le_bytes([buffer[sample_idx], buffer[sample_idx + 1]]);
+            all_samples.push(sample);
+        }
+    }
+    
+    // Build analysis buffer with Frame 0 signal
+    let mut analysis_buffer = vec![0i16; 240];
+    for i in 0..80 {
+        if i < all_samples.len() {
+            analysis_buffer[120 + i] = all_samples[i];
+        }
+    }
+    for i in 0..40 {
+        if 80 + i < all_samples.len() {
+            analysis_buffer[200 + i] = all_samples[80 + i];
+        }
+    }
+    
+    println!("Raw analysis buffer energy: {}", 
+        analysis_buffer.iter().map(|&x| (x as i64) * (x as i64)).sum::<i64>());
+    
+    // **TEST 1: Skip preprocessing entirely**
+    println!("\n=== TEST 1: NO PREPROCESSING ===");
+    
+    use crate::codecs::g729a::types::Q15;
+    
+    // Convert raw samples directly to Q15
+    let raw_q15: Vec<Q15> = analysis_buffer.iter().map(|&x| Q15(x)).collect();
+    
+    use crate::codecs::g729a::spectral::{LinearPredictor, LSPConverter, LSPQuantizer};
+    
+    let predictor = LinearPredictor::new();
+    let raw_lp = predictor.analyze(&raw_q15);
+    
+    println!("Raw LP coefficients: {:?}", 
+        raw_lp.values.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    let converter = LSPConverter::new();
+    let raw_lsp = converter.lp_to_lsp(&raw_lp);
+    
+    let mut quantizer = LSPQuantizer::new();
+    let raw_quantized = quantizer.quantize(&raw_lsp);
+    
+    println!("Raw signal LSP indices: {:?}", raw_quantized.indices);
+    
+    // **TEST 2: Only apply pre-emphasis (skip high-pass filter)**
+    println!("\n=== TEST 2: PRE-EMPHASIS ONLY ===");
+    
+    // Apply only pre-emphasis filter manually
+    const PREEMPH_FACTOR: i16 = 22282; // 0.68 * 32768
+    let mut preemph_mem = 0i16;
+    let mut preemph_only = Vec::new();
+    
+    for &sample in &analysis_buffer {
+        let preemph_contrib = ((preemph_mem as i32 * PREEMPH_FACTOR as i32) + 16384) >> 15;
+        let output = sample as i32 - preemph_contrib;
+        let saturated = output.clamp(-32768, 32767) as i16;
+        preemph_only.push(Q15(saturated));
+        preemph_mem = sample;
+    }
+    
+    println!("Pre-emphasis only energy: {}", 
+        preemph_only.iter().map(|&x| (x.0 as i64) * (x.0 as i64)).sum::<i64>());
+    
+    let preemph_lp = predictor.analyze(&preemph_only);
+    let preemph_lsp = converter.lp_to_lsp(&preemph_lp);
+    
+    let mut quantizer2 = LSPQuantizer::new();
+    let preemph_quantized = quantizer2.quantize(&preemph_lsp);
+    
+    println!("Pre-emphasis only LSP indices: {:?}", preemph_quantized.indices);
+    
+    // **TEST 3: Compare with ITU-T reference**
+    let reference_indices = [16u8, 22u8, 22u8, 1u8];
+    println!("\nITU-T reference indices: {:?}", reference_indices);
+    
+    println!("\n=== COMPARISON RESULTS ===");
+    
+    // Check which approach matches best
+    let raw_matches = raw_quantized.indices.iter().zip(reference_indices.iter())
+        .filter(|(a, b)| a == b).count();
+    let preemph_matches = preemph_quantized.indices.iter().zip(reference_indices.iter())
+        .filter(|(a, b)| a == b).count();
+    
+    println!("Raw signal matches: {}/4", raw_matches);
+    println!("Pre-emphasis only matches: {}/4", preemph_matches);
+    
+    if raw_matches > preemph_matches {
+        println!("🎯 SOLUTION: Skip preprocessing entirely!");
+    } else if preemph_matches > raw_matches {
+        println!("🎯 SOLUTION: Use only pre-emphasis, skip high-pass filter!");
+    } else if raw_matches >= 2 || preemph_matches >= 2 {
+        println!("🔶 PROGRESS: Found better approach, need fine-tuning");
+    } else {
+        println!("❌ Neither approach works - deeper issue remains");
+    }
+    
+    // **HYPOTHESIS**: The ITU-T G.729A reference might use different preprocessing
+    // or our filter coefficients might be wrong. The high-pass filter is removing
+    // too much energy from the signal, making LP analysis produce wrong coefficients.
+}
+
+#[test]
+fn test_decode_reference_indices_to_find_expected_signal() {
+    println!("=== DECODE ITU-T REFERENCE INDICES TO EXPECTED SIGNAL ===");
+    
+    // Decode the CORRECT ITU-T Frame 0 LSP indices [1, 105, 17, 0]
+    let reference_indices = [1u8, 105u8, 17u8, 0u8];
+    
+    use crate::codecs::g729a::spectral::{LSPDecoder, LSPConverter};
+    let mut decoder = LSPDecoder::new();
+    let reference_lsp = decoder.decode(&reference_indices);
+    
+    println!("ITU-T Reference LSP indices: {:?}", reference_indices);
+    println!("ITU-T Reference LSP frequencies: {:?}", 
+        reference_lsp.frequencies.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Convert reference LSP to LP coefficients
+    let converter = LSPConverter::new();
+    let reference_lp = converter.lsp_to_lp(&reference_lsp);
+    
+    println!("ITU-T Reference LP coefficients: {:?}", 
+        reference_lp.values.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Compare with what our bcg729-exact algorithms produce
+    println!("\n=== COMPARE WITH OUR bcg729-EXACT ALGORITHMS ===");
+    
+    // Read ALGTHM.IN Frame 0 and process with bcg729-exact chain
+    let mut file = File::open("src/codecs/g729a/tests/test_vectors/ALGTHM.IN")
+        .expect("Failed to open ALGTHM.IN");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read ALGTHM.IN");
+    
+    let mut all_samples = Vec::new();
+    for i in 0..buffer.len()/2 {
+        let sample_idx = i * 2;
+        if sample_idx + 1 < buffer.len() {
+            let sample = i16::from_le_bytes([buffer[sample_idx], buffer[sample_idx + 1]]);
+            all_samples.push(sample);
+        }
+    }
+    
+    // Build Frame 0 analysis buffer exactly like the encoder
+    let mut analysis_buffer = vec![Q15(0); 240];
+    
+    // Current frame: Frame 0 (samples 0-79) at positions 120-199
+    for i in 0..80 {
+        if i < all_samples.len() {
+            analysis_buffer[120 + i] = Q15(all_samples[i]);
+        }
+    }
+    
+    // Lookahead: Frame 1 first 40 samples (samples 80-119) at positions 200-239
+    for i in 0..40 {
+        if 80 + i < all_samples.len() {
+            analysis_buffer[200 + i] = Q15(all_samples[80 + i]);
+        }
+    }
+    
+    println!("Frame 0 analysis buffer energy: {}", 
+        analysis_buffer.iter().map(|&x| (x.0 as i64) * (x.0 as i64)).sum::<i64>());
+    
+    // Apply bcg729-exact processing 
+    use crate::codecs::g729a::spectral::LinearPredictor;
+    let predictor = LinearPredictor::new();
+    let our_lp = predictor.analyze(&analysis_buffer);
+    
+    println!("Our bcg729-exact LP coefficients: {:?}", 
+        our_lp.values.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Calculate the difference
+    println!("\n=== LP COEFFICIENT ANALYSIS ===");
+    let mut total_difference = 0i64;
+    for i in 0..10 {
+        let diff = (our_lp.values[i].0 as i64) - (reference_lp.values[i].0 as i64);
+        total_difference += diff.abs();
+        println!("  LP[{}]: Our={:6}, ITU-T={:6}, Diff={:6}", 
+            i, our_lp.values[i].0, reference_lp.values[i].0, diff);
+    }
+    
+    println!("Total absolute LP difference: {}", total_difference);
+    
+    if total_difference < 10000 {
+        println!("🎉 LP coefficients are very close - signal processing is correct!");
+    } else if total_difference < 100000 {
+        println!("🔶 LP coefficients are somewhat close - minor algorithm differences");
+    } else {
+        println!("❌ LP coefficients are very different - major signal or algorithm issue");
+        
+        // **KEY INSIGHT**: If our LP coefficients are very different, it could mean:
+        // 1. We're analyzing the wrong Frame 0 content
+        // 2. The ITU-T reference uses different signal preprocessing
+        // 3. The ALGTHM.IN Frame 0 is not the same as what produced the reference LSP indices
+        
+        println!("\n🔍 DIAGNOSTIC: This suggests Frame 0 in ALGTHM.IN may not be the exact");
+        println!("   signal that was used to generate the reference LSP indices [16,22,22,1].");
+        println!("   The ITU-T test vectors might be synthetic or from a different source.");
+    }
+    
+    // Also test our quantization of the correct reference LSP
+    println!("\n=== TEST QUANTIZATION OF REFERENCE LSP ===");
+    
+    use crate::codecs::g729a::spectral::LSPQuantizer;
+    let mut quantizer = LSPQuantizer::new();
+    let quantized_reference = quantizer.quantize(&reference_lsp);
+    
+    println!("Reference LSP quantized: {:?}", quantized_reference.indices);
+    println!("Expected indices:        {:?}", reference_indices);
+    
+    let ref_matches = quantized_reference.indices.iter().zip(reference_indices.iter())
+        .filter(|(a, b)| a == b).count();
+    
+    println!("Reference self-consistency: {}/4 matches", ref_matches);
+    
+    if ref_matches == 4 {
+        println!("✅ Our quantizer is self-consistent with reference LSP");
+    } else {
+        println!("❌ Our quantizer produces different results for reference LSP");
+        println!("   This indicates a fundamental quantizer algorithm issue");
+    }
+}
+
+#[test]
+fn test_bcg729_exact_quantizer_self_consistency() {
+    println!("=== TEST BCG729-EXACT QUANTIZER SELF-CONSISTENCY ===");
+    
+    // Decode the CORRECT ITU-T Frame 0 LSP indices [1, 105, 17, 0]
+    let reference_indices = [1u8, 105u8, 17u8, 0u8];
+    
+    use crate::codecs::g729a::spectral::{LSPDecoder, LSPQuantizer};
+    
+    // Step 1: Decode reference indices to get LSP
+    let mut decoder = LSPDecoder::new();
+    let reference_lsp = decoder.decode(&reference_indices);
+    
+    println!("ITU-T Reference indices: {:?}", reference_indices);
+    println!("Decoded LSP frequencies: {:?}", 
+        reference_lsp.frequencies.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Step 2: Re-quantize the same LSP
+    let mut quantizer = LSPQuantizer::new();
+    let quantized_result = quantizer.quantize(&reference_lsp);
+    
+    println!("\n=== SELF-CONSISTENCY TEST ===");
+    println!("Re-quantized indices: {:?}", quantized_result.indices);
+    println!("Expected indices:     {:?}", reference_indices);
+    
+    let mut matches = 0;
+    for i in 0..4 {
+        if quantized_result.indices[i] == reference_indices[i] {
+            matches += 1;
+            println!("  ✅ Index {}: {} matches", i, quantized_result.indices[i]);
+        } else {
+            println!("  ❌ Index {}: {} ≠ {}", i, quantized_result.indices[i], reference_indices[i]);
+        }
+    }
+    
+    println!("\nSelf-consistency: {}/4 matches", matches);
+    
+    if matches == 4 {
+        println!("🎉 QUANTIZER PASSES SELF-CONSISTENCY TEST!");
+        println!("   This proves our bcg729-exact implementation is correct!");
+    } else {
+        println!("❌ Quantizer still has issues - needs more debugging");
+        
+        // Debug: decode our result and compare LSP values
+        let our_decoded = decoder.decode(&quantized_result.indices);
+        println!("\nDebug LSP comparison:");
+        for i in 0..10 {
+            let ref_val = reference_lsp.frequencies[i].0;
+            let our_val = our_decoded.frequencies[i].0;
+            let diff = (ref_val as i32 - our_val as i32).abs();
+            println!("  LSP[{}]: ref={:6}, our={:6}, diff={:6}", i, ref_val, our_val, diff);
+        }
+    }
+    
+    assert_eq!(matches, 4, "Quantizer must pass self-consistency test");
+}
+
+#[test]
+fn test_debug_lsp_lsf_conversion() {
+    println!("=== DEBUG LSP-LSF CONVERSION ===");
+    
+    use crate::codecs::g729a::spectral::quantizer::{g729_acos_q15q13, g729_cos_q13q15};
+    
+    // Test with known values
+    let test_values = [32767, 16384, 0, -16384, -32768];
+    
+    println!("Testing arccos (LSP Q15 -> LSF Q13):");
+    for &val in &test_values {
+        let lsf = g729_acos_q15q13(val);
+        println!("  LSP {} -> LSF {}", val, lsf);
+    }
+    
+    println!("\nTesting cosine (LSF Q13 -> LSP Q15):");
+    let test_lsf = [0, 6434, 12868, 19302, 25736];
+    for &val in &test_lsf {
+        let lsp = g729_cos_q13q15(val);
+        println!("  LSF {} -> LSP {}", val, lsp);
+    }
+    
+    // Test round-trip
+    println!("\nRound-trip test:");
+    let original_lsp = [5000i16, 10000, 15000, 20000, -5000];
+    for &val in &original_lsp {
+        let lsf = g729_acos_q15q13(val);
+        let back_to_lsp = g729_cos_q13q15(lsf);
+        println!("  LSP {} -> LSF {} -> LSP {} (diff: {})", 
+            val, lsf, back_to_lsp, (val - back_to_lsp).abs());
+    }
+}
+
+#[test]
+fn test_trace_reference_decode() {
+    println!("=== TRACE REFERENCE DECODE [16, 22, 22, 1] ===");
+    
+    use crate::codecs::g729a::spectral::LSPDecoder;
+    use crate::codecs::g729a::tables::{LSP_CB1, LSP_CB2};
+    
+    let indices = [16u8, 22u8, 22u8, 1u8];
+    let l0 = indices[0] as usize;
+    let l1 = indices[1] as usize; 
+    let l2 = indices[2] as usize;
+    let l3 = indices[3] as usize;
+    
+    println!("Indices: L0={}, L1={}, L2={}, L3={}", l0, l1, l2, l3);
+    
+    // Check codebook values
+    println!("\nCodebook L1[{}]:", l1);
+    if l1 < LSP_CB1.len() {
+        println!("  Values: {:?}", LSP_CB1[l1]);
+    }
+    
+    println!("\nCodebook L2[{}] (first 5):", l2);
+    if l2 < LSP_CB2.len() {
+        println!("  Values: {:?}", &LSP_CB2[l2][0..5]);
+    }
+    
+    println!("\nCodebook L3[{}] (last 5):", l3);
+    if l3 < LSP_CB2.len() {
+        println!("  Values: {:?}", &LSP_CB2[l3][5..10]);
+    }
+    
+    // Reconstruct quantizer output
+    let mut quantizer_output = [0i16; 10];
+    for i in 0..5 {
+        quantizer_output[i] = LSP_CB1[l1][i] + LSP_CB2[l2][i];
+        println!("quantizer_output[{}] = {} + {} = {}", 
+            i, LSP_CB1[l1][i], LSP_CB2[l2][i], quantizer_output[i]);
+    }
+    for i in 5..10 {
+        quantizer_output[i] = LSP_CB1[l1][i] + LSP_CB2[l3][i];
+        println!("quantizer_output[{}] = {} + {} = {}", 
+            i, LSP_CB1[l1][i], LSP_CB2[l3][i], quantizer_output[i]);
+    }
+    
+    println!("\nQuantizer output before rearrange: {:?}", quantizer_output);
+    
+    // Now decode with our decoder
+    let mut decoder = LSPDecoder::new();
+    let decoded = decoder.decode(&indices);
+    
+    println!("\nFinal decoded LSP: {:?}", 
+        decoded.frequencies.iter().map(|x| x.0).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_parse_algthm_bit_frame0_manually() {
+    println!("=== MANUALLY PARSE ALGTHM.BIT FRAME 0 ===");
+    
+    use std::fs::File;
+    use std::io::Read;
+    
+    // Read ALGTHM.BIT in ITU-T expanded format
+    let mut file = File::open("src/codecs/g729a/tests/test_vectors/ALGTHM.BIT")
+        .expect("Failed to open ALGTHM.BIT");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read ALGTHM.BIT");
+    
+    // ITU-T expanded format: each bit is 2 bytes (0x007F='0', 0x0081='1')
+    // Skip sync word (2 bytes) and frame size (2 bytes)
+    let mut bit_pos = 4;
+    
+    println!("First few bytes: {:02X?}", &buffer[0..20]);
+    
+    // Frame 0 starts after sync/size header
+    // G.729A frame = 80 bits = 160 bytes in expanded format
+    let frame_start = bit_pos;
+    let frame_end = frame_start + 160;
+    
+    if frame_end > buffer.len() {
+        println!("ERROR: File too short for frame 0");
+        return;
+    }
+    
+    // Extract bits for Frame 0
+    let mut frame_bits = Vec::new();
+    for i in (frame_start..frame_end).step_by(2) {
+        let bit_value = u16::from_le_bytes([buffer[i], buffer[i+1]]);
+        let bit = if bit_value == 0x0081 { 1u8 } else { 0u8 };
+        frame_bits.push(bit);
+    }
+    
+    println!("Frame 0 bits (80 total): {:?}", &frame_bits[0..20]);
+    
+    // Parse LSP parameters according to G.729A bit allocation
+    // L0: 1 bit
+    // L1: 7 bits  
+    // L2: 5 bits
+    // L3: 5 bits
+    let l0 = frame_bits[0];
+    
+    let mut l1 = 0u8;
+    for i in 0..7 {
+        l1 = (l1 << 1) | frame_bits[1 + i];
+    }
+    
+    let mut l2 = 0u8;
+    for i in 0..5 {
+        l2 = (l2 << 1) | frame_bits[8 + i];
+    }
+    
+    let mut l3 = 0u8;
+    for i in 0..5 {
+        l3 = (l3 << 1) | frame_bits[13 + i];
+    }
+    
+    println!("\n=== PARSED LSP INDICES ===");
+    println!("L0: {} (predictor select)", l0);
+    println!("L1: {} (stage 1 VQ)", l1);
+    println!("L2: {} (stage 2 lower)", l2);
+    println!("L3: {} (stage 2 upper)", l3);
+    
+    println!("\nAs array: [{}, {}, {}, {}]", l0, l1, l2, l3);
+    
+    // Compare with what we thought were the indices
+    println!("\nWe thought indices were: [16, 22, 22, 1]");
+    println!("Actual parsed indices:   [{}, {}, {}, {}]", l0, l1, l2, l3);
+}
+
+#[test]
+fn test_debug_vq_search_l1() {
+    println!("=== DEBUG VQ SEARCH FOR L1 (7 vs 105) ===");
+    
+    use crate::codecs::g729a::spectral::{LSPDecoder, LSPQuantizer};
+    use crate::codecs::g729a::tables::{LSP_CB1};
+    
+    // First decode the correct reference to get target LSF
+    let reference_indices = [1u8, 105u8, 17u8, 0u8];
+    let mut decoder = LSPDecoder::new();
+    let reference_lsp = decoder.decode(&reference_indices);
+    
+    println!("Reference LSP frequencies: {:?}", 
+        reference_lsp.frequencies.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+    
+    // Now let's trace through why our quantizer picks L1=7 instead of L1=105
+    let mut quantizer = LSPQuantizer::new();
+    
+    // Convert LSP to LSF to see the target
+    use crate::codecs::g729a::spectral::quantizer::g729_acos_q15q13;
+    let mut target_lsf = [0i16; 10];
+    for i in 0..10 {
+        target_lsf[i] = g729_acos_q15q13(reference_lsp.frequencies[i].0);
+    }
+    
+    println!("\nTarget LSF (after arccos): {:?}", &target_lsf[0..5]);
+    
+    // Check what's in codebook entries 7 and 105
+    println!("\nCodebook comparison:");
+    println!("L1[7]:   {:?}", &LSP_CB1[7][0..5]);
+    println!("L1[105]: {:?}", &LSP_CB1[105][0..5]);
+    
+    // Calculate distances manually
+    let mut dist_7 = 0i64;
+    let mut dist_105 = 0i64;
+    
+    println!("\nPer-coefficient analysis:");
+    for i in 0..10 {
+        let diff_7 = (target_lsf[i] as i64) - (LSP_CB1[7][i] as i64);
+        let diff_105 = (target_lsf[i] as i64) - (LSP_CB1[105][i] as i64);
+        
+        dist_7 += diff_7 * diff_7;
+        dist_105 += diff_105 * diff_105;
+        
+        if i < 5 {
+            println!("  Coeff[{}]: target={}, L1[7]={}, L1[105]={}, diff_7={}, diff_105={}", 
+                i, target_lsf[i], LSP_CB1[7][i], LSP_CB1[105][i], diff_7.abs(), diff_105.abs());
+        }
+    }
+    
+    println!("\nTotal squared distances:");
+    println!("  L1[7]:   {}", dist_7);
+    println!("  L1[105]: {}", dist_105);
+    
+    if dist_7 < dist_105 {
+        println!("\n❌ Our simple distance favors L1[7] - need to check MA prediction!");
+    } else {
+        println!("\n✅ L1[105] should win based on distance");
+    }
+    
+    // The issue might be in the MA prediction and target vector computation
+    println!("\n=== CHECKING MA PREDICTION ===");
+    
+    // Manually compute what the target vector should be for L0=1
+    // This is where the bug likely is
+}
+
+#[test]
+fn test_trace_decoder_ma_prediction() {
+    println!("=== TRACE DECODER MA PREDICTION ===");
+    
+    use crate::codecs::g729a::tables::{LSP_CB1, LSP_CB2};
+    
+    let indices = [1u8, 105u8, 17u8, 0u8];
+    
+    // Step 1: Reconstruct quantizer output from codebooks
+    let mut quantizer_output = [0i16; 10];
+    for i in 0..5 {
+        quantizer_output[i] = LSP_CB1[105][i] + LSP_CB2[17][i];
+    }
+    for i in 5..10 {
+        quantizer_output[i] = LSP_CB1[105][i] + LSP_CB2[0][i];
+    }
+    
+    println!("Quantizer output (before rearrange): {:?}", quantizer_output);
+    
+    // Step 2: Apply rearrangements (should be minimal for correct values)
+    // Skip for now to see raw values
+    
+    // Step 3: The key issue - MA prediction for L0=1
+    // The decoder should compute: qLSF = MAPredictorSum * quantizer_output + MA_prediction
+    
+    // Check what MA predictor coefficients we're using for L0=1
+    println!("\n=== MA PREDICTOR DEBUG ===");
+    
+    // The decoder initialization should have the correct previous LSF values
+    // bcg729 initializes with: [2339, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396]
+    let initial_lsf = [2339, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396];
+    println!("Initial prev_lsf: {:?}", &initial_lsf[0..5]);
+    
+    // For first frame, all 4 previous frames have the same initial values
+    // So the MA prediction should be based on these initial values
+    
+    // The issue is likely that we're not applying the MA prediction correctly
+    // or the MA predictor coefficients are wrong
+}
+
+#[test]
+fn test_debug_target_vector_computation() {
+    println!("=== DEBUG TARGET VECTOR COMPUTATION ===");
+    
+    // Reference indices [1, 105, 17, 0] where L0=1
+    let l0 = 1;
+    
+    // Decode to get the expected LSF values
+    use crate::codecs::g729a::spectral::LSPDecoder;
+    let mut decoder = LSPDecoder::new();
+    let reference_indices = [1u8, 105u8, 17u8, 0u8];
+    let reference_lsp = decoder.decode(&reference_indices);
+    
+    // Convert to LSF
+    use crate::codecs::g729a::spectral::quantizer::g729_acos_q15q13;
+    let mut lsf = [0i16; 10];
+    for i in 0..10 {
+        lsf[i] = g729_acos_q15q13(reference_lsp.frequencies[i].0);
+    }
+    
+    println!("LSF values: {:?}", &lsf[0..5]);
+    
+    // Initial prev_lsf should be [2339, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396]
+    let prev_lsf = [2339i16, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396];
+    
+    // MA predictor for L0=1, frame 0
+    let ma_pred = [7733i16, 7880, 8188, 8175, 8247, 8490, 8637, 8601, 8359, 7569];
+    
+    // Compute target vector
+    println!("\nTarget vector computation for first 3 coefficients:");
+    for i in 0..3 {
+        let mut acc = (lsf[i] as i32) << 15; // Q13 -> Q28
+        println!("  Coeff[{}]: LSF={} -> acc_init={}", i, lsf[i], acc);
+        
+        // For first frame, all 4 previous frames have same values
+        for j in 0..4 {
+            let ma_val = (prev_lsf[i] as i32) * (ma_pred[i] as i32);
+            acc -= ma_val;
+            println!("    Frame[{}]: prev_lsf={} * ma_pred={} = {} -> acc={}", 
+                j, prev_lsf[i], ma_pred[i], ma_val, acc);
+        }
+        
+        // Convert back to Q13
+        let temp_q13 = (acc >> 15) as i16;
+        println!("    -> temp_q13={}", temp_q13);
+        
+        // Apply inverse MA predictor sum (Q12)
+        // For L0=1, coeff 0: inv_sum = 9202
+        let inv_sums = [9202i16, 7320, 6788, 7738, 8170, 8154, 8856, 8818, 8366, 8544];
+        let target = ((temp_q13 as i32 * inv_sums[i] as i32) >> 12) as i16;
+        println!("    -> target_vector[{}] = {} * {} >> 12 = {}", i, temp_q13, inv_sums[i], target);
+    }
+}
+
+#[test]
+fn test_force_correct_lsp_to_quantizer() {
+    println!("=== FORCE CORRECT LSP TO QUANTIZER ===");
+    
+    // From our reverse engineering, the LSF that should produce [1, 105, 17, 0] is:
+    // [2254, 3389, 4623, 7659, 9837, ...]
+    
+    // Convert these LSF values to LSP
+    use crate::codecs::g729a::spectral::quantizer::g729_cos_q13q15;
+    let target_lsf = [2254i16, 3389, 4623, 7659, 9837, 12500, 15000, 17500, 20000, 22500];
+    
+    let mut lsp_frequencies = [crate::codecs::g729a::types::Q15::ZERO; 10];
+    for i in 0..10 {
+        lsp_frequencies[i] = crate::codecs::g729a::types::Q15(g729_cos_q13q15(target_lsf[i]));
+    }
+    
+    println!("Target LSF: {:?}", &target_lsf[0..5]);
+    println!("Converted LSP: {:?}", lsp_frequencies.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+    
+    // Now quantize these LSP values
+    use crate::codecs::g729a::spectral::LSPQuantizer;
+    use crate::codecs::g729a::types::LSPParameters;
+    let mut quantizer = LSPQuantizer::new();
+    let lsp_params = LSPParameters { frequencies: lsp_frequencies };
+    let quantized = quantizer.quantize(&lsp_params);
+    
+    println!("\nQuantized indices: {:?}", quantized.indices);
+    println!("Expected indices:  [1, 105, 17, 0]");
+    
+    let mut matches = 0;
+    for i in 0..4 {
+        if quantized.indices[i] == [1u8, 105, 17, 0][i] {
+            matches += 1;
+            println!("  ✅ Index {}: {}", i, quantized.indices[i]);
+        } else {
+            println!("  ❌ Index {}: {} ≠ {}", i, quantized.indices[i], [1, 105, 17, 0][i]);
+        }
+    }
+    
+    println!("\nMatches: {}/4", matches);
+    
+    if matches == 4 {
+        println!("✅ Quantizer WORKS when given the right LSP!");
+        println!("   This proves the quantizer algorithm is correct.");
+        println!("   The issue is in LP analysis or LSP conversion.");
+    } else {
+        println!("❌ Quantizer still has issues even with perfect input");
+    }
+}
+
+#[test]
+fn test_debug_exact_arccos() {
+    println!("=== DEBUG EXACT ARCCOS ===");
+    
+    use crate::codecs::g729a::spectral::quantizer::g729_acos_q15q13;
+    
+    // Test some key values
+    let test_values = [
+        (32767, "1.0"),      // cos(0) = 1
+        (0, "0.0"),          // cos(π/2) = 0
+        (-32767, "-1.0"),    // cos(π) = -1
+        (23170, "0.707"),    // cos(π/4) ≈ 0.707
+        (31535, "0.962"),    // From our test case
+    ];
+    
+    for (val, desc) in test_values.iter() {
+        let result = g729_acos_q15q13(*val);
+        println!("acos({} = {}) = {} (expected range: 0-25736)", val, desc, result);
+    }
+    
+    // Also test the intermediate functions
+    println!("\nTest sqrt function:");
+    use crate::codecs::g729a::spectral::quantizer::g729_sqrt_q0q7;
+    let sqrt_test = g729_sqrt_q0q7(1073741824); // 1.0 in Q30
+    println!("sqrt(1.0 in Q30) = {} (expected ~128 in Q7)", sqrt_test);
+}
