@@ -3058,3 +3058,64 @@ fn test_debug_l1_codebook_entry_105() {
     println!("\nEntry 7 distance ({}) < Entry 105 distance ({}): {}", 
              dist_7, dist_105, dist_7 < dist_105);
 }
+
+#[test]
+fn test_debug_ma_prediction_exact() {
+    println!("=== DEBUG MA PREDICTION EXACT ===");
+    
+    use crate::codecs::g729a::spectral::LSPQuantizer;
+    use crate::codecs::g729a::spectral::quantizer::g729_acos_q15q13;
+    use crate::codecs::g729a::types::LSPParameters;
+    
+    // The LSF values we're getting
+    let our_lsf = [2252i16, 3391, 4620, 7662, 9834, 11000, 13000, 15000, 17000, 19000];
+    // The expected LSF values
+    let expected_lsf = [2254i16, 3389, 4623, 7659, 9837, 11000, 13000, 15000, 17000, 19000];
+    
+    println!("Our LSF:      {:?}", &our_lsf[0..5]);
+    println!("Expected LSF: {:?}", &expected_lsf[0..5]);
+    println!("Differences:  {:?}", 
+             (0..5).map(|i| our_lsf[i] - expected_lsf[i]).collect::<Vec<_>>());
+    
+    // Compute target vectors for both
+    let mut quantizer = LSPQuantizer::new();
+    
+    // For L0=1 (which should be selected)
+    let l0 = 1;
+    println!("\nComputing target vector for L0={}:", l0);
+    
+    // Our target vector
+    let mut our_target = [0i16; 10];
+    for i in 0..10 {
+        let mut acc = (our_lsf[i] as i32) << 15; // Q13 -> Q28
+        for j in 0..4 {
+            let ma_coeff = quantizer.get_ma_predictor(l0, j, i);
+            // Initial predictor values should be the bcg729 init values
+            let prev_lsf_init = [2339i16, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396];
+            acc -= (prev_lsf_init[i] as i32) * (ma_coeff as i32);
+        }
+        let temp_q13 = (acc >> 15) as i16;
+        let inv_sum = quantizer.get_inv_ma_predictor_sum(l0, i);
+        our_target[i] = ((temp_q13 as i32 * inv_sum as i32) >> 12) as i16;
+    }
+    
+    println!("Our target vector: {:?}", &our_target[0..5]);
+    
+    // Expected target vector (same calculation with expected LSF)
+    let mut expected_target = [0i16; 10];
+    for i in 0..10 {
+        let mut acc = (expected_lsf[i] as i32) << 15; // Q13 -> Q28
+        for j in 0..4 {
+            let ma_coeff = quantizer.get_ma_predictor(l0, j, i);
+            let prev_lsf_init = [2339i16, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396];
+            acc -= (prev_lsf_init[i] as i32) * (ma_coeff as i32);
+        }
+        let temp_q13 = (acc >> 15) as i16;
+        let inv_sum = quantizer.get_inv_ma_predictor_sum(l0, i);
+        expected_target[i] = ((temp_q13 as i32 * inv_sum as i32) >> 12) as i16;
+    }
+    
+    println!("Expected target: {:?}", &expected_target[0..5]);
+    println!("Target diffs:    {:?}", 
+             (0..5).map(|i| our_target[i] - expected_target[i]).collect::<Vec<_>>());
+}
