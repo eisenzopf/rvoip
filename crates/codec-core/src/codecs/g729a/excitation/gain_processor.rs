@@ -321,14 +321,25 @@ impl GainQuantizer {
         
         // TEMPORARY: Boost gains for testing to achieve reasonable signal levels
         // This compensates for encoder targeting very small gains with test signals
-        let boost_factor = 25; // Increased multiplier to reach target range 0.5-1.5
+        // BUT: Don't boost if this appears to be silence/very low energy
+        // Use very conservative thresholds: only skip boost for truly minimal gains
+        // Silence detection: ga=2 && gc=[386,591] suggests silence or very low energy
+        // Based on debug logs: silence produces ga=2,gc=591 and ga=2,gc=386 consistently
+        let is_silence = adaptive_gain.0.abs() <= 2 && fixed_gain.0.abs() <= 591;
+        let boost_factor = if is_silence { 1 } else { 25 }; // No boost for silence
+        
         let boosted_adaptive = Q15((adaptive_gain.0 as i32 * boost_factor).clamp(i16::MIN as i32, i16::MAX as i32) as i16);
         let boosted_fixed = Q15((fixed_gain.0 as i32 * boost_factor).clamp(i16::MIN as i32, i16::MAX as i32) as i16);
         
         #[cfg(debug_assertions)]
         {
-            eprintln!("Gain boost applied: ga {} -> {}, gc {} -> {}", 
-                adaptive_gain.0, boosted_adaptive.0, fixed_gain.0, boosted_fixed.0);
+            if is_silence {
+                eprintln!("Silence detected: ga={}, gc={} - no gain boost applied", 
+                    adaptive_gain.0, fixed_gain.0);
+            } else {
+                eprintln!("Gain boost applied: ga {} -> {}, gc {} -> {}", 
+                    adaptive_gain.0, boosted_adaptive.0, fixed_gain.0, boosted_fixed.0);
+            }
         }
         
         self.predictor.update(fixed_gain); // Update with original gain
