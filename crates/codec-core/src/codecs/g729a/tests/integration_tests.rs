@@ -71,7 +71,7 @@ mod tests {
             .expect("Decoding failed");
         
         // Output should be mostly silence (allowing for some codec noise)
-        let max_sample = decoded.samples.iter().map(|&x| x.abs()).max().unwrap();
+        let max_sample = decoded.samples.iter().map(|&x| x.saturating_abs()).max().unwrap();
         assert!(max_sample < 1000, "Silent input produced loud output: {}", max_sample);
     }
     
