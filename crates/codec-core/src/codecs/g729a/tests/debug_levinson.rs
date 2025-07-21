@@ -3077,45 +3077,33 @@ fn test_debug_ma_prediction_exact() {
     println!("Differences:  {:?}", 
              (0..5).map(|i| our_lsf[i] - expected_lsf[i]).collect::<Vec<_>>());
     
-    // Compute target vectors for both
+    // The tiny LSF differences propagate through MA prediction
+    // This shows why even 2-3 LSB differences cause different VQ selection
+    
+    // Simplified calculation: just show the LSF difference impact
+    let lsf_diffs = [our_lsf[0] - expected_lsf[0], 
+                     our_lsf[1] - expected_lsf[1],
+                     our_lsf[2] - expected_lsf[2], 
+                     our_lsf[3] - expected_lsf[3],
+                     our_lsf[4] - expected_lsf[4]];
+    
+    println!("\nLSF differences: {:?}", lsf_diffs);
+    println!("These small differences (2-3 out of 25736 range) cause:");
+    println!("- Different target vectors after MA prediction");
+    println!("- Different weighted errors in VQ search");
+    println!("- Selection of different codebook entries");
+    
+    // Quantize with our LSF values
     let mut quantizer = LSPQuantizer::new();
-    
-    // For L0=1 (which should be selected)
-    let l0 = 1;
-    println!("\nComputing target vector for L0={}:", l0);
-    
-    // Our target vector
-    let mut our_target = [0i16; 10];
+    let mut lsp_frequencies = [crate::codecs::g729a::types::Q15::ZERO; 10];
     for i in 0..10 {
-        let mut acc = (our_lsf[i] as i32) << 15; // Q13 -> Q28
-        for j in 0..4 {
-            let ma_coeff = quantizer.get_ma_predictor(l0, j, i);
-            // Initial predictor values should be the bcg729 init values
-            let prev_lsf_init = [2339i16, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396];
-            acc -= (prev_lsf_init[i] as i32) * (ma_coeff as i32);
-        }
-        let temp_q13 = (acc >> 15) as i16;
-        let inv_sum = quantizer.get_inv_ma_predictor_sum(l0, i);
-        our_target[i] = ((temp_q13 as i32 * inv_sum as i32) >> 12) as i16;
+        // Convert back to LSP for quantization
+        use crate::codecs::g729a::spectral::quantizer::g729_cos_q13q15;
+        lsp_frequencies[i] = crate::codecs::g729a::types::Q15(g729_cos_q13q15(our_lsf[i]));
     }
+    let lsp_params = LSPParameters { frequencies: lsp_frequencies };
+    let quantized = quantizer.quantize(&lsp_params);
     
-    println!("Our target vector: {:?}", &our_target[0..5]);
-    
-    // Expected target vector (same calculation with expected LSF)
-    let mut expected_target = [0i16; 10];
-    for i in 0..10 {
-        let mut acc = (expected_lsf[i] as i32) << 15; // Q13 -> Q28
-        for j in 0..4 {
-            let ma_coeff = quantizer.get_ma_predictor(l0, j, i);
-            let prev_lsf_init = [2339i16, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396];
-            acc -= (prev_lsf_init[i] as i32) * (ma_coeff as i32);
-        }
-        let temp_q13 = (acc >> 15) as i16;
-        let inv_sum = quantizer.get_inv_ma_predictor_sum(l0, i);
-        expected_target[i] = ((temp_q13 as i32 * inv_sum as i32) >> 12) as i16;
-    }
-    
-    println!("Expected target: {:?}", &expected_target[0..5]);
-    println!("Target diffs:    {:?}", 
-             (0..5).map(|i| our_target[i] - expected_target[i]).collect::<Vec<_>>());
+    println!("\nWith our LSF:     indices = {:?}", quantized.indices);
+    println!("Expected indices:         = [1, 105, 17, 0]");
 }
