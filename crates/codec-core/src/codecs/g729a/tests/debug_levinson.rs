@@ -1489,3 +1489,262 @@ impl<'a> BitReader<'a> {
         result
     }
 } 
+
+#[test]
+fn test_full_encoder_itu_t_compliance() {
+    println!("=== TEST FULL G.729A ENCODER ITU-T COMPLIANCE ===");
+    
+    // Read Frame 0 from ALGTHM.IN
+    let mut file = File::open("src/codecs/g729a/tests/test_vectors/ALGTHM.IN")
+        .expect("Failed to open ALGTHM.IN");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read ALGTHM.IN");
+    
+    let mut all_samples = Vec::new();
+    for i in 0..buffer.len()/2 {
+        let sample_idx = i * 2;
+        if sample_idx + 1 < buffer.len() {
+            let sample = i16::from_le_bytes([buffer[sample_idx], buffer[sample_idx + 1]]);
+            all_samples.push(sample);
+        }
+    }
+    
+    println!("Loaded {} samples from ALGTHM.IN", all_samples.len());
+    
+    // Create ITU-T reference LSP indices for comparison
+    let reference_indices = [16u8, 22u8, 22u8, 1u8]; // Frame 0 from ALGTHM.BIT
+    
+    // Create a fresh G.729A encoder with ITU-T initialization
+    let mut encoder = crate::codecs::g729a::codec::encoder::G729AEncoder::new();
+    
+    // Build Frame 0 (samples 0-79) and Frame 1 lookahead (samples 80-119)
+    let mut frame_0 = [0i16; 80];
+    let mut lookahead = [0i16; 40];
+    
+    for i in 0..80 {
+        if i < all_samples.len() {
+            frame_0[i] = all_samples[i];
+        }
+    }
+    
+    for i in 0..40 {
+        if 80 + i < all_samples.len() {
+            lookahead[i] = all_samples[80 + i];
+        }
+    }
+    
+    println!("Frame 0 samples [0..10]: {:?}", &frame_0[0..10]);
+    println!("Frame 0 energy: {}", frame_0.iter().map(|&x| (x as i64) * (x as i64)).sum::<i64>());
+    
+    // Create AudioFrame
+    let audio_frame = crate::codecs::g729a::types::AudioFrame {
+        samples: frame_0,
+        timestamp: 0,
+    };
+    
+    // Encode Frame 0 with proper lookahead
+    println!("\n=== ENCODING FRAME 0 ===");
+    let encoded_result = encoder.encode_frame_with_lookahead(&audio_frame, &lookahead);
+    
+    match encoded_result {
+        Ok(encoded_bytes) => {
+            // Unpack the bitstream to get encoded parameters
+            let decoded_params = crate::codecs::g729a::codec::bitstream::unpack_frame(&encoded_bytes);
+            
+            println!("Successfully encoded Frame 0!");
+            println!("Encoded LSP indices: {:?}", decoded_params.lsp_indices);
+            println!("Reference LSP indices: {:?}", reference_indices);
+            
+            // Compare LSP indices
+            let mut matches = 0;
+            for i in 0..4 {
+                if decoded_params.lsp_indices[i] == reference_indices[i] {
+                    matches += 1;
+                    println!("✓ LSP[{}]: {} (match)", i, decoded_params.lsp_indices[i]);
+                } else {
+                    println!("✗ LSP[{}]: {} vs {} (reference)", i, decoded_params.lsp_indices[i], reference_indices[i]);
+                }
+            }
+            
+            let compliance_percentage = (matches as f64 / 4.0) * 100.0;
+            println!("\n🎯 FRAME 0 COMPLIANCE: {:.1}% ({}/{} indices match)", 
+                compliance_percentage, matches, 4);
+            
+            // Also check other parameters
+            println!("\nOther encoded parameters:");
+            println!("Pitch delays: {:?}", decoded_params.pitch_delays);
+            println!("Fixed codebook indices: {:?}", decoded_params.fixed_codebook_indices);
+            println!("Gain indices: {:?}", decoded_params.gain_indices);
+            
+            // If we get 100% compliance, we've solved it!
+            if matches == 4 {
+                println!("🎉 PERFECT COMPLIANCE ACHIEVED! 🎉");
+            } else {
+                println!("❌ Still not perfect compliance. Need to investigate further.");
+            }
+        },
+        Err(e) => {
+            println!("❌ Encoding failed: {:?}", e);
+            panic!("Encoder failed to process Frame 0");
+        }
+    }
+}
+
+#[test]
+fn test_find_correct_frame_alignment() {
+    println!("=== FIND CORRECT FRAME ALIGNMENT ===");
+    
+    // Read all samples from ALGTHM.IN
+    let mut file = File::open("src/codecs/g729a/tests/test_vectors/ALGTHM.IN")
+        .expect("Failed to open ALGTHM.IN");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read ALGTHM.IN");
+    
+    let mut all_samples = Vec::new();
+    for i in 0..buffer.len()/2 {
+        let sample_idx = i * 2;
+        if sample_idx + 1 < buffer.len() {
+            let sample = i16::from_le_bytes([buffer[sample_idx], buffer[sample_idx + 1]]);
+            all_samples.push(sample);
+        }
+    }
+    
+    println!("Loaded {} samples from ALGTHM.IN", all_samples.len());
+    
+    // Target reference from ALGTHM.BIT Frame 0
+    let target_indices = [16u8, 22u8, 22u8, 1u8];
+    
+    // Test frames 0-10 to find which one matches
+    for frame_num in 0..=10 {
+        let frame_start = frame_num * 80;
+        let lookahead_start = frame_start + 80;
+        
+        if frame_start + 80 > all_samples.len() {
+            break;
+        }
+        
+        // Build frame samples
+        let mut frame_samples = [0i16; 80];
+        let mut lookahead = [0i16; 40];
+        
+        for i in 0..80 {
+            if frame_start + i < all_samples.len() {
+                frame_samples[i] = all_samples[frame_start + i];
+            }
+        }
+        
+        for i in 0..40 {
+            if lookahead_start + i < all_samples.len() {
+                lookahead[i] = all_samples[lookahead_start + i];
+            }
+        }
+        
+        // Calculate frame energy for diagnostic purposes
+        let frame_energy: i64 = frame_samples.iter().map(|&x| (x as i64) * (x as i64)).sum();
+        let max_sample = frame_samples.iter().map(|&x| x.abs()).max().unwrap_or(0);
+        
+        println!("\nFrame {}: energy={}, max_sample={}", frame_num, frame_energy, max_sample);
+        println!("  Samples [0..10]: {:?}", &frame_samples[0..10]);
+        
+        // Skip silent frames (likely won't match active speech reference)
+        if frame_energy < 1000000 {
+            println!("  -> Skipping silent frame");
+            continue;
+        }
+        
+        // Create a fresh encoder for each test
+        let mut encoder = crate::codecs::g729a::codec::encoder::G729AEncoder::new();
+        
+        let audio_frame = crate::codecs::g729a::types::AudioFrame {
+            samples: frame_samples,
+            timestamp: frame_num as u64 * 80,
+        };
+        
+        // Encode the frame
+        match encoder.encode_frame_with_lookahead(&audio_frame, &lookahead) {
+            Ok(encoded_bytes) => {
+                let decoded_params = crate::codecs::g729a::codec::bitstream::unpack_frame(&encoded_bytes);
+                
+                // Check for matches
+                let mut matches = 0;
+                for i in 0..4 {
+                    if decoded_params.lsp_indices[i] == target_indices[i] {
+                        matches += 1;
+                    }
+                }
+                
+                let compliance = (matches as f64 / 4.0) * 100.0;
+                println!("  -> LSP indices: {:?} ({}% match)", decoded_params.lsp_indices, compliance);
+                
+                if matches >= 2 {
+                    println!("  🎯 POTENTIAL MATCH! Frame {} has {}% compliance", frame_num, compliance);
+                    if matches == 4 {
+                        println!("  🎉 PERFECT MATCH FOUND! Frame {} produces exact reference indices!", frame_num);
+                        break;
+                    }
+                }
+            },
+            Err(e) => {
+                println!("  -> Encoding failed: {:?}", e);
+            }
+        }
+    }
+    
+    println!("\n=== FRAME ALIGNMENT SEARCH COMPLETE ===");
+}
+
+#[test]
+fn test_decoder_reference_reconstruction() {
+    println!("=== TEST DECODER REFERENCE RECONSTRUCTION ===");
+    
+    // ITU-T reference indices from ALGTHM.BIT Frame 0
+    let reference_indices = [16u8, 22u8, 22u8, 1u8];
+    
+    println!("Testing decoder reconstruction of reference indices: {:?}", reference_indices);
+    
+    // Create a fresh decoder
+    let mut decoder = crate::codecs::g729a::spectral::quantizer::LSPDecoder::new();
+    
+    // Decode the reference indices
+    let decoded_lsp = decoder.decode(&reference_indices);
+    
+    println!("Decoded LSP frequencies: {:?}", decoded_lsp.frequencies.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Convert decoded LSP back to LP coefficients
+    let lsp_converter = crate::codecs::g729a::spectral::lsp_converter::LSPConverter::new();
+    let decoded_lp = lsp_converter.lsp_to_lp(&decoded_lsp);
+    
+    println!("Decoded LP coefficients: {:?}", decoded_lp.values.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Now test the round-trip: encode these LP coefficients back
+    let re_encoded_lsp = lsp_converter.lp_to_lsp(&decoded_lp);
+    
+    println!("Re-encoded LSP frequencies: {:?}", re_encoded_lsp.frequencies.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Try to quantize the re-encoded LSP
+    let mut quantizer = crate::codecs::g729a::spectral::quantizer::LSPQuantizer::new();
+    let quantized = quantizer.quantize(&re_encoded_lsp);
+    
+    println!("Re-quantized indices: {:?}", quantized.indices);
+    
+    // Check if we get back the original indices
+    let mut matches = 0;
+    for i in 0..4 {
+        if quantized.indices[i] == reference_indices[i] {
+            matches += 1;
+            println!("✓ Index[{}]: {} (match)", i, quantized.indices[i]);
+        } else {
+            println!("✗ Index[{}]: {} vs {} (reference)", i, quantized.indices[i], reference_indices[i]);
+        }
+    }
+    
+    let round_trip_compliance = (matches as f64 / 4.0) * 100.0;
+    println!("\n🔄 ROUND-TRIP COMPLIANCE: {:.1}% ({}/{} indices match)", 
+        round_trip_compliance, matches, 4);
+    
+    if matches == 4 {
+        println!("🎉 PERFECT ROUND-TRIP! Our decoder and encoder are consistent!");
+    } else {
+        println!("❌ Round-trip failed. This indicates encoder/decoder mismatch.");
+    }
+}

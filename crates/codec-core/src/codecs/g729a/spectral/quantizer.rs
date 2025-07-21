@@ -43,8 +43,21 @@ impl LSPPredictor {
             ],
         ];
 
+        // ITU-T G.729A: Initialize predictor with INITIAL_LSP values for realistic startup
+        // Convert INITIAL_LSP_Q15 to Q13 for predictor state
+        let initial_lsp_q13: [Q15; LP_ORDER] = crate::codecs::g729a::constants::INITIAL_LSP_Q15
+            .map(|val| Q15(val >> 2)); // Q15 to Q13: divide by 4
+        
+        let mut prev_lsp_init = [[Q15::ZERO; LP_ORDER]; 4];
+        
+        // Initialize all 4 previous frames with the same initial LSP values
+        // This provides a reasonable startup state for MA prediction
+        for i in 0..4 {
+            prev_lsp_init[i] = initial_lsp_q13;
+        }
+
         Self {
-            prev_lsp: [[Q15::ZERO; LP_ORDER]; 4],
+            prev_lsp: prev_lsp_init,
             ma_predictors,
         }
     }
@@ -53,6 +66,15 @@ impl LSPPredictor {
     pub fn predict_with_predictor(&self, predictor_idx: usize) -> [Q15; LP_ORDER] {
         let predictor_idx = predictor_idx.min(1); // Clamp to [0,1]
         let mut prediction = [Q15::ZERO; LP_ORDER];
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("      🔮 PREDICTOR DEBUG ({}): ", predictor_idx);
+            eprintln!("        Prev LSP state: {:?}", 
+                self.prev_lsp.iter().take(2).map(|frame| frame.iter().take(3).map(|x| x.0).collect::<Vec<_>>()).collect::<Vec<_>>());
+            eprintln!("        MA coeffs[{}]: {:?}", predictor_idx,
+                self.ma_predictors[predictor_idx].iter().take(2).map(|frame| frame.iter().take(3).collect::<Vec<_>>()).collect::<Vec<_>>());
+        }
         
         // ITU-T G.729A MA prediction using selected predictor
         for i in 0..LP_ORDER {
@@ -63,11 +85,27 @@ impl LSPPredictor {
                 let coeff = self.ma_predictors[predictor_idx][j][i];
                 let prev_val = self.prev_lsp[j][i].0;
                 sum += (coeff as i64) * (prev_val as i64);
+                
+                #[cfg(debug_assertions)]
+                if i < 3 && j < 2 {
+                    eprintln!("        LSP[{}] frame[{}]: coeff={} * prev={} = {}", 
+                        i, j, coeff, prev_val, (coeff as i64) * (prev_val as i64));
+                }
             }
             
             // Convert Q26 to Q13 and saturate
             let q13_result = (sum >> 13).clamp(-4096, 4095) as i16;
             prediction[i] = Q15(q13_result);
+            
+            #[cfg(debug_assertions)]
+            if i < 3 {
+                eprintln!("        LSP[{}]: sum_Q26={} -> Q13={}", i, sum, q13_result);
+            }
+        }
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("        Final prediction: {:?}", prediction.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
         }
         
         prediction
@@ -212,11 +250,34 @@ impl LSPQuantizer {
         let mean_lsp = self.get_mean_lsp();
         let mut residual = [Q15::ZERO; LP_ORDER];
         
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("    📊 RESIDUAL COMPUTATION DEBUG (Predictor {}):", predictor_idx);
+            eprintln!("      Input LSP Q13: {:?}", lsp_q13.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("      Mean LSP Q13:  {:?}", mean_lsp.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("      Prediction Q13: {:?}", prediction.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         for i in 0..LP_ORDER {
             let mut val = lsp_q13[i].0 as i32;
             val -= mean_lsp[i].0 as i32;
             val -= prediction[i].0 as i32;
             residual[i] = Q15(val.clamp(-4096, 4095) as i16);
+            
+            #[cfg(debug_assertions)]
+            if i < 5 {
+                eprintln!("      LSP[{}]: {} - {} - {} = {} -> {}", 
+                    i, lsp_q13[i].0, mean_lsp[i].0, prediction[i].0, 
+                    lsp_q13[i].0 as i32 - mean_lsp[i].0 as i32 - prediction[i].0 as i32,
+                    residual[i].0);
+            }
+        }
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("      Final residual: {:?}", residual.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+            let residual_energy: i64 = residual.iter().map(|x| (x.0 as i64) * (x.0 as i64)).sum();
+            eprintln!("      Residual energy: {}", residual_energy);
         }
         
         // 3. Stage 1: 7-bit VQ (128 entries, full 10D)
@@ -409,9 +470,12 @@ impl LSPQuantizer {
         let weights = self.get_lsp_weights(&(0..LP_ORDER).collect::<Vec<_>>());
         
         #[cfg(debug_assertions)]
-        eprintln!("    Stage1 weighted search: {} entries, weights: {:?}", 
-                  self.codebooks.stage1_codebook.len(),
-                  weights.iter().take(3).map(|x| x.0).collect::<Vec<_>>());
+        {
+            eprintln!("    🔍 VQ Stage1 DEBUG:");
+            eprintln!("      Residual: {:?}", residual.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("      Weights: {:?}", weights.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("      Searching {} codebook entries...", self.codebooks.stage1_codebook.len());
+        }
         
         // Search all 128 codebook entries
         for (idx, codebook_entry) in self.codebooks.stage1_codebook.iter().enumerate() {
@@ -423,18 +487,44 @@ impl LSPQuantizer {
                 dist += (diff * diff) * (weights[i].0 as f64);
             }
             
+            #[cfg(debug_assertions)]
+            {
+                // Log details for first 5 entries, index 71, and any new best
+                if idx < 5 || idx == 71 || dist < best_dist {
+                    eprintln!("      Entry {}: dist={:.0}, vector: {:?}", 
+                        idx, dist, codebook_entry.iter().take(3).map(|x| x.0).collect::<Vec<_>>());
+                    
+                    if idx < 5 {
+                        // Show detailed calculation for first few entries
+                        eprintln!("        Detail: diff²*weight = {:?}", 
+                            residual.iter().zip(codebook_entry.iter()).zip(weights.iter())
+                                .take(3)
+                                .map(|((r,c),w)| {
+                                    let diff = r.0 as f64 - c.0 as f64;
+                                    diff * diff * w.0 as f64
+                                })
+                                .collect::<Vec<_>>());
+                    }
+                }
+            }
+            
             if dist < best_dist {
                 best_dist = dist;
                 best_idx = idx as u8;
                 for i in 0..LP_ORDER {
                     best_vector[i] = codebook_entry[i];
                 }
+                
+                #[cfg(debug_assertions)]
+                eprintln!("        ⭐ NEW BEST: idx={}, dist={:.0}", best_idx, best_dist);
             }
         }
         
         #[cfg(debug_assertions)]
-        eprintln!("    Stage1 result: idx={}, dist={:.2}, vector: {:?}", 
-                  best_idx, best_dist, best_vector.iter().take(3).map(|x| x.0).collect::<Vec<_>>());
+        {
+            eprintln!("    🎯 Final Stage1: idx={}, dist={:.0}", best_idx, best_dist);
+            eprintln!("      Best vector: {:?}", best_vector.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+        }
         
         (best_idx, best_vector)
     }
