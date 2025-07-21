@@ -1335,6 +1335,123 @@ fn test_encoder_with_preemphasis() {
     }
 }
 
+#[test]
+fn test_debug_lp_to_lsp_conversion() {
+    println!("=== DEBUG LP→LSP CONVERSION ALGORITHM ===");
+    
+    // Read Frame 0 from ALGTHM.IN and compute LP coefficients
+    let mut file = File::open("src/codecs/g729a/tests/test_vectors/ALGTHM.IN")
+        .expect("Failed to open ALGTHM.IN");
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).expect("Failed to read ALGTHM.IN");
+    
+    let mut all_samples = Vec::new();
+    for i in 0..buffer.len()/2 {
+        let sample_idx = i * 2;
+        if sample_idx + 1 < buffer.len() {
+            let sample = i16::from_le_bytes([buffer[sample_idx], buffer[sample_idx + 1]]);
+            all_samples.push(sample);
+        }
+    }
+    
+    // Build Frame 0 analysis buffer (with pre-emphasis)
+    let mut analysis_buffer = vec![0i16; 240];
+    for i in 0..80 {
+        if i < all_samples.len() {
+            analysis_buffer[120 + i] = all_samples[i]; // Current frame
+        }
+    }
+    for i in 0..40 {
+        if 80 + i < all_samples.len() {
+            analysis_buffer[200 + i] = all_samples[80 + i]; // Lookahead
+        }
+    }
+    
+    // Apply pre-emphasis filter
+    let mut preprocessor = crate::codecs::g729a::signal::preprocessor::Preprocessor::new();
+    let processed_samples = preprocessor.process(&analysis_buffer);
+    
+    // Apply Hamming window and compute LP
+    let hamming_window = crate::codecs::g729a::tables::window_tables::get_hamming_window();
+    let mut windowed = Vec::new();
+    for i in 0..240 {
+        let sample = crate::codecs::g729a::math::fixed_point::mult(processed_samples[i].0, hamming_window[i].0);
+        windowed.push(Q15(sample));
+    }
+    
+    // Compute autocorrelation, apply lag window, and run Levinson-Durbin
+    let mut correlations = crate::codecs::g729a::math::dsp_operations::autocorrelation(&windowed, LP_ORDER);
+    let lag_window = crate::codecs::g729a::tables::window_tables::get_lag_window();
+    crate::codecs::g729a::math::dsp_operations::apply_lag_window(&mut correlations, &lag_window);
+    
+    let linear_predictor = crate::codecs::g729a::spectral::linear_prediction::LinearPredictor::new();
+    let (lp_coeffs, _) = linear_predictor.levinson_durbin(&correlations);
+    
+    println!("Our computed LP coefficients: {:?}", lp_coeffs.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Now decode the ITU-T reference LSP indices to get reference LP coefficients
+    let real_reference_indices = [16u8, 22u8, 22u8, 1u8];
+    let mut lsp_decoder = crate::codecs::g729a::spectral::quantizer::LSPDecoder::new();
+    let decoded_lsp = lsp_decoder.decode(&real_reference_indices);
+    
+    println!("ITU-T reference LSP: {:?}", decoded_lsp.frequencies.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Convert ITU-T reference LSP back to LP coefficients
+    let lsp_converter = crate::codecs::g729a::spectral::lsp_converter::LSPConverter::new();
+    let reference_lp = lsp_converter.lsp_to_lp(&decoded_lsp);
+    
+    println!("ITU-T reference LP coefficients: {:?}", reference_lp.values.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Now compare our LP→LSP conversion
+    let lp_struct = crate::codecs::g729a::types::LPCoefficients {
+        values: lp_coeffs,
+        reflection_coeffs: [Q15::ZERO; LP_ORDER],
+    };
+    
+    println!("\n=== POLYNOMIAL FORMATION DEBUG ===");
+    
+    // Debug polynomial formation step-by-step
+    let f1_coeffs = crate::codecs::g729a::math::polynomial::form_sum_polynomial_q12(&lp_coeffs);
+    let f2_coeffs = crate::codecs::g729a::math::polynomial::form_difference_polynomial_q12(&lp_coeffs);
+    
+    println!("Our F1 polynomial (Q15): {:?}", f1_coeffs.iter().map(|&x| x).collect::<Vec<_>>());
+    println!("Our F2 polynomial (Q15): {:?}", f2_coeffs.iter().map(|&x| x).collect::<Vec<_>>());
+    
+    // Compare with polynomial formation from ITU-T reference LP
+    let ref_f1_coeffs = crate::codecs::g729a::math::polynomial::form_sum_polynomial_q12(&reference_lp.values);
+    let ref_f2_coeffs = crate::codecs::g729a::math::polynomial::form_difference_polynomial_q12(&reference_lp.values);
+    
+    println!("ITU-T F1 polynomial (Q15): {:?}", ref_f1_coeffs.iter().map(|&x| x).collect::<Vec<_>>());
+    println!("ITU-T F2 polynomial (Q15): {:?}", ref_f2_coeffs.iter().map(|&x| x).collect::<Vec<_>>());
+    
+    // Check polynomial differences
+    let mut f1_diff = 0i64;
+    let mut f2_diff = 0i64;
+    for i in 0..6 {
+        f1_diff += ((f1_coeffs[i] - ref_f1_coeffs[i]) as i64).abs();
+        f2_diff += ((f2_coeffs[i] - ref_f2_coeffs[i]) as i64).abs();
+    }
+    
+    println!("Polynomial differences: F1={}, F2={}", f1_diff, f2_diff);
+    
+    // Convert our LP to LSP and compare
+    let our_lsp = lsp_converter.lp_to_lsp(&lp_struct);
+    
+    println!("\n=== LSP COMPARISON ===");
+    println!("Our LSP:     {:?}", our_lsp.frequencies.iter().map(|x| x.0).collect::<Vec<_>>());
+    println!("ITU-T LSP:   {:?}", decoded_lsp.frequencies.iter().map(|x| x.0).collect::<Vec<_>>());
+    
+    // Calculate LSP frequency differences
+    let mut lsp_diff = 0i64;
+    for i in 0..LP_ORDER {
+        lsp_diff += ((our_lsp.frequencies[i].0 as i64) - (decoded_lsp.frequencies[i].0 as i64)).abs();
+    }
+    
+    println!("Total LSP frequency difference: {}", lsp_diff);
+    
+    // The problem should now be clear from this detailed comparison
+}
+
 // Simple bit reader for parsing bitstream
 struct BitReader<'a> {
     data: &'a [u8],
