@@ -118,23 +118,20 @@ fn unsigned_count_leading_zeros(x: u32) -> u32 {
 pub fn g729_sqrt_q0q7(x: u32) -> i32 {
     if x == 0 { return 0; }
     
-    // Set x in Q14 in range [0.25, 1[
-    // For x in Q30 (like 1073741824 = 1.0), clz will be 1
-    // k = (19-1)/2 = 9
+    // bcg729: k = (19-unsignedCountLeadingZeros(x))>>1;
     let clz = unsigned_count_leading_zeros(x);
-    let k = ((19_i32.saturating_sub(clz as i32)) >> 1).max(0);
+    let k = ((19_i32 - clz as i32) >> 1).max(0);
     
-    // x = x.2^-2k to put it in range [0.25, 1[
+    // x = VSHR32(x, k*2); /* x = x.2^-2k */
     let x_q14 = (x >> (k * 2)) as i32;
     
-    // sqrt(x) ~= 0.22178 + 1.29227*x - 0.77070*x^2 + 0.25659*x^3
-    // Using nested form for better precision
-    let inner = C2 + ((C3 as i64 * x_q14 as i64) >> 14) as i32;
-    let middle = C1 + ((inner as i64 * x_q14 as i64) >> 14) as i32;
-    let rt = C0 + ((middle as i64 * x_q14 as i64) >> 14) as i32;
+    // bcg729 uses nested MULT16_16_Q14 which is (a*b)>>14
+    // rt = ADD16(C0, MULT16_16_Q14(x, ADD16(C1, MULT16_16_Q14(x, ADD16(C2, MULT16_16_Q14(x, (C3)))))));
+    let term3 = C2 + ((x_q14 as i64 * C3 as i64) >> 14) as i32;
+    let term2 = C1 + ((x_q14 as i64 * term3 as i64) >> 14) as i32;
+    let rt = C0 + ((x_q14 as i64 * term2 as i64) >> 14) as i32;
     
-    // rt = sqrt(x).2^(7-k)
-    // Shift to get result in Q7
+    // rt = VSHR32(rt,-k); /* rt = sqrt(x).2^7 */
     if k >= 0 {
         rt << k
     } else {
@@ -200,11 +197,12 @@ fn g729_atan_q15q13(x: i32) -> i16 {
 
 /// Arcsine in Q15 -> Q13
 fn g729_asin_q15q13(x: i16) -> i16 {
-    // asin(x) = atan(x/sqrt(1-x²))
-    // Following bcg729: g729Atan_Q15Q13(DIV32(SSHL(x,15), PSHR(g729Sqrt_Q0Q7(SUB32(ONE_IN_Q30, MULT16_16(x,x))),7)))
+    // bcg729: g729Atan_Q15Q13(DIV32(SSHL(x,15), PSHR(g729Sqrt_Q0Q7(SUB32(ONE_IN_Q30, MULT16_16(x,x))),7)))
     
-    // Calculate 1 - x²
-    let x_sq = (x as i32 * x as i32); // x² in Q30
+    // MULT16_16(x,x) gives Q30
+    let x_sq = (x as i32) * (x as i32); // x² in Q30
+    
+    // SUB32(ONE_IN_Q30, x_sq)
     let one_minus_x_sq = (ONE_IN_Q30 as i32) - x_sq; // 1-x² in Q30
     
     if one_minus_x_sq <= 0 {
@@ -216,19 +214,22 @@ fn g729_asin_q15q13(x: i16) -> i16 {
         }
     }
     
-    // sqrt(1-x²) in Q7
-    let sqrt_val = g729_sqrt_q0q7(one_minus_x_sq as u32);
+    // g729Sqrt_Q0Q7 expects unsigned Q0 input, but one_minus_x_sq is Q30
+    // We need to treat the Q30 value as if it were Q0 for the sqrt function
+    let sqrt_val = g729_sqrt_q0q7(one_minus_x_sq as u32); // sqrt(1-x²) in Q7
     
-    // x << 15 to get Q30, then divide by (sqrt >> 7) to get back to Q15
-    // This is equivalent to: (x << 15) / (sqrt_val >> 7)
-    let numerator = (x as i32) << 15; // x in Q30
-    let denominator = sqrt_val >> 7;   // sqrt in Q0
+    // PSHR(sqrt_val, 7) shifts right by 7 to get Q0
+    // SSHL(x,15) shifts x left by 15 to get Q30
+    // DIV32 divides Q30 by Q0 to get Q30/Q0 = Q30
+    let numerator = (x as i32) << 15; // SSHL(x,15) -> Q30
+    let denominator = sqrt_val >> 7;   // PSHR(sqrt_val,7) -> Q0
     
-    if denominator == 0 {
+    if denominator <= 0 {
         return if x >= 0 { HALF_PI_Q13 } else { -(HALF_PI_Q13 as i16) };
     }
     
-    let ratio = numerator / denominator; // Result in Q15
+    // DIV32 gives Q15 result when dividing Q30 by Q0
+    let ratio = numerator / denominator;
     
     g729_atan_q15q13(ratio)
 }

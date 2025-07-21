@@ -3008,6 +3008,14 @@ fn test_debug_exact_arccos() {
     use crate::codecs::g729a::spectral::quantizer::g729_sqrt_q0q7;
     let sqrt_test = g729_sqrt_q0q7(1073741824); // 1.0 in Q30
     println!("sqrt(1.0 in Q30) = {} (expected ~128 in Q7)", sqrt_test);
+    
+    // Test with smaller value that should work
+    let sqrt_1_q0 = g729_sqrt_q0q7(1); // 1 in Q0
+    println!("sqrt(1 in Q0) = {} (expected ~128 in Q7)", sqrt_1_q0);
+    
+    // Test with 16384 (0.25 in Q16 shifted to Q0)
+    let sqrt_025 = g729_sqrt_q0q7(16384); // 0.25 when considered as Q16->Q0
+    println!("sqrt(16384) = {} (expected ~64 in Q7 for sqrt(0.5))", sqrt_025);
 }
 
 #[test]
