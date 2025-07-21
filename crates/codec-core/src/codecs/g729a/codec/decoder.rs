@@ -73,6 +73,15 @@ impl G729ADecoder {
             // Convert to LP coefficients
             let lp_coeffs = self.lsp_converter.lsp_to_lp(&interpolated_lsp);
             
+            #[cfg(debug_assertions)]
+            {
+                if sf_idx == 0 { // Only print for first subframe to avoid spam
+                    eprintln!("Decoder LSP→LP conversion:");
+                    eprintln!("  LSP freqs: {:?}", &interpolated_lsp.frequencies[..3].iter().map(|x| x.0).collect::<Vec<_>>());
+                    eprintln!("  LP coeffs: {:?}", &lp_coeffs.values[..3].iter().map(|x| x.0).collect::<Vec<_>>());
+                }
+            }
+            
             // Decode subframe
             let sf_output = self.decode_subframe(
                 params.pitch_delays[sf_idx],
@@ -87,11 +96,27 @@ impl G729ADecoder {
         }
         
         // 4. Post-processing
+        #[cfg(debug_assertions)]
+        {
+            let pre_postfilter_energy: i64 = output.iter().map(|&x| (x.0 as i64).pow(2)).sum();
+            eprintln!("Pre-postfilter energy: {}", pre_postfilter_energy);
+        }
+        
+        // TEMPORARY: Disable postfilter to test core codec
+        let postprocessed = output; // Skip postfilter
+        /*
         let postprocessed = self.postfilter.process(
             &output,
             &self.lsp_converter.lsp_to_lp(&current_lsp),
             self.prev_pitch,
         );
+        */
+        
+        #[cfg(debug_assertions)]
+        {
+            let post_postfilter_energy: i64 = postprocessed.iter().map(|&x| (x.0 as i64).pow(2)).sum();
+            eprintln!("Post-postfilter energy (no filter): {}", post_postfilter_energy);
+        }
         
         // 5. Update state
         self.prev_lsp = Some(current_lsp);
@@ -103,6 +128,13 @@ impl G729ADecoder {
         };
         for i in 0..FRAME_SIZE {
             frame.samples[i] = postprocessed[i].0;
+        }
+        
+        #[cfg(debug_assertions)]
+        {
+            let frame_energy: i64 = frame.samples.iter().map(|&x| x as i64 * x as i64).sum();
+            eprintln!("Final decoded frame energy: {}", frame_energy);
+            eprintln!("First 5 decoded samples: {:?}", &frame.samples[..5]);
         }
         
         Ok(frame)
@@ -126,6 +158,16 @@ impl G729ADecoder {
         // 3. Decode gains
         let gains = self.gain_decoder.decode(gain_indices);
         
+        #[cfg(debug_assertions)]
+        {
+            let adaptive_energy: i32 = adaptive_vector.iter().map(|&x| (x.0 as i32).pow(2) >> 15).sum();
+            let fixed_energy: i32 = fixed_vector.iter().map(|&x| (x.0 as i32).pow(2) >> 15).sum();
+            eprintln!("Decoder step energies:");
+            eprintln!("  Adaptive vector energy: {}", adaptive_energy);
+            eprintln!("  Fixed vector energy: {}", fixed_energy);
+            eprintln!("  Decoded gains: adaptive={}, fixed={}", gains.adaptive_gain.0, gains.fixed_gain.0);
+        }
+        
         // 4. Compute excitation
         let excitation = apply_gains(
             &adaptive_vector,
@@ -134,11 +176,24 @@ impl G729ADecoder {
             gains.fixed_gain,
         );
         
+        #[cfg(debug_assertions)]
+        {
+            let excitation_energy: i32 = excitation.iter().map(|&x| (x.0 as i32).pow(2) >> 15).sum();
+            eprintln!("  Excitation energy: {}", excitation_energy);
+        }
+        
         // 5. Update adaptive codebook
         self.adaptive_codebook.update_excitation(&excitation);
         
         // 6. Synthesize speech
         let synthesized = self.synthesis_filter.synthesize(&excitation, &lp_coeffs.values);
+        
+        #[cfg(debug_assertions)]
+        {
+            let synthesized_energy: i32 = synthesized.iter().map(|&x| (x.0 as i32).pow(2) >> 15).sum();
+            eprintln!("  Synthesized energy: {}", synthesized_energy);
+            eprintln!("  LP coeffs [0..3]: {:?}", &lp_coeffs.values[..3].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
         
         // Update pitch for postfilter
         self.prev_pitch = pitch_delay;

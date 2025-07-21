@@ -151,8 +151,8 @@ impl GainQuantizer {
     /// Search gain codebook (simplified)
     fn search_gain_codebook(
         &self,
-        ga_target: Q15,
-        gc_target: Q15,
+        target_ga: Q15,
+        target_gc: Q15,
         gc_pred: Q15,
         corr_xh: Q31,
         corr_xf: Q31,
@@ -160,22 +160,36 @@ impl GainQuantizer {
         energy_h: Q31,
         energy_f: Q31,
     ) -> (u8, u8) {
-        // G.729A uses 3+4 bit joint scalar/predictive VQ
-        // We search for optimal (gp, gc) that minimizes:
-        // E = ||x - gp*y - gc*z||^2
-        
+        let mut best_criterion = Q31(i32::MIN);
         let mut best_ga_idx = 0u8;
         let mut best_gc_idx = 0u8;
-        let mut best_criterion = Q31(i32::MIN);
         
         #[cfg(debug_assertions)]
         {
-            eprintln!("    Searching {} x {} gain combinations", 8, 16);
-            eprintln!("    Target gains: ga={}, gc={}, pred={}", ga_target.0, gc_target.0, gc_pred.0);
+            eprintln!("    Searching 8 x 16 gain combinations");
+            eprintln!("    Target gains: ga={}, gc={}, pred={}", target_ga.0, target_gc.0, gc_pred.0);
+            
+            // Show what all adaptive gain indices decode to
+            eprintln!("    Adaptive gain decode table:");
+            for i in 0..8 {
+                let decoded = self.decode_adaptive_gain(i);
+                eprintln!("      ga_idx={} -> ga={}", i, decoded.0);
+            }
+            
+            // Show first few fixed gain indices
+            eprintln!("    Fixed gain decode table (first 8):");
+            for i in 0..8 {
+                let decoded = self.decode_fixed_gain(i, gc_pred);
+                eprintln!("      gc_idx={} -> gc={}", i, decoded.0);
+            }
         }
         
-        // Precompute some terms for efficiency
-        let energy_x = corr_xh.saturating_add(corr_xf); // Simplified
+        // G.729A uses distortion minimization, not correlation maximization
+        // We want to minimize: ||(target - ga*adaptive - gc*fixed)||²
+        // which is equivalent to minimizing: E_target + ga²*E_adaptive + gc²*E_fixed 
+        //                                    - 2*ga*corr(target,adaptive) - 2*gc*corr(target,fixed) + 2*ga*gc*corr(adaptive,fixed)
+        
+        let mut best_distortion = Q31(i32::MAX);
         
         // Search adaptive gain (3 bits = 8 values)
         for ga_idx in 0..8 {
@@ -185,37 +199,86 @@ impl GainQuantizer {
             for gc_idx in 0..16 {
                 let gc = self.decode_fixed_gain(gc_idx, gc_pred);
                 
-                // Compute selection criterion
-                // C = (gp*Rxy + gc*Rxz)^2 / (gp^2*Ryy + gc^2*Rzz + 2*gp*gc*Ryz)
+                // Compute distortion for this gain combination
+                // For silence case (corr_xh ≈ 0, corr_xf ≈ 0), this reduces to:
+                // distortion = ga²*E_adaptive + gc²*E_fixed + 2*ga*gc*corr_hf
                 
-                // Numerator
-                let term1 = (ga.to_q31().0 as i64 * corr_xh.0 as i64 >> 31) as i32;
-                let term2 = (gc.to_q31().0 as i64 * corr_xf.0 as i64 >> 31) as i32;
-                let numerator = Q31(term1.saturating_add(term2));
+                // Simplified computation avoiding potential overflow
+                let ga_contrib = if energy_h.0 > 0 {
+                    ((ga.0 as i64 * ga.0 as i64) >> 15) * (energy_h.0 as i64 >> 15)
+                } else {
+                    0
+                };
                 
-                // Denominator
-                let ga_sq = (ga.0 as i32 * ga.0 as i32) >> 15;
-                let gc_sq = (gc.0 as i32 * gc.0 as i32) >> 15;
-                let ga_gc = (ga.0 as i32 * gc.0 as i32) >> 14; // *2
+                let gc_contrib = if energy_f.0 > 0 {
+                    ((gc.0 as i64 * gc.0 as i64) >> 15) * (energy_f.0 as i64 >> 15)
+                } else {
+                    0
+                };
                 
-                let denom_term1 = (ga_sq as i64 * energy_h.0 as i64 >> 31) as i32;
-                let denom_term2 = (gc_sq as i64 * energy_f.0 as i64 >> 31) as i32;
-                let denom_term3 = (ga_gc as i64 * corr_hf.0 as i64 >> 31) as i32;
-                let denominator = Q31(denom_term1.saturating_add(denom_term2).saturating_add(denom_term3));
+                let cross_contrib = if corr_hf.0 != 0 {
+                    ((ga.0 as i64 * gc.0 as i64) >> 14) * (corr_hf.0 as i64 >> 15)
+                } else {
+                    0
+                };
                 
-                // Compute criterion (avoid division)
-                if denominator.0 > 0 {
-                    // Approximate num^2/den by comparing num^2 * 1/den
-                    let num_sq = (numerator.0 as i64 * numerator.0 as i64 >> 31) as i32;
-                    let criterion = Q31(num_sq / (denominator.0 >> 16).max(1));
+                let corr_adaptive = if corr_xh.0 != 0 {
+                    (ga.0 as i64 * corr_xh.0 as i64 * 2) >> 15
+                } else {
+                    0
+                };
+                
+                let corr_fixed = if corr_xf.0 != 0 {
+                    (gc.0 as i64 * corr_xf.0 as i64 * 2) >> 15
+                } else {
+                    0
+                };
+                
+                let total_distortion = (ga_contrib + gc_contrib + cross_contrib - corr_adaptive - corr_fixed)
+                    .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                
+                let distortion = Q31(total_distortion);
+                
+                #[cfg(debug_assertions)]
+                {
+                    // Show distortion for key candidates
+                    if (ga_idx == 0 || ga_idx == 5) && (gc_idx == 0 || gc_idx == 4) {
+                        eprintln!("      ga_idx={}, gc_idx={} -> ga={}, gc={}, distortion={}",
+                            ga_idx, gc_idx, ga.0, gc.0, distortion.0);
+                    }
+                }
+                
+                // Select combination with minimum distortion
+                if distortion.0 < best_distortion.0 {
+                    best_distortion = distortion;
+                    best_ga_idx = ga_idx;
+                    best_gc_idx = gc_idx;
+                } else if distortion.0 == best_distortion.0 {
+                    // When distortions are equal, prefer smaller gains (for silence)
+                    let current_ga = self.decode_adaptive_gain(ga_idx);
+                    let current_gc = self.decode_fixed_gain(gc_idx, gc_pred);
+                    let best_ga = self.decode_adaptive_gain(best_ga_idx);
+                    let best_gc = self.decode_fixed_gain(best_gc_idx, gc_pred);
                     
-                    if criterion.0 > best_criterion.0 {
-                        best_criterion = criterion;
+                    // Prefer combination with smaller total gain magnitude
+                    let current_total = (current_ga.0.abs() as u32) + (current_gc.0.abs() as u32);
+                    let best_total = (best_ga.0.abs() as u32) + (best_gc.0.abs() as u32);
+                    
+                    if current_total < best_total {
                         best_ga_idx = ga_idx;
                         best_gc_idx = gc_idx;
                     }
                 }
             }
+        }
+        
+        #[cfg(debug_assertions)]
+        {
+            let final_ga = self.decode_adaptive_gain(best_ga_idx);
+            let final_gc = self.decode_fixed_gain(best_gc_idx, gc_pred);
+            eprintln!("    Selected: ga_idx={}, gc_idx={} -> ga={}, gc={}", 
+                best_ga_idx, best_gc_idx, final_ga.0, final_gc.0);
+            eprintln!("    Targets were: ga={}, gc={}", target_ga.0, target_gc.0);
         }
         
         (best_ga_idx, best_gc_idx)

@@ -64,33 +64,33 @@ impl LSPConverter {
     
     /// Convert LSP frequencies back to LP coefficients
     pub fn lsp_to_lp(&self, lsp: &LSPParameters) -> LPCoefficients {
-        let mut lp_values = [Q15::ZERO; LP_ORDER];
+        // TEMPORARY: Use reasonable fixed LP coefficients to test synthesis filter
+        // This bypasses the LSP→LP conversion to isolate synthesis filter issues
         
-        // Reconstruct polynomials from LSP frequencies
-        let (f1, f2) = self.lsp_to_polynomials(&lsp.frequencies);
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("LSP→LP conversion (TEMPORARY BYPASS):");
+            eprintln!("  LSP freqs: {:?}", lsp.frequencies.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+        }
         
-        // Combine to get LP coefficients
-        // A(z) = (F1(z) + F2(z)) / 2
-        for i in 0..LP_ORDER {
-            let idx1 = i / 2;
-            let idx2 = i / 2;
-            
-            if i % 2 == 0 && idx1 < f1.len() {
-                // Even index: from F1
-                if i == 0 {
-                    lp_values[i] = f1[idx1].saturating_add(f2[idx2]);
-                } else {
-                    lp_values[i] = f1[idx1].saturating_add(f2[idx2]);
-                }
-            } else if idx2 < f2.len() {
-                // Odd index: from F2
-                // Use saturating negation to avoid overflow
-                let neg_f2 = Q15(-(f2[idx2].0 as i32) as i16);
-                lp_values[i] = f1[idx1].saturating_add(neg_f2);
-            }
-            
-            // Divide by 2
-            lp_values[i] = Q15(lp_values[i].0 >> 1);
+        // Use a reasonable set of LP coefficients that won't cause instability
+        // These are based on a stable all-pole filter with moderate spectral shaping
+        let lp_values = [
+            Q15(-8192),  // a[0] = -0.25
+            Q15(4096),   // a[1] =  0.125
+            Q15(-2048),  // a[2] = -0.0625
+            Q15(1024),   // a[3] =  0.03125
+            Q15(-512),   // a[4] = -0.015625
+            Q15(256),    // a[5] =  0.0078125
+            Q15(-128),   // a[6] = -0.00390625
+            Q15(64),     // a[7] =  0.001953125
+            Q15(-32),    // a[8] = -0.0009765625
+            Q15(16),     // a[9] =  0.00048828125
+        ];
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  Fixed LP coeffs: {:?}", lp_values.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
         }
         
         LPCoefficients {
@@ -134,19 +134,34 @@ impl LSPConverter {
         let mut f1 = vec![Q15::ONE]; // Start with 1
         let mut f2 = vec![Q15::ONE];
         
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("    Building polynomials from LSP:");
+            eprintln!("    LSP[0..5]: {:?}", lsp.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         // Build polynomials from roots
         for i in 0..LP_ORDER/2 {
             // F2 polynomial from even LSPs
             if 2 * i < LP_ORDER {
                 let cos_val = self.frequency_to_cos(lsp[2 * i]);
+                #[cfg(debug_assertions)]
+                eprintln!("    F2[{}]: LSP={} -> cos={}", i, lsp[2 * i].0, cos_val.0);
                 f2 = self.multiply_by_root(&f2, cos_val);
             }
             
             // F1 polynomial from odd LSPs
             if 2 * i + 1 < LP_ORDER {
                 let cos_val = self.frequency_to_cos(lsp[2 * i + 1]);
+                #[cfg(debug_assertions)]
+                eprintln!("    F1[{}]: LSP={} -> cos={}", i, lsp[2 * i + 1].0, cos_val.0);
                 f1 = self.multiply_by_root(&f1, cos_val);
             }
+        }
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("    Final F1 len: {}, F2 len: {}", f1.len(), f2.len());
         }
         
         (f1, f2)
@@ -155,9 +170,40 @@ impl LSPConverter {
     /// Convert normalized frequency to cosine value
     fn frequency_to_cos(&self, freq: Q15) -> Q15 {
         // cos_val = cos(freq * pi)
-        // Approximation: cos_val = 1 - 2*freq
-        let two_freq = Q15(freq.0.saturating_mul(2));
-        Q15::ONE.saturating_add(Q15(-two_freq.0))
+        // LSP frequency range: [0, 1] normalized
+        // Cosine range: [1, -1] for [0, pi]
+        
+        // Use piecewise linear approximation for better accuracy
+        // Convert Q15 frequency [0, 32767] to angle [0, pi]
+        let normalized = freq.0 as u32; // [0, 32767]
+        
+        if normalized <= 8192 {
+            // First quarter [0, π/4]: cos(x) ≈ 1 - x²/2
+            let x = (normalized * 2) as i32; // Scale to [0, 16384] 
+            let x_sq = ((x as i64 * x as i64) >> 15) as i32; // x² in Q15
+            let cos_val = Q15_ONE - (x_sq >> 1) as i16; // 1 - x²/2
+            Q15(cos_val.max(0))
+        } else if normalized <= 16384 {
+            // Second quarter [π/4, π/2]: cos(x) ≈ 0.707 - 0.707*(x-π/4)
+            let x_offset = normalized as i32 - 8192; // x - π/4
+            let slope = 23170; // 0.707 in Q15
+            let base = 23170; // 0.707 in Q15  
+            let cos_val = base - ((slope as i64 * x_offset as i64) >> 13) as i32;
+            Q15(cos_val.max(0) as i16)
+        } else if normalized <= 24576 {
+            // Third quarter [π/2, 3π/4]: cos(x) ≈ -(x-π/2)*0.707
+            let x_offset = normalized as i32 - 16384; // x - π/2
+            let slope = 23170; // 0.707 in Q15
+            let cos_val = -((slope as i64 * x_offset as i64) >> 13) as i32;
+            Q15(cos_val.max(-32767) as i16)
+        } else {
+            // Fourth quarter [3π/4, π]: cos(x) ≈ -0.707 - 0.707*(x-3π/4)
+            let x_offset = normalized as i32 - 24576; // x - 3π/4
+            let slope = 23170; // 0.707 in Q15
+            let base = -23170; // -0.707 in Q15
+            let cos_val = base - ((slope as i64 * x_offset as i64) >> 13) as i32;
+            Q15(cos_val.max(-32767) as i16)
+        }
     }
     
     /// Multiply polynomial by (z - root)
@@ -165,16 +211,66 @@ impl LSPConverter {
         let mut result = vec![Q15::ZERO; poly.len() + 1];
         
         // (a0 + a1*z + ...) * (z - root) = -root*a0 + (a0 - root*a1)*z + ...
-        result[0] = Q15((-root.0 as i32 * poly[0].0 as i32 >> 15) as i16);
+        // Use Q31 arithmetic to prevent overflow, then scale back to Q15
         
+        // First coefficient: -root * a0
+        let first_term = (-root.0 as i64 * poly[0].0 as i64) >> 15;
+        result[0] = Q15(first_term.clamp(i16::MIN as i64, i16::MAX as i64) as i16);
+        
+        // Middle coefficients: a[i-1] - root * a[i]
         for i in 1..poly.len() {
-            let term1 = poly[i - 1];
-            let term2 = root.saturating_mul(poly[i]);
-            result[i] = term1.saturating_add(Q15(-term2.0));
+            let term1 = poly[i - 1].0 as i64;
+            let term2 = (root.0 as i64 * poly[i].0 as i64) >> 15;
+            let combined = term1 - term2;
+            result[i] = Q15(combined.clamp(i16::MIN as i64, i16::MAX as i64) as i16);
         }
         
-        result[poly.len()] = poly[poly.len() - 1];
+        // Last coefficient: a[n]
+        if !poly.is_empty() {
+            result[poly.len()] = poly[poly.len() - 1];
+        }
+        
+        // Apply scaling to prevent explosive growth
+        // After each polynomial multiplication, scale down by small factor
+        let scale_factor = 0.98; // Slightly less than 1 to prevent runaway growth
+        for coeff in &mut result {
+            let scaled = (coeff.0 as f32 * scale_factor) as i16;
+            *coeff = Q15(scaled);
+        }
+        
         result
+    }
+    
+    /// Multiply polynomial by (1 - 2*cos*z^-1 + z^-2)
+    fn multiply_polynomial_by_factor(&self, poly: &mut [Q15], degree: usize, cos_val: Q15) {
+        // This implements the stable recursion used in G.729A
+        // poly(z) *= (1 - 2*cos*z^-1 + z^-2)
+        
+        if degree == 0 {
+            return;
+        }
+        
+        // Work backwards to avoid overwriting coefficients we still need
+        for i in (2..=degree).rev() {
+            if i < poly.len() {
+                let term1 = poly[i];
+                let term2 = if i >= 1 { 
+                    Q15(((cos_val.0 as i32 * poly[i-1].0 as i32) >> 14) as i16) // 2*cos*poly[i-1]
+                } else { 
+                    Q15::ZERO 
+                };
+                let term3 = if i >= 2 { poly[i-2] } else { Q15::ZERO };
+                
+                poly[i] = term1.saturating_add(Q15(-term2.0)).saturating_add(term3);
+            }
+        }
+        
+        // Handle i=1 separately
+        if degree >= 1 && poly.len() > 1 {
+            let term1 = poly[1];
+            let term2 = Q15(((cos_val.0 as i32 * poly[0].0 as i32) >> 14) as i16); // 2*cos*poly[0]
+            poly[1] = term1.saturating_add(Q15(-term2.0));
+        }
     }
     
     /// Check LSP stability and enforce minimum separation
