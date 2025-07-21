@@ -68,6 +68,25 @@ impl PitchTracker {
             return PitchCandidate { delay: 40, correlation: Q15::ZERO };
         }
         
+        // Check for silence/very low energy - G.729A should use default pitch for silent frames
+        let current_frame_start = 120;
+        let current_frame_end = 200; // 80 samples
+        let energy: i64 = weighted_speech[current_frame_start..current_frame_end]
+            .iter()
+            .map(|&s| (s.0 as i64).pow(2))
+            .sum();
+        
+        #[cfg(debug_assertions)]
+        eprintln!("Pitch analysis: frame energy = {}", energy);
+        
+        // If energy is very low, return default pitch (ITU-T practice for silent frames)
+        if energy < 1000 { // Threshold for silence detection
+            #[cfg(debug_assertions)]
+            eprintln!("Silent frame detected, using default pitch");
+            
+            return PitchCandidate { delay: 40, correlation: Q15::ZERO };
+        }
+        
         // For ITU-T algorithm, we need to extract the appropriate region
         // Current frame starts at sample 120 in the 240-sample buffer
         // We need 143 past samples + 80 current = 223 total
@@ -257,7 +276,15 @@ impl PitchTracker {
     fn normalize_correlation_itu_t(&self, correlation: i32, autocorr: i32) -> i32 {
         // ITU-T: MULT32_32_Q23(correlationMax, g729InvSqrt_Q0Q31(autoCorrelation))
         let inv_sqrt = g729_inv_sqrt_q0q31(autocorr);
-        mult32_32_q23(correlation, inv_sqrt)
+        let result = mult32_32_q23(correlation, inv_sqrt);
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("    🔍 Normalize: corr={}, autocorr={}, inv_sqrt={}, result={}", 
+                correlation, autocorr, inv_sqrt, result);
+        }
+        
+        result
     }
     
     /// ITU-T: Select best pitch with favor-lower-delays algorithm

@@ -227,16 +227,147 @@ pub fn apply_lag_window(corr: &mut [Q31], lag_window: &[Q15]) {
     }
 }
 
-/// ITU-T MULT16_32_P15 operation: (a * b) >> 15 with rounding
-fn mult16_32_p15(a: i16, b: i32) -> i32 {
+/// ITU-T MULT16_32_P15 operation for lag windowing (bcg729 exact)  
+/// Used for: autoCorrelationCoefficients[i] = MULT16_32_P15(wlag[i], autoCorrelationCoefficients[i])
+pub fn mult16_32_p15(a: i16, b: i32) -> i32 {
     let product = (a as i64) * (b as i64);
-    ((product + 0x4000) >> 15) as i32
+    // P15 means shift right 15 with rounding
+    let rounded = (product + 0x4000) >> 15;
+    rounded.clamp(i32::MIN as i64, i32::MAX as i64) as i32
 }
 
-/// ITU-T MULT16_16_P15 operation for windowing
+/// ITU-T MULT16_16_P15 operation for windowing (bcg729 exact)
+/// windowedSignal[i] = MULT16_16_P15(signal[i], wlp[i])
+/// Result: signal in Q0, wlp in Q0.15, windowedSignal in Q0
 pub fn mult16_16_p15(a: i16, b: i16) -> i16 {
     let product = (a as i32) * (b as i32);
-    ((product + 0x4000) >> 15) as i16
+    // P15 means shift right 15 with rounding
+    let rounded = (product + 0x4000) >> 15;
+    rounded.clamp(-32768, 32767) as i16
+}
+
+/// ITU-T countLeadingZeros function (bcg729 exact)
+/// Counts leading zeros excluding the MSB (sign bit)
+pub fn count_leading_zeros(value: i32) -> i32 {
+    if value == 0 {
+        return 31; // All bits except sign are zero
+    }
+    
+    let abs_value = value.abs();
+    let leading_zeros = abs_value.leading_zeros() as i32;
+    
+    // ITU-T counts excluding MSB, so subtract 1
+    (leading_zeros - 1).max(0)
+}
+
+/// ITU-T autocorrelation computation with exact bcg729 algorithm
+/// Uses 64-bit accumulation and dynamic normalization
+pub fn autocorrelation_bcg729(windowed_signal: &[Q15], order: usize) -> Vec<Q31> {
+    let len = windowed_signal.len();
+    let mut corr = Vec::with_capacity(order + 1);
+    
+    // Step 1: Compute R[0] on 64 bits as it's likely to overflow 32 bits
+    let mut acc64 = 0i64;
+    for i in 0..len {
+        let sample = windowed_signal[i].0 as i64;
+        acc64 += sample * sample;
+    }
+    
+    // ITU-T: To avoid arithmetic problems for low-level input signals
+    if acc64 == 0 {
+        acc64 = 1;
+    }
+    
+    // Step 2: Normalize acc64 on 32 bits and determine scale factor
+    let mut right_shift_to_normalize = 0i32;
+    let r0_normalized = if acc64 > i32::MAX as i64 {
+        // acc64 doesn't fit in 32 bits - right shift until it does
+        let mut temp_acc = acc64;
+        while temp_acc > i32::MAX as i64 {
+            temp_acc >>= 1;
+            right_shift_to_normalize += 1;
+        }
+        temp_acc as i32
+    } else {
+        // acc64 fits in 32 bits - use left shift for better precision
+        right_shift_to_normalize = -count_leading_zeros(acc64 as i32);
+        if right_shift_to_normalize < 0 {
+            let left_shift = -right_shift_to_normalize;
+            if left_shift < 31 {
+                ((acc64 << left_shift).min(i32::MAX as i64)) as i32
+            } else {
+                (acc64.min(i32::MAX as i64)) as i32
+            }
+        } else {
+            acc64 as i32
+        }
+    };
+    
+    corr.push(Q31(r0_normalized));
+    
+    #[cfg(debug_assertions)]
+    eprintln!("bcg729 Autocorrelation debug:");
+    eprintln!("  Raw R[0]: {}, Normalized: {}, Scale: {}", acc64, r0_normalized, -right_shift_to_normalize);
+    
+    // Step 3: Compute R[1] to R[order] with same scaling
+    if right_shift_to_normalize > 0 {
+        // Use 64-bit computation for other coefficients
+        for lag in 1..=order {
+            let mut acc64 = 0i64;
+            let max_i = len - lag;
+            
+            for i in 0..max_i {
+                let sample1 = windowed_signal[i].0 as i64;
+                let sample2 = windowed_signal[i + lag].0 as i64;
+                acc64 += sample1 * sample2;
+            }
+            
+            let r_lag = (acc64 >> right_shift_to_normalize) as i32;
+            corr.push(Q31(r_lag));
+        }
+    } else {
+        // Use 32-bit computation (faster)
+        for lag in 1..=order {
+            let mut acc32 = 0i32;
+            let max_i = len - lag;
+            
+            for i in 0..max_i {
+                let sample1 = windowed_signal[i].0 as i32;
+                let sample2 = windowed_signal[i + lag].0 as i32;
+                acc32 = acc32.saturating_add(sample1 * sample2);
+            }
+            
+            // Apply left shift normalization
+            let r_lag = if right_shift_to_normalize < 0 {
+                let left_shift = -right_shift_to_normalize;
+                if left_shift < 31 {
+                    ((acc32 as i64) << left_shift).min(i32::MAX as i64) as i32
+                } else {
+                    (acc32 as i64).min(i32::MAX as i64) as i32
+                }
+            } else {
+                acc32
+            };
+            
+            corr.push(Q31(r_lag));
+        }
+    }
+    
+    #[cfg(debug_assertions)]
+    eprintln!("  R[1]: {}, R[2]: {}", corr[1].0, if corr.len() > 2 { corr[2].0 } else { 0 });
+    
+    corr
+}
+
+/// Apply bcg729-exact lag window to autocorrelation coefficients
+/// Uses MULT16_32_P15 operation with wlag[] table
+pub fn apply_lag_window_bcg729(corr: &mut [Q31], wlag: &[Q15]) {
+    // ITU-T: Apply lag window starting from R[1] (R[0] remains unchanged)
+    // autoCorrelationCoefficients[i] = MULT16_32_P15(wlag[i], autoCorrelationCoefficients[i])
+    for i in 1..corr.len().min(wlag.len()) {
+        let windowed = mult16_32_p15(wlag[i].0, corr[i].0);
+        corr[i] = Q31(windowed);
+    }
 }
 
 /// Optimized convolution for filter operations
