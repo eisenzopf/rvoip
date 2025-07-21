@@ -10,33 +10,29 @@ pub fn L_mac(L_var3: Word32, var1: Word16, var2: Word16) -> Word32 {
 }
 
 pub fn round(L_var1: Word32) -> Word16 {
-    let y = (L_var1.saturating_add(0x8000)) >> 16;
-    if y > std::i16::MAX as i32 {
-        std::i16::MAX
-    } else if y < std::i16::MIN as i32 {
-        std::i16::MIN
-    } else {
-        y as Word16
-    }
+    // This function assumes L_var1 is in Q13 format
+    // and converts it to Q0 (standard i16).
+    let y = (L_var1.saturating_add(1 << 12)) >> 13;
+    y.clamp(std::i16::MIN as i32, std::i16::MAX as i32) as Word16
 }
 
 pub fn shl(var1: Word16, var2: Word16) -> Word16 {
     if var2 < 0 {
         return shr(var1, -var2);
     }
-    let val = (var1 as i32) << var2;
-    if val > std::i16::MAX as i32 {
-        std::i16::MAX
-    } else if val < std::i16::MIN as i32 {
-        std::i16::MIN
-    } else {
-        val as Word16
+    if var2 >= 15 {
+        return if var1 > 0 { std::i16::MAX } else if var1 < 0 { std::i16::MIN } else { 0 };
     }
+    let val = (var1 as i32) << var2;
+    val.clamp(std::i16::MIN as i32, std::i16::MAX as i32) as Word16
 }
 
 pub fn shr(var1: Word16, var2: Word16) -> Word16 {
     if var2 < 0 {
         return shl(var1, -var2);
+    }
+    if var2 >= 15 {
+        return if var1 < 0 { -1 } else { 0 };
     }
     var1 >> var2
 }
@@ -45,19 +41,19 @@ pub fn L_shl(L_var1: Word32, var2: Word16) -> Word32 {
     if var2 < 0 {
         return L_shr(L_var1, -var2);
     }
-    let val = (L_var1 as i64) << var2;
-    if val > std::i32::MAX as i64 {
-        std::i32::MAX
-    } else if val < std::i32::MIN as i64 {
-        std::i32::MIN
-    } else {
-        val as Word32
+    if var2 >= 31 {
+        return if L_var1 > 0 { std::i32::MAX } else if L_var1 < 0 { std::i32::MIN } else { 0 };
     }
+    let val = (L_var1 as i64) << var2;
+    val.clamp(std::i32::MIN as i64, std::i32::MAX as i64) as i32
 }
 
 pub fn L_shr(L_var1: Word32, var2: Word16) -> Word32 {
     if var2 < 0 {
         return L_shl(L_var1, -var2);
+    }
+    if var2 >= 31 {
+        return if L_var1 < 0 { -1 } else { 0 };
     }
     L_var1 >> var2
 }

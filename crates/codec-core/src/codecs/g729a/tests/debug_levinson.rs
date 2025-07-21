@@ -3009,3 +3009,44 @@ fn test_debug_exact_arccos() {
     let sqrt_test = g729_sqrt_q0q7(1073741824); // 1.0 in Q30
     println!("sqrt(1.0 in Q30) = {} (expected ~128 in Q7)", sqrt_test);
 }
+
+#[test]
+fn test_debug_l1_codebook_entry_105() {
+    println!("=== DEBUG L1 CODEBOOK ENTRY 105 ===");
+    
+    use crate::codecs::g729a::spectral::LSPQuantizer;
+    let quantizer = LSPQuantizer::new();
+    
+    // Print codebook entry 105
+    println!("L1 codebook entry 105:");
+    for i in 0..10 {
+        println!("  CB1[105][{}] = {}", i, quantizer.get_l1_codebook(105, i));
+    }
+    
+    // Expected target vector from our test
+    let target_vector = [2143i16, 2376, 3044, 6152, 7980, 10000, 12000, 14000, 16000, 18000];
+    
+    // Calculate distance to entry 105
+    let mut dist_105 = 0i64;
+    for i in 0..10 {
+        let diff = (target_vector[i] as i32) - (quantizer.get_l1_codebook(105, i) as i32);
+        dist_105 += (diff as i64) * (diff as i64);
+    }
+    println!("\nDistance to entry 105: {}", dist_105);
+    
+    // Also check entry 7 which was selected
+    println!("\nL1 codebook entry 7:");
+    for i in 0..10 {
+        println!("  CB1[7][{}] = {}", i, quantizer.get_l1_codebook(7, i));
+    }
+    
+    let mut dist_7 = 0i64;
+    for i in 0..10 {
+        let diff = (target_vector[i] as i32) - (quantizer.get_l1_codebook(7, i) as i32);
+        dist_7 += (diff as i64) * (diff as i64);
+    }
+    println!("\nDistance to entry 7: {}", dist_7);
+    
+    println!("\nEntry 7 distance ({}) < Entry 105 distance ({}): {}", 
+             dist_7, dist_105, dist_7 < dist_105);
+}
