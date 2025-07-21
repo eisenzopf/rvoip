@@ -38,6 +38,19 @@ impl PerceptualWeightingFilter {
             gamma_power = gamma_power.saturating_mul(self.gamma);
         }
         
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("Weighting filter debug:");
+            eprintln!("  Input LP coeffs [0..5]: {:?}", lp_coeffs.values[..5].iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("  Gamma: {}, powers: {:?}", self.gamma.0, 
+                (0..5).map(|i| {
+                    let mut gp = self.gamma;
+                    for _ in 0..i { gp = gp.saturating_mul(self.gamma); }
+                    gp.0
+                }).collect::<Vec<_>>());
+            eprintln!("  Weighted coeffs [0..5]: {:?}", coefficients[..6].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         WeightedFilter { coefficients }
     }
     
@@ -72,7 +85,14 @@ impl PerceptualWeightingFilter {
         let mut weighted = Vec::with_capacity(signal.len());
         let mut state = [Q15::ZERO; LP_ORDER];
         
-        for &sample in signal {
+        #[cfg(debug_assertions)]
+        {
+            let input_energy: i32 = signal.iter().take(80).map(|&x| (x.0 as i32).pow(2) >> 15).sum();
+            eprintln!("  Filter input energy (80 samples): {}", input_energy);
+            eprintln!("  First 5 input samples: {:?}", signal.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+        }
+        
+        for (idx, &sample) in signal.iter().enumerate() {
             // Compute filter output
             let mut sum = sample.to_q31();
             
@@ -86,11 +106,22 @@ impl PerceptualWeightingFilter {
             let output = sum.to_q15();
             weighted.push(output);
             
+            #[cfg(debug_assertions)]
+            if idx < 5 {
+                eprintln!("  Sample {}: input={}, output={}, sum={}", idx, sample.0, output.0, sum.0);
+            }
+            
             // Update state
             for i in (1..LP_ORDER).rev() {
                 state[i] = state[i - 1];
             }
             state[0] = output;
+        }
+        
+        #[cfg(debug_assertions)]
+        {
+            let output_energy: i32 = weighted.iter().take(80).map(|&x| (x.0 as i32).pow(2) >> 15).sum();
+            eprintln!("  Filter output energy (80 samples): {}", output_energy);
         }
         
         weighted
