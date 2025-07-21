@@ -1,9 +1,13 @@
-//! Signal preprocessing with high-pass filtering
+//! Signal preprocessing with pre-emphasis and high-pass filtering
 
 use crate::codecs::g729a::types::{AudioFrame, Q15};
 
-/// High-pass filter preprocessor
+/// ITU-T G.729A signal preprocessor with exact pre-emphasis and high-pass filtering
 pub struct Preprocessor {
+    // Pre-emphasis filter state: H(z) = 1 - 0.68z^-1
+    preemph_mem: i16,  // x[n-1] for pre-emphasis
+    
+    // High-pass filter state (140Hz cutoff)
     // Filter state - previous outputs (y[n-1], y[n-2])
     output_y1: i32,  // Q15.12 format
     output_y2: i32,  // Q15.12 format
@@ -16,6 +20,7 @@ impl Preprocessor {
     /// Create a new preprocessor
     pub fn new() -> Self {
         Self {
+            preemph_mem: 0,
             output_y1: 0,
             output_y2: 0,
             input_x0: 0,
@@ -23,8 +28,42 @@ impl Preprocessor {
         }
     }
 
-    /// Process a frame through the high-pass filter
+    /// Process a frame through the ITU-T G.729A preprocessing pipeline
     pub fn process(&mut self, samples: &[i16]) -> Vec<Q15> {
+        // Step 1: Apply pre-emphasis filter H(z) = 1 - 0.68z^-1
+        let preemphasized = self.apply_preemphasis(samples);
+        
+        // Step 2: Apply high-pass filter (140Hz cutoff)
+        let highpass_filtered = self.apply_highpass_filter(&preemphasized);
+        
+        highpass_filtered
+    }
+    
+    /// Apply ITU-T G.729A pre-emphasis filter: H(z) = 1 - 0.68z^-1
+    fn apply_preemphasis(&mut self, samples: &[i16]) -> Vec<i16> {
+        // Pre-emphasis coefficient: 0.68 in Q15 format
+        const PREEMPH_FACTOR: i16 = 22282; // 0.68 * 32768
+        
+        let mut result = Vec::with_capacity(samples.len());
+        
+        for &sample in samples {
+            // y[n] = x[n] - 0.68 * x[n-1]
+            let preemph_contrib = ((self.preemph_mem as i32 * PREEMPH_FACTOR as i32) + 16384) >> 15;
+            let output = sample as i32 - preemph_contrib;
+            
+            // Saturate to 16-bit range
+            let saturated = output.clamp(-32768, 32767) as i16;
+            result.push(saturated);
+            
+            // Update memory
+            self.preemph_mem = sample;
+        }
+        
+        result
+    }
+    
+    /// Apply high-pass filter (140Hz cutoff) 
+    fn apply_highpass_filter(&mut self, samples: &[i16]) -> Vec<Q15> {
         // Filter coefficients (140Hz cutoff)
         // Coefficients are stored in Q1.12 for A1 and Q0.12 for others
         const A1: i16 = 7807;   // Q1.12

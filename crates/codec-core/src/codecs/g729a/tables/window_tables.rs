@@ -78,4 +78,22 @@ pub fn get_lag_window_coeff(idx: usize) -> i32 {
     let i = idx - 1;
     // Combine high and low parts to form Q31 value
     ((LAG_WINDOW_H[i] as i32) << 16) | (LAG_WINDOW_L[i] as i32 & 0xFFFF)
+}
+
+/// Get lag window coefficients as Q15 values for autocorrelation
+/// Returns [1.0, w[1], w[2], ..., w[10]] in Q15 format
+pub fn get_lag_window() -> Vec<Q15> {
+    let mut lag_window = Vec::with_capacity(11);
+    
+    // lag_window[0] = 1.0 in Q15
+    lag_window.push(Q15(32767));
+    
+    // Convert Q31 values to Q15 by right shift 16
+    for i in 1..=10 {
+        let q31_val = get_lag_window_coeff(i);
+        let q15_val = (q31_val >> 16) as i16;
+        lag_window.push(Q15(q15_val));
+    }
+    
+    lag_window
 } 

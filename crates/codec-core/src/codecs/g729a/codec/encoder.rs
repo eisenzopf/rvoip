@@ -163,22 +163,31 @@ impl G729AEncoder {
         let quantized_lp = self.lsp_converter.lsp_to_lp(&quantized_lsp.reconstructed);
         
         // 4. Open-loop pitch analysis
-        // TEMPORARY: Use original LP coefficients for weighting since LSP→LP conversion is broken
-        // Apply weighting filter to current frame + lookahead region [120..240]
+        // Apply weighting filter to a larger region including history for pitch context
+        // ITU-T requires access to past samples for correlation computation
+        let pitch_analysis_region = &analysis_buffer[0..240]; // Full buffer with history
+        let weighted_full = self.compute_weighted_speech(pitch_analysis_region, &lp_coeffs);
+        
+        // Extract the current frame + lookahead portion for other processing
         let speech_region = &analysis_buffer[120..240]; // 80 + 40 = 120 samples
-        let weighted_speech = self.compute_weighted_speech(speech_region, &lp_coeffs);
+        let weighted_speech = &weighted_full[120..240]; // Current frame weighted speech
         
         #[cfg(debug_assertions)]
         {
             let energy: i32 = weighted_speech[..80].iter()
                 .map(|&x| (x.0 as i32).pow(2) >> 15)
                 .sum();
-            eprintln!("Weighted speech energy (first 80 samples): {}", energy);
+            let full_energy: i32 = weighted_full[..240].iter()
+                .map(|&x| (x.0 as i32).pow(2) >> 15)
+                .sum();
+            eprintln!("Weighted speech energy (current 80 samples): {}", energy);
+            eprintln!("Weighted speech energy (full 240 samples): {}", full_energy);
             eprintln!("First 10 weighted samples: {:?}", 
                 &weighted_speech[..10].iter().map(|x| x.0).collect::<Vec<_>>());
         }
         
-        let open_loop_pitch = self.pitch_tracker.estimate_open_loop_pitch(&weighted_speech);
+        // Pass the full weighted signal (with history) to pitch tracker
+        let open_loop_pitch = self.pitch_tracker.estimate_open_loop_pitch(&weighted_full);
         
         // 5. Process subframes
         let mut encoded = EncodedFrame {

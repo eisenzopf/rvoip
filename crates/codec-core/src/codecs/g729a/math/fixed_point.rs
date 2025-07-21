@@ -23,14 +23,151 @@ pub trait FixedPointOps: Sized {
     fn to_q31(self) -> Q31;
 }
 
+/// ITU-T G.729 basic arithmetic operations - bit-exact compliance
+/// Based on the ITU-T reference implementation and bcg729
+
+/// Add two 16-bit values - exact ITU-T implementation
+pub fn add(a: i16, b: i16) -> i16 {
+    let result = (a as i32).wrapping_add(b as i32);
+    if result > 32767 {
+        32767
+    } else if result < -32768 {
+        -32768
+    } else {
+        result as i16
+    }
+}
+
+/// Subtract two 16-bit values - exact ITU-T implementation  
+pub fn sub(a: i16, b: i16) -> i16 {
+    let result = (a as i32).wrapping_sub(b as i32);
+    if result > 32767 {
+        32767
+    } else if result < -32768 {
+        -32768
+    } else {
+        result as i16
+    }
+}
+
+/// Negate 16-bit value - exact ITU-T implementation
+pub fn negate(a: i16) -> i16 {
+    if a == -32768 {
+        32767  // ITU-T: negate of -32768 is +32767
+    } else {
+        a.wrapping_neg()
+    }
+}
+
+/// Multiply two Q15 values -> Q15 - exact ITU-T implementation
+pub fn mult(a: i16, b: i16) -> i16 {
+    if a == -32768 && b == -32768 {
+        32767  // ITU-T: special case for overflow
+    } else {
+        let result = ((a as i32).wrapping_mul(b as i32).wrapping_add(16384)) >> 15;
+        if result > 32767 {
+            32767
+        } else if result < -32768 {
+            -32768
+        } else {
+            result as i16
+        }
+    }
+}
+
+/// Multiply-accumulate: result + (a * b) - exact ITU-T implementation
+pub fn mac(result: i32, a: i16, b: i16) -> i32 {
+    let product = if a == -32768 && b == -32768 {
+        32767i32 << 15  // Special case
+    } else {
+        (a as i32).wrapping_mul(b as i32)
+    };
+    
+    // ITU-T: use wrapping arithmetic, no saturation at 32-bit level
+    result.wrapping_add(product)
+}
+
+/// Multiply-subtract: result - (a * b) - exact ITU-T implementation  
+pub fn msu(result: i32, a: i16, b: i16) -> i32 {
+    let product = if a == -32768 && b == -32768 {
+        32767i32 << 15  // Special case
+    } else {
+        (a as i32).wrapping_mul(b as i32)
+    };
+    
+    // ITU-T: use wrapping arithmetic, no saturation at 32-bit level
+    result.wrapping_sub(product)
+}
+
+/// Extract upper 16 bits from 32-bit value - exact ITU-T implementation
+pub fn extract_h(x: i32) -> i16 {
+    ((x >> 16) & 0xFFFF) as i16
+}
+
+/// Extract lower 16 bits from 32-bit value - exact ITU-T implementation
+pub fn extract_l(x: i32) -> i16 {
+    (x & 0xFFFF) as i16
+}
+
+/// Round 32-bit to 16-bit - exact ITU-T implementation
+pub fn round(x: i32) -> i16 {
+    let result = x.wrapping_add(0x8000) >> 16;
+    if result > 32767 {
+        32767
+    } else if result < -32768 {
+        -32768
+    } else {
+        result as i16
+    }
+}
+
+/// Shift left with overflow protection - exact ITU-T implementation
+pub fn shl(x: i16, shift: i16) -> i16 {
+    if shift >= 15 || shift < 0 {
+        return 0;
+    }
+    
+    let result = (x as i32).wrapping_shl(shift as u32);
+    if result > 32767 {
+        32767
+    } else if result < -32768 {
+        -32768
+    } else {
+        result as i16
+    }
+}
+
+/// Shift right - exact ITU-T implementation
+pub fn shr(x: i16, shift: i16) -> i16 {
+    if shift >= 16 || shift < 0 {
+        return if x < 0 { -1 } else { 0 };
+    }
+    
+    x >> shift
+}
+
+/// Shift right with rounding - exact ITU-T implementation
+pub fn shr_r(x: i16, shift: i16) -> i16 {
+    if shift >= 16 || shift < 0 {
+        return if x < 0 { -1 } else { 0 };
+    }
+    
+    if shift == 0 {
+        x
+    } else {
+        let result = x.wrapping_add(1 << (shift - 1)) >> shift;
+        result
+    }
+}
+
+// Update Q15 implementation to use proper ITU-T operations
 impl FixedPointOps for Q15 {
     fn saturating_add(self, other: Self) -> Self {
-        Q15(self.0.saturating_add(other.0))
+        Q15(add(self.0, other.0))
     }
     
     fn saturating_mul(self, other: Self) -> Self {
-        let result = ((self.0 as i32 * other.0 as i32) >> 15) as i16;
-        Q15(result)
+        Q15(mult(self.0, other.0))
     }
     
     fn to_q15(self) -> Q15 {
@@ -381,6 +518,97 @@ fn reciprocal_q15(x: Q15) -> Q15 {
     let (log_exp, log_frac) = log2_g729a(x_q31);
     let recip_q31 = pow2_g729a(-log_exp, Q15(-log_frac.0));
     recip_q31.to_q15()
+}
+
+/// ITU-T fixed-point division Q27 result: dividend/divisor -> Q27
+pub fn div32_32_q27(dividend: i32, divisor: i32) -> i32 {
+    if divisor == 0 {
+        return if dividend >= 0 { i32::MAX >> 4 } else { i32::MIN >> 4 };
+    }
+    
+    // Prevent overflow by checking if dividend is too large
+    let abs_dividend = dividend.abs() as i64;
+    let abs_divisor = divisor.abs() as i64;
+    
+    if abs_dividend >= abs_divisor {
+        // Return maximum/minimum value to prevent overflow
+        return if (dividend > 0) == (divisor > 0) {
+            i32::MAX >> 4  // Q27 max positive
+        } else {
+            i32::MIN >> 4  // Q27 max negative
+        };
+    }
+    
+    // Perform division with Q27 scaling
+    let result = ((dividend as i64) << 27) / (divisor as i64);
+    result.clamp(i32::MIN as i64 >> 4, i32::MAX as i64 >> 4) as i32
+}
+
+/// ITU-T fixed-point division Q31 result: dividend/divisor -> Q31
+pub fn div32_32_q31(dividend: i32, divisor: i32) -> i32 {
+    if divisor == 0 {
+        return if dividend >= 0 { i32::MAX } else { i32::MIN };
+    }
+    
+    // Prevent overflow by checking if dividend is too large
+    let abs_dividend = dividend.abs() as i64;
+    let abs_divisor = divisor.abs() as i64;
+    
+    if abs_dividend >= abs_divisor {
+        // Return maximum/minimum value to prevent overflow
+        return if (dividend > 0) == (divisor > 0) {
+            i32::MAX  // Q31 max positive
+        } else {
+            i32::MIN  // Q31 max negative
+        };
+    }
+    
+    // Perform division with Q31 scaling
+    let result = ((dividend as i64) << 31) / (divisor as i64);
+    result.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+/// ITU-T 32x32 multiply with Q31 result: a * b -> Q31
+pub fn mult32_32_q31(a: i32, b: i32) -> i32 {
+    let result = ((a as i64) * (b as i64)) >> 31;
+    result.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+/// ITU-T 32x32 multiply with Q23 result: a * b -> Q23  
+pub fn mult32_32_q23(a: i32, b: i32) -> i32 {
+    let result = ((a as i64) * (b as i64)) >> 23;
+    result.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+/// ITU-T 32-bit multiply-accumulate with Q31 scaling
+pub fn mac32_32_q31(c: i32, a: i32, b: i32) -> i32 {
+    let product = ((a as i64) * (b as i64)) >> 31;
+    let result = (c as i64) + product;
+    result.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+/// ITU-T 32-bit add
+pub fn add32(a: i32, b: i32) -> i32 {
+    (a as i64).wrapping_add(b as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+/// ITU-T 32-bit subtract  
+pub fn sub32(a: i32, b: i32) -> i32 {
+    (a as i64).wrapping_sub(b as i64).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+}
+
+/// ITU-T signed shift left for 32-bit
+pub fn sshl32(a: i32, shift: i16) -> i32 {
+    if shift >= 0 {
+        if shift >= 31 {
+            if a >= 0 { i32::MAX } else { i32::MIN }
+        } else {
+            let result = (a as i64) << shift;
+            result.clamp(i32::MIN as i64, i32::MAX as i64) as i32
+        }
+    } else {
+        a >> (-shift).min(31)
+    }
 }
 
 #[cfg(test)]

@@ -2,125 +2,206 @@
 
 use crate::codecs::g729a::constants::*;
 use crate::codecs::g729a::types::{Q15, Q31, LPCoefficients};
-use crate::codecs::g729a::math::{autocorrelation, FixedPointOps};
+use crate::codecs::g729a::math::{autocorrelation, FixedPointOps, apply_lag_window, mult16_16_p15};
+use crate::codecs::g729a::math::fixed_point::{
+    div32_32_q27, div32_32_q31, mult32_32_q31, mult32_32_q23, 
+    mac32_32_q31, add32, sub32, sshl32
+};
 use crate::codecs::g729a::signal::{HammingWindow, LagWindow};
+use crate::codecs::g729a::tables::{get_hamming_window, get_lag_window};
 
 /// Linear predictor for spectral analysis
 pub struct LinearPredictor {
-    /// Window for autocorrelation
-    autocorr_window: HammingWindow,
-    /// Lag window for stability
-    lag_window: LagWindow,
+    /// Window for LP analysis
+    hamming_window: Vec<Q15>,
+    /// Lag window for autocorrelation
+    lag_window: Vec<Q15>,
 }
 
 impl LinearPredictor {
-    /// Create a new linear predictor
+    /// Create a new linear predictor with exact ITU-T windows
     pub fn new() -> Self {
         Self {
-            autocorr_window: HammingWindow::new_asymmetric(),
-            lag_window: LagWindow::new(LP_ORDER + 1, 0.0001),
+            hamming_window: get_hamming_window(),
+            lag_window: get_lag_window(),
         }
     }
     
-    /// Analyze windowed signal and extract LP coefficients
-    pub fn analyze(&self, windowed_signal: &[Q15]) -> LPCoefficients {
-        // 1. Compute autocorrelation
-        let correlations = autocorrelation(windowed_signal, LP_ORDER + 1);
+    /// Analyze signal and extract LP coefficients - exact ITU-T implementation
+    pub fn analyze(&self, signal: &[Q15]) -> LPCoefficients {
+        // ITU-T: Windowing per spec 3.2.1 eq4
+        let windowed_signal = self.apply_hamming_window(signal);
         
         #[cfg(debug_assertions)]
         {
-            eprintln!("Autocorrelation debug:");
-            eprintln!("  R[0] (energy): {}", correlations[0].0);
-            eprintln!("  R[1..5]: {:?}", &correlations[1..6].iter().map(|x| x.0).collect::<Vec<_>>());
+            let windowed_energy: i64 = windowed_signal.iter()
+                .map(|&s| (s.0 as i64) * (s.0 as i64))
+                .sum();
+            eprintln!("Windowed signal energy: {}", windowed_energy);
+            eprintln!("First 10 windowed samples: {:?}", &windowed_signal[0..10].iter().map(|x| x.0).collect::<Vec<_>>());
         }
         
-        // 2. Apply lag windowing for numerical stability
-        let windowed_corr = self.lag_window.apply_to_correlation(&correlations);
+        // ITU-T: Autocorrelation per spec 3.2.1 eq5 with dynamic scaling
+        let mut correlations = autocorrelation(&windowed_signal, LP_ORDER);
+        
+        // ITU-T: Apply lag window per spec 3.2.1 eq7
+        apply_lag_window(&mut correlations, &self.lag_window);
         
         #[cfg(debug_assertions)]
         {
             eprintln!("After lag windowing:");
-            eprintln!("  R[0]: {}, R[1]: {}", windowed_corr[0].0, windowed_corr[1].0);
+            eprintln!("  R[0]: {}, R[1]: {}", correlations[0].0, correlations[1].0);
         }
         
-        // 3. Levinson-Durbin recursion
-        let (coefficients, reflection_coeffs) = self.levinson_durbin(&windowed_corr);
+        // ITU-T: Levinson-Durbin recursion per spec 3.2.2
+        let (coefficients, reflection_coeffs) = self.levinson_durbin(&correlations);
         
-        #[cfg(debug_assertions)]
-        {
-            eprintln!("LP coefficients: {:?}", coefficients.iter().map(|x| x.0).collect::<Vec<_>>());
-        }
-        
-        // 4. Bandwidth expansion (done in quantization stage for G.729A)
         LPCoefficients {
             values: coefficients,
             reflection_coeffs,
         }
     }
     
-    /// Levinson-Durbin algorithm to solve Toeplitz system
-    fn levinson_durbin(&self, r: &[Q31]) -> ([Q15; LP_ORDER], [Q15; LP_ORDER]) {
-        let mut a = [[Q15::ZERO; LP_ORDER + 1]; LP_ORDER + 1];
-        let mut k = [Q15::ZERO; LP_ORDER];
+    /// Apply Hamming window per ITU-T spec 3.2.1 eq4
+    fn apply_hamming_window(&self, signal: &[Q15]) -> Vec<Q15> {
+        assert_eq!(signal.len(), WINDOW_SIZE, "Signal must be {} samples", WINDOW_SIZE);
+        assert_eq!(self.hamming_window.len(), WINDOW_SIZE, "Window must be {} samples", WINDOW_SIZE);
         
-        // Check for zero energy
+        let mut windowed = Vec::with_capacity(WINDOW_SIZE);
+        
+        for i in 0..WINDOW_SIZE {
+            // ITU-T: windowedSignal[i] = MULT16_16_P15(signal[i], wlp[i])
+            let windowed_sample = mult16_16_p15(signal[i].0, self.hamming_window[i].0);
+            windowed.push(Q15(windowed_sample));
+        }
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("Window values [120..130]: {:?}", &self.hamming_window[120..130].iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("Windowed samples [120..130]: {:?}", &windowed[120..130].iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
+        windowed
+    }
+    
+    /// Levinson-Durbin algorithm - exact ITU-T implementation
+    pub fn levinson_durbin(&self, r: &[Q31]) -> ([Q15; LP_ORDER], [Q15; LP_ORDER]) {
+        // ITU-T: Check for zero energy
         if r[0].0 <= 0 {
-            return ([Q15::ZERO; LP_ORDER], k);
+            return ([Q15::ZERO; LP_ORDER], [Q15::ZERO; LP_ORDER]);
         }
         
-        // Initialize
-        a[0][0] = Q15::ONE;
-        let mut alpha = r[0];
+        // ITU-T: Initialize arrays exactly as in autoCorrelation2LP()
+        let mut previous_a = [0i32; LP_ORDER + 1]; // for previous iteration
+        let mut lp_coeffs = [0i32; LP_ORDER + 1];  // in Q27 (Q4.27)
         
-        // Recursion
-        for m in 1..=LP_ORDER {
-            // Compute reflection coefficient
-            let mut sum = Q31::ZERO;
-            for j in 1..m {
-                let prod = a[m-1][j].to_q31().saturating_mul(r[m-j].to_q15().to_q31());
-                sum = sum.saturating_add(prod);
+        // ITU-T constants
+        const ONE_IN_Q27: i32 = 1 << 27;
+        const ONE_IN_Q31: i32 = i32::MAX;  // 0x7FFFFFFF
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("ITU-T Levinson-Durbin debug:");
+            eprintln!("  R[0] = {}, R[1] = {}", r[0].0, r[1].0);
+        }
+        
+        // ITU-T: init - iteration i=1 setup
+        lp_coeffs[0] = ONE_IN_Q27;  // a[0] = 1 in Q27
+        
+        // ITU-T: a[1] = -r1/r0 (result in Q27)
+        lp_coeffs[1] = -div32_32_q27(r[1].0, r[0].0);
+        let mut reflection_coeffs = [0i32; LP_ORDER];
+        reflection_coeffs[0] = sshl32(lp_coeffs[1], 4); // k[0] = a[1] in Q31
+        
+        // ITU-T: E = r0(1 - a[1]^2) in Q31
+        // LPCoefficient[1] is in Q27, using a Q23 operation will result in a Q31 variable
+        let mut e = mult32_32_q31(
+            r[0].0, 
+            sub32(ONE_IN_Q31, mult32_32_q23(lp_coeffs[1], lp_coeffs[1]))
+        );
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  After iteration 1:");
+            eprintln!("    a[1] = {} (Q27)", lp_coeffs[1]);
+            eprintln!("    k[0] = {} (Q31)", reflection_coeffs[0]);
+            eprintln!("    E = {} (Q31)", e);
+        }
+        
+        // ITU-T: Main iterations i = 2..10
+        for i in 2..=LP_ORDER {
+            // ITU-T: update the previousIterationLPCoefficients needed for this one
+            for j in 1..i {
+                previous_a[j] = lp_coeffs[j];
             }
             
-            let numerator = r[m].saturating_add(sum);
+            // ITU-T: sum = r[i] + ∑ a[j]*r[i-j] with j = 1..i-1 (a[0] is always 1)
+            let mut sum = 0i32; // in Q27
+            for j in 1..i {
+                // LPCoefficients in Q27, autoCorrelation in Q31 -> result in Q27 -> sum in Q27
+                sum = mac32_32_q31(sum, lp_coeffs[j], r[i - j].0);
+            }
+            // set sum in Q31 and add r[i]
+            sum = add32(sshl32(sum, 4), r[i].0);
             
-            // Avoid division by zero
-            if alpha.0 <= 0 {
-                break;
+            // ITU-T: a[i] = -sum/E
+            // LPCoefficient of current iteration is in Q31 for now, it will be set to Q27 at the end of this iteration
+            lp_coeffs[i] = -div32_32_q31(sum, e);
+            reflection_coeffs[i - 1] = lp_coeffs[i]; // k[i-1] in Q31
+            
+            #[cfg(debug_assertions)]
+            {
+                eprintln!("  Iteration {}:", i);
+                eprintln!("    sum = {} (Q31)", sum);
+                eprintln!("    a[{}] = {} (Q31)", i, lp_coeffs[i]);
+                eprintln!("    k[{}] = {} (Q31)", i-1, reflection_coeffs[i-1]);
             }
             
-            // k[m] = -(r[m] + sum) / alpha
-            // Approximate division using multiplication by inverse
-            let k_m = Q15(-(numerator.0 / (alpha.0 >> 15).max(1)) as i16);
-            k[m-1] = k_m;
-            
-            // Update coefficients
-            for j in 1..=m/2 {
-                let tmp = a[m-1][j].saturating_add(k_m.saturating_mul(a[m-1][m-j]));
-                a[m][m-j] = a[m-1][m-j].saturating_add(k_m.saturating_mul(a[m-1][j]));
-                a[m][j] = tmp;
+            // ITU-T: iterations j = 1..i-1
+            //        a[j] += a[i]*a[i-j]
+            for j in 1..i {
+                // LPCoefficients in Q27 except for LPCoefficients[i] in Q31
+                lp_coeffs[j] = mac32_32_q31(lp_coeffs[j], lp_coeffs[i], previous_a[i - j]);
             }
             
-            a[m][m] = k_m;
+            // ITU-T: E *= (1 - a[i]^2) - all in Q31
+            e = mult32_32_q31(e, sub32(ONE_IN_Q31, mult32_32_q31(lp_coeffs[i], lp_coeffs[i])));
             
-            // Update prediction error
-            let k_sq = k_m.saturating_mul(k_m);
-            let factor = Q15::ONE.saturating_add(Q15(-k_sq.0));
-            alpha = Q31((alpha.0 as i64 * factor.0 as i64 >> 15) as i32);
+            // ITU-T: set LPCoefficients[i] from Q31 to Q27
+            lp_coeffs[i] = lp_coeffs[i] >> 4;
             
-            // Check stability
-            if k_m.0.abs() >= Q15_ONE - 100 {
-                // Near instability, stop iteration
+            #[cfg(debug_assertions)]
+            {
+                eprintln!("    After update: a[{}] = {} (Q27), E = {}", i, lp_coeffs[i], e);
+            }
+            
+            // Check for instability
+            if e <= 0 {
+                eprintln!("Warning: Levinson-Durbin became unstable at iteration {}", i);
                 break;
             }
         }
         
-        // Extract final coefficients (skip a[0] = 1)
-        let mut coeffs = [Q15::ZERO; LP_ORDER];
+        // ITU-T: convert with rounding the LP Coefficients from Q27 to Q12, ignore first coefficient which is always 1
+        let mut lp_output = [Q15::ZERO; LP_ORDER];
+        let mut reflection_output = [Q15::ZERO; LP_ORDER];
+        
         for i in 0..LP_ORDER {
-            coeffs[i] = a[LP_ORDER][i + 1];
+            // ITU-T: PSHR(LPCoefficients[i+1], 15) with saturation - Q27 to Q12 conversion
+            let q12_val = ((lp_coeffs[i + 1] + 0x4000) >> 15).clamp(-32768, 32767) as i16;
+            lp_output[i] = Q15(q12_val << 3); // Convert Q12 to Q15 for our internal format
+            
+            // Convert reflection coefficients from Q31 to Q15
+            reflection_output[i] = Q15((reflection_coeffs[i] >> 16).clamp(-32768, 32767) as i16);
         }
         
-        (coeffs, k)
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  Final LP coefficients (Q12->Q15): {:?}", lp_output.iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("  Final reflection coefficients (Q15): {:?}", reflection_output.iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
+        (lp_output, reflection_output)
     }
     
     /// Apply bandwidth expansion to LP coefficients
@@ -146,6 +227,7 @@ impl Default for LinearPredictor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_linear_predictor_creation() {
@@ -239,7 +321,7 @@ mod tests {
         }
         
         // Apply window
-        let windowed = predictor.autocorr_window.apply(&signal);
+        let windowed = predictor.apply_hamming_window(&signal);
         
         // Analyze
         let lp_coeffs = predictor.analyze(&windowed);
