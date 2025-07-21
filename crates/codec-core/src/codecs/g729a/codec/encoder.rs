@@ -114,7 +114,17 @@ impl G729AEncoder {
             let buffer_energy: i32 = analysis_buffer[..240].iter()
                 .map(|&x| (x.0 as i32).pow(2) >> 15)
                 .sum();
-            eprintln!("Analysis buffer energy: {}", buffer_energy);
+            let history_energy: i32 = analysis_buffer[..120].iter()
+                .map(|&x| (x.0 as i32).pow(2) >> 15)
+                .sum();
+            let current_energy: i32 = analysis_buffer[120..200].iter()
+                .map(|&x| (x.0 as i32).pow(2) >> 15)
+                .sum();
+            let lookahead_energy: i32 = analysis_buffer[200..240].iter()
+                .map(|&x| (x.0 as i32).pow(2) >> 15)
+                .sum();
+            eprintln!("Analysis buffer energy: {} (history: {}, current: {}, lookahead: {})", 
+                buffer_energy, history_energy, current_energy, lookahead_energy);
             eprintln!("Analysis buffer [115..125]: {:?}", 
                 &analysis_buffer[115..125].iter().map(|x| x.0).collect::<Vec<_>>());
         }
@@ -153,7 +163,10 @@ impl G729AEncoder {
         let quantized_lp = self.lsp_converter.lsp_to_lp(&quantized_lsp.reconstructed);
         
         // 4. Open-loop pitch analysis
-        let weighted_speech = self.compute_weighted_speech(&analysis_buffer, &quantized_lp);
+        // TEMPORARY: Use original LP coefficients for weighting since LSP→LP conversion is broken
+        // Apply weighting filter to current frame + lookahead region [120..240]
+        let speech_region = &analysis_buffer[120..240]; // 80 + 40 = 120 samples
+        let weighted_speech = self.compute_weighted_speech(speech_region, &lp_coeffs);
         
         #[cfg(debug_assertions)]
         {
