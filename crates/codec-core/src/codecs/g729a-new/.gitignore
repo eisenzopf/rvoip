@@ -33,6 +33,7 @@ Session.vim
 .dir-locals.el
 
 target/
+.env
 
 ## Tool
 .valgrindrc
