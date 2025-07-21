@@ -61,7 +61,8 @@ pub fn g729_cos_q13q15(x: i16) -> i16 {
             let inner = KCOS3 + mult16_16_p15(KCOS4 as i16, x2);
             let middle = KCOS2 + mult16_16_p15(inner as i16, x2);
             let result = KCOS1 + mult16_16_p15(middle as i16, x2);
-            return result.clamp(-32768, 32767) as i16;
+            // bcg729 uses SATURATE which clamps to MAXINT16 (32767) not -32768
+            return result.min(32767).max(-32768) as i16;
         } else { // π/4 ≤ x < π/2
             let x_adj = 12868 - x; // π/2 - x
             x2 = mult16_16_p11(x_adj, x_adj); // x² in Q15

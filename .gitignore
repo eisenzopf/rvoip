@@ -106,4 +106,4 @@ tests/rustdoc-gui/src/**.lock
 flake.lock
 /default.nix
 
-# Before adding new lines, see the comment at the top.
+# Before adding new lines, see the comment at the top.crates/codec-core/src/codecs/g729a-new/target/
