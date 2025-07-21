@@ -37,25 +37,15 @@ impl LSPPredictor {
             .try_into()
             .unwrap();
         
-        // ITU-T G.729A: Initialize predictor with progressive values for better startup
+        // ITU-T G.729A: Initialize predictor with realistic startup - use zeros for cold start
         let mut prev_lsp_init = [[Q15::ZERO; LP_ORDER]; 4];
         
-        // Frame 0: Use zeros (no prediction)
-        prev_lsp_init[0] = [Q15::ZERO; LP_ORDER];
-        
-        // Frame 1: Use 25% of initial LSP
-        for i in 0..LP_ORDER {
-            prev_lsp_init[1][i] = Q15(initial_lsp[i].0 >> 2); // 25% in Q13
-        }
-        
-        // Frame 2: Use 50% of initial LSP  
-        for i in 0..LP_ORDER {
-            prev_lsp_init[2][i] = Q15(initial_lsp[i].0 >> 1); // 50% in Q13
-        }
-        
-        // Frame 3: Use 75% of initial LSP
-        for i in 0..LP_ORDER {
-            prev_lsp_init[3][i] = Q15((initial_lsp[i].0 as i32 * 3 / 4) as i16); // 75% in Q13
+        // ITU-T recommends cold start with zeros for all previous frames
+        // This prevents overwhelming prediction values that dominate quantization
+        for i in 0..4 {
+            for j in 0..LP_ORDER {
+                prev_lsp_init[i][j] = Q15::ZERO; // Cold start with zeros
+            }
         }
 
         Self {
@@ -105,11 +95,23 @@ impl LSPPredictor {
         for i in (1..4).rev() {
             self.prev_lsp[i] = self.prev_lsp[i - 1];
         }
+        
         // Store in Q13 format for prediction
+        // CRITICAL: Apply saturation limits to prevent Q13 overflow
         let mut lsp_q13 = [Q15::ZERO; LP_ORDER];
         for j in 0..LP_ORDER {
-            lsp_q13[j] = Q15(quantized_lsp[j].0 >> 2); // Q15 to Q13
+            // Convert Q15 to Q13: divide by 4, but clamp to Q13 range [-4096, 4095]
+            let q13_val = (quantized_lsp[j].0 as i32 >> 2).clamp(-4096, 4095) as i16;
+            lsp_q13[j] = Q15(q13_val);
         }
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  Predictor update: Q15 input {:?} -> Q13 clamped {:?}", 
+                quantized_lsp.iter().map(|x| x.0).collect::<Vec<_>>(),
+                lsp_q13.iter().map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         self.prev_lsp[0] = lsp_q13;
     }
 }
@@ -181,6 +183,12 @@ impl LSPQuantizer {
         {
             eprintln!("  Mean LSP: {:?}", mean_lsp.iter().map(|x| x.0).collect::<Vec<_>>());
             eprintln!("  Residual after prediction: {:?}", residual.iter().map(|x| x.0).collect::<Vec<_>>());
+            
+            // Debug: Show magnitude of residual components
+            let prediction_mag: i32 = prediction.iter().map(|x| (x.0 as i32).abs()).sum();
+            let mean_mag: i32 = mean_lsp.iter().map(|x| (x.0 as i32).abs()).sum();
+            let input_mag: i32 = lsp_q13.iter().map(|x| (x.0 as i32).abs()).sum();
+            eprintln!("  Magnitudes - Input: {}, Prediction: {}, Mean: {}", input_mag, prediction_mag, mean_mag);
         }
         
         for i in 0..LP_ORDER {
@@ -190,6 +198,14 @@ impl LSPQuantizer {
         #[cfg(debug_assertions)]
         {
             eprintln!("  Final residual: {:?}", residual.iter().map(|x| x.0).collect::<Vec<_>>());
+            
+            // Check if residual seems reasonable (not all huge values)
+            let residual_mag: i32 = residual.iter().map(|x| (x.0 as i32).abs()).sum();
+            eprintln!("  Total residual magnitude: {}", residual_mag);
+            
+            if residual_mag > 50000 {
+                eprintln!("  WARNING: Very large residual magnitude - may indicate Q-format issue");
+            }
         }
         
         // 3. First stage: 7-bit VQ on residual (ITU-T G.729A split-VQ)
@@ -236,22 +252,47 @@ impl LSPQuantizer {
         
         // ITU-T G.729A split-VQ: reconstructed = mean + prediction + quantized_residual
         for i in 0..5 {
-            reconstructed_q13[i] = mean_lsp[i]
-                .saturating_add(prediction[i])
-                .saturating_add(stage1_quant[i])
-                .saturating_add(stage2_quant_lower[i]);
+            // Accumulate in i32 to prevent overflow, then saturate to Q13 range
+            let mut sum = mean_lsp[i].0 as i32;
+            sum += prediction[i].0 as i32;
+            sum += stage1_quant[i].0 as i32;
+            sum += stage2_quant_lower[i].0 as i32;
+            
+            // Saturate to Q13 range: [-4096, 4095] (since Q13 uses 13 bits after decimal)
+            let q13_saturated = sum.clamp(-4096, 4095) as i16;
+            reconstructed_q13[i] = Q15(q13_saturated);
         }
         for i in 5..10 {
-            reconstructed_q13[i] = mean_lsp[i]
-                .saturating_add(prediction[i])
-                .saturating_add(stage2_quant_upper[i-5]);
+            // Upper part doesn't use stage1
+            let mut sum = mean_lsp[i].0 as i32;
+            sum += prediction[i].0 as i32;
+            sum += stage2_quant_upper[i-5].0 as i32;
+            
+            // Saturate to Q13 range
+            let q13_saturated = sum.clamp(-4096, 4095) as i16;
+            reconstructed_q13[i] = Q15(q13_saturated);
         }
         
-        // ITU-T: Convert reconstructed LSP from Q13 back to Q15 with saturation
+        // ITU-T: Convert reconstructed LSP from Q13 back to Q15 with proper scaling
         let mut reconstructed = [Q15::ZERO; LP_ORDER];
         for i in 0..LP_ORDER {
-            let q15_val = (reconstructed_q13[i].0 as i32 * 4).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-            reconstructed[i] = Q15(q15_val); // Q13 to Q15 with saturation
+            // Q13 to Q15: multiply by 4, but check for overflow first
+            let q13_val = reconstructed_q13[i].0 as i32;
+            
+            // Check if multiplication by 4 would overflow i16 range
+            if q13_val > i16::MAX as i32 / 4 {
+                reconstructed[i] = Q15(i16::MAX);
+            } else if q13_val < i16::MIN as i32 / 4 {
+                reconstructed[i] = Q15(i16::MIN);
+            } else {
+                reconstructed[i] = Q15((q13_val * 4) as i16);
+            }
+        }
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  Reconstructed Q13: {:?}", reconstructed_q13.iter().map(|x| x.0).collect::<Vec<_>>());
+            eprintln!("  Reconstructed Q15: {:?}", reconstructed.iter().map(|x| x.0).collect::<Vec<_>>());
         }
         
         // 7. Check stability and adjust if needed
@@ -322,15 +363,36 @@ impl LSPQuantizer {
         let mut best_dist = i32::MAX;
         let mut best_vector = vec![Q15::ZERO; 5];
         
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  VQ Stage1 (5D): searching {} codebook entries", self.codebooks.stage1_codebook.len());
+            eprintln!("  Input residual: {:?}", residual.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+        }
+        
         // Search all 128 codebook entries
         for (idx, codebook_entry) in self.codebooks.stage1_codebook.iter().enumerate() {
             let dist = self.weighted_distance(residual, codebook_entry, &[0, 1, 2, 3, 4]);
+            
+            #[cfg(debug_assertions)]
+            if idx < 5 || idx == 11 || dist < best_dist { // Show first few entries, idx 11, and best
+                eprintln!("    Entry {}: dist={}, vector={:?}", 
+                    idx, dist, codebook_entry.iter().take(5).map(|x| x.0).collect::<Vec<_>>());
+            }
             
             if dist < best_dist {
                 best_dist = dist;
                 best_idx = idx as u8;
                 best_vector = codebook_entry[0..5].iter().map(|&x| x).collect();
+                
+                #[cfg(debug_assertions)]
+                eprintln!("    NEW BEST: idx={}, dist={}", best_idx, best_dist);
             }
+        }
+        
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("  Final Stage1: idx={}, dist={}, vector={:?}", 
+                best_idx, best_dist, best_vector.iter().map(|x| x.0).collect::<Vec<_>>());
         }
         
         (best_idx, best_vector)
