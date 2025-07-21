@@ -156,7 +156,9 @@ fn g729_atan_q15q13(x: i32) -> i16 {
     // Limit argument to 0..1
     if x > ONE_IN_Q15 {
         complement = true;
-        x = ((ONE_IN_Q30 / x as i64) & 0x7FFFFFFF) as i32; // 1/x in Q15
+        // bcg729: x = DIV32(ONE_IN_Q30, x); /* 1/x in Q15 */
+        // For Q15 input, 1/x gives Q15 output
+        x = ((ONE_IN_Q30 / x as i64) as i32).clamp(-32768, 32767);
     }
     
     // Determine segmentation
@@ -229,7 +231,8 @@ fn g729_asin_q15q13(x: i16) -> i16 {
     }
     
     // DIV32 gives Q15 result when dividing Q30 by Q0
-    let ratio = numerator / denominator;
+    // But we need to ensure the result fits in 32-bit range for atan
+    let ratio = (numerator / denominator).clamp(-2147483647, 2147483647);
     
     g729_atan_q15q13(ratio)
 }
@@ -533,7 +536,7 @@ impl LSPQuantizer {
     }
     
     // Helper functions with bcg729 exact values
-    fn get_ma_predictor(&self, l0: usize, frame: usize, coeff: usize) -> i16 {
+    pub fn get_ma_predictor(&self, l0: usize, frame: usize, coeff: usize) -> i16 {
         // Use the actual bcg729 MA predictor coefficients
         let ma_predictors = [
             // Predictor 0
