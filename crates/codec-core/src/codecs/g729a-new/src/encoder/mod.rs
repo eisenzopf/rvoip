@@ -5,3 +5,4 @@ pub mod lsp_quantizer;
 pub mod perceptual_weighting;
 pub mod pitch;
 pub mod pre_proc;
+pub mod target;

@@ -4,13 +4,13 @@ This plan outlines the steps to implement the G.729 Annex A specification in Rus
 
 ## Phase 1: Encoder Implementation
 
-- [ ] **Preprocessing:** Implement the pre-processing stage of the encoder, including high-pass filtering and scaling.
-- [ ] **LPC Analysis:** Implement the Linear Prediction (LP) analysis, including windowing, autocorrelation, and Levinson-Durbin recursion.
-- [ ] **LSP Conversion and Quantization:** Implement the conversion from LP coefficients to Line Spectrum Pairs (LSPs) and their quantization.
-- [ ] **Perceptual Weighting:** Implement the perceptual weighting filter.
-- [ ] **Open-Loop Pitch Analysis:** Implement the open-loop pitch analysis to estimate the pitch delay.
-- [ ] **Impulse Response Computation:** Implement the computation of the impulse response of the weighted synthesis filter.
-- [ ] **Target Signal Computation:** Implement the computation of the target signal for the adaptive and fixed codebook search.
+- [x] **Preprocessing:** Implement the pre-processing stage of the encoder, including high-pass filtering and scaling.
+- [x] **LPC Analysis:** Implement the Linear Prediction (LP) analysis, including windowing, autocorrelation, and Levinson-Durbin recursion.
+- [x] **LSP Conversion and Quantization:** Implement the conversion from LP coefficients to Line Spectrum Pairs (LSPs) and their quantization.
+- [x] **Perceptual Weighting:** Implement the perceptual weighting filter.
+- [x] **Open-Loop Pitch Analysis:** Implement the open-loop pitch analysis to estimate the pitch delay.
+- [x] **Impulse Response Computation:** Implement the computation of the impulse response of the weighted synthesis filter.
+- [x] **Target Signal Computation:** Implement the computation of the target signal for the adaptive and fixed codebook search.
 - [ ] **Adaptive Codebook Search:** Implement the adaptive codebook search to find the optimal pitch lag and gain.
 - [ ] **Fixed Codebook Search:** Implement the fixed codebook search to find the optimal innovation vector.
 - [ ] **Gain Quantization:** Implement the quantization of the adaptive and fixed codebook gains.
