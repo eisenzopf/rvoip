@@ -5,4 +5,12 @@ edition = "2021"
 
 [dependencies]
 
+[[test]]
+name = "discrete_comparison"
+path = "tests/discrete_comparison/rust_test.rs"
+
+[[test]]
+name = "pre_proc"
+path = "tests/pre_proc/rust_test.rs"
+
 [workspace]

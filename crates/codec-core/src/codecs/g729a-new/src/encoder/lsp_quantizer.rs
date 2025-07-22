@@ -1,42 +1,140 @@
 use crate::common::basic_operators::*;
+use crate::common::oper_32b::*;
 
-const NC: i32 = 5;
-const N_COEF: i32 = 11;
+const NC: usize = 5;
+const GRID_POINTS: usize = 60;
+const GRID: [Word16; 64] = [
+    32767, 32729, 32610, 32413, 32138, 31786, 31357, 30853, 30274, 29622, 28899, 28106,
+    27246, 26320, 25330, 24279, 23170, 22006, 20788, 19520, 18205, 16846, 15447, 14010,
+    12540, 11039, 9512, 7962, 6393, 4808, 3212, 1608, 0, -1608, -3212, -4808, -6393,
+    -7962, -9512, -11039, -12540, -14010, -15447, -16846, -18205, -19520, -20788,
+    -22006, -23170, -24279, -25330, -26320, -27246, -28106, -28899, -29622, -30274,
+    -30853, -31357, -31786, -32138, -32413, -32610, -32729,
+];
 
-fn get_lsp_pol(a: &[Word16], f: &mut [Word16]) {
+fn chebyshev(x: Word16, f: &[Word16], n: usize) -> Word16 {
+    let mut b0_h: Word16;
+    let mut b0_l: Word16;
+    let mut b1_h: Word16;
+    let mut b1_l: Word16;
+    let mut b2_h: Word16;
+    let mut b2_l: Word16;
     let mut t0: Word32;
 
-    f[0] = round(L_shl(4096, 11));
+    b2_h = 256;
+    b2_l = 0;
 
-    for i in 1..=NC {
-        t0 = L_mult(a[i as usize], 4096);
-        t0 = L_mac(t0, a[(N_COEF - i) as usize], 4096);
-        f[i as usize] = round(L_shr(t0, 13));
+    t0 = l_mult(x, 512);
+    t0 = l_mac(t0, f[1], 4096);
+    (b1_h, b1_l) = l_extract(t0);
+
+    for i in 2..n {
+        t0 = mpy_32_16(b1_h, b1_l, x);
+        t0 = l_shl(t0, 1);
+        t0 = l_mac(t0, b2_h, -32768);
+        t0 = l_msu(t0, b2_l, 1);
+        t0 = l_mac(t0, f[i], 4096);
+        (b0_h, b0_l) = l_extract(t0);
+
+        b2_l = b1_l;
+        b2_h = b1_h;
+        b1_l = b0_l;
+        b1_h = b0_h;
     }
+
+    t0 = mpy_32_16(b1_h, b1_l, x);
+    t0 = l_mac(t0, b2_h, -32768);
+    t0 = l_msu(t0, b2_l, 1);
+    t0 = l_mac(t0, f[n], 2048);
+
+    t0 = l_shl(t0, 6);
+    extract_h(t0)
 }
 
-fn chebyshev(x: Word16, f: &[Word16]) -> Word16 {
-    let mut b1: Word16 = 0;
-    let mut b2: Word16 = 0;
-    let mut b0: Word16;
-    let mut t0: Word32;
+pub fn az_lsp(a: &[Word16], lsp: &mut [Word16], old_lsp: &[Word16]) {
+    let mut f1 = [0; NC + 1];
+    let mut f2 = [0; NC + 1];
 
-    t0 = L_mac(L_mult(x, 512), f[1], 256);
-    b2 = round(L_shr(t0, 9));
+    f1[0] = 2048;
+    f2[0] = 2048;
 
-    for i in 2..NC {
-        t0 = L_mult(x, b2);
-        t0 = L_mac(t0, f[i as usize], 256);
-        t0 = L_mac(t0, b1, -32768);
-        b0 = round(L_shr(t0, 9));
-        b1 = b2;
-        b2 = b0;
+    for i in 0..NC {
+        let t0 = l_mult(a[i + 1], 16384);
+        let t0 = l_mac(t0, a[10 - i], 16384);
+        let x = extract_h(t0);
+        f1[i + 1] = sub(x, f1[i]);
+
+        let t0 = l_mult(a[i + 1], 16384);
+        let t0 = l_msu(t0, a[10 - i], 16384);
+        let x = extract_h(t0);
+        f2[i + 1] = add(x, f2[i]);
     }
 
-    t0 = L_mult(x, b2);
-    t0 = L_mac(t0, f[NC as usize], 256);
-    t0 = L_mac(t0, b1, -32768);
-    round(L_shr(t0, 9))
+    let mut nf = 0;
+    let mut ip = 0;
+    let mut xlow = GRID[0];
+    let mut ylow = chebyshev(xlow, &f1, NC);
+    let mut j = 0;
+
+    while nf < 10 && j < GRID_POINTS {
+        j += 1;
+        let mut xhigh = xlow;
+        let mut yhigh = ylow;
+        xlow = GRID[j];
+
+        ylow = if ip == 0 {
+            chebyshev(xlow, &f1, NC)
+        } else {
+            chebyshev(xlow, &f2, NC)
+        };
+
+        if l_mult(ylow, yhigh) <= 0 {
+            for _ in 0..2 {
+                let xmid = add(shr(xlow, 1), shr(xhigh, 1));
+                let ymid = if ip == 0 {
+                    chebyshev(xmid, &f1, NC)
+                } else {
+                    chebyshev(xmid, &f2, NC)
+                };
+                if l_mult(ylow, ymid) <= 0 {
+                    yhigh = ymid;
+                    xhigh = xmid;
+                } else {
+                    ylow = ymid;
+                    xlow = xmid;
+                }
+            }
+
+            let x = sub(xhigh, xlow);
+            let y = sub(yhigh, ylow);
+            let xint = if y == 0 {
+                xlow
+            } else {
+                let sign = y;
+                let y = abs_s(y);
+                let exp = norm_l(y as Word32);
+                let y = shl(y, exp as Word16);
+                let y = div_s(16383, y);
+                let mut t0 = l_mult(x, y);
+                t0 = l_shr(t0, sub(20, exp as Word16) as Word16);
+                let y = extract_l(t0);
+                let y = if sign < 0 { negate(y) } else { y };
+                let t0 = l_mult(ylow, y);
+                let t0 = l_shr(t0, 11);
+                sub(xlow, extract_l(t0))
+            };
+            lsp[nf] = xint;
+            xlow = xint;
+            nf += 1;
+            ip = 1 - ip;
+        }
+    }
+
+    if nf < 10 {
+        for i in 0..10 {
+            lsp[i] = old_lsp[i];
+        }
+    }
 }
 
 #[cfg(test)]
@@ -46,9 +144,14 @@ mod tests {
     #[test]
     fn test_lsp() {
         let a = [4096, -2043, 10, 32, -1, -10, 5, 1, -1, 0, 0];
-        let mut f = [0; 6];
-        get_lsp_pol(&a, &mut f);
-        let x = chebyshev(16384, &f);
-        assert_eq!(x, -16384);
+        let mut lsp = [0; 10];
+        let lsp_old = [0; 10];
+
+        az_lsp(&a, &mut lsp, &lsp_old);
+
+        let expected_lsp = [
+            31372, 9312, 30839, 19243, 238, 15278, 7348, 6134, 29692, -681,
+        ];
+        assert_eq!(lsp, expected_lsp);
     }
 }

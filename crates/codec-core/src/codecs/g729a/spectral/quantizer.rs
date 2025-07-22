@@ -32,17 +32,17 @@ const qLSF_MAX: i16 = 25681; // Maximum qLSF value
 
 /// Multiply 16x16 and return result shifted right by 11 (Q11 scaling)
 fn mult16_16_p11(a: i16, b: i16) -> i16 {
-    ((a as i32 * b as i32) >> 11) as i16
+    ((1024 + (a as i32 * b as i32)) >> 11) as i16
 }
 
 /// Multiply 16x16 and return result shifted right by 13 (Q13 scaling)
 fn mult16_16_p13(a: i16, b: i16) -> i16 {
-    ((a as i32 * b as i32) >> 13) as i16
+    ((4096 + (a as i32 * b as i32)) >> 13) as i16
 }
 
 /// Multiply 16x16 and return result shifted right by 15 (Q15 scaling)
 fn mult16_16_p15(a: i16, b: i16) -> i32 {
-    (a as i32 * b as i32) >> 15
+    (16384 + (a as i32 * b as i32)) >> 15
 }
 
 /// bcg729-exact cosine function: LSF (Q13) -> LSP (Q15)
