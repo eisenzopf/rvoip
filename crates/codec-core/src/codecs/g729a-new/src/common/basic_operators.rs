@@ -162,37 +162,26 @@ pub fn l_msu(l_var3: Word32, var1: Word16, var2: Word16) -> Word32 {
 }
 
 pub fn l_add(l_var1: Word32, l_var2: Word32) -> Word32 {
-    let l_var_out = (l_var1 as i64) + (l_var2 as i64);
-    if l_var_out > 0x7FFFFFFF {
-        unsafe {
-            OVERFLOW = true;
+    let l_var_out = l_var1.wrapping_add(l_var2);
+    if ((l_var1 ^ l_var2) & MIN_32) == 0 {
+        if (l_var_out ^ l_var1) & MIN_32 != 0 {
+            unsafe {
+                OVERFLOW = true;
+            }
+            return if l_var1 < 0 { MIN_32 } else { std::i32::MAX };
         }
-        std::i32::MAX
-    } else if l_var_out < -0x80000000 {
-        unsafe {
-            OVERFLOW = true;
-        }
-        std::i32::MIN
-    } else {
-        l_var_out as Word32
     }
+    l_var_out
 }
 
 pub fn l_sub(l_var1: Word32, l_var2: Word32) -> Word32 {
-    let l_var_out = (l_var1 as i64) - (l_var2 as i64);
-    if l_var_out > 0x7FFFFFFF {
-        unsafe {
-            OVERFLOW = true;
+    let l_var_out = l_var1.wrapping_sub(l_var2);
+    if ((l_var1 ^ l_var2) & MIN_32) != 0 {
+        if (l_var_out ^ l_var1) & MIN_32 != 0 {
+            return if l_var1 < 0 { MIN_32 } else { std::i32::MAX };
         }
-        std::i32::MAX
-    } else if l_var_out < -0x80000000 {
-        unsafe {
-            OVERFLOW = true;
-        }
-        std::i32::MIN
-    } else {
-        l_var_out as Word32
     }
+    l_var_out
 }
 
 pub fn l_shl(l_var1: Word32, var2: Word16) -> Word32 {
@@ -269,7 +258,7 @@ pub fn norm_l(l_var1: Word32) -> Word16 {
     }
     let mut var1 = l_var1;
     if var1 < 0 {
-        var1 = !var1;
+        var1 = l_negate(var1);
     }
     let mut var_out = 0;
     while var1 < 0x40000000 {
@@ -299,7 +288,7 @@ pub fn div_s(var1: Word16, var2: Word16) -> Word16 {
         var_out <<= 1;
         l_num <<= 1;
         if l_num >= l_denom {
-            l_num -= l_denom;
+            l_num = l_sub(l_num, l_denom);
             var_out += 1;
         }
     }

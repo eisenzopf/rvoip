@@ -35,6 +35,10 @@ Session.vim
 target/
 .env
 code/
+*.c
+*.h
+*.o
+Makefile
 
 ## Tool
 .valgrindrc
