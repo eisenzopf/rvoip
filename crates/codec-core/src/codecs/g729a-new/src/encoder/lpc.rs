@@ -56,18 +56,19 @@ impl Lpc {
 
         // Compute r[0] and test for overflow
         loop {
-            overflow = false;
+            unsafe {
+                crate::common::basic_operators::OVERFLOW = false;
+            }
             sum = 1; // Avoid case of all zeros
             for i in 0..240 {
                 sum = l_mac(sum, y[i], y[i]);
                 if unsafe { crate::common::basic_operators::OVERFLOW } {
-                    overflow = true;
                     break;
                 }
             }
 
             // If overflow divide y[] by 4
-            if overflow {
+            if unsafe { crate::common::basic_operators::OVERFLOW } {
                 for i in 0..240 {
                     y[i] = shr(y[i], 2);
                 }
@@ -137,11 +138,9 @@ impl Lpc {
         let mut alp_exp = norm_l(t0);
         t0 = l_shl(t0, alp_exp);
         let (mut alp_h, mut alp_l) = l_extract(t0);
-        println!("alp_h={}, alp_l={}, alp_exp={}", alp_h, alp_l, alp_exp);
 
         // ITERATIONS I=2 to M
         for i in 2..=10 {
-            println!("i={}", i);
             // t0 = SUM ( R[j]*A[i-j] ,j=1,i-1 ) + R[i]
             t0 = 0;
             for j in 1..i {
@@ -150,20 +149,16 @@ impl Lpc {
             t0 = l_shl(t0, 4);
             t1 = l_comp(rh[i], rl[i]);
             t0 = l_add(t0, t1);
-            println!("t0={}", t0);
 
             // K = -t0 / Alpha
             t1 = l_abs(t0);
-            println!("t1={}", t1);
             t2 = div_32(t1, alp_h, alp_l);
             if t0 > 0 {
                 t2 = l_negate(t2);
             }
-            println!("t2={}", t2);
             t2 = l_shl(t2, alp_exp);
             (kh, kl) = l_extract(t2);
             rc[i - 1] = kh;
-            println!("kh={}, kl={}", kh, kl);
 
             // Test for unstable filter
             if sub(abs_s(kh), 32750) > 0 {
@@ -196,7 +191,6 @@ impl Lpc {
             t0 = l_shl(t0, j);
             (alp_h, alp_l) = l_extract(t0);
             alp_exp = add(alp_exp, j);
-            println!("alp_h={}, alp_l={}, alp_exp={}", alp_h, alp_l, alp_exp);
 
             // A[j] = An[j]
             for j in 1..=i {
@@ -211,7 +205,6 @@ impl Lpc {
             t0 = l_comp(ah[i], al[i]);
             a[i] = round(l_shl(t0, 1));
             self.old_a[i] = a[i];
-            println!("a[{}]={}", i, a[i]);
         }
         self.old_rc[0] = rc[0];
         self.old_rc[1] = rc[1];
