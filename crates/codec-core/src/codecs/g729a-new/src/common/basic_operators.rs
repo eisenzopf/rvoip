@@ -114,19 +114,7 @@ pub fn l_mult(var1: Word16, var2: Word16) -> Word32 {
         return std::i32::MAX;
     }
     let l_var_out = l_var_out * 2;
-    if l_var_out > 0x7FFFFFFF {
-        unsafe {
-            OVERFLOW = true;
-        }
-        std::i32::MAX
-    } else if l_var_out < -0x80000000 {
-        unsafe {
-            OVERFLOW = true;
-        }
-        std::i32::MIN
-    } else {
-        l_var_out as Word32
-    }
+    l_var_out as Word32
 }
 
 pub fn negate(var1: Word16) -> Word16 {
