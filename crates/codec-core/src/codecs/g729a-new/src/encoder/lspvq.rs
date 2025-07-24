@@ -1,155 +1,124 @@
+
 use crate::common::basic_operators::*;
 use crate::common::tab_ld8a::*;
 
-// static memory
-static mut FREQ_PREV: [[Word16; M]; MA_NP] = [[0; M]; MA_NP];
+pub struct LspQuantizer {
+    freq_prev: [[Word16; M]; MA_NP],
+}
 
-pub fn lsp_encw_reset() {
-    let freq_prev_reset = [
-        2339, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396,
-    ];
-    for i in 0..MA_NP {
-        unsafe {
-            FREQ_PREV[i].copy_from_slice(&freq_prev_reset);
+impl LspQuantizer {
+    pub fn new() -> Self {
+        let mut freq_prev = [[0; M]; MA_NP];
+        let freq_prev_reset = [
+            2339, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396,
+        ];
+        for i in 0..MA_NP {
+            freq_prev[i].copy_from_slice(&freq_prev_reset);
         }
+        Self { freq_prev }
+    }
+
+    pub fn qua_lsp(&mut self, lsp: &[Word16], lsp_q: &mut [Word16], ana: &mut [Word16]) {
+        let mut lsf = [0; M];
+        let mut lsf_q = [0; M];
+
+        lsp_to_lsf(lsp, &mut lsf);
+        lsp_qua_cs(&lsf, &mut lsf_q, ana, &mut self.freq_prev);
+        lsf_to_lsp(&lsf_q, lsp_q);
     }
 }
 
-pub fn qua_lsp(
-  lsp: &[Word16],       // (i) Q15 : Unquantized LSP
-  lsp_q: &mut [Word16],     // (o) Q15 : Quantized LSP
-  ana: &mut [Word16]        // (o)     : indexes
-)
-{
-  let mut lsf = [0; M];
-  let mut lsf_q = [0; M];  // domain 0.0<= lsf <PI in Q13
-
-  // Convert LSPs to LSFs
-  lsp_to_lsf(lsp, &mut lsf);
-
-  unsafe {
-    lsp_qua_cs(&lsf, &mut lsf_q, ana, &mut FREQ_PREV);
-  }
-
-  // Convert LSFs to LSPs
-  lsf_to_lsp(&lsf_q, lsp_q);
-}
-
 fn lsp_qua_cs(
-  flsp_in: &[Word16],    // (i) Q13 : Original LSP parameters
-  lspq_out: &mut [Word16],   // (o) Q13 : Quantized LSP parameters
-  code: &mut [Word16],         // (o)     : codes of the selected LSP
+  flsp_in: &[Word16],
+  lspq_out: &mut [Word16],
+  code: &mut [Word16],
   freq_prev: &mut [[Word16; M]; MA_NP]
 )
 {
-  let mut wegt = [0; M];       // Q11->normalized : weighting coefficients
-
+  let mut wegt = [0; M];
   get_wegt( flsp_in, &mut wegt );
-
   relspwed( flsp_in, &wegt, lspq_out, &LSPCB1, &LSPCB2, &FG,
     freq_prev, &FG_SUM, &FG_SUM_INV, code);
 }
 
 fn relspwed(
-  lsp: &[Word16],                 // (i) Q13 : unquantized LSP parameters
-  wegt: &[Word16],                // (i) norm: weighting coefficients
-  lspq: &mut [Word16],                // (o) Q13 : quantized LSP parameters
-  lspcb1: &[[Word16; M]],           // (i) Q13 : first stage LSP codebook
-  lspcb2: &[[Word16; M]],           // (i) Q13 : Second stage LSP codebook
-  fg: &[[[Word16; M]; MA_NP]],    // (i) Q15 : MA prediction coefficients
-  freq_prev: &mut [[Word16; M]],   // (i/o) Q13 : previous LSP vector
-  fg_sum: &[[Word16; M]],       // (i) Q15 : present MA prediction coef.
-  fg_sum_inv: &[[Word16; M]],   // (i) Q12 : inverse coef.
-  code_ana: &mut [Word16]             // (o)     : codes of the selected LSP
+  lsp: &[Word16],
+  wegt: &[Word16],
+  lspq: &mut [Word16],
+  lspcb1: &[[Word16; M]],
+  lspcb2: &[[Word16; M]],
+  fg: &[[[Word16; M]; MA_NP]],
+  freq_prev: &mut [[Word16; M]],
+  fg_sum: &[[Word16; M]],
+  fg_sum_inv: &[[Word16; M]],
+  code_ana: &mut [Word16]
 )
 {
   let mut cand = [0; MODE];
   let mut tindex1 = [0; MODE];
   let mut tindex2 = [0; MODE];
-  let mut l_tdist = [0; MODE];         // Q26
-  let mut rbuf = [0; M];               // Q13
-  let mut buf = [0; M];                // Q13
+  let mut l_tdist = [0; MODE];
+  let mut rbuf = [0; M];
+  let mut buf = [0; M];
 
   for mode in 0..MODE {
     let mut cand_cur = 0;
     lsp_prev_extract(lsp, &mut rbuf, &fg[mode], freq_prev, &fg_sum_inv[mode]);
-
     lsp_pre_select(&rbuf, lspcb1, &mut cand_cur );
     cand[mode] = cand_cur;
-
     let mut index = 0;
     lsp_select_1(&rbuf, &lspcb1[cand_cur as usize], wegt, lspcb2, &mut index);
-
     tindex1[mode] = index;
-
     for j in 0..NC {
       buf[j] = add( lspcb1[cand_cur as usize][j], lspcb2[index as usize][j] );
     }
-
     lsp_expand_1(&mut buf, GAP1);
-
     lsp_select_2(&rbuf, &lspcb1[cand_cur as usize], wegt, lspcb2, &mut index);
-
     tindex2[mode] = index;
-
     for j in NC..M {
       buf[j] = add( lspcb1[cand_cur as usize][j], lspcb2[index as usize][j] );
     }
-
     lsp_expand_2(&mut buf, GAP1);
-
     lsp_expand_1_2(&mut buf, GAP2);
-
     lsp_get_tdist(wegt, &buf, &mut l_tdist[mode], &rbuf, &fg_sum[mode]);
   }
 
   let mut mode_index = 0;
   lsp_last_select(&l_tdist, &mut mode_index);
 
-  code_ana[0] = shl(mode_index, NC0_B) | cand[mode_index as usize];
-  code_ana[1] = shl(tindex1[mode_index as usize], NC1_B) | tindex2[mode_index as usize];
+  code_ana[0] = add(shl(mode_index, NC0_B), cand[mode_index as usize]);
+  code_ana[1] = add(shl(tindex1[mode_index as usize], NC1_B), tindex2[mode_index as usize]);
 
   lsp_get_quant(lspcb1, lspcb2, cand[mode_index as usize],
       tindex1[mode_index as usize], tindex2[mode_index as usize],
       &fg[mode_index as usize], freq_prev, lspq, &fg_sum[mode_index as usize]) ;
 }
 
-fn get_wegt(
-  flsp: &[Word16],    // (i) Q13 : M LSP parameters
-  wegt: &mut [Word16]     // (o) Q11->norm : M weighting coefficients
-)
-{
-    let mut buf = [0; M]; // in Q13
-
-    buf[0] = sub( flsp[1], add(PI04, 8192) );
-
-    for i in 1..M-1 {
-        let tmp = sub( flsp[i+1], flsp[i-1] );
-        buf[i] = sub( tmp, 8192 );
+fn get_wegt(flsp: &[Word16], wegt: &mut [Word16]) {
+    let mut buf = [0; M];
+    buf[0] = sub(flsp[1], add(PI04, 8192));
+    for i in 1..M - 1 {
+        let tmp = sub(flsp[i + 1], flsp[i - 1]);
+        buf[i] = sub(tmp, 8192);
     }
-
-    buf[M-1] = sub( sub(PI92, 8192), flsp[M-2] );
+    buf[M - 1] = sub(sub(PI92, 8192), flsp[M - 2]);
 
     for i in 0..M {
         if buf[i] > 0 {
-            wegt[i] = 2048;                    // 2048:1.0(Q11)
-        }
-        else {
-            let l_acc = l_mult( buf[i], buf[i] );           // L_acc in Q27
-            let tmp = extract_h( l_shl( l_acc, 2 ) );       // tmp in Q13
-
-            let l_acc = l_mult( tmp, CONST10 );             // L_acc in Q25
-            let tmp = extract_h( l_shl( l_acc, 2 ) );       // tmp in Q11
-
-            wegt[i] = add( tmp, 2048 );                 // wegt in Q11
+            wegt[i] = 2048;
+        } else {
+            let l_acc = l_mult(buf[i], buf[i]);
+            let tmp = extract_h(l_shl(l_acc, 2));
+            let l_acc = l_mult(tmp, CONST10);
+            let tmp = extract_h(l_shl(l_acc, 2));
+            wegt[i] = add(tmp, 2048);
         }
     }
 
-    let mut l_acc = l_mult( wegt[4], CONST12 );             // L_acc in Q26
-    wegt[4] = extract_h( l_shl( l_acc, 1 ) );       // wegt in Q11
-
-    l_acc = l_mult( wegt[5], CONST12 );             // L_acc in Q26
-    wegt[5] = extract_h( l_shl( l_acc, 1 ) );       // wegt in Q11
+    let mut l_acc = l_mult(wegt[4], CONST12);
+    wegt[4] = extract_h(l_shl(l_acc, 1));
+    l_acc = l_mult(wegt[5], CONST12);
+    wegt[5] = extract_h(l_shl(l_acc, 1));
 
     let mut tmp = 0;
     for i in 0..M {
@@ -160,7 +129,7 @@ fn get_wegt(
 
     let sft = norm_s(tmp);
     for i in 0..M {
-        wegt[i] = shl(wegt[i], sft);                  // wegt in Q(11+sft)
+        wegt[i] = shl(wegt[i], sft);
     }
 }
 
