@@ -272,12 +272,12 @@ pub fn div_s(var1: Word16, var2: Word16) -> Word16 {
     let mut var_out: Word16 = 0;
 
     for _ in 0..15 {
-        var_out <<= 1;
-        l_num <<= 1;
+        var_out = shl(var_out, 1);
+        l_num = l_shl(l_num, 1);
 
         if l_num >= l_denom {
-            l_num -= l_denom;
-            var_out += 1;
+            l_num = l_sub(l_num, l_denom);
+            var_out = add(var_out, 1);
         }
     }
     var_out
