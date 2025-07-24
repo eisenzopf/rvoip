@@ -44,7 +44,7 @@ pub fn shl(var1: Word16, var2: Word16) -> Word16 {
     if var2 < 0 {
         return shr(var1, -var2);
     }
-    let resultat = (var1 as i32) << var2;
+    let resultat = (var1 as i32) * (1i32 << var2);
     if (var2 > 15 && var1 != 0) || (resultat != (resultat as Word16) as i32) {
         if var1 > 0 {
             32767
