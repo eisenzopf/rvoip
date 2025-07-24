@@ -106,8 +106,8 @@ fn relspwed(
   let mut mode_index = 0;
   lsp_last_select(&l_tdist, &mut mode_index);
 
-  code_ana[0] = (mode_index << NC0_B) | cand[mode_index as usize];
-  code_ana[1] = (tindex1[mode_index as usize] << NC1_B) | tindex2[mode_index as usize];
+  code_ana[0] = shl(mode_index, NC0_B) | cand[mode_index as usize];
+  code_ana[1] = shl(tindex1[mode_index as usize], NC1_B) | tindex2[mode_index as usize];
 
   lsp_get_quant(lspcb1, lspcb2, cand[mode_index as usize],
       tindex1[mode_index as usize], tindex2[mode_index as usize],
@@ -121,14 +121,14 @@ fn get_wegt(
 {
     let mut buf = [0; M]; // in Q13
 
-    buf[0] = sub( flsp[1], PI04+8192 );           // 8192:1.0(Q13)
+    buf[0] = sub( flsp[1], add(PI04, 8192) );
 
     for i in 1..M-1 {
         let tmp = sub( flsp[i+1], flsp[i-1] );
         buf[i] = sub( tmp, 8192 );
     }
 
-    buf[M-1] = sub( PI92-8192, flsp[M-2] );
+    buf[M-1] = sub( sub(PI92, 8192), flsp[M-2] );
 
     for i in 0..M {
         if buf[i] > 0 {
@@ -165,10 +165,10 @@ fn get_wegt(
 }
 
 fn lsp_to_lsf(lsp: &[Word16], lsf: &mut [Word16]) {
-    let mut ind = 63;
+    let mut ind: Word16 = 63;
     for i in (0..M).rev() {
         while sub(TABLE2[ind as usize], lsp[i]) < 0 {
-            ind -= 1;
+            ind = sub(ind, 1);
             if ind <= 0 {
                 break;
             }
