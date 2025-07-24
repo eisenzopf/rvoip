@@ -393,7 +393,11 @@ fn lsp_prev_update(lsp_ele: &[Word16], freq_prev: &mut [[Word16; M]]) {
 
 fn lsp_stability(buf: &mut [Word16]) {
     for j in 0..M - 1 {
-        if sub(buf[j + 1], buf[j]) < 0 {
+        let l_acc = l_deposit_l(buf[j + 1]);
+        let l_accb = l_deposit_l(buf[j]);
+        let l_diff = l_sub(l_acc, l_accb);
+
+        if l_diff < 0 {
             let tmp = buf[j + 1];
             buf[j + 1] = buf[j];
             buf[j] = tmp;
@@ -404,7 +408,11 @@ fn lsp_stability(buf: &mut [Word16]) {
         buf[0] = L_LIMIT;
     }
     for j in 0..M - 1 {
-        if sub(buf[j + 1], buf[j]) < GAP3 {
+        let l_acc = l_deposit_l(buf[j + 1]);
+        let l_accb = l_deposit_l(buf[j]);
+        let l_diff = l_sub(l_acc, l_accb);
+
+        if l_sub(l_diff, GAP3 as Word32) < 0 {
             buf[j + 1] = add(buf[j], GAP3);
         }
     }

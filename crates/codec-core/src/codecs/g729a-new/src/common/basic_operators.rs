@@ -233,6 +233,10 @@ pub fn l_deposit_h(var1: Word16) -> Word32 {
     (var1 as Word32) << 16
 }
 
+pub fn l_deposit_l(var1: Word16) -> Word32 {
+    var1 as Word32
+}
+
 pub fn l_abs(l_var1: Word32) -> Word32 {
     if l_var1 == std::i32::MIN {
         std::i32::MAX
