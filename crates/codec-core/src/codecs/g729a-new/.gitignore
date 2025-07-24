@@ -32,7 +32,7 @@ Session.vim
 .vs/
 .dir-locals.el
 c_test
-c_output.csv
+*.csv
 
 target/
 .env

@@ -11,11 +11,25 @@ pub static mut OVERFLOW: bool = false;
 pub const MIN_32: Word32 = -2147483648;
 
 pub fn add(var1: Word16, var2: Word16) -> Word16 {
-    var1.wrapping_add(var2)
+    let l_sum = (var1 as i32) + (var2 as i32);
+    if l_sum > 32767 {
+        32767
+    } else if l_sum < -32768 {
+        -32768
+    } else {
+        l_sum as Word16
+    }
 }
 
 pub fn sub(var1: Word16, var2: Word16) -> Word16 {
-    var1.wrapping_sub(var2)
+    let l_diff = (var1 as i32) - (var2 as i32);
+    if l_diff > 32767 {
+        32767
+    } else if l_diff < -32768 {
+        -32768
+    } else {
+        l_diff as Word16
+    }
 }
 
 pub fn abs_s(var1: Word16) -> Word16 {
@@ -30,7 +44,16 @@ pub fn shl(var1: Word16, var2: Word16) -> Word16 {
     if var2 < 0 {
         return shr(var1, -var2);
     }
-    var1.wrapping_shl(var2 as u32)
+    let resultat = (var1 as i32) << var2;
+    if (var2 > 15 && var1 != 0) || (resultat != (resultat as Word16) as i32) {
+        if var1 > 0 {
+            32767
+        } else {
+            -32768
+        }
+    } else {
+        resultat as Word16
+    }
 }
 
 pub fn shr(var1: Word16, var2: Word16) -> Word16 {
