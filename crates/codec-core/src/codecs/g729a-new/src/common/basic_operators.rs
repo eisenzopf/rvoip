@@ -9,6 +9,8 @@ pub type Word32 = i32;
 pub static mut OVERFLOW: bool = false;
 
 pub const MIN_32: Word32 = -2147483648;
+pub const MAX_32: Word32 = 2147483647;
+
 
 pub fn add(var1: Word16, var2: Word16) -> Word16 {
     let l_sum = (var1 as i32) + (var2 as i32);

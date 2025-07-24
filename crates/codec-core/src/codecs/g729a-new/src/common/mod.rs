@@ -10,3 +10,4 @@ pub mod lsp_quantizer_common;
 pub mod oper_32b;
 pub mod pitch_parity;
 pub mod util;
+pub mod tab_ld8a;
