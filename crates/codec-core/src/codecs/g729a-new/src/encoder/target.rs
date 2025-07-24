@@ -4,7 +4,7 @@ use crate::common::filter::*;
 pub fn target_signal(
     p: &[Word16],
     f: &[Word16],
-    exc: &[Word16],
+    _exc: &[Word16],
     r: &[Word16],
     x: &mut [Word16],
     mem: &mut [Word16],

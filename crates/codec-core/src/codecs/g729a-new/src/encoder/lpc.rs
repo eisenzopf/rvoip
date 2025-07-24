@@ -47,7 +47,6 @@ impl Lpc {
     pub fn autocorrelation(&self, x: &[Word16], m: i16, r_h: &mut [Word16], r_l: &mut [Word16]) {
         let mut y = [0i16; 240];
         let mut sum: i32;
-        let mut overflow: bool;
 
         // Windowing of signal
         for i in 0..240 {

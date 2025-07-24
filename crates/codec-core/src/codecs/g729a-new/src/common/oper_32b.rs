@@ -1,5 +1,5 @@
 use crate::common::basic_operators::{
-    div_s, extract_h, extract_l, l_add, l_mac, l_msu, l_mult, l_shr, l_sub, mult, Word16, Word32,
+    div_s, extract_h, extract_l, l_mac, l_msu, l_mult, l_shr, l_sub, mult, Word16, Word32,
 };
 
 pub fn l_extract(l_32: Word32) -> (Word16, Word16) {
