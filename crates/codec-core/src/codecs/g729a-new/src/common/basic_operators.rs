@@ -60,38 +60,41 @@ pub fn shr(var1: Word16, var2: Word16) -> Word16 {
     if var2 < 0 {
         return shl(var1, -var2);
     }
-    var1 >> var2
+    if var2 >= 15 {
+        if var1 < 0 {
+            -1
+        } else {
+            0
+        }
+    } else {
+        if var1 < 0 {
+            !((!var1) >> var2)
+        } else {
+            var1 >> var2
+        }
+    }
 }
 
-fn saturate(l_var1: i64) -> Word32 {
-    if l_var1 > 0x7FFFFFFF {
-        unsafe {
-            OVERFLOW = true;
-        }
-        std::i32::MAX
-    } else if l_var1 < -0x80000000 {
-        unsafe {
-            OVERFLOW = true;
-        }
-        std::i32::MIN
+fn sature(l_var1: Word32) -> Word16 {
+    if l_var1 > 0x7fff {
+        unsafe { OVERFLOW = true; }
+        32767
+    } else if l_var1 < -0x8000 {
+        unsafe { OVERFLOW = true; }
+        -32768
     } else {
-        unsafe {
-            OVERFLOW = false;
-        }
-        l_var1 as Word32
+        unsafe { OVERFLOW = false; }
+        l_var1 as Word16
     }
 }
 
 pub fn mult(var1: Word16, var2: Word16) -> Word16 {
-    let l_produit = (var1 as i64) * (var2 as i64);
-    let l_produit = l_produit >> 15;
-    if l_produit > 32767 {
-        32767
-    } else if l_produit < -32768 {
-        -32768
-    } else {
-        l_produit as Word16
+    let mut l_produit = (var1 as i32).wrapping_mul(var2 as i32);
+    l_produit = (l_produit & 0xffff8000u32 as i32).wrapping_shr(15);
+    if (l_produit & 0x00010000) != 0 {
+        l_produit |= 0xffff0000u32 as i32;
     }
+    sature(l_produit)
 }
 
 pub fn l_mult(var1: Word16, var2: Word16) -> Word32 {
