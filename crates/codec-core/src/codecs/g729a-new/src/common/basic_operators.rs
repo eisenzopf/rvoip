@@ -249,6 +249,25 @@ pub fn l_abs(l_var1: Word32) -> Word32 {
     }
 }
 
+pub fn norm_s(var1: Word16) -> Word16 {
+    if var1 == 0 {
+        return 0;
+    }
+    if var1 == -1 {
+        return 15;
+    }
+    let mut var_out = 0;
+    let mut var1_mut = var1;
+    if var1_mut < 0 {
+        var1_mut = !var1_mut;
+    }
+    while var1_mut < 0x4000 {
+        var_out += 1;
+        var1_mut <<= 1;
+    }
+    var_out
+}
+
 pub fn norm_l(l_var1: Word32) -> Word16 {
     if l_var1 == 0 {
         return 0;
@@ -258,7 +277,7 @@ pub fn norm_l(l_var1: Word32) -> Word16 {
     }
     let mut var1 = l_var1;
     if var1 < 0 {
-        var1 = l_negate(var1);
+        var1 = !var1;
     }
     let mut var_out = 0;
     while var1 < 0x40000000 {
@@ -289,7 +308,7 @@ pub fn div_s(var1: Word16, var2: Word16) -> Word16 {
         l_num <<= 1;
         if l_num >= l_denom {
             l_num = l_sub(l_num, l_denom);
-            var_out += 1;
+            var_out = add(var_out, 1);
         }
     }
     var_out
@@ -390,5 +409,15 @@ mod tests {
     #[test]
     fn test_round() {
         assert_eq!(round(536870912), 8192);
+    }
+
+    #[test]
+    fn test_norm_s() {
+        assert_eq!(norm_s(0), 0);
+        assert_eq!(norm_s(-1), 15);
+        assert_eq!(norm_s(1), 14);
+        assert_eq!(norm_s(16384), 0);
+        assert_eq!(norm_s(-16385), 0);
+        assert_eq!(norm_s(-32768), 0);
     }
 }

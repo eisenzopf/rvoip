@@ -31,6 +31,8 @@ Session.vim
 .settings/
 .vs/
 .dir-locals.el
+ctest
+c_output.csv
 
 target/
 .env

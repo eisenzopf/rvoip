@@ -31,7 +31,7 @@ fn chebyshev(x: Word16, f: &[Word16], n: usize) -> Word16 {
     for i in 2..n {
         t0 = mpy_32_16(b1_h, b1_l, x);
         t0 = l_shl(t0, 1);
-        t0 = l_mac(t0, b2_h, -32768);
+        t0 = l_mac(t0, b2_h, -32768i32 as Word16);
         t0 = l_msu(t0, b2_l, 1);
         t0 = l_mac(t0, f[i], 4096);
         (b0_h, b0_l) = l_extract(t0);
@@ -43,7 +43,7 @@ fn chebyshev(x: Word16, f: &[Word16], n: usize) -> Word16 {
     }
 
     t0 = mpy_32_16(b1_h, b1_l, x);
-    t0 = l_mac(t0, b2_h, -32768);
+    t0 = l_mac(t0, b2_h, -32768i32 as Word16);
     t0 = l_msu(t0, b2_l, 1);
     t0 = l_mac(t0, f[n], 2048);
 
@@ -112,7 +112,7 @@ pub fn az_lsp(a: &[Word16], lsp: &mut [Word16], old_lsp: &[Word16]) {
             } else {
                 let sign = y;
                 let y = abs_s(y);
-                let exp = norm_l(y as Word32);
+                let exp = norm_s(y);
                 let y = shl(y, exp as Word16);
                 let y = div_s(16383, y);
                 let mut t0 = l_mult(x, y);
@@ -127,6 +127,12 @@ pub fn az_lsp(a: &[Word16], lsp: &mut [Word16], old_lsp: &[Word16]) {
             xlow = xint;
             nf += 1;
             ip = 1 - ip;
+
+            ylow = if ip == 0 {
+                chebyshev(xlow, &f1, NC)
+            } else {
+                chebyshev(xlow, &f2, NC)
+            };
         }
     }
 
@@ -137,21 +143,3 @@ pub fn az_lsp(a: &[Word16], lsp: &mut [Word16], old_lsp: &[Word16]) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_lsp() {
-        let a = [4096, -2043, 10, 32, -1, -10, 5, 1, -1, 0, 0];
-        let mut lsp = [0; 10];
-        let lsp_old = [0; 10];
-
-        az_lsp(&a, &mut lsp, &lsp_old);
-
-        let expected_lsp = [
-            31372, 9312, 30839, 19243, 238, 15278, 7348, 6134, 29692, -681,
-        ];
-        assert_eq!(lsp, expected_lsp);
-    }
-}

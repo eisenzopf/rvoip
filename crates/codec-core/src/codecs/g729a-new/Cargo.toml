@@ -17,4 +17,8 @@ path = "tests/pre_proc/rust_test.rs"
 name = "lpc"
 path = "tests/lpc/rust_test.rs"
 
+[[test]]
+name = "lsp"
+path = "tests/lsp/rust_test.rs"
+
 [workspace]
