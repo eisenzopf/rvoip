@@ -1,6 +1,5 @@
-
 use g729a_new::encoder::lsp_quantizer::az_lsp;
-use g729a_new::encoder::lspvq::{qua_lsp, lsp_encw_reset};
+use g729a_new::encoder::lspvq::LspQuantizer;
 
 #[test]
 fn test_lsp_quantizer() {
@@ -12,9 +11,9 @@ fn test_lsp_quantizer() {
 
     println!("rust_function_name,rust_output");
 
-    lsp_encw_reset();
+    let mut quantizer = LspQuantizer::new();
     az_lsp(&a, &mut lsp, &old_lsp);
-    qua_lsp(&lsp, &mut lsp_q, &mut ana);
+    quantizer.qua_lsp(&lsp, &mut lsp_q, &mut ana);
 
     for i in 0..10 {
         println!("lsp_q,{}", lsp_q[i]);
