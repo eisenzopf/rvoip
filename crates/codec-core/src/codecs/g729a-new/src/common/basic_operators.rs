@@ -95,15 +95,16 @@ pub fn mult(var1: Word16, var2: Word16) -> Word16 {
 }
 
 pub fn l_mult(var1: Word16, var2: Word16) -> Word32 {
-    let l_var_out = (var1 as i64) * (var2 as i64);
-    if l_var_out == 0x40000000 {
+    let mut l_var_out = (var1 as i32).wrapping_mul(var2 as i32);
+    if l_var_out != 0x40000000 {
+        l_var_out = l_var_out.wrapping_mul(2);
+    } else {
         unsafe {
             OVERFLOW = true;
         }
-        return std::i32::MAX;
+        l_var_out = std::i32::MAX;
     }
-    let l_var_out = l_var_out * 2;
-    l_var_out as Word32
+    l_var_out
 }
 
 pub fn negate(var1: Word16) -> Word16 {
