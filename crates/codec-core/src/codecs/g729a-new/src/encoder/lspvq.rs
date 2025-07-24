@@ -380,7 +380,7 @@ fn lsp_stability(buf: &mut [Word16]) {
         let l_accb = l_deposit_l(buf[j]);
         let l_diff = l_sub(l_acc, l_accb);
 
-        if l_sub(l_diff, GAP3 as Word32) < 0 {
+        if l_sub(l_diff, l_deposit_l(GAP3)) < 0 {
             buf[j + 1] = add(buf[j], GAP3);
         }
     }
