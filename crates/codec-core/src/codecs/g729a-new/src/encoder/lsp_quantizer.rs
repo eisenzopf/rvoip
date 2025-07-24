@@ -89,7 +89,7 @@ pub fn az_lsp(a: &[Word16], lsp: &mut [Word16], old_lsp: &[Word16]) {
         };
 
         if l_mult(ylow, yhigh) <= 0 {
-            for _ in 0..2 {
+            for _ in 0..4 {
                 let xmid = add(shr(xlow, 1), shr(xhigh, 1));
                 let ymid = if ip == 0 {
                     chebyshev(xmid, &f1, NC)
