@@ -21,4 +21,8 @@ path = "tests/lpc/rust_test.rs"
 name = "lsp"
 path = "tests/lsp/rust_test.rs"
 
+[[test]]
+name = "lsp_quantizer"
+path = "tests/lsp_quantizer/rust_test.rs"
+
 [workspace]
