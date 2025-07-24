@@ -85,7 +85,13 @@ fn saturate(l_var1: i64) -> Word32 {
 pub fn mult(var1: Word16, var2: Word16) -> Word16 {
     let l_produit = (var1 as i64) * (var2 as i64);
     let l_produit = l_produit >> 15;
-    saturate(l_produit) as Word16
+    if l_produit > 32767 {
+        32767
+    } else if l_produit < -32768 {
+        -32768
+    } else {
+        l_produit as Word16
+    }
 }
 
 pub fn l_mult(var1: Word16, var2: Word16) -> Word32 {
