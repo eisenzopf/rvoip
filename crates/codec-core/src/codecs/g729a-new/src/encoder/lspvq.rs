@@ -86,8 +86,8 @@ fn relspwed(
   let mut mode_index = 0;
   lsp_last_select(&l_tdist, &mut mode_index);
 
-  code_ana[0] = add(shl(mode_index, NC0_B), cand[mode_index as usize]);
-  code_ana[1] = add(shl(tindex1[mode_index as usize], NC1_B), tindex2[mode_index as usize]);
+  code_ana[0] = shl(mode_index, NC0_B) | cand[mode_index as usize];
+  code_ana[1] = shl(tindex1[mode_index as usize], NC1_B) | tindex2[mode_index as usize];
 
   lsp_get_quant(lspcb1, lspcb2, cand[mode_index as usize],
       tindex1[mode_index as usize], tindex2[mode_index as usize],
