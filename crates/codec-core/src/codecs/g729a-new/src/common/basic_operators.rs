@@ -169,10 +169,21 @@ pub fn l_sub(l_var1: Word32, l_var2: Word32) -> Word32 {
 }
 
 pub fn l_shl(l_var1: Word32, var2: Word16) -> Word32 {
-    if var2 < 0 {
+    if var2 <= 0 {
         return l_shr(l_var1, -var2);
     }
-    l_var1.wrapping_shl(var2 as u32)
+    let mut l_acc = l_var1;
+    for _ in 0..var2 {
+        if l_acc > 0x3FFFFFFF {
+            unsafe { OVERFLOW = true; }
+            return std::i32::MAX;
+        } else if l_acc < -0x40000000 { // 0xc0000000
+            unsafe { OVERFLOW = true; }
+            return std::i32::MIN;
+        }
+        l_acc *= 2;
+    }
+    l_acc
 }
 
 pub fn l_shr(l_var1: Word32, var2: Word16) -> Word32 {
@@ -272,8 +283,8 @@ pub fn div_s(var1: Word16, var2: Word16) -> Word16 {
     let mut var_out: Word16 = 0;
 
     for _ in 0..15 {
-        var_out = shl(var_out, 1);
-        l_num = l_shl(l_num, 1);
+        var_out <<= 1;
+        l_num <<= 1;
 
         if l_num >= l_denom {
             l_num = l_sub(l_num, l_denom);
