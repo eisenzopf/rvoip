@@ -11,37 +11,11 @@ pub static mut OVERFLOW: bool = false;
 pub const MIN_32: Word32 = -2147483648;
 
 pub fn add(var1: Word16, var2: Word16) -> Word16 {
-    let l_somme = (var1 as i64) + (var2 as i64);
-    if l_somme > 32767 {
-        unsafe {
-            OVERFLOW = true;
-        }
-        32767
-    } else if l_somme < -32768 {
-        unsafe {
-            OVERFLOW = true;
-        }
-        -32768
-    } else {
-        l_somme as Word16
-    }
+    var1.wrapping_add(var2)
 }
 
 pub fn sub(var1: Word16, var2: Word16) -> Word16 {
-    let l_diff = (var1 as i64) - (var2 as i64);
-    if l_diff > 32767 {
-        unsafe {
-            OVERFLOW = true;
-        }
-        32767
-    } else if l_diff < -32768 {
-        unsafe {
-            OVERFLOW = true;
-        }
-        -32768
-    } else {
-        l_diff as Word16
-    }
+    var1.wrapping_sub(var2)
 }
 
 pub fn abs_s(var1: Word16) -> Word16 {
@@ -56,21 +30,7 @@ pub fn shl(var1: Word16, var2: Word16) -> Word16 {
     if var2 < 0 {
         return shr(var1, -var2);
     }
-    let l_var1 = var1 as i64;
-    let l_result = l_var1 << var2;
-    if l_result > 32767 {
-        unsafe {
-            OVERFLOW = true;
-        }
-        32767
-    } else if l_result < -32768 {
-        unsafe {
-            OVERFLOW = true;
-        }
-        -32768
-    } else {
-        l_result as Word16
-    }
+    var1.wrapping_shl(var2 as u32)
 }
 
 pub fn shr(var1: Word16, var2: Word16) -> Word16 {
@@ -151,47 +111,45 @@ pub fn l_msu(l_var3: Word32, var1: Word16, var2: Word16) -> Word32 {
 
 pub fn l_add(l_var1: Word32, l_var2: Word32) -> Word32 {
     let l_var_out = l_var1.wrapping_add(l_var2);
-    if ((l_var1 ^ l_var2) & MIN_32) == 0 {
-        if (l_var_out ^ l_var1) & MIN_32 != 0 {
-            unsafe {
-                OVERFLOW = true;
-            }
-            return if l_var1 < 0 { MIN_32 } else { std::i32::MAX };
+    if (l_var1 > 0 && l_var2 > 0 && l_var_out < 0)
+        || (l_var1 < 0 && l_var2 < 0 && l_var_out > 0)
+    {
+        unsafe {
+            OVERFLOW = true;
         }
+        if l_var1 < 0 {
+            std::i32::MIN
+        } else {
+            std::i32::MAX
+        }
+    } else {
+        l_var_out
     }
-    l_var_out
 }
 
 pub fn l_sub(l_var1: Word32, l_var2: Word32) -> Word32 {
     let l_var_out = l_var1.wrapping_sub(l_var2);
-    if ((l_var1 ^ l_var2) & MIN_32) != 0 {
-        if (l_var_out ^ l_var1) & MIN_32 != 0 {
-            return if l_var1 < 0 { MIN_32 } else { std::i32::MAX };
+    if (l_var1 > 0 && l_var2 < 0 && l_var_out < 0)
+        || (l_var1 < 0 && l_var2 > 0 && l_var_out > 0)
+    {
+        unsafe {
+            OVERFLOW = true;
         }
+        if l_var1 < 0 {
+            std::i32::MIN
+        } else {
+            std::i32::MAX
+        }
+    } else {
+        l_var_out
     }
-    l_var_out
 }
 
 pub fn l_shl(l_var1: Word32, var2: Word16) -> Word32 {
-    let mut l_var_out = l_var1;
     if var2 < 0 {
         return l_shr(l_var1, -var2);
     }
-    for _ in 0..var2 {
-        if l_var_out > 0x3fffffff {
-            unsafe {
-                OVERFLOW = true;
-            }
-            return std::i32::MAX;
-        } else if l_var_out < -0x40000000 {
-            unsafe {
-                OVERFLOW = true;
-            }
-            return std::i32::MIN;
-        }
-        l_var_out *= 2;
-    }
-    l_var_out
+    l_var1.wrapping_shl(var2 as u32)
 }
 
 pub fn l_shr(l_var1: Word32, var2: Word16) -> Word32 {
@@ -276,27 +234,27 @@ pub fn norm_l(l_var1: Word32) -> Word16 {
 }
 
 pub fn div_s(var1: Word16, var2: Word16) -> Word16 {
-    if var1 < 0 || var2 < 0 || var1 > var2 {
-        panic!("div_s error");
+    if var1 < 0 || var2 <= 0 || var1 > var2 {
+        // Error case, handled by panic.
+        // In a real-world scenario, a more graceful error handling would be preferred.
+        panic!("div_s error: invalid inputs var1={}, var2={}", var1, var2);
     }
-    if var2 == 0 {
-        panic!("div_s by zero");
-    }
-    if var1 == 0 {
-        return 0;
-    }
+
     if var1 == var2 {
-        return std::i16::MAX;
+        return 32767; // Corresponds to MAX_16 in C
     }
+
     let mut l_num = var1 as Word32;
     let l_denom = var2 as Word32;
-    let mut var_out = 0;
+    let mut var_out: Word16 = 0;
+
     for _ in 0..15 {
         var_out <<= 1;
         l_num <<= 1;
+
         if l_num >= l_denom {
-            l_num = l_sub(l_num, l_denom);
-            var_out = add(var_out, 1);
+            l_num -= l_denom;
+            var_out += 1;
         }
     }
     var_out
