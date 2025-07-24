@@ -2,6 +2,7 @@ pub mod acelp_codebook;
 pub mod gain_quantizer;
 pub mod lpc;
 pub mod lsp_quantizer;
+pub mod lspvq;
 pub mod perceptual_weighting;
 pub mod pitch;
 pub mod pre_proc;
