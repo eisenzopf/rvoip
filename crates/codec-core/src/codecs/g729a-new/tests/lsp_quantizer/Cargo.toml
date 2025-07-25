@@ -1,0 +1,11 @@
+[package]
+name = "lsp_quantizer_test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "final_test"
+path = "final_test.rs"
+
+[dependencies]
+codec-core = { path = "../../../../../.." } 
