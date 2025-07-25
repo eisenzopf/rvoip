@@ -1,0 +1,7 @@
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running unittests src/lib.rs (/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/target/release/deps/codec_core-a6f350f00882b6de)
+     Running unittests src/bin/g722_compliance_test.rs (/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/target/release/deps/g722_compliance_test-8c82fe0ab299a74e)
+     Running unittests src/bin/g729a_bit_inspector.rs (/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/target/release/deps/g729a_bit_inspector-e271d9829d8c1840)
+     Running unittests src/bin/g729a_bitstream_analyzer.rs (/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/target/release/deps/g729a_bitstream_analyzer-7d00c14dd0988f87)
+     Running unittests src/codecs/g729a/run_compliance_tests.rs (/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/target/release/deps/g729a_compliance-6ca0afea3bcd814c)
+     Running unittests src/bin/g729a_param_inspector.rs (/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/target/release/deps/g729a_param_inspector-4ef3aa28bc517270)

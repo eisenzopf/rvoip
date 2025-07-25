@@ -238,7 +238,7 @@ fn lsp_select_2(
     for k1 in 0..NC1 {
         let mut l_dist = 0;
         for j in NC..M {
-            let tmp = sub(buf[j], lspcb2[k1][j - NC]);
+            let tmp = sub(buf[j], lspcb2[k1][j]);
             let tmp2 = mult(wegt[j], tmp);
             l_dist = l_mac(l_dist, tmp2, tmp);
         }
