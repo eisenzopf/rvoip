@@ -353,10 +353,13 @@ fn lsp_prev_compose(
 
 fn lsp_prev_update(lsp_ele: &[Word16], freq_prev: &mut [[Word16; M]]) {
     for k in (1..MA_NP).rev() {
-        let (src, dest) = freq_prev.split_at_mut(k);
-        dest[0].copy_from_slice(&src[k - 1]);
+        for i in 0..M {
+            freq_prev[k][i] = freq_prev[k-1][i];
+        }
     }
-    freq_prev[0].copy_from_slice(lsp_ele);
+    for i in 0..M {
+        freq_prev[0][i] = lsp_ele[i];
+    }
 }
 
 fn lsp_stability(buf: &mut [Word16]) {
