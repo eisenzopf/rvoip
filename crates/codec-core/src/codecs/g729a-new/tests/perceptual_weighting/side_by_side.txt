@@ -2,36 +2,81 @@ SIDE-BY-SIDE COMPARISON (First 3 Tests)
 =======================================
 
 
-Test Warning: File c_output.csv is empty:
+Test 1:
 Parameter     C Value Rust Value   Match
 ----------------------------------------
-p0                                 ✓
-p1                                 ✓
-p2                                 ✓
-p3                                 ✓
-p4                                 ✓
-p5                                 ✓
-p6                                 ✓
-p7                                 ✓
-p8                                 ✓
-p9                                 ✓
-p10                                ✓
-f0                                 ✓
-f1                                 ✓
-f2                                 ✓
-f3                                 ✓
-f4                                 ✓
-f5                                 ✓
-f6                                 ✓
-f7                                 ✓
-f8                                 ✓
-f9                                 ✓
-f10                                ✓
+p0               4096       4096   ✓
+p1                  0      -1536   ✗
+p2                  0        576   ✗
+p3                  0       -216   ✗
+p4                  0         81   ✗
+p5                  0        -30   ✗
+p6                  0         11   ✗
+p7                  0         -4   ✗
+p8                  0          2   ✗
+p9                  0         -1   ✗
+p10                 0          0   ✓
+f0               4096       4096   ✓
+f1             -24576      -1126   ✗
+f2              16384        310   ✗
+f3             -32768        -85   ✗
+f4                  0         23   ✗
+f5                  0         -6   ✗
+f6                  0          2   ✗
+f7                  0          0   ✓
+f8                  0          0   ✓
+f9                  0          0   ✓
+f10                 0          0   ✓
 
-Match Summary: 22/22 parameters match
+Match Summary: 7/22 parameters match
+
+Test 2:
+Parameter     C Value Rust Value   Match
+----------------------------------------
+p0               4096       4096   ✓
+p1                  0       -768   ✗
+p2                  0        288   ✗
+p3                  0       -108   ✗
+p4                  0         41   ✗
+p5                  0        -15   ✗
+p6                  0          6   ✗
+p7                  0         -2   ✗
+p8                  0          1   ✗
+p9                  0          0   ✓
+p10                 0          0   ✓
+f0               4096       4096   ✓
+f1             -12288       -563   ✗
+f2               8192        155   ✗
+f3              16384        -43   ✗
+f4             -32768         12   ✗
+f5                  0         -3   ✗
+f6                  0          1   ✗
+f7                  0          0   ✓
+f8                  0          0   ✓
+f9                  0          0   ✓
+f10                 0          0   ✓
+
+Match Summary: 8/22 parameters match
+
+Test 3:
+Parameter     C Value Rust Value   Match
+----------------------------------------
+p0               4096       4096   ✓
+p1                  0      -2304   ✗
+p2                  0       1152   ✗
+p3                  0       -648   ✗
+p4                  0        324   ✗
+p5                  0       -182   ✗
+p6                  0         91   ✗
+p7                  0        -51   ✗
+p8                  0         26   ✗
+p9                  0        -14   ✗
+p10                 0          7   ✗
+f0               4096       4096   ✓
+f1              28672      -1690   ✗
 
 OVERALL SUMMARY
 ===============
-Total Tests: 1
+Total Tests: 5
 Perfect Matches: 1
-✓ All tests match perfectly!
+✗ Some tests have mismatches. Check comparison.csv for details.

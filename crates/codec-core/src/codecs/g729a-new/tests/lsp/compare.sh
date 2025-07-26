@@ -2,7 +2,8 @@
 
 set -e
 
-# This script is intended to be run from the root of the project.
+# This script is intended to be run from the g729a-new directory
+# (crates/codec-core/src/codecs/g729a-new)
 
 # Compile C test
 make -C tests/lsp clean
