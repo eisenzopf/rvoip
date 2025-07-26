@@ -151,7 +151,7 @@ fn get_wegt(flsp: &[Word16], wegt: &mut [Word16]) {
             tmp = wegt[i];
         }
     }
-
+    
     let sft = norm_s(tmp);
     for i in 0..M {
         wegt[i] = shl(wegt[i], sft);

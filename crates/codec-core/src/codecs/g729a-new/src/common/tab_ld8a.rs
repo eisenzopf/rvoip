@@ -15,12 +15,12 @@ pub const NC1_B: i16 = 5;
 pub const GAP1: i16 = 10;  // Q13 - from C reference
 pub const GAP2: i16 = 5;   // Q13 - from C reference
 pub const GAP3: i16 = 321;
-pub const PI04: i16 = 10294;
-pub const PI92: i16 = 32111;
+pub const PI04: i16 = 1029;    // Q13 pi*0.04 - matches C: ((Word16)1029)
+pub const PI92: i16 = 23677;   // Q13 pi*0.92 - matches C: ((Word16)23677)
 pub const L_LIMIT: i16 = 40;
 pub const M_LIMIT: i16 = 25708;
-pub const CONST10: i16 = 16384;
-pub const CONST12: i16 = 24576;
+pub const CONST10: i16 = 20480; // Q11 10.0 - matches C: ((Word16)10*(1<<11))
+pub const CONST12: i16 = 19661; // Q14 1.2 - matches C: ((Word16)19661)
 
 pub const LSPCB1: [[Word16; M]; NC0] = [
     [ 1486,  2168,  3751,  9074, 12134, 13944, 17983, 19173, 21190, 21820],
