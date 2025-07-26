@@ -2,7 +2,8 @@
 
 set -e
 
-# This script is intended to be run from the root of the project.
+# This script is intended to be run from the g729a-new directory
+# (crates/codec-core/src/codecs/g729a-new)
 
 # Compile C test
 make -C tests/lpc clean
@@ -11,7 +12,8 @@ make -C tests/lpc
 # Run C test and capture output
 ./tests/lpc/c_test > tests/lpc/c_output.csv
 
-# Run Rust test and capture output
+# Run Rust test and capture output  
+# Note: Since we're in g729a-new directory, we need to run cargo from here
 cargo test --test lpc -- --nocapture | awk '/rust_function_name,rust_output/{flag=1; print; next} /^test test_lpc_functions/{flag=0} flag' > tests/lpc/rust_output.csv
 
 # Create the final CSV with a proper header
