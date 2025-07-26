@@ -1,0 +1,1323 @@
+Building C test...
+In file included from c_test.c:10:
+./../../code/BASIC_OP.C:16:10: warning: non-portable path to file '"TYPEDEF.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   16 | #include "typedef.h"
+      |          ^~~~~~~~~~~
+      |          "TYPEDEF.H"
+./../../code/BASIC_OP.C:17:10: warning: non-portable path to file '"BASIC_OP.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   17 | #include "basic_op.h"
+      |          ^~~~~~~~~~~~
+      |          "BASIC_OP.H"
+In file included from c_test.c:10:
+In file included from ./../../code/BASIC_OP.C:17:
+./../../code/basic_op.h:34:8: warning: incompatible redeclaration of library function 'round' [-Wincompatible-library-redeclaration]
+   34 | Word16 round(Word32 L_var1);              /* Round,               1 */
+      |        ^
+./../../code/basic_op.h:34:8: note: 'round' is a builtin with type 'double (double)'
+In file included from c_test.c:11:
+./../../code/OPER_32B.C:11:10: warning: non-portable path to file '"TYPEDEF.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   11 | #include "typedef.h"
+      |          ^~~~~~~~~~~
+      |          "TYPEDEF.H"
+./../../code/OPER_32B.C:12:10: warning: non-portable path to file '"BASIC_OP.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   12 | #include "basic_op.h"
+      |          ^~~~~~~~~~~~
+      |          "BASIC_OP.H"
+./../../code/OPER_32B.C:13:10: warning: non-portable path to file '"OPER_32B.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   13 | #include "oper_32b.h"
+      |          ^~~~~~~~~~~~
+      |          "OPER_32B.H"
+In file included from c_test.c:12:
+./../../code/LPCFUNC.C:17:10: warning: non-portable path to file '"TYPEDEF.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   17 | #include "typedef.h"
+      |          ^~~~~~~~~~~
+      |          "TYPEDEF.H"
+./../../code/LPCFUNC.C:18:10: warning: non-portable path to file '"BASIC_OP.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   18 | #include "basic_op.h"
+      |          ^~~~~~~~~~~~
+      |          "BASIC_OP.H"
+./../../code/LPCFUNC.C:19:10: warning: non-portable path to file '"OPER_32B.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   19 | #include "oper_32b.h"
+      |          ^~~~~~~~~~~~
+      |          "OPER_32B.H"
+./../../code/LPCFUNC.C:21:10: warning: non-portable path to file '"LD8A.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   21 | #include "ld8a.h"
+      |          ^~~~~~~~
+      |          "LD8A.H"
+./../../code/LPCFUNC.C:22:10: warning: non-portable path to file '"TAB_LD8A.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   22 | #include "tab_ld8a.h"
+      |          ^~~~~~~~~~~~
+      |          "TAB_LD8A.H"
+In file included from c_test.c:13:
+./../../code/TAB_LD8A.C:14:10: warning: non-portable path to file '"TYPEDEF.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   14 | #include "typedef.h"
+      |          ^~~~~~~~~~~
+      |          "TYPEDEF.H"
+./../../code/TAB_LD8A.C:15:10: warning: non-portable path to file '"LD8A.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   15 | #include "ld8a.h"
+      |          ^~~~~~~~
+      |          "LD8A.H"
+./../../code/TAB_LD8A.C:16:10: warning: non-portable path to file '"TAB_LD8A.H"'; specified path differs in case from file name on disk [-Wnonportable-include-path]
+   16 | #include "tab_ld8a.h"
+      |          ^~~~~~~~~~~~
+      |          "TAB_LD8A.H"
+14 warnings generated.
+Running C test...
+Running Rust test...
+Comparing outputs and generating summary...
+Comparison complete. Results in comparison.csv
+FAILURE: Outputs differ.
+test_id,parameter,c_value,rust_value,match
+
+Test --- C DEBUG gamma1 ---
+--- C DEBUG gamma1 ---,p0,,,✓
+--- C DEBUG gamma1 ---,p1,,,✓
+--- C DEBUG gamma1 ---,p2,,,✓
+--- C DEBUG gamma1 ---,p3,,,✓
+--- C DEBUG gamma1 ---,p4,,,✓
+--- C DEBUG gamma1 ---,p5,,,✓
+--- C DEBUG gamma1 ---,p6,,,✓
+--- C DEBUG gamma1 ---,p7,,,✓
+--- C DEBUG gamma1 ---,p8,,,✓
+--- C DEBUG gamma1 ---,p9,,,✓
+--- C DEBUG gamma1 ---,p10,,,✓
+--- C DEBUG gamma1 ---,f0,,,✓
+--- C DEBUG gamma1 ---,f1,,,✓
+--- C DEBUG gamma1 ---,f2,,,✓
+--- C DEBUG gamma1 ---,f3,,,✓
+--- C DEBUG gamma1 ---,f4,,,✓
+--- C DEBUG gamma1 ---,f5,,,✓
+--- C DEBUG gamma1 ---,f6,,,✓
+--- C DEBUG gamma1 ---,f7,,,✓
+--- C DEBUG gamma1 ---,f8,,,✓
+--- C DEBUG gamma1 ---,f9,,,✓
+--- C DEBUG gamma1 ---,f10,,,✓
+
+Test C fac init: 30802
+C fac init: 30802,p0,,p0,✗
+C fac init: 30802,p1,,p1,✗
+C fac init: 30802,p2,,p2,✗
+C fac init: 30802,p3,,p3,✗
+C fac init: 30802,p4,,p4,✗
+C fac init: 30802,p5,,p5,✗
+C fac init: 30802,p6,,p6,✗
+C fac init: 30802,p7,,p7,✗
+C fac init: 30802,p8,,p8,✗
+C fac init: 30802,p9,,p9,✗
+C fac init: 30802,p10,,p10,✗
+C fac init: 30802,f0,,f0,✗
+C fac init: 30802,f1,,f1,✗
+C fac init: 30802,f2,,f2,✗
+C fac init: 30802,f3,,f3,✗
+C fac init: 30802,f4,,f4,✗
+C fac init: 30802,f5,,f5,✗
+C fac init: 30802,f6,,f6,✗
+C fac init: 30802,f7,,f7,✗
+C fac init: 30802,f8,,f8,✗
+C fac init: 30802,f9,,f9,✗
+C fac init: 30802,f10,,f10,✗
+
+Test C i=1
+C i=1,p0, a[i]=-4174,,✗
+C i=1,p1, fac=30802,,✗
+C i=1,p2, L_mult=-257135096,,✗
+C i=1,p3, ap[i]=-3924,,✗
+C i=1,p4,,,✓
+C i=1,p5,,,✓
+C i=1,p6,,,✓
+C i=1,p7,,,✓
+C i=1,p8,,,✓
+C i=1,p9,,,✓
+C i=1,p10,,,✓
+C i=1,f0,,,✓
+C i=1,f1,,,✓
+C i=1,f2,,,✓
+C i=1,f3,,,✓
+C i=1,f4,,,✓
+C i=1,f5,,,✓
+C i=1,f6,,,✓
+C i=1,f7,,,✓
+C i=1,f8,,,✓
+C i=1,f9,,,✓
+C i=1,f10,,,✓
+
+Test C i=1
+C i=1,p0, new_fac=28954,,✗
+C i=1,p1,,,✓
+C i=1,p2,,,✓
+C i=1,p3,,,✓
+C i=1,p4,,,✓
+C i=1,p5,,,✓
+C i=1,p6,,,✓
+C i=1,p7,,,✓
+C i=1,p8,,,✓
+C i=1,p9,,,✓
+C i=1,p10,,,✓
+C i=1,f0,,,✓
+C i=1,f1,,,✓
+C i=1,f2,,,✓
+C i=1,f3,,,✓
+C i=1,f4,,,✓
+C i=1,f5,,,✓
+C i=1,f6,,,✓
+C i=1,f7,,,✓
+C i=1,f8,,,✓
+C i=1,f9,,,✓
+C i=1,f10,,,✓
+
+Test C i=2
+C i=2,p0, a[i]=1, a[i]=-4174,✗
+C i=2,p1, fac=28954, fac=30802,✗
+C i=2,p2, L_mult=57908, L_mult=-257135096,✗
+C i=2,p3, ap[i]=1, ap[i]=-3924,✗
+C i=2,p4,,,✓
+C i=2,p5,,,✓
+C i=2,p6,,,✓
+C i=2,p7,,,✓
+C i=2,p8,,,✓
+C i=2,p9,,,✓
+C i=2,p10,,,✓
+C i=2,f0,,,✓
+C i=2,f1,,,✓
+C i=2,f2,,,✓
+C i=2,f3,,,✓
+C i=2,f4,,,✓
+C i=2,f5,,,✓
+C i=2,f6,,,✓
+C i=2,f7,,,✓
+C i=2,f8,,,✓
+C i=2,f9,,,✓
+C i=2,f10,,,✓
+
+Test C i=2
+C i=2,p0, new_fac=27217, new_fac=28954,✗
+C i=2,p1,,,✓
+C i=2,p2,,,✓
+C i=2,p3,,,✓
+C i=2,p4,,,✓
+C i=2,p5,,,✓
+C i=2,p6,,,✓
+C i=2,p7,,,✓
+C i=2,p8,,,✓
+C i=2,p9,,,✓
+C i=2,p10,,,✓
+C i=2,f0,,,✓
+C i=2,f1,,,✓
+C i=2,f2,,,✓
+C i=2,f3,,,✓
+C i=2,f4,,,✓
+C i=2,f5,,,✓
+C i=2,f6,,,✓
+C i=2,f7,,,✓
+C i=2,f8,,,✓
+C i=2,f9,,,✓
+C i=2,f10,,,✓
+
+Test C i=3
+C i=3,p0, a[i]=17, a[i]=1,✗
+C i=3,p1, fac=27217, fac=28954,✗
+C i=3,p2, L_mult=925378, L_mult=57908,✗
+C i=3,p3, ap[i]=14, ap[i]=1,✗
+C i=3,p4,,,✓
+C i=3,p5,,,✓
+C i=3,p6,,,✓
+C i=3,p7,,,✓
+C i=3,p8,,,✓
+C i=3,p9,,,✓
+C i=3,p10,,,✓
+C i=3,f0,,,✓
+C i=3,f1,,,✓
+C i=3,f2,,,✓
+C i=3,f3,,,✓
+C i=3,f4,,,✓
+C i=3,f5,,,✓
+C i=3,f6,,,✓
+C i=3,f7,,,✓
+C i=3,f8,,,✓
+C i=3,f9,,,✓
+C i=3,f10,,,✓
+
+Test C i=3
+C i=3,p0, new_fac=25584, new_fac=27217,✗
+C i=3,p1,,,✓
+C i=3,p2,,,✓
+C i=3,p3,,,✓
+C i=3,p4,,,✓
+C i=3,p5,,,✓
+C i=3,p6,,,✓
+C i=3,p7,,,✓
+C i=3,p8,,,✓
+C i=3,p9,,,✓
+C i=3,p10,,,✓
+C i=3,f0,,,✓
+C i=3,f1,,,✓
+C i=3,f2,,,✓
+C i=3,f3,,,✓
+C i=3,f4,,,✓
+C i=3,f5,,,✓
+C i=3,f6,,,✓
+C i=3,f7,,,✓
+C i=3,f8,,,✓
+C i=3,f9,,,✓
+C i=3,f10,,,✓
+
+Test C i=4
+C i=4,p0, a[i]=12, a[i]=17,✗
+C i=4,p1, fac=25584, fac=27217,✗
+C i=4,p2, L_mult=614016, L_mult=925378,✗
+C i=4,p3, ap[i]=9, ap[i]=14,✗
+C i=4,p4,,,✓
+C i=4,p5,,,✓
+C i=4,p6,,,✓
+C i=4,p7,,,✓
+C i=4,p8,,,✓
+C i=4,p9,,,✓
+C i=4,p10,,,✓
+C i=4,f0,,,✓
+C i=4,f1,,,✓
+C i=4,f2,,,✓
+C i=4,f3,,,✓
+C i=4,f4,,,✓
+C i=4,f5,,,✓
+C i=4,f6,,,✓
+C i=4,f7,,,✓
+C i=4,f8,,,✓
+C i=4,f9,,,✓
+C i=4,f10,,,✓
+
+Test C i=4
+C i=4,p0, new_fac=24049, new_fac=25584,✗
+C i=4,p1,,,✓
+C i=4,p2,,,✓
+C i=4,p3,,,✓
+C i=4,p4,,,✓
+C i=4,p5,,,✓
+C i=4,p6,,,✓
+C i=4,p7,,,✓
+C i=4,p8,,,✓
+C i=4,p9,,,✓
+C i=4,p10,,,✓
+C i=4,f0,,,✓
+C i=4,f1,,,✓
+C i=4,f2,,,✓
+C i=4,f3,,,✓
+C i=4,f4,,,✓
+C i=4,f5,,,✓
+C i=4,f6,,,✓
+C i=4,f7,,,✓
+C i=4,f8,,,✓
+C i=4,f9,,,✓
+C i=4,f10,,,✓
+
+Test C i=5
+C i=5,p0, a[i]=13, a[i]=12,✗
+C i=5,p1, fac=24049, fac=25584,✗
+C i=5,p2, L_mult=625274, L_mult=614016,✗
+C i=5,p3, ap[i]=10, ap[i]=9,✗
+C i=5,p4,,,✓
+C i=5,p5,,,✓
+C i=5,p6,,,✓
+C i=5,p7,,,✓
+C i=5,p8,,,✓
+C i=5,p9,,,✓
+C i=5,p10,,,✓
+C i=5,f0,,,✓
+C i=5,f1,,,✓
+C i=5,f2,,,✓
+C i=5,f3,,,✓
+C i=5,f4,,,✓
+C i=5,f5,,,✓
+C i=5,f6,,,✓
+C i=5,f7,,,✓
+C i=5,f8,,,✓
+C i=5,f9,,,✓
+C i=5,f10,,,✓
+
+Test C i=5
+C i=5,p0, new_fac=22606, new_fac=24049,✗
+C i=5,p1,,,✓
+C i=5,p2,,,✓
+C i=5,p3,,,✓
+C i=5,p4,,,✓
+C i=5,p5,,,✓
+C i=5,p6,,,✓
+C i=5,p7,,,✓
+C i=5,p8,,,✓
+C i=5,p9,,,✓
+C i=5,p10,,,✓
+C i=5,f0,,,✓
+C i=5,f1,,,✓
+C i=5,f2,,,✓
+C i=5,f3,,,✓
+C i=5,f4,,,✓
+C i=5,f5,,,✓
+C i=5,f6,,,✓
+C i=5,f7,,,✓
+C i=5,f8,,,✓
+C i=5,f9,,,✓
+C i=5,f10,,,✓
+
+Test C i=6
+C i=6,p0, a[i]=13, a[i]=13,✓
+C i=6,p1, fac=22606, fac=24049,✗
+C i=6,p2, L_mult=587756, L_mult=625274,✗
+C i=6,p3, ap[i]=9, ap[i]=10,✗
+C i=6,p4,,,✓
+C i=6,p5,,,✓
+C i=6,p6,,,✓
+C i=6,p7,,,✓
+C i=6,p8,,,✓
+C i=6,p9,,,✓
+C i=6,p10,,,✓
+C i=6,f0,,,✓
+C i=6,f1,,,✓
+C i=6,f2,,,✓
+C i=6,f3,,,✓
+C i=6,f4,,,✓
+C i=6,f5,,,✓
+C i=6,f6,,,✓
+C i=6,f7,,,✓
+C i=6,f8,,,✓
+C i=6,f9,,,✓
+C i=6,f10,,,✓
+
+Test C i=6
+C i=6,p0, new_fac=21250, new_fac=22606,✗
+C i=6,p1,,,✓
+C i=6,p2,,,✓
+C i=6,p3,,,✓
+C i=6,p4,,,✓
+C i=6,p5,,,✓
+C i=6,p6,,,✓
+C i=6,p7,,,✓
+C i=6,p8,,,✓
+C i=6,p9,,,✓
+C i=6,p10,,,✓
+C i=6,f0,,,✓
+C i=6,f1,,,✓
+C i=6,f2,,,✓
+C i=6,f3,,,✓
+C i=6,f4,,,✓
+C i=6,f5,,,✓
+C i=6,f6,,,✓
+C i=6,f7,,,✓
+C i=6,f8,,,✓
+C i=6,f9,,,✓
+C i=6,f10,,,✓
+
+Test C i=7
+C i=7,p0, a[i]=13, a[i]=13,✓
+C i=7,p1, fac=21250, fac=22606,✗
+C i=7,p2, L_mult=552500, L_mult=587756,✗
+C i=7,p3, ap[i]=8, ap[i]=9,✗
+C i=7,p4,,,✓
+C i=7,p5,,,✓
+C i=7,p6,,,✓
+C i=7,p7,,,✓
+C i=7,p8,,,✓
+C i=7,p9,,,✓
+C i=7,p10,,,✓
+C i=7,f0,,,✓
+C i=7,f1,,,✓
+C i=7,f2,,,✓
+C i=7,f3,,,✓
+C i=7,f4,,,✓
+C i=7,f5,,,✓
+C i=7,f6,,,✓
+C i=7,f7,,,✓
+C i=7,f8,,,✓
+C i=7,f9,,,✓
+C i=7,f10,,,✓
+
+Test C i=7
+C i=7,p0, new_fac=19975, new_fac=21250,✗
+C i=7,p1,,,✓
+C i=7,p2,,,✓
+C i=7,p3,,,✓
+C i=7,p4,,,✓
+C i=7,p5,,,✓
+C i=7,p6,,,✓
+C i=7,p7,,,✓
+C i=7,p8,,,✓
+C i=7,p9,,,✓
+C i=7,p10,,,✓
+C i=7,f0,,,✓
+C i=7,f1,,,✓
+C i=7,f2,,,✓
+C i=7,f3,,,✓
+C i=7,f4,,,✓
+C i=7,f5,,,✓
+C i=7,f6,,,✓
+C i=7,f7,,,✓
+C i=7,f8,,,✓
+C i=7,f9,,,✓
+C i=7,f10,,,✓
+
+Test C i=8
+C i=8,p0, a[i]=11, a[i]=13,✗
+C i=8,p1, fac=19975, fac=21250,✗
+C i=8,p2, L_mult=439450, L_mult=552500,✗
+C i=8,p3, ap[i]=7, ap[i]=8,✗
+C i=8,p4,,,✓
+C i=8,p5,,,✓
+C i=8,p6,,,✓
+C i=8,p7,,,✓
+C i=8,p8,,,✓
+C i=8,p9,,,✓
+C i=8,p10,,,✓
+C i=8,f0,,,✓
+C i=8,f1,,,✓
+C i=8,f2,,,✓
+C i=8,f3,,,✓
+C i=8,f4,,,✓
+C i=8,f5,,,✓
+C i=8,f6,,,✓
+C i=8,f7,,,✓
+C i=8,f8,,,✓
+C i=8,f9,,,✓
+C i=8,f10,,,✓
+
+Test C i=8
+C i=8,p0, new_fac=18777, new_fac=19975,✗
+C i=8,p1,,,✓
+C i=8,p2,,,✓
+C i=8,p3,,,✓
+C i=8,p4,,,✓
+C i=8,p5,,,✓
+C i=8,p6,,,✓
+C i=8,p7,,,✓
+C i=8,p8,,,✓
+C i=8,p9,,,✓
+C i=8,p10,,,✓
+C i=8,f0,,,✓
+C i=8,f1,,,✓
+C i=8,f2,,,✓
+C i=8,f3,,,✓
+C i=8,f4,,,✓
+C i=8,f5,,,✓
+C i=8,f6,,,✓
+C i=8,f7,,,✓
+C i=8,f8,,,✓
+C i=8,f9,,,✓
+C i=8,f10,,,✓
+
+Test C i=9
+C i=9,p0, a[i]=9, a[i]=11,✗
+C i=9,p1, fac=18777, fac=19975,✗
+C i=9,p2, L_mult=337986, L_mult=439450,✗
+C i=9,p3, ap[i]=5, ap[i]=7,✗
+C i=9,p4,,,✓
+C i=9,p5,,,✓
+C i=9,p6,,,✓
+C i=9,p7,,,✓
+C i=9,p8,,,✓
+C i=9,p9,,,✓
+C i=9,p10,,,✓
+C i=9,f0,,,✓
+C i=9,f1,,,✓
+C i=9,f2,,,✓
+C i=9,f3,,,✓
+C i=9,f4,,,✓
+C i=9,f5,,,✓
+C i=9,f6,,,✓
+C i=9,f7,,,✓
+C i=9,f8,,,✓
+C i=9,f9,,,✓
+C i=9,f10,,,✓
+
+Test C i=9
+C i=9,p0, new_fac=17650, new_fac=18777,✗
+C i=9,p1,,,✓
+C i=9,p2,,,✓
+C i=9,p3,,,✓
+C i=9,p4,,,✓
+C i=9,p5,,,✓
+C i=9,p6,,,✓
+C i=9,p7,,,✓
+C i=9,p8,,,✓
+C i=9,p9,,,✓
+C i=9,p10,,,✓
+C i=9,f0,,,✓
+C i=9,f1,,,✓
+C i=9,f2,,,✓
+C i=9,f3,,,✓
+C i=9,f4,,,✓
+C i=9,f5,,,✓
+C i=9,f6,,,✓
+C i=9,f7,,,✓
+C i=9,f8,,,✓
+C i=9,f9,,,✓
+C i=9,f10,,,✓
+
+Test C i=10
+C i=10,p0, a[m]=103, a[i]=9,✗
+C i=10,p1, fac=17650, fac=18777,✗
+C i=10,p2, L_mult=3635900, L_mult=337986,✗
+C i=10,p3, ap[m]=55, ap[i]=5,✗
+C i=10,p4,,,✓
+C i=10,p5,,,✓
+C i=10,p6,,,✓
+C i=10,p7,,,✓
+C i=10,p8,,,✓
+C i=10,p9,,,✓
+C i=10,p10,,,✓
+C i=10,f0,,,✓
+C i=10,f1,,,✓
+C i=10,f2,,,✓
+C i=10,f3,,,✓
+C i=10,f4,,,✓
+C i=10,f5,,,✓
+C i=10,f6,,,✓
+C i=10,f7,,,✓
+C i=10,f8,,,✓
+C i=10,f9,,,✓
+C i=10,f10,,,✓
+
+Test --- C DEBUG gamma2 ---
+--- C DEBUG gamma2 ---,p0,, new_fac=17650,✗
+--- C DEBUG gamma2 ---,p1,,,✓
+--- C DEBUG gamma2 ---,p2,,,✓
+--- C DEBUG gamma2 ---,p3,,,✓
+--- C DEBUG gamma2 ---,p4,,,✓
+--- C DEBUG gamma2 ---,p5,,,✓
+--- C DEBUG gamma2 ---,p6,,,✓
+--- C DEBUG gamma2 ---,p7,,,✓
+--- C DEBUG gamma2 ---,p8,,,✓
+--- C DEBUG gamma2 ---,p9,,,✓
+--- C DEBUG gamma2 ---,p10,,,✓
+--- C DEBUG gamma2 ---,f0,,,✓
+--- C DEBUG gamma2 ---,f1,,,✓
+--- C DEBUG gamma2 ---,f2,,,✓
+--- C DEBUG gamma2 ---,f3,,,✓
+--- C DEBUG gamma2 ---,f4,,,✓
+--- C DEBUG gamma2 ---,f5,,,✓
+--- C DEBUG gamma2 ---,f6,,,✓
+--- C DEBUG gamma2 ---,f7,,,✓
+--- C DEBUG gamma2 ---,f8,,,✓
+--- C DEBUG gamma2 ---,f9,,,✓
+--- C DEBUG gamma2 ---,f10,,,✓
+
+Test C fac init: 19661
+C fac init: 19661,p0,, a[m]=103,✗
+C fac init: 19661,p1,, fac=17650,✗
+C fac init: 19661,p2,, L_mult=3635900,✗
+C fac init: 19661,p3,, ap[m]=55,✗
+C fac init: 19661,p4,,,✓
+C fac init: 19661,p5,,,✓
+C fac init: 19661,p6,,,✓
+C fac init: 19661,p7,,,✓
+C fac init: 19661,p8,,,✓
+C fac init: 19661,p9,,,✓
+C fac init: 19661,p10,,,✓
+C fac init: 19661,f0,,,✓
+C fac init: 19661,f1,,,✓
+C fac init: 19661,f2,,,✓
+C fac init: 19661,f3,,,✓
+C fac init: 19661,f4,,,✓
+C fac init: 19661,f5,,,✓
+C fac init: 19661,f6,,,✓
+C fac init: 19661,f7,,,✓
+C fac init: 19661,f8,,,✓
+C fac init: 19661,f9,,,✓
+C fac init: 19661,f10,,,✓
+
+Test C i=1
+C i=1,p0, a[i]=-4174,,✗
+C i=1,p1, fac=19661,,✗
+C i=1,p2, L_mult=-164130028,,✗
+C i=1,p3, ap[i]=-2504,,✗
+C i=1,p4,,,✓
+C i=1,p5,,,✓
+C i=1,p6,,,✓
+C i=1,p7,,,✓
+C i=1,p8,,,✓
+C i=1,p9,,,✓
+C i=1,p10,,,✓
+C i=1,f0,,,✓
+C i=1,f1,,,✓
+C i=1,f2,,,✓
+C i=1,f3,,,✓
+C i=1,f4,,,✓
+C i=1,f5,,,✓
+C i=1,f6,,,✓
+C i=1,f7,,,✓
+C i=1,f8,,,✓
+C i=1,f9,,,✓
+C i=1,f10,,,✓
+
+Test C i=1
+C i=1,p0, new_fac=11797,,✗
+C i=1,p1,,,✓
+C i=1,p2,,,✓
+C i=1,p3,,,✓
+C i=1,p4,,,✓
+C i=1,p5,,,✓
+C i=1,p6,,,✓
+C i=1,p7,,,✓
+C i=1,p8,,,✓
+C i=1,p9,,,✓
+C i=1,p10,,,✓
+C i=1,f0,,,✓
+C i=1,f1,,,✓
+C i=1,f2,,,✓
+C i=1,f3,,,✓
+C i=1,f4,,,✓
+C i=1,f5,,,✓
+C i=1,f6,,,✓
+C i=1,f7,,,✓
+C i=1,f8,,,✓
+C i=1,f9,,,✓
+C i=1,f10,,,✓
+
+Test C i=2
+C i=2,p0, a[i]=1, a[i]=-4174,✗
+C i=2,p1, fac=11797, fac=19661,✗
+C i=2,p2, L_mult=23594, L_mult=-164130028,✗
+C i=2,p3, ap[i]=0, ap[i]=-2504,✗
+C i=2,p4,,,✓
+C i=2,p5,,,✓
+C i=2,p6,,,✓
+C i=2,p7,,,✓
+C i=2,p8,,,✓
+C i=2,p9,,,✓
+C i=2,p10,,,✓
+C i=2,f0,,,✓
+C i=2,f1,,,✓
+C i=2,f2,,,✓
+C i=2,f3,,,✓
+C i=2,f4,,,✓
+C i=2,f5,,,✓
+C i=2,f6,,,✓
+C i=2,f7,,,✓
+C i=2,f8,,,✓
+C i=2,f9,,,✓
+C i=2,f10,,,✓
+
+Test C i=2
+C i=2,p0, new_fac=7078, new_fac=11797,✗
+C i=2,p1,,,✓
+C i=2,p2,,,✓
+C i=2,p3,,,✓
+C i=2,p4,,,✓
+C i=2,p5,,,✓
+C i=2,p6,,,✓
+C i=2,p7,,,✓
+C i=2,p8,,,✓
+C i=2,p9,,,✓
+C i=2,p10,,,✓
+C i=2,f0,,,✓
+C i=2,f1,,,✓
+C i=2,f2,,,✓
+C i=2,f3,,,✓
+C i=2,f4,,,✓
+C i=2,f5,,,✓
+C i=2,f6,,,✓
+C i=2,f7,,,✓
+C i=2,f8,,,✓
+C i=2,f9,,,✓
+C i=2,f10,,,✓
+
+Test C i=3
+C i=3,p0, a[i]=17, a[i]=1,✗
+C i=3,p1, fac=7078, fac=11797,✗
+C i=3,p2, L_mult=240652, L_mult=23594,✗
+C i=3,p3, ap[i]=4, ap[i]=0,✗
+C i=3,p4,,,✓
+C i=3,p5,,,✓
+C i=3,p6,,,✓
+C i=3,p7,,,✓
+C i=3,p8,,,✓
+C i=3,p9,,,✓
+C i=3,p10,,,✓
+C i=3,f0,,,✓
+C i=3,f1,,,✓
+C i=3,f2,,,✓
+C i=3,f3,,,✓
+C i=3,f4,,,✓
+C i=3,f5,,,✓
+C i=3,f6,,,✓
+C i=3,f7,,,✓
+C i=3,f8,,,✓
+C i=3,f9,,,✓
+C i=3,f10,,,✓
+
+Test C i=3
+C i=3,p0, new_fac=4247, new_fac=7078,✗
+C i=3,p1,,,✓
+C i=3,p2,,,✓
+C i=3,p3,,,✓
+C i=3,p4,,,✓
+C i=3,p5,,,✓
+C i=3,p6,,,✓
+C i=3,p7,,,✓
+C i=3,p8,,,✓
+C i=3,p9,,,✓
+C i=3,p10,,,✓
+C i=3,f0,,,✓
+C i=3,f1,,,✓
+C i=3,f2,,,✓
+C i=3,f3,,,✓
+C i=3,f4,,,✓
+C i=3,f5,,,✓
+C i=3,f6,,,✓
+C i=3,f7,,,✓
+C i=3,f8,,,✓
+C i=3,f9,,,✓
+C i=3,f10,,,✓
+
+Test C i=4
+C i=4,p0, a[i]=12, a[i]=17,✗
+C i=4,p1, fac=4247, fac=7078,✗
+C i=4,p2, L_mult=101928, L_mult=240652,✗
+C i=4,p3, ap[i]=2, ap[i]=4,✗
+C i=4,p4,,,✓
+C i=4,p5,,,✓
+C i=4,p6,,,✓
+C i=4,p7,,,✓
+C i=4,p8,,,✓
+C i=4,p9,,,✓
+C i=4,p10,,,✓
+C i=4,f0,,,✓
+C i=4,f1,,,✓
+C i=4,f2,,,✓
+C i=4,f3,,,✓
+C i=4,f4,,,✓
+C i=4,f5,,,✓
+C i=4,f6,,,✓
+C i=4,f7,,,✓
+C i=4,f8,,,✓
+C i=4,f9,,,✓
+C i=4,f10,,,✓
+
+Test C i=4
+C i=4,p0, new_fac=2548, new_fac=4247,✗
+C i=4,p1,,,✓
+C i=4,p2,,,✓
+C i=4,p3,,,✓
+C i=4,p4,,,✓
+C i=4,p5,,,✓
+C i=4,p6,,,✓
+C i=4,p7,,,✓
+C i=4,p8,,,✓
+C i=4,p9,,,✓
+C i=4,p10,,,✓
+C i=4,f0,,,✓
+C i=4,f1,,,✓
+C i=4,f2,,,✓
+C i=4,f3,,,✓
+C i=4,f4,,,✓
+C i=4,f5,,,✓
+C i=4,f6,,,✓
+C i=4,f7,,,✓
+C i=4,f8,,,✓
+C i=4,f9,,,✓
+C i=4,f10,,,✓
+
+Test C i=5
+C i=5,p0, a[i]=13, a[i]=12,✗
+C i=5,p1, fac=2548, fac=4247,✗
+C i=5,p2, L_mult=66248, L_mult=101928,✗
+C i=5,p3, ap[i]=1, ap[i]=2,✗
+C i=5,p4,,,✓
+C i=5,p5,,,✓
+C i=5,p6,,,✓
+C i=5,p7,,,✓
+C i=5,p8,,,✓
+C i=5,p9,,,✓
+C i=5,p10,,,✓
+C i=5,f0,,,✓
+C i=5,f1,,,✓
+C i=5,f2,,,✓
+C i=5,f3,,,✓
+C i=5,f4,,,✓
+C i=5,f5,,,✓
+C i=5,f6,,,✓
+C i=5,f7,,,✓
+C i=5,f8,,,✓
+C i=5,f9,,,✓
+C i=5,f10,,,✓
+
+Test C i=5
+C i=5,p0, new_fac=1529, new_fac=2548,✗
+C i=5,p1,,,✓
+C i=5,p2,,,✓
+C i=5,p3,,,✓
+C i=5,p4,,,✓
+C i=5,p5,,,✓
+C i=5,p6,,,✓
+C i=5,p7,,,✓
+C i=5,p8,,,✓
+C i=5,p9,,,✓
+C i=5,p10,,,✓
+C i=5,f0,,,✓
+C i=5,f1,,,✓
+C i=5,f2,,,✓
+C i=5,f3,,,✓
+C i=5,f4,,,✓
+C i=5,f5,,,✓
+C i=5,f6,,,✓
+C i=5,f7,,,✓
+C i=5,f8,,,✓
+C i=5,f9,,,✓
+C i=5,f10,,,✓
+
+Test C i=6
+C i=6,p0, a[i]=13, a[i]=13,✓
+C i=6,p1, fac=1529, fac=2548,✗
+C i=6,p2, L_mult=39754, L_mult=66248,✗
+C i=6,p3, ap[i]=1, ap[i]=1,✓
+C i=6,p4,,,✓
+C i=6,p5,,,✓
+C i=6,p6,,,✓
+C i=6,p7,,,✓
+C i=6,p8,,,✓
+C i=6,p9,,,✓
+C i=6,p10,,,✓
+C i=6,f0,,,✓
+C i=6,f1,,,✓
+C i=6,f2,,,✓
+C i=6,f3,,,✓
+C i=6,f4,,,✓
+C i=6,f5,,,✓
+C i=6,f6,,,✓
+C i=6,f7,,,✓
+C i=6,f8,,,✓
+C i=6,f9,,,✓
+C i=6,f10,,,✓
+
+Test C i=6
+C i=6,p0, new_fac=917, new_fac=1529,✗
+C i=6,p1,,,✓
+C i=6,p2,,,✓
+C i=6,p3,,,✓
+C i=6,p4,,,✓
+C i=6,p5,,,✓
+C i=6,p6,,,✓
+C i=6,p7,,,✓
+C i=6,p8,,,✓
+C i=6,p9,,,✓
+C i=6,p10,,,✓
+C i=6,f0,,,✓
+C i=6,f1,,,✓
+C i=6,f2,,,✓
+C i=6,f3,,,✓
+C i=6,f4,,,✓
+C i=6,f5,,,✓
+C i=6,f6,,,✓
+C i=6,f7,,,✓
+C i=6,f8,,,✓
+C i=6,f9,,,✓
+C i=6,f10,,,✓
+
+Test C i=7
+C i=7,p0, a[i]=13, a[i]=13,✓
+C i=7,p1, fac=917, fac=1529,✗
+C i=7,p2, L_mult=23842, L_mult=39754,✗
+C i=7,p3, ap[i]=0, ap[i]=1,✗
+C i=7,p4,,,✓
+C i=7,p5,,,✓
+C i=7,p6,,,✓
+C i=7,p7,,,✓
+C i=7,p8,,,✓
+C i=7,p9,,,✓
+C i=7,p10,,,✓
+C i=7,f0,,,✓
+C i=7,f1,,,✓
+C i=7,f2,,,✓
+C i=7,f3,,,✓
+C i=7,f4,,,✓
+C i=7,f5,,,✓
+C i=7,f6,,,✓
+C i=7,f7,,,✓
+C i=7,f8,,,✓
+C i=7,f9,,,✓
+C i=7,f10,,,✓
+
+Test C i=7
+C i=7,p0, new_fac=550, new_fac=917,✗
+C i=7,p1,,,✓
+C i=7,p2,,,✓
+C i=7,p3,,,✓
+C i=7,p4,,,✓
+C i=7,p5,,,✓
+C i=7,p6,,,✓
+C i=7,p7,,,✓
+C i=7,p8,,,✓
+C i=7,p9,,,✓
+C i=7,p10,,,✓
+C i=7,f0,,,✓
+C i=7,f1,,,✓
+C i=7,f2,,,✓
+C i=7,f3,,,✓
+C i=7,f4,,,✓
+C i=7,f5,,,✓
+C i=7,f6,,,✓
+C i=7,f7,,,✓
+C i=7,f8,,,✓
+C i=7,f9,,,✓
+C i=7,f10,,,✓
+
+Test C i=8
+C i=8,p0, a[i]=11, a[i]=13,✗
+C i=8,p1, fac=550, fac=917,✗
+C i=8,p2, L_mult=12100, L_mult=23842,✗
+C i=8,p3, ap[i]=0, ap[i]=0,✓
+C i=8,p4,,,✓
+C i=8,p5,,,✓
+C i=8,p6,,,✓
+C i=8,p7,,,✓
+C i=8,p8,,,✓
+C i=8,p9,,,✓
+C i=8,p10,,,✓
+C i=8,f0,,,✓
+C i=8,f1,,,✓
+C i=8,f2,,,✓
+C i=8,f3,,,✓
+C i=8,f4,,,✓
+C i=8,f5,,,✓
+C i=8,f6,,,✓
+C i=8,f7,,,✓
+C i=8,f8,,,✓
+C i=8,f9,,,✓
+C i=8,f10,,,✓
+
+Test C i=8
+C i=8,p0, new_fac=330, new_fac=550,✗
+C i=8,p1,,,✓
+C i=8,p2,,,✓
+C i=8,p3,,,✓
+C i=8,p4,,,✓
+C i=8,p5,,,✓
+C i=8,p6,,,✓
+C i=8,p7,,,✓
+C i=8,p8,,,✓
+C i=8,p9,,,✓
+C i=8,p10,,,✓
+C i=8,f0,,,✓
+C i=8,f1,,,✓
+C i=8,f2,,,✓
+C i=8,f3,,,✓
+C i=8,f4,,,✓
+C i=8,f5,,,✓
+C i=8,f6,,,✓
+C i=8,f7,,,✓
+C i=8,f8,,,✓
+C i=8,f9,,,✓
+C i=8,f10,,,✓
+
+Test C i=9
+C i=9,p0, a[i]=9, a[i]=11,✗
+C i=9,p1, fac=330, fac=550,✗
+C i=9,p2, L_mult=5940, L_mult=12100,✗
+C i=9,p3, ap[i]=0, ap[i]=0,✓
+C i=9,p4,,,✓
+C i=9,p5,,,✓
+C i=9,p6,,,✓
+C i=9,p7,,,✓
+C i=9,p8,,,✓
+C i=9,p9,,,✓
+C i=9,p10,,,✓
+C i=9,f0,,,✓
+C i=9,f1,,,✓
+C i=9,f2,,,✓
+C i=9,f3,,,✓
+C i=9,f4,,,✓
+C i=9,f5,,,✓
+C i=9,f6,,,✓
+C i=9,f7,,,✓
+C i=9,f8,,,✓
+C i=9,f9,,,✓
+C i=9,f10,,,✓
+
+Test C i=9
+C i=9,p0, new_fac=198, new_fac=330,✗
+C i=9,p1,,,✓
+C i=9,p2,,,✓
+C i=9,p3,,,✓
+C i=9,p4,,,✓
+C i=9,p5,,,✓
+C i=9,p6,,,✓
+C i=9,p7,,,✓
+C i=9,p8,,,✓
+C i=9,p9,,,✓
+C i=9,p10,,,✓
+C i=9,f0,,,✓
+C i=9,f1,,,✓
+C i=9,f2,,,✓
+C i=9,f3,,,✓
+C i=9,f4,,,✓
+C i=9,f5,,,✓
+C i=9,f6,,,✓
+C i=9,f7,,,✓
+C i=9,f8,,,✓
+C i=9,f9,,,✓
+C i=9,f10,,,✓
+
+Test C i=10
+C i=10,p0, a[m]=103, a[i]=9,✗
+C i=10,p1, fac=198, fac=330,✗
+C i=10,p2, L_mult=40788, L_mult=5940,✗
+C i=10,p3, ap[m]=1, ap[i]=0,✗
+C i=10,p4,,,✓
+C i=10,p5,,,✓
+C i=10,p6,,,✓
+C i=10,p7,,,✓
+C i=10,p8,,,✓
+C i=10,p9,,,✓
+C i=10,p10,,,✓
+C i=10,f0,,,✓
+C i=10,f1,,,✓
+C i=10,f2,,,✓
+C i=10,f3,,,✓
+C i=10,f4,,,✓
+C i=10,f5,,,✓
+C i=10,f6,,,✓
+C i=10,f7,,,✓
+C i=10,f8,,,✓
+C i=10,f9,,,✓
+C i=10,f10,,,✓
+
+Test 0
+0,p0,4096, new_fac=198,✗
+0,p1,-3924,,✗
+0,p2,1,,✗
+0,p3,14,,✗
+0,p4,9,,✗
+0,p5,10,,✗
+0,p6,9,,✗
+0,p7,8,,✗
+0,p8,7,,✗
+0,p9,5,,✗
+0,p10,55,,✗
+0,f0,4096,,✗
+0,f1,-2504,,✗
+0,f2,0,,✗
+0,f3,4,,✗
+0,f4,2,,✗
+0,f5,1,,✗
+0,f6,1,,✗
+0,f7,0,,✗
+0,f8,0,,✗
+0,f9,0,,✗
+0,f10,1,,✗
+
+Test 1
+1,p0,4096, a[m]=103,✗
+1,p1,-3290, fac=198,✗
+1,p2,1767, L_mult=40788,✗
+1,p3,-831, ap[m]=1,✗
+1,p4,390,,✗
+1,p5,-183,,✗
+1,p6,86,,✗
+1,p7,-39,,✗
+1,p8,18,,✗
+1,p9,-9,,✗
+1,p10,4,,✗
+1,f0,4096,,✗
+1,f1,-2100,,✗
+1,f2,720,,✗
+1,f3,-216,,✗
+1,f4,65,,✗
+1,f5,-19,,✗
+1,f6,6,,✗
+1,f7,-2,,✗
+1,f8,1,,✗
+1,f9,0,,✗
+1,f10,0,,✗
+
+Test 2
+2,p0,4096,4096,✓
+2,p1,-2820,-3924,✗
+2,p2,1325,1,✗
+2,p3,-664,14,✗
+2,p4,312,9,✗
+2,p5,-147,10,✗
+2,p6,69,9,✗
+2,p7,-32,8,✗
+2,p8,15,7,✗
+2,p9,-7,5,✗
+2,p10,3,55,✗
+2,f0,4096,4096,✓
+2,f1,-1800,-2504,✗
+2,f2,540,0,✗
+2,f3,-173,4,✗
+2,f4,52,2,✗
+2,f5,-16,1,✗
+2,f6,5,1,✗
+2,f7,-1,0,✗
+2,f8,0,0,✓
+2,f9,0,0,✓
+2,f10,0,1,✗
+
+Test 3
+3,p0,4096,4096,✓
+3,p1,-3760,-3290,✗
+3,p2,2209,1767,✗
+3,p3,-1246,-831,✗
+3,p4,586,390,✗
+3,p5,-275,-183,✗
+3,p6,129,86,✗
+3,p7,-60,-39,✗
+3,p8,28,18,✗
+3,p9,-13,-9,✗
+3,p10,6,4,✗
+3,f0,4096,4096,✓
+3,f1,-2400,-2100,✗
+3,f2,900,720,✗
+3,f3,-324,-216,✗
+3,f4,97,65,✗
+3,f5,-29,-19,✗
+3,f6,9,6,✗
+3,f7,-3,-2,✗
+3,f8,1,1,✓
+3,f9,0,0,✓
+3,f10,0,0,✓
+
+Test 4
+4,p0,4096,4096,✓
+4,p1,-2350,-2820,✗
+4,p2,884,1325,✗
+4,p3,-415,-664,✗
+4,p4,195,312,✗
+4,p5,-92,-147,✗
+4,p6,43,69,✗
+4,p7,-20,-32,✗
+4,p8,9,15,✗
+4,p9,-4,-7,✗
+4,p10,2,3,✗
+4,f0,4096,4096,✓
+4,f1,-1500,-1800,✗
+4,f2,360,540,✗
+4,f3,-108,-173,✗
+4,f4,32,52,✗
+4,f5,-10,-16,✗
+4,f6,3,5,✗
+4,f7,-1,-1,✓
+4,f8,0,0,✓
+4,f9,0,0,✓
+4,f10,0,0,✓
+
+Test 5
+5,p0,4096,4096,✓
+5,p1,-3572,-3760,✗
+5,p2,1944,2209,✗
+5,p3,-997,-1246,✗
+5,p4,468,586,✗
+5,p5,-220,-275,✗
+5,p6,103,129,✗
+5,p7,-49,-60,✗
+5,p8,23,28,✗
+5,p9,-10,-13,✗
+5,p10,5,6,✗
+5,f0,4096,4096,✓
+5,f1,-2280,-2400,✗
+5,f2,792,900,✗
+5,f3,-259,-324,✗
+5,f4,78,97,✗
+5,f5,-23,-29,✗
+5,f6,7,9,✗
+5,f7,-2,-3,✗
+5,f8,1,1,✓
+5,f9,0,0,✓
+5,f10,0,0,✓
+
+Test 6
+6,p0,4096,4096,✓
+6,p1,-4230,-2350,✗
+6,p2,2651,884,✗
+6,p3,-1661,-415,✗
+6,p4,781,195,✗
+6,p5,-367,-92,✗
+6,p6,172,43,✗
+6,p7,-81,-20,✗
+6,p8,38,9,✗
+6,p9,-18,-4,✗
+6,p10,8,2,✗
+6,f0,4096,4096,✓
+6,f1,-2700,-1500,✗
+6,f2,1080,360,✗
+6,f3,-432,-108,✗
+6,f4,130,32,✗
+6,f5,-39,-10,✗
+6,f6,12,3,✗
+6,f7,-3,-1,✗
+6,f8,1,0,✗
+6,f9,0,0,✓
+6,f10,0,0,✓
+
+Test 7
+7,p0,4096,4096,✓
+7,p1,-3008,-3572,✗
+7,p2,1590,1944,✗
+7,p3,-748,-997,✗
+7,p4,351,468,✗
+7,p5,-165,-220,✗
+7,p6,77,103,✗
+7,p7,-36,-49,✗
+7,p8,17,23,✗
+7,p9,-8,-10,✗
+7,p10,4,5,✗
+7,f0,4096,4096,✓
+7,f1,-1920,-2280,✗
+7,f2,648,792,✗
+7,f3,-194,-259,✗
+7,f4,58,78,✗
+7,f5,-17,-23,✗
+7,f6,5,7,✗
+7,f7,-2,-2,✓
+7,f8,0,1,✗
+7,f9,0,0,✓
+7,f10,0,0,✓
+
+Test 8
+8,p0,4096,4096,✓
+8,p1,-3948,-4230,✗
+8,p2,2474,2651,✗
+8,p3,-1495,-1661,✗
+8,p4,703,781,✗
+8,p5,-330,-367,✗
+8,p6,155,172,✗
+8,p7,-73,-81,✗
+8,p8,34,38,✗
+8,p9,-16,-18,✗
+8,p10,8,8,✓
+8,f0,4096,4096,✓
+8,f1,-2520,-2700,✗
+8,f2,1008,1080,✗
+8,f3,-389,-432,✗
+8,f4,117,130,✗
+8,f5,-35,-39,✗
+8,f6,10,12,✗
+8,f7,-3,-3,✓
+8,f8,1,1,✓
+8,f9,0,0,✓
+8,f10,0,0,✓
+
+Test 9
+9,p0,4096,4096,✓
+9,p1,-3666,-3008,✗
+9,p2,2121,1590,✗
+9,p3,-1163,-748,✗
+9,p4,547,351,✗
+9,p5,-257,-165,✗
+9,p6,121,77,✗
+9,p7,-56,-36,✗
+9,p8,26,17,✗
+9,p9,-12,-8,✗
+9,p10,5,4,✗
+9,f0,4096,4096,✓
+9,f1,-2340,-1920,✗
+9,f2,864,648,✗
+9,f3,-302,-194,✗
+9,f4,91,58,✗
+9,f5,-27,-17,✗
+9,f6,8,5,✗
+9,f7,-2,-2,✓
+9,f8,1,0,✗
+9,f9,0,0,✓
+9,f10,0,0,✓
+
+SUMMARY
+total_matches,847
+total_parameters,1144
+pass_rate,74%

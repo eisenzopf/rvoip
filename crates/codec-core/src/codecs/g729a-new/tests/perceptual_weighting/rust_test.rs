@@ -1,13 +1,28 @@
+use g729a_new::common::basic_operators::*;
 use g729a_new::encoder::perceptual_weighting::perceptual_weighting;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-fn print_coeffs_csv(test_id: i32, p: &[i16], f: &[i16]) {
-    print!("{}", test_id);
-    for val in p { print!(",{}", val); }
-    for val in f { print!(",{}", val); }
-    println!();
+const M: usize = 10;
+
+fn weight_az_with_debug(a: &[Word16], gamma: Word16, ap: &mut [Word16], test_id: i32) {
+    ap[0] = a[0];
+    let mut fac = gamma;
+    if test_id == 0 { println!("Rust fac init: {}", fac); }
+
+    for i in 1..M {
+        let l_temp = l_mult(a[i], fac);
+        ap[i] = round(l_temp);
+        if test_id == 0 { println!("Rust i={}, a[i]={}, fac={}, L_mult={}, ap[i]={}", i, a[i], fac, l_temp, ap[i]); }
+        
+        let l_temp_fac = l_mult(fac, gamma);
+        fac = round(l_temp_fac);
+        if test_id == 0 { println!("Rust i={}, new_fac={}", i, fac); }
+    }
+    let l_temp = l_mult(a[M], fac);
+    ap[M] = round(l_temp);
+    if test_id == 0 { println!("Rust i={}, a[m]={}, fac={}, L_mult={}, ap[m]={}", M, a[M], fac, l_temp, ap[M]); }
 }
 
 #[test]
@@ -34,8 +49,20 @@ fn test_perceptual_weighting_from_csv() {
         let mut p = [0; 11];
         let mut f = [0; 11];
 
-        perceptual_weighting(&a, &mut p, &mut f);
+        if test_id == 0 {
+            const GAMMA1: Word16 = 30802; // 0.94 in Q15
+            const GAMMA2: Word16 = 19661; // 0.6 in Q15
+            println!("--- Rust DEBUG gamma1 ---");
+            weight_az_with_debug(&a, GAMMA1, &mut p, test_id);
+            println!("--- Rust DEBUG gamma2 ---");
+            weight_az_with_debug(&a, GAMMA2, &mut f, test_id);
+        } else {
+            perceptual_weighting(&a, &mut p, &mut f);
+        }
 
-        print_coeffs_csv(test_id, &p, &f);
+        print!("{}", test_id);
+        for val in p { print!(",{}", val); }
+        for val in f { print!(",{}", val); }
+        println!();
     }
 }
