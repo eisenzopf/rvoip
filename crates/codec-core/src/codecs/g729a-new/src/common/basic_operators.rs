@@ -145,38 +145,30 @@ pub fn l_msu(l_var3: Word32, var1: Word16, var2: Word16) -> Word32 {
 }
 
 pub fn l_add(l_var1: Word32, l_var2: Word32) -> Word32 {
-    let l_var_out = l_var1.wrapping_add(l_var2);
-    if (l_var1 > 0 && l_var2 > 0 && l_var_out < 0)
-        || (l_var1 < 0 && l_var2 < 0 && l_var_out > 0)
-    {
-        unsafe {
-            OVERFLOW = true;
-        }
-        if l_var1 < 0 {
-            std::i32::MIN
-        } else {
-            std::i32::MAX
-        }
+    let temp = (l_var1 as i64) + (l_var2 as i64);
+    if temp > MAX_32 as i64 {
+        unsafe { OVERFLOW = true; }
+        MAX_32
+    } else if temp < MIN_32 as i64 {
+        unsafe { OVERFLOW = true; }
+        MIN_32
     } else {
-        l_var_out
+        unsafe { OVERFLOW = false; }
+        temp as Word32
     }
 }
 
 pub fn l_sub(l_var1: Word32, l_var2: Word32) -> Word32 {
-    let l_var_out = l_var1.wrapping_sub(l_var2);
-    if (l_var1 > 0 && l_var2 < 0 && l_var_out < 0)
-        || (l_var1 < 0 && l_var2 > 0 && l_var_out > 0)
-    {
-        unsafe {
-            OVERFLOW = true;
-        }
-        if l_var1 < 0 {
-            std::i32::MIN
-        } else {
-            std::i32::MAX
-        }
+    let temp = (l_var1 as i64) - (l_var2 as i64);
+    if temp > MAX_32 as i64 {
+        unsafe { OVERFLOW = true; }
+        MAX_32
+    } else if temp < MIN_32 as i64 {
+        unsafe { OVERFLOW = true; }
+        MIN_32
     } else {
-        l_var_out
+        unsafe { OVERFLOW = false; }
+        temp as Word32
     }
 }
 
