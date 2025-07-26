@@ -1,18 +1,19 @@
 #!/bin/bash
 
-# Change to the test directory
-cd "$(dirname "$0")"
+set -e
 
-# Compile C test program
-make clean && make
+# This script is intended to be run from the g729a-new directory
+# (crates/codec-core/src/codecs/g729a-new)
+
+# Compile C test
+make -C tests/perceptual_weighting clean
+make -C tests/perceptual_weighting
 
 # Run C implementation and save output
-./c_test > c_output.csv
+./tests/perceptual_weighting/c_test > tests/perceptual_weighting/c_output.csv
 
-# Run Rust implementation and save output
-cd ../../
-cargo test --test perceptual_weighting test_perceptual_weighting_from_csv --release -- --nocapture 2>&1 | grep -v "running\|test result\|warning" | grep "^[0-9]" > tests/perceptual_weighting/rust_output.csv
-cd tests/perceptual_weighting
+# Run Rust test and capture output
+cargo test --test perceptual_weighting test_perceptual_weighting_from_csv -- --nocapture 2>&1 | grep -v "running\|test result\|warning" | grep "^[0-9]" > tests/perceptual_weighting/rust_output.csv
 
 # Function to extract data rows (skip header)
 extract_data() {
@@ -30,21 +31,21 @@ extract_data() {
 }
 
 # Sort both outputs (excluding headers) and compare
-extract_data c_output.csv | sort > c_sorted.csv
-extract_data rust_output.csv | sort > rust_sorted.csv
+extract_data tests/perceptual_weighting/c_output.csv | sort > tests/perceptual_weighting/c_sorted.csv
+extract_data tests/perceptual_weighting/rust_output.csv | sort > tests/perceptual_weighting/rust_sorted.csv
 
 # Create comparison CSV file
-echo "SIDE-BY-SIDE COMPARISON" > comparison.csv
-echo "=======================" >> comparison.csv
-echo "" >> comparison.csv
+echo "SIDE-BY-SIDE COMPARISON" > tests/perceptual_weighting/comparison.csv
+echo "=======================" >> tests/perceptual_weighting/comparison.csv
+echo "" >> tests/perceptual_weighting/comparison.csv
 
 # Process each test case
 while IFS= read -r c_line; do
     test_id=$(echo "$c_line" | cut -d',' -f1)
-    rust_line=$(grep "^$test_id," rust_sorted.csv 2>/dev/null || echo "")
+    rust_line=$(grep "^$test_id," tests/perceptual_weighting/rust_sorted.csv 2>/dev/null || echo "")
     
-    echo "Test $test_id:" >> comparison.csv
-    echo "Parameter,C Value,Rust Value,Match" >> comparison.csv
+    echo "Test $test_id:" >> tests/perceptual_weighting/comparison.csv
+    echo "Parameter,C Value,Rust Value,Match" >> tests/perceptual_weighting/comparison.csv
     
     IFS=',' read -ra C_VALS <<< "$c_line"
     if [ -n "$rust_line" ]; then
@@ -66,7 +67,7 @@ while IFS= read -r c_line; do
             match="✓"
             ((total_matches++))
         fi
-        echo "p$i,$c_val,$rust_val,$match" >> comparison.csv
+        echo "p$i,$c_val,$rust_val,$match" >> tests/perceptual_weighting/comparison.csv
     done
     
     # Compare f coefficients
@@ -78,13 +79,13 @@ while IFS= read -r c_line; do
             match="✓"
             ((total_matches++))
         fi
-        echo "f$i,$c_val,$rust_val,$match" >> comparison.csv
+        echo "f$i,$c_val,$rust_val,$match" >> tests/perceptual_weighting/comparison.csv
     done
     
     # Add match summary for this test
-    echo "Match Summary: $total_matches/$total_params parameters match" >> comparison.csv
-    echo "" >> comparison.csv
-done < c_sorted.csv
+    echo "Match Summary: $total_matches/$total_params parameters match" >> tests/perceptual_weighting/comparison.csv
+    echo "" >> tests/perceptual_weighting/comparison.csv
+done < tests/perceptual_weighting/c_sorted.csv
 
 # Create a readable side-by-side view
 {
@@ -92,7 +93,7 @@ done < c_sorted.csv
     echo "======================================="
     echo ""
     
-    head -n 70 comparison.csv | while IFS= read -r line; do
+    head -n 70 tests/perceptual_weighting/comparison.csv | while IFS= read -r line; do
         if [[ $line == Test* ]]; then
             echo -e "\n$line"
         elif [[ $line == Parameter* ]]; then
@@ -105,11 +106,11 @@ done < c_sorted.csv
             printf "%-10s %10s %10s   %s\n" "$param" "$c_val" "$rust_val" "$match"
         fi
     done
-} > side_by_side.txt
+} > tests/perceptual_weighting/side_by_side.txt
 
 # Calculate overall statistics
-total_tests=$(grep -c "^Test" comparison.csv)
-perfect_matches=$(grep -c "Match Summary: 22/22" comparison.csv)
+total_tests=$(grep -c "^Test" tests/perceptual_weighting/comparison.csv)
+perfect_matches=$(grep -c "Match Summary: 22/22" tests/perceptual_weighting/comparison.csv)
 {
     echo ""
     echo "OVERALL SUMMARY"
@@ -121,13 +122,13 @@ perfect_matches=$(grep -c "Match Summary: 22/22" comparison.csv)
     else
         echo "✗ Some tests have mismatches. Check comparison.csv for details."
     fi
-} | tee -a side_by_side.txt
+} | tee -a tests/perceptual_weighting/side_by_side.txt
 
 # Display the side-by-side view
-cat side_by_side.txt
+cat tests/perceptual_weighting/side_by_side.txt
 
 # Clean up intermediate files
-rm -f c_sorted.csv rust_sorted.csv
+rm -f tests/perceptual_weighting/c_sorted.csv tests/perceptual_weighting/rust_sorted.csv
 
 # Exit with appropriate status
 if [ $perfect_matches -eq $total_tests ]; then
