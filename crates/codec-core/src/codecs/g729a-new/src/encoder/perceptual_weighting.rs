@@ -1,7 +1,7 @@
 use crate::common::basic_operators::*;
 
-const GAMMA1: Word16 = 30802; // 0.94 in Q15
-const GAMMA2: Word16 = 19661; // 0.6 in Q15
+const GAMMA1: Word16 = 24576; // 0.75 in Q15 (from LD8A.H)
+const GAMMA2: Word16 = 18022; // 0.55 in Q15 (from LD8A.H GAMMA2_PST)
 const M: usize = 10;
 
 fn weight_az(a: &[Word16], gamma: Word16, ap: &mut [Word16]) {

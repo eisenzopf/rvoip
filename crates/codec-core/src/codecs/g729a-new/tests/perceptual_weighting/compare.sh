@@ -1,85 +1,161 @@
 #!/bin/bash
 
-set -e
+# Change to the test directory
+cd "$(dirname "$0")"
 
-TEST_DIR=$(dirname "$0")
-cd "$TEST_DIR"
+# Compile C test program
+make clean && make
 
-echo "Building C test..."
-make clean > /dev/null
-make > /dev/null
-
-echo "Running C test..."
+# Run C implementation and save output
 ./c_test > c_output.csv
 
-echo "Running Rust test..."
-cargo test --quiet --test perceptual_weighting -- --nocapture | grep -v 'Running' > rust_output.csv
+# Run Rust implementation and save output
+cd ../../
+cargo test --test perceptual_weighting test_perceptual_weighting_from_csv --release -- --nocapture 2>&1 | grep -v "running\|test result\|warning" | grep "^[0-9]" > tests/perceptual_weighting/rust_output.csv
+cd tests/perceptual_weighting
 
-echo "Comparing outputs and generating summary..."
-
-# Create comparison CSV file
-echo "test_id,parameter,c_value,rust_value,match" > comparison.csv
-echo "" >> comparison.csv
-
-total_matches=0
-total_params=0
-
-# Get headers from the first line of the C output
-c_header=$(head -n 1 c_output.csv)
-IFS=',' read -ra params <<< "$c_header"
-
-# Read files line by line
-exec 3< c_output.csv
-exec 4< rust_output.csv
-
-# Skip header lines
-read -r <&3
-read -r <&4
-
-while read -r c_line <&3 && read -r r_line <&4; do
-    # Split lines into arrays
-    IFS=',' read -ra c_fields <<< "$c_line"
-    IFS=',' read -ra r_fields <<< "$r_line"
-
-    test_id=${c_fields[0]}
-    echo "Test $test_id" >> comparison.csv
-
-    # Compare all parameter fields (from index 1 onwards)
-    for i in $(seq 1 $((${#params[@]} - 1))); do
-        param_name=${params[$i]}
-        c_val=${c_fields[$i]}
-        r_val=${r_fields[$i]}
-        match_char="✓"
-        if [ "$c_val" != "$r_val" ]; then
-            match_char="✗"
+# Function to extract data rows (skip header)
+extract_data() {
+    if [ -f "$1" ]; then
+        if [ -s "$1" ]; then
+            tail -n +2 "$1"
         else
-            total_matches=$((total_matches + 1))
+            echo "Warning: File $1 is empty"
+            return 1
         fi
-        total_params=$((total_params + 1))
-        echo "$test_id,$param_name,$c_val,$r_val,$match_char" >> comparison.csv
+    else
+        echo "Warning: File $1 does not exist"
+        return 1
+    fi
+}
+
+# Sort both outputs (excluding headers) and compare
+extract_data c_output.csv | sort > c_sorted.csv
+extract_data rust_output.csv | sort > rust_sorted.csv
+
+# Compare the sorted files
+DIFF_OUTPUT=$(diff c_sorted.csv rust_sorted.csv)
+DIFF_STATUS=$?
+
+# Function to calculate differences for a single row
+calculate_row_diff() {
+    local c_line="$1"
+    local rust_line="$2"
+    
+    IFS=',' read -ra C_VALS <<< "$c_line"
+    IFS=',' read -ra RUST_VALS <<< "$rust_line"
+    
+    echo "Test ID: ${C_VALS[0]}"
+    echo "Differences (C vs Rust):"
+    
+    # Compare p coefficients
+    echo "P coefficients:"
+    for i in {1..11}; do
+        c_val=${C_VALS[$i]}
+        rust_val=${RUST_VALS[$i]}
+        if [ "$c_val" != "$rust_val" ]; then
+            diff=$((rust_val - c_val))
+            echo "  p$((i-1)): C=$c_val, Rust=$rust_val (diff=$diff)"
+        fi
     done
+    
+    # Compare f coefficients
+    echo "F coefficients:"
+    for i in {12..22}; do
+        c_val=${C_VALS[$i]}
+        rust_val=${RUST_VALS[$i]}
+        if [ "$c_val" != "$rust_val" ]; then
+            diff=$((rust_val - c_val))
+            echo "  f$((i-12)): C=$c_val, Rust=$rust_val (diff=$diff)"
+        fi
+    done
+    echo "----------------------------------------"
+}
+
+# Function to generate side-by-side comparison
+generate_comparison() {
+    echo "SIDE-BY-SIDE COMPARISON" > comparison.csv
+    echo "=======================" >> comparison.csv
     echo "" >> comparison.csv
-done
 
-exec 3<&-
-exec 4<&-
+    # Process each test case
+    while IFS= read -r c_line; do
+        test_id=$(echo "$c_line" | cut -d',' -f1)
+        rust_line=$(grep "^$test_id," rust_sorted.csv 2>/dev/null || echo "")
+        
+        echo "Test $test_id:" >> comparison.csv
+        echo "Parameter,C Value,Rust Value,Match" >> comparison.csv
+        
+        IFS=',' read -ra C_VALS <<< "$c_line"
+        if [ -n "$rust_line" ]; then
+            IFS=',' read -ra RUST_VALS <<< "$rust_line"
+        else
+            RUST_VALS=()
+        fi
+        
+        # Compare p coefficients
+        for i in {0..10}; do
+            c_val=${C_VALS[$((i+1))]}
+            rust_val=${RUST_VALS[$((i+1))]-}
+            match="✗"
+            if [ "$c_val" = "$rust_val" ]; then
+                match="✓"
+            fi
+            echo "p$i,$c_val,$rust_val,$match" >> comparison.csv
+        done
+        
+        # Compare f coefficients
+        for i in {0..10}; do
+            c_val=${C_VALS[$((i+12))]}
+            rust_val=${RUST_VALS[$((i+12))]-}
+            match="✗"
+            if [ "$c_val" = "$rust_val" ]; then
+                match="✓"
+            fi
+            echo "f$i,$c_val,$rust_val,$match" >> comparison.csv
+        done
+        
+        echo "" >> comparison.csv
+    done < c_sorted.csv
+}
 
-echo "SUMMARY" >> comparison.csv
-echo "total_matches,$total_matches" >> comparison.csv
-echo "total_parameters,$total_params" >> comparison.csv
-if [ "$total_params" -gt 0 ]; then
-    pass_rate=$((total_matches * 100 / total_params))
-    echo "pass_rate,${pass_rate}%" >> comparison.csv
-fi
+# Generate side-by-side comparison
+generate_comparison
 
-echo "Comparison complete. Results in comparison.csv"
-
-if [ "$total_matches" -eq "$total_params" ] && [ "$total_params" -gt 0 ]; then
-    echo "SUCCESS: All outputs match!"
-    exit 0
-else
-    echo "FAILURE: Outputs differ."
-    cat comparison.csv
+# If there are differences, analyze them
+if [ $DIFF_STATUS -ne 0 ]; then
+    echo "Found differences between C and Rust implementations!"
+    echo "Detailed analysis:"
+    echo "----------------------------------------"
+    
+    # Process each line from C output
+    while IFS= read -r c_line; do
+        test_id=$(echo "$c_line" | cut -d',' -f1)
+        rust_line=$(grep "^$test_id," rust_sorted.csv 2>/dev/null || echo "")
+        if [ -n "$rust_line" ]; then
+            calculate_row_diff "$c_line" "$rust_line"
+        else
+            echo "No Rust output for test $test_id"
+        fi
+    done < c_sorted.csv
+    
+    # Save detailed comparison to file
+    {
+        echo "Detailed Comparison Report"
+        echo "=========================="
+        echo
+        echo "Generated on: $(date)"
+        echo
+        echo "Raw differences:"
+        echo "$DIFF_OUTPUT"
+    } > comparison_output.txt
+    
+    echo "Detailed comparison saved to comparison_output.txt"
+    echo "Side-by-side comparison saved to comparison.csv"
     exit 1
+else
+    echo "C and Rust implementations match exactly!"
+    echo "Side-by-side comparison saved to comparison.csv"
+    exit 0
 fi
 
