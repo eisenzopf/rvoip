@@ -1,51 +1,8 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 
-type Word16 = i16;
-
-// We'll need to copy the target_signal function here since we can't easily import it as a binary
-fn syn_filt(
-    a: &[Word16],
-    x: &[Word16],
-    y: &mut [Word16],
-    lg: usize,
-    mem: &mut [Word16],
-    update: bool,
-) {
-    // Simplified synthesis filter implementation
-    for i in 0..lg {
-        let mut s = x[i] as i32;
-        for j in 1..a.len().min(i + 1) {
-            s -= (a[j] as i32 * y[i - j] as i32) >> 12;
-        }
-        for j in 1..a.len().min(mem.len() + 1) {
-            if i < j {
-                s -= (a[j] as i32 * mem[mem.len() - j + i] as i32) >> 12;
-            }
-        }
-        y[i] = s as Word16;
-    }
-    
-    if update && mem.len() > 0 {
-        let copy_len = mem.len().min(lg);
-        for i in 0..copy_len {
-            mem[mem.len() - copy_len + i] = y[lg - copy_len + i];
-        }
-    }
-}
-
-fn target_signal(
-    p: &[Word16],
-    f: &[Word16],
-    _exc: &[Word16],
-    r: &[Word16],
-    x: &mut [Word16],
-    mem: &mut [Word16],
-) {
-    let mut temp = [0; 40];
-    syn_filt(p, r, &mut temp, 40, mem, false);
-    syn_filt(f, &temp, x, 40, mem, false);
-}
+// Import from the library instead of implementing custom versions
+use g729a_new::encoder::target::target_signal;
 
 fn main() {
     // Read test vectors
@@ -86,7 +43,7 @@ fn main() {
             mem[i] = mem_input[i];
         }
 
-        // Call the target_signal function
+        // Call the library target_signal function
         target_signal(
             p,
             f,
