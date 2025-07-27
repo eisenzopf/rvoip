@@ -3,6 +3,7 @@ use crate::common::basic_operators::{
     shr, sub, Word16, Word32, MIN_32,
 };
 use crate::common::oper_32b::{l_extract, mpy_32};
+use crate::common::adaptive_codebook_common::pitch_fr3_fast as pitch_fr3_fast_impl;
 
 const L_FRAME: i32 = 80;
 const PIT_MAX: i32 = 143;
@@ -250,9 +251,8 @@ pub fn pitch_ol_fast(signal: &[Word16], pit_max: i32, l_frame: i32) -> i32 {
 
 /// Adaptive codebook search (pitch synthesis)
 /// 
-/// This function performs closed-loop pitch analysis for G.729A adaptive codebook.
-/// For now, this is a stub implementation that will be completed when the full
-/// adaptive codebook infrastructure is ready.
+/// This function performs closed-loop pitch analysis for G.729A adaptive codebook
+/// using the actual implementation from adaptive_codebook_common.
 pub fn pitch_fr3_fast(
     exc: &mut [Word16],
     xn: &[Word16], 
@@ -263,9 +263,7 @@ pub fn pitch_fr3_fast(
     i_subfr: Word16,
     pit_frac: &mut Word16,
 ) -> Word16 {
-    // Stub implementation - return middle of search range
-    *pit_frac = 0;
-    (t0_min + t0_max) / 2
+    pitch_fr3_fast_impl(exc, xn, h, l_subfr, t0_min, t0_max, i_subfr, pit_frac)
 }
 
 #[cfg(test)]
