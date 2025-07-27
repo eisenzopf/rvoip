@@ -45,4 +45,8 @@ path = "tests/lsp_quantizer/rust_ma_state_test.rs"
 name = "perceptual_weighting"
 path = "tests/perceptual_weighting/rust_test.rs"
 
+[[test]]
+name = "pitch_analysis"
+path = "tests/pitch_analysis/rust_test.rs"
+
 [workspace]
