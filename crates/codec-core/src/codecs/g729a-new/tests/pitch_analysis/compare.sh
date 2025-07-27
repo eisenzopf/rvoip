@@ -22,7 +22,7 @@ fi
 awk 'BEGIN{print "test_id,pitch_lag"} {print NR-1 "," $0}' tests/pitch_analysis/c_output.txt > tests/pitch_analysis/c_output.csv
 
 # Run Rust test and capture output
-cargo test --test pitch_analysis test_pitch_analysis_from_csv -- --nocapture 2>&1 | grep "^[0-9]" > tests/pitch_analysis/rust_raw_output.txt
+cargo test --test pitch_analysis test_pitch_analysis_from_csv -- --nocapture 2>/dev/null | grep "^[0-9]*$" > tests/pitch_analysis/rust_raw_output.txt
 
 # Convert Rust output to CSV format with test indices
 awk 'BEGIN{print "test_id,pitch_lag"} {print NR-1 "," $0}' tests/pitch_analysis/rust_raw_output.txt > tests/pitch_analysis/rust_output.csv

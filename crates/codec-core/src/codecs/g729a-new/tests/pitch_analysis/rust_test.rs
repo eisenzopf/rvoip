@@ -1,4 +1,4 @@
-use g729a_new::encoder::pitch::pitch_ol_fast;
+use g729a_new::encoder::pitch_ol_fast_g729a::pitch_ol_fast_g729a;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
@@ -35,8 +35,8 @@ fn test_pitch_analysis_from_csv() {
                 .expect(&format!("Failed to parse signal[{}]", i));
         }
         
-        // Call the open-loop pitch analysis function with the full signal
-        let pitch_lag = pitch_ol_fast(&signal, PIT_MAX as i32, L_FRAME as i32);
+        // Call the new G.729A compliant open-loop pitch analysis function
+        let pitch_lag = pitch_ol_fast_g729a(&signal, PIT_MAX as i32, L_FRAME as i32);
         
         // Output the result
         println!("{}", pitch_lag);
