@@ -1,7 +1,14 @@
-Comparison Summary
-==================
+Test Results Summary
+====================
 
-Total comparisons: 1440
+TEST VECTOR MATCHING:
+Total test vectors: 36
+Matching test vectors: 36
+Failed test vectors: 0
+✓ ALL TESTS PASSED - Rust implementation matches C reference exactly!
+
+VALUE-LEVEL STATISTICS:
+Total value comparisons: 1440
 Values with differences: 0
 Maximum absolute difference: 0
 Maximum percentage difference: 0%
