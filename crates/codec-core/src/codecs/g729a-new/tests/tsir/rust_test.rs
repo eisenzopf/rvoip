@@ -70,22 +70,27 @@ fn main() {
 
         let test_id = values[0];
         
-        // Extract arrays from the CSV line
-        let p = &values[1..41];
-        let f = &values[41..81];
-        let exc = &values[81..121];
-        let r = &values[121..161];
-        let mem_input = &values[161..201];
+        // Extract arrays from the CSV line:
+        // test_id, p[11], f[11], r[40], mem[10]
+        let p = &values[1..12];      // LP coefficients: 11 values
+        let f = &values[12..23];     // Weighted filter coefficients: 11 values  
+        let r = &values[23..63];     // Residual: 40 values
+        let mem_input = &values[63..73]; // Memory: 10 values
 
         // Create arrays for the target_signal function
         let mut x = vec![0i16; 40];
-        let mut mem = mem_input.to_vec();
+        let mut mem = vec![0i16; 10];
+        
+        // Copy memory values
+        for i in 0..10.min(mem_input.len()) {
+            mem[i] = mem_input[i];
+        }
 
         // Call the target_signal function
         target_signal(
             p,
             f,
-            exc,
+            &[],  // exc not needed for basic target signal calculation
             r,
             &mut x,
             &mut mem,
