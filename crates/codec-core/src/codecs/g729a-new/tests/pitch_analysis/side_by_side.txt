@@ -7,7 +7,7 @@ Test ID    C Pitch Lag     Rust Pitch Lag  Match
 
 SUMMARY
 =======
-Total Tests: 71
-Matching: 0
-Mismatches: 71
-Match Rate: 0%
+Total Tests: 35
+Matching: 13
+Mismatches: 22
+Match Rate: 37.1%

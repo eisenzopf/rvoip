@@ -324,14 +324,29 @@ pub fn inv_sqrt(l_x: Word32) -> Word32 {
     }
     let exp = norm_l(l_x);
     let l_x = l_shl(l_x, exp);
-    let i = extract_h(l_x);
-    let a = shr(i, 9);
-    let i = shr(i, 1);
-    let i = i & 0x3f;
-    let l_y = l_mult(TABSQR[i as usize], 1);
-    let l_y = l_shr(l_y, a as Word16);
+    
     let exp = sub(30, exp as Word16);
-    l_shl(l_y, exp as Word16)
+    let l_x = if (exp & 1) == 0 {
+        l_shr(l_x, 1)
+    } else {
+        l_x
+    };
+    
+    let exp = shr(exp, 1);
+    let exp = add(exp, 1);
+    
+    let l_x = l_shr(l_x, 9);
+    let i = extract_h(l_x);
+    let l_x = l_shr(l_x, 1);
+    let a = extract_l(l_x) & 0x7fff;
+    
+    let i = sub(i, 16);
+    
+    let l_y = l_deposit_h(TABSQR[i as usize]);
+    let tmp = sub(TABSQR[i as usize], TABSQR[(i + 1) as usize]);
+    let l_y = l_msu(l_y, tmp, a);
+    
+    l_shr(l_y, exp)
 }
 
 #[cfg(test)]

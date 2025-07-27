@@ -5,5 +5,6 @@ pub mod lsp_quantizer;
 pub mod lspvq;
 pub mod perceptual_weighting;
 pub mod pitch;
+pub mod pitch_ol_fast_g729a;
 pub mod pre_proc;
 pub mod target;
