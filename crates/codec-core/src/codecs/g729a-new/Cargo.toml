@@ -49,4 +49,8 @@ path = "tests/perceptual_weighting/rust_test.rs"
 name = "pitch_analysis"
 path = "tests/pitch_analysis/rust_test.rs"
 
+[[bin]]
+name = "rust_test"
+path = "tests/tsir/rust_test.rs"
+
 [workspace]

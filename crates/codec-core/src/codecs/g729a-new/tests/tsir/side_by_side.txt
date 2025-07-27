@@ -1,0 +1,7 @@
+Comparison Summary
+==================
+
+Total comparisons: 1440
+Values with differences: 1440
+Maximum absolute difference: 63468
+Maximum percentage difference: 263400.00%
