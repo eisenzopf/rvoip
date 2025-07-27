@@ -21,8 +21,8 @@ fi
 # Convert c_output.txt to CSV format with test indices
 awk 'BEGIN{print "test_id,pitch_lag"} {print NR-1 "," $0}' tests/pitch_analysis/c_output.txt > tests/pitch_analysis/c_output.csv
 
-# Run Rust test and capture output
-cargo test --test pitch_analysis test_pitch_analysis_from_csv -- --nocapture 2>/dev/null | grep "^[0-9]*$" > tests/pitch_analysis/rust_raw_output.txt
+# Run Rust test and capture output (only lines with at least one digit)
+cargo test --test pitch_analysis test_pitch_analysis_from_csv -- --nocapture 2>/dev/null | grep "^[0-9]\+$" > tests/pitch_analysis/rust_raw_output.txt
 
 # Convert Rust output to CSV format with test indices
 awk 'BEGIN{print "test_id,pitch_lag"} {print NR-1 "," $0}' tests/pitch_analysis/rust_raw_output.txt > tests/pitch_analysis/rust_output.csv
@@ -76,18 +76,14 @@ echo "Match Rate: ${match_percentage}%" >> tests/pitch_analysis/comparison.csv
     printf "%-10s %-15s %-15s %s\n" "Test ID" "C Pitch Lag" "Rust Pitch Lag" "Match"
     echo "----------------------------------------------------"
     
-    # Show test results, handling case where there might be fewer than 7 lines
-    if [ $total_tests -gt 7 ]; then
-        tail -n +5 tests/pitch_analysis/comparison.csv | head -n -7 | while IFS=',' read -r test_id c_val rust_val match; do
-            printf "%-10s %-15s %-15s %s\n" "$test_id" "$c_val" "$rust_val" "$match"
-        done
-    else
-        tail -n +5 tests/pitch_analysis/comparison.csv | while IFS=',' read -r test_id c_val rust_val match; do
-            if [ -n "$test_id" ] && [ "$test_id" != "SUMMARY" ]; then
-                printf "%-10s %-15s %-15s %s\n" "$test_id" "$c_val" "$rust_val" "$match"
-            fi
-        done
-    fi
+    # Show test results - stop when we hit empty line or SUMMARY
+    tail -n +5 tests/pitch_analysis/comparison.csv | while IFS=',' read -r test_id c_val rust_val match; do
+        # Stop when we hit empty line or SUMMARY
+        if [ -z "$test_id" ] || [ "$test_id" = "SUMMARY" ]; then
+            break
+        fi
+        printf "%-10s %-15s %-15s %s\n" "$test_id" "$c_val" "$rust_val" "$match"
+    done
     
     echo ""
     tail -n 7 tests/pitch_analysis/comparison.csv
