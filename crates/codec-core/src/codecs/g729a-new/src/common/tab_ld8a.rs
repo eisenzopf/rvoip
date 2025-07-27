@@ -22,6 +22,26 @@ pub const M_LIMIT: i16 = 25708;
 pub const CONST10: i16 = 20480; // Q11 10.0 - matches C: ((Word16)10*(1<<11))
 pub const CONST12: i16 = 19661; // Q14 1.2 - matches C: ((Word16)19661)
 
+// Constants for adaptive codebook (pitch synthesis)
+pub const UP_SAMP: i16 = 3;
+pub const L_INTER10: i16 = 10;
+pub const FIR_SIZE_SYN: usize = (UP_SAMP as usize * L_INTER10 as usize + 1);
+
+// 1/3 resolution interpolation filter (-3 dB at 3600 Hz) in Q15
+pub const inter_3l: [Word16; FIR_SIZE_SYN] = [
+   29443,
+   25207,   14701,    3143,
+   -4402,   -5850,   -2783,
+    1211,    3130,    2259,
+       0,   -1652,   -1666,
+    -464,     756,    1099,
+     550,    -245,    -634,
+    -451,       0,     308,
+     296,      78,    -120,
+    -165,     -79,      34,
+      91,      70,       0
+];
+
 pub const LSPCB1: [[Word16; M]; NC0] = [
     [ 1486,  2168,  3751,  9074, 12134, 13944, 17983, 19173, 21190, 21820],
     [ 1730,  2640,  3450,  4870,  6126,  7876, 15644, 17817, 20294, 21902],

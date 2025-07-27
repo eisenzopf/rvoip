@@ -248,6 +248,26 @@ pub fn pitch_ol_fast(signal: &[Word16], pit_max: i32, l_frame: i32) -> i32 {
     t1
 }
 
+/// Adaptive codebook search (pitch synthesis)
+/// 
+/// This function performs closed-loop pitch analysis for G.729A adaptive codebook.
+/// For now, this is a stub implementation that will be completed when the full
+/// adaptive codebook infrastructure is ready.
+pub fn pitch_fr3_fast(
+    exc: &mut [Word16],
+    xn: &[Word16], 
+    h: &[Word16],
+    l_subfr: Word16,
+    t0_min: Word16,
+    t0_max: Word16,
+    i_subfr: Word16,
+    pit_frac: &mut Word16,
+) -> Word16 {
+    // Stub implementation - return middle of search range
+    *pit_frac = 0;
+    (t0_min + t0_max) / 2
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
