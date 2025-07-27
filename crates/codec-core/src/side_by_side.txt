@@ -1,0 +1,7 @@
+Comparison Summary
+==================
+
+Total comparisons: 0
+Values with differences: 0
+Maximum absolute difference: 0
+Maximum percentage difference: 0%
