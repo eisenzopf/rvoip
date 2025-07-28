@@ -49,6 +49,10 @@ path = "tests/perceptual_weighting/rust_test.rs"
 name = "pitch_analysis"
 path = "tests/pitch_analysis/rust_test.rs"
 
+[[test]]
+name = "adaptive_codebook_search"
+path = "tests/acspc/rust_test.rs"
+
 [[bin]]
 name = "rust_test"
 path = "tests/tsir/rust_test.rs"
