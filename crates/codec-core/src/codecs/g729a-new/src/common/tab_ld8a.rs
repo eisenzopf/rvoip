@@ -25,7 +25,9 @@ pub const CONST12: i16 = 19661; // Q14 1.2 - matches C: ((Word16)19661)
 // Constants for adaptive codebook (pitch synthesis)
 pub const UP_SAMP: i16 = 3;
 pub const L_INTER10: i16 = 10;
-pub const FIR_SIZE_SYN: usize = (UP_SAMP as usize * L_INTER10 as usize + 1);
+pub const L_INTERPOL: usize = L_INTER10 as usize;
+pub const PIT_MAX: usize = 143;
+pub const FIR_SIZE_SYN: usize = UP_SAMP as usize * L_INTER10 as usize + 1;
 
 // 1/3 resolution interpolation filter (-3 dB at 3600 Hz) in Q15
 pub const inter_3l: [Word16; FIR_SIZE_SYN] = [
