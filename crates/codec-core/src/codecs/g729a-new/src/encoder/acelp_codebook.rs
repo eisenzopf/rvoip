@@ -157,7 +157,10 @@ fn cor_h(h: &[Word16], rr: &mut [Word16]) {
             let l_fin_sup = if pos0 < pos1 { L_SUBFR } else { pos0 + 1 };
             
             for j in pos1..l_fin_sup {
-                s = l_mac(s, h_scaled[j], h_scaled[j - (pos1 - pos0)]);
+                let idx = j as isize - (pos1 as isize - pos0 as isize);
+                if idx >= 0 && (idx as usize) < L_SUBFR {
+                    s = l_mac(s, h_scaled[j], h_scaled[idx as usize]);
+                }
             }
             
             rr[k] = extract_h(s);

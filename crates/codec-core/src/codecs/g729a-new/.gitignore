@@ -33,6 +33,7 @@ Session.vim
 .dir-locals.el
 c_test*
 *.csv
+*.C
 
 target/
 .env

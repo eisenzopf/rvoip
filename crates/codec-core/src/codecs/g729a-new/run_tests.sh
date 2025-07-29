@@ -6,3 +6,4 @@
 ./tests/lsp_quantizer/compare.sh
 ./tests/tsir/compare.sh
 ./tests/acspc/compare.sh
+./tests/acelp/compare.sh
