@@ -1,6 +1,7 @@
 pub mod common;
 pub mod decoder;
 pub mod encoder;
+pub mod rust_test;
 
 #[cfg(test)]
 mod tests {

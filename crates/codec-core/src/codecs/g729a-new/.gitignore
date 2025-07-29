@@ -34,6 +34,8 @@ Session.vim
 c_test*
 *.csv
 *.C
+*.hex
+*.bit
 
 target/
 .env

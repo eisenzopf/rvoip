@@ -1,0 +1,14 @@
+[package]
+name = "g729a_rust_test"
+version = "0.1.0"
+edition = "2021"
+
+# Empty workspace to prevent cargo from trying to use parent workspace
+[workspace]
+
+[[bin]]
+name = "rust_test"
+path = "rust_test_main.rs"
+
+[dependencies]
+g729a-new = { path = "../.." } 
