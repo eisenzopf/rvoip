@@ -6,6 +6,28 @@
 
 use crate::common::basic_operators::*;
 
+/// ACELP codebook search module
+pub struct AcelpCodebook {
+    // No state needed for basic ACELP module
+}
+
+impl AcelpCodebook {
+    pub fn new() -> Self {
+        Self {}
+    }
+    
+    /// Search for the best fixed codebook excitation
+    pub fn search(&self, target: &[Word16], h: &[Word16], t0: i16) -> u32 {
+        // Simplified search - real implementation would use acelp_code_a
+        let mut code = [0i16; L_SUBFR];
+        let mut y = [0i16; L_SUBFR];
+        let mut sign = 0i16;
+        
+        let index = acelp_code_a(target, h, t0, 0, &mut code, &mut y, &mut sign);
+        index as u32
+    }
+}
+
 // Constants from G.729A
 const L_SUBFR: usize = 40;  // Subframe size
 const NB_POS: usize = 8;    // Number of positions for each pulse

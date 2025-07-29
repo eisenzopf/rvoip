@@ -1,5 +1,6 @@
 pub mod acelp_codebook;
 pub mod gain_quantizer;
+pub mod g729a_encoder;
 pub mod lpc;
 pub mod lsp_quantizer;
 pub mod lspvq;

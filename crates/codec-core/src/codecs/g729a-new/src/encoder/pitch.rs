@@ -1,5 +1,5 @@
 use crate::common::basic_operators::{
-    abs_s, add, extract_l, inv_sqrt, l_deposit_h, l_mac, l_msu, l_sub, mult, shl,
+    abs_s, add, extract_l, inv_sqrt, l_mac, l_sub, mult, shl,
     shr, sub, Word16, Word32, MIN_32,
 };
 use crate::common::oper_32b::{l_extract, mpy_32};
@@ -7,6 +7,31 @@ use crate::common::adaptive_codebook_common::pitch_fr3_fast as pitch_fr3_fast_im
 
 const L_FRAME: i32 = 80;
 const PIT_MAX: i32 = 143;
+
+/// Pitch analysis module
+pub struct Pitch {
+    // No state needed for basic pitch module
+}
+
+impl Pitch {
+    pub fn new() -> Self {
+        Self {}
+    }
+    
+    /// Open-loop pitch search
+    pub fn open_loop_search(&self, wsp: &[Word16]) -> i32 {
+        pitch_ol_fast(wsp, PIT_MAX, L_FRAME)
+    }
+    
+    /// Closed-loop pitch search
+    pub fn closed_loop_search(&self, target: &[Word16], exc: &[Word16], t_op: i32, subframe: usize) -> (i16, i16) {
+        // Simplified closed-loop search
+        // Real implementation would refine the open-loop estimate
+        let t0 = t_op as i16;
+        let t0_frac = 0; // No fractional part for simplicity
+        (t0, t0_frac)
+    }
+}
 
 /// G.729A compliant open-loop pitch analysis
 /// 

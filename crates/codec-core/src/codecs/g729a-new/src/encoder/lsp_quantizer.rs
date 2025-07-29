@@ -1,5 +1,6 @@
 use crate::common::basic_operators::*;
 use crate::common::oper_32b::*;
+use crate::common::tab_ld8a::M;
 
 const NC: usize = 5;
 const GRID_POINTS: usize = 60;
@@ -138,6 +139,36 @@ pub fn az_lsp(a: &[Word16], lsp: &mut [Word16], old_lsp: &[Word16]) {
     if nf < 10 {
         for i in 0..10 {
             lsp[i] = old_lsp[i];
+        }
+    }
+}
+
+/// LSP Quantizer module
+pub struct LspQuantizer {
+    // No state needed for basic LSP quantizer
+}
+
+impl LspQuantizer {
+    pub fn new() -> Self {
+        Self {}
+    }
+    
+    /// Quantize LSP parameters and return codebook indices
+    pub fn quantize(&self, lsp: &[Word16], lsp_q: &mut [Word16], old_lsp_q: &[Word16]) -> (Word16, Word16) {
+        // Simplified quantization - real implementation would use vector quantization
+        // For now, just copy LSPs and return dummy indices
+        lsp_q.copy_from_slice(&lsp[0..M]);
+        (0, 0) // Dummy indices
+    }
+    
+    /// Interpolate LSP parameters for subframe
+    pub fn interpolate_lsp(&self, old_lsp: &[Word16], new_lsp: &[Word16], subframe: usize, a_coeffs: &mut [Word16]) {
+        // Simplified interpolation
+        // Real implementation would interpolate between old and new LSP
+        // and convert back to LP coefficients
+        a_coeffs[0] = 4096; // a[0] = 1.0 in Q12
+        for i in 1..=M {
+            a_coeffs[i] = 0;
         }
     }
 }

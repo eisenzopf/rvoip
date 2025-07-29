@@ -6,6 +6,24 @@
 
 use crate::common::basic_operators::*;
 
+/// Perceptual weighting filter module
+pub struct PerceptualWeighting {
+    // No state needed for basic perceptual weighting
+}
+
+impl PerceptualWeighting {
+    pub fn new() -> Self {
+        Self {}
+    }
+    
+    /// Apply perceptual weighting filter to speech
+    pub fn weight_speech(&self, speech: &[Word16], a_coeffs: &[Word16], wsp: &mut [Word16], mem_w: &mut [Word16]) {
+        // Simplified weighting - real implementation would use weight_az and filtering
+        // For now, just copy speech to weighted speech
+        wsp.copy_from_slice(speech);
+    }
+}
+
 const GAMMA1: Word16 = 24576; // 0.75 in Q15 (from LD8A.H)
 const GAMMA2: Word16 = 18022; // 0.55 in Q15 (from LD8A.H GAMMA2_PST)
 const M: usize = 10;

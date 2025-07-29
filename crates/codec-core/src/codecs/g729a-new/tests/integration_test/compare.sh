@@ -16,9 +16,10 @@ NC='\033[0m' # No Color
 echo -e "${YELLOW}G.729A Encoder Integration Test Comparison${NC}"
 echo "=============================================="
 
-# Paths
-TEST_VECTORS_DIR="../test_vectors"
-OUTPUT_DIR="./output"
+# Paths - adjusted to run from g729a-new directory
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+TEST_VECTORS_DIR="${SCRIPT_DIR}/../test_vectors"
+OUTPUT_DIR="${SCRIPT_DIR}/output"
 C_OUTPUT_DIR="${OUTPUT_DIR}/c"
 RUST_OUTPUT_DIR="${OUTPUT_DIR}/rust"
 
@@ -28,12 +29,16 @@ mkdir -p "${RUST_OUTPUT_DIR}"
 
 # Build C test
 echo -e "${YELLOW}Building C reference implementation...${NC}"
+cd "${SCRIPT_DIR}"
 make clean
 make c_test
+cd -
 
 # Build Rust test
 echo -e "${YELLOW}Building Rust implementation...${NC}"
+cd "${SCRIPT_DIR}"
 cargo build --release
+cd -
 
 # Function to run tests on a specific test vector
 run_test() {
@@ -51,11 +56,11 @@ run_test() {
     
     # Run C encoder
     echo "Running C encoder..."
-    ./c_test encode "${TEST_VECTORS_DIR}/${input_file}" "${C_OUTPUT_DIR}/${test_name}.bit"
+    "${SCRIPT_DIR}/c_test" encode "${TEST_VECTORS_DIR}/${input_file}" "${C_OUTPUT_DIR}/${test_name}.bit"
     
     # Run Rust encoder
     echo "Running Rust encoder..."
-    ./target/release/rust_test encode "${TEST_VECTORS_DIR}/${input_file}" "${RUST_OUTPUT_DIR}/${test_name}.bit"
+    "${SCRIPT_DIR}/target/release/rust_test" encode "${TEST_VECTORS_DIR}/${input_file}" "${RUST_OUTPUT_DIR}/${test_name}.bit"
     
     # Compare bitstream outputs
     echo "Comparing encoder outputs..."
