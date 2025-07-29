@@ -13,11 +13,16 @@ pub const SIZE_WORD: Word16 = 80;      // Number of speech bits
 /// Convert parameters to serial bitstream (G.729A bit allocation)
 /// 
 /// Bit allocation per frame (80 bits total):
-/// - LSP indices: 18 bits (L0=10, L1=8)
-/// - Subframe 1: P1=8, S1=1, C1=13, GA1=3, GB1=4 (29 bits)
-/// - Subframe 2: P2=5, S2=1, C2=13, GA2=3, GB2=4 (26 bits)
-/// - Parity: 1 bit
-/// - Fixed codebook signs are embedded in the codebook indices
+/// - LSP indices: 18 bits (L0=8, L1=10)
+/// - Subframe 1: P1=8, parity=1, C1=13, S1=4, G1=7 (33 bits)
+/// - Subframe 2: P2=5, C2=13, S2=4, G2=7 (29 bits)
+/// 
+/// Parameter order:
+/// prm[0-1]: LSP indices
+/// prm[2]: Pitch delay (subframe 1)
+/// prm[3]: Parity bit
+/// prm[4-6]: Fixed codebook and gains (subframe 1)
+/// prm[7-10]: Pitch and codebook (subframe 2)
 pub fn prm2bits(prm: &[Word16; PRM_SIZE]) -> [Word16; SERIAL_SIZE] {
     let mut serial = [0i16; SERIAL_SIZE];
     
@@ -27,22 +32,22 @@ pub fn prm2bits(prm: &[Word16; PRM_SIZE]) -> [Word16; SERIAL_SIZE] {
     
     let mut bit_pos = 2;  // Start after sync and size words
     
-    // LSP indices: 18 bits (L0=10, L1=8)
-    pack_bits(&mut serial, &mut bit_pos, prm[0] as u16, 10);
-    pack_bits(&mut serial, &mut bit_pos, prm[1] as u16, 8);
+    // LSP indices: 18 bits (L0=8, L1=10)
+    pack_bits(&mut serial, &mut bit_pos, prm[0] as u16, 8);
+    pack_bits(&mut serial, &mut bit_pos, prm[1] as u16, 10);
     
     // Subframe 1
     pack_bits(&mut serial, &mut bit_pos, prm[2] as u16, 8);    // P1: Pitch delay
-    pack_bits(&mut serial, &mut bit_pos, prm[3] as u16, 1);    // S1: Pitch parity
-    pack_bits(&mut serial, &mut bit_pos, prm[4] as u16, 13);   // C1: Fixed codebook
-    pack_bits(&mut serial, &mut bit_pos, prm[5] as u16, 3);    // GA1: Adaptive gain
-    pack_bits(&mut serial, &mut bit_pos, prm[6] as u16, 4);    // GB1: Fixed gain
+    pack_bits(&mut serial, &mut bit_pos, prm[3] as u16, 1);    // Parity bit
+    pack_bits(&mut serial, &mut bit_pos, prm[4] as u16, 13);   // C1: Fixed codebook positions
+    pack_bits(&mut serial, &mut bit_pos, prm[5] as u16, 4);    // S1: Fixed codebook signs
+    pack_bits(&mut serial, &mut bit_pos, prm[6] as u16, 7);    // G1: Combined gains (4+3)
     
     // Subframe 2
     pack_bits(&mut serial, &mut bit_pos, prm[7] as u16, 5);    // P2: Relative pitch
-    pack_bits(&mut serial, &mut bit_pos, prm[8] as u16, 13);   // C2: Fixed codebook
-    pack_bits(&mut serial, &mut bit_pos, prm[9] as u16, 3);    // GA2: Adaptive gain
-    pack_bits(&mut serial, &mut bit_pos, prm[10] as u16, 4);   // GB2: Fixed gain
+    pack_bits(&mut serial, &mut bit_pos, prm[8] as u16, 13);   // C2: Fixed codebook positions
+    pack_bits(&mut serial, &mut bit_pos, prm[9] as u16, 4);    // S2: Fixed codebook signs
+    pack_bits(&mut serial, &mut bit_pos, prm[10] as u16, 7);   // G2: Combined gains (4+3)
     
     // The fixed codebook sign bits S1 and S2 are included in C1 and C2
     
@@ -55,21 +60,21 @@ pub fn bits2prm(serial: &[Word16; SERIAL_SIZE]) -> [Word16; PRM_SIZE] {
     let mut bit_pos = 2;  // Skip sync word and size word
     
     // LSP indices
-    prm[0] = unpack_bits(serial, &mut bit_pos, 10) as i16;
-    prm[1] = unpack_bits(serial, &mut bit_pos, 8) as i16;
+    prm[0] = unpack_bits(serial, &mut bit_pos, 8) as i16;
+    prm[1] = unpack_bits(serial, &mut bit_pos, 10) as i16;
     
     // Subframe 1
     prm[2] = unpack_bits(serial, &mut bit_pos, 8) as i16;     // P1: Pitch delay
-    prm[3] = unpack_bits(serial, &mut bit_pos, 1) as i16;     // S1: Pitch parity
-    prm[4] = unpack_bits(serial, &mut bit_pos, 13) as i16;    // C1: Fixed codebook
-    prm[5] = unpack_bits(serial, &mut bit_pos, 3) as i16;     // GA1: Adaptive gain
-    prm[6] = unpack_bits(serial, &mut bit_pos, 4) as i16;     // GB1: Fixed gain
+    prm[3] = unpack_bits(serial, &mut bit_pos, 1) as i16;     // Parity bit
+    prm[4] = unpack_bits(serial, &mut bit_pos, 13) as i16;    // C1: Fixed codebook positions
+    prm[5] = unpack_bits(serial, &mut bit_pos, 4) as i16;     // S1: Fixed codebook signs
+    prm[6] = unpack_bits(serial, &mut bit_pos, 7) as i16;     // G1: Combined gains
     
     // Subframe 2
     prm[7] = unpack_bits(serial, &mut bit_pos, 5) as i16;     // P2: Relative pitch
-    prm[8] = unpack_bits(serial, &mut bit_pos, 13) as i16;    // C2: Fixed codebook
-    prm[9] = unpack_bits(serial, &mut bit_pos, 3) as i16;     // GA2: Adaptive gain
-    prm[10] = unpack_bits(serial, &mut bit_pos, 4) as i16;    // GB2: Fixed gain
+    prm[8] = unpack_bits(serial, &mut bit_pos, 13) as i16;    // C2: Fixed codebook positions
+    prm[9] = unpack_bits(serial, &mut bit_pos, 4) as i16;     // S2: Fixed codebook signs
+    prm[10] = unpack_bits(serial, &mut bit_pos, 7) as i16;    // G2: Combined gains
     
     prm
 }
