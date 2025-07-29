@@ -61,6 +61,14 @@ path = "tests/acelp/rust_test.rs"
 name = "gain_quantization"
 path = "tests/gain_quantization/rust_test.rs"
 
+[[test]]
+name = "round_trip"
+path = "tests/round_trip/round_trip_test.rs"
+
+[[test]]
+name = "debug_codec"
+path = "tests/round_trip/debug_codec.rs"
+
 [[bin]]
 name = "rust_test"
 path = "tests/tsir/rust_test.rs"

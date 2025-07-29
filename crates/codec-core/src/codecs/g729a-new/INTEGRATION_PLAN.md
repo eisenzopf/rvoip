@@ -5,6 +5,11 @@ This document outlines the tasks needed to complete the G.729A encoder implement
 
 ## Current Status (Updated 2025-07-29)
 
+### Overall Status
+- [x] G.729A Encoder: **Complete** (18% bit differences from C reference)
+- [x] G.729A Decoder: **Complete** 
+- [x] Round-trip tests: **Complete** (WAV file encode/decode working)
+
 ## 🎯 **Encoder Status: COMPLETED & WORKING**
 The G.729A encoder is now fully functional and produces valid output that processes all test vectors successfully. While not bit-exact with the C reference (~18% bit differences), it generates proper G.729A compliant bitstreams.
 
@@ -101,7 +106,7 @@ Bitstream → Bit Unpacking → Parameter Extraction → Speech Synthesis
 
 ## 📋 **Decoder Implementation Plan**
 
-### ❌ Phase 1: Core Decoder Infrastructure (High Priority)
+### ✅ Phase 1: Core Decoder Infrastructure (High Priority) - COMPLETED
 
 #### Task 1: Create G729ADecoder Structure
 **Location**: `src/decoder/g729a_decoder.rs` (new file)
@@ -159,7 +164,7 @@ impl LspDecoder {
 }
 ```
 
-### ❌ Phase 2: Excitation Reconstruction (High Priority)
+### ✅ Phase 2: Excitation Reconstruction (High Priority) - COMPLETED
 
 #### Task 4: Adaptive Codebook Decoding
 **Location**: `src/decoder/adaptive_codebook.rs`
@@ -227,7 +232,7 @@ impl GainDecoder {
 }
 ```
 
-### ❌ Phase 3: Speech Synthesis (Medium Priority)
+### ✅ Phase 3: Speech Synthesis (Medium Priority) - COMPLETED
 
 #### Task 7: Synthesis Filtering
 **Location**: Use existing `src/common/filter.rs` 
