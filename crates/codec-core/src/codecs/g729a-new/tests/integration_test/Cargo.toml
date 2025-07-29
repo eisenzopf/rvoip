@@ -8,7 +8,7 @@ edition = "2021"
 
 [[bin]]
 name = "rust_test"
-path = "rust_test_main.rs"
+path = "rust_test.rs"
 
 [dependencies]
 g729a-new = { path = "../.." } 
