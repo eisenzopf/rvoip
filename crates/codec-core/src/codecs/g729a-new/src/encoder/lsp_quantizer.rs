@@ -3,7 +3,7 @@ use crate::common::oper_32b::*;
 use crate::common::tab_ld8a::M;
 
 const NC: usize = 5;
-const GRID_POINTS: usize = 60;
+const GRID_POINTS: usize = 50;
 const GRID: [Word16; 51] = [
     32760, 32703, 32509, 32187, 31738, 31164, 30466, 29649, 28714, 27666, 26509, 25248,
     23886, 22431, 20887, 19260, 17557, 15786, 13951, 12062, 10125, 8149, 6140, 4106,
