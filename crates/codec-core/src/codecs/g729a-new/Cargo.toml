@@ -57,6 +57,10 @@ path = "tests/acspc/rust_test.rs"
 name = "acelp_fixed_codebook"
 path = "tests/acelp/rust_test.rs"
 
+[[test]]
+name = "gain_quantization"
+path = "tests/gain_quantization/rust_test.rs"
+
 [[bin]]
 name = "rust_test"
 path = "tests/tsir/rust_test.rs"
