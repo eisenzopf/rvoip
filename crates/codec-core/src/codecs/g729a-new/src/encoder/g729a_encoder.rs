@@ -188,22 +188,26 @@ impl G729AEncoder {
             let fixed_index = self.acelp.search(&target_signal, &h, t0);
             
             // Step 11: Quantize gains (simplified for now)
-            let ga_index = 0i16; // Placeholder - should be from gain quantizer
-            let gb_index = 0i16; // Placeholder - should be from gain quantizer
+            let gain_index = 0i16; // Placeholder - should be from gain quantizer (7 bits total)
+            
+            // For now, split the fixed codebook index into position and sign
+            // Real implementation would get these from ACELP search
+            let fixed_position = fixed_index & 0x1FFF;  // Lower 13 bits
+            let fixed_sign = 0i16;  // Placeholder - should contain 4 sign bits
             
             // Store parameters according to G.729A specification
             if subframe == 0 {
                 // Subframe 1 parameters
-                prm[2] = t0;            // P1: 8-bit pitch delay
-                prm[4] = fixed_index;   // C1: 13-bit fixed codebook index + sign
-                prm[5] = ga_index;      // GA1: 3-bit adaptive gain
-                prm[6] = gb_index;      // GB1: 4-bit fixed gain
+                prm[2] = t0;               // P1: 8-bit pitch delay
+                prm[4] = fixed_position;   // C1: 13-bit fixed codebook positions
+                prm[5] = fixed_sign;       // S1: 4-bit fixed codebook signs
+                prm[6] = gain_index;       // G1: 7-bit gains (4 fixed + 3 adaptive)
             } else {
                 // Subframe 2 parameters
-                prm[7] = t0 - prm[2];   // P2: 5-bit relative pitch delay
-                prm[8] = fixed_index;   // C2: 13-bit fixed codebook index + sign
-                prm[9] = ga_index;      // GA2: 3-bit adaptive gain
-                prm[10] = gb_index;     // GB2: 4-bit fixed gain
+                prm[7] = t0 - prm[2];      // P2: 5-bit relative pitch delay
+                prm[8] = fixed_position;   // C2: 13-bit fixed codebook positions  
+                prm[9] = fixed_sign;       // S2: 4-bit fixed codebook signs
+                prm[10] = gain_index;      // G2: 7-bit gains (4 fixed + 3 adaptive)
             }
             
             // Update filter memories for next subframe
