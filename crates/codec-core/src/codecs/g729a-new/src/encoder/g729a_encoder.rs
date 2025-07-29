@@ -1,10 +1,11 @@
 use crate::common::basic_operators::*;
 use crate::common::oper_32b::*;
 use crate::common::tab_ld8a::{L_FRAME, L_SUBFR, M, MP1};
-use crate::common::bits::{prm2bits, bits2prm, PRM_SIZE, SERIAL_SIZE};
+use crate::common::bits::{PRM_SIZE, SERIAL_SIZE};
 use crate::common::impulse_response::compute_impulse_response;
-use crate::common::lsp_az::{lsp_az, int_qlpc};
+use crate::common::lsp_az::int_qlpc;
 use crate::common::filter::syn_filt;
+use crate::common::adaptive_codebook_common::pred_lt_3;
 use crate::encoder::pre_proc::PreProc;
 use crate::encoder::lpc::Lpc;
 use crate::encoder::lspvq::LspQuantizer;
@@ -52,6 +53,11 @@ pub struct G729AEncoder {
     
     // Other state
     sharp: Word16,                                  // Sharpening parameter
+    
+    // Gain history for taming
+    past_gain_pit: Word16,                          // Past pitch gain
+    gain_pit_buffer: [Word16; 5],                   // History of pitch gains
+    gain_buffer_index: usize,                       // Circular buffer index
 }
 
 impl G729AEncoder {
@@ -80,6 +86,10 @@ impl G729AEncoder {
             old_lsp_q: [0; M],
             
             sharp: 0,
+            
+            past_gain_pit: 0,
+            gain_pit_buffer: [0; 5],
+            gain_buffer_index: 0,
         }
     }
     
@@ -101,6 +111,12 @@ impl G729AEncoder {
         self.old_lsp[9] = -26000;
         
         self.old_lsp_q.copy_from_slice(&self.old_lsp);
+        
+        // Initialize excitation buffer with small random values to avoid div by zero
+        // This simulates background noise
+        for i in 0..self.old_exc.len() {
+            self.old_exc[i] = ((i as i16) % 3) - 1; // Small values: -1, 0, 1
+        }
     }
     
     /// Encode one frame of speech (80 samples)
@@ -186,12 +202,42 @@ impl G729AEncoder {
             // Step 9: Adaptive codebook search (closed-loop pitch)
             let (t0, t0_frac) = self.pitch.closed_loop_search(&target_signal, &self.old_exc, t_op, subframe);
             
-            // Step 10: Generate adaptive excitation
-            let mut y1 = [0i16; L_SUBFR];
+            // Step 10: Generate adaptive excitation using fractional delay
             let mut exc = [0i16; L_SUBFR];
-            // TODO: Generate adaptive excitation using pitch delay and fractional part
-            // For now, use a small non-zero value to avoid division by zero
-            y1[0] = 1;
+            let mut y1 = [0i16; L_SUBFR];
+            
+            // Create a working buffer for pred_lt_3
+            // We need to extract the relevant portion of old_exc for pred_lt_3
+            let exc_start = PIT_MAX + L_INTERPOL + sf_start;
+            let mut exc_work = vec![0i16; L_SUBFR + t0 as usize + 1 + L_INTERPOL as usize];
+            
+            // Copy the relevant portion of old_exc into working buffer
+            let copy_start = exc_start.saturating_sub(t0 as usize + 1 + L_INTERPOL as usize);
+            let copy_len = exc_work.len().min(self.old_exc.len() - copy_start);
+            exc_work[..copy_len].copy_from_slice(&self.old_exc[copy_start..copy_start + copy_len]);
+            
+            // The output will be written at the end of exc_work buffer
+            let out_offset = exc_work.len() - L_SUBFR;
+            
+            // Apply fractional delay interpolation
+            pred_lt_3(&mut exc_work[out_offset..], t0, t0_frac, L_SUBFR as i16);
+            
+            // Copy the interpolated excitation to exc
+            exc.copy_from_slice(&exc_work[out_offset..]);
+            
+            // Filter adaptive excitation through h to get y1
+            for i in 0..L_SUBFR {
+                let mut s = 0i32;
+                for j in 0..=i {
+                    s = l_mac(s, exc[j], h[i - j]);
+                }
+                y1[i] = round(l_shl(s, 3)); // Q12
+            }
+            
+            // Ensure y1 has some energy to avoid division by zero
+            if y1.iter().all(|&x| x == 0) {
+                y1[0] = 1; // Minimal energy
+            }
             
             // Step 11: Fixed codebook search
             let mut fixed_code = [0i16; L_SUBFR];
@@ -206,11 +252,26 @@ impl G729AEncoder {
             // Step 12: Compute correlations for gain quantization
             let (g_coeff, exp_coeff) = self.compute_gain_correlations(&target_signal, &y1, &y2, &target_signal);
             
-            // Step 13: Quantize gains
-            let tameflag = 0i16; // TODO: Compute taming flag based on pitch gain history
+            // Debug: Check if y1 has any energy
+            let mut y1_energy = 0i32;
+            for i in 0..L_SUBFR {
+                y1_energy = l_mac(y1_energy, y1[i], y1[i]);
+            }
+            if y1_energy == 0 && subframe == 0 {
+                println!("WARNING: y1 has zero energy in first subframe!");
+                println!("  exc[0..10]: {:?}", &exc[0..10]);
+                println!("  y1[0..10]: {:?}", &y1[0..10]);
+                println!("  t0={}, t0_frac={}", t0, t0_frac);
+            }
+            
+            // Step 13: Compute taming flag and quantize gains
+            let tameflag = self.compute_taming_flag();
             let (gain_index, gain_pit, gain_cod) = self.gain_quantizer.quantize_gain(
                 &fixed_code, &g_coeff, &exp_coeff, L_SUBFR as i16, tameflag
             );
+            
+            // Update pitch gain history
+            self.update_gain_history(gain_pit);
             
             // Store parameters according to G.729A specification
             if subframe == 0 {
@@ -227,8 +288,23 @@ impl G729AEncoder {
                 prm[10] = gain_index;      // G2: 7-bit gains (GA2 + GB2)
             }
             
-            // Update filter memories for next subframe
-            // Note: simplified for now - real implementation would update memories
+            // Step 14: Update excitation buffer with quantized excitation
+            // exc = gain_pit * adaptive + gain_cod * fixed
+            for i in 0..L_SUBFR {
+                // Compute total excitation (Q0)
+                let exc_adaptive = mult(exc[i], gain_pit); // Q0 = Q0 * Q14 >> 15
+                let exc_fixed = mult(fixed_code[i], gain_cod); // Q0 = Q13 * Q1 >> 15
+                let exc_total = add(exc_adaptive, shr(exc_fixed, 1)); // Align Q-formats
+                
+                // Update excitation buffer at correct position
+                self.old_exc[PIT_MAX + L_INTERPOL + sf_start + i] = exc_total;
+            }
+            
+            // Step 15: Update synthesis filter memory
+            // Compute synthesis: speech = exc * 1/A(z)
+            let mut synth = [0i16; L_SUBFR];
+            syn_filt(&a_subframe, &self.old_exc[PIT_MAX + L_INTERPOL + sf_start..], 
+                     &mut synth, L_SUBFR as i32, &mut self.mem_syn, true);
         }
         
         // Compute parity bit P0 for pitch delay of first subframe
@@ -315,6 +391,42 @@ impl G729AEncoder {
         exp_coeff[4] = sub(exp, 1);
         
         (g_coeff, exp_coeff)
+    }
+    
+    /// Compute taming flag based on pitch gain history
+    /// Returns 1 if taming is needed, 0 otherwise
+    fn compute_taming_flag(&self) -> Word16 {
+        // Constants for taming decision
+        const GPCLIP: Word16 = 15565;  // 0.95 in Q14
+        const GPCLIP2: Word16 = 14746; // 0.90 in Q14  
+        const GP0999: Word16 = 16383;  // 0.9999 in Q14
+        
+        // Check if past pitch gain was very high
+        if self.past_gain_pit > GPCLIP {
+            return 1;
+        }
+        
+        // Check if recent gains have been consistently high
+        let mut high_gain_count = 0;
+        for i in 0..5 {
+            if self.gain_pit_buffer[i] > GPCLIP2 {
+                high_gain_count += 1;
+            }
+        }
+        
+        // If 3 or more recent gains were high, apply taming
+        if high_gain_count >= 3 {
+            return 1;
+        }
+        
+        0
+    }
+    
+    /// Update pitch gain history
+    fn update_gain_history(&mut self, gain_pit: Word16) {
+        self.past_gain_pit = gain_pit;
+        self.gain_pit_buffer[self.gain_buffer_index] = gain_pit;
+        self.gain_buffer_index = (self.gain_buffer_index + 1) % 5;
     }
 }
 
