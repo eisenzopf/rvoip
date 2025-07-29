@@ -1,6 +1,7 @@
 use crate::common::basic_operators::Word16;
 use crate::common::tab_ld8a::{L_FRAME, L_SUBFR, M, MP1};
 use crate::common::bits::{prm2bits, bits2prm, PRM_SIZE, SERIAL_SIZE};
+use crate::common::impulse_response::compute_impulse_response;
 use crate::encoder::pre_proc::PreProc;
 use crate::encoder::lpc::Lpc;
 use crate::encoder::lsp_quantizer::LspQuantizer;
@@ -167,7 +168,7 @@ impl G729AEncoder {
             
             // Step 7: Compute impulse response
             let mut h = [0i16; L_SUBFR];
-            self.compute_impulse_response(&a_subframe, &mut h);
+            compute_impulse_response(&a_subframe, &mut h);
             
             // Step 8: Compute target signal
             let mut target_signal = [0i16; L_SUBFR];
@@ -227,16 +228,5 @@ impl G729AEncoder {
         
         prm
     }
-    
-    /// Compute impulse response H(z) = W(z)/A(z)
-    fn compute_impulse_response(&self, _a_coeffs: &[Word16], h: &mut [Word16]) {
-        // Simplified version - full implementation would compute W(z)/A(z)
-        // For now, just use a simple impulse
-        h[0] = 4096; // 1.0 in Q12
-        for i in 1..L_SUBFR {
-            h[i] = 0;
-        }
-    }
-    
 }
 
