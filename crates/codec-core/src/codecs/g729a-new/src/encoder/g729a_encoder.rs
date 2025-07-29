@@ -149,8 +149,13 @@ impl G729AEncoder {
         let mut wsp = vec![0i16; L_FRAME];
         self.perceptual_weighting.weight_speech(&speech_proc, &a_coeffs, &mut wsp, &mut self.mem_w);
         
+        // Copy current frame's weighted speech into the history buffer
+        // old_wsp layout: [PIT_MAX samples from previous frames][L_FRAME current frame]
+        self.old_wsp[PIT_MAX..PIT_MAX + L_FRAME].copy_from_slice(&wsp);
+        
         // Step 5: Open-loop pitch analysis
-        let t_op = self.pitch.open_loop_search(&wsp);
+        // Pass the entire buffer including history (PIT_MAX + L_FRAME samples total)
+        let t_op = self.pitch.open_loop_search(&self.old_wsp);
         
         // Process two subframes
         for subframe in 0..2 {
@@ -212,6 +217,11 @@ impl G729AEncoder {
         // Shift excitation buffer
         for i in 0..(PIT_MAX + L_INTERPOL) {
             self.old_exc[i] = self.old_exc[i + L_FRAME];
+        }
+        
+        // Shift weighted speech buffer (keep last PIT_MAX samples for next frame)
+        for i in 0..PIT_MAX {
+            self.old_wsp[i] = self.old_wsp[i + L_FRAME];
         }
         
         
