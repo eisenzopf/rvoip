@@ -4,35 +4,10 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
+// Import the actual ACELP implementation
+use g729a_new::encoder::acelp_codebook::acelp_code_a;
+
 const L_SUBFR: usize = 40;
-
-// TODO: Once implemented, import the actual function
-// use g729a_new::encoder::acelp_codebook::acelp_code_a;
-
-// Placeholder for ACELP function until implementation is complete
-fn acelp_code_a(
-    x: &[i16],           // Target vector
-    h: &[i16],           // Impulse response (Q12)
-    t0: i16,             // Pitch lag
-    pitch_sharp: i16,    // Pitch gain (Q14)
-    code: &mut [i16],    // Output: innovative codebook (Q13)
-    y: &mut [i16],       // Output: filtered codebook (Q12)
-    sign: &mut i16,      // Output: signs of pulses
-) -> i16 {
-    // Placeholder implementation - returns dummy values
-    // TODO: Replace with actual implementation
-    eprintln!("WARNING: Using placeholder ACELP implementation");
-    
-    // Initialize outputs to zero
-    for i in 0..L_SUBFR {
-        code[i] = 0;
-        y[i] = 0;
-    }
-    *sign = 0;
-    
-    // Return dummy index
-    0
-}
 
 #[test]
 fn test_acelp_codebook_search_from_csv() {
