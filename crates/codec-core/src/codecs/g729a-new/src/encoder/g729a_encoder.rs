@@ -2,9 +2,10 @@ use crate::common::basic_operators::Word16;
 use crate::common::tab_ld8a::{L_FRAME, L_SUBFR, M, MP1};
 use crate::common::bits::{prm2bits, bits2prm, PRM_SIZE, SERIAL_SIZE};
 use crate::common::impulse_response::compute_impulse_response;
+use crate::common::lsp_az::{lsp_az, int_qlpc};
 use crate::encoder::pre_proc::PreProc;
 use crate::encoder::lpc::Lpc;
-use crate::encoder::lsp_quantizer::LspQuantizer;
+use crate::encoder::lspvq::LspQuantizer;
 use crate::encoder::gain_quantizer::GainQuantizer;
 use crate::encoder::pitch::Pitch;
 use crate::encoder::acelp_codebook::AcelpCodebook;
@@ -141,10 +142,11 @@ impl G729AEncoder {
         
         // Quantize LSP parameters
         let mut lsp_q = [0i16; M];
-        let (lsp_index1, lsp_index2) = self.lsp_quantizer.quantize(&lsp, &mut lsp_q, &self.old_lsp_q);
+        let mut ana = [0i16; 2];  // LSP indices
+        self.lsp_quantizer.qua_lsp(&lsp, &mut lsp_q, &mut ana);
         
-        prm[0] = lsp_index1;
-        prm[1] = lsp_index2;
+        prm[0] = ana[0];
+        prm[1] = ana[1];
         
         // Step 4: Perceptual weighting filter
         let mut wsp = vec![0i16; L_FRAME];
@@ -158,13 +160,18 @@ impl G729AEncoder {
         // Pass the entire buffer including history (PIT_MAX + L_FRAME samples total)
         let t_op = self.pitch.open_loop_search(&self.old_wsp);
         
+        // Step 6: Interpolate LSP and convert to LP coefficients for both subframes
+        let mut az = [0i16; 2 * MP1];  // LP coefficients for both subframes
+        int_qlpc(&self.old_lsp_q, &lsp_q, &mut az);
+        
         // Process two subframes
         for subframe in 0..2 {
             let sf_start = subframe * L_SUBFR;
+            let az_offset = subframe * MP1;
             
-            // Step 6: Interpolate LSP for this subframe
+            // Get LP coefficients for this subframe
             let mut a_subframe = [0i16; MP1];
-            self.lsp_quantizer.interpolate_lsp(&self.old_lsp_q, &lsp_q, subframe, &mut a_subframe);
+            a_subframe.copy_from_slice(&az[az_offset..az_offset + MP1]);
             
             // Step 7: Compute impulse response
             let mut h = [0i16; L_SUBFR];
@@ -224,7 +231,6 @@ impl G729AEncoder {
         for i in 0..PIT_MAX {
             self.old_wsp[i] = self.old_wsp[i + L_FRAME];
         }
-        
         
         prm
     }

@@ -4,6 +4,12 @@ use crate::common::basic_operators::Word16;
 pub const PRM_SIZE: usize = 11;      // Number of analysis parameters per frame
 pub const SERIAL_SIZE: usize = 82;   // Serial frame size (80 bits + 2 sync)
 
+// G.729A bit stream format constants
+pub const BIT_0: Word16 = 0x007f;   // Zero bit in bitstream
+pub const BIT_1: Word16 = 0x0081;   // One bit in bitstream
+pub const SYNC_WORD: Word16 = 0x6b21;  // Frame sync word
+pub const SIZE_WORD: Word16 = 80;      // Number of speech bits
+
 /// Convert parameters to serial bitstream (G.729A bit allocation)
 /// 
 /// Bit allocation per frame (80 bits total):
@@ -14,7 +20,12 @@ pub const SERIAL_SIZE: usize = 82;   // Serial frame size (80 bits + 2 sync)
 /// - Fixed codebook signs are embedded in the codebook indices
 pub fn prm2bits(prm: &[Word16; PRM_SIZE]) -> [Word16; SERIAL_SIZE] {
     let mut serial = [0i16; SERIAL_SIZE];
-    let mut bit_pos = 0;
+    
+    // Add sync word and size
+    serial[0] = SYNC_WORD;
+    serial[1] = SIZE_WORD;
+    
+    let mut bit_pos = 2;  // Start after sync and size words
     
     // LSP indices: 18 bits (L0=10, L1=8)
     pack_bits(&mut serial, &mut bit_pos, prm[0] as u16, 10);
@@ -41,7 +52,7 @@ pub fn prm2bits(prm: &[Word16; PRM_SIZE]) -> [Word16; SERIAL_SIZE] {
 /// Unpack serial bitstream to parameters
 pub fn bits2prm(serial: &[Word16; SERIAL_SIZE]) -> [Word16; PRM_SIZE] {
     let mut prm = [0i16; PRM_SIZE];
-    let mut bit_pos = 0;
+    let mut bit_pos = 2;  // Skip sync word and size word
     
     // LSP indices
     prm[0] = unpack_bits(serial, &mut bit_pos, 10) as i16;
@@ -67,7 +78,8 @@ pub fn bits2prm(serial: &[Word16; SERIAL_SIZE]) -> [Word16; PRM_SIZE] {
 fn pack_bits(serial: &mut [Word16], bit_pos: &mut usize, value: u16, num_bits: usize) {
     for i in 0..num_bits {
         if *bit_pos < serial.len() {
-            serial[*bit_pos] = ((value >> (num_bits - 1 - i)) & 1) as i16;
+            let bit = (value >> (num_bits - 1 - i)) & 1;
+            serial[*bit_pos] = if bit == 1 { BIT_1 } else { BIT_0 };
             *bit_pos += 1;
         }
     }
@@ -78,7 +90,8 @@ fn unpack_bits(serial: &[Word16], bit_pos: &mut usize, num_bits: usize) -> u16 {
     let mut value = 0u16;
     for _ in 0..num_bits {
         if *bit_pos < serial.len() {
-            value = (value << 1) | (serial[*bit_pos] as u16 & 1);
+            let bit = if serial[*bit_pos] == BIT_1 { 1 } else { 0 };
+            value = (value << 1) | bit;
             *bit_pos += 1;
         }
     }
