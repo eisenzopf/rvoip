@@ -17,14 +17,13 @@ impl AcelpCodebook {
     }
     
     /// Search for the best fixed codebook excitation
-    pub fn search(&self, target: &[Word16], h: &[Word16], t0: i16) -> u32 {
+    pub fn search(&self, target: &[Word16], h: &[Word16], t0: i16) -> i16 {
         // Simplified search - real implementation would use acelp_code_a
         let mut code = [0i16; L_SUBFR];
         let mut y = [0i16; L_SUBFR];
         let mut sign = 0i16;
         
-        let index = acelp_code_a(target, h, t0, 0, &mut code, &mut y, &mut sign);
-        index as u32
+        acelp_code_a(target, h, t0, 0, &mut code, &mut y, &mut sign)
     }
 }
 

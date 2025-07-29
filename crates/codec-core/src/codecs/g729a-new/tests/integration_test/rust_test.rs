@@ -4,7 +4,7 @@ use std::env;
 
 // Import the actual G.729A encoder from the library
 use g729a_new::common::basic_operators::Word16;
-use g729a_new::encoder::g729a_encoder::{G729AEncoder, prm2bits, PRM_SIZE, SERIAL_SIZE};
+use g729a_new::encoder::g729a_encoder::{G729AEncoder, export_prm2bits as prm2bits, EXPORT_PRM_SIZE as PRM_SIZE, EXPORT_SERIAL_SIZE as SERIAL_SIZE};
 
 // G.729A constants
 const L_FRAME: usize = 80;      // Frame size (10ms at 8kHz)
@@ -36,7 +36,7 @@ fn encode_file(input_path: &str, output_path: &str) -> Result<(), Box<dyn std::e
         // Encode the frame
         let prm = encoder.encode_frame(&speech_frame);
         
-        // Convert parameters to serial bits
+        // Convert parameters to serial bits (fix parameter array structure if needed)
         let serial = prm2bits(&prm);
         
         // Write serial bits as bytes (compatible with C reference format)
