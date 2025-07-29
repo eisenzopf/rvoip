@@ -48,7 +48,7 @@ impl AcelpDecoder {
         positions[2] = add(mult(temp_index & 7, 5), 2); // Track 2
         temp_index = shr(temp_index, 3);
         
-        positions[3] = add(mult(temp_index & 1, 5), 3); // Track 3
+        positions[3] = add(mult(temp_index & 7, 5), 3); // Track 3
         
         // Ensure positions are within bounds
         for i in 0..4 {

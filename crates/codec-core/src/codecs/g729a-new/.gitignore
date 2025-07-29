@@ -36,6 +36,7 @@ c_test*
 *.C
 *.hex
 *.bit
+*.wav
 
 target/
 .env
