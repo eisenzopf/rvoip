@@ -97,18 +97,12 @@ impl G729AEncoder {
     pub fn init(&mut self) {
         *self = Self::new();
         
-        // Initialize LSP values to default
-        // These are typical initial LSP values for 8kHz speech
-        self.old_lsp[0] = 30000;
-        self.old_lsp[1] = 26000;
-        self.old_lsp[2] = 21000;
-        self.old_lsp[3] = 15000;
-        self.old_lsp[4] = 8000;
-        self.old_lsp[5] = 0;
-        self.old_lsp[6] = -8000;
-        self.old_lsp[7] = -15000;
-        self.old_lsp[8] = -21000;
-        self.old_lsp[9] = -26000;
+        // Initialize LSP values to G.729A default (from freq_prev_reset)
+        // These are in Q13 format
+        let lsp_init = [
+            2339, 4679, 7018, 9358, 11698, 14037, 16377, 18717, 21056, 23396,
+        ];
+        self.old_lsp.copy_from_slice(&lsp_init);
         
         self.old_lsp_q.copy_from_slice(&self.old_lsp);
         
@@ -200,7 +194,7 @@ impl G729AEncoder {
             self.target.compute(&wsp[sf_start..], &a_subframe, &h, &mut target_signal, &mut self.mem_zero);
             
             // Step 9: Adaptive codebook search (closed-loop pitch)
-            let (t0, t0_frac) = self.pitch.closed_loop_search(&target_signal, &self.old_exc, t_op, subframe);
+            let (t0, t0_frac) = self.pitch.closed_loop_search(&target_signal, &self.old_exc, &h, t_op, subframe);
             
             // Step 10: Generate adaptive excitation using fractional delay
             let mut exc = [0i16; L_SUBFR];

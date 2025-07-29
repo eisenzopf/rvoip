@@ -24,12 +24,40 @@ impl Pitch {
     }
     
     /// Closed-loop pitch search
-    pub fn closed_loop_search(&self, target: &[Word16], exc: &[Word16], t_op: i32, subframe: usize) -> (i16, i16) {
-        // Simplified closed-loop search
-        // Real implementation would refine the open-loop estimate
-        let t0 = t_op as i16;
-        let t0_frac = 0; // No fractional part for simplicity
-        (t0, t0_frac)
+    pub fn closed_loop_search(&self, target: &[Word16], exc: &[Word16], h: &[Word16], t_op: i32, subframe: usize) -> (i16, i16) {
+        // Determine search range based on open-loop estimate
+        let (t0_min, t0_max) = if subframe == 0 {
+            // First subframe: wider search range
+            let min = sub(t_op as Word16, 3) as i16;
+            let max = add(t_op as Word16, 3) as i16;
+            // Constrain to valid range [20, 143]
+            (min.max(20), max.min(143))
+        } else {
+            // Second subframe: search around previous pitch
+            // This would use the previous subframe's pitch value
+            // For now, use the open-loop estimate
+            let min = sub(t_op as Word16, 5) as i16;
+            let max = add(t_op as Word16, 4) as i16;
+            (min.max(20), max.min(143))
+        };
+        
+        // Create a mutable copy of the excitation buffer for pitch_fr3_fast
+        // The function needs to modify the buffer during search
+        let mut exc_work = exc.to_vec();
+        let mut pit_frac = 0i16;
+        
+        let t0 = pitch_fr3_fast(
+            &mut exc_work,
+            target,
+            h,
+            40, // L_SUBFR
+            t0_min,
+            t0_max,
+            subframe as Word16,
+            &mut pit_frac,
+        );
+        
+        (t0, pit_frac)
     }
 }
 
