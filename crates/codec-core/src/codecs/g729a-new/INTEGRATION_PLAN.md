@@ -3,25 +3,45 @@
 ## Overview
 This document outlines the tasks needed to complete the G.729A encoder implementation so that the integration test can successfully encode audio and compare outputs with the C reference implementation.
 
-## Current Status
+## Current Status (Updated 2025-07-29)
 
 ### ✅ Completed Components
 - **Pre-processing**: High-pass filter with scaling
 - **LPC Analysis**: Autocorrelation, lag windowing, Levinson-Durbin
 - **LSP Conversion**: LP to LSP conversion (`az_lsp`)
-- **LSP Quantization**: Vector quantization with codebook search
+- **LSP Quantization**: Vector quantization with codebook search (using lspvq module)
+- **LSP to LP Conversion**: `lsp_az` and `int_qlpc` functions in common/lsp_az.rs
 - **Pitch Analysis**: Open-loop and closed-loop pitch search
 - **Fixed Codebook**: ACELP algebraic codebook search
-- **Gain Quantization**: Adaptive and fixed gain quantization
-- **Perceptual Weighting**: Filter computation
-- **Target Signal**: Target computation for codebook search
+- **Gain Quantization**: Complete implementation with codebook search in gain_quantizer.rs
+- **Perceptual Weighting**: `weight_az` function implemented
+- **Target Signal**: `target_signal` function implemented
+- **Impulse Response**: `compute_impulse_response` in common/impulse_response.rs
+- **High-level Encoder**: G729AEncoder struct created in encoder/g729a_encoder.rs
+- **Bit Packing**: `prm2bits` and `bits2prm` with proper G.729A format (0x7f/0x81)
+
+### 🔧 Components That Exist But Need Integration
+1. **Gain Quantizer** (`gain_quantizer.rs`):
+   - Has complete `quantize_gain` implementation
+   - Currently using placeholder zeros in g729a_encoder.rs
+   - Needs correlation coefficients computed before calling
+
+2. **Target Signal** (`target.rs`):
+   - Has `target_signal` function using synthesis filtering
+   - The `compute` method is placeholder (just copies weighted speech)
+   - Needs to call `target_signal` with proper parameters
+
+3. **Perceptual Weighting** (`perceptual_weighting.rs`):
+   - Has `weight_az` function for coefficient computation
+   - The `weight_speech` method is placeholder (just copies input)
+   - Needs synthesis filtering implementation
 
 ### ❌ Missing Components
-1. High-level encoder orchestration
-2. Speech buffer management (240-sample window)
-3. Parameter bit packing/unpacking
-4. Complete frame processing pipeline
-5. Synthesis filter memory management
+1. Correlation computation for gain quantization (g_coeff parameters)
+2. Excitation buffer updates after each subframe
+3. Synthesis filter memory updates
+4. Fixed codebook sign extraction from ACELP search
+5. Fractional pitch support in pitch search
 
 ## Implementation Tasks
 
@@ -174,19 +194,67 @@ Use ITU-T test vectors:
 - PITCH.IN/BIT - Pitch search
 - FIXED.IN/BIT - Fixed codebook
 
+## Updated Implementation Tasks (2025-07-29)
+
+### Task 1: Hook Up Gain Quantizer ✅ High Priority
+**Location**: `src/encoder/g729a_encoder.rs`
+
+Replace placeholder gain quantization with actual call to `gain_quantizer.quantize_gain()`:
+- Compute correlation coefficients (g_coeff, exp_coeff)
+- Call quantize_gain with proper parameters
+- Use returned gain indices and quantized gains
+
+### Task 2: Implement Perceptual Weighting Filter ✅ High Priority  
+**Location**: `src/encoder/perceptual_weighting.rs`
+
+Update `weight_speech` method to:
+- Call `weight_az` to compute W(z) = A(z/γ1)/A(z/γ2) coefficients
+- Apply synthesis filtering using the weighted coefficients
+- Update filter memory
+
+### Task 3: Fix Target Signal Computation ✅ High Priority
+**Location**: `src/encoder/target.rs`
+
+Update `compute` method to:
+- Call existing `target_signal` function
+- Pass proper residual signal and filter coefficients
+- Handle filter memories correctly
+
+### Task 4: Add Correlation Computation ✅ Critical
+**Location**: New function in `src/encoder/g729a_encoder.rs` or separate module
+
+Implement correlation computation for gain quantization:
+- Compute correlations between target, filtered excitation, and fixed codebook
+- Return g_coeff[5] and exp_coeff[5] arrays
+
+### Task 5: Update Excitation and Synthesis Memories ✅ Critical
+**Location**: `src/encoder/g729a_encoder.rs`
+
+After each subframe:
+- Update excitation buffer with quantized excitation
+- Update synthesis filter memory
+- Maintain proper state for next subframe
+
+### Task 6: Extract Fixed Codebook Signs ✅ Medium Priority
+**Location**: `src/encoder/acelp_codebook.rs`
+
+Update ACELP search to return:
+- Position indices (13 bits)
+- Sign information (4 bits)
+
 ## Implementation Order
 
-1. **Phase 1**: Fix immediate issues (Tasks 1, 6)
-   - Fix speech buffer in integration test
-   - Get basic frame processing working
+1. **Phase 1**: Hook up existing components (Tasks 1, 2, 3)
+   - These just need integration, no new algorithms
+   - Will fix most test failures
 
-2. **Phase 2**: Core infrastructure (Tasks 2, 3)
-   - Implement complete encoder struct
-   - Add bit packing functions
+2. **Phase 2**: Add missing computations (Task 4)
+   - Correlation computation for gain quantization
+   - Critical for proper gain values
 
-3. **Phase 3**: Complete pipeline (Tasks 4, 5)
-   - Synthesis filters
-   - Full encoding pipeline
+3. **Phase 3**: Complete state management (Tasks 5, 6)
+   - Memory updates for continuity
+   - Sign extraction for bit-exact output
 
 ## Success Criteria
 
