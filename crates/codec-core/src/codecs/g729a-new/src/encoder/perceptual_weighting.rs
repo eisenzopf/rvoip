@@ -5,6 +5,8 @@
 //! the spectral characteristics of the input signal.
 
 use crate::common::basic_operators::*;
+use crate::common::filter::{syn_filt, residu};
+use crate::common::tab_ld8a::{L_SUBFR, M, MP1};
 
 /// Perceptual weighting filter module
 pub struct PerceptualWeighting {
@@ -17,16 +19,35 @@ impl PerceptualWeighting {
     }
     
     /// Apply perceptual weighting filter to speech
+    /// This computes W(z) = A(z/γ1)/A(z/γ2) and filters the speech through it
     pub fn weight_speech(&self, speech: &[Word16], a_coeffs: &[Word16], wsp: &mut [Word16], mem_w: &mut [Word16]) {
-        // Simplified weighting - real implementation would use weight_az and filtering
-        // For now, just copy speech to weighted speech
-        wsp.copy_from_slice(speech);
+        // Compute weighted filter coefficients
+        let mut p = [0i16; MP1];  // A(z/γ1) with γ1 = 0.75
+        let mut f = [0i16; MP1];  // A(z/γ2) with γ2 = 0.55
+        
+        let mut debug_p = Vec::new();
+        let mut debug_f = Vec::new();
+        weight_az(&a_coeffs[..=M], GAMMA1, &mut p, &mut debug_p);
+        weight_az(&a_coeffs[..=M], GAMMA2, &mut f, &mut debug_f);
+        
+        // Apply the perceptual weighting filter W(z) = A(z/γ1)/A(z/γ2)
+        // This is done by:
+        // 1. First filtering through A(z/γ2) (analysis filter)
+        // 2. Then filtering through 1/A(z/γ1) (inverse synthesis filter)
+        
+        // Temporary buffer for intermediate result
+        let mut temp = vec![0i16; speech.len()];
+        
+        // First apply A(z/γ2) - analysis filter (compute residual)
+        residu(&f, speech, &mut temp, speech.len() as i32);
+        
+        // Then apply 1/A(z/γ1) - synthesis filter
+        syn_filt(&p, &temp, wsp, speech.len() as i32, mem_w, true);
     }
 }
 
 const GAMMA1: Word16 = 24576; // 0.75 in Q15 (from LD8A.H)
 const GAMMA2: Word16 = 18022; // 0.55 in Q15 (from LD8A.H GAMMA2_PST)
-const M: usize = 10;
 
 /// Debug information for weight_az function calculations
 ///

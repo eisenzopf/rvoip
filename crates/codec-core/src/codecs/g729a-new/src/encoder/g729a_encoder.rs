@@ -1,14 +1,16 @@
-use crate::common::basic_operators::Word16;
+use crate::common::basic_operators::*;
+use crate::common::oper_32b::*;
 use crate::common::tab_ld8a::{L_FRAME, L_SUBFR, M, MP1};
 use crate::common::bits::{prm2bits, bits2prm, PRM_SIZE, SERIAL_SIZE};
 use crate::common::impulse_response::compute_impulse_response;
 use crate::common::lsp_az::{lsp_az, int_qlpc};
+use crate::common::filter::syn_filt;
 use crate::encoder::pre_proc::PreProc;
 use crate::encoder::lpc::Lpc;
 use crate::encoder::lspvq::LspQuantizer;
 use crate::encoder::gain_quantizer::GainQuantizer;
 use crate::encoder::pitch::Pitch;
-use crate::encoder::acelp_codebook::AcelpCodebook;
+use crate::encoder::acelp_codebook::{AcelpCodebook, acelp_code_a};
 use crate::encoder::perceptual_weighting::PerceptualWeighting;
 use crate::encoder::target::Target;
 
@@ -184,30 +186,45 @@ impl G729AEncoder {
             // Step 9: Adaptive codebook search (closed-loop pitch)
             let (t0, t0_frac) = self.pitch.closed_loop_search(&target_signal, &self.old_exc, t_op, subframe);
             
-            // Step 10: Fixed codebook search
-            let fixed_index = self.acelp.search(&target_signal, &h, t0);
+            // Step 10: Generate adaptive excitation
+            let mut y1 = [0i16; L_SUBFR];
+            let mut exc = [0i16; L_SUBFR];
+            // TODO: Generate adaptive excitation using pitch delay and fractional part
+            // For now, use a small non-zero value to avoid division by zero
+            y1[0] = 1;
             
-            // Step 11: Quantize gains (simplified for now)
-            let gain_index = 0i16; // Placeholder - should be from gain quantizer (7 bits total)
+            // Step 11: Fixed codebook search
+            let mut fixed_code = [0i16; L_SUBFR];
+            let mut y2 = [0i16; L_SUBFR];
+            let mut fixed_sign = 0i16;
+            let fixed_index = acelp_code_a(&target_signal, &h, t0, self.sharp, &mut fixed_code, &mut y2, &mut fixed_sign);
             
-            // For now, split the fixed codebook index into position and sign
-            // Real implementation would get these from ACELP search
-            let fixed_position = fixed_index & 0x1FFF;  // Lower 13 bits
-            let fixed_sign = 0i16;  // Placeholder - should contain 4 sign bits
+            // Extract position and sign from the combined index
+            let fixed_position = shr(fixed_index, 4);  // Upper 13 bits are positions
+            let fixed_sign_bits = fixed_index & 0x000F;  // Lower 4 bits are signs
+            
+            // Step 12: Compute correlations for gain quantization
+            let (g_coeff, exp_coeff) = self.compute_gain_correlations(&target_signal, &y1, &y2, &target_signal);
+            
+            // Step 13: Quantize gains
+            let tameflag = 0i16; // TODO: Compute taming flag based on pitch gain history
+            let (gain_index, gain_pit, gain_cod) = self.gain_quantizer.quantize_gain(
+                &fixed_code, &g_coeff, &exp_coeff, L_SUBFR as i16, tameflag
+            );
             
             // Store parameters according to G.729A specification
             if subframe == 0 {
                 // Subframe 1 parameters
                 prm[2] = t0;               // P1: 8-bit pitch delay
                 prm[4] = fixed_position;   // C1: 13-bit fixed codebook positions
-                prm[5] = fixed_sign;       // S1: 4-bit fixed codebook signs
-                prm[6] = gain_index;       // G1: 7-bit gains (4 fixed + 3 adaptive)
+                prm[5] = fixed_sign_bits;  // S1: 4-bit fixed codebook signs
+                prm[6] = gain_index;       // G1: 7-bit gains (GA1 + GB1)
             } else {
                 // Subframe 2 parameters
                 prm[7] = t0 - prm[2];      // P2: 5-bit relative pitch delay
                 prm[8] = fixed_position;   // C2: 13-bit fixed codebook positions  
-                prm[9] = fixed_sign;       // S2: 4-bit fixed codebook signs
-                prm[10] = gain_index;      // G2: 7-bit gains (4 fixed + 3 adaptive)
+                prm[9] = fixed_sign_bits;  // S2: 4-bit fixed codebook signs
+                prm[10] = gain_index;      // G2: 7-bit gains (GA2 + GB2)
             }
             
             // Update filter memories for next subframe
@@ -237,6 +254,67 @@ impl G729AEncoder {
         }
         
         prm
+    }
+    
+    /// Compute correlation coefficients for gain quantization
+    /// Returns (g_coeff, exp_coeff) arrays
+    fn compute_gain_correlations(
+        &self,
+        target: &[Word16],      // Target signal
+        y1: &[Word16],          // Filtered adaptive excitation
+        y2: &[Word16],          // Filtered fixed excitation
+        xn: &[Word16],          // Target for pitch search
+    ) -> ([Word16; 5], [Word16; 5]) {
+        let mut g_coeff = [0i16; 5];
+        let mut exp_coeff = [0i16; 5];
+        
+        // Compute correlations for gain quantization
+        // g_coeff[0] = <y1,y1>
+        let mut l_acc = 0i32;
+        for i in 0..L_SUBFR {
+            l_acc = l_mac(l_acc, y1[i], y1[i]);
+        }
+        let exp = norm_l(l_acc);
+        g_coeff[0] = extract_h(l_shl(l_acc, exp));
+        exp_coeff[0] = sub(exp, 1);
+        
+        // g_coeff[1] = -2*<xn,y1>
+        l_acc = 0;
+        for i in 0..L_SUBFR {
+            l_acc = l_mac(l_acc, xn[i], y1[i]);
+        }
+        let exp = norm_l(l_acc);
+        g_coeff[1] = negate(extract_h(l_shl(l_acc, exp)));
+        exp_coeff[1] = sub(exp, 2);
+        
+        // g_coeff[2] = <y2,y2>
+        l_acc = 0;
+        for i in 0..L_SUBFR {
+            l_acc = l_mac(l_acc, y2[i], y2[i]);
+        }
+        let exp = norm_l(l_acc);
+        g_coeff[2] = extract_h(l_shl(l_acc, exp));
+        exp_coeff[2] = sub(exp, 1);
+        
+        // g_coeff[3] = -2*<xn,y2>
+        l_acc = 0;
+        for i in 0..L_SUBFR {
+            l_acc = l_mac(l_acc, xn[i], y2[i]);
+        }
+        let exp = norm_l(l_acc);
+        g_coeff[3] = negate(extract_h(l_shl(l_acc, exp)));
+        exp_coeff[3] = sub(exp, 2);
+        
+        // g_coeff[4] = 2*<y1,y2>
+        l_acc = 0;
+        for i in 0..L_SUBFR {
+            l_acc = l_mac(l_acc, y1[i], y2[i]);
+        }
+        let exp = norm_l(l_acc);
+        g_coeff[4] = extract_h(l_shl(l_acc, exp));
+        exp_coeff[4] = sub(exp, 1);
+        
+        (g_coeff, exp_coeff)
     }
 }
 

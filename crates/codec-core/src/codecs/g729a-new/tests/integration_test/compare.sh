@@ -18,7 +18,9 @@ echo "=============================================="
 
 # Paths - adjusted to run from g729a-new directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-TEST_VECTORS_DIR="${SCRIPT_DIR}/../test_vectors"
+# Test vectors are at the root of g729a-new
+ROOT_DIR="${SCRIPT_DIR}/../.."
+TEST_VECTORS_DIR="${ROOT_DIR}/test_vectors"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 C_OUTPUT_DIR="${OUTPUT_DIR}/c"
 RUST_OUTPUT_DIR="${OUTPUT_DIR}/rust"

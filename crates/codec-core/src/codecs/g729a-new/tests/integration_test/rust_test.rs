@@ -34,10 +34,21 @@ fn encode_file(input_path: &str, output_path: &str) -> Result<(), Box<dyn std::e
         }
         
         // Encode the frame
+        if frame_count == 0 {
+            println!("Encoding first frame...");
+        }
         let prm = encoder.encode_frame(&speech_frame);
+        
+        if frame_count == 0 {
+            println!("First frame encoded, converting to bits...");
+        }
         
         // Convert parameters to serial bits (fix parameter array structure if needed)
         let serial = prm2bits(&prm);
+        
+        if frame_count == 0 {
+            println!("First frame bits: {:?}", &serial[0..10]);
+        }
         
         // Write serial bits as bytes (compatible with C reference format)
         for &bit_word in &serial {

@@ -2,6 +2,21 @@ use crate::common::basic_operators::*;
 
 const M: usize = 10;
 
+/// Compute the residual signal by filtering through A(z)
+/// This is the inverse of synthesis filtering
+pub fn residu(a: &[Word16], x: &[Word16], y: &mut [Word16], lg: i32) {
+    for i in 0..lg as usize {
+        let mut s = l_mult(x[i], a[0]);
+        for j in 1..=M {
+            if i >= j {
+                s = l_mac(s, a[j], x[i - j]);
+            }
+        }
+        s = l_shl(s, 3);
+        y[i] = round(s);
+    }
+}
+
 pub fn syn_filt(a: &[Word16], x: &[Word16], y: &mut [Word16], lg: i32, mem: &mut [Word16], update: bool) {
     let mut yy = [0; 100];  // Temporary buffer (lg + M)
     
