@@ -12,36 +12,46 @@ This document outlines the tasks needed to complete the G.729A encoder implement
 - **LSP Quantization**: Vector quantization with codebook search (using lspvq module)
 - **LSP to LP Conversion**: `lsp_az` and `int_qlpc` functions in common/lsp_az.rs
 - **Pitch Analysis**: Open-loop and closed-loop pitch search
-- **Fixed Codebook**: ACELP algebraic codebook search
-- **Gain Quantization**: Complete implementation with codebook search in gain_quantizer.rs
-- **Perceptual Weighting**: `weight_az` function implemented
-- **Target Signal**: `target_signal` function implemented
+- **Fixed Codebook**: ACELP algebraic codebook search with sign extraction
+- **Gain Quantization**: Complete implementation with codebook search, integrated with correlation computation
+- **Perceptual Weighting**: Full implementation with `weight_az` and filtering using `residu`/`syn_filt`
+- **Target Signal**: Complete implementation using `target_signal` function
 - **Impulse Response**: `compute_impulse_response` in common/impulse_response.rs
-- **High-level Encoder**: G729AEncoder struct created in encoder/g729a_encoder.rs
+- **High-level Encoder**: G729AEncoder struct created with full encoding pipeline
 - **Bit Packing**: `prm2bits` and `bits2prm` with proper G.729A format (0x7f/0x81)
+- **Correlation Computation**: Implemented for gain quantization (g_coeff, exp_coeff)
+- **Integration Test**: Fixed paths and successfully running encoder on test vectors
 
-### 🔧 Components That Exist But Need Integration
-1. **Gain Quantizer** (`gain_quantizer.rs`):
-   - Has complete `quantize_gain` implementation
-   - Currently using placeholder zeros in g729a_encoder.rs
-   - Needs correlation coefficients computed before calling
+### 🚀 Recent Accomplishments (2025-07-29)
+1. **Perceptual Weighting Filter**: 
+   - Implemented `weight_speech` using existing `weight_az` function
+   - Added `residu` function for inverse filtering
+   - Properly computes W(z) = A(z/γ1)/A(z/γ2) and applies filtering
 
-2. **Target Signal** (`target.rs`):
-   - Has `target_signal` function using synthesis filtering
-   - The `compute` method is placeholder (just copies weighted speech)
-   - Needs to call `target_signal` with proper parameters
+2. **Target Signal Computation**:
+   - Fixed `compute` method to use existing `target_signal` function
+   - Properly computes residual and applies perceptual weighting
 
-3. **Perceptual Weighting** (`perceptual_weighting.rs`):
-   - Has `weight_az` function for coefficient computation
-   - The `weight_speech` method is placeholder (just copies input)
-   - Needs synthesis filtering implementation
+3. **Gain Quantizer Integration**:
+   - Added `compute_gain_correlations` function
+   - Integrated existing `quantize_gain` with proper inputs
+   - Fixed division by zero issue
 
-### ❌ Missing Components
-1. Correlation computation for gain quantization (g_coeff parameters)
-2. Excitation buffer updates after each subframe
-3. Synthesis filter memory updates
-4. Fixed codebook sign extraction from ACELP search
-5. Fractional pitch support in pitch search
+4. **Fixed Codebook Integration**:
+   - Properly extracts position (13 bits) and sign (4 bits) from ACELP search
+   - Calls `acelp_code_a` directly with all parameters
+
+5. **Integration Test**:
+   - Fixed test vector paths
+   - Encoder successfully processes SPEECH.IN (3750 frames)
+   - Produces properly formatted bitstream with sync word and bit format
+
+### ❌ Remaining Tasks
+1. **Generate Adaptive Excitation**: Use pitch delay and fractional part
+2. **Update Excitation Buffer**: After each subframe with quantized excitation
+3. **Update Synthesis Filter Memory**: Maintain state between subframes
+4. **Compute Taming Flag**: Based on pitch gain history
+5. **Add Fractional Pitch Support**: For higher quality pitch representation
 
 ## Implementation Tasks
 

@@ -1,5 +1,6 @@
 use crate::common::basic_operators::*;
 use crate::common::filter::*;
+use crate::common::tab_ld8a::{L_SUBFR, M, MP1};
 
 /// Target signal computation module
 pub struct Target {
@@ -12,10 +13,18 @@ impl Target {
     }
     
     /// Compute target signal for codebook search
+    /// The target signal is computed by filtering the weighted speech through
+    /// the perceptual weighting filter W(z) = A(z/γ1)/A(z/γ2)
     pub fn compute(&self, wsp: &[Word16], a_coeffs: &[Word16], h: &[Word16], target: &mut [Word16], mem_zero: &mut [Word16]) {
-        // Simplified target computation
-        // Real implementation would use target_signal function
-        target.copy_from_slice(&wsp[..target.len()]);
+        // Compute the residual signal from weighted speech
+        let mut residual = [0i16; L_SUBFR];
+        
+        // First compute residual by filtering weighted speech through A(z)
+        residu(a_coeffs, wsp, &mut residual, L_SUBFR as i32);
+        
+        // Then compute target signal using the target_signal function
+        // This filters the residual through the perceptual weighting filter
+        target_signal(a_coeffs, h, &[0i16; L_SUBFR], &residual, target, mem_zero);
     }
 }
 
