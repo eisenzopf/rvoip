@@ -6,7 +6,7 @@ const L_SUBFR: usize = 40;
 
 #[test]
 fn test_gain_quantization_from_csv() {
-    let file = File::open("test_inputs.csv")
+    let file = File::open("tests/gain_quantization/test_inputs.csv")
         .expect("Failed to open test_inputs.csv");
     let reader = BufReader::new(file);
     let mut lines = reader.lines();
