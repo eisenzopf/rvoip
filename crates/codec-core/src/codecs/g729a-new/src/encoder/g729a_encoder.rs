@@ -1,5 +1,6 @@
 use crate::common::basic_operators::Word16;
 use crate::common::tab_ld8a::{L_FRAME, L_SUBFR, M, MP1};
+use crate::common::bits::{prm2bits, bits2prm, PRM_SIZE, SERIAL_SIZE};
 use crate::encoder::pre_proc::PreProc;
 use crate::encoder::lpc::Lpc;
 use crate::encoder::lsp_quantizer::LspQuantizer;
@@ -9,9 +10,10 @@ use crate::encoder::acelp_codebook::AcelpCodebook;
 use crate::encoder::perceptual_weighting::PerceptualWeighting;
 use crate::encoder::target::Target;
 
+// Re-export for external use
+pub use crate::common::bits::{prm2bits as export_prm2bits, bits2prm as export_bits2prm, PRM_SIZE as EXPORT_PRM_SIZE, SERIAL_SIZE as EXPORT_SERIAL_SIZE};
+
 // G.729A constants
-pub const PRM_SIZE: usize = 11;      // Number of analysis parameters per frame
-pub const SERIAL_SIZE: usize = 82;   // Serial frame size (80 bits + 2 sync)
 pub const PIT_MAX: usize = 143;      // Maximum pitch delay
 pub const L_INTERPOL: usize = 11;    // Length of interpolation filter
 pub const L_WINDOW: usize = 240;     // LPC analysis window size
@@ -134,7 +136,7 @@ impl G729AEncoder {
         
         // Step 3: Convert LP to LSP and quantize
         let mut lsp = [0i16; M];
-        crate::encoder::lsp_quantizer::az_lsp(&a_coeffs[1..], &mut lsp, &self.old_lsp);
+        crate::encoder::lsp_quantizer::az_lsp(&a_coeffs, &mut lsp, &self.old_lsp);
         
         // Quantize LSP parameters
         let mut lsp_q = [0i16; M];
@@ -153,7 +155,6 @@ impl G729AEncoder {
         // Process two subframes
         for subframe in 0..2 {
             let sf_start = subframe * L_SUBFR;
-            let param_offset = 2 + subframe * 4;
             
             // Step 6: Interpolate LSP for this subframe
             let mut a_subframe = [0i16; MP1];
@@ -174,22 +175,35 @@ impl G729AEncoder {
             let fixed_index = self.acelp.search(&target_signal, &h, t0);
             
             // Step 11: Quantize gains (simplified for now)
-            let ga_index = 0; // Placeholder
-            let gb_index = 0; // Placeholder
+            let ga_index = 0i16; // Placeholder - should be from gain quantizer
+            let gb_index = 0i16; // Placeholder - should be from gain quantizer
             
-            // Store parameters
+            // Store parameters according to G.729A specification
             if subframe == 0 {
-                prm[param_offset] = t0;                           // 8-bit pitch delay
+                // Subframe 1 parameters
+                prm[2] = t0;            // P1: 8-bit pitch delay
+                prm[4] = fixed_index;   // C1: 13-bit fixed codebook index + sign
+                prm[5] = ga_index;      // GA1: 3-bit adaptive gain
+                prm[6] = gb_index;      // GB1: 4-bit fixed gain
             } else {
-                prm[param_offset] = t0 - prm[2];                 // 5-bit relative pitch
+                // Subframe 2 parameters
+                prm[7] = t0 - prm[2];   // P2: 5-bit relative pitch delay
+                prm[8] = fixed_index;   // C2: 13-bit fixed codebook index + sign
+                prm[9] = ga_index;      // GA2: 3-bit adaptive gain
+                prm[10] = gb_index;     // GB2: 4-bit fixed gain
             }
-            prm[param_offset + 1] = (ga_index << 4) | gb_index;  // Combined gain indices
-            prm[param_offset + 2] = (fixed_index >> 8) as i16;   // Fixed codebook high
-            prm[param_offset + 3] = (fixed_index & 0xFF) as i16; // Fixed codebook low
             
             // Update filter memories for next subframe
             // Note: simplified for now - real implementation would update memories
         }
+        
+        // Compute parity bit P0 for pitch delay of first subframe
+        // Parity is computed on the 6 MSBs of P1
+        let mut parity = 0i16;
+        for i in 2..8 {
+            parity ^= (prm[2] >> i) & 1;
+        }
+        prm[3] = parity;
         
         // Update state for next frame
         self.old_lsp.copy_from_slice(&lsp);
@@ -200,12 +214,6 @@ impl G729AEncoder {
             self.old_exc[i] = self.old_exc[i + L_FRAME];
         }
         
-        // Compute parity bit
-        let mut parity = 0i16;
-        for i in 0..10 {
-            parity ^= prm[i] & 1;
-        }
-        prm[10] = parity;
         
         prm
     }
@@ -222,94 +230,3 @@ impl G729AEncoder {
     
 }
 
-/// Convert parameters to serial bitstream (G.729A bit allocation)
-pub fn prm2bits(prm: &[Word16; PRM_SIZE]) -> [Word16; SERIAL_SIZE] {
-    let mut serial = [0i16; SERIAL_SIZE];
-    let mut bit_pos = 0;
-    
-    // LSP indices: 18 bits (L0=10, L1=8)
-    pack_bits(&mut serial, &mut bit_pos, prm[0] as u16, 10);
-    pack_bits(&mut serial, &mut bit_pos, prm[1] as u16, 8);
-    
-    // Subframe 1: P1=8, S1=1, C1=13, GA1=3, GB1=4
-    pack_bits(&mut serial, &mut bit_pos, prm[2] as u16, 8);   // Pitch delay
-    let gains1 = prm[3] as u16;
-    pack_bits(&mut serial, &mut bit_pos, gains1 >> 4, 3);      // GA1
-    pack_bits(&mut serial, &mut bit_pos, gains1 & 0xF, 4);     // GB1
-    let fixed1 = ((prm[4] as u16) << 8) | (prm[5] as u16);
-    pack_bits(&mut serial, &mut bit_pos, fixed1, 13);          // Fixed codebook
-    
-    // Subframe 2: P2=5, S2=1, C2=13, GA2=3, GB2=4  
-    pack_bits(&mut serial, &mut bit_pos, prm[6] as u16, 5);   // Relative pitch
-    let gains2 = prm[7] as u16;
-    pack_bits(&mut serial, &mut bit_pos, gains2 >> 4, 3);      // GA2
-    pack_bits(&mut serial, &mut bit_pos, gains2 & 0xF, 4);     // GB2
-    let fixed2 = ((prm[8] as u16) << 8) | (prm[9] as u16);
-    pack_bits(&mut serial, &mut bit_pos, fixed2, 13);          // Fixed codebook
-    
-    // Parity bit
-    pack_bits(&mut serial, &mut bit_pos, prm[10] as u16, 1);
-    
-    // Sync bits (optional, fill remaining)
-    while bit_pos < SERIAL_SIZE {
-        serial[bit_pos] = 0;
-        bit_pos += 1;
-    }
-    
-    serial
-}
-
-/// Unpack serial bitstream to parameters
-pub fn bits2prm(serial: &[Word16; SERIAL_SIZE]) -> [Word16; PRM_SIZE] {
-    let mut prm = [0i16; PRM_SIZE];
-    let mut bit_pos = 0;
-    
-    // LSP indices
-    prm[0] = unpack_bits(serial, &mut bit_pos, 10) as i16;
-    prm[1] = unpack_bits(serial, &mut bit_pos, 8) as i16;
-    
-    // Subframe 1
-    prm[2] = unpack_bits(serial, &mut bit_pos, 8) as i16;      // Pitch
-    let ga1 = unpack_bits(serial, &mut bit_pos, 3);
-    let gb1 = unpack_bits(serial, &mut bit_pos, 4);
-    prm[3] = ((ga1 << 4) | gb1) as i16;                        // Combined gains
-    let fixed1 = unpack_bits(serial, &mut bit_pos, 13);
-    prm[4] = (fixed1 >> 8) as i16;                             // Fixed high
-    prm[5] = (fixed1 & 0xFF) as i16;                           // Fixed low
-    
-    // Subframe 2
-    prm[6] = unpack_bits(serial, &mut bit_pos, 5) as i16;      // Relative pitch
-    let ga2 = unpack_bits(serial, &mut bit_pos, 3);
-    let gb2 = unpack_bits(serial, &mut bit_pos, 4);
-    prm[7] = ((ga2 << 4) | gb2) as i16;                        // Combined gains
-    let fixed2 = unpack_bits(serial, &mut bit_pos, 13);
-    prm[8] = (fixed2 >> 8) as i16;                             // Fixed high
-    prm[9] = (fixed2 & 0xFF) as i16;                           // Fixed low
-    
-    // Parity
-    prm[10] = unpack_bits(serial, &mut bit_pos, 1) as i16;
-    
-    prm
-}
-
-/// Pack bits into serial array
-fn pack_bits(serial: &mut [Word16], bit_pos: &mut usize, value: u16, num_bits: usize) {
-    for i in 0..num_bits {
-        if *bit_pos < serial.len() {
-            serial[*bit_pos] = ((value >> (num_bits - 1 - i)) & 1) as i16;
-            *bit_pos += 1;
-        }
-    }
-}
-
-/// Unpack bits from serial array
-fn unpack_bits(serial: &[Word16], bit_pos: &mut usize, num_bits: usize) -> u16 {
-    let mut value = 0u16;
-    for _ in 0..num_bits {
-        if *bit_pos < serial.len() {
-            value = (value << 1) | (serial[*bit_pos] as u16 & 1);
-            *bit_pos += 1;
-        }
-    }
-    value
-}
