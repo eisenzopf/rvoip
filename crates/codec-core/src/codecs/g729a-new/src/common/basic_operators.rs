@@ -318,6 +318,56 @@ const TABSQR: [Word16; 49] = [
     16384,
 ];
 
+const TABPOW: [Word16; 33] = [
+    16384, 16743, 17109, 17484, 17867, 18258, 18658, 19066, 19484, 19911,
+    20347, 20792, 21247, 21713, 22188, 22674, 23170, 23678, 24196, 24726,
+    25268, 25821, 26386, 26964, 27554, 28158, 28774, 29405, 30048, 30706,
+    31379, 32066, 32767,
+];
+
+const TABLOG: [Word16; 33] = [
+    0, 1455, 2866, 4236, 5568, 6863, 8124, 9352, 10549, 11716,
+    12855, 13967, 15054, 16117, 17156, 18172, 19167, 20142, 21097, 22033,
+    22951, 23852, 24735, 25603, 26455, 27291, 28113, 28922, 29716, 30497,
+    31266, 32023, 32767,
+];
+
+pub fn log2(l_x: Word32) -> (Word16, Word16) {
+    if l_x <= 0 {
+        return (0, 0);
+    }
+    
+    let exp = norm_l(l_x);
+    let l_x = l_shl(l_x, exp);
+    let exp = sub(30, exp);
+    
+    let l_x = l_shr(l_x, 9);
+    let i = extract_h(l_x);
+    let l_x = l_shr(l_x, 1);
+    let a = extract_l(l_x) & 0x7fff;
+    
+    let i = sub(i, 32);
+    
+    let l_y = l_deposit_h(TABLOG[i as usize]);
+    let tmp = sub(TABLOG[i as usize], TABLOG[(i + 1) as usize]);
+    let l_y = l_msu(l_y, tmp, a);
+    
+    let frac = extract_h(l_y);
+    (exp, frac)
+}
+
+pub fn pow2(exp: Word16, frac: Word16) -> Word32 {
+    let i = shr(frac, 10);
+    let a = frac & 0x03ff;
+    
+    let mut l_x = l_deposit_h(TABPOW[i as usize]);
+    let tmp = sub(TABPOW[i as usize], TABPOW[(i + 1) as usize]);
+    l_x = l_msu(l_x, tmp, a);
+    
+    l_x = l_shr(l_x, sub(30, exp));
+    l_x
+}
+
 pub fn inv_sqrt(l_x: Word32) -> Word32 {
     if l_x == 0 {
         return 0x7fffffff;
