@@ -3,7 +3,7 @@
 //! This module provides high-level audio streaming pipelines that integrate
 //! device management, format conversion, and codec processing.
 
-use crate::types::{AudioFormat, AudioFrame, AudioStreamConfig, AudioCodec};
+use crate::types::{AudioFormat, AudioFrame, AudioStreamConfig};
 use crate::device::{AudioDevice, AudioDeviceManager};
 use crate::types::AudioDirection;
 use crate::format::{FormatConverter, AudioFrameBuffer};
@@ -87,9 +87,9 @@ impl AudioPipelineBuilder {
         self
     }
 
-    /// Set codec
-    pub fn codec(mut self, codec: AudioCodec) -> Self {
-        self.config.codec = codec;
+    /// Set codec by name
+    pub fn codec_name(mut self, codec_name: impl Into<String>) -> Self {
+        self.config.codec_name = codec_name.into();
         self
     }
 
@@ -330,8 +330,8 @@ impl AudioPipeline {
     }
 
     /// Set codec for the pipeline
-    pub async fn set_codec(&mut self, codec: AudioCodec) -> AudioResult<()> {
-        self.config.codec = codec;
+    pub async fn set_codec_name(&mut self, codec_name: impl Into<String>) -> AudioResult<()> {
+        self.config.codec_name = codec_name.into();
         // TODO: Reconfigure codec processing
         Ok(())
     }
@@ -452,7 +452,7 @@ impl PipelineManager {
         let pipeline = AudioPipeline::builder()
             .input_format(config.input_format.clone())
             .output_format(config.output_format.clone())
-            .codec(config.codec.clone())
+            .codec_name(config.codec_name.clone())
             .device_manager(self.device_manager.clone())
             .build()
             .await?;

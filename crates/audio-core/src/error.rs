@@ -52,16 +52,6 @@ pub enum AudioError {
         reason: String,
     },
 
-    /// Audio codec error (encoding/decoding)
-    #[error("Codec error in {codec}: {operation} failed: {reason}")]
-    CodecError {
-        /// The codec name
-        codec: String,
-        /// The operation that failed (encode/decode)
-        operation: String,
-        /// Reason for the failure
-        reason: String,
-    },
 
     /// Audio buffer overflow/underflow
     #[error("Audio buffer {buffer_type} {error_type}: {details}")]
@@ -198,18 +188,6 @@ impl AudioError {
         }
     }
 
-    /// Create a codec error
-    pub fn codec_error<S1: Into<String>, S2: Into<String>, S3: Into<String>>(
-        codec: S1,
-        operation: S2,
-        reason: S3,
-    ) -> Self {
-        Self::CodecError {
-            codec: codec.into(),
-            operation: operation.into(),
-            reason: reason.into(),
-        }
-    }
 
     /// Create a buffer error
     pub fn buffer_error<S1: Into<String>, S2: Into<String>, S3: Into<String>>(
@@ -257,7 +235,7 @@ impl AudioError {
     /// Create an invalid configuration error (convenience method)
     pub fn invalid_configuration<S: Into<String>>(reason: S) -> Self {
         Self::ConfigurationError {
-            component: "codec".to_string(),
+            component: "configuration".to_string(),
             reason: reason.into(),
         }
     }
@@ -283,7 +261,6 @@ impl AudioError {
             // Non-recoverable errors - fundamental issues
             Self::DeviceNotFound { .. } => false,
             Self::FormatNotSupported { .. } => false,
-            Self::CodecError { .. } => false,
             Self::ConfigurationError { .. } => false,
             Self::InvalidData { .. } => false,
             Self::FeatureNotAvailable { .. } => false,
@@ -314,9 +291,6 @@ impl AudioError {
             }
             Self::FormatNotSupported { format, .. } => {
                 format!("The audio format '{}' is not supported. Try a different audio setting.", format)
-            }
-            Self::CodecError { codec, .. } => {
-                format!("Audio codec '{}' has a problem. The call quality may be affected.", codec)
             }
             Self::BufferError { .. } => {
                 "Audio buffer issue detected. This may cause audio glitches.".to_string()
