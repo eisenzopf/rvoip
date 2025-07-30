@@ -1,29 +1,20 @@
-//! # Codec-Core: High-Performance Audio Codec Library
+//! # Codec-Core: Audio Codec Library for VoIP
 //!
-//! A comprehensive, production-ready implementation of audio codecs for VoIP applications.
-//! This library provides ITU-T compliant codecs with SIMD optimizations, zero-copy APIs,
-//! and extensive testing including real audio validation.
-//!
-//! ## 🎯 Production Ready
-//!
-//! - **ITU-T Compliant**: All codecs pass official compliance tests
-//! - **Real Audio Tested**: Validated with actual speech samples  
-//! - **High Quality**: >37 dB SNR with real speech validation
-//! - **Performance Optimized**: SIMD acceleration and lookup tables
-//! - **Zero Allocation**: Efficient batch processing APIs
+//! A simple implementation of G.711 audio codec for VoIP applications.
+//! This library provides ITU-T compliant G.711 μ-law and A-law encoding/decoding
+//! with lookup table optimizations.
 //!
 //! ## Features
 //!
-//! - **G.711 (PCMU/PCMA)**: ITU-T compliant μ-law and A-law with SIMD optimizations
-//! - **Real Audio Testing**: Validated with actual speech samples via WAV roundtrip tests
-//! - **Comprehensive Test Suite**: ITU-T compliance tests and quality validation
+//! - **ITU-T G.711 Compliant**: Passes official compliance tests
+//! - **Real Audio Tested**: Validated with actual speech samples  
+//! - **Good Quality**: ~37 dB SNR with real speech
+//! - **Lookup Table Optimized**: Fast O(1) encoding/decoding
 //!
-//! ## Performance
+//! ## Implementation
 //!
-//! - **SIMD Optimized**: x86_64 SSE2 and AArch64 NEON support
 //! - **Lookup Tables**: Pre-computed tables for O(1) operations
-//! - **Zero-Copy APIs**: Minimal memory allocation during processing
-//! - **Parallel Processing**: Multi-threaded encoding/decoding where beneficial
+//! - **Simple APIs**: Straightforward encoding/decoding functions
 //!
 //! ## Usage
 //!
@@ -91,10 +82,8 @@
 //!
 //! ## Performance Tips
 //!
-//! - Use batch processing functions for better performance
-//! - Pre-allocate output buffers when possible
-//! - Enable SIMD optimizations (automatic on x86_64/AArch64)
-//! - Use appropriate frame sizes (160 samples for G.711)
+
+//! - Use appropriate frame sizes (160 samples for G.711 at 8kHz/20ms)
 //!
 //! ### Direct G.711 Functions
 //!
@@ -144,9 +133,6 @@
 //!
 //! ### Core Codecs (enabled by default)
 //! - `g711`: G.711 μ-law/A-law codecs
-//! ### Optimizations
-//! - `simd`: SIMD optimizations (auto-detected)
-//! - `lut`: Lookup table optimizations (enabled by default)
 
 #![deny(missing_docs)]
 #![warn(clippy::all)]
@@ -176,10 +162,6 @@ pub const SUPPORTED_CODECS: &[&str] = &[
     #[cfg(feature = "g711")]
     "PCMA",
 
-    #[cfg(any(feature = "g729", feature = "g729-sim"))]
-    "G729",
-    #[cfg(any(feature = "opus", feature = "opus-sim"))]
-    "opus",
 ];
 
 /// Initialize the codec library
@@ -194,8 +176,7 @@ pub fn init() -> Result<()> {
     // Initialize logging if not already done
     let _ = tracing_subscriber::fmt::try_init();
 
-    // Initialize SIMD capabilities
-    utils::simd::init_simd_support();
+
 
     // Initialize lookup tables
     #[cfg(feature = "g711")]
@@ -212,7 +193,6 @@ pub fn info() -> LibraryInfo {
     LibraryInfo {
         version: VERSION,
         supported_codecs: SUPPORTED_CODECS.to_vec(),
-        simd_support: utils::simd::get_simd_support(),
     }
 }
 
@@ -223,8 +203,6 @@ pub struct LibraryInfo {
     pub version: &'static str,
     /// List of supported codec names
     pub supported_codecs: Vec<&'static str>,
-    /// SIMD support information
-    pub simd_support: utils::simd::SimdSupport,
 }
 
 #[cfg(test)]

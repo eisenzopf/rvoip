@@ -6,7 +6,7 @@
 //! ## Performance
 //!
 //! Using lookup tables provides O(1) conversion time compared to the algorithmic
-//! approach, significantly improving performance for real-time applications.
+//! approach for fast conversion.
 //!
 //! ## Memory Usage
 //!
@@ -144,26 +144,7 @@ pub fn alaw_expand_table(encoded: u8) -> i16 {
     ALAW_DECODE_TABLE[encoded as usize]
 }
 
-/// Batch μ-law compression using lookup tables
-///
-/// This function provides high-performance batch μ-law compression using
-/// pre-computed lookup tables.
-///
-/// # Arguments
-///
-/// * `samples` - Input linear PCM samples
-/// * `output` - Output buffer for μ-law encoded samples
-///
-/// # Panics
-///
-/// Panics if the input and output slices have different lengths.
-pub fn mulaw_compress_batch_table(samples: &[i16], output: &mut [u8]) {
-    assert_eq!(samples.len(), output.len());
-    
-    for (i, &sample) in samples.iter().enumerate() {
-        output[i] = mulaw_compress_table(sample);
-    }
-}
+
 
 /// Batch μ-law expansion using lookup tables
 ///
@@ -186,26 +167,7 @@ pub fn mulaw_expand_batch_table(encoded: &[u8], output: &mut [i16]) {
     }
 }
 
-/// Batch A-law compression using lookup tables
-///
-/// This function provides high-performance batch A-law compression using
-/// pre-computed lookup tables.
-///
-/// # Arguments
-///
-/// * `samples` - Input linear PCM samples
-/// * `output` - Output buffer for A-law encoded samples
-///
-/// # Panics
-///
-/// Panics if the input and output slices have different lengths.
-pub fn alaw_compress_batch_table(samples: &[i16], output: &mut [u8]) {
-    assert_eq!(samples.len(), output.len());
-    
-    for (i, &sample) in samples.iter().enumerate() {
-        output[i] = alaw_compress_table(sample);
-    }
-}
+
 
 /// Batch A-law expansion using lookup tables
 ///
@@ -285,32 +247,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_batch_processing() {
-        let samples = vec![0i16, 100, -100, 1000, -1000, 10000, -10000];
-        let mut mulaw_encoded = vec![0u8; samples.len()];
-        let mut mulaw_decoded = vec![0i16; samples.len()];
-        let mut alaw_encoded = vec![0u8; samples.len()];
-        let mut alaw_decoded = vec![0i16; samples.len()];
-        
-        // Test μ-law batch processing
-        mulaw_compress_batch_table(&samples, &mut mulaw_encoded);
-        mulaw_expand_batch_table(&mulaw_encoded, &mut mulaw_decoded);
-        
-        for (original, recovered) in samples.iter().zip(mulaw_decoded.iter()) {
-            let error = (recovered - original).abs();
-            assert!(error < 2000, "μ-law batch table error: {} vs {}", original, recovered);
-        }
-        
-        // Test A-law batch processing
-        alaw_compress_batch_table(&samples, &mut alaw_encoded);
-        alaw_expand_batch_table(&alaw_encoded, &mut alaw_decoded);
-        
-        for (original, recovered) in samples.iter().zip(alaw_decoded.iter()) {
-            let error = (recovered - original).abs();
-            assert!(error < 2000, "A-law batch table error: {} vs {}", original, recovered);
-        }
-    }
+
 
     #[test]
     fn test_table_validation() {
@@ -341,31 +278,5 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_performance_batch_vs_individual() {
-        use std::time::Instant;
-        
-        let samples = vec![0i16; 1000];
-        let mut encoded = vec![0u8; samples.len()];
-        let mut decoded = vec![0i16; samples.len()];
-        
-        // Test batch processing (should be faster)
-        let start = Instant::now();
-        mulaw_compress_batch_table(&samples, &mut encoded);
-        let batch_time = start.elapsed();
-        
-        // Test individual processing
-        let start = Instant::now();
-        for (i, &sample) in samples.iter().enumerate() {
-            encoded[i] = mulaw_compress_table(sample);
-        }
-        let individual_time = start.elapsed();
-        
-        println!("Batch time: {:?}, Individual time: {:?}", batch_time, individual_time);
-        
-        // Both should work correctly
-        for (i, &sample) in samples.iter().enumerate() {
-            assert_eq!(encoded[i], mulaw_compress_table(sample));
-        }
-    }
+
 } 

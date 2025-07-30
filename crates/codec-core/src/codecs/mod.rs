@@ -1,7 +1,6 @@
 //! # Audio Codec Implementations
 //!
-//! This module contains production-ready implementations of various audio codecs
-//! optimized for VoIP applications. All codecs are ITU-T compliant and thoroughly tested.
+//! This module contains G.711 audio codec implementation for VoIP applications.
 //!
 //! ## Available Codecs
 //!
@@ -9,17 +8,16 @@
 //! - **Standard**: ITU-T G.711 
 //! - **Sample Rate**: 8 kHz
 //! - **Bitrate**: 64 kbps
-//! - **Quality**: 37+ dB SNR
-//! - **Use Case**: Universal VoIP compatibility
+//! - **Quality**: ~37 dB SNR
+//! - **Use Case**: Standard telephony
 //! - **Variants**: μ-law (PCMU), A-law (PCMA)
 //!
-//! ## Real Audio Testing
+//! ## Testing
 //!
-//! All codecs are validated with real speech samples through WAV roundtrip tests:
-//! - Automatic download of reference audio samples
+//! G.711 is validated with real speech samples through WAV roundtrip tests:
+//! - Downloads reference audio samples
 //! - Round-trip encoding and decoding validation
-//! - Signal-to-Noise Ratio (SNR) measurement  
-//! - Quality validation with industry-standard metrics
+//! - Signal-to-Noise Ratio (SNR) measurement
 //!
 //! ## Usage Examples
 //!
@@ -44,7 +42,7 @@
 //! ```rust
 //! use codec_core::codecs::g711::{G711Codec, G711Variant};
 //!
-//! // Direct instantiation for specific needs  
+//! // Direct instantiation  
 //! let mut g711_ulaw = G711Codec::new(G711Variant::MuLaw);
 //! let mut g711_alaw = G711Codec::new(G711Variant::ALaw);
 //! # Ok::<(), Box<dyn std::error::Error>>(())

@@ -133,25 +133,7 @@ mod tests {
         assert_eq!(encoded_mu.len(), 160);
     }
 
-    #[test]
-    fn test_batch_encoding_operations() {
-        let samples = vec![1000i16, 2000i16, -1000i16, -2000i16, 0i16];
-        let mut alaw_encoded = vec![0u8; samples.len()];
-        let mut mulaw_encoded = vec![0u8; samples.len()];
 
-        // Test batch encoding
-        alaw_compress_batch(&samples, &mut alaw_encoded);
-        ulaw_compress_batch(&samples, &mut mulaw_encoded);
-
-        assert_eq!(alaw_encoded.len(), samples.len());
-        assert_eq!(mulaw_encoded.len(), samples.len());
-        
-        // Verify batch vs individual encoding consistency
-        for (i, &sample) in samples.iter().enumerate() {
-            assert_eq!(alaw_encoded[i], alaw_compress(sample));
-            assert_eq!(mulaw_encoded[i], ulaw_compress(sample));
-        }
-    }
 
     #[test]
     fn test_encoding_repeatability() {

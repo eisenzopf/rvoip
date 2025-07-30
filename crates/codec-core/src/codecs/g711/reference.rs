@@ -174,85 +174,13 @@ pub fn ulaw_expand(compressed: u8) -> i16 {
     )
 }
 
-/// Batch A-law compression
-///
-/// Compresses a slice of linear PCM samples to A-law encoding.
-///
-/// # Arguments
-///
-/// * `samples` - Input linear PCM samples
-/// * `output` - Output buffer for A-law encoded samples
-///
-/// # Panics
-///
-/// Panics if the input and output slices have different lengths.
-pub fn alaw_compress_batch(samples: &[i16], output: &mut [u8]) {
-    assert_eq!(samples.len(), output.len(), "Input and output slices must have the same length");
-    
-    for (i, &sample) in samples.iter().enumerate() {
-        output[i] = alaw_compress(sample);
-    }
-}
 
-/// Batch A-law expansion
-///
-/// Expands a slice of A-law encoded samples to linear PCM.
-///
-/// # Arguments
-///
-/// * `encoded` - A-law encoded samples
-/// * `output` - Output buffer for linear PCM samples
-///
-/// # Panics
-///
-/// Panics if the input and output slices have different lengths.
-pub fn alaw_expand_batch(encoded: &[u8], output: &mut [i16]) {
-    assert_eq!(encoded.len(), output.len(), "Input and output slices must have the same length");
-    
-    for (i, &encoded_sample) in encoded.iter().enumerate() {
-        output[i] = alaw_expand(encoded_sample);
-    }
-}
 
-/// Batch μ-law compression
-///
-/// Compresses a slice of linear PCM samples to μ-law encoding.
-///
-/// # Arguments
-///
-/// * `samples` - Input linear PCM samples
-/// * `output` - Output buffer for μ-law encoded samples
-///
-/// # Panics
-///
-/// Panics if the input and output slices have different lengths.
-pub fn ulaw_compress_batch(samples: &[i16], output: &mut [u8]) {
-    assert_eq!(samples.len(), output.len(), "Input and output slices must have the same length");
-    
-    for (i, &sample) in samples.iter().enumerate() {
-        output[i] = ulaw_compress(sample);
-    }
-}
 
-/// Batch μ-law expansion
-///
-/// Expands a slice of μ-law encoded samples to linear PCM.
-///
-/// # Arguments
-///
-/// * `encoded` - μ-law encoded samples
-/// * `output` - Output buffer for linear PCM samples
-///
-/// # Panics
-///
-/// Panics if the input and output slices have different lengths.
-pub fn ulaw_expand_batch(encoded: &[u8], output: &mut [i16]) {
-    assert_eq!(encoded.len(), output.len(), "Input and output slices must have the same length");
-    
-    for (i, &encoded_sample) in encoded.iter().enumerate() {
-        output[i] = ulaw_expand(encoded_sample);
-    }
-}
+
+
+
+
 
 #[cfg(test)]
 mod tests {
@@ -286,35 +214,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_alaw_batch_processing() {
-        let samples = vec![0i16, 100, -100, 1000, -1000];
-        let mut encoded = vec![0u8; samples.len()];
-        let mut decoded = vec![0i16; samples.len()];
-        
-        alaw_compress_batch(&samples, &mut encoded);
-        alaw_expand_batch(&encoded, &mut decoded);
-        
-        for (original, recovered) in samples.iter().zip(decoded.iter()) {
-            let error = (recovered - original).abs();
-            assert!(error < 2000, "A-law batch error too large: {} vs {}", original, recovered);
-        }
-    }
 
-    #[test]
-    fn test_ulaw_batch_processing() {
-        let samples = vec![0i16, 100, -100, 1000, -1000];
-        let mut encoded = vec![0u8; samples.len()];
-        let mut decoded = vec![0i16; samples.len()];
-        
-        ulaw_compress_batch(&samples, &mut encoded);
-        ulaw_expand_batch(&encoded, &mut decoded);
-        
-        for (original, recovered) in samples.iter().zip(decoded.iter()) {
-            let error = (recovered - original).abs();
-            assert!(error < 2000, "μ-law batch error too large: {} vs {}", original, recovered);
-        }
-    }
+
+
 
     #[test]
     fn test_boundary_values() {

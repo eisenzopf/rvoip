@@ -1,15 +1,14 @@
 //! G.711 Audio Codec Implementation
 //!
 //! This module implements the G.711 codec with both μ-law (PCMU) and A-law (PCMA)
-//! variants. G.711 is the fundamental codec for telephony systems worldwide.
+//! variants. G.711 is the standard codec for telephony systems.
 //!
 //! ## Features
 //!
 //! - ITU-T G.711 compliant implementation
-//! - Both A-law and μ-law encoding/decoding
-//! - Single-sample and batch processing functions
-//! - Zero-allocation batch processing
-//! - Optimized for VoIP applications
+//! - Both A-law and μ-law encoding/decoding  
+//! - Simple single-sample functions
+//! - Lookup table optimized for performance
 //!
 //! ## Usage
 //!
@@ -27,17 +26,14 @@
 //! let ulaw_decoded = ulaw_expand(ulaw_encoded);
 //! ```
 //!
-//! ### Batch Processing (Zero-Allocation)
+//! ### Processing Multiple Samples
 //!
 //! ```rust
-//! use codec_core::codecs::g711::{alaw_compress_batch, alaw_expand_batch};
+//! use codec_core::codecs::g711::{alaw_compress, alaw_expand};
 //!
 //! let samples = vec![0i16, 100, -100, 1000, -1000];
-//! let mut encoded = vec![0u8; samples.len()];
-//! let mut decoded = vec![0i16; samples.len()];
-//!
-//! alaw_compress_batch(&samples, &mut encoded);
-//! alaw_expand_batch(&encoded, &mut decoded);
+//! let encoded: Vec<u8> = samples.iter().map(|&s| alaw_compress(s)).collect();
+//! let decoded: Vec<i16> = encoded.iter().map(|&e| alaw_expand(e)).collect();
 //! ```
 //!
 //! ### Using the G711Codec Struct
@@ -72,8 +68,7 @@ pub mod tests;
 
 // Re-export the core functions
 pub use reference::{
-    alaw_compress, alaw_expand, ulaw_compress, ulaw_expand,
-    alaw_compress_batch, alaw_expand_batch, ulaw_compress_batch, ulaw_expand_batch
+    alaw_compress, alaw_expand, ulaw_compress, ulaw_expand
 };
 
 /// G.711 codec implementation
