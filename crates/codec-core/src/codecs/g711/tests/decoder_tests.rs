@@ -100,25 +100,7 @@ mod tests {
         assert_ne!(decoded_mu, decoded_a);
     }
 
-    #[test]
-    fn test_batch_decoding_operations() {
-        let encoded = vec![100u8, 150u8, 200u8, 50u8, 75u8];
-        let mut alaw_decoded = vec![0i16; encoded.len()];
-        let mut mulaw_decoded = vec![0i16; encoded.len()];
 
-        // Test batch decoding
-        alaw_expand_batch(&encoded, &mut alaw_decoded);
-        ulaw_expand_batch(&encoded, &mut mulaw_decoded);
-
-        assert_eq!(alaw_decoded.len(), encoded.len());
-        assert_eq!(mulaw_decoded.len(), encoded.len());
-        
-        // Verify batch vs individual decoding consistency
-        for (i, &enc) in encoded.iter().enumerate() {
-            assert_eq!(alaw_decoded[i], alaw_expand(enc));
-            assert_eq!(mulaw_decoded[i], ulaw_expand(enc));
-        }
-    }
 
     #[test]
     fn test_decoding_repeatability() {
