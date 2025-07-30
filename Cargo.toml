@@ -12,6 +12,7 @@ members = [
     "crates/call-engine",
     "crates/client-core",
     "crates/codec-core",
+    "crates/audio-core",
     "crates/rvoip",
 ]
 
@@ -28,6 +29,7 @@ default-members = [
     "crates/call-engine",
     "crates/client-core",
     "crates/codec-core",
+    "crates/audio-core",
     "crates/rvoip",
 ]
 
