@@ -13,24 +13,53 @@
 //!
 //! ## Usage
 //!
+//! ### Direct Function Calls
+//!
 //! ```rust
-//! use rvoip_codec_core::codecs::g711;
+//! use codec_core::codecs::g711::{alaw_compress, alaw_expand, ulaw_compress, ulaw_expand};
 //!
 //! // Single sample processing
 //! let sample = 1024i16;
-//! let alaw_encoded = g711::alaw_compress(sample);
-//! let alaw_decoded = g711::alaw_expand(alaw_encoded);
+//! let alaw_encoded = alaw_compress(sample);
+//! let alaw_decoded = alaw_expand(alaw_encoded);
 //!
-//! let ulaw_encoded = g711::ulaw_compress(sample);
-//! let ulaw_decoded = g711::ulaw_expand(ulaw_encoded);
+//! let ulaw_encoded = ulaw_compress(sample);
+//! let ulaw_decoded = ulaw_expand(ulaw_encoded);
+//! ```
 //!
-//! // Batch processing (zero-allocation)
+//! ### Batch Processing (Zero-Allocation)
+//!
+//! ```rust
+//! use codec_core::codecs::g711::{alaw_compress_batch, alaw_expand_batch};
+//!
 //! let samples = vec![0i16, 100, -100, 1000, -1000];
 //! let mut encoded = vec![0u8; samples.len()];
 //! let mut decoded = vec![0i16; samples.len()];
 //!
-//! g711::alaw_compress_batch(&samples, &mut encoded);
-//! g711::alaw_expand_batch(&encoded, &mut decoded);
+//! alaw_compress_batch(&samples, &mut encoded);
+//! alaw_expand_batch(&encoded, &mut decoded);
+//! ```
+//!
+//! ### Using the G711Codec Struct
+//!
+//! ```rust
+//! use codec_core::codecs::g711::{G711Codec, G711Variant};
+//! use codec_core::types::{AudioCodec, CodecConfig, CodecType, SampleRate};
+//!
+//! // Create μ-law codec
+//! let config = CodecConfig::new(CodecType::G711Pcmu)
+//!     .with_sample_rate(SampleRate::Rate8000)
+//!     .with_channels(1);
+//! let mut codec = G711Codec::new_pcmu(config)?;
+//!
+//! // Or create A-law codec directly
+//! let mut alaw_codec = G711Codec::new(G711Variant::ALaw);
+//!
+//! // Encode/decode
+//! let samples = vec![0i16; 160]; // 20ms at 8kHz
+//! let encoded = codec.encode(&samples)?;
+//! let decoded = codec.decode(&encoded)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 use crate::error::CodecError;

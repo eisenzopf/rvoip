@@ -31,6 +31,8 @@ Session.vim
 .settings/
 .vs/
 .dir-locals.el
+Cargo.lock
+Cargo.backup
 
 ## Tool
 .valgrindrc

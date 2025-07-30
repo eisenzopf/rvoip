@@ -9,4 +9,5 @@ pub mod decoder_tests;
 pub mod itu_validation_tests;
 pub mod itu_test_standalone;
 pub mod algorithm_verification;
-pub mod quick_itu_test; 
+pub mod quick_itu_test;
+pub mod wav_roundtrip_test; 

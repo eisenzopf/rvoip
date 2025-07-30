@@ -11,26 +11,6 @@ repository = "https://github.com/your-org/rvoip"
 name = "codec_core"
 path = "src/lib.rs"
 
-[[bin]]
-name = "g729a_compliance"
-path = "src/codecs/g729a/run_compliance_tests.rs"
-required-features = []
-
-[[bin]]
-name = "g729a_bit_inspector"
-path = "src/bin/g729a_bit_inspector.rs"
-required-features = []
-
-[[bin]]
-name = "g729a_bitstream_analyzer"
-path = "src/bin/g729a_bitstream_analyzer.rs"
-required-features = []
-
-[[bin]]
-name = "g729a_param_inspector"
-path = "src/bin/g729a_param_inspector.rs"
-required-features = []
-
 [lints]
 workspace = true
 
@@ -51,12 +31,6 @@ rustfft = "6.1"              # Fast Fourier transforms
 num-complex = "0.4"          # Complex number support
 apodize = "1.0"              # Windowing functions
 
-# External codec libraries (optional)
-opus = { version = "0.3", optional = true }
-# g729 = { version = "0.3", optional = true }  # Commented out - licensing required
-
-
-
 # Testing dependencies
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full"] }
@@ -67,51 +41,18 @@ temp-dir = "0.1"
 
 # Feature flags
 [features]
-default = ["g711", "g722", "g729-core", "opus-sim"]
+default = ["g711"]
 
 # Individual codec features
 g711 = []                    # Always available - no external dependencies
-g722 = []                    # Always available - no external dependencies
-opus = ["dep:opus"]          # Real Opus - requires external library
-opus-sim = []                # Opus simulation - no external dependencies
-
-# G.729 codec variants - allows selective compilation of features
-# Core G.729 (8 kbit/s, full complexity)
-g729-core = []
-
-# G.729 Annex A (8 kbit/s, reduced complexity ~40% faster)
-# Enables simplified pitch analysis, adaptive ACELP, and reduced postfiltering
-annex-a = ["g729-core"]
-
-# G.729 Annex B (VAD/DTX/CNG extensions for bandwidth efficiency)
-# Enables Voice Activity Detection, Discontinuous Transmission, and Comfort Noise Generation
-# Can provide ~50% bandwidth savings during silence periods
-annex-b = ["g729-core"]
-
-# Convenience feature to enable all G.729 variants
-# Includes G.729, G.729A, G.729B, and G.729BA (A+B combined)
-all-annexes = ["annex-a", "annex-b"]
-
-# Development feature for comprehensive testing across all variants
-dev-all = ["all-annexes"]
-
-# Legacy features (deprecated - use g729-core instead)
-g729 = ["g729-core"]         # Real G.729 - now maps to g729-core
-g729-sim = ["g729-core"]     # G.729 simulation - now maps to g729-core
 
 # Performance features
 simd = []                    # SIMD optimizations
 lut = []                     # Pre-computed lookup tables (enabled by default)
 
 # All codecs
-all-codecs = ["g711", "g722", "g729", "opus"]
-all-sim = ["g711", "g722", "g729-sim", "opus-sim"]
+all-codecs = ["g711"]
+all-sim = ["g711"]
 
 # Benchmarking
 bench = []
-
-# Uncomment to enable benchmarks (requires creating benches/codec_benchmarks.rs)
-# [[bench]]
-# name = "codec_benchmarks"
-# harness = false
-# required-features = ["bench"] 

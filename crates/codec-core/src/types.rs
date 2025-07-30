@@ -95,7 +95,7 @@ pub trait AudioCodecExt: AudioCodec {
 /// Audio codec information
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodecInfo {
-    /// Codec name (e.g., "PCMU", "G722", "opus")
+    /// Codec name (e.g., "PCMU", "PCMA", "opus")
     pub name: &'static str,
     /// Sample rate in Hz
     pub sample_rate: u32,
@@ -117,7 +117,7 @@ pub enum CodecType {
     /// G.711 A-law (PCMA)
     G711Pcma,
     /// G.722 wideband
-    G722,
+
     /// G.729 low-bitrate
     G729,
     /// G.729A reduced complexity
@@ -134,7 +134,7 @@ impl CodecType {
         match self {
             Self::G711Pcmu => "PCMU",
             Self::G711Pcma => "PCMA",
-            Self::G722 => "G722",
+
             Self::G729 => "G729",
             Self::G729A => "G729A",
             Self::G729BA => "G729BA",
@@ -146,7 +146,7 @@ impl CodecType {
     pub fn default_sample_rate(self) -> u32 {
         match self {
             Self::G711Pcmu | Self::G711Pcma => 8000,
-            Self::G722 => 16000,
+
             Self::G729 | Self::G729A | Self::G729BA => 8000,
             Self::Opus => 48000,
         }
@@ -156,7 +156,7 @@ impl CodecType {
     pub fn default_bitrate(self) -> u32 {
         match self {
             Self::G711Pcmu | Self::G711Pcma => 64000,
-            Self::G722 => 64000,
+
             Self::G729 | Self::G729A | Self::G729BA => 8000,
             Self::Opus => 64000,
         }
@@ -167,7 +167,7 @@ impl CodecType {
         match self {
             Self::G711Pcmu => Some(0),
             Self::G711Pcma => Some(8),
-            Self::G722 => Some(9),
+
             Self::G729 | Self::G729A | Self::G729BA => Some(18),
             Self::Opus => None, // Dynamic payload type
         }
@@ -177,7 +177,7 @@ impl CodecType {
     pub fn supported_sample_rates(self) -> &'static [u32] {
         match self {
             Self::G711Pcmu | Self::G711Pcma => &[8000],
-            Self::G722 => &[16000],
+
             Self::G729 | Self::G729A | Self::G729BA => &[8000],
             Self::Opus => &[8000, 12000, 16000, 24000, 48000],
         }
@@ -186,7 +186,7 @@ impl CodecType {
     /// Get supported channel counts
     pub fn supported_channels(self) -> &'static [u8] {
         match self {
-            Self::G711Pcmu | Self::G711Pcma | Self::G722 | Self::G729 | Self::G729A | Self::G729BA => &[1],
+            Self::G711Pcmu | Self::G711Pcma | Self::G729 | Self::G729A | Self::G729BA => &[1],
             Self::Opus => &[1, 2],
         }
     }
@@ -378,10 +378,7 @@ impl CodecConfig {
         Self::new(CodecType::G711Pcma)
     }
 
-    /// Create G.722 configuration
-    pub fn g722() -> Self {
-        Self::new(CodecType::G722)
-    }
+
 
     /// Create G.729 configuration
     pub fn g729() -> Self {
@@ -500,7 +497,7 @@ impl CodecType {
     pub fn bitrate_range(self) -> (u32, u32) {
         match self {
             Self::G711Pcmu | Self::G711Pcma => (64000, 64000),
-            Self::G722 => (64000, 64000),
+
             Self::G729 | Self::G729A | Self::G729BA => (8000, 8000),
             Self::Opus => (6000, 510000),
         }
@@ -512,8 +509,7 @@ impl CodecType {
 pub struct CodecParameters {
     /// G.711 specific parameters
     pub g711: G711Parameters,
-    /// G.722 specific parameters
-    pub g722: G722Parameters,
+
     /// G.729 specific parameters
     pub g729: G729Parameters,
     /// Opus specific parameters
@@ -527,12 +523,7 @@ pub struct G711Parameters {
     pub use_alaw: bool,
 }
 
-/// G.722 codec parameters
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct G722Parameters {
-    /// Quality mode (0-2, higher is better)
-    pub quality: u8,
-}
+
 
 /// G.729 codec parameters
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -652,7 +643,7 @@ impl CodecType {
     pub fn quality_score(self) -> u8 {
         match self {
             Self::G711Pcmu | Self::G711Pcma => 70,
-            Self::G722 => 80,
+
             Self::G729 | Self::G729A | Self::G729BA => 85,
             Self::Opus => 95,
         }
