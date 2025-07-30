@@ -13,7 +13,7 @@ categories.workspace = true
 keywords.workspace = true
 
 # Crate-specific description
-description = "Comprehensive audio handling for VoIP applications with device management, format conversion, and codec processing"
+description = "Comprehensive audio handling for VoIP applications with device management and format conversion"
 
 # ✨ INHERIT LINTS FROM WORKSPACE
 [lints]
@@ -36,8 +36,6 @@ dasp = { version = "0.11", features = ["signal"], optional = true }
 # For audio file decoding in tests
 symphonia = { version = "0.5", features = ["mp3", "wav"], optional = true }
 
-# Codecs
-audiopus = { version = "0.2", optional = true }
 
 # Async runtime and utilities
 tokio = { version = "1.0", features = ["full"] }
@@ -67,7 +65,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serial_test = "3.1"
 
 [features]
-default = ["device-cpal", "format-conversion", "codec-g711"]
+default = ["device-cpal", "format-conversion"]
 
 # Device backend features
 device-cpal = ["cpal"]
@@ -77,11 +75,6 @@ device-mock = []
 format-conversion = ["samplerate", "rubato"]
 format-advanced = ["format-conversion", "dasp"]
 
-# Codec features
-codec-g711 = []
-codec-g722 = []
-codec-opus = ["audiopus"]
-codec-all = ["codec-g711", "codec-g722", "codec-opus"]
 
 # Client integration features
 client-integration = ["rvoip-client-core", "symphonia", "format-advanced"]
@@ -94,7 +87,7 @@ processing-vad = []
 processing-all = ["processing-aec", "processing-agc", "processing-noise", "processing-vad"]
 
 # All features
-full = ["device-cpal", "format-advanced", "codec-all", "processing-all"]
+full = ["device-cpal", "format-advanced", "processing-all"]
 
 # Example configurations
 # Examples will be implemented in future phases 

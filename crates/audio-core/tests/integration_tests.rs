@@ -102,32 +102,18 @@ mod types_tests {
         assert!(best_format.is_voip_suitable());
     }
 
-    #[test]
-    fn test_audio_codec_properties() {
-        let g711 = AudioCodec::G711U;
-        assert_eq!(g711.name(), "PCMU");
-        assert_eq!(g711.payload_type(), Some(0));
-        assert_eq!(g711.typical_sample_rate(), 8000);
-        assert!(!g711.supports_vbr());
-
-        let opus = AudioCodec::Opus;
-        assert_eq!(opus.name(), "opus");
-        assert_eq!(opus.payload_type(), Some(96));
-        assert_eq!(opus.typical_sample_rate(), 48000);
-        assert!(opus.supports_vbr());
-    }
 
     #[test]
     fn test_audio_stream_config() {
         let config = AudioStreamConfig::voip_basic();
         assert_eq!(config.input_format.sample_rate, 8000);
-        assert_eq!(config.codec, AudioCodec::G711U);
+        assert_eq!(config.codec_name, "PCMU");
         assert!(config.enable_aec);
         assert!(config.enable_agc);
 
         let hq_config = AudioStreamConfig::voip_high_quality();
         assert_eq!(hq_config.input_format.sample_rate, 48000);
-        assert_eq!(hq_config.codec, AudioCodec::Opus);
+        assert_eq!(hq_config.codec_name, "opus");
         assert!(hq_config.enable_noise_suppression);
         assert!(hq_config.enable_vad);
     }
@@ -267,8 +253,6 @@ mod error_tests {
         let device_error = AudioError::device_not_found("test-device");
         assert!(matches!(device_error, AudioError::DeviceNotFound { .. }));
 
-        let codec_error = AudioError::codec_error("G711", "encode", "invalid data");
-        assert!(matches!(codec_error, AudioError::CodecError { .. }));
 
         let buffer_error = AudioError::buffer_error("capture", "overflow", "buffer full");
         assert!(matches!(buffer_error, AudioError::BufferError { .. }));
@@ -297,10 +281,6 @@ mod error_tests {
         assert!(message.contains("device"));
         assert!(message.contains("not found"));
 
-        let codec_error = AudioError::codec_error("G711", "encode", "invalid data");
-        let message = codec_error.user_friendly_message();
-        assert!(message.contains("codec"));
-        assert!(message.contains("problem"));
     }
 }
 
@@ -338,44 +318,6 @@ mod defaults_tests {
     }
 }
 
-#[cfg(test)]
-mod codec_tests {
-    use super::*;
-    use rvoip_audio_core::codec::{CodecFactory, CodecConfig, CodecType};
-    use std::collections::HashMap;
-
-    #[test]
-    fn test_codec_factory_creation() {
-        let config = CodecConfig {
-            codec: CodecType::G729,
-            sample_rate: 8000,
-            channels: 1,
-            bitrate: 8000,
-            params: HashMap::new(),
-        };
-        
-        let codec = CodecFactory::create(config);
-        assert!(codec.is_ok(), "Codec factory should create G.729 codec successfully");
-    }
-
-    #[test]
-    fn test_codec_factory_all_types() {
-        let codecs = [CodecType::G711Pcmu, CodecType::G711Pcma, CodecType::G722, CodecType::G729, CodecType::Opus];
-        
-        for codec_type in codecs {
-            let config = CodecConfig {
-                codec: codec_type,
-                sample_rate: codec_type.default_sample_rate(),
-                channels: 1,
-                bitrate: codec_type.default_bitrate(),
-                params: HashMap::new(),
-            };
-            
-            let codec = CodecFactory::create(config);
-            assert!(codec.is_ok(), "Codec factory should create {:?} codec successfully", codec_type);
-        }
-    }
-}
 
 #[cfg(test)]
 mod integration_tests {
@@ -418,23 +360,4 @@ mod integration_tests {
         assert_eq!(frame3.format.channels, 2);
     }
 
-    #[test]
-    fn test_codec_selection_by_format() {
-        // Test selecting appropriate codecs based on format
-        let narrowband = AudioFormat::pcm_8khz_mono();
-        let wideband = AudioFormat::pcm_16khz_mono();
-        let hifi = AudioFormat::pcm_48khz_stereo();
-
-        // For narrowband, G.711 is appropriate
-        assert!(narrowband.is_voip_suitable());
-        assert_eq!(AudioCodec::G711U.typical_sample_rate(), 8000);
-
-        // For wideband, G.722 is appropriate
-        assert!(wideband.is_voip_suitable());
-        assert_eq!(AudioCodec::G722.typical_sample_rate(), 16000);
-
-        // For high fidelity, Opus is appropriate
-        assert!(!hifi.is_voip_suitable());
-        assert_eq!(AudioCodec::Opus.typical_sample_rate(), 48000);
-    }
 } 

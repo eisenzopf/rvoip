@@ -9,7 +9,6 @@
 //!
 //! - **Device Management**: Cross-platform audio device access and control
 //! - **Format Bridge**: Audio format conversion and resampling
-//! - **Codec Engine**: Audio codec encoding/decoding for VoIP
 //! - **Pipeline**: High-level audio streaming pipelines
 //! - **RTP Integration**: RTP payload encoding/decoding
 //! - **Processing**: Audio signal processing (AEC, AGC, etc.)
@@ -61,7 +60,6 @@
 //!
 //! - `device-cpal`: CPAL-based audio device support (default)
 //! - `format-conversion`: Audio format conversion and resampling
-//! - `codec-g711`, `codec-g722`, `codec-opus`: Various audio codecs
 //! - `processing-*`: Audio signal processing features
 //!
 //! Enable features in your `Cargo.toml`:
@@ -85,8 +83,6 @@ pub mod device;
 #[cfg(feature = "format-conversion")]
 pub mod format;
 
-// Codec support
-pub mod codec;
 
 // Audio pipeline
 pub mod pipeline;
@@ -106,7 +102,7 @@ pub mod processing;
 // Re-export commonly used types
 pub use error::{AudioError, AudioResult};
 pub use types::{
-    AudioFormat, AudioFrame, AudioDirection, AudioCodec,
+    AudioFormat, AudioFrame, AudioDirection,
     AudioDeviceInfo, AudioStreamConfig, AudioQualityMetrics
 };
 
@@ -116,8 +112,6 @@ pub use device::{AudioDeviceManager, AudioDevice};
 // Re-export pipeline
 pub use pipeline::AudioPipeline;
 
-// Re-export codec engine
-pub use codec::{CodecType, CodecConfig, CodecFactory, CodecNegotiator, CodecQualityMetrics};
 
 // Re-export integration types from session-core and rtp-core
 pub use rvoip_session_core::api::types::SessionId;

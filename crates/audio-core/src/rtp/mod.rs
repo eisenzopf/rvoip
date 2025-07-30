@@ -1,19 +1,19 @@
 //! RTP integration
 //!
-//! This module provides RTP payload encoding and decoding.
+//! This module provides RTP payload handling for audio streams.
 
 use crate::types::{AudioFrame, AudioFormat};
-use crate::codec::{CodecType, CodecConfig};
 use crate::error::AudioError;
 
-/// RTP payload handling for audio codecs
+/// RTP payload handling for audio
 pub struct RtpPayloadHandler {
-    codec: CodecType,
+    codec_name: String,
     payload_type: u8,
     ssrc: u32,
     sequence_number: u16,
     timestamp: u32,
     sample_rate: u32,
+    samples_per_packet: usize,
 }
 
 /// RTP packet structure
@@ -30,7 +30,7 @@ pub struct RtpPacket {
     pub payload: Vec<u8>,
 }
 
-/// RTP payload format for different codecs
+/// RTP payload format trait for different codecs
 pub trait RtpPayloadFormat {
     /// Pack encoded audio data into RTP payload
     fn pack_payload(&self, data: &[u8]) -> Vec<u8>;
@@ -47,14 +47,18 @@ pub trait RtpPayloadFormat {
 
 impl RtpPayloadHandler {
     /// Create a new RTP payload handler
-    pub fn new(codec: CodecType, ssrc: u32) -> Self {
+    pub fn new(codec_name: String, payload_type: u8, sample_rate: u32, ssrc: u32) -> Self {
+        // Default to 20ms packets
+        let samples_per_packet = (sample_rate * 20 / 1000) as usize;
+        
         Self {
-            codec,
-            payload_type: codec.payload_type(),
+            codec_name,
+            payload_type,
             ssrc,
             sequence_number: 0,
             timestamp: 0,
-            sample_rate: codec.default_sample_rate(),
+            sample_rate,
+            samples_per_packet,
         }
     }
 
@@ -74,7 +78,7 @@ impl RtpPayloadHandler {
 
         // Update sequence number and timestamp
         self.sequence_number = self.sequence_number.wrapping_add(1);
-        self.timestamp = self.timestamp.wrapping_add(self.samples_per_packet() as u32);
+        self.timestamp = self.timestamp.wrapping_add(self.samples_per_packet as u32);
 
         packet
     }
@@ -138,27 +142,21 @@ impl RtpPayloadHandler {
         data
     }
 
-    /// Get samples per packet for current codec
+    /// Get samples per packet for current configuration
     pub fn samples_per_packet(&self) -> usize {
-        match self.codec {
-            CodecType::G711Pcmu | CodecType::G711Pcma => 160, // 20ms at 8kHz
-            CodecType::G722 => 160, // 20ms at 16kHz (but transmitted as 8kHz)
-            CodecType::G729 => 80, // 10ms at 8kHz
-            CodecType::Opus => {
-                // Opus frame size depends on sample rate
-                match self.sample_rate {
-                    8000 => 160,
-                    16000 => 320,
-                    48000 => 960,
-                    _ => 320,
-                }
-            }
-        }
+        self.samples_per_packet
     }
 
-    /// Set sample rate (for dynamic codecs like Opus)
+    /// Set samples per packet
+    pub fn set_samples_per_packet(&mut self, samples: usize) {
+        self.samples_per_packet = samples;
+    }
+
+    /// Set sample rate
     pub fn set_sample_rate(&mut self, sample_rate: u32) {
         self.sample_rate = sample_rate;
+        // Update samples per packet for 20ms
+        self.samples_per_packet = (sample_rate * 20 / 1000) as usize;
     }
 
     /// Get current timestamp
@@ -175,117 +173,6 @@ impl RtpPayloadHandler {
     pub fn reset(&mut self) {
         self.sequence_number = 0;
         self.timestamp = 0;
-    }
-}
-
-/// G.711 RTP payload format
-pub struct G711PayloadFormat {
-    payload_type: u8,
-}
-
-impl G711PayloadFormat {
-    pub fn new(is_pcmu: bool) -> Self {
-        Self {
-            payload_type: if is_pcmu { 0 } else { 8 },
-        }
-    }
-}
-
-impl RtpPayloadFormat for G711PayloadFormat {
-    fn pack_payload(&self, data: &[u8]) -> Vec<u8> {
-        // G.711 payload is just the raw encoded bytes
-        data.to_vec()
-    }
-
-    fn unpack_payload(&self, payload: &[u8]) -> Result<Vec<u8>, AudioError> {
-        // G.711 payload is just the raw encoded bytes
-        Ok(payload.to_vec())
-    }
-
-    fn payload_type(&self) -> u8 {
-        self.payload_type
-    }
-
-    fn samples_per_packet(&self) -> usize {
-        160 // 20ms at 8kHz
-    }
-}
-
-/// G.722 RTP payload format
-pub struct G722PayloadFormat;
-
-impl RtpPayloadFormat for G722PayloadFormat {
-    fn pack_payload(&self, data: &[u8]) -> Vec<u8> {
-        // G.722 payload is just the raw encoded bytes
-        data.to_vec()
-    }
-
-    fn unpack_payload(&self, payload: &[u8]) -> Result<Vec<u8>, AudioError> {
-        // G.722 payload is just the raw encoded bytes
-        Ok(payload.to_vec())
-    }
-
-    fn payload_type(&self) -> u8 {
-        9
-    }
-
-    fn samples_per_packet(&self) -> usize {
-        160 // 20ms at 16kHz, but RTP timestamp increments at 8kHz rate
-    }
-}
-
-/// G.729 RTP payload format
-pub struct G729PayloadFormat;
-
-impl RtpPayloadFormat for G729PayloadFormat {
-    fn pack_payload(&self, data: &[u8]) -> Vec<u8> {
-        // G.729 payload is just the raw encoded bytes (10 bytes per frame)
-        data.to_vec()
-    }
-
-    fn unpack_payload(&self, payload: &[u8]) -> Result<Vec<u8>, AudioError> {
-        // G.729 payload is just the raw encoded bytes
-        Ok(payload.to_vec())
-    }
-
-    fn payload_type(&self) -> u8 {
-        18
-    }
-
-    fn samples_per_packet(&self) -> usize {
-        80 // 10ms at 8kHz
-    }
-}
-
-/// Opus RTP payload format
-pub struct OpusPayloadFormat {
-    sample_rate: u32,
-}
-
-impl OpusPayloadFormat {
-    pub fn new(sample_rate: u32) -> Self {
-        Self { sample_rate }
-    }
-}
-
-impl RtpPayloadFormat for OpusPayloadFormat {
-    fn pack_payload(&self, data: &[u8]) -> Vec<u8> {
-        // Opus payload is the raw encoded frame
-        data.to_vec()
-    }
-
-    fn unpack_payload(&self, payload: &[u8]) -> Result<Vec<u8>, AudioError> {
-        // Opus payload is the raw encoded frame
-        Ok(payload.to_vec())
-    }
-
-    fn payload_type(&self) -> u8 {
-        111 // Dynamic payload type for Opus
-    }
-
-    fn samples_per_packet(&self) -> usize {
-        // 20ms frame at current sample rate
-        (self.sample_rate * 20 / 1000) as usize
     }
 }
 
@@ -369,15 +256,16 @@ mod tests {
 
     #[test]
     fn test_rtp_payload_handler_creation() {
-        let handler = RtpPayloadHandler::new(CodecType::G711Pcmu, 0x12345678);
-        assert_eq!(handler.codec, CodecType::G711Pcmu);
+        let handler = RtpPayloadHandler::new("PCMU".to_string(), 0, 8000, 0x12345678);
+        assert_eq!(handler.codec_name, "PCMU");
         assert_eq!(handler.payload_type, 0);
         assert_eq!(handler.ssrc, 0x12345678);
+        assert_eq!(handler.samples_per_packet(), 160); // 20ms at 8kHz
     }
 
     #[test]
     fn test_rtp_packet_creation() {
-        let mut handler = RtpPayloadHandler::new(CodecType::G711Pcmu, 0x12345678);
+        let mut handler = RtpPayloadHandler::new("PCMU".to_string(), 0, 8000, 0x12345678);
         let data = vec![0x80, 0x01, 0x02, 0x03];
         
         let packet = handler.create_packet(&data, false);
@@ -403,7 +291,7 @@ mod tests {
             payload: vec![0x80, 0x01, 0x02, 0x03],
         };
 
-        let handler = RtpPayloadHandler::new(CodecType::G711Pcmu, 0xDEADBEEF);
+        let handler = RtpPayloadHandler::new("PCMU".to_string(), 0, 8000, 0xDEADBEEF);
         let serialized = handler.serialize_packet(&packet);
         
         assert_eq!(serialized.len(), 16); // 12 byte header + 4 byte payload
@@ -422,7 +310,7 @@ mod tests {
             0x80, 0x01, 0x02, 0x03,  // Payload
         ];
 
-        let handler = RtpPayloadHandler::new(CodecType::G711Pcmu, 0xDEADBEEF);
+        let handler = RtpPayloadHandler::new("PCMU".to_string(), 0, 8000, 0xDEADBEEF);
         let packet = handler.parse_packet(&data).unwrap();
         
         assert_eq!(packet.version, 2);
@@ -431,36 +319,6 @@ mod tests {
         assert_eq!(packet.timestamp, 0x56789ABC);
         assert_eq!(packet.ssrc, 0xDEADBEEF);
         assert_eq!(packet.payload, vec![0x80, 0x01, 0x02, 0x03]);
-    }
-
-    #[test]
-    fn test_g711_payload_format() {
-        let format = G711PayloadFormat::new(true); // PCMU
-        let data = vec![0x80, 0x01, 0x02, 0x03];
-        
-        let packed = format.pack_payload(&data);
-        assert_eq!(packed, data);
-        
-        let unpacked = format.unpack_payload(&packed).unwrap();
-        assert_eq!(unpacked, data);
-        
-        assert_eq!(format.payload_type(), 0);
-        assert_eq!(format.samples_per_packet(), 160);
-    }
-
-    #[test]
-    fn test_g729_payload_format() {
-        let format = G729PayloadFormat;
-        let data = vec![0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x01, 0x00, 0xFF]; // 10 bytes for G.729
-        
-        let packed = format.pack_payload(&data);
-        assert_eq!(packed, data);
-        
-        let unpacked = format.unpack_payload(&packed).unwrap();
-        assert_eq!(unpacked, data);
-        
-        assert_eq!(format.payload_type(), 18);
-        assert_eq!(format.samples_per_packet(), 80);
     }
 
     #[test]
@@ -490,20 +348,4 @@ mod tests {
         // Should not have more packets
         assert!(!buffer.has_packets());
     }
-
-    #[test]
-    fn test_samples_per_packet() {
-        let handler_g711 = RtpPayloadHandler::new(CodecType::G711Pcmu, 0x12345678);
-        assert_eq!(handler_g711.samples_per_packet(), 160);
-        
-        let handler_g722 = RtpPayloadHandler::new(CodecType::G722, 0x12345678);
-        assert_eq!(handler_g722.samples_per_packet(), 160);
-        
-        let handler_g729 = RtpPayloadHandler::new(CodecType::G729, 0x12345678);
-        assert_eq!(handler_g729.samples_per_packet(), 80);
-        
-        let mut handler_opus = RtpPayloadHandler::new(CodecType::Opus, 0x12345678);
-        handler_opus.set_sample_rate(48000);
-        assert_eq!(handler_opus.samples_per_packet(), 960);
-    }
-} 
+}

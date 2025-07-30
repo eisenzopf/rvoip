@@ -266,70 +266,6 @@ impl AudioFrame {
     }
 }
 
-/// Audio codec enumeration
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AudioCodec {
-    /// G.711 μ-law (PCMU)
-    G711U,
-    /// G.711 A-law (PCMA)
-    G711A,
-    /// G.722 wideband codec
-    G722,
-    /// Opus codec
-    Opus,
-    /// Linear PCM
-    PCM,
-    /// Custom codec
-    Custom(String),
-}
-
-impl AudioCodec {
-    /// Get the codec name
-    pub fn name(&self) -> &str {
-        match self {
-            AudioCodec::G711U => "PCMU",
-            AudioCodec::G711A => "PCMA",
-            AudioCodec::G722 => "G722",
-            AudioCodec::Opus => "opus",
-            AudioCodec::PCM => "L16",
-            AudioCodec::Custom(name) => name,
-        }
-    }
-
-    /// Get the RTP payload type (if standard)
-    pub fn payload_type(&self) -> Option<u8> {
-        match self {
-            AudioCodec::G711U => Some(0),
-            AudioCodec::G711A => Some(8),
-            AudioCodec::G722 => Some(9),
-            AudioCodec::PCM => Some(11),
-            AudioCodec::Opus => Some(96), // Dynamic payload type
-            AudioCodec::Custom(_) => None,
-        }
-    }
-
-    /// Check if this codec supports variable bitrate
-    pub fn supports_vbr(&self) -> bool {
-        matches!(self, AudioCodec::Opus)
-    }
-
-    /// Get the typical sample rate for this codec
-    pub fn typical_sample_rate(&self) -> u32 {
-        match self {
-            AudioCodec::G711U | AudioCodec::G711A => 8000,
-            AudioCodec::G722 => 16000,
-            AudioCodec::Opus => 48000,
-            AudioCodec::PCM => 44100,
-            AudioCodec::Custom(_) => 8000,
-        }
-    }
-}
-
-impl fmt::Display for AudioCodec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
-    }
-}
 
 /// Audio stream configuration
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -338,8 +274,8 @@ pub struct AudioStreamConfig {
     pub input_format: AudioFormat,
     /// Output audio format (to RTP)
     pub output_format: AudioFormat,
-    /// Codec to use for encoding
-    pub codec: AudioCodec,
+    /// Codec name to use for encoding
+    pub codec_name: String,
     /// Enable echo cancellation
     pub enable_aec: bool,
     /// Enable automatic gain control
@@ -360,7 +296,7 @@ impl AudioStreamConfig {
         Self {
             input_format: AudioFormat::pcm_8khz_mono(),
             output_format: AudioFormat::pcm_8khz_mono(),
-            codec: AudioCodec::G711U,
+            codec_name: "PCMU".to_string(),
             enable_aec: true,
             enable_agc: true,
             enable_noise_suppression: false,
@@ -375,7 +311,7 @@ impl AudioStreamConfig {
         Self {
             input_format: AudioFormat::pcm_48khz_stereo(),
             output_format: AudioFormat::pcm_16khz_mono(),
-            codec: AudioCodec::Opus,
+            codec_name: "opus".to_string(),
             enable_aec: true,
             enable_agc: true,
             enable_noise_suppression: true,
@@ -494,18 +430,6 @@ mod tests {
         assert!(!loud_frame.is_silent());
     }
 
-    #[test]
-    fn test_codec_properties() {
-        let g711 = AudioCodec::G711U;
-        assert_eq!(g711.name(), "PCMU");
-        assert_eq!(g711.payload_type(), Some(0));
-        assert_eq!(g711.typical_sample_rate(), 8000);
-        assert!(!g711.supports_vbr());
-
-        let opus = AudioCodec::Opus;
-        assert_eq!(opus.name(), "opus");
-        assert!(opus.supports_vbr());
-    }
 
     #[test]
     fn test_quality_metrics() {
