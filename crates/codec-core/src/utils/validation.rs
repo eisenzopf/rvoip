@@ -46,10 +46,7 @@ pub fn validate_frame_size(codec_type: CodecType, frame_size: usize) -> Result<(
             // G.711 commonly uses 10ms or 20ms frames at 8kHz
             vec![80, 160, 240, 320]
         }
-        CodecType::G722 => {
-            // G.722 commonly uses 10ms or 20ms frames at 16kHz
-            vec![160, 320, 480, 640]
-        }
+
         CodecType::G729 | CodecType::G729A | CodecType::G729BA => {
             // G.729/G.729A/G.729BA use fixed 10ms frames at 8kHz
             vec![80]
