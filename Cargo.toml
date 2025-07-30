@@ -13,6 +13,7 @@ members = [
     "crates/client-core",
     "crates/codec-core",
     "crates/audio-core",
+    "crates/sip-client",
     "crates/rvoip",
 ]
 
@@ -30,6 +31,7 @@ default-members = [
     "crates/client-core",
     "crates/codec-core",
     "crates/audio-core",
+    "crates/sip-client",
     "crates/rvoip",
 ]
 
