@@ -11,7 +11,8 @@ use tracing::{debug, warn, trace};
 use crate::error::{Result, CodecError};
 use crate::types::{AudioFrame, SampleRate, PayloadType};
 use crate::codec::audio::common::AudioCodec;
-use crate::codec::audio::{G711Codec, G711Variant, OpusCodec, OpusApplication, G729Codec};
+use crate::codec::audio::{OpusCodec, OpusApplication, G729Codec};
+use crate::codec::factory::CodecFactory;
 use crate::processing::format::{FormatConverter, ConversionParams};
 
 /// Transcoding path between two codecs
@@ -150,31 +151,8 @@ impl Transcoder {
     /// Create a codec instance for the given payload type
     fn create_codec(&self, payload_type: PayloadType) -> Result<Box<dyn AudioCodec>> {
         match payload_type {
-            0 => { // PCMU
-                let codec = G711Codec::new(
-                    SampleRate::Rate8000,
-                    1,
-                    crate::codec::audio::G711Config {
-                        variant: G711Variant::MuLaw,
-                        sample_rate: 8000,
-                        channels: 1,
-                        frame_size_ms: 10.0,
-                    }
-                )?;
-                Ok(Box::new(codec))
-            }
-            8 => { // PCMA
-                let codec = G711Codec::new(
-                    SampleRate::Rate8000,
-                    1,
-                    crate::codec::audio::G711Config {
-                        variant: G711Variant::ALaw,
-                        sample_rate: 8000,
-                        channels: 1,
-                        frame_size_ms: 10.0,
-                    }
-                )?;
-                Ok(Box::new(codec))
+            0 | 8 => { // PCMU or PCMA - use factory
+                CodecFactory::create_codec_default(payload_type)
             }
             18 => { // G.729
                 let codec = G729Codec::new(

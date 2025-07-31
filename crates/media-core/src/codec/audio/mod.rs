@@ -27,7 +27,7 @@ pub mod payload_type {
 }
 
 // Re-export G.711 codec types
-pub use g711::{G711Codec, G711Config, G711Variant};
+pub use g711::G711Codec;
 
 // Re-export Opus codec types
 pub use opus::{OpusCodec, OpusConfig, OpusApplication};
