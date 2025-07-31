@@ -112,7 +112,14 @@ impl SipClientBuilder {
     #[cfg(feature = "advanced-api")]
     pub async fn build_advanced(self) -> SipClientResult<crate::advanced::AdvancedSipClient> {
         self.validate()?;
-        crate::advanced::AdvancedSipClient::from_config(self.config).await
+        crate::advanced::AdvancedSipClient::new(
+            &self.config.sip_identity,
+            crate::advanced::AudioPipelineConfig::custom()
+                .echo_cancellation(self.config.audio.echo_cancellation)
+                .noise_suppression(self.config.audio.noise_suppression)
+                .auto_gain_control(self.config.audio.auto_gain_control),
+            crate::advanced::MediaPreferences::default()
+        ).await
     }
     
     /// Get the configuration without building
