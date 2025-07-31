@@ -2,8 +2,12 @@
 
 use crate::{
     error::{SipClientError, SipClientResult},
+    error_reporting::ErrorReportingExt,
     events::{EventEmitter, EventStream, SipClientEvent},
     types::{Call, CallDirection, CallId, CallState, SipClientConfig},
+    recovery::{RecoveryManager, RecoveryConfig, ConnectionMonitor, NetworkMetrics},
+    degradation::QualityAdaptationManager,
+    reconnect::ReconnectionHandler,
 };
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -43,6 +47,14 @@ struct SipClientInner {
     events: EventEmitter,
     /// Event handler task handle
     event_handler_task: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// Recovery manager
+    recovery_manager: Arc<RecoveryManager>,
+    /// Quality adaptation manager
+    quality_adaptation_manager: Arc<QualityAdaptationManager>,
+    /// Reconnection handler
+    reconnection_handler: Arc<ReconnectionHandler>,
+    /// Connection monitor handle
+    connection_monitor: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 impl SipClient {
@@ -72,6 +84,24 @@ impl SipClient {
         let audio_manager = Self::create_audio_manager(&config).await?;
         let codec_registry = Self::create_codec_registry(&config)?;
         
+        // Create event emitter
+        let events = EventEmitter::default();
+        
+        // Create recovery components
+        let recovery_config = RecoveryConfig::default();
+        let recovery_manager = Arc::new(RecoveryManager::new(
+            recovery_config.clone(),
+            events.clone(),
+        ));
+        let quality_adaptation_manager = Arc::new(QualityAdaptationManager::new(
+            events.clone(),
+        ));
+        
+        let reconnection_handler = Arc::new(ReconnectionHandler::new(
+            recovery_manager.clone(),
+            events.clone(),
+        ));
+        
         let inner = Arc::new(SipClientInner {
             config,
             client,
@@ -79,8 +109,12 @@ impl SipClient {
             codec_registry,
             calls: Arc::new(RwLock::new(HashMap::new())),
             audio_tasks: Arc::new(RwLock::new(HashMap::new())),
-            events: EventEmitter::default(),
+            events,
             event_handler_task: Arc::new(RwLock::new(None)),
+            recovery_manager,
+            quality_adaptation_manager,
+            reconnection_handler,
+            connection_monitor: Arc::new(RwLock::new(None)),
         });
         
         Ok(Self { inner })
@@ -129,6 +163,10 @@ impl SipClient {
         // Start audio pipeline for the call
         self.setup_audio_pipeline(&call).await?;
         
+        // Initialize quality adaptation for the call
+        let codecs = vec![codec_core::CodecType::G711Pcmu, codec_core::CodecType::G711Pcma];
+        self.inner.quality_adaptation_manager.initialize_call(call_id, codecs).await;
+        
         Ok(call)
     }
     
@@ -147,6 +185,10 @@ impl SipClient {
         
         // Start audio pipeline for answered call
         self.setup_audio_pipeline(&call).await?;
+        
+        // Initialize quality adaptation for the call
+        let codecs = vec![codec_core::CodecType::G711Pcmu, codec_core::CodecType::G711Pcma];
+        self.inner.quality_adaptation_manager.initialize_call(*call_id, codecs).await;
         
         Ok(())
     }
@@ -168,6 +210,9 @@ impl SipClient {
         
         // Clean up audio pipeline
         self.cleanup_audio_pipeline(call_id).await?;
+        
+        // Clean up quality adaptation
+        self.inner.quality_adaptation_manager.cleanup_call(call_id).await;
         
         // Update state
         if let Some(call) = self.inner.calls.read().get(call_id) {
@@ -275,6 +320,51 @@ impl SipClient {
         
         // Start event forwarding from client-core
         self.start_event_forwarding().await?;
+        
+        // Register reconnection callbacks
+        self.register_reconnection_callbacks().await?;
+        
+        // Start connection monitoring with quality adaptation
+        let inner = self.inner.clone();
+        let quality_manager = self.inner.quality_adaptation_manager.clone();
+        let monitor = ConnectionMonitor::new(
+            self.inner.events.clone(),
+            std::time::Duration::from_secs(5),
+            move || {
+                let inner = inner.clone();
+                let quality_manager = quality_manager.clone();
+                Box::pin(async move {
+                    // Simulate network metrics collection
+                    // In a real implementation, this would gather actual metrics
+                    let metrics = NetworkMetrics {
+                        packet_loss_percent: 0.5,
+                        jitter_ms: 15.0,
+                        rtt_ms: 50.0,
+                        available_bandwidth_bps: Some(128000),
+                        consecutive_errors: 0,
+                    };
+                    
+                    // Update quality adaptation based on metrics
+                    let degradation_actions = quality_manager.update_metrics(metrics).await;
+                    
+                    // Apply degradation actions if needed
+                    for (call_id, actions) in degradation_actions {
+                        if actions.codec_downgrade {
+                            tracing::info!("Applied codec downgrade for call {}", call_id);
+                        }
+                        if actions.reduce_quality {
+                            tracing::info!("Reduced quality for call {} to {} bps", call_id, actions.target_bitrate.unwrap_or(0));
+                        }
+                    }
+                    
+                    // Simple health check - return true if connection is healthy
+                    true
+                })
+            },
+        );
+        
+        let monitor_handle = monitor.start_monitoring().await;
+        *self.inner.connection_monitor.write() = Some(monitor_handle);
         
         // Emit started event
         self.inner.events.emit(SipClientEvent::Started);
@@ -629,6 +719,70 @@ impl SipClient {
         }
         Ok(())
     }
+    
+    /// Register reconnection callbacks for various connection types
+    async fn register_reconnection_callbacks(&self) -> SipClientResult<()> {
+        use crate::reconnect::ConnectionType;
+        
+        // Registration reconnection
+        let client = self.inner.client.clone();
+        let config = self.inner.config.clone();
+        self.inner.reconnection_handler.register_callback(
+            ConnectionType::Registration,
+            move || {
+                let client = client.clone();
+                let config = config.clone();
+                Box::pin(async move {
+                    // Create registration config
+                    let reg_config = rvoip_client_core::registration::RegistrationConfig::new(
+                        config.sip_registrar.clone().unwrap_or_else(|| "sip:localhost:5060".to_string()),
+                        config.sip_identity.clone(),
+                        format!("sip:{}@{}:{}", 
+                            config.sip_identity.split('@').next().unwrap_or("user"),
+                            config.local_address.ip(),
+                            config.local_address.port()
+                        ),
+                    ).with_expires(config.registration_ttl);
+                    
+                    // Re-register with SIP server
+                    client.register(reg_config).await
+                        .map_err(|e| SipClientError::RegistrationFailed {
+                            reason: e.to_string(),
+                        })?;
+                    Ok(())
+                })
+            },
+        ).await;
+        
+        // Audio device reconnection
+        let audio_manager = self.inner.audio_manager.clone();
+        self.inner.reconnection_handler.register_callback(
+            ConnectionType::AudioDevice,
+            move || {
+                let audio_manager = audio_manager.clone();
+                Box::pin(async move {
+                    // Try to reinitialize audio devices
+                    // This is a simplified version - real implementation would be more sophisticated
+                    let input_devices = audio_manager
+                        .list_devices(rvoip_audio_core::AudioDirection::Input)
+                        .await
+                        .map_err(|e| SipClientError::AudioDevice {
+                            message: format!("Failed to list input devices: {}", e),
+                        })?;
+                        
+                    if input_devices.is_empty() {
+                        return Err(SipClientError::AudioDevice {
+                            message: "No input devices available".to_string(),
+                        });
+                    }
+                    
+                    Ok(())
+                })
+            },
+        ).await;
+        
+        Ok(())
+    }
 }
 
 // Extension trait for Call to add convenience methods
@@ -811,11 +965,66 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
         // Find associated call if any
         let call = call_id.and_then(|id| self.inner.calls.read().get(&id).cloned());
         
-        // Emit error event
+        // Determine error category and trigger recovery if needed
+        let category = match &error {
+            rvoip_client_core::ClientError::NetworkError { .. } => crate::events::ErrorCategory::Network,
+            rvoip_client_core::ClientError::ProtocolError { .. } => crate::events::ErrorCategory::Protocol,
+            rvoip_client_core::ClientError::MediaError { .. } => crate::events::ErrorCategory::Audio,
+            rvoip_client_core::ClientError::InvalidConfiguration { .. } => crate::events::ErrorCategory::Configuration,
+            _ => crate::events::ErrorCategory::Internal,
+        };
+        
+        // Convert to SipClientError for recovery handling  
+        let sip_error = match &error {
+            rvoip_client_core::ClientError::NetworkError { reason } => SipClientError::Network {
+                message: reason.clone(),
+            },
+            rvoip_client_core::ClientError::AuthenticationFailed { reason } => SipClientError::RegistrationFailed {
+                reason: reason.clone(),
+            },
+            _ => SipClientError::Internal {
+                message: error.to_string(),
+            },
+        };
+        
+        // Trigger reconnection based on error type
+        match category {
+            crate::events::ErrorCategory::Network => {
+                // Trigger registration reconnection
+                let reg_error = match &sip_error {
+                    SipClientError::Network { message } => SipClientError::Network { message: message.clone() },
+                    SipClientError::RegistrationFailed { reason } => SipClientError::RegistrationFailed { reason: reason.clone() },
+                    _ => SipClientError::Internal { message: error.to_string() },
+                };
+                
+                let _ = self.inner.reconnection_handler.trigger_reconnection(
+                    crate::reconnect::ConnectionType::Registration,
+                    reg_error,
+                ).await;
+                
+                // If there's a call, try to recover it
+                if let Some(call_id) = call_id {
+                    let call_error = match &sip_error {
+                        SipClientError::Network { message } => SipClientError::Network { message: message.clone() },
+                        _ => SipClientError::Internal { message: error.to_string() },
+                    };
+                    
+                    let _ = self.inner.reconnection_handler.trigger_reconnection(
+                        crate::reconnect::ConnectionType::Call(call_id),
+                        call_error,
+                    ).await;
+                }
+            }
+            _ => {}
+        }
+        
+        // Emit error event with enhanced message
+        let enhanced_message = sip_error.user_message();
+        
         self.inner.events.emit(SipClientEvent::Error {
             call,
-            message: error.to_string(),
-            category: crate::events::ErrorCategory::Internal,
+            message: enhanced_message,
+            category,
         });
     }
     

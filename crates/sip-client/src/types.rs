@@ -158,6 +158,8 @@ pub struct SipClientConfig {
     pub sip_identity: String,
     /// SIP server address (e.g., "sip.example.com:5060")
     pub sip_server: Option<String>,
+    /// SIP registrar address (if different from server)
+    pub sip_registrar: Option<String>,
     /// Local SIP address to bind to
     pub local_address: std::net::SocketAddr,
     /// Audio configuration
@@ -172,6 +174,8 @@ pub struct SipClientConfig {
     pub call_timeout: Duration,
     /// Enable automatic call recording
     pub auto_record: bool,
+    /// Registration TTL in seconds
+    pub registration_ttl: u32,
 }
 
 impl Default for SipClientConfig {
@@ -179,6 +183,7 @@ impl Default for SipClientConfig {
         Self {
             sip_identity: String::new(),
             sip_server: None,
+            sip_registrar: None,
             local_address: "0.0.0.0:5060".parse().unwrap(),
             audio: AudioConfig::default(),
             codecs: CodecConfig::default(),
@@ -186,6 +191,7 @@ impl Default for SipClientConfig {
             registration: None,
             call_timeout: Duration::from_secs(30),
             auto_record: false,
+            registration_ttl: 3600,
         }
     }
 }

@@ -52,11 +52,15 @@
 #![doc(html_root_url = "https://docs.rs/rvoip-sip-client/0.1.0")]
 
 pub mod error;
+pub mod error_reporting;
 pub mod builder;
 pub mod simple;
 pub mod advanced;
 pub mod events;
 pub mod types;
+pub mod recovery;
+pub mod reconnect;
+pub mod degradation;
 
 #[cfg(test)]
 mod simple_tests;
@@ -89,7 +93,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// all underlying components.
 pub async fn init() -> SipClientResult<()> {
     // Initialize codec tables
-    codec_core::init()?;
+    codec_core::init().map_err(|e| SipClientError::CodecCore(e))?;
     
     // Initialize audio subsystem
     // audio_core doesn't have an init, but we could add one if needed
