@@ -2,12 +2,12 @@
 
 ## Overview
 
-The `sip-client` library provides a unified, production-ready SIP client implementation that orchestrates three core components:
-- **client-core**: High-level SIP protocol handling and session management
-- **audio-core**: Audio device management, format conversion, and pipeline processing
-- **codec-core**: Audio codec encoding/decoding (G.711, etc.)
+The `sip-client` library provides a unified, production-ready SIP client implementation that orchestrates audio device management with SIP protocol handling:
+- **client-core**: High-level SIP protocol handling and session management (includes RTP via session-core/media-core)
+- **audio-core**: Audio device management, PCM capture/playback, and format conversion
+- **codec-core**: Not directly used - media-core will integrate codec-core for encoding/decoding
 
-This library serves as the primary entry point for developers building VoIP applications, providing both simple and advanced APIs while handling all integration complexity internally.
+This library serves as the primary entry point for developers building VoIP applications, providing both simple and advanced APIs while handling the complexity of connecting audio devices to SIP/RTP streams.
 
 ## Architecture
 
@@ -28,20 +28,26 @@ This library serves as the primary entry point for developers building VoIP appl
 │ ┌─────────────────────────────────────────────────────────────┐ │
 │ │                  Integration Layer                           │ │
 │ │                                                              │ │
-│ │  • Codec negotiation orchestration                           │ │
-│ │  • Audio pipeline configuration                              │ │
-│ │  • Media session lifecycle management                        │ │
+│ │  • Audio pipeline lifecycle management                       │ │
+│ │  • PCM frame flow coordination                               │ │
 │ │  • Event aggregation and translation                         │ │
+│ │  • Resource management and cleanup                           │ │
 │ └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────┬───────────────────────────────────────────┘
                       │
      ┌────────────────┼────────────────┐
      │                │                │
      ▼                ▼                ▼
-┌──────────┐    ┌──────────┐    ┌──────────┐
-│client-core│    │audio-core│    │codec-core│
-└──────────┘    └──────────┘    └──────────┘
+┌──────────┐    ┌──────────┐    ┌────────────────────────┐
+│client-core│    │audio-core│    │media-core (internal)   │
+│           │    │          │    │ • Uses codec-core for  │
+│ • SIP     │    │ • Device │    │   encoding/decoding    │
+│ • RTP     │    │   mgmt   │    │ • Managed by           │
+│ • SDP     │    │ • PCM    │    │   session-core         │
+└──────────┘    └──────────┘    └────────────────────────┘
 ```
+
+**Note**: codec-core is not directly used by sip-client. Instead, media-core (managed by session-core) uses codec-core as its codec provider. This maintains the established architecture where encoding/decoding happens at the RTP layer.
 
 ## Core Components
 
@@ -67,51 +73,147 @@ Flexible configuration system:
 - Preset configurations for common scenarios
 
 ### 4. Integration Layer
-Handles the complex orchestration between components:
-- **Codec Negotiation**: Coordinates SDP offer/answer with available codecs
-- **Audio Pipeline**: Configures audio flow based on negotiated parameters
-- **Media Lifecycle**: Manages setup/teardown of audio sessions
-- **Event System**: Aggregates events from all components into unified stream
+Handles the orchestration between audio devices and SIP/RTP:
+- **Audio Pipeline Management**: Connects audio devices to client-core's audio streaming API
+- **PCM Frame Flow**: Coordinates bidirectional PCM audio between audio-core and client-core
+- **Media Lifecycle**: Manages setup/teardown of audio pipelines when calls connect/disconnect
+- **Event System**: Aggregates events from client-core and audio-core into unified stream
+
+## Current Status
+
+### ✅ Completed
+- **Phase 1 Foundation**: All project setup, core types, and basic integration complete
+- **Library Cleanup**: Successfully removed codec features from audio-core and audio features from client-core
+- **Simple API**: Basic structure implemented with call operations
+- **Tests**: All components compile and pass basic tests
+
+### 🚧 What's Next (Priority Order)
+
+1. **Complete Audio Pipeline Integration** (Phase 2)
+   - Implement `setup_audio_pipeline()` and `cleanup_audio_pipeline()` in simple.rs
+   - Connect audio-core PCM capture to client-core's `send_audio_frame()` API
+   - Connect client-core's `subscribe_to_audio_frames()` to audio-core PCM playback
+   - Handle bidirectional PCM frame flow with proper timing
+
+2. **Media-Core Codec Integration** (Prerequisite - needs to be done in media-core)
+   - Media-core needs to integrate codec-core as its codec provider
+   - This work is outside sip-client scope but required for the architecture
+   - Once complete, client-core will automatically use codec-core for encoding/decoding
+
+3. **Event System Completion** (Phase 2)
+   - Connect client-core events to sip-client event system
+   - Add audio-core event forwarding
+   - Implement proper event filtering and transformation
+
+4. **Resource Management** (Phase 2)
+   - Add proper start/stop lifecycle methods
+   - Implement graceful shutdown
+   - Handle resource cleanup on errors
+
+5. **Testing Infrastructure** (Phase 2)
+   - Create mock implementations for testing
+   - Add integration tests for call flows
+   - Test audio pipeline setup/teardown
+
+## Missing Integration Pieces
+
+### Core Integration Gaps
+The following are the key pieces missing that sip-client needs to implement:
+
+### 1. **Audio Device to RTP Stream Bridge**
+**Problem**: Need to connect audio devices to client-core's audio streaming API
+- audio-core produces/consumes PCM `AudioFrame` from devices
+- client-core expects `session-core::AudioFrame` for its streaming API
+- Need continuous bidirectional flow with proper timing
+
+**Solution**: Create an audio bridge that:
+- Converts between audio-core and session-core AudioFrame types
+- Manages capture and playback tasks with proper timing
+- Handles backpressure and buffer management
+
+### 2. **Prerequisite: Media-Core Codec Integration**
+**Status**: This needs to be implemented in media-core project
+- media-core currently has its own G.711 implementation
+- Need to update media-core to use codec-core as its codec provider
+- This maintains the architecture where encoding happens at the RTP layer
+
+**Impact on sip-client**: Once complete, encoding/decoding will happen automatically in media-core when we send/receive PCM frames through client-core
+
+### 3. **Media Session Lifecycle Coordination**
+**Problem**: Need to coordinate audio pipeline with call lifecycle
+- When call connects: need to setup audio capture/playback pipelines
+- When call disconnects: need to cleanup all audio resources
+- Handle media state changes (hold/resume, etc.)
+
+**Solution**: Extend the `Call` object with audio lifecycle methods that:
+- Start audio pipelines when call is established
+- Stop audio pipelines when call ends
+- Handle hold/resume by pausing/resuming pipelines
+
+### 4. **Audio Processing Loop Implementation**
+**Problem**: Need continuous PCM audio flow between components
+
+**Capture Direction** (Mic → Network):
+```
+Microphone → audio-core → PCM AudioFrame → client-core.send_audio_frame() → [media-core encodes] → RTP
+```
+
+**Playback Direction** (Network → Speaker):
+```
+RTP → [media-core decodes] → client-core.subscribe_to_audio_frames() → PCM AudioFrame → audio-core → Speaker
+```
+
+**Solution**: Use async streams with backpressure handling:
+- Spawn capture task that reads from audio-core and sends to client-core
+- Spawn playback task that receives from client-core and plays via audio-core
+- Handle timing and buffering appropriately
+
+### Recommended Implementation Approach
+
+1. **Focus on PCM Frame Flow**: Connect audio devices to client-core's streaming API
+2. **No Direct Codec Usage**: Let media-core handle encoding/decoding internally
+3. **Simple Frame Conversion**: Convert between audio-core and session-core AudioFrame types
+4. **Lifecycle Management**: Tie audio pipeline lifecycle to call state
 
 ## Development Phases
 
-### Phase 1: Foundation (Week 1)
-- [ ] **Project Setup**
-  - [ ] Create Cargo.toml with dependencies on client-core, audio-core, codec-core
-  - [ ] Set up module structure
-  - [ ] Configure feature flags
-  - [ ] Create error types and result handling
+### Phase 1: Foundation (Week 1) ✅ COMPLETED
+- [x] **Project Setup**
+  - [x] Create Cargo.toml with dependencies on client-core, audio-core, codec-core
+  - [x] Set up module structure
+  - [x] Configure feature flags
+  - [x] Create error types and result handling
 
-- [ ] **Core Types**
-  - [ ] Define SipClient struct with internal state management
-  - [ ] Create configuration types (SipClientConfig, AudioConfig, CodecConfig)
-  - [ ] Design event aggregation system
-  - [ ] Implement builder pattern foundation
+- [x] **Core Types**
+  - [x] Define SipClient struct with internal state management
+  - [x] Create configuration types (SipClientConfig, AudioConfig, CodecConfig)
+  - [x] Design event aggregation system
+  - [x] Implement builder pattern foundation
 
-- [ ] **Basic Integration**
-  - [ ] Wire up client-core for SIP operations
-  - [ ] Connect audio-core for device management
-  - [ ] Integrate codec-core for encoding/decoding
-  - [ ] Create internal message passing system
+- [x] **Basic Integration**
+  - [x] Wire up client-core for SIP operations
+  - [x] Connect audio-core for device management
+  - [x] Integrate codec-core for encoding/decoding
+  - [x] Create internal message passing system
 
-### Phase 2: Simple API (Week 2)
-- [ ] **Client Lifecycle**
-  - [ ] Implement `SipClient::new()` with defaults
+### Phase 2: Simple API (Week 2) 🚧 IN PROGRESS
+- [x] **Client Lifecycle**
+  - [x] Implement `SipClient::new()` with defaults
   - [ ] Add `start()` and `stop()` methods
   - [ ] Handle resource cleanup and error recovery
-  - [ ] Create connection state management
+  - [x] Create connection state management
 
-- [ ] **Basic Call Operations**
-  - [ ] Implement `make_call(uri)` with automatic setup
-  - [ ] Add `answer_call()` and `reject_call()`
-  - [ ] Create `hangup()` with proper cleanup
-  - [ ] Handle call state transitions
+- [x] **Basic Call Operations**
+  - [x] Implement `make_call(uri)` with automatic setup
+  - [x] Add `answer_call()` and `reject_call()`
+  - [x] Create `hangup()` with proper cleanup
+  - [x] Handle call state transitions
 
 - [ ] **Audio Integration**
   - [ ] Automatic device selection
   - [ ] Default audio pipeline setup
   - [ ] Built-in echo cancellation
-  - [ ] Volume control and mute operations
+  - [x] Volume control and mute operations
 
 ### Phase 3: Advanced API (Week 3)
 - [ ] **Custom Audio Pipelines**
@@ -120,11 +222,11 @@ Handles the complex orchestration between components:
   - [ ] Support external audio sources/sinks
   - [ ] Frame-level audio access API
 
-- [ ] **Codec Management**
-  - [ ] Manual codec selection API
-  - [ ] Codec priority configuration
-  - [ ] Runtime codec switching
-  - [ ] Custom codec registration
+- [ ] **Media Preferences**
+  - [ ] Configure preferred codecs for client-core
+  - [ ] Set custom SDP attributes
+  - [ ] Configure jitter buffer settings
+  - [ ] Note: Actual codec selection happens in media-core
 
 - [ ] **Advanced Call Control**
   - [ ] Call transfer implementation
@@ -241,16 +343,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ### Audio Flow
 ```
-Microphone → audio-core (capture) → codec-core (encode) → client-core (RTP) → Network
-Network → client-core (RTP) → codec-core (decode) → audio-core (playback) → Speaker
+Microphone → audio-core (capture) → PCM frames → client-core (streaming API) → media-core (encode) → RTP → Network
+Network → RTP → media-core (decode) → PCM frames → client-core (streaming API) → audio-core (playback) → Speaker
 ```
 
-### Codec Negotiation Flow
-1. codec-core provides available codecs to sip-client
-2. sip-client adds them to SDP via client-core
-3. client-core negotiates with peer
-4. sip-client configures audio-core pipeline with selected codec
-5. codec-core handles encoding/decoding during call
+### Architecture Notes
+1. **PCM Throughout**: Audio flows as raw PCM frames through the entire application layer
+2. **Encoding at RTP Layer**: media-core (managed by session-core) handles codec operations
+3. **Clean Separation**: audio-core only handles device I/O, never touches encoded data
+4. **Streaming API**: client-core provides `send_audio_frame()` and `subscribe_to_audio_frames()` for PCM data
+5. **Future Enhancement**: media-core will be updated to use codec-core as its codec provider
 
 ### Event Aggregation
 ```rust
@@ -258,16 +360,17 @@ enum SipClientEvent {
     // From client-core
     IncomingCall { from: String, call_id: CallId },
     CallStateChanged { call_id: CallId, state: CallState },
+    MediaStatisticsUpdate { call_id: CallId, stats: MediaStatistics },
     
     // From audio-core
     AudioDeviceChanged { device: AudioDevice },
     AudioLevelChanged { level: f32 },
-    
-    // From codec-core
-    CodecChanged { old: CodecType, new: CodecType },
+    AudioPipelineError { error: String },
     
     // Aggregated events
     CallQualityReport { call_id: CallId, mos: f32, jitter: f32 },
+    AudioStreamStarted { call_id: CallId },
+    AudioStreamStopped { call_id: CallId },
 }
 ```
 
@@ -362,7 +465,8 @@ let client = SipClientBuilder::new()
 [dependencies]
 rvoip-client-core = { path = "../client-core" }
 rvoip-audio-core = { path = "../audio-core" }
-rvoip-codec-core = { path = "../codec-core" }
+# Note: codec-core is NOT a direct dependency
+# It will be used by media-core (inside session-core/client-core)
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
@@ -380,4 +484,11 @@ tokio-stream = "0.1"
 futures = "0.3"
 ```
 
-This development plan provides a clear roadmap for creating a unified SIP client library that makes VoIP development in Rust accessible while maintaining the flexibility for advanced use cases.
+## Key Architectural Decisions
+
+1. **Maintain Existing Architecture**: sip-client acts as a coordination layer, not a reimplementation
+2. **PCM Frame Flow**: All audio flows as PCM frames between components, with encoding/decoding happening in media-core
+3. **No Direct Codec Usage**: sip-client does not use codec-core directly; this is handled by media-core
+4. **Focus on Integration**: Primary responsibility is connecting audio devices to SIP/RTP streams
+
+This development plan provides a clear roadmap for creating a unified SIP client library that makes VoIP development in Rust accessible while respecting the established architecture of the RVOIP project.
