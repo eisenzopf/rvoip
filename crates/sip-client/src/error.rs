@@ -36,6 +36,13 @@ pub enum SipClientError {
     #[error("Audio device error: {message}")]
     AudioDevice { message: String },
     
+    /// Audio pipeline error
+    #[error("Audio pipeline error in {operation}: {details}")]
+    AudioPipelineError { 
+        operation: String,
+        details: String,
+    },
+    
     /// Codec negotiation failed
     #[error("Codec negotiation failed: {reason}")]
     CodecNegotiationFailed { reason: String },
