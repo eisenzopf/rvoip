@@ -260,6 +260,71 @@ pub enum SipClientEvent {
         /// Reason for disconnection
         reason: String,
     },
+    
+    // Recovery events
+    /// Recovery succeeded for a component
+    RecoverySucceeded {
+        /// Component that recovered
+        component: String,
+        /// Number of attempts it took
+        attempts: u32,
+    },
+    
+    /// Recovery failed for a component
+    RecoveryFailed {
+        /// Component that failed to recover
+        component: String,
+        /// Error message
+        error: String,
+        /// Number of attempts made
+        attempts: u32,
+    },
+    
+    /// Connection lost
+    ConnectionLost {
+        /// Reason for connection loss
+        reason: String,
+    },
+    
+    /// Connection restored
+    ConnectionRestored,
+    
+    /// Degradation applied
+    DegradationApplied {
+        /// Degradation level (0 = normal, higher = more degraded)
+        level: u8,
+        /// Actions taken
+        actions: crate::recovery::DegradationActions,
+    },
+    
+    // Reconnection events
+    /// Reconnection failed
+    ReconnectionFailed {
+        /// Connection type that failed
+        connection_type: String,
+        /// Error message
+        error: String,
+    },
+    
+    /// Registration restored after reconnection
+    RegistrationRestored,
+    
+    /// Call recovered after disconnection
+    CallRecovered {
+        /// Recovered call ID
+        call_id: CallId,
+    },
+    
+    /// Call lost and cannot be recovered
+    CallLost {
+        /// Lost call ID
+        call_id: CallId,
+        /// Reason for loss
+        reason: String,
+    },
+    
+    /// Audio devices restored after reconnection
+    AudioDevicesRestored,
 }
 
 /// Error categories for event classification

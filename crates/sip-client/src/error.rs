@@ -62,7 +62,28 @@ pub enum SipClientError {
     /// Internal error
     #[error("Internal error: {message}")]
     Internal { message: String },
+    
+    /// Registration failed
+    #[error("Registration failed: {reason}")]
+    RegistrationFailed { reason: String },
+    
+    /// Call failed
+    #[error("Call {call_id} failed: {reason}")]
+    CallFailed {
+        call_id: String,
+        reason: String,
+    },
+    
+    /// Codec error with details
+    #[error("Codec '{codec}' error: {details}")]
+    CodecError {
+        codec: String,
+        details: String,
+    },
 }
+
+// Note: Clone is not implemented because some wrapped errors don't implement Clone.
+// If you need to clone an error, consider converting it to a string first.
 
 impl SipClientError {
     /// Create a configuration error
@@ -72,10 +93,17 @@ impl SipClientError {
         }
     }
     
-    /// Create an invalid state error
+    /// Create an invalid state error with expected and actual state
     pub fn invalid_state(message: impl Into<String>) -> Self {
         Self::InvalidState {
             message: message.into(),
+        }
+    }
+    
+    /// Create an invalid state error with expected and actual values
+    pub fn invalid_state_with_details(expected: &str, actual: &str) -> Self {
+        Self::InvalidState {
+            message: format!("Expected state: {}, but was: {}", expected, actual),
         }
     }
     
