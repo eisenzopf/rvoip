@@ -5,12 +5,14 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 use bytes::Bytes;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, CodecError};
 use crate::types::DialogId;
+use crate::codec::audio::common::AudioCodec;
 use rvoip_rtp_core::RtpSession;
 
 use super::{MediaSessionController, audio_generation::{AudioTransmitter, AudioTransmitterConfig, AudioSource}};
@@ -217,5 +219,58 @@ impl MediaSessionController {
             ..Default::default()
         };
         self.start_audio_transmission_with_config(dialog_id, config).await
+    }
+    
+    /// Encode and send audio frame (for session-core to delegate encoding)
+    /// This method accepts raw PCM audio, encodes it using the configured codec,
+    /// and sends it via RTP
+    pub async fn encode_and_send_audio_frame(&self, dialog_id: &DialogId, pcm_samples: Vec<i16>, timestamp: u32) -> Result<()> {
+        // Get session info to determine codec
+        let codec_payload_type = {
+            let sessions = self.sessions.read().await;
+            let session = sessions.get(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            
+            // Determine payload type from configured codec
+            session.config.preferred_codec
+                .as_ref()
+                .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
+                .unwrap_or(0) // Default to PCMU
+        };
+        
+        // Create AudioFrame for codec interface
+        let audio_frame = crate::types::AudioFrame::new(
+            pcm_samples,
+            8000, // Default for G.711
+            1,    // Default mono
+            timestamp
+        );
+        
+        // Encode based on payload type
+        let encoded_payload = match codec_payload_type {
+            0 => {
+                // PCMU encoding using media-core's G711Codec
+                let mut codec = self.g711_codec.lock().await;
+                codec.encode(&audio_frame)?
+            },
+            8 => {
+                // PCMA encoding - create temporary codec
+                use crate::codec::audio::G711Codec;
+                let mut codec = G711Codec::a_law(8000, 1)?;
+                codec.encode(&audio_frame)?
+            },
+            _ => {
+                // For other codecs, we would need to instantiate them here
+                // For now, return an error
+                return Err(Error::unsupported_payload_type(codec_payload_type));
+            }
+        };
+        
+        // Send the encoded packet via RTP
+        self.send_rtp_packet(dialog_id, encoded_payload, timestamp).await?;
+        
+        debug!("✅ Encoded and sent audio frame for dialog: {} (codec PT: {}, timestamp: {})", 
+               dialog_id, codec_payload_type, timestamp);
+        Ok(())
     }
 } 

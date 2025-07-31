@@ -31,7 +31,8 @@ use crate::processing::audio::{
     AdvancedAcousticEchoCanceller, AdvancedAecConfig,
     AdvancedVadResult, AdvancedAgcResult, AdvancedAecResult
 };
-use crate::codec::audio::{G711Codec, G711Config, G711Variant};
+use crate::codec::audio::G711Codec;
+use codec_core::codecs::g711::G711Variant;
 use crate::codec::mapping::CodecMapper;
 use crate::types::SampleRate;
 
@@ -144,16 +145,7 @@ impl MediaSessionController {
         
         // Create G.711 codec for zero-copy processing
         let g711_codec = Arc::new(tokio::sync::Mutex::new(
-            G711Codec::new(
-                SampleRate::Rate8000,
-                1,
-                G711Config {
-                    variant: G711Variant::MuLaw,
-                    sample_rate: 8000,
-                    channels: 1,
-                    frame_size_ms: 20.0,
-                }
-            ).expect("Failed to create G.711 codec")
+            G711Codec::mu_law(8000, 1).expect("Failed to create G.711 codec")
         ));
         
         // Create SIMD processor
@@ -235,16 +227,7 @@ impl MediaSessionController {
         
         // Create G.711 codec for zero-copy processing
         let g711_codec = Arc::new(tokio::sync::Mutex::new(
-            G711Codec::new(
-                SampleRate::Rate8000,
-                1,
-                G711Config {
-                    variant: G711Variant::MuLaw,
-                    sample_rate: 8000,
-                    channels: 1,
-                    frame_size_ms: 20.0,
-                }
-            ).expect("Failed to create G.711 codec")
+            G711Codec::mu_law(8000, 1).expect("Failed to create G.711 codec")
         ));
         
         // Create SIMD processor

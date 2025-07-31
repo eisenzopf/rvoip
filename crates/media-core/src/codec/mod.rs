@@ -6,22 +6,19 @@
 pub mod audio;
 pub mod transcoding;  // Add transcoding module
 pub mod mapping;      // Add codec mapping utilities
-pub mod g711;         // Export G.711 codec module
+pub mod factory;      // Export codec factory
 
 // Re-export audio codec types
 pub use audio::common::*;
-
-// Re-export G.711 codecs from our relay module
-pub use crate::relay::{G711PcmuCodec, G711PcmaCodec};
-
-// Re-export G.711 codec types and functions
-pub use g711::{G711Codec, G711Variant, encode_ulaw, decode_ulaw, encode_alaw, decode_alaw};
 
 // Re-export transcoding types
 pub use transcoding::{Transcoder, TranscodingPath, TranscodingStats};
 
 // Re-export codec mapping types
 pub use mapping::{CodecMapper, CodecCapability};
+
+// Re-export codec factory
+pub use factory::CodecFactory;
 
 /// Basic codec trait for RTP payload processing
 pub trait Codec: Send + Sync {
@@ -46,8 +43,7 @@ impl CodecRegistry {
         let mut codecs: std::collections::HashMap<u8, Box<dyn Codec>> = std::collections::HashMap::new();
         
         // Register G.711 codecs
-        codecs.insert(0, Box::new(G711PcmuCodec::new()));  // PCMU
-        codecs.insert(8, Box::new(G711PcmaCodec::new()));  // PCMA
+        // Codecs can be registered here when needed
         
         Self { codecs }
     }
@@ -75,33 +71,6 @@ impl Default for CodecRegistry {
 }
 
 // Implement Codec trait for our G.711 codecs
-impl Codec for G711PcmuCodec {
-    fn payload_type(&self) -> u8 {
-        G711PcmuCodec::payload_type(self)
-    }
-    
-    fn name(&self) -> &'static str {
-        G711PcmuCodec::name(self)
-    }
-    
-    fn process_payload(&self, payload: &[u8]) -> crate::Result<Vec<u8>> {
-        G711PcmuCodec::process_packet(self, payload).map(|bytes| bytes.to_vec())
-    }
-}
-
-impl Codec for G711PcmaCodec {
-    fn payload_type(&self) -> u8 {
-        G711PcmaCodec::payload_type(self)
-    }
-    
-    fn name(&self) -> &'static str {
-        G711PcmaCodec::name(self)
-    }
-    
-    fn process_payload(&self, payload: &[u8]) -> crate::Result<Vec<u8>> {
-        G711PcmaCodec::process_packet(self, payload).map(|bytes| bytes.to_vec())
-    }
-}
 
 #[cfg(test)]
 mod tests {

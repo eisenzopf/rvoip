@@ -22,6 +22,9 @@ workspace = true
 # Use the rtp-core crate from our workspace
 rvoip-rtp-core = { path = "../rtp-core", version = "0.1.4" }
 
+# Codec support
+rvoip-codec-core = { path = "../codec-core", version = "0.1.0" }
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

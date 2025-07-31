@@ -444,14 +444,14 @@ mod tests {
             tx,
         ).unwrap();
         
-        // Set audio codec
-        let codec = Box::new(G711Codec::mu_law(SampleRate::Rate8000, 1).unwrap());
+        // Set audio codec using factory
+        let codec = crate::codec::factory::CodecFactory::create_codec_default(0).unwrap();
         session.set_audio_codec(codec).await.unwrap();
         
         // Verify codec is set
         let codec_guard = session.audio_codec.read().await;
         assert!(codec_guard.is_some());
         let info = codec_guard.as_ref().unwrap().get_info();
-        assert_eq!(info.name, "PCMU");
+        assert!(info.name.contains("μ-law"));
     }
 } 

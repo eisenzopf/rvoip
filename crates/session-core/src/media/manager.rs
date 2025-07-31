@@ -911,52 +911,23 @@ impl MediaManager {
             .unwrap_or_default()
             .as_millis() as u32 * 8) % u32::MAX; // Convert to 8kHz RTP clock
         
-        // Encode audio frame to G.711 μ-law (PCMU) format
-        let encoded_payload = {
-            // Use simple linear PCM to μ-law conversion
-            media_frame.samples.iter().map(|&sample| {
-                // Convert i16 to μ-law u8
-                let sign = if sample < 0 { 0x80u8 } else { 0x00u8 };
-                let magnitude = sample.abs() as u16;
-                
-                // Find the segment (simplified μ-law encoding)
-                let mut segment = 0u8;
-                let mut temp = magnitude >> 5;
-                while temp != 0 && segment < 7 {
-                    segment += 1;
-                    temp >>= 1;
-                }
-                
-                // Calculate quantization value
-                let quantization = if segment == 0 {
-                    (magnitude >> 1) as u8
-                } else {
-                    (((magnitude >> (segment + 1)) & 0x0F) + 0x10) as u8
-                };
-                
-                // Combine sign, segment, and quantization
-                sign | (segment << 4) | (quantization & 0x0F)
-            }).collect::<Vec<u8>>()
-        };
+        // Delegate encoding and transmission to media-core
+        // This properly uses codec-core for encoding based on the configured codec
+        tracing::info!("🔧 [DEBUG] About to encode and send audio frame for session: {} (dialog: {}, {} samples)", 
+                      session_id, dialog_id, media_frame.samples.len());
         
-        // Send the encoded payload via RTP
-        let payload_len = encoded_payload.len();
-        
-        tracing::info!("🔧 [DEBUG] About to send RTP packet for session: {} (dialog: {}, payload: {} bytes)", 
-                      session_id, dialog_id, payload_len);
-        
-        match self.controller.send_rtp_packet(&dialog_id, encoded_payload, timestamp).await {
+        match self.controller.encode_and_send_audio_frame(&dialog_id, media_frame.samples, timestamp).await {
             Ok(()) => {
-                tracing::info!("✅ [SUCCESS] RTP packet sent successfully for session: {}", session_id);
+                tracing::info!("✅ [SUCCESS] Audio frame encoded and sent successfully for session: {}", session_id);
             }
             Err(e) => {
-                tracing::error!("❌ [ERROR] Failed to send RTP packet for session: {}: {}", session_id, e);
+                tracing::error!("❌ [ERROR] Failed to encode and send audio frame for session: {}: {}", session_id, e);
                 return Err(MediaError::MediaEngine { source: Box::new(e) });
             }
         }
         
-        tracing::debug!("📡 Sent audio frame as RTP packet for session: {} ({} samples → {} bytes, timestamp: {})", 
-                       session_id, audio_frame.samples.len(), payload_len, timestamp);
+        tracing::debug!("📡 Sent audio frame for session: {} ({} samples, timestamp: {})", 
+                       session_id, audio_frame.samples.len(), timestamp);
         Ok(())
     }
 
