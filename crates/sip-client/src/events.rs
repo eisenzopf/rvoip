@@ -19,6 +19,12 @@ pub enum SipClientEvent {
         display_name: Option<String>,
     },
     
+    /// Outgoing call initiated
+    OutgoingCall {
+        /// The call object
+        call: std::sync::Arc<Call>,
+    },
+    
     /// Call state changed
     CallStateChanged {
         /// The call object
@@ -51,6 +57,12 @@ pub enum SipClientEvent {
         duration_secs: u64,
     },
     
+    /// Call ended
+    CallEnded {
+        /// The call
+        call: std::sync::Arc<Call>,
+    },
+    
     // Audio events
     /// Audio device changed
     AudioDeviceChanged {
@@ -80,6 +92,26 @@ pub enum SipClientEvent {
         message: String,
         /// Device that failed
         device: Option<String>,
+    },
+    
+    /// Call was transferred
+    CallTransferred {
+        /// The call that was transferred
+        call: std::sync::Arc<Call>,
+        /// Target URI for the transfer
+        target: String,
+    },
+    
+    /// Call was put on hold
+    CallOnHold {
+        /// The call that was put on hold
+        call: std::sync::Arc<Call>,
+    },
+    
+    /// Call was resumed from hold
+    CallResumed {
+        /// The call that was resumed
+        call: std::sync::Arc<Call>,
     },
     
     // Quality events

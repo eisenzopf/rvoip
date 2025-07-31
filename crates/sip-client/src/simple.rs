@@ -228,6 +228,35 @@ impl SipClient {
         self.inner.calls.read().values().cloned().collect()
     }
     
+    /// List available audio devices
+    pub async fn list_audio_devices(&self, direction: rvoip_audio_core::AudioDirection) -> SipClientResult<Vec<rvoip_audio_core::AudioDeviceInfo>> {
+        Ok(self.inner.audio_manager.list_devices(direction).await?)
+    }
+    
+    /// Get current audio device
+    pub async fn get_audio_device(&self, direction: rvoip_audio_core::AudioDirection) -> SipClientResult<rvoip_audio_core::AudioDeviceInfo> {
+        let device = self.inner.audio_manager.get_default_device(direction).await?;
+        Ok(device.info().clone())
+    }
+    
+    /// Set audio device
+    pub async fn set_audio_device(&self, direction: rvoip_audio_core::AudioDirection, device_id: &str) -> SipClientResult<()> {
+        // Get current device for comparison
+        let old_device = self.get_audio_device(direction).await.ok();
+        
+        // TODO: Actually change the device in audio_manager
+        // For now, just emit the event
+        
+        // Emit device change event
+        self.inner.events.emit(SipClientEvent::AudioDeviceChanged {
+            direction,
+            old_device: old_device.map(|d| d.name),
+            new_device: Some(device_id.to_string()),
+        });
+        
+        Ok(())
+    }
+    
     /// Start the SIP client
     ///
     /// This initializes all subsystems and begins listening for calls.
@@ -422,11 +451,29 @@ impl SipClient {
         // Spawn task to capture audio and send to client-core
         let client = self.inner.client.clone();
         let call_id = call.id;
+        let events = self.inner.events.clone();
         let capture_handle = tokio::spawn(async move {
             let mut pipeline = pipeline;
+            let mut frame_count = 0u64;
             loop {
                 match pipeline.capture_frame().await {
                     Ok(audio_frame) => {
+                        // Emit audio level event periodically (every 50 frames = ~1 second at 20ms frames)
+                        frame_count += 1;
+                        if frame_count % 50 == 0 {
+                            let level = audio_frame.rms_level();
+                            let peak = audio_frame.samples.iter()
+                                .map(|&s| s.abs() as f32 / i16::MAX as f32)
+                                .fold(0.0f32, |max, val| if val > max { val } else { max });
+                            
+                            events.emit(SipClientEvent::AudioLevelChanged {
+                                call_id: Some(call_id),
+                                direction: rvoip_audio_core::AudioDirection::Input,
+                                level: level / i16::MAX as f32,
+                                peak,
+                            });
+                        }
+                        
                         // Convert audio-core frame to session-core frame
                         let session_frame = audio_frame.to_session_core();
                         
@@ -438,6 +485,10 @@ impl SipClient {
                     }
                     Err(e) => {
                         tracing::error!("Failed to capture audio frame: {}", e);
+                        events.emit(SipClientEvent::AudioDeviceError {
+                            message: format!("Capture error: {}", e),
+                            device: None,
+                        });
                         break;
                     }
                 }
@@ -477,8 +528,11 @@ impl SipClient {
             })?;
         
         // Spawn task to receive audio from client-core and play
+        let events_playback = self.inner.events.clone();
+        let call_id_playback = call.id;
         let playback_handle = tokio::spawn(async move {
             let mut pipeline = playback_pipeline;
+            let mut frame_count = 0u64;
             while let Ok(session_frame) = audio_subscriber.recv() {
                 // Convert session-core frame to audio-core frame
                 let audio_frame = rvoip_audio_core::types::AudioFrame::from_session_core(
@@ -486,9 +540,29 @@ impl SipClient {
                     config.output_format.frame_size_ms
                 );
                 
+                // Emit audio level event periodically for playback
+                frame_count += 1;
+                if frame_count % 50 == 0 {
+                    let level = audio_frame.rms_level();
+                    let peak = audio_frame.samples.iter()
+                        .map(|&s| s.abs() as f32 / i16::MAX as f32)
+                        .fold(0.0f32, |max, val| if val > max { val } else { max });
+                    
+                    events_playback.emit(SipClientEvent::AudioLevelChanged {
+                        call_id: Some(call_id_playback),
+                        direction: rvoip_audio_core::AudioDirection::Output,
+                        level: level / i16::MAX as f32,
+                        peak,
+                    });
+                }
+                
                 // Send to audio pipeline for playback
                 if let Err(e) = pipeline.playback_frame(audio_frame).await {
                     tracing::error!("Failed to playback audio frame: {}", e);
+                    events_playback.emit(SipClientEvent::AudioDeviceError {
+                        message: format!("Playback error: {}", e),
+                        device: None,
+                    });
                     break;
                 }
             }

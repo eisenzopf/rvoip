@@ -58,6 +58,12 @@ pub mod advanced;
 pub mod events;
 pub mod types;
 
+#[cfg(test)]
+mod simple_tests;
+
+#[cfg(all(test, feature = "advanced-api"))]
+mod advanced_tests;
+
 // Re-export main types
 pub use error::{SipClientError, SipClientResult};
 pub use builder::SipClientBuilder;
@@ -68,7 +74,11 @@ pub use events::{SipClientEvent, EventStream};
 pub use simple::SipClient;
 
 #[cfg(feature = "advanced-api")]
-pub use advanced::{AdvancedSipClient, AudioPipelineConfig, CodecPriority};
+pub use advanced::{
+    AdvancedSipClient, AudioPipelineConfig, AudioProcessorTrait, 
+    AudioProcessor, CodecPriority, MediaPreferences, AudioStream,
+    CallStatistics
+};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
