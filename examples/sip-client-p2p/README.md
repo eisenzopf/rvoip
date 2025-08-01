@@ -1,110 +1,95 @@
-# SIP P2P Voice Call Example
+# SIP Client P2P Example
 
-This example demonstrates how to make direct peer-to-peer SIP voice calls between two computers without needing a SIP server.
+This example demonstrates peer-to-peer SIP voice calls between two computers without requiring a SIP server.
 
-## Prerequisites
+## Features
 
-- Two computers on the same network (or with network connectivity)
+- Direct peer-to-peer SIP calls
+- Real-time audio using system microphone and speakers
+- G.711 μ-law/A-law codec support (standard telephony codecs)
+- Audio level visualization during calls
+- No SIP server required
+
+## Requirements
+
+- Two computers on the same network
 - Microphone and speakers on both computers
 - Rust toolchain installed
 
-## Running the Example
+## Usage
 
 ### Step 1: Start the Receiver
 
 On the first computer, run:
 
 ```bash
-cargo run -- receive -n alice
+cargo run --release -- receive -n alice
 ```
 
 This will display:
-- Your IP address (e.g., `192.168.1.100`)
+- Your IP address
 - Your SIP address (e.g., `sip:alice@192.168.1.100:5060`)
 - A command for the caller to use
 
-### Step 2: Start the Caller
+### Step 2: Make a Call
 
-On the second computer, use the command shown by the receiver:
+On the second computer, use the command shown by the receiver. For example:
 
 ```bash
-cargo run -- call -n bob -t 192.168.1.100
+cargo run --release -- call -n bob -t 192.168.1.100
 ```
 
-Replace `192.168.1.100` with the actual IP address shown by the receiver.
+Where `192.168.1.100` is the IP address of the receiver.
 
-### Step 3: Have a Conversation!
+### During the Call
 
-- The call will connect automatically
-- You'll see audio level meters showing microphone and speaker activity
-- Talk naturally - the voice data is transmitted in real-time
-- Press `Ctrl+C` to end the call
+- The receiver will auto-answer incoming calls
+- Audio level meters show microphone and speaker activity
+- Press Ctrl+C to end the call
 
 ## Command Options
 
 ### Receiver Mode
-```bash
-cargo run -- receive --help
 ```
-- `-n, --name <NAME>`: Your name (required)
-- `-p, --port <PORT>`: Port to listen on (default: 5060)
+cargo run -- receive [OPTIONS]
+
+OPTIONS:
+    -n, --name <NAME>    Your name (e.g., "alice")
+    -p, --port <PORT>    Port to listen on [default: 5060]
+```
 
 ### Caller Mode
-```bash
-cargo run -- call --help
 ```
-- `-n, --name <NAME>`: Your name (required)
-- `-t, --target <TARGET>`: Target IP address (required)
-- `-P, --target-port <PORT>`: Target port (default: 5060)
-- `-p, --port <PORT>`: Your local port (default: 5061)
+cargo run -- call [OPTIONS]
+
+OPTIONS:
+    -n, --name <NAME>              Your name (e.g., "bob")
+    -t, --target <TARGET>          Target IP address of the receiver
+    -P, --target-port <PORT>       Target port [default: 5060]
+    -p, --port <PORT>             Your local port [default: 5061]
+```
 
 ## Troubleshooting
 
 ### No Audio
-- Check that your microphone and speakers are properly connected
-- The example will list available audio devices when starting
-- Make sure your system audio settings allow the application to access the microphone
+- Check microphone permissions in your system settings
+- Ensure both computers can ping each other
+- Try running with `RUST_LOG=debug` for more information
 
 ### Connection Failed
-- Ensure both computers are on the same network
-- Check firewall settings - SIP uses UDP port 5060/5061 by default
-- Verify the IP address is correct
+- Verify firewall settings allow UDP traffic on ports 5060-5061
+- Make sure you're using the correct IP address
+- Check that no other SIP applications are using the same ports
 
 ### Poor Audio Quality
-- This example uses G.711 μ-law codec by default
-- Network congestion can affect quality
-- Try moving closer to your WiFi router
+- The example uses G.711 codec (8kHz) which is telephony quality
+- Ensure stable network connection between computers
+- Close other bandwidth-intensive applications
 
-## How It Works
+## Technical Details
 
-This example demonstrates the simplicity of the `rvoip-sip-client` library:
-
-```rust
-// Create a SIP client with one line
-let client = SipClientBuilder::new()
-    .sip_identity(format!("sip:{}@{}:{}", name, ip, port))
-    .local_address(format!("0.0.0.0:{}", port).parse()?)
-    .build()
-    .await?;
-
-// Make a call
-let call = client.call("sip:alice@192.168.1.100:5060").await?;
-
-// Or receive calls by listening to events
-let mut events = client.event_iter();
-while let Some(event) = events.next().await {
-    match event {
-        SipClientEvent::IncomingCall { call, from, .. } => {
-            client.answer(&call.id).await?;
-        }
-        // ... handle other events
-    }
-}
-```
-
-The library handles all the complexity of:
-- SIP protocol negotiation
-- Audio device management
-- Codec selection and encoding/decoding
-- Network transport
-- Error recovery and reconnection
+- Uses RVoIP SIP client library for SIP signaling
+- Audio captured at hardware native rate (usually 44.1kHz or 48kHz)
+- Automatic format conversion to 8kHz for G.711 codec
+- RTP transport for real-time audio streaming
+- Direct peer-to-peer connection (no media server)
