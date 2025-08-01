@@ -25,34 +25,34 @@ rvoip-session-core.workspace = true
 rvoip-rtp-core.workspace = true
 rvoip-client-core = { workspace = true, optional = true }
 
-# Audio device access
-cpal = { version = "0.15", optional = true }
+# Audio device access - NOT USED (no actual implementation found)
+# cpal = { version = "0.15", optional = true }
 
-# Audio processing and format conversion
-samplerate = { version = "0.2", optional = true }
-rubato = { version = "0.15", optional = true }
-dasp = { version = "0.11", features = ["signal"], optional = true }
+# Audio processing and format conversion - NOT USED (no imports found)
+# samplerate = { version = "0.2", optional = true }
+# rubato = { version = "0.15", optional = true }
+# dasp = { version = "0.11", features = ["signal"], optional = true }
 
-# For audio file decoding in tests
-symphonia = { version = "0.5", features = ["mp3", "wav"], optional = true }
+# For audio file decoding in tests - NOT USED
+# symphonia = { version = "0.5", features = ["mp3", "wav"], optional = true }
 
 
 # Async runtime and utilities
 tokio = { version = "1.0", features = ["full"] }
-async-trait = "0.1"
-futures = "0.3"
+# async-trait = "0.1"  # NOT USED
+# futures = "0.3"      # NOT USED
 
 # Data structures and utilities
 uuid = { version = "1.0", features = ["v4", "serde"] }
-bytes = "1.0"
-dashmap = "5.5"
+# bytes = "1.0"        # NOT USED
+# dashmap = "5.5"      # NOT USED
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-parking_lot = "0.12"
+# serde_json = "1.0"   # NOT USED
+# parking_lot = "0.12" # NOT USED
 
 # Logging and error handling
-tracing = "0.1"
-anyhow = "1.0"
+# tracing = "0.1"      # NOT USED
+# anyhow = "1.0"       # NOT USED
 thiserror = "1.0"
 
 # Time and synchronization
@@ -65,19 +65,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serial_test = "3.1"
 
 [features]
-default = ["device-cpal", "format-conversion"]
+default = ["format-conversion"]
 
-# Device backend features
-device-cpal = ["cpal"]
+# Device backend features (placeholder - no actual implementation)
+# device-cpal = ["cpal"]
 device-mock = []
 
-# Format conversion features
-format-conversion = ["samplerate", "rubato"]
-format-advanced = ["format-conversion", "dasp"]
-
+# Format conversion feature (placeholder - dependencies removed as not actually used)
+format-conversion = []
+# format-advanced = ["format-conversion", "dasp"]
 
 # Client integration features
-client-integration = ["rvoip-client-core", "symphonia", "format-advanced"]
+client-integration = ["rvoip-client-core"]
 
 # Audio processing features (future)
 processing-aec = []
@@ -87,7 +86,7 @@ processing-vad = []
 processing-all = ["processing-aec", "processing-agc", "processing-noise", "processing-vad"]
 
 # All features
-full = ["device-cpal", "format-advanced", "processing-all"]
+full = ["processing-all"]
 
 # Example configurations
 # Examples will be implemented in future phases 
