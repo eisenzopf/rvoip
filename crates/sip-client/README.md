@@ -4,109 +4,20 @@
 [![Documentation](https://docs.rs/rvoip-sip-client/badge.svg)](https://docs.rs/rvoip-sip-client)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
 
-A unified, production-ready SIP client library that orchestrates the RVOIP stack components to provide a complete VoIP solution.
+A simple, batteries-included SIP client library for making and receiving VoIP calls in Rust.
 
-## Overview
+## What can you do with this?
 
-The `sip-client` library integrates three core components:
-- **client-core**: High-level SIP protocol handling and session management
-- **audio-core**: Audio device management, format conversion, and pipeline processing
-- **codec-core**: Audio codec encoding/decoding (G.711, etc.)
-
-## Features
-
-- 🚀 **Simple API** - Get started with just 3 lines of code
-- 🎛️ **Advanced Control** - Full access to audio pipeline and codec configuration
-- 🔊 **Audio Processing** - Built-in echo cancellation, noise suppression, and AGC
-- 📞 **Complete Call Control** - Make, receive, transfer, hold, and conference calls
-- 🎯 **Automatic Codec Negotiation** - Seamless interoperability with any SIP endpoint
-- 📊 **Real-time Metrics** - Call quality monitoring with MOS scores
-- 🔄 **Event-driven Architecture** - Perfect for modern UI frameworks
+- ✅ **Make voice calls** to any SIP address
+- ✅ **Receive incoming calls** from other SIP clients
+- ✅ **Connect to SIP servers** (like Asterisk, FreeSWITCH)
+- ✅ **Direct peer-to-peer calls** using IP addresses
+- ✅ **Automatic audio handling** - just plug in your mic and speakers
+- ✅ **Production-ready** with error recovery and reconnection
 
 ## Quick Start
 
-```rust
-use sip_client::SipClient;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // One-line setup with defaults
-    let client = SipClient::new("sip:alice@example.com").await?;
-    
-    // Make a call
-    let call = client.call("sip:bob@example.com").await?;
-    
-    // Wait for answer
-    call.wait_for_answer().await?;
-    
-    println!("Call connected! Press Ctrl+C to hangup");
-    tokio::signal::ctrl_c().await?;
-    
-    // Hangup
-    call.hangup().await?;
-    
-    Ok(())
-}
-```
-
-## Advanced Usage
-
-```rust
-use sip_client::{SipClientBuilder, AudioPipelineConfig, CodecPriority};
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Advanced configuration with full control
-    let client = SipClientBuilder::new()
-        .sip_identity("sip:alice@example.com")
-        .sip_server("sip.example.com:5060")
-        .audio_pipeline(
-            AudioPipelineConfig::custom()
-                .input_device("Blue Yeti Microphone")
-                .output_device("AirPods Pro")
-                .echo_cancellation(true)
-                .noise_suppression(true)
-                .auto_gain_control(true)
-        )
-        .codecs(vec![
-            CodecPriority::new("opus", 100),
-            CodecPriority::new("G722", 90),
-            CodecPriority::new("PCMU", 80),
-        ])
-        .build()
-        .await?;
-    
-    // Subscribe to events
-    let mut events = client.events();
-    tokio::spawn(async move {
-        while let Some(event) = events.next().await {
-            match event {
-                SipClientEvent::CallQualityReport { mos, .. } => {
-                    println!("Call quality: {:.1} MOS", mos);
-                }
-                _ => {}
-            }
-        }
-    });
-    
-    // Make a call with custom audio processing
-    let call = client.call("sip:bob@example.com").await?;
-    let mut audio_stream = call.audio_stream().await?;
-    
-    // Process audio frames directly
-    while let Some(frame) = audio_stream.next().await {
-        // Apply custom processing
-        let processed = my_audio_filter(frame);
-        audio_stream.send(processed).await?;
-    }
-    
-    Ok(())
-}
-```
-
-## Installation
-
-Add to your `Cargo.toml`:
+### 1. Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -114,34 +25,193 @@ rvoip-sip-client = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
-## Examples
+### 2. Make your first call:
 
-Check out the `examples/` directory for complete working examples:
+```rust
+use rvoip_sip_client::SipClient;
+use std::time::Duration;
 
-- `simple_softphone` - Basic softphone implementation
-- `advanced_client` - Advanced features demonstration
-- `call_center_agent` - Call center agent console
-
-Run examples with:
-
-```bash
-cargo run --example simple_softphone
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Create a SIP client with your SIP address
+    let client = SipClient::new("sip:alice@example.com").await?;
+    
+    // Start the client
+    client.start().await?;
+    
+    // Make a call
+    let call = client.call("sip:bob@example.com").await?;
+    
+    // Wait for the other person to answer
+    call.wait_for_answer().await?;
+    println!("🎉 Call connected!");
+    
+    // Let them talk for 30 seconds
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    
+    // Hang up
+    client.hangup(&call.id).await?;
+    println!("📞 Call ended");
+    
+    Ok(())
+}
 ```
 
-## Architecture
+### 3. Receive incoming calls:
 
-```
-Your Application
-        │
-        ▼
-   SIP Client (this crate)
-        │
-   ┌────┴────┬──────────┐
-   ▼         ▼          ▼
-client-core  audio-core  codec-core
+```rust
+use rvoip_sip_client::{SipClient, SipClientEvent};
+use tokio_stream::StreamExt;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = SipClient::new("sip:alice@example.com").await?;
+    client.start().await?;
+    
+    // Subscribe to events
+    let mut events = client.events();
+    
+    println!("📞 Waiting for calls...");
+    
+    while let Some(event) = events.next().await {
+        match event {
+            SipClientEvent::IncomingCall { call, from, .. } => {
+                println!("📞 Incoming call from {}", from);
+                
+                // Answer the call
+                client.answer(&call.id).await?;
+                println!("✅ Call answered!");
+            }
+            SipClientEvent::CallEnded { call } => {
+                println!("📞 Call ended: {}", call.id);
+            }
+            _ => {}
+        }
+    }
+    
+    Ok(())
+}
 ```
 
-The SIP Client handles all the complex integration between components, providing you with a clean, unified API.
+## Common Use Cases
+
+### Connect to a SIP Server (PBX)
+
+```rust
+use rvoip_sip_client::SipClientBuilder;
+
+// Connect to your company's PBX
+let client = SipClientBuilder::new()
+    .sip_identity("sip:alice@company.com")
+    .sip_server("pbx.company.com:5060")
+    .build()
+    .await?;
+```
+
+### Direct Peer-to-Peer Call
+
+```rust
+// Call someone directly by IP address (no server needed!)
+let call = client.call("sip:bob@192.168.1.100:5060").await?;
+```
+
+### Mute/Unmute During Call
+
+```rust
+// Mute your microphone
+client.set_mute(&call.id, true).await?;
+
+// Unmute
+client.set_mute(&call.id, false).await?;
+```
+
+### List Audio Devices
+
+```rust
+use rvoip_audio_core::AudioDirection;
+
+// List available microphones
+let mics = client.list_audio_devices(AudioDirection::Input).await?;
+for mic in mics {
+    println!("🎤 {}", mic.name);
+}
+
+// List available speakers
+let speakers = client.list_audio_devices(AudioDirection::Output).await?;
+for speaker in speakers {
+    println!("🔊 {}", speaker.name);
+}
+```
+
+## Error Handling
+
+The library provides user-friendly error messages:
+
+```rust
+match client.call("sip:invalid@nowhere").await {
+    Ok(call) => println!("Call started"),
+    Err(e) => {
+        // You'll get helpful messages like:
+        // "Network connectivity issue detected"
+        // "Check your internet connection"
+        // "Verify firewall settings allow SIP traffic"
+        eprintln!("Call failed: {}", e);
+    }
+}
+```
+
+## Events You Can Listen For
+
+```rust
+use rvoip_sip_client::SipClientEvent;
+
+match event {
+    SipClientEvent::IncomingCall { call, from, .. } => {
+        // Someone is calling you
+    }
+    SipClientEvent::CallConnected { call_id, .. } => {
+        // Call was answered
+    }
+    SipClientEvent::CallEnded { call } => {
+        // Call finished
+    }
+    SipClientEvent::AudioLevelChanged { level, .. } => {
+        // Audio volume changed (useful for UI meters)
+    }
+    _ => {}
+}
+```
+
+## Supported Features
+
+✅ **What Works Now:**
+- G.711 μ-law and A-law codecs (standard telephony codecs)
+- Echo cancellation and noise suppression
+- Automatic audio device selection
+- Error recovery and reconnection
+- Both server-based and peer-to-peer calls
+
+⏳ **Coming Soon:**
+- Additional codecs (Opus, G.722)
+- Call recording
+- Conference calls
+- Video calls
+
+## Troubleshooting
+
+### "Not receiving audio"
+- Check your firewall allows UDP ports 5060 (SIP) and 10000-20000 (RTP)
+- Ensure your audio devices have proper permissions
+
+### "Registration failed"
+- Verify your SIP credentials
+- Check the server address and port
+- Ensure you're connected to the internet
+
+### "No audio devices found"
+- On macOS: Check System Preferences > Security & Privacy > Microphone
+- On Windows: Check Settings > Privacy > Microphone
+- On Linux: Ensure PulseAudio/ALSA is running
 
 ## License
 
@@ -151,3 +221,9 @@ This project is licensed under either of:
 - MIT license ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
+
+## Need Help?
+
+- 📖 [API Documentation](https://docs.rs/rvoip-sip-client)
+- 💬 [GitHub Issues](https://github.com/rvoip/rvoip/issues)
+- 📧 [Email Support](mailto:support@rvoip.io)

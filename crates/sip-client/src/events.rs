@@ -347,6 +347,27 @@ pub enum ErrorCategory {
 /// Event stream type
 pub type EventStream = BroadcastStream<SipClientEvent>;
 
+/// Simple event iterator that doesn't require StreamExt
+pub struct EventIterator {
+    stream: EventStream,
+}
+
+impl EventIterator {
+    /// Create a new event iterator from a stream
+    pub fn new(stream: EventStream) -> Self {
+        Self { stream }
+    }
+    
+    /// Get the next event (async)
+    pub async fn next(&mut self) -> Option<SipClientEvent> {
+        use tokio_stream::StreamExt;
+        match self.stream.next().await {
+            Some(Ok(event)) => Some(event),
+            _ => None,
+        }
+    }
+}
+
 /// Event emitter for the SIP client
 #[derive(Clone)]
 pub struct EventEmitter {
@@ -369,6 +390,11 @@ impl EventEmitter {
     /// Subscribe to events
     pub fn subscribe(&self) -> EventStream {
         BroadcastStream::new(self.sender.subscribe())
+    }
+    
+    /// Subscribe to events with a simple iterator
+    pub fn subscribe_simple(&self) -> EventIterator {
+        EventIterator::new(self.subscribe())
     }
     
     /// Get the number of active receivers

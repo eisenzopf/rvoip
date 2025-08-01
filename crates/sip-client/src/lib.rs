@@ -74,8 +74,25 @@ pub use builder::SipClientBuilder;
 pub use types::{Call, CallId, CallState, AudioConfig, CodecConfig};
 pub use events::{SipClientEvent, EventStream};
 
+// Re-export audio types that users need
+pub use rvoip_audio_core::AudioDirection;
+
+// Re-export async stream extension for event handling
+pub use tokio_stream::StreamExt;
+
 #[cfg(feature = "simple-api")]
 pub use simple::SipClient;
+
+// Convenience re-exports for common async patterns
+pub mod prelude {
+    //! Common imports for sip-client applications
+    pub use crate::{
+        SipClient, SipClientBuilder, SipClientEvent, 
+        Call, CallId, CallState, AudioDirection,
+        SipClientError, SipClientResult,
+    };
+    pub use tokio_stream::StreamExt;
+}
 
 #[cfg(feature = "advanced-api")]
 pub use advanced::{
