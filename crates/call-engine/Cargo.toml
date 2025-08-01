@@ -19,9 +19,9 @@ description = "Call center engine and advanced call management for the rvoip sta
 [lints]
 workspace = true
 [dependencies]
-# Workspace crates
-rvoip-sip-core = { path = "../sip-core", version = "0.1.4" }
-rvoip-session-core = { path = "../session-core", version = "0.1.4" }
+# 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
+rvoip-sip-core.workspace = true
+rvoip-session-core.workspace = true
 
 # Database - Modern async approach with sqlx
 # Replace rusqlite/r2d2 with sqlx for true async support
@@ -64,7 +64,7 @@ parking_lot = "0.12"
 
 # For examples
 clap = { version = "4.5", features = ["derive"] }
-rvoip-client-core = { path = "../client-core", version = "0.1.1" }
+rvoip-client-core.workspace = true
 
 [dev-dependencies]
 # Testing

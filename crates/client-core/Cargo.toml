@@ -19,7 +19,8 @@ description = "High-level VoIP client library for the rvoip stack"
 [lints]
 workspace = true
 [dependencies]
-rvoip-session-core = { path = "../session-core", version = "0.1.4" }
+# 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
+rvoip-session-core.workspace = true
 
 # Async runtime and utilities
 tokio = { version = "1.0", features = ["full"] }

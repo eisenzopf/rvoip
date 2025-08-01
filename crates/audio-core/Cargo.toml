@@ -20,10 +20,10 @@ description = "Comprehensive audio handling for VoIP applications with device ma
 workspace = true
 
 [dependencies]
-# Integration with other rvoip crates
-rvoip-session-core = { path = "../session-core", version = "0.1.4" }
-rvoip-rtp-core = { path = "../rtp-core", version = "0.1.4" }
-rvoip-client-core = { path = "../client-core", version = "0.1.4", optional = true }
+# 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
+rvoip-session-core.workspace = true
+rvoip-rtp-core.workspace = true
+rvoip-client-core = { workspace = true, optional = true }
 
 # Audio device access
 cpal = { version = "0.15", optional = true }
