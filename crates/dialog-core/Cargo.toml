@@ -41,19 +41,13 @@ rand.workspace = true
 
 # Crate-specific dependencies not in workspace
 http = "0.2"
-mockall = { version = "0.11", optional = true }
 
 [dev-dependencies]
 # Testing
 tokio-test = "0.4"
-rstest = "0.18"
 
 # Logging for examples
 tracing-subscriber = "0.3"
-
-# SIPp testing (for integration tests)
-assert_cmd = "2.0"
-predicates = "3.0"
 
 [features]
 default = ["recovery", "events"]
@@ -65,7 +59,7 @@ recovery = []
 events = []
 
 # Testing features
-testing = ["mockall"]
+testing = []
 
 # Development features (additional debugging)
 dev = ["recovery", "events", "testing"]

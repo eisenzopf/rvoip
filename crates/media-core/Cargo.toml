@@ -51,19 +51,14 @@ rand = "0.8"
 
 # Missing dependencies needed for compilation
 uuid = { version = "1.0", features = ["v4"] }
-bytemuck = "1.0"
-num_cpus = "1.0"
 once_cell = "1.19"           # Lazy static initialization for G.711 lookup tables
+num_cpus = "1.0"             # Used for default worker thread configuration
 
 # Advanced signal processing
 rustfft = "6.1"
-num-complex = "0.4"
-apodize = "1.0"              # Windowing functions
-biquad = "0.4"               # Digital filters
-
-# Performance optimization  
-rayon = "1.7"                # Parallel processing
-ringbuf = "0.3"              # Lock-free ring buffers
+num-complex = "0.4"          # Used in AEC v2 implementation
+apodize = "1.0"              # Used in VAD v2 for windowing functions
+biquad = "0.4"               # Used in AGC v2 for digital filters
 
 # Media codecs (optional)
 opus = { version = "0.3", optional = true }
