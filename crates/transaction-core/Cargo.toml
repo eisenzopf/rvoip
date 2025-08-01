@@ -28,7 +28,6 @@ rvoip-sip-transport = { workspace = true, features = ["udp", "tcp", "tls", "ws"]
 tokio = { version = "1.28.2", features = ["full"] }
 async-trait = "0.1.60"
 futures = "0.3"
-pin-project = "1.0"
 
 # Error handling
 thiserror = "1.0.40"
@@ -41,7 +40,6 @@ tracing = "0.1.37"
 
 # Added from the code block
 rand = "0.8"
-lazy_static = "1.4.0"
 
 [dev-dependencies]
 serial_test = "3.2.0"
