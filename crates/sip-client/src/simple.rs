@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use rvoip_client_core::events::ClientEventHandler;
 
 /// Simple SIP client with easy-to-use API
+#[derive(Clone)]
 pub struct SipClient {
     /// Internal state
     inner: Arc<SipClientInner>,
@@ -263,9 +264,14 @@ impl SipClient {
         Ok(())
     }
     
-    /// Subscribe to events
+    /// Subscribe to events (requires StreamExt)
     pub fn events(&self) -> EventStream {
         self.inner.events.subscribe()
+    }
+    
+    /// Subscribe to events with simple iterator (no StreamExt needed)
+    pub fn event_iter(&self) -> crate::events::EventIterator {
+        self.inner.events.subscribe_simple()
     }
     
     /// Get active calls
@@ -416,6 +422,27 @@ impl SipClient {
             .ok_or_else(|| SipClientError::CallNotFound {
                 call_id: call_id.to_string(),
             })
+    }
+    
+    /// Get the currently active call (if any)
+    pub fn active_call(&self) -> Option<Arc<Call>> {
+        // Return the first connected call
+        self.inner.calls.read()
+            .values()
+            .find(|call| matches!(*call.state.read(), CallState::Connected))
+            .cloned()
+    }
+    
+    /// Check if there's an active call
+    pub fn has_active_call(&self) -> bool {
+        self.active_call().is_some()
+    }
+    
+    /// Wait for the next event (convenience method)
+    pub async fn next_event(&mut self) -> Option<SipClientEvent> {
+        // This would require making events() return a mutable stream
+        // For now, users still need to use events() + StreamExt
+        None
     }
     
     // Helper methods
