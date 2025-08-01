@@ -20,45 +20,33 @@ description = "Unified SIP client library orchestrating client-core, audio-core,
 workspace = true
 
 [dependencies]
-# Core rvoip dependencies
-rvoip-client-core = { path = "../client-core", version = "0.1.4" }
-rvoip-audio-core = { path = "../audio-core", version = "0.1.4" }
-rvoip-codec-core = { path = "../codec-core", version = "0.1.4" }
+# 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
+rvoip-client-core.workspace = true
+rvoip-audio-core.workspace = true
+rvoip-codec-core.workspace = true
+rvoip-session-core.workspace = true
 
-# Session core for types
-rvoip-session-core = { path = "../session-core", version = "0.1.4" }
-
-# Async runtime and utilities
-tokio = { version = "1.0", features = ["full"] }
-async-trait = "0.1"
-futures = "0.3"
-tokio-stream = { version = "0.1", features = ["sync"] }
-
-# Error handling
-thiserror = "1.0"
-anyhow = "1.0"
-
-# Logging and tracing
-tracing = "0.1"
-
-# Data structures
-dashmap = "5.5"
-parking_lot = "0.12"
-
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Time handling
-chrono = "0.4"
+# External dependencies from workspace
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+tokio-stream.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
-# Testing utilities
+tokio.workspace = true
+tracing-subscriber.workspace = true
+
+# Crate-specific dev dependencies that aren't in workspace
 tokio-test = "0.4"
 tracing-test = "0.2"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Mock and test utilities
 mockall = "0.12"
 serial_test = "3.1"
 
