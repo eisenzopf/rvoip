@@ -98,7 +98,7 @@ async fn run_receiver(name: String, port: u16) -> Result<(), Box<dyn std::error:
     // Create SIP client
     let client = SipClientBuilder::new()
         .sip_identity(sip_address.clone())
-        .local_address(format!("0.0.0.0:{}", port).parse()?)
+        .local_address(format!("{}:{}", local_ip, port).parse()?)
         .build()
         .await?;
     
@@ -188,7 +188,7 @@ async fn run_caller(
     // Create SIP client
     let client = SipClientBuilder::new()
         .sip_identity(sip_address)
-        .local_address(format!("0.0.0.0:{}", port).parse()?)
+        .local_address(format!("{}:{}", local_ip, port).parse()?)
         .build()
         .await?;
     

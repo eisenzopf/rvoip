@@ -12,9 +12,9 @@ use crate::{
 use std::sync::Arc;
 use parking_lot::RwLock;
 use std::collections::HashMap;
-use tokio::task::JoinHandle;
 use async_trait::async_trait;
 use rvoip_client_core::events::ClientEventHandler;
+use tokio::task::JoinHandle;
 
 /// Simple SIP client with easy-to-use API
 #[derive(Clone)]
@@ -23,13 +23,6 @@ pub struct SipClient {
     inner: Arc<SipClientInner>,
 }
 
-/// Audio pipeline tasks for a call
-struct AudioPipelineTasks {
-    /// Capture task handle
-    capture_task: JoinHandle<()>,
-    /// Playback task handle
-    playback_task: JoinHandle<()>,
-}
 
 struct SipClientInner {
     /// Configuration
@@ -42,8 +35,6 @@ struct SipClientInner {
     codec_registry: Arc<codec_core::CodecRegistry>,
     /// Active calls
     calls: Arc<RwLock<HashMap<CallId, Arc<Call>>>>,
-    /// Audio pipeline tasks per call
-    audio_tasks: Arc<RwLock<HashMap<CallId, AudioPipelineTasks>>>,
     /// Event emitter
     events: EventEmitter,
     /// Event handler task handle
@@ -109,7 +100,6 @@ impl SipClient {
             audio_manager,
             codec_registry,
             calls: Arc::new(RwLock::new(HashMap::new())),
-            audio_tasks: Arc::new(RwLock::new(HashMap::new())),
             events,
             event_handler_task: Arc::new(RwLock::new(None)),
             recovery_manager,
@@ -161,8 +151,8 @@ impl SipClient {
         // Store call
         self.inner.calls.write().insert(call_id, call.clone());
         
-        // Start audio pipeline for the call
-        self.setup_audio_pipeline(&call).await?;
+        // Note: Audio pipeline is handled by session-core/media-core layers
+        // which manage the actual RTP transport and media processing
         
         // Initialize quality adaptation for the call
         let codecs = vec![codec_core::CodecType::G711Pcmu, codec_core::CodecType::G711Pcma];
@@ -184,8 +174,8 @@ impl SipClient {
         // Update call state
         *call.state.write() = CallState::Connected;
         
-        // Start audio pipeline for answered call
-        self.setup_audio_pipeline(&call).await?;
+        // Note: Audio pipeline is handled by session-core/media-core layers
+        // which manage the actual RTP transport and media processing
         
         // Initialize quality adaptation for the call
         let codecs = vec![codec_core::CodecType::G711Pcmu, codec_core::CodecType::G711Pcma];
@@ -209,8 +199,7 @@ impl SipClient {
         // Terminate via client-core
         self.inner.client.hangup_call(call_id).await?;
         
-        // Clean up audio pipeline
-        self.cleanup_audio_pipeline(call_id).await?;
+        // Note: Audio pipeline cleanup is handled by session-core/media-core layers
         
         // Clean up quality adaptation
         self.inner.quality_adaptation_manager.cleanup_call(call_id).await;
@@ -510,208 +499,6 @@ impl SipClient {
     async fn create_sdp_answer(&self, _call: &Call) -> SipClientResult<String> {
         // TODO: Create proper SDP answer based on offer
         self.create_sdp_offer().await
-    }
-    
-    async fn setup_audio_pipeline(&self, call: &Arc<Call>) -> SipClientResult<()> {
-        use rvoip_audio_core::pipeline::AudioPipeline;
-        use rvoip_audio_core::types::{AudioFormat, AudioStreamConfig};
-        
-        // Create audio pipeline configuration
-        let mut config = AudioStreamConfig::voip_basic();
-        
-        // Configure based on negotiated codec (default to G.711 μ-law 8kHz)
-        let codec_type = call.codec.as_ref()
-            .cloned()
-            .unwrap_or(codec_core::CodecType::G711Pcmu);
-            
-        // Set codec name and format based on codec type
-        // Note: codec-core currently only supports G.711 codecs
-        let (codec_name, audio_format) = match codec_type {
-            codec_core::CodecType::G711Pcmu => ("PCMU", AudioFormat::pcm_8khz_mono()),
-            codec_core::CodecType::G711Pcma => ("PCMA", AudioFormat::pcm_8khz_mono()),
-            // For unsupported codecs, default to PCMU
-            _ => {
-                tracing::warn!("Codec {:?} not supported by codec-core, defaulting to PCMU", codec_type);
-                ("PCMU", AudioFormat::pcm_8khz_mono())
-            }
-        };
-        
-        config.codec_name = codec_name.to_string();
-        
-        config.input_format = audio_format.clone();
-        config.output_format = audio_format;
-        
-        // Create audio pipeline with audio processing enabled
-        let mut pipeline = AudioPipeline::builder()
-            .input_format(config.input_format.clone())
-            .output_format(config.output_format.clone())
-            .device_manager(self.inner.audio_manager.as_ref().clone())
-            .enable_processing(true) // Enable AEC, AGC, noise suppression
-            .buffer_size_ms(50) // 50ms buffer for jitter
-            .build()
-            .await
-            .map_err(|e| SipClientError::AudioPipelineError {
-                operation: "create".to_string(),
-                details: e.to_string(),
-            })?;
-        
-        // Start the pipeline
-        pipeline.start().await
-            .map_err(|e| SipClientError::AudioPipelineError {
-                operation: "start".to_string(),
-                details: e.to_string(),
-            })?;
-        
-        // Store pipeline reference (we'll need to add this field)
-        // For now, we'll spawn tasks to handle audio flow
-        
-        // Spawn task to capture audio and send to client-core
-        let client = self.inner.client.clone();
-        let call_id = call.id;
-        let events = self.inner.events.clone();
-        let capture_handle = tokio::spawn(async move {
-            let mut pipeline = pipeline;
-            let mut frame_count = 0u64;
-            loop {
-                match pipeline.capture_frame().await {
-                    Ok(audio_frame) => {
-                        // Emit audio level event periodically (every 50 frames = ~1 second at 20ms frames)
-                        frame_count += 1;
-                        if frame_count % 50 == 0 {
-                            let level = audio_frame.rms_level();
-                            let peak = audio_frame.samples.iter()
-                                .map(|&s| s.abs() as f32 / i16::MAX as f32)
-                                .fold(0.0f32, |max, val| if val > max { val } else { max });
-                            
-                            events.emit(SipClientEvent::AudioLevelChanged {
-                                call_id: Some(call_id),
-                                direction: rvoip_audio_core::AudioDirection::Input,
-                                level: level / i16::MAX as f32,
-                                peak,
-                            });
-                        }
-                        
-                        // Convert audio-core frame to session-core frame
-                        let session_frame = audio_frame.to_session_core();
-                        
-                        // Send to client-core for encoding and RTP transmission
-                        if let Err(e) = client.send_audio_frame(&call_id, session_frame).await {
-                            tracing::error!("Failed to send audio frame: {}", e);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to capture audio frame: {}", e);
-                        events.emit(SipClientEvent::AudioDeviceError {
-                            message: format!("Capture error: {}", e),
-                            device: None,
-                        });
-                        break;
-                    }
-                }
-                
-                // Add small delay to prevent busy loop
-                tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
-            }
-        });
-        
-        // Subscribe to incoming audio frames from client-core
-        let mut audio_subscriber = self.inner.client
-            .subscribe_to_audio_frames(&call.id)
-            .await
-            .map_err(|e| SipClientError::AudioPipelineError {
-                operation: "subscribe".to_string(),
-                details: e.to_string(),
-            })?;
-        
-        // Create a new pipeline for playback (we need separate instance for now)
-        let mut playback_pipeline = AudioPipeline::builder()
-            .input_format(config.input_format.clone())
-            .output_format(config.output_format.clone())
-            .device_manager(self.inner.audio_manager.as_ref().clone())
-            .enable_processing(false) // No processing needed for playback
-            .buffer_size_ms(50)
-            .build()
-            .await
-            .map_err(|e| SipClientError::AudioPipelineError {
-                operation: "create_playback".to_string(),
-                details: e.to_string(),
-            })?;
-        
-        playback_pipeline.start().await
-            .map_err(|e| SipClientError::AudioPipelineError {
-                operation: "start_playback".to_string(),
-                details: e.to_string(),
-            })?;
-        
-        // Spawn task to receive audio from client-core and play
-        let events_playback = self.inner.events.clone();
-        let call_id_playback = call.id;
-        let playback_handle = tokio::spawn(async move {
-            let mut pipeline = playback_pipeline;
-            let mut frame_count = 0u64;
-            while let Ok(session_frame) = audio_subscriber.recv() {
-                // Convert session-core frame to audio-core frame
-                let audio_frame = rvoip_audio_core::types::AudioFrame::from_session_core(
-                    &session_frame,
-                    config.output_format.frame_size_ms
-                );
-                
-                // Emit audio level event periodically for playback
-                frame_count += 1;
-                if frame_count % 50 == 0 {
-                    let level = audio_frame.rms_level();
-                    let peak = audio_frame.samples.iter()
-                        .map(|&s| s.abs() as f32 / i16::MAX as f32)
-                        .fold(0.0f32, |max, val| if val > max { val } else { max });
-                    
-                    events_playback.emit(SipClientEvent::AudioLevelChanged {
-                        call_id: Some(call_id_playback),
-                        direction: rvoip_audio_core::AudioDirection::Output,
-                        level: level / i16::MAX as f32,
-                        peak,
-                    });
-                }
-                
-                // Send to audio pipeline for playback
-                if let Err(e) = pipeline.playback_frame(audio_frame).await {
-                    tracing::error!("Failed to playback audio frame: {}", e);
-                    events_playback.emit(SipClientEvent::AudioDeviceError {
-                        message: format!("Playback error: {}", e),
-                        device: None,
-                    });
-                    break;
-                }
-            }
-        });
-        
-        // Store task handles for cleanup
-        let audio_tasks = AudioPipelineTasks {
-            capture_task: capture_handle,
-            playback_task: playback_handle,
-        };
-        
-        self.inner.audio_tasks.write().insert(call.id, audio_tasks);
-        
-        Ok(())
-    }
-    
-    async fn cleanup_audio_pipeline(&self, call_id: &CallId) -> SipClientResult<()> {
-        // Remove and stop audio tasks
-        if let Some(tasks) = self.inner.audio_tasks.write().remove(call_id) {
-            // Cancel the tasks
-            tasks.capture_task.abort();
-            tasks.playback_task.abort();
-            
-            // Wait for tasks to finish (with timeout)
-            let timeout = tokio::time::Duration::from_secs(1);
-            let _ = tokio::time::timeout(timeout, tasks.capture_task).await;
-            let _ = tokio::time::timeout(timeout, tasks.playback_task).await;
-            
-            tracing::debug!("Cleaned up audio pipeline for call {}", call_id);
-        }
-        
-        Ok(())
     }
     
     /// Start event forwarding from client-core to sip-client events
