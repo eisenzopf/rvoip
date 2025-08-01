@@ -9,9 +9,10 @@ use crate::types::AudioDirection;
 use crate::format::{FormatConverter, AudioFrameBuffer};
 use crate::error::{AudioError, AudioResult};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, oneshot};
 use tokio::time::{Duration, Interval, interval};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Audio pipeline for streaming between devices and RTP
 pub struct AudioPipeline {
@@ -39,6 +40,10 @@ pub struct AudioPipeline {
     output_frame_tx: mpsc::Sender<AudioFrame>,
     /// Output frame receiver  
     output_frame_rx: Option<mpsc::Receiver<AudioFrame>>,
+    /// Number of frames sent for playback
+    frames_sent: Arc<AtomicU64>,
+    /// Number of frames actually played
+    frames_played: Arc<AtomicU64>,
 }
 
 /// Pipeline operational state
@@ -202,6 +207,8 @@ impl AudioPipelineBuilder {
             input_frame_rx: Some(input_frame_rx),
             output_frame_tx,
             output_frame_rx: Some(output_frame_rx),
+            frames_sent: Arc::new(AtomicU64::new(0)),
+            frames_played: Arc::new(AtomicU64::new(0)),
         })
     }
 }
@@ -230,6 +237,10 @@ impl AudioPipeline {
         *state = PipelineState::Starting;
         drop(state);
 
+        // Reset frame counters
+        self.frames_sent.store(0, Ordering::SeqCst);
+        self.frames_played.store(0, Ordering::SeqCst);
+
         // Start input processing task
         if let Some(ref input_device) = self.input_device {
             let device = input_device.clone();
@@ -237,22 +248,29 @@ impl AudioPipeline {
             let format = self.config.input_format.clone();
             let state = self.state.clone();
 
-            tokio::spawn(async move {
-                Self::input_capture_task(device, tx, format, state).await;
+            tokio::task::spawn_blocking(move || {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async move {
+                    Self::input_capture_task(device, tx, format, state).await;
+                });
             });
         }
 
         // Start output processing task
         if let Some(ref output_device) = self.output_device {
             let device = output_device.clone();
-            let mut rx = self.output_frame_rx.take().ok_or_else(|| AudioError::PipelineError {
+            let rx = self.output_frame_rx.take().ok_or_else(|| AudioError::PipelineError {
                 stage: "start".to_string(),
                 reason: "Output receiver already taken".to_string(),
             })?;
             let state = self.state.clone();
+            let frames_played = self.frames_played.clone();
 
-            tokio::spawn(async move {
-                Self::output_playback_task(device, rx, state).await;
+            tokio::task::spawn_blocking(move || {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async move {
+                    Self::output_playback_task(device, rx, state, frames_played).await;
+                });
             });
         }
 
@@ -296,6 +314,68 @@ impl AudioPipeline {
             })
         }
     }
+    
+    /// Play an audio frame to the output device
+    pub async fn play_frame(&mut self, frame: AudioFrame) -> AudioResult<()> {
+        self.output_frame_tx.send(frame).await
+            .map_err(|_| AudioError::PipelineError {
+                stage: "playback".to_string(),
+                reason: "Output channel closed".to_string(),
+            })?;
+        self.frames_sent.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    
+    /// Wait for all queued frames to finish playing
+    /// 
+    /// Note: This method tracks when frames start playing and waits for the audio
+    /// duration plus a buffer. Due to CPAL's internal buffering, we cannot track
+    /// exactly when samples finish playing. A fully accurate implementation would
+    /// require low-level audio driver integration.
+    pub async fn wait_for_playback_complete(&self) -> AudioResult<()> {
+        let sent = self.frames_sent.load(Ordering::SeqCst);
+        if sent == 0 {
+            return Ok(()); // Nothing to wait for
+        }
+        
+        // Record when we started waiting
+        let wait_start = tokio::time::Instant::now();
+        
+        // First, wait for the first frame to start playing
+        let mut attempts = 0;
+        let max_attempts = 500; // 5 seconds with 10ms intervals
+        
+        while self.frames_played.load(Ordering::SeqCst) == 0 {
+            if attempts >= max_attempts {
+                return Err(AudioError::PipelineError {
+                    stage: "wait_playback".to_string(),
+                    reason: "Timeout waiting for playback to start".to_string(),
+                });
+            }
+            
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            attempts += 1;
+        }
+        
+        // Calculate total audio duration from when first frame started playing
+        let frame_duration_ms = self.config.output_format.frame_size_ms as u64;
+        let total_audio_duration_ms = sent * frame_duration_ms;
+        
+        // Add buffer time for CPAL's internal buffering and OS latency
+        let buffer_time_ms = 500;
+        let total_wait_from_start = Duration::from_millis(total_audio_duration_ms + buffer_time_ms);
+        
+        // Calculate remaining wait time
+        let elapsed = wait_start.elapsed();
+        if elapsed < total_wait_from_start {
+            let remaining = total_wait_from_start - elapsed;
+            eprintln!("⏱️ Waiting {:.1}s for audio to finish playing ({} frames)", 
+                remaining.as_secs_f32(), sent);
+            tokio::time::sleep(remaining).await;
+        }
+        
+        Ok(())
+    }
 
     /// Send an audio frame to the output device for playback
     pub async fn playback_frame(&mut self, frame: AudioFrame) -> AudioResult<()> {
@@ -336,15 +416,82 @@ impl AudioPipeline {
         Ok(())
     }
 
-    /// Input capture task (simulated for now)
+    /// Input capture task with real audio device support
     async fn input_capture_task(
-        _device: Arc<dyn AudioDevice>,
+        device: Arc<dyn AudioDevice>,
         tx: mpsc::Sender<AudioFrame>,
         format: AudioFormat,
         state: Arc<RwLock<PipelineState>>,
     ) {
+        #[cfg(feature = "device-cpal")]
+        {
+            // Try to use real CPAL audio capture
+            if let Some(cpal_device) = device.as_any().downcast_ref::<crate::device::cpal_backend::CpalAudioDevice>() {
+                eprintln!("🎤 Starting REAL audio capture from: {}", device.info().name);
+                
+                // Create a channel for the CPAL stream to send frames
+                let (stream_tx, mut stream_rx) = mpsc::channel::<AudioFrame>(100);
+                
+                // Create the CPAL capture stream
+                match crate::device::cpal_stream::create_capture_stream(
+                    cpal_device.cpal_device(),
+                    format.clone(),
+                    stream_tx,
+                ) {
+                    Ok(stream) => {
+                        eprintln!("✅ CPAL audio capture stream started successfully!");
+                        
+                        // Keep stream alive in a separate variable
+                        let _stream = stream;
+                        
+                        // Keep the stream alive and forward frames
+                        let mut frame_count = 0u64;
+                        loop {
+                            // Check if we should stop
+                            {
+                                let current_state = state.read().await;
+                                if *current_state == PipelineState::Stopping || *current_state == PipelineState::Stopped {
+                                    break;
+                                }
+                            }
+                            
+                            // Forward frames from CPAL stream to pipeline
+                            match stream_rx.recv().await {
+                                Some(frame) => {
+                                    frame_count += 1;
+                                    if frame_count <= 5 || frame_count % 100 == 0 {
+                                        eprintln!("🎤 Captured real audio frame #{}", frame_count);
+                                    }
+                                    
+                                    if tx.send(frame).await.is_err() {
+                                        break; // Pipeline channel closed
+                                    }
+                                }
+                                None => {
+                                    eprintln!("⚠️ CPAL stream channel closed");
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // Stream will be dropped here, stopping capture
+                        eprintln!("🛑 Real audio capture stopped after {} frames", frame_count);
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Failed to create CPAL capture stream: {}", e);
+                        eprintln!("⚠️ Falling back to test tone generation");
+                    }
+                }
+            }
+        }
+        
+        // Fallback: Generate test tone if CPAL is not available or fails
+        eprintln!("⚠️ Using test tone generation (no real audio capture)");
+        
         let mut interval = interval(Duration::from_millis(format.frame_size_ms as u64));
         let mut timestamp = 0u32;
+        let mut frame_count = 0u64;
 
         loop {
             // Check if we should stop
@@ -357,24 +504,134 @@ impl AudioPipeline {
 
             interval.tick().await;
 
-            // Simulate capturing audio (in real implementation, this would read from device)
-            let samples = vec![0i16; format.samples_per_frame()]; // Silent frame for simulation
+            // Generate a test tone
+            let samples = if frame_count < 100 {
+                // Generate a 440Hz test tone for first 100 frames (2 seconds at 20ms frames)
+                let samples_per_frame = format.samples_per_frame();
+                let mut samples = Vec::with_capacity(samples_per_frame);
+                for i in 0..samples_per_frame {
+                    let t = (timestamp + i as u32) as f32 / format.sample_rate as f32;
+                    let sample = (t * 440.0 * 2.0 * std::f32::consts::PI).sin() * 0.3 * i16::MAX as f32;
+                    samples.push(sample as i16);
+                }
+                samples
+            } else {
+                // Silent frames after the test tone
+                vec![0i16; format.samples_per_frame()]
+            };
+            
             let frame = AudioFrame::new(samples, format.clone(), timestamp);
+
+            if frame_count < 5 {
+                eprintln!("📡 Generated test tone frame #{}", frame_count);
+            }
 
             if tx.send(frame).await.is_err() {
                 break; // Channel closed
             }
 
             timestamp = timestamp.wrapping_add(format.samples_per_frame() as u32);
+            frame_count += 1;
         }
+        
+        eprintln!("🛑 Test tone generation stopped after {} frames", frame_count);
     }
 
-    /// Output playback task (simulated for now)
+    /// Output playback task with real audio device support
     async fn output_playback_task(
-        _device: Arc<dyn AudioDevice>,
+        device: Arc<dyn AudioDevice>,
         mut rx: mpsc::Receiver<AudioFrame>,
         state: Arc<RwLock<PipelineState>>,
+        frames_played: Arc<AtomicU64>,
     ) {
+        #[cfg(feature = "device-cpal")]
+        {
+            // Try to use real CPAL audio playback
+            if let Some(cpal_device) = device.as_any().downcast_ref::<crate::device::cpal_backend::CpalAudioDevice>() {
+                eprintln!("🔊 Starting REAL audio playback to: {}", device.info().name);
+                
+                // Get the format from the first frame
+                if let Some(first_frame) = rx.recv().await {
+                    let format = first_frame.format.clone();
+                    
+                    // Create a channel to send frames to CPAL stream
+                    let (stream_tx, stream_rx) = mpsc::channel::<AudioFrame>(100);
+                    
+                    // Send the first frame
+                    let _ = stream_tx.send(first_frame).await;
+                    frames_played.fetch_add(1, Ordering::SeqCst);
+                    
+                    // Create the CPAL playback stream
+                    match crate::device::cpal_stream::create_playback_stream(
+                        cpal_device.cpal_device(),
+                        format,
+                        stream_rx,
+                    ) {
+                        Ok(stream) => {
+                            eprintln!("✅ CPAL audio playback stream started successfully!");
+                            
+                            let mut frame_count = 1u64; // Already sent first frame
+                            
+                            // Forward frames to CPAL stream
+                            loop {
+                                // Check if we should stop
+                                {
+                                    let current_state = state.read().await;
+                                    if *current_state == PipelineState::Stopping || *current_state == PipelineState::Stopped {
+                                        break;
+                                    }
+                                }
+                                
+                                match rx.recv().await {
+                                    Some(frame) => {
+                                        frame_count += 1;
+                                        
+                                        if frame_count <= 5 || frame_count % 100 == 0 {
+                                            let rms = frame.rms_level();
+                                            eprintln!("🔊 Playing real audio frame #{}: RMS: {:.3}", 
+                                                frame_count, 
+                                                rms / i16::MAX as f32
+                                            );
+                                        }
+                                        
+                                        // Send to CPAL stream
+                                        if stream_tx.send(frame).await.is_err() {
+                                            eprintln!("⚠️ CPAL playback channel full or closed");
+                                            break;
+                                        }
+                                        
+                                        // Increment frames played counter
+                                        frames_played.fetch_add(1, Ordering::SeqCst);
+                                    }
+                                    None => {
+                                        eprintln!("🔊 Pipeline playback channel closed");
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            // Drop the stream to stop playback
+                            drop(stream);
+                            eprintln!("🛑 Real audio playback stopped after {} frames", frame_count);
+                            return;
+                        }
+                        Err(e) => {
+                            eprintln!("❌ Failed to create CPAL playback stream: {}", e);
+                            eprintln!("⚠️ Falling back to discarding audio frames");
+                        }
+                    }
+                } else {
+                    eprintln!("⚠️ No audio frames received for playback");
+                    return;
+                }
+            }
+        }
+        
+        // Fallback: Just discard frames if CPAL is not available
+        eprintln!("⚠️ Discarding audio frames (no real playback)");
+        
+        let mut frame_count = 0u64;
+        
         loop {
             // Check if we should stop
             {
@@ -385,13 +642,29 @@ impl AudioPipeline {
             }
 
             match rx.recv().await {
-                Some(_frame) => {
-                    // Simulate playing audio (in real implementation, this would write to device)
-                    // For now, just consume the frame
+                Some(frame) => {
+                    frame_count += 1;
+                    
+                    if frame_count <= 5 || frame_count % 100 == 0 {
+                        let rms = frame.rms_level();
+                        eprintln!("🔊 Discarded audio frame #{}: {} samples, RMS: {:.3}", 
+                            frame_count, 
+                            frame.samples.len(),
+                            rms / i16::MAX as f32
+                        );
+                    }
+                    
+                    // Even in fallback mode, mark frame as played
+                    frames_played.fetch_add(1, Ordering::SeqCst);
                 }
-                None => break, // Channel closed
+                None => {
+                    eprintln!("🔊 Playback channel closed");
+                    break;
+                }
             }
         }
+        
+        eprintln!("🛑 Frame discard stopped after {} frames", frame_count);
     }
 
     /// Get pipeline statistics

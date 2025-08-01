@@ -281,7 +281,13 @@ impl SipClient {
     
     /// List available audio devices
     pub async fn list_audio_devices(&self, direction: rvoip_audio_core::AudioDirection) -> SipClientResult<Vec<rvoip_audio_core::AudioDeviceInfo>> {
-        Ok(self.inner.audio_manager.list_devices(direction).await?)
+        tracing::debug!("🔍 Listing audio devices for direction: {:?}", direction);
+        let devices = self.inner.audio_manager.list_devices(direction).await?;
+        tracing::info!("📋 Found {} {} devices", devices.len(), direction);
+        for (i, device) in devices.iter().enumerate() {
+            tracing::debug!("  {}. {} (id: {})", i + 1, device.name, device.id);
+        }
+        Ok(devices)
     }
     
     /// Get current audio device
@@ -516,6 +522,23 @@ impl SipClient {
         use rvoip_audio_core::pipeline::AudioPipeline;
         use rvoip_audio_core::types::{AudioFormat, AudioStreamConfig};
         
+        tracing::info!("🎵 Setting up audio pipeline for call {}", call.id);
+        
+        // First check available audio devices
+        let input_devices = self.inner.audio_manager.list_devices(rvoip_audio_core::AudioDirection::Input).await?;
+        let output_devices = self.inner.audio_manager.list_devices(rvoip_audio_core::AudioDirection::Output).await?;
+        tracing::info!("🎤 Available input devices: {} devices", input_devices.len());
+        tracing::info!("🔊 Available output devices: {} devices", output_devices.len());
+        
+        if input_devices.is_empty() {
+            tracing::error!("❌ No input devices available!");
+            return Err(crate::error::SipClientError::audio_device("No input devices available"));
+        }
+        if output_devices.is_empty() {
+            tracing::error!("❌ No output devices available!");
+            return Err(crate::error::SipClientError::audio_device("No output devices available"));
+        }
+        
         // Create audio pipeline configuration
         let mut config = AudioStreamConfig::voip_basic();
         
@@ -553,6 +576,7 @@ impl SipClient {
             })?;
         
         // Start the capture pipeline
+        tracing::info!("🎤 Starting audio capture pipeline");
         capture_pipeline.start().await
             .map_err(|e| SipClientError::AudioPipelineError {
                 operation: "start_capture".to_string(),
@@ -566,11 +590,28 @@ impl SipClient {
         let capture_handle = tokio::spawn(async move {
             let mut pipeline = capture_pipeline;
             let mut frame_count = 0u64;
+            tracing::info!("🎤 Audio capture task started for call {}", call_id);
+            
+            // Log first few frames to verify capture is working
+            let mut logged_frames = 0;
+            
             loop {
+                tracing::trace!("📡 Attempting to capture audio frame #{}", frame_count);
                 match pipeline.capture_frame().await {
                     Ok(audio_frame) => {
-                        // Emit audio level event periodically
                         frame_count += 1;
+                        
+                        // Log first few frames
+                        if logged_frames < 5 {
+                            logged_frames += 1;
+                            tracing::info!("✅ Captured audio frame #{}: {} samples, RMS: {:.3}", 
+                                frame_count, 
+                                audio_frame.samples.len(),
+                                audio_frame.rms_level() / i16::MAX as f32
+                            );
+                        }
+                        
+                        // Emit audio level event periodically
                         if frame_count % 50 == 0 {
                             let level = audio_frame.rms_level();
                             let peak = audio_frame.samples.iter()
@@ -612,6 +653,7 @@ impl SipClient {
         });
         
         // Subscribe to incoming audio frames from RTP
+        tracing::info!("📻 Subscribing to incoming audio frames from RTP");
         let mut audio_subscriber = self.inner.client
             .subscribe_to_audio_frames(&call.id)
             .await
@@ -634,6 +676,7 @@ impl SipClient {
                 details: e.to_string(),
             })?;
         
+        tracing::info!("🔊 Starting audio playback pipeline");
         playback_pipeline.start().await
             .map_err(|e| SipClientError::AudioPipelineError {
                 operation: "start_playback".to_string(),
@@ -696,6 +739,7 @@ impl SipClient {
         
         self.inner.audio_tasks.write().insert(call.id, audio_tasks);
         
+        tracing::info!("✅ Audio pipeline setup complete for call {}", call.id);
         Ok(())
     }
     

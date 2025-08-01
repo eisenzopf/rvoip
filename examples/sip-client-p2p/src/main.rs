@@ -123,7 +123,7 @@ async fn run_receiver(name: String, port: u16) -> Result<(), Box<dyn std::error:
         match event {
             SipClientEvent::IncomingCall { call, from, .. } => {
                 println!("\n{} {}", "📞 INCOMING CALL FROM:".bright_yellow().bold(), from.bright_white());
-                println!("{}", "Answering automatically...".bright_black());
+                println!("{}", "Answering call...".bright_black());
                 
                 match client.answer(&call.id).await {
                     Ok(_) => {
