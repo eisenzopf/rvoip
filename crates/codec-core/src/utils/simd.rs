@@ -80,12 +80,17 @@ pub fn encode_mulaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
             // Load 8 samples at once
             let samples_vec = _mm_loadu_si128(chunk.as_ptr() as *const __m128i);
             
-            // Process each sample (simplified - real implementation would be more complex)
-            for i in 0..8 {
-                let sample = _mm_extract_epi16(samples_vec, i) as i16;
-                output[out_idx] = linear_to_mulaw_scalar(sample);
-                out_idx += 1;
-            }
+            // Process each sample - need to unroll or use different approach
+            // _mm_extract_epi16 requires compile-time constant, so we unroll
+            output[out_idx] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 0) as i16);
+            output[out_idx + 1] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 1) as i16);
+            output[out_idx + 2] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 2) as i16);
+            output[out_idx + 3] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 3) as i16);
+            output[out_idx + 4] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 4) as i16);
+            output[out_idx + 5] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 5) as i16);
+            output[out_idx + 6] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 6) as i16);
+            output[out_idx + 7] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 7) as i16);
+            out_idx += 8;
         }
     }
     
@@ -131,12 +136,17 @@ pub fn encode_alaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
             // Load 8 samples at once
             let samples_vec = _mm_loadu_si128(chunk.as_ptr() as *const __m128i);
             
-            // Process each sample (simplified - real implementation would be more complex)
-            for i in 0..8 {
-                let sample = _mm_extract_epi16(samples_vec, i) as i16;
-                output[out_idx] = linear_to_alaw_scalar(sample);
-                out_idx += 1;
-            }
+            // Process each sample - need to unroll or use different approach
+            // _mm_extract_epi16 requires compile-time constant, so we unroll
+            output[out_idx] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 0) as i16);
+            output[out_idx + 1] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 1) as i16);
+            output[out_idx + 2] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 2) as i16);
+            output[out_idx + 3] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 3) as i16);
+            output[out_idx + 4] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 4) as i16);
+            output[out_idx + 5] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 5) as i16);
+            output[out_idx + 6] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 6) as i16);
+            output[out_idx + 7] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 7) as i16);
+            out_idx += 8;
         }
     }
     
