@@ -175,7 +175,7 @@ impl SipClient {
         // Create SDP answer
         let sdp = self.create_sdp_answer(&call).await?;
         
-        // Answer via client-core
+        // Answer via client-core (this will send our SDP answer)
         self.inner.client.answer_call(call_id).await?;
         
         // Update call state
@@ -506,8 +506,23 @@ impl SipClient {
     }
     
     async fn create_sdp_offer(&self) -> SipClientResult<String> {
-        // TODO: Create proper SDP based on codec configuration
-        Ok("v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0 8\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\n".to_string())
+        // Get local IP from the configured address
+        let local_ip = self.inner.config.local_address.ip();
+        
+        // Use a proper RTP port (different from SIP port)
+        let rtp_port = self.inner.config.local_address.port() + 4000; // e.g., 5060 -> 9060
+        
+        Ok(format!(
+            "v=0\r\n\
+             o=- 0 0 IN IP4 {}\r\n\
+             s=-\r\n\
+             c=IN IP4 {}\r\n\
+             t=0 0\r\n\
+             m=audio {} RTP/AVP 0 8\r\n\
+             a=rtpmap:0 PCMU/8000\r\n\
+             a=rtpmap:8 PCMA/8000\r\n",
+            local_ip, local_ip, rtp_port
+        ))
     }
     
     async fn create_sdp_answer(&self, _call: &Call) -> SipClientResult<String> {
@@ -648,6 +663,9 @@ impl SipClient {
                 }
             }
         });
+        
+        // Get the incoming call info to extract remote SDP
+        tracing::info!("📋 Getting call info to extract remote SDP");
         
         // Subscribe to incoming audio frames from RTP
         tracing::info!("📻 Subscribing to incoming audio frames from RTP");

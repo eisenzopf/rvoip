@@ -1234,6 +1234,11 @@ impl CallHandler for ClientCallHandler {
                 }
                 if let Some(remote_sdp) = &remote_sdp {
                     call_info_ref.metadata.insert("remote_sdp".to_string(), remote_sdp.clone());
+                    
+                    // Process the SDP answer to configure RTP endpoints
+                    // Note: We don't have direct access to ClientManager here, but that's OK
+                    // because session-core will handle the SDP processing when it receives
+                    // the CallAnswered event. The remote SDP is already stored in metadata.
                 }
             }
             

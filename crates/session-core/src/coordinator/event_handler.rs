@@ -321,6 +321,26 @@ impl SessionCoordinator {
                                         tracing::error!("Failed to update media session with remote SDP: {}", e);
                                     } else {
                                         tracing::info!("Updated media session with remote SDP for session {}", session_id);
+                                        
+                                        // Now establish media flow to the remote endpoint
+                                        // The establish_media_flow will also start audio transmission
+                                        let remote_addr_str = negotiated.remote_addr.to_string();
+                                        
+                                        // Get dialog ID for this session
+                                        let dialog_id = {
+                                            let mapping = self.media_manager.session_mapping.read().await;
+                                            mapping.get(&session_id).cloned()
+                                        };
+                                        
+                                        if let Some(dialog_id) = dialog_id {
+                                            if let Err(e) = self.media_manager.controller.establish_media_flow(&dialog_id, negotiated.remote_addr).await {
+                                                tracing::error!("Failed to establish media flow: {}", e);
+                                            } else {
+                                                tracing::info!("✅ Established media flow to {} for session {}", remote_addr_str, session_id);
+                                            }
+                                        } else {
+                                            tracing::warn!("No dialog ID found for session {} - cannot establish media flow", session_id);
+                                        }
                                     }
                                 }
                                 Err(e) => {
