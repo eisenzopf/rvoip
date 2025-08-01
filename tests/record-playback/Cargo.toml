@@ -1,0 +1,18 @@
+[package]
+name = "record-playback"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "record-playback"
+path = "src/main.rs"
+
+[dependencies]
+rvoip-audio-core = { path = "../../crates/audio-core" }
+tokio = { version = "1.0", features = ["full"] }
+anyhow = "1.0"
+clap = { version = "4.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[workspace]

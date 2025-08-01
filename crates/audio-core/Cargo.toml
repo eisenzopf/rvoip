@@ -25,8 +25,8 @@ rvoip-session-core.workspace = true
 rvoip-rtp-core.workspace = true
 rvoip-client-core = { workspace = true, optional = true }
 
-# Audio device access - NOT USED (no actual implementation found)
-# cpal = { version = "0.15", optional = true }
+# Audio device access
+cpal = { version = "0.15", optional = true }
 
 # Audio processing and format conversion - NOT USED (no imports found)
 # samplerate = { version = "0.2", optional = true }
@@ -65,10 +65,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serial_test = "3.1"
 
 [features]
-default = ["format-conversion"]
+default = ["format-conversion", "device-cpal"]
 
-# Device backend features (placeholder - no actual implementation)
-# device-cpal = ["cpal"]
+# Device backend features
+device-cpal = ["cpal"]
 device-mock = []
 
 # Format conversion feature (placeholder - dependencies removed as not actually used)

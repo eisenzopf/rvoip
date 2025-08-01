@@ -31,6 +31,17 @@ pub enum AudioError {
         /// The device identifier that was disconnected
         device_id: String,
     },
+    
+    /// General audio device error
+    #[error("Audio device error for {device}: {operation} failed: {reason}")]
+    DeviceError {
+        /// The device identifier
+        device: String,
+        /// The operation that failed
+        operation: String,
+        /// The reason for failure
+        reason: String,
+    },
 
     /// Audio format not supported by device or codec
     #[error("Audio format not supported: {format} by {component}")]
@@ -268,6 +279,7 @@ impl AudioError {
             
             // Conditionally recoverable
             Self::DeviceDisconnected { .. } => true, // Device might reconnect
+            Self::DeviceError { .. } => true, // Device operation might succeed on retry
             Self::FormatConversionFailed { .. } => true, // Different parameters might work
             Self::PipelineError { .. } => true, // Pipeline can be restarted
             Self::RtpPayloadError { .. } => true, // Next packet might be OK
