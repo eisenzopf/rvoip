@@ -66,13 +66,17 @@ run_test() {
 
 # List of all crates to test
 CRATES=(
+    "rvoip-audio-core"
     "rvoip-call-engine"
     "rvoip-client-core"
+    "rvoip-codec-core"
     "rvoip-dialog-core"
+    "rvoip-infra-common"
     "rvoip-media-core"
     "rvoip-rtp-core"
     "rvoip"
     "rvoip-session-core"
+    "rvoip-sip-client"
     "rvoip-sip-core"
     "rvoip-sip-transport"
     "rvoip-transaction-core"

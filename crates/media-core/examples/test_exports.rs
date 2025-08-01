@@ -4,6 +4,10 @@
 //! and accessible from the public API.
 
 use rvoip_media_core::prelude::*;
+use rvoip_media_core::processing::{
+    VadConfig, AecConfig, AgcConfig,
+    VoiceActivityDetector, AcousticEchoCanceller, AutomaticGainControl
+};
 
 fn main() -> Result<()> {
     println!("🧪 Testing VAD and AEC exports...");

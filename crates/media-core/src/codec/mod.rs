@@ -8,6 +8,8 @@ pub mod transcoding;  // Add transcoding module
 pub mod mapping;      // Add codec mapping utilities
 pub mod factory;      // Export codec factory
 
+use crate::relay::{G711PcmuCodec, G711PcmaCodec};
+
 // Re-export audio codec types
 pub use audio::common::*;
 
@@ -43,7 +45,8 @@ impl CodecRegistry {
         let mut codecs: std::collections::HashMap<u8, Box<dyn Codec>> = std::collections::HashMap::new();
         
         // Register G.711 codecs
-        // Codecs can be registered here when needed
+        codecs.insert(0, Box::new(G711PcmuCodec));
+        codecs.insert(8, Box::new(G711PcmaCodec));
         
         Self { codecs }
     }

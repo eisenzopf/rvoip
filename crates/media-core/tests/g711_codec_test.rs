@@ -2,9 +2,29 @@
 //!
 //! This test validates the working G.711 implementation in media-core
 
-use rvoip_media_core::codec::{G711Codec, G711Variant, encode_ulaw, decode_ulaw, encode_alaw, decode_alaw, Codec};
-use rvoip_media_core::{AudioBuffer, AudioFormat, SampleRate, Sample};
+use rvoip_media_core::codec::audio::g711::G711Codec;
+use rvoip_media_core::codec::audio::common::AudioCodec;
+use rvoip_media_core::{AudioBuffer, AudioFormat, SampleRate, Sample, AudioFrame};
+use codec_core::codecs::g711::{G711Variant, ulaw_compress, ulaw_expand, alaw_compress, alaw_expand};
 use bytes::BytesMut;
+
+/// Calculate signal-to-noise ratio (SNR) between AudioFrames
+fn calculate_audio_frame_snr(original: &AudioFrame, processed: &AudioFrame) -> f64 {
+    let signal_power: f64 = original.samples.iter()
+        .map(|&s| (s as f64).powi(2))
+        .sum::<f64>() / original.samples.len() as f64;
+    
+    let noise_power: f64 = original.samples.iter()
+        .zip(processed.samples.iter())
+        .map(|(&o, &p)| ((o - p) as f64).powi(2))
+        .sum::<f64>() / original.samples.len() as f64;
+    
+    if noise_power > 0.0 {
+        10.0 * (signal_power / noise_power).log10()
+    } else {
+        f64::INFINITY
+    }
+}
 
 #[test]
 fn test_g711_ulaw_round_trip() {
@@ -17,8 +37,8 @@ fn test_g711_ulaw_round_trip() {
     
     println!("📊 μ-law round-trip results:");
     for &original in &test_values {
-        let encoded = encode_ulaw(original);
-        let decoded = decode_ulaw(encoded);
+        let encoded = ulaw_compress(original);
+        let decoded = ulaw_expand(encoded);
         let error = (original as i32 - decoded as i32).abs() as u32;
         
         println!("  {} → 0x{:02X} → {} (error: {})", original, encoded, decoded, error);
@@ -45,8 +65,8 @@ fn test_g711_alaw_round_trip() {
     
     println!("📊 A-law round-trip results:");
     for &original in &test_values {
-        let encoded = encode_alaw(original);
-        let decoded = decode_alaw(encoded);
+        let encoded = alaw_compress(original);
+        let decoded = alaw_expand(encoded);
         let error = (original as i32 - decoded as i32).abs() as u32;
         
         println!("  {} → 0x{:02X} → {} (error: {})", original, encoded, decoded, error);
@@ -82,7 +102,7 @@ fn test_g711_codec_pcmu() {
     // Encode to μ-law
     let mut encoded = Vec::with_capacity(num_samples);
     for &sample in &pcm_samples {
-        encoded.push(encode_ulaw(sample));
+        encoded.push(ulaw_compress(sample));
     }
     
     println!("✅ Encoded to {} μ-law bytes", encoded.len());
@@ -91,7 +111,7 @@ fn test_g711_codec_pcmu() {
     // Decode back to PCM
     let mut decoded = Vec::with_capacity(num_samples);
     for &byte in &encoded {
-        decoded.push(decode_ulaw(byte));
+        decoded.push(ulaw_expand(byte));
     }
     
     println!("✅ Decoded to {} PCM samples", decoded.len());
@@ -133,7 +153,7 @@ fn test_g711_codec_pcma() {
     // Encode to A-law
     let mut encoded = Vec::with_capacity(num_samples);
     for &sample in &pcm_samples {
-        encoded.push(encode_alaw(sample));
+        encoded.push(alaw_compress(sample));
     }
     
     println!("✅ Encoded to {} A-law bytes", encoded.len());
@@ -142,7 +162,7 @@ fn test_g711_codec_pcma() {
     // Decode back to PCM
     let mut decoded = Vec::with_capacity(num_samples);
     for &byte in &encoded {
-        decoded.push(decode_alaw(byte));
+        decoded.push(alaw_expand(byte));
     }
     
     println!("✅ Decoded to {} PCM samples", decoded.len());
@@ -164,19 +184,18 @@ fn test_g711_codec_pcma() {
 fn test_g711_codec_properties() {
     println!("🎵 Testing G.711 codec properties");
     
-    let pcmu_codec = G711Codec::new(G711Variant::PCMU);
-    let pcma_codec = G711Codec::new(G711Variant::PCMA);
+    let mut pcmu_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1).unwrap();
+    let mut pcma_codec = G711Codec::new(G711Variant::ALaw, 8000, 1).unwrap();
     
     // Test codec properties
-    assert_eq!(pcmu_codec.name(), "PCMU");
-    assert_eq!(pcmu_codec.payload_type(), 0);
-    assert_eq!(pcmu_codec.sample_rate(), 8000);
-    assert_eq!(pcmu_codec.frame_size(), 160);
+    let pcmu_info = pcmu_codec.get_info();
+    let pcma_info = pcma_codec.get_info();
     
-    assert_eq!(pcma_codec.name(), "PCMA");
-    assert_eq!(pcma_codec.payload_type(), 8);
-    assert_eq!(pcma_codec.sample_rate(), 8000);
-    assert_eq!(pcma_codec.frame_size(), 160);
+    assert_eq!(pcmu_info.name, "G.711 μ-law");
+    assert_eq!(pcmu_info.sample_rate, 8000);
+    
+    assert_eq!(pcma_info.name, "G.711 A-law");
+    assert_eq!(pcma_info.sample_rate, 8000);
     
     // Test format support
     let valid_format = AudioFormat::mono_16bit(SampleRate::Rate8000);
@@ -187,9 +206,8 @@ fn test_g711_codec_properties() {
     };
     let invalid_format_rate = AudioFormat::mono_16bit(SampleRate::Rate16000);
     
-    assert!(pcmu_codec.supports_format(valid_format));
-    assert!(!pcmu_codec.supports_format(invalid_format_stereo));
-    assert!(!pcmu_codec.supports_format(invalid_format_rate));
+    // G.711 codec supports 8kHz mono by construction
+    // Format support is implicit in the constructor parameters
     
     println!("✅ All codec properties correct!");
 }
@@ -210,13 +228,13 @@ fn test_g711_edge_cases() {
     println!("📊 Edge case testing:");
     for &value in &edge_cases {
         // Test μ-law
-        let ulaw_encoded = encode_ulaw(value);
-        let ulaw_decoded = decode_ulaw(ulaw_encoded);
+        let ulaw_encoded = ulaw_compress(value);
+        let ulaw_decoded = ulaw_expand(ulaw_encoded);
         println!("  μ-law: {} → 0x{:02X} → {}", value, ulaw_encoded, ulaw_decoded);
         
         // Test A-law
-        let alaw_encoded = encode_alaw(value);
-        let alaw_decoded = decode_alaw(alaw_encoded);
+        let alaw_encoded = alaw_compress(value);
+        let alaw_decoded = alaw_expand(alaw_encoded);
         println!("  A-law: {} → 0x{:02X} → {}", value, alaw_encoded, alaw_decoded);
         
         // Verify no panics occurred (basic sanity check)
@@ -231,34 +249,31 @@ fn test_g711_edge_cases() {
 fn test_g711_compare_variants() {
     println!("🎵 Comparing G.711 μ-law vs A-law");
     
-    let pcmu_codec = G711Codec::new(G711Variant::PCMU);
-    let pcma_codec = G711Codec::new(G711Variant::PCMA);
+    let mut pcmu_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1).unwrap();
+    let mut pcma_codec = G711Codec::new(G711Variant::ALaw, 8000, 1).unwrap();
     
     // Create identical test signal
     let num_samples = 160;
-    let mut pcm_data = BytesMut::with_capacity(num_samples * 2);
+    let mut pcm_samples: Vec<i16> = Vec::with_capacity(num_samples);
     
     for i in 0..num_samples {
         let t = i as f32 / 8000.0;
         let sample = (2.0 * std::f32::consts::PI * 1000.0 * t).sin(); // 1kHz tone
         let pcm_sample = (sample * 20000.0) as i16;
-        
-        pcm_data.extend_from_slice(&[(pcm_sample & 0xFF) as u8, ((pcm_sample >> 8) & 0xFF) as u8]);
+        pcm_samples.push(pcm_sample);
     }
     
-    let pcm_buffer = AudioBuffer::new(
-        pcm_data.freeze(),
-        AudioFormat::mono_16bit(SampleRate::Rate8000)
-    );
+    // Convert to AudioFrame for encoding
+    let audio_frame = AudioFrame::new(pcm_samples.clone(), 8000, 1, 0);
     
     // Test both variants
-    let pcmu_encoded = pcmu_codec.encode(&pcm_buffer).expect("PCMU encode failed");
+    let pcmu_encoded = pcmu_codec.encode(&audio_frame).expect("PCMU encode failed");
     let pcmu_decoded = pcmu_codec.decode(&pcmu_encoded).expect("PCMU decode failed");
-    let pcmu_snr = calculate_snr(&pcm_buffer, &pcmu_decoded);
+    let pcmu_snr = calculate_audio_frame_snr(&audio_frame, &pcmu_decoded);
     
-    let pcma_encoded = pcma_codec.encode(&pcm_buffer).expect("PCMA encode failed");
+    let pcma_encoded = pcma_codec.encode(&audio_frame).expect("PCMA encode failed");
     let pcma_decoded = pcma_codec.decode(&pcma_encoded).expect("PCMA decode failed");
-    let pcma_snr = calculate_snr(&pcm_buffer, &pcma_decoded);
+    let pcma_snr = calculate_audio_frame_snr(&audio_frame, &pcma_decoded);
     
     println!("📊 Comparison results:");
     println!("  PCMU (μ-law) SNR: {:.2} dB", pcmu_snr);

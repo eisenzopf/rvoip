@@ -75,6 +75,16 @@ impl AudioCodec for G711Codec {
     }
     
     fn decode(&mut self, encoded_data: &[u8]) -> Result<AudioFrame> {
+        if encoded_data.is_empty() {
+            return Err(Error::Codec(crate::error::CodecError::DecodingFailed {
+                reason: format!("G.711 {} decoding failed: empty buffer", 
+                    match self.variant {
+                        G711Variant::MuLaw => "μ-law",
+                        G711Variant::ALaw => "A-law",
+                    })
+            }));
+        }
+        
         let samples = self.inner.decode(encoded_data)
             .map_err(|e| Error::Codec(crate::error::CodecError::DecodingFailed {
                 reason: format!("G.711 {} decoding failed: {}", 

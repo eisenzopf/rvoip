@@ -37,7 +37,7 @@ default-members = [
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
 [workspace.package]
-version = "0.1.13"  # 🎯 SINGLE VERSION TO MANAGE!
+version = "0.1.15"  # 🎯 SINGLE VERSION TO MANAGE!
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/eisenzopf/rvoip"
@@ -127,10 +127,14 @@ rvoip-media-core = { path = "crates/media-core", version = "0.1.13" }
 rvoip-session-core = { path = "crates/session-core", version = "0.1.13" }
 rvoip-call-engine = { path = "crates/call-engine", version = "0.1.13" }
 rvoip-client-core = { path = "crates/client-core", version = "0.1.13" }
+rvoip-codec-core = { path = "crates/codec-core", version = "0.1.13" }
+rvoip-audio-core = { path = "crates/audio-core", version = "0.1.13" }
+rvoip-sip-client = { path = "crates/sip-client", version = "0.1.13" }
 rvoip = { path = "crates/rvoip", version = "0.1.8" }
 
 # External dependencies
 tokio = { version = "1.36", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }

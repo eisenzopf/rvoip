@@ -4,6 +4,10 @@
 //! including real-time metrics, trend analysis, and automatic quality adjustments.
 
 use rvoip_media_core::prelude::*;
+use rvoip_media_core::quality::{
+    QualityMonitor, QualityMonitorConfig, SessionMetrics, OverallMetrics,
+    QualityAdjustment, AdaptationStrategy, QualityMetrics
+};
 use rvoip_media_core::codec::audio::common::AudioCodec;
 use rvoip_media_core::quality::adaptation::{AdaptationConfig, AdaptationEngine, AdjustmentType};
 use rvoip_media_core::quality::metrics::QualityTrend;
@@ -67,7 +71,7 @@ async fn main() -> Result<()> {
             // Test adaptation suggestions
             let trend = session_metrics.get_trend();
             let adjustments = adaptation_engine.suggest_adjustments(
-                &session1,
+                &MediaSessionId::new("session-1"),
                 &metrics,
                 trend,
                 64_000, // Current bitrate
@@ -117,7 +121,12 @@ async fn main() -> Result<()> {
         
         if let Some(session_metrics) = quality_monitor.get_session_metrics(&trend_session).await {
             let trend = session_metrics.get_trend();
-            let grade = metrics.get_quality_grade();
+            let grade = match metrics.mos_score {
+                mos if mos >= 4.0 => "Excellent",
+                mos if mos >= 3.5 => "Good", 
+                mos if mos >= 2.5 => "Fair",
+                _ => "Poor",
+            };
             
             println!("   Step {}: MOS={:.1}, Grade={:?}, Trend={:?}", 
                      i + 1, mos_score, grade, trend);
@@ -125,7 +134,7 @@ async fn main() -> Result<()> {
             // Get adaptation suggestions for significant changes
             if i > 2 && (trend != QualityTrend::Stable) {
                 let adjustments = adaptation_engine.suggest_adjustments(
-                    &trend_session,
+                    &MediaSessionId::new("trend-session"),
                     &metrics,
                     trend,
                     64_000,
@@ -223,9 +232,9 @@ fn create_good_quality_metrics() -> QualityMetrics {
         jitter_ms: 5.0,
         rtt_ms: 20.0,
         mos_score: 4.3,
-        avg_bitrate: 64_000,
-        snr_db: 25.0,
-        processing_latency_ms: 8.0,
+        avg_bitrate: 64000,
+        snr_db: 35.0,
+        processing_latency_ms: 10.0,
     }
 }
 
@@ -235,9 +244,9 @@ fn create_high_packet_loss_metrics() -> QualityMetrics {
         jitter_ms: 12.0,
         rtt_ms: 45.0,
         mos_score: 2.1,
-        avg_bitrate: 64_000,
-        snr_db: 18.0,
-        processing_latency_ms: 15.0,
+        avg_bitrate: 48000,
+        snr_db: 15.0,
+        processing_latency_ms: 50.0,
     }
 }
 
@@ -247,9 +256,9 @@ fn create_high_jitter_metrics() -> QualityMetrics {
         jitter_ms: 65.0,
         rtt_ms: 35.0,
         mos_score: 2.8,
-        avg_bitrate: 64_000,
+        avg_bitrate: 56000,
         snr_db: 22.0,
-        processing_latency_ms: 12.0,
+        processing_latency_ms: 30.0,
     }
 }
 
@@ -259,9 +268,9 @@ fn create_poor_quality_metrics() -> QualityMetrics {
         jitter_ms: 45.0,
         rtt_ms: 180.0,
         mos_score: 1.8,
-        avg_bitrate: 32_000,
-        snr_db: 12.0,
-        processing_latency_ms: 95.0,
+        avg_bitrate: 32000,
+        snr_db: 10.0,
+        processing_latency_ms: 80.0,
     }
 }
 
@@ -271,9 +280,9 @@ fn create_recovering_quality_metrics() -> QualityMetrics {
         jitter_ms: 18.0,
         rtt_ms: 55.0,
         mos_score: 3.6,
-        avg_bitrate: 48_000,
-        snr_db: 20.0,
-        processing_latency_ms: 18.0,
+        avg_bitrate: 60000,
+        snr_db: 28.0,
+        processing_latency_ms: 20.0,
     }
 }
 
@@ -282,10 +291,10 @@ fn create_custom_quality_metrics(mos_score: f32) -> QualityMetrics {
         packet_loss: if mos_score < 3.0 { 5.0 } else { 1.0 },
         jitter_ms: if mos_score < 3.0 { 25.0 } else { 8.0 },
         rtt_ms: 30.0,
-        mos_score,
-        avg_bitrate: 64_000,
-        snr_db: 20.0,
-        processing_latency_ms: 10.0,
+        mos_score: mos_score,
+        avg_bitrate: 64000,
+        snr_db: 20.0 + (mos_score * 5.0),
+        processing_latency_ms: 50.0 - (mos_score * 10.0),
     }
 }
 
@@ -313,11 +322,18 @@ fn create_test_audio_frame() -> AudioFrame {
 
 fn display_quality_metrics(metrics: &QualityMetrics, session_metrics: &SessionMetrics) {
     println!("   📊 Quality Metrics:");
-    println!("     MOS Score: {:.2} ({:?})", metrics.mos_score, metrics.get_quality_grade());
+    let grade = match metrics.mos_score {
+        mos if mos >= 4.0 => "Excellent",
+        mos if mos >= 3.5 => "Good",
+        mos if mos >= 2.5 => "Fair",
+        _ => "Poor",
+    };
+    println!("     MOS Score: {:.2} ({})", metrics.mos_score, grade);
     println!("     Packet Loss: {:.1}%", metrics.packet_loss);
     println!("     Jitter: {:.1}ms", metrics.jitter_ms);
     println!("     RTT: {:.1}ms", metrics.rtt_ms);
-    println!("     SNR: {:.1}dB", metrics.snr_db);
+    println!("     Bitrate: {} bps", metrics.avg_bitrate);
+    println!("     SNR: {:.1} dB", metrics.snr_db);
     println!("     Trend: {:?}", session_metrics.get_trend());
 }
 
