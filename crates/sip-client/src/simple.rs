@@ -46,8 +46,6 @@ struct SipClientInner {
     audio_tasks: Arc<RwLock<HashMap<CallId, AudioPipelineTasks>>>,
     /// Event emitter
     events: EventEmitter,
-    /// Event handler task handle
-    event_handler_task: Arc<RwLock<Option<JoinHandle<()>>>>,
     /// Recovery manager
     recovery_manager: Arc<RecoveryManager>,
     /// Quality adaptation manager
@@ -111,7 +109,6 @@ impl SipClient {
             calls: Arc::new(RwLock::new(HashMap::new())),
             audio_tasks: Arc::new(RwLock::new(HashMap::new())),
             events,
-            event_handler_task: Arc::new(RwLock::new(None)),
             recovery_manager,
             quality_adaptation_manager,
             reconnection_handler,
@@ -769,34 +766,16 @@ impl SipClient {
         });
         self.inner.client.set_event_handler(handler.clone()).await;
         
-        // Subscribe to client-core events
-        let mut event_rx = self.inner.client.subscribe_events();
-        
-        // Create event forwarder task
-        let inner = self.inner.clone();
-        let task = tokio::spawn(async move {
-            while let Ok(event) = event_rx.recv().await {
-                // Forward event through our event handler
-                let handler = SipClientEventHandler {
-                    inner: inner.clone(),
-                };
-                
-                handler.handle_client_event(event).await;
-            }
-        });
-        
-        // Store the task handle
-        *self.inner.event_handler_task.write() = Some(task);
+        // We don't need a separate subscription task since we've already
+        // registered the event handler above. The handler will be called
+        // directly by client-core for all events.
         
         Ok(())
     }
     
     /// Stop event forwarding
     async fn stop_event_forwarding(&self) -> SipClientResult<()> {
-        if let Some(task) = self.inner.event_handler_task.write().take() {
-            task.abort();
-            let _ = task.await;
-        }
+        // Event handler will be cleaned up when client-core stops
         Ok(())
     }
     
