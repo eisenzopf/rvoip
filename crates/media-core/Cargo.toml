@@ -19,11 +19,11 @@ description = "Media processing and codec support for the rvoip stack"
 [lints]
 workspace = true
 [dependencies]
-# Use the rtp-core crate from our workspace
-rvoip-rtp-core = { path = "../rtp-core", version = "0.1.4" }
+# 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
+rvoip-rtp-core.workspace = true
 
 # Codec support
-rvoip-codec-core = { path = "../codec-core", version = "0.1.0" }
+rvoip-codec-core.workspace = true
 
 # Logging
 tracing = "0.1"
