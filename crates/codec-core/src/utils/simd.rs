@@ -72,11 +72,11 @@ pub fn encode_mulaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
         return encode_mulaw_scalar(samples, output);
     }
     
-    let chunks = samples.chunks_exact(8);
+    let mut chunks = samples.chunks_exact(8);
     let mut out_idx = 0;
     
     unsafe {
-        for chunk in chunks {
+        for chunk in chunks.by_ref() {
             // Load 8 samples at once
             let samples_vec = _mm_loadu_si128(chunk.as_ptr() as *const __m128i);
             
@@ -128,11 +128,11 @@ pub fn encode_alaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
         return encode_alaw_scalar(samples, output);
     }
     
-    let chunks = samples.chunks_exact(8);
+    let mut chunks = samples.chunks_exact(8);
     let mut out_idx = 0;
     
     unsafe {
-        for chunk in chunks {
+        for chunk in chunks.by_ref() {
             // Load 8 samples at once
             let samples_vec = _mm_loadu_si128(chunk.as_ptr() as *const __m128i);
             
