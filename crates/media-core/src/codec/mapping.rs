@@ -158,16 +158,16 @@ impl CodecMapper {
         }
         
         // Remove any existing registration for this name or payload type
-        if let Some(old_payload) = self.name_to_payload.get(&name) {
-            self.payload_to_name.remove(old_payload);
+        if let Some(old_payload) = self.name_to_payload.get(&name).cloned() {
+            self.payload_to_name.remove(&old_payload);
             // Remove from Opus configs if it was an Opus codec
             if name.starts_with("opus") {
-                self.opus_configs.remove(old_payload);
+                self.opus_configs.remove(&old_payload);
             }
         }
-        if let Some(old_name) = self.payload_to_name.get(&payload_type) {
-            self.name_to_payload.remove(old_name);
-            self.codec_clock_rates.remove(old_name);
+        if let Some(old_name) = self.payload_to_name.get(&payload_type).cloned() {
+            self.name_to_payload.remove(&old_name);
+            self.codec_clock_rates.remove(&old_name);
             // Remove from Opus configs if it was an Opus codec
             if old_name.starts_with("opus") {
                 if let Some(config) = self.opus_configs.remove(&payload_type) {
@@ -665,13 +665,21 @@ mod tests {
         assert_eq!(mapper.payload_to_codec(dynamic_range::DYNAMIC_START), Some("custom".to_string()));
         assert_eq!(mapper.get_clock_rate("custom"), 16000);
         
-        // Test overriding with another dynamic payload type
+        // Test registering another dynamic codec
         let custom_pt_97 = 97; // Another dynamic payload type
         mapper.register_dynamic_codec("custom2".to_string(), custom_pt_97, 32000);
         
-        assert_eq!(mapper.codec_to_payload("custom"), None); // Old registration removed
+        // Both codecs should exist
+        assert_eq!(mapper.codec_to_payload("custom"), Some(dynamic_range::DYNAMIC_START));
         assert_eq!(mapper.codec_to_payload("custom2"), Some(custom_pt_97));
         assert_eq!(mapper.get_clock_rate("custom2"), 32000);
+        
+        // Test overriding the same codec with a different payload type
+        mapper.register_dynamic_codec("custom".to_string(), 98, 48000);
+        assert_eq!(mapper.codec_to_payload("custom"), Some(98));
+        assert_eq!(mapper.get_clock_rate("custom"), 48000);
+        // Old payload type should be freed
+        assert_eq!(mapper.payload_to_codec(dynamic_range::DYNAMIC_START), None);
     }
     
     #[test]

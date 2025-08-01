@@ -65,6 +65,20 @@ impl G711PcmuCodec {
     }
 }
 
+impl crate::codec::Codec for G711PcmuCodec {
+    fn payload_type(&self) -> u8 {
+        0
+    }
+    
+    fn name(&self) -> &'static str {
+        "PCMU"
+    }
+    
+    fn process_payload(&self, payload: &[u8]) -> crate::Result<Vec<u8>> {
+        Ok(payload.to_vec())
+    }
+}
+
 /// Simple G.711 PCMA codec implementation
 #[derive(Debug, Clone)]
 pub struct G711PcmaCodec;
@@ -99,6 +113,20 @@ impl G711PcmaCodec {
     pub fn process_packet(&self, payload: &[u8]) -> Result<bytes::Bytes> {
         // For basic relay, just pass through the payload
         Ok(bytes::Bytes::copy_from_slice(payload))
+    }
+}
+
+impl crate::codec::Codec for G711PcmaCodec {
+    fn payload_type(&self) -> u8 {
+        8
+    }
+    
+    fn name(&self) -> &'static str {
+        "PCMA"
+    }
+    
+    fn process_payload(&self, payload: &[u8]) -> crate::Result<Vec<u8>> {
+        Ok(payload.to_vec())
     }
 }
 

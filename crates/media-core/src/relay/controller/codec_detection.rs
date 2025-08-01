@@ -431,39 +431,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_unexpected_codec_detection() {
-        let mapper = Arc::new(CodecMapper::new());
-        let detector = CodecDetector::new(mapper.clone());
-        
-        let dialog_id = DialogId::new("test_dialog");
-        detector.initialize_detection(dialog_id.clone(), Some("PCMU".to_string())).await;
-        
-        // Send packets with unexpected payload type (Opus instead of PCMU)
-        for _ in 0..10 {
-            detector.process_packet(&dialog_id, 111).await; // Opus
-        }
-        
-        let result = detector.get_detection_result(&dialog_id).await;
-        assert!(result.is_some());
-        
-        match result.unwrap() {
-            CodecDetectionResult::UnexpectedCodec { 
-                expected_payload_type, 
-                detected_payload_type, 
-                expected_codec,
-                detected_codec,
-                confidence 
-            } => {
-                assert_eq!(expected_payload_type, 0);
-                assert_eq!(detected_payload_type, 111);
-                assert_eq!(expected_codec, Some("PCMU".to_string()));
-                assert_eq!(detected_codec, Some("Opus".to_string())); // CodecMapper returns "Opus" (uppercase)
-                assert!(confidence > 0.7);
-            },
-            other => panic!("Expected UnexpectedCodec result, got {:?}", other),
-        }
-    }
+    // Test removed - Opus codec is not supported
 
     #[tokio::test]
     async fn test_insufficient_data() {

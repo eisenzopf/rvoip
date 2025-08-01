@@ -4,6 +4,7 @@
 //! voice activity detection, format conversion, and audio processing.
 
 use rvoip_media_core::prelude::*;
+use rvoip_media_core::processing::{ProcessingConfig, ProcessingPipeline};
 use std::time::Duration;
 
 #[tokio::main]

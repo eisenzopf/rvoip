@@ -19,13 +19,14 @@ use rvoip_rtp_core::{
 use rvoip_media_core::{
     MediaEngine, MediaEngineConfig, MediaSessionParams,
     MediaSessionId, DialogId, AudioFrame, SampleRate,
-    prelude::{G711Codec, G711Variant, G711Config, Transcoder},
+    codec::audio::g711::G711Codec,
     integration::{RtpBridge, RtpBridgeConfig, events::RtpParameters},
     processing::format::FormatConverter,
     codec::{AudioCodec, mapping::CodecMapper},
     relay::controller::codec_detection::CodecDetector,
     relay::controller::codec_fallback::CodecFallbackManager,
 };
+use codec_core::codecs::g711::G711Variant;
 
 /// Test helper to create a configured media engine
 async fn create_test_media_engine() -> Arc<MediaEngine> {
@@ -116,16 +117,8 @@ async fn test_codec_compatibility_with_rtp() {
     // Test that our codec implementations work with rtp-core payload formats
     
     // Test G.711 PCMU compatibility
-    let mut g711_codec = G711Codec::new(
-        SampleRate::Rate8000,
-        1,
-        G711Config {
-            variant: G711Variant::MuLaw,
-            sample_rate: 8000,
-            channels: 1,
-            frame_size_ms: 10.0,
-        }
-    ).expect("Failed to create G.711 codec");
+    let mut g711_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1)
+        .expect("Failed to create G.711 codec");
     
     // Create test audio frame
     let test_samples: Vec<i16> = (0..80).map(|i| (i * 100) as i16).collect();
@@ -250,6 +243,7 @@ async fn test_rtp_bridge_packet_routing() {
 async fn test_transcoding_over_rtp() {
     // Test that transcoding works in the context of RTP transport
     
+    use rvoip_media_core::codec::Transcoder;
     let format_converter = Arc::new(RwLock::new(FormatConverter::new()));
     let mut transcoder = Transcoder::new(format_converter);
     

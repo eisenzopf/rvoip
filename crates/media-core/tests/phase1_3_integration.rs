@@ -27,13 +27,14 @@ async fn test_session_controller_performance_integration() -> Result<()> {
     assert!(pool_stats.pool_size > 0, "Frame pool should have frames available");
     
     // Create advanced processor configuration with single-band AGC (working configuration)
+    use rvoip_media_core::relay::controller::types::AdvancedProcessorConfig;
     let mut processor_config = AdvancedProcessorConfig::default();
     processor_config.enable_advanced_vad = true;
     processor_config.enable_advanced_agc = true;
     processor_config.enable_advanced_aec = true;
     processor_config.enable_simd = true;
-    processor_config.sample_rate = 16000; // Use 16 kHz to avoid VAD frame size issues
-    processor_config.frame_pool_size = 8; // Create dedicated session pool
+    processor_config.sample_rate = 16000;
+    processor_config.frame_pool_size = 8;
     
     // Configure AGC for single-band processing to avoid biquad filterbank issues
     processor_config.agc_config.num_bands = 1;
@@ -47,9 +48,7 @@ async fn test_session_controller_performance_integration() -> Result<()> {
     println!("   - VAD v2: {}", processor_config.enable_advanced_vad);
     println!("   - AGC v2: {} (single-band)", processor_config.enable_advanced_agc);
     println!("   - AEC v2: {}", processor_config.enable_advanced_aec);
-    println!("   - SIMD: {}", processor_config.enable_simd);
-    println!("   - Sample rate: {}", processor_config.sample_rate);
-    println!("   - Session pool size: {}", processor_config.frame_pool_size);
+
     
     // Create media config
     let media_config = MediaConfig {

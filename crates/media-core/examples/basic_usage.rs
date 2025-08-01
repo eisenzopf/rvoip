@@ -4,6 +4,8 @@
 //! media session management in a SIP server context.
 
 use rvoip_media_core::prelude::*;
+use rvoip_media_core::types::payload_types;
+use rvoip_media_core::MediaSessionParams;
 
 #[tokio::main]
 async fn main() -> Result<()> {
