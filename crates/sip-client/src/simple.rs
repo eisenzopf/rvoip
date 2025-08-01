@@ -716,6 +716,12 @@ impl SipClient {
     
     /// Start event forwarding from client-core to sip-client events
     async fn start_event_forwarding(&self) -> SipClientResult<()> {
+        // Create and register the event handler with client-core
+        let handler = Arc::new(SipClientEventHandler {
+            inner: self.inner.clone(),
+        });
+        self.inner.client.set_event_handler(handler.clone()).await;
+        
         // Subscribe to client-core events
         let mut event_rx = self.inner.client.subscribe_events();
         
@@ -873,8 +879,8 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
             display_name: call_info.caller_display_name,
         });
         
-        // For now, always accept (in future, we might add a handler callback)
-        rvoip_client_core::events::CallAction::Accept
+        // Ignore the call to let the application decide when to answer
+        rvoip_client_core::events::CallAction::Ignore
     }
     
     async fn on_call_state_changed(&self, status_info: rvoip_client_core::events::CallStatusInfo) {
