@@ -7,16 +7,19 @@ use crate::api::types::SessionId;
 use crate::errors::Result;
 use super::types::*;
 use super::MediaError;
+use super::rtp_decoder::{RtpPayloadDecoder, RtpEvent};
+use super::rtp_encoder;
 use std::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use tracing::warn;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex, mpsc};
 use async_trait::async_trait;
 
 // Import RTP types from media-core for zero-copy processing
 use rvoip_rtp_core::RtpPacket;
 use rvoip_media_core::performance::pool::PoolStats;
+use rvoip_media_core::{RtpEvent as MediaCoreRtpEvent, RtpEventCallback, MediaSessionId as MediaCoreSessionId};
 use crate::manager::events::SessionEventProcessor;
 
 // Add integration imports for new codec detection and fallback systems
@@ -57,6 +60,15 @@ pub struct MediaManager {
     
     /// Codec mapper for payload type resolution
     pub codec_mapper: Arc<CodecMapper>,
+    
+    /// RTP payload decoder for converting RTP packets to AudioFrames
+    pub rtp_decoder: Arc<Mutex<RtpPayloadDecoder>>,
+    
+    /// RTP payload encoder for converting AudioFrames to RTP packets
+    pub rtp_encoder: Arc<Mutex<rtp_encoder::RtpPayloadEncoder>>,
+    
+    /// Sessions with active RTP processing
+    pub rtp_processing_active: Arc<Mutex<HashSet<SessionId>>>,
 }
 
 /// Configuration for zero-copy RTP processing per session
@@ -107,6 +119,9 @@ impl MediaManager {
             codec_detector,
             fallback_manager,
             codec_mapper,
+            rtp_decoder: Arc::new(Mutex::new(RtpPayloadDecoder::new())),
+            rtp_encoder: Arc::new(Mutex::new(rtp_encoder::RtpPayloadEncoder::new())),
+            rtp_processing_active: Arc::new(Mutex::new(HashSet::new())),
         }
     }
     
@@ -133,6 +148,9 @@ impl MediaManager {
             codec_detector,
             fallback_manager,
             codec_mapper,
+            rtp_decoder: Arc::new(Mutex::new(RtpPayloadDecoder::new())),
+            rtp_encoder: Arc::new(Mutex::new(rtp_encoder::RtpPayloadEncoder::new())),
+            rtp_processing_active: Arc::new(Mutex::new(HashSet::new())),
         }
     }
     
@@ -164,6 +182,9 @@ impl MediaManager {
             codec_detector,
             fallback_manager,
             codec_mapper,
+            rtp_decoder: Arc::new(Mutex::new(RtpPayloadDecoder::new())),
+            rtp_encoder: Arc::new(Mutex::new(rtp_encoder::RtpPayloadEncoder::new())),
+            rtp_processing_active: Arc::new(Mutex::new(HashSet::new())),
         }
     }
     
@@ -181,6 +202,9 @@ impl MediaManager {
     pub async fn start(&self) -> super::MediaResult<()> {
         self.event_processor.start().await
             .map_err(|e| MediaError::internal(&format!("Failed to start event processor: {}", e)))?;
+        
+        // Initialize RTP event integration to connect media-core RTP events to our decoder
+        self.initialize_rtp_event_integration().await?;
         
         tracing::info!("✅ MediaManager started with event processing enabled");
         Ok(())
@@ -840,6 +864,7 @@ impl MediaManager {
     // =============================================================================
 
     /// Set audio frame callback for a session to receive decoded frames
+    /// This method integrates with the RTP decoder to provide audio frames from RTP events
     pub async fn set_audio_frame_callback(
         &self,
         session_id: &SessionId,
@@ -847,7 +872,13 @@ impl MediaManager {
     ) -> super::MediaResult<()> {
         let dialog_id = self.get_dialog_id(session_id).await?;
 
-        // Create a forwarding channel to convert media-core frames to session-core frames
+        // Register with RTP decoder for direct RTP-to-AudioFrame conversion
+        {
+            let mut decoder = self.rtp_decoder.lock().await;
+            decoder.add_subscriber(session_id.clone(), callback.clone());
+        }
+
+        // Also set up the media-core callback for fallback/compatibility
         let (media_sender, mut media_receiver) = tokio::sync::mpsc::channel::<rvoip_media_core::types::AudioFrame>(100);
 
         // Set up the media-core callback
@@ -876,6 +907,12 @@ impl MediaManager {
     /// Remove audio frame callback for a session
     pub async fn remove_audio_frame_callback(&self, session_id: &SessionId) -> super::MediaResult<()> {
         let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Remove from RTP decoder
+        {
+            let mut decoder = self.rtp_decoder.lock().await;
+            decoder.remove_subscriber(session_id);
+        }
         
         self.controller.remove_audio_frame_callback(&dialog_id).await
             .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
@@ -1000,6 +1037,9 @@ impl MediaManager {
             return Err(MediaError::SessionNotFound { session_id: session_id.to_string() });
         }
         
+        // Start RTP event processing for this session
+        self.start_rtp_event_processing(session_id).await?;
+        
         // TODO: Start the actual audio streaming pipeline
         // For now, this is handled through the existing audio transmission methods
         tracing::info!("🎵 Started audio streaming for session: {}", session_id);
@@ -1010,13 +1050,217 @@ impl MediaManager {
     pub async fn stop_audio_streaming(&self, session_id: &SessionId) -> super::MediaResult<()> {
         let dialog_id = self.get_dialog_id(session_id).await?;
         
-        // Remove the callback first
+        // Stop RTP event processing first
+        self.stop_rtp_event_processing(session_id).await?;
+        
+        // Remove the callback
         self.remove_audio_frame_callback(session_id).await?;
         
         // TODO: Stop the actual audio streaming pipeline
         // For now, this is handled through the existing audio transmission methods
         tracing::info!("🛑 Stopped audio streaming for session: {}", session_id);
         Ok(())
+    }
+
+    /// Start RTP event processing for a session
+    /// This method connects RTP transport events to the payload decoder
+    pub async fn start_rtp_event_processing(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        // Check if already processing
+        {
+            let mut active = self.rtp_processing_active.lock().await;
+            if active.contains(session_id) {
+                tracing::debug!("RTP event processing already active for session: {}", session_id);
+                return Ok(());
+            }
+            active.insert(session_id.clone());
+        }
+
+        // Get dialog ID for RTP transport communication
+        let dialog_id = self.get_dialog_id(session_id).await?;
+        
+        // Clone necessary components for the processing task
+        let session_id_clone = session_id.clone();
+        let decoder = self.rtp_decoder.clone();
+        let controller = self.controller.clone();
+        let active_sessions = self.rtp_processing_active.clone();
+        
+        // Spawn RTP event processing task
+        tokio::spawn(async move {
+            tracing::info!("🎵 Starting RTP event processing for session: {}", session_id_clone);
+            
+            // Create a channel to receive RTP events from transport
+            let (rtp_event_sender, mut rtp_event_receiver) = mpsc::channel::<RtpEvent>(100);
+            
+            // TODO: Connect to actual RTP transport events
+            // For now, this is a placeholder that would receive events from rtp-core
+            // In the real implementation, this would be connected to the RTP transport layer
+            
+            // Process RTP events until session ends
+            while active_sessions.lock().await.contains(&session_id_clone) {
+                tokio::select! {
+                    // Process incoming RTP events
+                    Some(rtp_event) = rtp_event_receiver.recv() => {
+                        let mut decoder_guard = decoder.lock().await;
+                        if let Err(e) = decoder_guard.process_rtp_event(rtp_event, &session_id_clone).await {
+                            tracing::error!("Failed to process RTP event for session {}: {}", session_id_clone, e);
+                        }
+                    }
+                    
+                    // Check if session is still active every 100ms
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                        // Continue loop - the while condition will check if session is still active
+                    }
+                }
+            }
+            
+            tracing::info!("🛑 RTP event processing ended for session: {}", session_id_clone);
+        });
+        
+        tracing::info!("✅ Started RTP event processing for session: {}", session_id);
+        Ok(())
+    }
+
+    /// Stop RTP event processing for a session
+    pub async fn stop_rtp_event_processing(&self, session_id: &SessionId) -> super::MediaResult<()> {
+        let mut active = self.rtp_processing_active.lock().await;
+        if active.remove(session_id) {
+            tracing::info!("🛑 Stopped RTP event processing for session: {}", session_id);
+        }
+        Ok(())
+    }
+
+    /// Get RTP decoder statistics
+    pub async fn get_rtp_decoder_stats(&self) -> super::rtp_decoder::RtpDecoderStats {
+        let decoder = self.rtp_decoder.lock().await;
+        decoder.get_stats()
+    }
+    
+    /// Send an audio frame as RTP packets
+    /// This method encodes the PCM audio frame to G.711 and sends it via RTP
+    pub async fn send_audio_frame(&self, session_id: &SessionId, frame: crate::api::types::AudioFrame) -> super::MediaResult<()> {
+        // Get the media session mapping
+        let mapping = self.session_mapping.read().await;
+        let media_session_id = mapping.get(session_id)
+            .ok_or_else(|| MediaError::SessionNotFound { 
+                session_id: session_id.to_string() 
+            })?
+            .clone();
+        
+        // For now, we'll skip getting session info and use default payload type
+        // TODO: Get actual payload type from session info when available
+        
+        // Determine payload type from negotiated codec
+        // For now, default to PCMU (0) if not specified
+        let payload_type = 0u8; // TODO: Get from session_info.codec_config
+        
+        // Initialize encoder for this session if needed
+        {
+            let mut encoder = self.rtp_encoder.lock().await;
+            // Check if session is already initialized by trying to encode a dummy frame
+            let test_frame = crate::api::types::AudioFrame {
+                timestamp: 0,
+                samples: vec![],
+                sample_rate: 8000,
+                channels: 1,
+            };
+            if encoder.encode_audio_frame(session_id, &test_frame).is_err() {
+                encoder.init_session(session_id.clone(), payload_type);
+            }
+        }
+        
+        // Encode the audio frame
+        let encoded_payload = {
+            let mut encoder = self.rtp_encoder.lock().await;
+            encoder.encode_audio_frame(session_id, &frame)
+                .map_err(|e| MediaError::Configuration { message: e })?
+        };
+        
+        // Create MediaPacket for media-core
+        let media_packet = rvoip_media_core::MediaPacket {
+            payload: bytes::Bytes::from(encoded_payload.data),
+            payload_type: encoded_payload.payload_type,
+            timestamp: encoded_payload.timestamp,
+            sequence_number: encoded_payload.sequence_number,
+            ssrc: 0, // TODO: Get SSRC from session
+            received_at: std::time::Instant::now(), // Not used for sending
+        };
+        
+        // Send the packet via existing send_audio_frame_for_transmission method
+        // This will use the controller's encode_and_send_audio_frame
+        self.send_audio_frame_for_transmission(session_id, frame).await?;
+        
+        Ok(())
+    }
+
+    /// Initialize RTP event integration with media-core
+    /// This registers a callback to receive RTP events from the media controller
+    pub async fn initialize_rtp_event_integration(&self) -> super::MediaResult<()> {
+        let callback = self.create_rtp_event_callback();
+        self.controller.add_rtp_event_callback(callback).await;
+        tracing::info!("✅ Initialized RTP event integration with media-core");
+        Ok(())
+    }
+
+    /// Create RTP event callback for media-core integration
+    /// This bridges media-core RtpEvents to session-core RtpEvents and forwards them to the decoder
+    pub fn create_rtp_event_callback(&self) -> RtpEventCallback {
+        let decoder = self.rtp_decoder.clone();
+        let session_mapping = self.session_mapping.clone();
+        
+        Arc::new(move |media_session_id: MediaCoreSessionId, media_event: MediaCoreRtpEvent| {
+            let decoder = decoder.clone();
+            let session_mapping = session_mapping.clone();
+            
+            // Spawn a task to handle the event asynchronously
+            tokio::spawn(async move {
+                // Convert MediaCoreSessionId to SessionId
+                // We need to reverse-lookup the session mapping to find our SessionId
+                let session_id = {
+                    let mapping = session_mapping.read().await;
+                    mapping.iter()
+                        .find_map(|(session_id, dialog_id)| {
+                            if dialog_id.as_str() == media_session_id.as_str() {
+                                Some(session_id.clone())
+                            } else {
+                                None
+                            }
+                        })
+                };
+                
+                if let Some(session_id) = session_id {
+                    // Convert media-core RtpEvent to session-core RtpEvent
+                    let session_event = match media_event {
+                        MediaCoreRtpEvent::MediaReceived { 
+                            payload_type, payload, timestamp, sequence_number, ssrc 
+                        } => {
+                            super::rtp_decoder::RtpEvent::MediaReceived {
+                                payload_type,
+                                payload,
+                                timestamp,
+                                sequence_number,
+                                ssrc,
+                            }
+                        }
+                        MediaCoreRtpEvent::PacketLost { sequence_number } => {
+                            super::rtp_decoder::RtpEvent::PacketLost { sequence_number }
+                        }
+                        MediaCoreRtpEvent::JitterBufferOverflow => {
+                            super::rtp_decoder::RtpEvent::JitterBufferOverflow
+                        }
+                    };
+                    
+                    // Process the event through our RTP decoder
+                    let mut decoder_guard = decoder.lock().await;
+                    if let Err(e) = decoder_guard.process_rtp_event(session_event, &session_id).await {
+                        tracing::error!("Failed to process RTP event from media-core for session {}: {}", session_id, e);
+                    } else {
+                        tracing::debug!("Successfully processed RTP event from media-core for session {}", session_id);
+                    }
+                } else {
+                    tracing::warn!("Received RTP event for unknown media session: {}", media_session_id);
+                }
+            });
+        })
     }
 
     /// Initialize codec detection for a session with expected codec
@@ -1113,13 +1357,22 @@ impl MediaManager {
     async fn cleanup_codec_processing(&self, session_id: &SessionId) -> super::MediaResult<()> {
         let dialog_id = self.get_dialog_id(session_id).await?;
         
+        // Stop RTP event processing
+        self.stop_rtp_event_processing(session_id).await?;
+        
+        // Remove RTP decoder subscriber
+        {
+            let mut decoder = self.rtp_decoder.lock().await;
+            decoder.remove_subscriber(session_id);
+        }
+        
         // Cleanup codec detection
         self.codec_detector.cleanup_detection(&dialog_id).await;
         
         // Cleanup fallback handling
         self.fallback_manager.cleanup_fallback(&dialog_id).await;
         
-        tracing::debug!("🧹 Cleaned up codec processing for session {}", session_id);
+        tracing::debug!("🧹 Cleaned up codec processing and RTP handling for session {}", session_id);
         Ok(())
     }
 }

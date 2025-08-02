@@ -15,6 +15,25 @@ use crate::relay::controller::codec_detection::{CodecDetector, CodecDetectionRes
 use crate::relay::controller::codec_fallback::{CodecFallbackManager, FallbackMode};
 use super::events::{IntegrationEvent, IntegrationEventType, RtpParameters, PacketInfo};
 
+/// RTP event types for external subscribers (e.g., session-core MediaManager)
+#[derive(Debug, Clone)]
+pub enum RtpEvent {
+    MediaReceived {
+        payload_type: u8,
+        payload: Vec<u8>,
+        timestamp: u32,
+        sequence_number: u16,
+        ssrc: u32,
+    },
+    PacketLost {
+        sequence_number: u16,
+    },
+    JitterBufferOverflow,
+}
+
+/// Callback for RTP events
+pub type RtpEventCallback = Arc<dyn Fn(MediaSessionId, RtpEvent) + Send + Sync>;
+
 /// Configuration for RTP bridge
 #[derive(Debug, Clone)]
 pub struct RtpBridgeConfig {
@@ -222,6 +241,8 @@ pub struct RtpBridge {
     codec_detector: Arc<CodecDetector>,
     /// Fallback manager for codec mismatches
     fallback_manager: Arc<CodecFallbackManager>,
+    /// RTP event callbacks for external subscribers
+    rtp_event_callbacks: Arc<RwLock<Vec<RtpEventCallback>>>,
 }
 
 impl RtpBridge {
@@ -244,9 +265,25 @@ impl RtpBridge {
             codec_mapper,
             codec_detector,
             fallback_manager,
+            rtp_event_callbacks: Arc::new(RwLock::new(Vec::new())),
         }
     }
     
+    /// Add an RTP event callback
+    pub async fn add_rtp_event_callback(&self, callback: RtpEventCallback) {
+        let mut callbacks = self.rtp_event_callbacks.write().await;
+        callbacks.push(callback);
+        debug!("Added RTP event callback, total callbacks: {}", callbacks.len());
+    }
+    
+    /// Remove all RTP event callbacks (useful for cleanup)
+    pub async fn clear_rtp_event_callbacks(&self) {
+        let mut callbacks = self.rtp_event_callbacks.write().await;
+        let count = callbacks.len();
+        callbacks.clear();
+        debug!("Cleared {} RTP event callbacks", count);
+    }
+
     /// Set up packet channels for rtp-core communication
     pub async fn setup_channels(
         &self,
@@ -449,6 +486,24 @@ impl RtpBridge {
         );
         if let Err(e) = self.event_tx.send(event) {
             warn!("Failed to send media packet received event: {}", e);
+        }
+        
+        // Send RTP event to external subscribers (e.g., session-core MediaManager)
+        let rtp_event = RtpEvent::MediaReceived {
+            payload_type: packet.payload_type,
+            payload: packet.payload.to_vec(),
+            timestamp: packet.timestamp,
+            sequence_number: packet.sequence_number,
+            ssrc: packet.ssrc,
+        };
+        
+        let callbacks = self.rtp_event_callbacks.read().await;
+        for callback in callbacks.iter() {
+            callback(session_id.clone(), rtp_event.clone());
+        }
+        
+        if !callbacks.is_empty() {
+            debug!("Sent RTP event to {} callbacks for session {}", callbacks.len(), session_id);
         }
         
         Ok(())

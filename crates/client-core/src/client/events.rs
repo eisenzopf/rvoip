@@ -97,6 +97,12 @@ pub struct ClientCallHandler {
     /// being sent to the registered event handler. This allows multiple consumers
     /// to receive events independently.
     pub event_tx: Option<tokio::sync::broadcast::Sender<crate::events::ClientEvent>>,
+    
+    /// Channel for notifying when calls become established
+    /// 
+    /// This channel is used to notify ClientManager when a call transitions to 
+    /// the Connected state, allowing it to set up audio frame subscription.
+    pub(crate) call_established_tx: Option<tokio::sync::mpsc::UnboundedSender<CallId>>,
 }
 
 impl std::fmt::Debug for ClientCallHandler {
@@ -151,6 +157,7 @@ impl ClientCallHandler {
             call_info,
             incoming_calls,
             event_tx: None,
+            call_established_tx: None,
         }
     }
     
@@ -181,6 +188,15 @@ impl ClientCallHandler {
     /// ```
     pub fn with_event_tx(mut self, event_tx: tokio::sync::broadcast::Sender<crate::events::ClientEvent>) -> Self {
         self.event_tx = Some(event_tx);
+        self
+    }
+    
+    /// Configure the handler with a call established notification channel
+    /// 
+    /// This internal method is used by ClientManager to provide a channel
+    /// for receiving notifications when calls transition to the Connected state.
+    pub(crate) fn with_call_established_tx(mut self, tx: tokio::sync::mpsc::UnboundedSender<CallId>) -> Self {
+        self.call_established_tx = Some(tx);
         self
     }
     
@@ -1261,6 +1277,11 @@ impl CallHandler for ClientCallHandler {
             // Forward to client event handler
             if let Some(handler) = self.client_event_handler.read().await.as_ref() {
                 handler.on_call_state_changed(status_info).await;
+            }
+            
+            // Notify about call establishment for audio setup
+            if let Some(tx) = &self.call_established_tx {
+                let _ = tx.send(call_id);
             }
             
             tracing::info!("Call {} established with SDP exchange", call_id);
