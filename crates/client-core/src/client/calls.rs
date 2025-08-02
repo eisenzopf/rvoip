@@ -384,6 +384,13 @@ impl super::manager::ClientManager {
             call_info.metadata.insert("answered_at".to_string(), Utc::now().to_rfc3339());
         }
         
+        // Set up automatic audio frame subscription for the call
+        if let Err(e) = self.setup_call_audio(call_id).await {
+            // Log the error but don't fail the call - audio might still work
+            // through other means or this might be a non-audio call
+            tracing::warn!("Failed to set up audio for call {}: {}", call_id, e);
+        }
+        
         // Update stats
         let mut stats = self.stats.lock().await;
         stats.connected_calls += 1;
@@ -633,6 +640,9 @@ impl super::manager::ClientManager {
                 priority: crate::events::EventPriority::Normal,
             });
         }
+        
+        // Clean up audio setup state if it exists
+        self.audio_setup_calls.remove(call_id);
         
         // Update stats - use saturating_sub to prevent integer underflow
         let mut stats = self.stats.lock().await;

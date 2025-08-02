@@ -19,6 +19,9 @@ use crate::types::conference::{
 };
 use crate::processing::audio::{AudioMixer, AudioStreamManager};
 use crate::quality::QualityMonitor;
+use crate::integration::{RtpBridge, RtpBridgeConfig, RtpEventCallback, IntegrationEvent};
+use crate::relay::controller::codec_detection::CodecDetector;
+use crate::relay::controller::codec_fallback::CodecFallbackManager;
 use crate::performance::{
     metrics::PerformanceMetrics,
     pool::{AudioFramePool, PoolConfig, PoolStats, RtpBufferPool, PooledRtpBuffer},
@@ -112,6 +115,9 @@ pub struct MediaSessionController {
     
     /// Codec mapper for payload type resolution
     pub(super) codec_mapper: Arc<CodecMapper>,
+    
+    /// RTP bridge for processing incoming packets
+    pub(super) rtp_bridge: Arc<RtpBridge>,
 }
 
 impl MediaSessionController {
@@ -154,6 +160,18 @@ impl MediaSessionController {
         // Create codec mapper
         let codec_mapper = Arc::new(CodecMapper::new());
         
+        // Create RTP bridge with its dependencies
+        let (integration_event_tx, _integration_event_rx) = mpsc::unbounded_channel();
+        let codec_detector = Arc::new(CodecDetector::new(codec_mapper.clone()));
+        let fallback_manager = Arc::new(CodecFallbackManager::new(codec_detector.clone(), codec_mapper.clone()));
+        let rtp_bridge = Arc::new(RtpBridge::new(
+            RtpBridgeConfig::default(),
+            integration_event_tx,
+            codec_mapper.clone(),
+            codec_detector,
+            fallback_manager,
+        ));
+        
         Self {
             relay: None,
             sessions: RwLock::new(HashMap::new()),
@@ -175,9 +193,16 @@ impl MediaSessionController {
             simd_processor,
             audio_frame_callbacks: RwLock::new(HashMap::new()),
             codec_mapper,
+            rtp_bridge,
         }
     }
     
+    /// Register an RTP event callback with the RTP bridge
+    /// This allows external subscribers (like session-core) to receive RTP events
+    pub async fn add_rtp_event_callback(&self, callback: RtpEventCallback) {
+        self.rtp_bridge.add_rtp_event_callback(callback).await;
+    }
+
     /// Create a new media session controller with custom port range (deprecated - use new() instead)
     pub fn with_port_range(_base_port: u16, _max_port: u16) -> Self {
         // Port allocation is now handled by rtp-core's GlobalPortAllocator
@@ -236,6 +261,18 @@ impl MediaSessionController {
         // Create codec mapper
         let codec_mapper = Arc::new(CodecMapper::new());
         
+        // Create RTP bridge with its dependencies
+        let (integration_event_tx, _integration_event_rx) = mpsc::unbounded_channel();
+        let codec_detector = Arc::new(CodecDetector::new(codec_mapper.clone()));
+        let fallback_manager = Arc::new(CodecFallbackManager::new(codec_detector.clone(), codec_mapper.clone()));
+        let rtp_bridge = Arc::new(RtpBridge::new(
+            RtpBridgeConfig::default(),
+            integration_event_tx,
+            codec_mapper.clone(),
+            codec_detector,
+            fallback_manager,
+        ));
+        
         Ok(Self {
             relay: None,
             sessions: RwLock::new(HashMap::new()),
@@ -257,6 +294,7 @@ impl MediaSessionController {
             simd_processor,
             audio_frame_callbacks: RwLock::new(HashMap::new()),
             codec_mapper,
+            rtp_bridge,
         })
     }
     

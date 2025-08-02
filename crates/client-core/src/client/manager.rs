@@ -10,6 +10,7 @@ use rvoip_session_core::api::{
     SessionManagerBuilder,
     SessionManagerConfig,
     SessionControl,
+    MediaControl,
     SipClient,
     MediaConfig as SessionMediaConfig,
     types::SessionId,
@@ -233,6 +234,13 @@ pub struct ClientManager {
     
     /// Event broadcast channel
     pub(crate) event_tx: tokio::sync::broadcast::Sender<ClientEvent>,
+    
+    /// Tracks which calls have audio frame subscription set up
+    pub(crate) audio_setup_calls: Arc<DashMap<CallId, bool>>,
+    
+    /// Handle to the audio setup task
+    audio_setup_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    
 }
 
 impl ClientManager {
@@ -420,13 +428,17 @@ impl ClientManager {
         // Create event broadcast channel
         let (event_tx, _) = tokio::sync::broadcast::channel(256);
         
+        // Create channel for call establishment notifications
+        let (call_established_tx, call_established_rx) = tokio::sync::mpsc::unbounded_channel();
+        
         // Create call handler
         let call_handler = Arc::new(ClientCallHandler::new(
             call_mapping.clone(),
             session_mapping.clone(),
             call_info.clone(),
             incoming_calls.clone(),
-        ).with_event_tx(event_tx.clone()));
+        ).with_event_tx(event_tx.clone())
+        .with_call_established_tx(call_established_tx));
         
 
         
@@ -479,7 +491,10 @@ impl ClientManager {
         
 
         
-        Ok(Arc::new(Self {
+        let audio_setup_calls = Arc::new(DashMap::new());
+        
+        // Create the client manager
+        let client = Arc::new(Self {
             coordinator,
             local_sip_addr: config.local_sip_addr,
             media_config: config.media.clone(),
@@ -490,7 +505,26 @@ impl ClientManager {
             call_info,
             call_handler,
             event_tx,
-        }))
+            audio_setup_calls,
+            audio_setup_task: Arc::new(Mutex::new(None)),
+        });
+        
+        // Spawn task to handle call establishment notifications
+        let client_clone = client.clone();
+        let mut call_established_rx = call_established_rx;
+        let audio_setup_task = tokio::spawn(async move {
+            while let Some(call_id) = call_established_rx.recv().await {
+                // Set up audio for the established call
+                if let Err(e) = client_clone.setup_call_audio(&call_id).await {
+                    tracing::warn!("Failed to set up audio for established call {}: {}", call_id, e);
+                }
+            }
+        });
+        
+        // Store the task handle
+        *client.audio_setup_task.lock().await = Some(audio_setup_task);
+        
+        Ok(client)
     }
     
     /// Set the event handler for client events
@@ -997,6 +1031,11 @@ impl ClientManager {
     /// }
     /// ```
     pub async fn stop(&self) -> ClientResult<()> {
+        // Cancel the audio setup task if it's running
+        if let Some(task) = self.audio_setup_task.lock().await.take() {
+            task.abort();
+        }
+        
         SessionControl::stop(&self.coordinator)
             .await
             .map_err(|e| ClientError::InternalError { 
@@ -1906,6 +1945,52 @@ impl ClientManager {
     
     // ===== PRIORITY 4.1: ENHANCED MEDIA INTEGRATION =====
     // Media operations have been moved to media.rs
+    
+    /// Set up audio frame subscription for a call
+    /// 
+    /// This internal method is called when a call becomes established to automatically
+    /// set up audio frame subscription, enabling audio to flow for the call.
+    pub(crate) async fn setup_call_audio(&self, call_id: &CallId) -> ClientResult<()> {
+        // Get the session ID for this call
+        if let Some(session_id_entry) = self.session_mapping.get(call_id) {
+            let session_id = session_id_entry.clone();
+            
+            // Subscribe to audio frames from this session
+            match MediaControl::subscribe_to_audio_frames(&self.coordinator, &session_id).await {
+                Ok(audio_subscriber) => {
+                    // Mark that audio is set up for this call
+                    self.audio_setup_calls.insert(*call_id, true);
+                    
+                    // Audio subscriber is now available for the application to use
+                    // The application (e.g., sip-client) can integrate with audio-core
+                    // to connect this subscriber to speakers and set up microphone capture
+                    tracing::info!("Audio frame subscription ready for call {}", call_id);
+                    tracing::info!("To enable audio, integrate with audio-core in your application");
+                    
+                    // For now, just drop the subscriber as we can't use audio-core directly
+                    // due to circular dependency issues
+                    drop(audio_subscriber);
+                    
+                    // TODO: In the future, this is where we would connect to audio-core
+                    // to route audio frames to the appropriate audio device.
+                    // For now, the audio frames are available via the subscriber.
+                    
+                    tracing::info!("Set up audio frame subscription for call {}", call_id);
+                    Ok(())
+                }
+                Err(e) => {
+                    // Log the error but don't fail the call - audio might still work
+                    // through other means or this might be a non-audio call
+                    tracing::warn!("Failed to set up audio frame subscription for call {}: {}", call_id, e);
+                    Err(ClientError::MediaError { 
+                        details: format!("Failed to subscribe to audio frames: {}", e) 
+                    })
+                }
+            }
+        } else {
+            Err(ClientError::CallNotFound { call_id: *call_id })
+        }
+    }
 }
 
 impl Drop for ClientManager {

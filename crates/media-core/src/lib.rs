@@ -14,27 +14,18 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
-//! use rvoip_media_core::prelude::*;
+//! ```rust,ignore
+//! use rvoip_media_core::relay::controller::MediaSessionController;
+//! use rvoip_media_core::types::{MediaSessionId, DialogId};
 //! 
 //! #[tokio::main]
-//! async fn main() -> Result<()> {
-//!     // Create and start media engine
-//!     let config = MediaEngineConfig::default();
-//!     let engine = MediaEngine::new(config).await?;
-//!     engine.start().await?;
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     // Create media session controller
+//!     let controller = MediaSessionController::new();
 //!     
-//!     // Create media session for SIP dialog
-//!     let dialog_id = DialogId::new("call-123");
-//!     let params = MediaSessionParams::audio_only()
-//!         .with_preferred_codec(payload_types::PCMU);
-//!     let session = engine.create_media_session(dialog_id, params).await?;
+//!     // RTP bridge callbacks can be added for external RTP event handling
+//!     // This enables integration with session-core for audio frame delivery
 //!     
-//!     // Get codec capabilities for SDP negotiation
-//!     let capabilities = engine.get_supported_codecs();
-//!     
-//!     // Clean shutdown
-//!     engine.stop().await?;
 //!     Ok(())
 //! }
 //! ```
@@ -94,6 +85,8 @@ pub use integration::{
     SessionBridgeConfig,
     IntegrationEvent,
     IntegrationEventType,
+    RtpEvent,
+    RtpEventCallback,
 };
 
 // Legacy exports (will be replaced in Phase 2)

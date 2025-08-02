@@ -16,6 +16,8 @@ pub mod manager;
 pub mod types;
 pub mod bridge;
 pub mod stats;
+pub mod rtp_decoder;
+pub mod rtp_encoder;
 
 // Re-exports for convenience
 pub use manager::MediaManager;
