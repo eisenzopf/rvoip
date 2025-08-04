@@ -30,6 +30,10 @@ enum Commands {
         /// Port to listen on (default: 5060)
         #[arg(short, long, default_value = "5060")]
         port: u16,
+        
+        /// IP address to bind to (default: auto-detect)
+        #[arg(short, long)]
+        ip: Option<String>,
     },
     
     /// Start as caller - make a call to another computer
@@ -62,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     
     match cli.command {
-        Commands::Receive { name, port } => run_receiver(name, port).await?,
+        Commands::Receive { name, port, ip } => run_receiver(name, port, ip).await?,
         Commands::Call { name, target, target_port, port } => {
             run_caller(name, target, target_port, port).await?
         }
@@ -71,13 +75,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_receiver(name: String, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_receiver(name: String, port: u16, ip: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     println!("{}", "═══════════════════════════════════════════".bright_cyan());
     println!("{}", "🎧 SIP P2P Voice Call - RECEIVER MODE".bright_cyan().bold());
     println!("{}", "═══════════════════════════════════════════".bright_cyan());
     
-    // Get local IP
-    let local_ip = local_ip()?;
+    // Get IP address - use provided IP or auto-detect
+    let local_ip = if let Some(ip_str) = ip {
+        ip_str.parse::<std::net::IpAddr>()
+            .map_err(|_| format!("Invalid IP address: {}", ip_str))?
+    } else {
+        local_ip()?
+    };
     let sip_address = format!("sip:{}@{}:{}", name, local_ip, port);
     
     println!("\n{} {}", "Your name:".bright_yellow(), name.bright_white());

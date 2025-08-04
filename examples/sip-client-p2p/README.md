@@ -26,6 +26,12 @@ On the first computer, run:
 cargo run --release -- receive -n alice
 ```
 
+Or to bind to a specific IP address (e.g., if you have multiple network interfaces):
+
+```bash
+cargo run --release -- receive -n alice --ip 192.168.1.100
+```
+
 This will display:
 - Your IP address
 - Your SIP address (e.g., `sip:alice@192.168.1.100:5060`)
@@ -56,6 +62,7 @@ cargo run -- receive [OPTIONS]
 OPTIONS:
     -n, --name <NAME>    Your name (e.g., "alice")
     -p, --port <PORT>    Port to listen on [default: 5060]
+    -i, --ip <IP>        IP address to bind to [default: auto-detect]
 ```
 
 ### Caller Mode
