@@ -625,33 +625,20 @@ impl MediaControl for Arc<SessionCoordinator> {
             return Err(crate::errors::SessionError::SessionNotFound(session_id.to_string()));
         }
         
-        // Create channel for audio frames - tokio mpsc for MediaManager, std mpsc for subscriber
-        let (tokio_sender, mut tokio_receiver) = tokio::sync::mpsc::channel::<crate::api::types::AudioFrame>(100);
-        let (std_sender, std_receiver) = std::sync::mpsc::channel::<crate::api::types::AudioFrame>();
+        // Create tokio channel for audio frames - no conversion needed anymore!
+        let (subscriber_sender, subscriber_receiver) = tokio::sync::mpsc::channel::<crate::api::types::AudioFrame>(1000);
         
-        // Set up the callback through MediaManager
+        // Set up the callback through MediaManager directly
         let media_manager = &self.media_manager;
-        media_manager.set_audio_frame_callback(session_id, tokio_sender).await
+        media_manager.set_audio_frame_callback(session_id, subscriber_sender).await
             .map_err(|e| crate::errors::SessionError::MediaIntegration { 
                 message: format!("Failed to set audio frame callback: {}", e) 
             })?;
         
-        // Spawn task to bridge tokio mpsc -> std mpsc for the subscriber
-        let session_id_clone = session_id.clone();
-        tokio::spawn(async move {
-            while let Some(frame) = tokio_receiver.recv().await {
-                if let Err(e) = std_sender.send(frame) {
-                    tracing::warn!("Failed to forward audio frame to subscriber for session {}: {}", session_id_clone, e);
-                    break;
-                }
-            }
-            tracing::debug!("🔊 Audio frame bridging task ended for session: {}", session_id_clone);
-        });
-        
         // Create subscriber
         let subscriber = crate::api::types::AudioFrameSubscriber::new(
             session_id.clone(),
-            std_receiver,
+            subscriber_receiver,
         );
         
         // Publish AudioStreamStarted event

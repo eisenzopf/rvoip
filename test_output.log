@@ -1,0 +1,475 @@
+   Compiling rvoip-client-core v0.1.16 (/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/crates/client-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.00s
+     Running tests/audio_exchange_test.rs (target/debug/deps/audio_exchange_test-ad41ab71c0745097)
+
+running 1 test
+[2m2025-08-03T18:24:57.183914Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m 🎵 Generating test tones...
+[2m2025-08-03T18:24:57.190125Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m 💾 Saved input tones to WAV files
+[2m2025-08-03T18:24:57.190137Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m 🔧 Creating clients...
+[2m2025-08-03T18:24:57.191267Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-08-03T18:24:57.191814Z[0m [32m INFO[0m [2mrvoip_sip_transport::transport::udp[0m[2m:[0m SIP UDP transport bound to 127.0.0.1:25060
+[2m2025-08-03T18:24:57.192409Z[0m [32m INFO[0m [2mrvoip_transaction_core::transport[0m[2m:[0m Added UDP transport bound to 127.0.0.1:25060
+[2m2025-08-03T18:24:57.192879Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-08-03T18:24:57.192981Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 127.0.0.1:25060
+[2m2025-08-03T18:24:57.193005Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m Creating new DialogManager with global transaction events and local address 127.0.0.1:25060
+[2m2025-08-03T18:24:57.193453Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m 🔄 Starting global transaction event processor for dialog-core
+[2m2025-08-03T18:24:57.194008Z[0m [32m INFO[0m [2mrvoip_session_core::manager::events[0m[2m:[0m Session event processor started
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+[2m2025-08-03T18:24:57.194097Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m SessionCoordinator initialized on port 25060
+[2m2025-08-03T18:24:57.194140Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Starting UnifiedDialogApi
+[2m2025-08-03T18:24:57.194146Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-08-03T18:24:57.194152Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager starting
+[2m2025-08-03T18:24:57.194157Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager started successfully
+[2m2025-08-03T18:24:57.194163Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Hybrid mode active - from_uri: Some("sip:client@127.0.0.1"), domain: None, auto_auth: false, auto_options: false
+[2m2025-08-03T18:24:57.194169Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m UnifiedDialogManager started successfully
+[2m2025-08-03T18:24:57.194183Z[0m [32m INFO[0m [2mrvoip_session_core::manager::cleanup[0m[2m:[0m Cleanup manager started
+[2m2025-08-03T18:24:57.194189Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m SessionCoordinator started
+🎬 SPAWN: Starting session coordination event loop
+📡 EVENT LOOP: Session coordination event loop started
+[2m2025-08-03T18:24:57.194395Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::cleanup[0m[2m:[0m Running cleanup operations
+[2m2025-08-03T18:24:57.194415Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Starting main coordinator event loop
+[2m2025-08-03T18:24:57.194511Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-08-03T18:24:57.194558Z[0m [32m INFO[0m [2mrvoip_sip_transport::transport::udp[0m[2m:[0m SIP UDP transport bound to 127.0.0.1:25061
+[2m2025-08-03T18:24:57.194590Z[0m [32m INFO[0m [2mrvoip_transaction_core::transport[0m[2m:[0m Added UDP transport bound to 127.0.0.1:25061
+[2m2025-08-03T18:24:57.194616Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-08-03T18:24:57.194624Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 127.0.0.1:25061
+[2m2025-08-03T18:24:57.194630Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m Creating new DialogManager with global transaction events and local address 127.0.0.1:25061
+[2m2025-08-03T18:24:57.194671Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m 🔄 Starting global transaction event processor for dialog-core
+[2m2025-08-03T18:24:57.194925Z[0m [32m INFO[0m [2mrvoip_session_core::manager::events[0m[2m:[0m Session event processor started
+🔗 SETUP: Setting up session coordination with dialog-core
+✅ SETUP: Session coordination setup complete
+🎬 SPAWN: Starting session coordination event loop
+[2m2025-08-03T18:24:57.194943Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m SessionCoordinator initialized on port 25061
+[2m2025-08-03T18:24:57.194958Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Starting main coordinator event loop
+📡 EVENT LOOP: Session coordination event loop started
+[2m2025-08-03T18:24:57.194969Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Starting UnifiedDialogApi
+[2m2025-08-03T18:24:57.194978Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-08-03T18:24:57.194983Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager starting
+[2m2025-08-03T18:24:57.194988Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager started successfully
+[2m2025-08-03T18:24:57.194993Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Hybrid mode active - from_uri: Some("sip:client@127.0.0.1"), domain: None, auto_auth: false, auto_options: false
+[2m2025-08-03T18:24:57.194999Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m UnifiedDialogManager started successfully
+[2m2025-08-03T18:24:57.195022Z[0m [32m INFO[0m [2mrvoip_session_core::manager::cleanup[0m[2m:[0m Cleanup manager started
+[2m2025-08-03T18:24:57.195035Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m SessionCoordinator started
+[2m2025-08-03T18:24:57.195076Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Starting UnifiedDialogApi
+[2m2025-08-03T18:24:57.195084Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-08-03T18:24:57.195090Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager starting
+[2m2025-08-03T18:24:57.195096Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager started successfully
+[2m2025-08-03T18:24:57.195101Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Hybrid mode active - from_uri: Some("sip:client@127.0.0.1"), domain: None, auto_auth: false, auto_options: false
+[2m2025-08-03T18:24:57.195106Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m UnifiedDialogManager started successfully
+[2m2025-08-03T18:24:57.195111Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m SessionCoordinator started
+[2m2025-08-03T18:24:57.195122Z[0m [32m INFO[0m [2mrvoip_client_core::client::manager[0m[2m:[0m ClientManager started on 127.0.0.1:25060
+[2m2025-08-03T18:24:57.195128Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Starting UnifiedDialogApi
+[2m2025-08-03T18:24:57.195134Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-08-03T18:24:57.195138Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager starting
+[2m2025-08-03T18:24:57.195143Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager started successfully
+[2m2025-08-03T18:24:57.195148Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Hybrid mode active - from_uri: Some("sip:client@127.0.0.1"), domain: None, auto_auth: false, auto_options: false
+[2m2025-08-03T18:24:57.195153Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m UnifiedDialogManager started successfully
+[2m2025-08-03T18:24:57.195158Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m SessionCoordinator started
+[2m2025-08-03T18:24:57.195165Z[0m [32m INFO[0m [2mrvoip_client_core::client::manager[0m[2m:[0m ClientManager started on 127.0.0.1:25061
+[2m2025-08-03T18:24:57.195171Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m ✅ Clients started
+[2m2025-08-03T18:24:57.195184Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m 📞 Client A calling Client B...
+[2m2025-08-03T18:24:57.195209Z[0m [34mDEBUG[0m [2mrvoip_client_core::client::recovery[0m[2m:[0m Attempting operation [3moperation[0m[2m=[0m"prepare_outgoing_call" [3mattempt[0m[2m=[0m1 [3mmax_attempts[0m[2m=[0m5
+[2m2025-08-03T18:24:57.195241Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::registry[0m[2m:[0m Registered session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:57.195267Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Creating media session for SIP session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:57.195276Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m Starting media session for dialog: media-sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:57.195338Z[0m [32m INFO[0m [2mrvoip_rtp_core::transport::allocator[0m[2m:[0m Created global port allocator with range 16384-32767
+[2m2025-08-03T18:24:57.196161Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::cleanup[0m[2m:[0m Running cleanup operations
+[2m2025-08-03T18:24:57.698744Z[0m [33m WARN[0m [2mrvoip_media_core::codec::mapping[0m[2m:[0m No clock rate registered for codec 'opus', using fallback: 48000Hz
+[2m2025-08-03T18:24:57.699294Z[0m [32m INFO[0m [2mrvoip_rtp_core::transport::udp[0m[2m:[0m Started UDP transport receiver tasks
+[2m2025-08-03T18:24:57.699524Z[0m [32m INFO[0m [2mrvoip_rtp_core::session[0m[2m:[0m Started RTP session with SSRC=086920ca
+[2m2025-08-03T18:24:57.699624Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m ✅ Created media session with REAL RTP session: media-sess_f78b4847-bf8d-4906-9716-f88ded241bb8 (port: 20891, codec: opus, PT: 0, clock: 48000Hz)
+[2m2025-08-03T18:24:57.699760Z[0m [32m INFO[0m [2mrvoip_session_core::media::manager[0m[2m:[0m ✅ Created media session: media-sess_f78b4847-bf8d-4906-9716-f88ded241bb8 for SIP session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8 with real MediaSessionController + zero-copy enabled
+[2m2025-08-03T18:24:57.699803Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Generating SDP offer for session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:57.699958Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::config[0m[2m:[0m Generating SDP offer for 127.0.0.1:20891
+[2m2025-08-03T18:24:57.700260Z[0m [32m INFO[0m [2mrvoip_session_core::media::manager[0m[2m:[0m ✅ Generated SDP offer for session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8 with port: 20891 and codecs: ["opus", "PCMU", "PCMA"]
+[2m2025-08-03T18:24:57.700362Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Getting media info for SIP session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:57.700415Z[0m [32m INFO[0m [2mrvoip_client_core::client::calls[0m[2m:[0m Prepared call with allocated RTP port: 20891
+[2m2025-08-03T18:24:57.700440Z[0m [34mDEBUG[0m [2mrvoip_client_core::client::recovery[0m[2m:[0m Attempting operation [3moperation[0m[2m=[0m"initiate_prepared_call" [3mattempt[0m[2m=[0m1 [3mmax_attempts[0m[2m=[0m5
+[2m2025-08-03T18:24:57.700472Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Making outgoing call from sip:client_a@127.0.0.1:25060 to sip:client_b@127.0.0.1:25061
+Request Via headers before transaction creation:
+  Via[0]: SIP/2.0/UDP 127.0.0.1:25060;branch=z9hG4bK-54a088b08af642d19df4047eb75fe29b
+Request Via headers after potential modification:
+  Via[0]: SIP/2.0/UDP 127.0.0.1:25060;branch=z9hG4bK-54a088b08af642d19df4047eb75fe29b
+Creating ClientInviteTransaction: Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Creating new ClientInviteTransaction: Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Created ClientInviteTransaction: Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Created ClientInviteTransaction: Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Starting event loop for INVITE Client transaction: Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Transaction loop starting for Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Initial state: Initial
+ClientInviteTransaction::initiate called for Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Current state is Initial
+Sending TransitionTo(Calling) command for Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Successfully sent TransitionTo command for Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Received command: TransitionTo(Calling) for transaction Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Processing TransitionTo(Calling) current state: Initial
+Valid state transition: Initial -> Calling
+State successfully changed to: Calling
+Sent StateChanged event result: Success
+[2m2025-08-03T18:24:57.703338Z[0m [32m INFO[0m [2mrvoip_sip_transport::transport::udp[0m[2m:[0m Sending INVITE message to 127.0.0.1:25061
+[2m2025-08-03T18:24:57.704629Z[0m [32m INFO[0m [2mrvoip_transaction_core::manager[0m[2m:[0m Created new ServerInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:server) [3mmethod[0m[2m=[0mINVITE
+🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from 127.0.0.1:25060
+Transaction loop starting for Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:server)
+Initial state: Proceeding
+Received command: TransitionTo(Proceeding) for transaction Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:server)
+Processing TransitionTo(Proceeding) current state: Proceeding
+🔍 INVITE HANDLER: Processing initial INVITE request from 127.0.0.1:25060
+Already in requested state, no transition needed: Proceeding
+[2m2025-08-03T18:24:57.705040Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::dialog_operations[0m[2m:[0m Created early dialog 7830ff87-bf28-40d8-80ef-218879407319 from INVITE request
+🔍 INVITE HANDLER: Created early dialog 7830ff87-bf28-40d8-80ef-218879407319
+🔍 INVITE HANDLER: Associated transaction Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:server) with dialog 7830ff87-bf28-40d8-80ef-218879407319
+🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog 7830ff87-bf28-40d8-80ef-218879407319
+🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog 7830ff87-bf28-40d8-80ef-218879407319
+[2m2025-08-03T18:24:57.705142Z[0m [32m INFO[0m [2mrvoip_dialog_core::protocol::invite_handler[0m[2m:[0m Initial INVITE processed, created dialog 7830ff87-bf28-40d8-80ef-218879407319
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: IncomingCall { dialog_id: DialogId(7830ff87-bf28-40d8-80ef-218879407319), transaction_id: z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:server, request: Request { method: Invite, uri: Uri { scheme: Sip, user: Some("client_b"), password: None, host: Address(127.0.0.1), port: Some(25061), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_a"), password: None, host: Address(127.0.0.1), port: Some(25060), parameters: [], headers: {}, raw_uri: None }, params: [Tag("0bcb742f")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_b"), password: None, host: Address(127.0.0.1), port: Some(25061), parameters: [], headers: {}, raw_uri: None }, params: [] })), CallId(CallId("call-57979946-1025-4bc6-b15a-1e15517eb0ac")), CSeq(CSeq { seq: 1, method: Invite }), MaxForwards(MaxForwards(70)), ContentType(ContentType(ContentTypeValue { m_type: "application", m_subtype: "sdp", parameters: {} })), ContentLength(ContentLength(314)), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(25060), params: [Branch("z9hG4bK-54a088b08af642d19df4047eb75fe29b")] }]))], body: b"v=0\r\no=rvoip 1754245497 1754245497 IN IP4 127.0.0.1\r\ns=RVOIP Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20891 RTP/AVP 96 97 98 0 8 9\r\na=rtpmap:96 opus@48000Hz@2ch/48000/2\r\na=rtpmap:97 opus@16000Hz/48000\r\na=rtpmap:98 opus@8000Hz/48000\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\na=sendrecv\r\n" }, source: 127.0.0.1:25060 }
+[2m2025-08-03T18:24:57.705381Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m handle_incoming_call called for dialog 7830ff87-bf28-40d8-80ef-218879407319
+[2m2025-08-03T18:24:57.705413Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m Incoming call from dialog 7830ff87-bf28-40d8-80ef-218879407319: sip:client_a@127.0.0.1:25060 -> sip:client_b@127.0.0.1:25061
+[2m2025-08-03T18:24:57.705479Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m Created session sess_4d5cf064-f781-4add-85f2-c221331a0de6 for incoming call dialog 7830ff87-bf28-40d8-80ef-218879407319
+[2m2025-08-03T18:24:57.705514Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::registry[0m[2m:[0m Registered session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:57.705585Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m Calling handler.on_incoming_call for session sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:57.705696Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m 📞 Incoming call from sip:client_a@127.0.0.1:25060 to sip:client_b@127.0.0.1:25061
+[2m2025-08-03T18:24:57.705734Z[0m [32m INFO[0m [2mrvoip_client_core::client::events[0m[2m:[0m Handler returned Accept for call aec304f2-a13c-40a9-9031-c3bc8233af12, generating SDP answer
+[2m2025-08-03T18:24:57.705752Z[0m [32m INFO[0m [2mrvoip_client_core::client::events[0m[2m:[0m Incoming call has SDP offer, will generate answer in session-core
+[2m2025-08-03T18:24:57.705770Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m Handler decision for session sess_4d5cf064-f781-4add-85f2-c221331a0de6: Accept(None)
+[2m2025-08-03T18:24:57.705903Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m Generating SDP answer for session sess_4d5cf064-f781-4add-85f2-c221331a0de6 as UAS
+[2m2025-08-03T18:24:57.705961Z[0m [33m WARN[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m SDP negotiation requested, accepting without SDP for now
+[2m2025-08-03T18:24:57.706007Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::common[0m[2m:[0m Answering call 7830ff87-bf28-40d8-80ef-218879407319
+[2m2025-08-03T18:24:57.706235Z[0m [32m INFO[0m [2mrvoip_sip_transport::transport::udp[0m[2m:[0m Sending response message to 127.0.0.1:25060
+🎯 COORDINATOR: Handling event: SessionCreated { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), from: "sip:client_a@127.0.0.1:25060", to: "sip:client_b@127.0.0.1:25061", call_state: Initiating }
+[2m2025-08-03T18:24:57.706305Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: SessionCreated { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), from: "sip:client_a@127.0.0.1:25060", to: "sip:client_b@127.0.0.1:25061", call_state: Initiating }
+[2m2025-08-03T18:24:57.706334Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:57.706398Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Session sess_4d5cf064-f781-4add-85f2-c221331a0de6 created with state Initiating
+[2m2025-08-03T18:24:57.706416Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Session sess_4d5cf064-f781-4add-85f2-c221331a0de6 in early state, deferring media setup
+🎯 COORDINATOR: Handling event: SdpNegotiationRequested { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), role: "uas", local_sdp: None, remote_sdp: Some("v=0\r\no=rvoip 1754245497 1754245497 IN IP4 127.0.0.1\r\ns=RVOIP Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20891 RTP/AVP 96 97 98 0 8 9\r\na=rtpmap:96 opus@48000Hz@2ch/48000/2\r\na=rtpmap:97 opus@16000Hz/48000\r\na=rtpmap:98 opus@8000Hz/48000\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\na=sendrecv\r\n") }
+[2m2025-08-03T18:24:57.706444Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: SdpNegotiationRequested { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), role: "uas", local_sdp: None, remote_sdp: Some("v=0\r\no=rvoip 1754245497 1754245497 IN IP4 127.0.0.1\r\ns=RVOIP Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20891 RTP/AVP 96 97 98 0 8 9\r\na=rtpmap:96 opus@48000Hz@2ch/48000/2\r\na=rtpmap:97 opus@16000Hz/48000\r\na=rtpmap:98 opus@8000Hz/48000\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\na=sendrecv\r\n") }
+[2m2025-08-03T18:24:57.706494Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:57.706452Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::common[0m[2m:[0m Dialog 7830ff87-bf28-40d8-80ef-218879407319 local tag set to match response: tag-049989d35e354d02b28e5b687499736c
+[2m2025-08-03T18:24:57.706553Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m SDP negotiation requested for session sess_4d5cf064-f781-4add-85f2-c221331a0de6 as uas
+[2m2025-08-03T18:24:57.706559Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::common[0m[2m:[0m Dialog 7830ff87-bf28-40d8-80ef-218879407319 transitioned to Confirmed state
+[2m2025-08-03T18:24:57.706613Z[0m [32m INFO[0m [2mrvoip_session_core::sdp::negotiator[0m[2m:[0m Negotiating SDP as UAS for session sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:57.706627Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::common[0m[2m:[0m Updated dialog lookup for confirmed dialog 7830ff87-bf28-40d8-80ef-218879407319
+[2m2025-08-03T18:24:57.706664Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::common[0m[2m:[0m Successfully answered call 7830ff87-bf28-40d8-80ef-218879407319
+[2m2025-08-03T18:24:57.706683Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m Answered incoming call for session sess_4d5cf064-f781-4add-85f2-c221331a0de6 with SDP: false
+[2m2025-08-03T18:24:57.706633Z[0m [34mDEBUG[0m [2mrvoip_session_core::sdp::negotiator[0m[2m:[0m Their offer: v=0
+o=rvoip 1754245497 1754245497 IN IP4 127.0.0.1
+s=RVOIP Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 20891 RTP/AVP 96 97 98 0 8 9
+a=rtpmap:96 opus@48000Hz@2ch/48000/2
+a=rtpmap:97 opus@16000Hz/48000
+a=rtpmap:98 opus@8000Hz/48000
+a=rtpmap:0 PCMU/8000
+a=rtpmap:8 PCMA/8000
+a=rtpmap:9 G722/8000
+a=sendrecv
+
+[2m2025-08-03T18:24:57.706702Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Getting media info for SIP session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+Received command: CancelTimer100 for transaction Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:server)
+[2m2025-08-03T18:24:57.706764Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Creating media session for SIP session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 48, 52, 57, 57, 56, 57, 100, 51, 53, 101, 51, 53, 52, 100, 48, 50, 98, 50, 56, 101, 53, 98, 54, 56, 55, 52, 57, 57, 55, 51, 54, 99]
+[2m2025-08-03T18:24:57.706893Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m Starting media session for dialog: media-sess_4d5cf064-f781-4add-85f2-c221331a0de6
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:server)
+Processing TransitionTo(Terminated) current state: Proceeding
+Valid state transition: Proceeding -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Successfully parsed tag: tag-049989d35e354d02b28e5b687499736c
+Transaction loop ending for Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:server). Final state: Terminated
+State after sending command: Calling
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(25060), params: [Branch("z9hG4bK-54a088b08af642d19df4047eb75fe29b")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_a"), password: None, host: Address(127.0.0.1), port: Some(25060), parameters: [], headers: {}, raw_uri: None }, params: [Tag("0bcb742f")] })), CallId(CallId("call-57979946-1025-4bc6-b15a-1e15517eb0ac")), CSeq(CSeq { seq: 1, method: Invite }), ContentLength(ContentLength(0)), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_b"), password: None, host: Address(127.0.0.1), port: Some(25061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-049989d35e354d02b28e5b687499736c")] })), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("server"), password: None, host: Address(127.0.0.1), port: Some(25061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])]))], body: b"" })) for transaction Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Received command: TransitionTo(Terminated) for transaction Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+Processing TransitionTo(Terminated) current state: Calling
+Valid state transition: Calling -> Terminated
+State successfully changed to: Terminated
+Sent StateChanged event result: Success
+Transaction loop ending for Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client). Final state: Terminated
+[2m2025-08-03T18:24:57.714098Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::transaction_integration[0m[2m:[0m Transaction Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client) received success response 200 OK for dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f
+[2m2025-08-03T18:24:57.714184Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::transaction_integration[0m[2m:[0m Updated dialog lookup for confirmed dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f
+Event loop for INVITE Client transaction ended: Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: ResponseReceived { dialog_id: DialogId(15d1d082-fd5d-49d1-b545-3b40de13f73f), response: Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(25060), params: [Branch("z9hG4bK-54a088b08af642d19df4047eb75fe29b")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_a"), password: None, host: Address(127.0.0.1), port: Some(25060), parameters: [], headers: {}, raw_uri: None }, params: [Tag("0bcb742f")] })), CallId(CallId("call-57979946-1025-4bc6-b15a-1e15517eb0ac")), CSeq(CSeq { seq: 1, method: Invite }), ContentLength(ContentLength(0)), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_b"), password: None, host: Address(127.0.0.1), port: Some(25061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-049989d35e354d02b28e5b687499736c")] })), Contact(Contact([Params([ContactParamInfo { address: Address { display_name: None, uri: Uri { scheme: Sip, user: Some("server"), password: None, host: Address(127.0.0.1), port: Some(25061), parameters: [], headers: {}, raw_uri: None }, params: [] } }])]))], body: b"" }, transaction_id: z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client }
+[2m2025-08-03T18:24:57.714402Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 🔍 RESPONSE HANDLER: status=200, tx_id='Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)', dialog=15d1d082-fd5d-49d1-b545-3b40de13f73f
+🎯 SESSION COORDINATION: Received response 200 for dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f
+🚀 SESSION COORDINATION: This is a 200 OK to INVITE - sending automatic ACK
+[2m2025-08-03T18:24:57.714680Z[0m [32m INFO[0m [2mrvoip_sip_transport::transport::udp[0m[2m:[0m Sending ACK message to 127.0.0.1:25061
+✅ SESSION COORDINATION: Successfully sent ACK for 200 OK response
+[2m2025-08-03T18:24:57.714853Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m ACK sent successfully for dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f transaction Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:client)
+[2m2025-08-03T18:24:57.714880Z[0m [34mDEBUG[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 🔍 ACK SENT: No direct session mapping found for dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f - using alternative correlation
+[2m2025-08-03T18:24:57.714914Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 🔧 ACK SENT: Alternative media creation for session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 after ACK (state: Initiating)
+[2m2025-08-03T18:24:57.714958Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 🚀 RFC 3261: Handled ACK sent for UAC side media creation
+📞 SESSION COORDINATION: Updating session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 state to Active for successful outgoing call
+[2m2025-08-03T18:24:57.714980Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 📞 200 OK received for session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 - keeping in Initiating state until media ready
+[2m2025-08-03T18:24:57.714993Z[0m [34mDEBUG[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m ✅ RFC 3261: Successfully processed 200 OK response for dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f
+🎯 COORDINATOR: Handling event: MediaEvent { session_id: SessionId("sess_f78b4847-bf8d-4906-9716-f88ded241bb8"), event: "rfc_compliant_media_creation_uac" }
+[2m2025-08-03T18:24:57.715032Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: MediaEvent { session_id: SessionId("sess_f78b4847-bf8d-4906-9716-f88ded241bb8"), event: "rfc_compliant_media_creation_uac" }
+[2m2025-08-03T18:24:57.715049Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:57.715110Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Media event for session sess_f78b4847-bf8d-4906-9716-f88ded241bb8: rfc_compliant_media_creation_uac
+[2m2025-08-03T18:24:57.715124Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Media creation event for sess_f78b4847-bf8d-4906-9716-f88ded241bb8: rfc_compliant_media_creation_uac
+[2m2025-08-03T18:24:57.715149Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::registry[0m[2m:[0m Registered session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_f78b4847-bf8d-4906-9716-f88ded241bb8"), old_state: Initiating, new_state: Active }
+[2m2025-08-03T18:24:57.715181Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: StateChanged { session_id: SessionId("sess_f78b4847-bf8d-4906-9716-f88ded241bb8"), old_state: Initiating, new_state: Active }
+[2m2025-08-03T18:24:57.715195Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:57.715208Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 state changed: Initiating -> Active
+[2m2025-08-03T18:24:57.715263Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Getting media info for SIP session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:57.715309Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m Media session already exists for sess_f78b4847-bf8d-4906-9716-f88ded241bb8, skipping creation
+[2m2025-08-03T18:24:57.715348Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Getting media info for SIP session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45[2m2025-08-03T18:24:57.715378Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Media info available: true
+[2m2025-08-03T18:24:57.715395Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Local SDP length: Some(314)
+, 48, 52, 57, 57, 56, 57, 100, 51[2m2025-08-03T18:24:57.715407Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Remote SDP length: None
+[2m2025-08-03T18:24:57.715425Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Notifying handler about call sess_f78b4847-bf8d-4906-9716-f88ded241bb8 establishment
+, 53, 101, 51, 53, 52, 100, 48, 50, 98, 50, 56, 101, 53, 98, 54, 56, 55, 52, 57, 57, 55, 51, 54, 99]
+Successfully parsed tag: tag-049989d35e354d02b28e5b687499736c
+[2m2025-08-03T18:24:57.715786Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::transaction_integration[0m[2m:[0m ✅ RFC 3261: ACK received for transaction Key(z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:server) in dialog 7830ff87-bf28-40d8-80ef-218879407319 - time to start media (UAS side)
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: AckReceived { dialog_id: DialogId(7830ff87-bf28-40d8-80ef-218879407319), transaction_id: z9hG4bK-54a088b08af642d19df4047eb75fe29b:INVITE:server, negotiated_sdp: None }
+[2m2025-08-03T18:24:57.715930Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m ✅ RFC 3261: ACK RECEIVED for session sess_4d5cf064-f781-4add-85f2-c221331a0de6 - creating media session (UAS side)
+[2m2025-08-03T18:24:57.815564Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Created outgoing call with dialog ID: 15d1d082-fd5d-49d1-b545-3b40de13f73f (transaction completed per RFC 3261)
+[2m2025-08-03T18:24:57.815646Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::manager[0m[2m:[0m Created outgoing call: sip:client_a@127.0.0.1:25060 -> sip:client_b@127.0.0.1:25061 (dialog: 15d1d082-fd5d-49d1-b545-3b40de13f73f)
+[2m2025-08-03T18:24:57.815794Z[0m [32m INFO[0m [2mrvoip_client_core::client::calls[0m[2m:[0m Created outgoing call sip:client_a@127.0.0.1:25060 -> sip:client_b@127.0.0.1:25061 (call_id: 21eaf4e6-297c-4888-a3c8-167867adc95b)
+[2m2025-08-03T18:24:57.815827Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m ✅ Call established - Client A ID: 21eaf4e6-297c-4888-a3c8-167867adc95b, Client B ID: aec304f2-a13c-40a9-9031-c3bc8233af12
+[2m2025-08-03T18:24:58.208573Z[0m [33m WARN[0m [2mrvoip_media_core::codec::mapping[0m[2m:[0m No clock rate registered for codec 'opus', using fallback: 48000Hz
+[2m2025-08-03T18:24:58.208956Z[0m [32m INFO[0m [2mrvoip_rtp_core::transport::udp[0m[2m:[0m Started UDP transport receiver tasks
+[2m2025-08-03T18:24:58.209084Z[0m [32m INFO[0m [2mrvoip_rtp_core::session[0m[2m:[0m Started RTP session with SSRC=71dac56d
+[2m2025-08-03T18:24:58.209147Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m ✅ Created media session with REAL RTP session: media-sess_4d5cf064-f781-4add-85f2-c221331a0de6 (port: 24674, codec: opus, PT: 0, clock: 48000Hz)
+[2m2025-08-03T18:24:58.209220Z[0m [32m INFO[0m [2mrvoip_session_core::media::manager[0m[2m:[0m ✅ Created media session: media-sess_4d5cf064-f781-4add-85f2-c221331a0de6 for SIP session: sess_4d5cf064-f781-4add-85f2-c221331a0de6 with real MediaSessionController + zero-copy enabled
+[2m2025-08-03T18:24:58.209238Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Getting media info for SIP session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.209326Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::config[0m[2m:[0m Generating SDP answer for offer
+[2m2025-08-03T18:24:58.209431Z[0m [34mDEBUG[0m [2mrvoip_session_core::sdp::negotiator[0m[2m:[0m Our answer: v=0
+o=rvoip 1754245498 1754245498 IN IP4 127.0.0.1
+s=RVOIP Session
+c=IN IP4 127.0.0.1
+t=0 0
+m=audio 24674 RTP/AVP 0
+a=rtpmap:0 PCMU/8000
+a=sendrecv
+
+[2m2025-08-03T18:24:58.209496Z[0m [32m INFO[0m [2mrvoip_session_core::sdp::negotiator[0m[2m:[0m Applying negotiated config: codec=PCMU, remote=127.0.0.1:20891
+[2m2025-08-03T18:24:58.209520Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m Updating media session for dialog: media-sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.209583Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m ✅ Updated RTP session remote address for dialog media-sess_4d5cf064-f781-4add-85f2-c221331a0de6: 127.0.0.1:20891
+[2m2025-08-03T18:24:58.209612Z[0m [33m WARN[0m [2mrvoip_media_core::codec::mapping[0m[2m:[0m No clock rate registered for codec 'opus', using fallback: 48000Hz
+[2m2025-08-03T18:24:58.209624Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m 🔄 Codec changed for dialog media-sess_4d5cf064-f781-4add-85f2-c221331a0de6: opus -> PCMU (PT: 0 -> 0, Clock: 48000Hz -> 8000Hz)
+[2m2025-08-03T18:24:58.209635Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m ✅ Media session successfully updated for dialog: media-sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.209672Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Initializing codec detection for session sess_4d5cf064-f781-4add-85f2-c221331a0de6: expected codec=Some("PCMU")
+[2m2025-08-03T18:24:58.209717Z[0m [32m INFO[0m [2mrvoip_session_core::media::manager[0m[2m:[0m ✅ Initialized codec detection and fallback for session sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.209776Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m SDP negotiation as UAS successful: codec=PCMU, local=127.0.0.1:24674, remote=127.0.0.1:20891
+[2m2025-08-03T18:24:58.209792Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Updating media session for SIP session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.209835Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Parsed remote address from SDP: 127.0.0.1:20891
+[2m2025-08-03T18:24:58.209854Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Parsed codec from SDP: opus@48000Hz@2ch
+[2m2025-08-03T18:24:58.209865Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m Updating media session for dialog: media-sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.209884Z[0m [33m WARN[0m [2mrvoip_media_core::codec::mapping[0m[2m:[0m No clock rate registered for codec 'opus@48000Hz@2ch', using fallback: 8000Hz
+[2m2025-08-03T18:24:58.209898Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m 🔄 Codec changed for dialog media-sess_4d5cf064-f781-4add-85f2-c221331a0de6: PCMU -> opus@48000Hz@2ch (PT: 0 -> 0, Clock: 8000Hz -> 8000Hz)
+[2m2025-08-03T18:24:58.209910Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m ✅ Media session successfully updated for dialog: media-sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.209922Z[0m [32m INFO[0m [2mrvoip_session_core::media::manager[0m[2m:[0m ✅ Updated media session for SIP session: sess_4d5cf064-f781-4add-85f2-c221331a0de6 with remote: 127.0.0.1:20891 and codecs: ["opus@48000Hz@2ch"]
+[2m2025-08-03T18:24:58.209937Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Updated media session with remote SDP (offer) for session sess_4d5cf064-f781-4add-85f2-c221331a0de6
+🎯 COORDINATOR: Handling event: MediaEvent { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), event: "rfc_compliant_media_creation_uas" }
+[2m2025-08-03T18:24:58.209974Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: MediaEvent { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), event: "rfc_compliant_media_creation_uas" }
+[2m2025-08-03T18:24:58.209990Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:58.210005Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Media event for session sess_4d5cf064-f781-4add-85f2-c221331a0de6: rfc_compliant_media_creation_uas
+[2m2025-08-03T18:24:58.210014Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Media creation event for sess_4d5cf064-f781-4add-85f2-c221331a0de6: rfc_compliant_media_creation_uas
+[2m2025-08-03T18:24:58.210036Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::registry[0m[2m:[0m Registered session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+🎯 COORDINATOR: Handling event: MediaNegotiated { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), local_addr: 127.0.0.1:24674, remote_addr: 127.0.0.1:20891, codec: "PCMU" }
+[2m2025-08-03T18:24:58.210057Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: MediaNegotiated { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), local_addr: 127.0.0.1:24674, remote_addr: 127.0.0.1:20891, codec: "PCMU" }
+[2m2025-08-03T18:24:58.210070Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:58.210081Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Unhandled event type
+🎯 COORDINATOR: Handling event: SdpEvent { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), event_type: "generated_sdp_answer", sdp: "v=0\r\no=rvoip 1754245498 1754245498 IN IP4 127.0.0.1\r\ns=RVOIP Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 24674 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n" }
+[2m2025-08-03T18:24:58.210095Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: SdpEvent { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), event_type: "generated_sdp_answer", sdp: "v=0\r\no=rvoip 1754245498 1754245498 IN IP4 127.0.0.1\r\ns=RVOIP Session\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 24674 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n" }
+[2m2025-08-03T18:24:58.210108Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:58.210120Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m SDP event for session sess_4d5cf064-f781-4add-85f2-c221331a0de6: generated_sdp_answer
+🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), old_state: Initiating, new_state: Active }
+[2m2025-08-03T18:24:58.210134Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: StateChanged { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), old_state: Initiating, new_state: Active }
+[2m2025-08-03T18:24:58.210144Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:58.210155Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Session sess_4d5cf064-f781-4add-85f2-c221331a0de6 state changed: Initiating -> Active
+[2m2025-08-03T18:24:58.210166Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Getting media info for SIP session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.210194Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m Media session already exists for sess_4d5cf064-f781-4add-85f2-c221331a0de6, skipping creation
+[2m2025-08-03T18:24:58.210208Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m Getting media info for SIP session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.210227Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Media info available: true
+[2m2025-08-03T18:24:58.210237Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Local SDP length: Some(156)
+[2m2025-08-03T18:24:58.210248Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Remote SDP length: Some(314)
+[2m2025-08-03T18:24:58.210257Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Notifying handler about call sess_4d5cf064-f781-4add-85f2-c221331a0de6 establishment
+[2m2025-08-03T18:24:58.210321Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m 📞 Call aec304f2-a13c-40a9-9031-c3bc8233af12 state changed to Connected
+[2m2025-08-03T18:24:58.210347Z[0m [32m INFO[0m [2mrvoip_client_core::client::events[0m[2m:[0m Call aec304f2-a13c-40a9-9031-c3bc8233af12 established with SDP exchange
+[2m2025-08-03T18:24:58.210405Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::rtp_decoder[0m[2m:[0m Added audio frame subscriber for session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.210452Z[0m [32m INFO[0m [2mrvoip_session_core::media::manager[0m[2m:[0m 🔊 Set up audio frame callback for session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.210484Z[0m [32m INFO[0m [2mrvoip_session_core::manager::events[0m[2m:[0m ▶️ Audio stream started for session sess_4d5cf064-f781-4add-85f2-c221331a0de6: stream-sess_4d5cf064-f781-4add-85f2-c221331a0de6 (8000Hz, 1 channels, Both)
+[2m2025-08-03T18:24:58.210497Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:58.210507Z[0m [32m INFO[0m [2mrvoip_session_core::api::media[0m[2m:[0m 🎧 Created audio frame subscriber for session sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:58.210535Z[0m [32m INFO[0m [2mrvoip_client_core::client::manager[0m[2m:[0m Audio frame subscription ready for call aec304f2-a13c-40a9-9031-c3bc8233af12
+[2m2025-08-03T18:24:58.210546Z[0m [32m INFO[0m [2mrvoip_client_core::client::manager[0m[2m:[0m To enable audio, integrate with audio-core in your application
+[2m2025-08-03T18:24:58.210558Z[0m [32m INFO[0m [2mrvoip_client_core::client::manager[0m[2m:[0m Set up audio frame subscription for call aec304f2-a13c-40a9-9031-c3bc8233af12
+[2m2025-08-03T18:24:59.817235Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::rtp_decoder[0m[2m:[0m Added audio frame subscriber for session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:59.817235Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::rtp_decoder[0m[2m:[0m Added audio frame subscriber for session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:59.817300Z[0m [32m INFO[0m [2mrvoip_session_core::media::manager[0m[2m:[0m 🔊 Set up audio frame callback for session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:59.817307Z[0m [32m INFO[0m [2mrvoip_session_core::media::manager[0m[2m:[0m 🔊 Set up audio frame callback for session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:59.817330Z[0m [32m INFO[0m [2mrvoip_session_core::manager::events[0m[2m:[0m ▶️ Audio stream started for session sess_4d5cf064-f781-4add-85f2-c221331a0de6: stream-sess_4d5cf064-f781-4add-85f2-c221331a0de6 (8000Hz, 1 channels, Both)
+[2m2025-08-03T18:24:59.817340Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m 🔊 Audio frame forwarding task ended for session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:59.817330Z[0m [32m INFO[0m [2mrvoip_session_core::manager::events[0m[2m:[0m ▶️ Audio stream started for session sess_f78b4847-bf8d-4906-9716-f88ded241bb8: stream-sess_f78b4847-bf8d-4906-9716-f88ded241bb8 (8000Hz, 1 channels, Both)
+[2m2025-08-03T18:24:59.817345Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:59.817364Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:59.817374Z[0m [32m INFO[0m [2mrvoip_session_core::api::media[0m[2m:[0m 🎧 Created audio frame subscriber for session sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:59.817380Z[0m [32m INFO[0m [2mrvoip_session_core::api::media[0m[2m:[0m 🎧 Created audio frame subscriber for session sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:59.817402Z[0m [34mDEBUG[0m [2mrvoip_session_core::api::media[0m[2m:[0m 🔊 Audio frame bridging task ended for session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:59.817407Z[0m [34mDEBUG[0m [2mrvoip_session_core::api::media[0m[2m:[0m 🎤 Sent audio frame for session sess_4d5cf064-f781-4add-85f2-c221331a0de6 (160 samples, 8000Hz)
+[2m2025-08-03T18:24:59.817411Z[0m [34mDEBUG[0m [2mrvoip_session_core::api::media[0m[2m:[0m 🎤 Sent audio frame for session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 (160 samples, 8000Hz)
+[2m2025-08-03T18:24:59.817418Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m 📤 Received audio frame for transmission for session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:59.817421Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m 📤 Received audio frame for transmission for session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:59.817430Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m ✅ Got dialog ID media-sess_4d5cf064-f781-4add-85f2-c221331a0de6 for session sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:59.817431Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::manager[0m[2m:[0m ✅ Got dialog ID media-sess_f78b4847-bf8d-4906-9716-f88ded241bb8 for session sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+
+thread 'tokio-runtime-worker' panicked at /Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/crates/session-core/src/media/manager.rs:946:25:
+attempt to multiply with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'tokio-runtime-worker' panicked at /Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/crates/session-core/src/media/manager.rs:946:25:
+attempt to multiply with overflow
+[2m2025-08-03T18:24:59.818195Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m 💾 Saving captured audio...
+[2m2025-08-03T18:24:59.818211Z[0m [33m WARN[0m [2maudio_exchange_test[0m[2m:[0m No audio samples captured for /Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/crates/client-core/tests/audio_exchange_test/client_a/output.wav
+[2m2025-08-03T18:24:59.818711Z[0m [33m WARN[0m [2maudio_exchange_test[0m[2m:[0m No audio samples captured for /Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/crates/client-core/tests/audio_exchange_test/client_b/output.wav
+[2m2025-08-03T18:24:59.818953Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::manager[0m[2m:[0m Terminating established dialog for session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 in state Active
+[2m2025-08-03T18:24:59.818965Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::manager[0m[2m:[0m 📞 BYE-SEND: Attempting to send BYE for established session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8 (dialog: 15d1d082-fd5d-49d1-b545-3b40de13f73f)
+Request Via headers before transaction creation:
+  Via[0]: SIP/2.0/UDP 127.0.0.1:25060;branch=z9hG4bK-2b2a575290a34f09a31db623ddbee2bc
+Request Via headers after potential modification:
+  Via[0]: SIP/2.0/UDP 127.0.0.1:25060;branch=z9hG4bK-2b2a575290a34f09a31db623ddbee2bc
+ClientNonInviteTransaction::initiate called for Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client)
+Transaction loop starting for Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client)
+Initial state: Initial
+Current state is Initial
+Sending TransitionTo(Trying) command for Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client)
+Successfully sent TransitionTo command for Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client)
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client)
+Processing TransitionTo(Trying) current state: Initial
+Valid state transition: Initial -> Trying
+State successfully changed to: Trying
+Sent StateChanged event result: Success
+[2m2025-08-03T18:24:59.819573Z[0m [32m INFO[0m [2mrvoip_sip_transport::transport::udp[0m[2m:[0m Sending BYE message to 127.0.0.1:25061
+Attempting to parse tag from: [116, 97, 103, 61, 116, 97, 103, 45, 48, 52, 57, 57, 56, 57, 100, 51, 53, 101, 51, 53, 52, 100, 48, 50, 98, 50, 56, 101, 53, 98, 54, 56, 55, 52, 57, 57, 55, 51, 54, 99]
+Successfully parsed tag: tag-049989d35e354d02b28e5b687499736c
+[2m2025-08-03T18:24:59.820176Z[0m [32m INFO[0m [2mrvoip_transaction_core::manager[0m[2m:[0m Created new ServerNonInviteTransaction [3mid[0m[2m=[0mKey(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:server) [3mmethod[0m[2m=[0mBYE
+Transaction loop starting for Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:server)
+Initial state: Trying
+Received command: TransitionTo(Trying) for transaction Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:server)
+Processing TransitionTo(Trying) current state: Trying
+Already in requested state, no transition needed: Trying
+Received command: ProcessMessage(Request(Request { method: Bye, uri: Uri { scheme: Sip, user: Some("client_b"), password: None, host: Address(127.0.0.1), port: Some(25061), parameters: [], headers: {}, raw_uri: None }, version: Version { major: 2, minor: 0 }, headers: [From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_a"), password: None, host: Address(127.0.0.1), port: Some(25060), parameters: [], headers: {}, raw_uri: None }, params: [Tag("0bcb742f")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_b"), password: None, host: Address(127.0.0.1), port: Some(25061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-049989d35e354d02b28e5b687499736c")] })), CallId(CallId("call-57979946-1025-4bc6-b15a-1e15517eb0ac")), CSeq(CSeq { seq: 2, method: Bye }), MaxForwards(MaxForwards(70)), ContentLength(ContentLength(0)), Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(25060), params: [Branch("z9hG4bK-2b2a575290a34f09a31db623ddbee2bc")] }]))], body: b"" })) for transaction Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:server)
+[2m2025-08-03T18:24:59.820448Z[0m [32m INFO[0m [2mrvoip_sip_transport::transport::udp[0m[2m:[0m Sending response message to 127.0.0.1:25060
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:server)
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+Sent StateChanged event result: Success
+[2m2025-08-03T18:24:59.820510Z[0m [32m INFO[0m [2mrvoip_dialog_core::protocol::bye_handler[0m[2m:[0m BYE processed for dialog 7830ff87-bf28-40d8-80ef-218879407319
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: CallTerminated { dialog_id: DialogId(7830ff87-bf28-40d8-80ef-218879407319), reason: "BYE received" }
+[2m2025-08-03T18:24:59.820566Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m handle_call_terminated called for dialog 7830ff87-bf28-40d8-80ef-218879407319: BYE received
+[2m2025-08-03T18:24:59.820581Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m Call terminated for session sess_4d5cf064-f781-4add-85f2-c221331a0de6: 7830ff87-bf28-40d8-80ef-218879407319 - BYE received
+🎯 COORDINATOR: Handling event: SessionTerminated { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), reason: "BYE received" }
+[2m2025-08-03T18:24:59.820613Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: SessionTerminated { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), reason: "BYE received" }
+[2m2025-08-03T18:24:59.820625Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+🎯 COORDINATOR: Matched SessionTerminated event for sess_4d5cf064-f781-4add-85f2-c221331a0de6 - BYE received
+🔴 COORDINATOR: handle_session_terminated called for session sess_4d5cf064-f781-4add-85f2-c221331a0de6 with reason: BYE received
+[2m2025-08-03T18:24:59.820639Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Session sess_4d5cf064-f781-4add-85f2-c221331a0de6 terminated: BYE received
+[2m2025-08-03T18:24:59.820648Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::coordinator[0m[2m:[0m Handling session terminated event for: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:59.820661Z[0m [33m WARN[0m [2mrvoip_session_core::media::coordinator[0m[2m:[0m No media session found for SIP session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+[2m2025-08-03T18:24:59.820679Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::registry[0m[2m:[0m Registered session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+🔔 COORDINATOR: Handler exists, checking for session sess_4d5cf064-f781-4add-85f2-c221331a0de6
+✅ COORDINATOR: Found session sess_4d5cf064-f781-4add-85f2-c221331a0de6, calling handler.on_call_ended
+[2m2025-08-03T18:24:59.820693Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Notifying handler about session sess_4d5cf064-f781-4add-85f2-c221331a0de6 termination
+[2m2025-08-03T18:24:59.820719Z[0m [34mDEBUG[0m [2mrvoip_client_core::client::events[0m[2m:[0m Call aec304f2-a13c-40a9-9031-c3bc8233af12 was connected and ended, should decrement connected_calls counter
+[2m2025-08-03T18:24:59.820741Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m 📞 Call aec304f2-a13c-40a9-9031-c3bc8233af12 state changed to Terminated
+🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), old_state: Active, new_state: Terminated }
+Attempting to parse tag from: [116, 97[2m2025-08-03T18:24:59.820766Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: StateChanged { session_id: SessionId("sess_4d5cf064-f781-4add-85f2-c221331a0de6"), old_state: Active, new_state: Terminated }
+, [2m2025-08-03T18:24:59.820775Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+103, 61, 116, 97, 103, 45[2m2025-08-03T18:24:59.820784Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Session sess_4d5cf064-f781-4add-85f2-c221331a0de6 state changed: Active -> Terminated
+, 48, 52, 57, 57[2m2025-08-03T18:24:59.820792Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::coordinator[0m[2m:[0m Handling session terminated event for: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+, 56, 57, 100, 51, 53, [2m2025-08-03T18:24:59.820802Z[0m [33m WARN[0m [2mrvoip_session_core::media::coordinator[0m[2m:[0m No media session found for SIP session: sess_4d5cf064-f781-4add-85f2-c221331a0de6
+101, 51, 53, 52, 100, 48, 50, 98, 50, 56, 101, 53, 98, 54, 56, 55, 52, 57, 57, 55, 51, 54, 99]
+Successfully parsed tag: tag-049989d35e354d02b28e5b687499736c
+State after sending command: Trying
+Received command: ProcessMessage(Response(Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(25060), params: [Branch("z9hG4bK-2b2a575290a34f09a31db623ddbee2bc")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_a"), password: None, host: Address(127.0.0.1), port: Some(25060), parameters: [], headers: {}, raw_uri: None }, params: [Tag("0bcb742f")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_b"), password: None, host: Address(127.0.0.1), port: Some(25061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-049989d35e354d02b28e5b687499736c")] })), CallId(CallId("call-57979946-1025-4bc6-b15a-1e15517eb0ac")), CSeq(CSeq { seq: 2, method: Bye }), ContentLength(ContentLength(0))], body: b"" })) for transaction Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client)
+Received command: TransitionTo(Completed) for transaction Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client)
+Processing TransitionTo(Completed) current state: Trying
+Valid state transition: Trying -> Completed
+State successfully changed to: Completed
+Sent StateChanged event result: Success
+[2m2025-08-03T18:24:59.831558Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::transaction_integration[0m[2m:[0m Transaction Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client) received success response 200 OK for dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: ResponseReceived { dialog_id: DialogId(15d1d082-fd5d-49d1-b545-3b40de13f73f), response: Response { version: Version { major: 2, minor: 0 }, status: Ok, reason: Some("OK"), headers: [Via(Via([ViaHeader { sent_protocol: SentProtocol { name: "SIP", version: "2.0", transport: "UDP" }, sent_by_host: Address(127.0.0.1), sent_by_port: Some(25060), params: [Branch("z9hG4bK-2b2a575290a34f09a31db623ddbee2bc")] }])), From(From(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_a"), password: None, host: Address(127.0.0.1), port: Some(25060), parameters: [], headers: {}, raw_uri: None }, params: [Tag("0bcb742f")] })), To(To(Address { display_name: Some("User"), uri: Uri { scheme: Sip, user: Some("client_b"), password: None, host: Address(127.0.0.1), port: Some(25061), parameters: [], headers: {}, raw_uri: None }, params: [Tag("tag-049989d35e354d02b28e5b687499736c")] })), CallId(CallId("call-57979946-1025-4bc6-b15a-1e15517eb0ac")), CSeq(CSeq { seq: 2, method: Bye }), ContentLength(ContentLength(0))], body: b"" }, transaction_id: z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client }
+[2m2025-08-03T18:24:59.831641Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 🔍 RESPONSE HANDLER: status=200, tx_id='Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client)', dialog=15d1d082-fd5d-49d1-b545-3b40de13f73f
+🎯 SESSION COORDINATION: Received response 200 for dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f
+[2m2025-08-03T18:24:59.831657Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 📞 BYE-RESPONSE: Processing response to BYE request (tx: Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client), dialog: 15d1d082-fd5d-49d1-b545-3b40de13f73f)
+[2m2025-08-03T18:24:59.831666Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m ✅ BYE-200OK: Received 200 OK for BYE request (tx: Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client), dialog: 15d1d082-fd5d-49d1-b545-3b40de13f73f)
+[2m2025-08-03T18:24:59.831677Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 🎯 BYE-COMPLETE: Session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 successfully terminated with 200 OK
+[2m2025-08-03T18:24:59.831685Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 📞 BYE-SUCCESS: Processing successful BYE for dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f
+📞 BYE-SUCCESS: Processing successful BYE for dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f
+[2m2025-08-03T18:24:59.831697Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m ✅ BYE-SUCCESS: Found session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 for dialog 15d1d082-fd5d-49d1-b545-3b40de13f73f - termination successful
+[2m2025-08-03T18:24:59.831706Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m ⏱️ BYE-TIMING: Session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 BYE completion took 10.75µs
+[2m2025-08-03T18:24:59.831721Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m ✅ BYE-SUCCESS: Generated SessionTerminated event for UAC session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 in 26.458µs
+✅ BYE-SUCCESS: Generated SessionTerminated event for UAC session sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:59.831734Z[0m [34mDEBUG[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 🧹 BYE-CLEANUP: Removed dialog mapping for 15d1d082-fd5d-49d1-b545-3b40de13f73f (session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8)
+[2m2025-08-03T18:24:59.831741Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m 🎉 BYE-FINAL: Session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 termination completed successfully in 47.417µs
+🎯 COORDINATOR: Handling event: SessionTerminated { session_id: SessionId("sess_f78b4847-bf8d-4906-9716-f88ded241bb8"), reason: "Call terminated by local BYE" }
+[2m2025-08-03T18:24:59.831762Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: SessionTerminated { session_id: SessionId("sess_f78b4847-bf8d-4906-9716-f88ded241bb8"), reason: "Call terminated by local BYE" }
+[2m2025-08-03T18:24:59.831773Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+🎯 COORDINATOR: Matched SessionTerminated event for sess_f78b4847-bf8d-4906-9716-f88ded241bb8 - Call terminated by local BYE
+🔴 COORDINATOR: handle_session_terminated called for session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 with reason: Call terminated by local BYE
+[2m2025-08-03T18:24:59.831783Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 terminated: Call terminated by local BYE
+[2m2025-08-03T18:24:59.831791Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::coordinator[0m[2m:[0m Handling session terminated event for: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:59.831799Z[0m [33m WARN[0m [2mrvoip_session_core::media::coordinator[0m[2m:[0m No media session found for SIP session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:59.831815Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::registry[0m[2m:[0m Registered session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+🔔 COORDINATOR: Handler exists, checking for session sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+✅ COORDINATOR: Found session sess_f78b4847-bf8d-4906-9716-f88ded241bb8, calling handler.on_call_ended
+[2m2025-08-03T18:24:59.831828Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Notifying handler about session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 termination
+🎯 COORDINATOR: Handling event: StateChanged { session_id: SessionId("sess_f78b4847-bf8d-4906-9716-f88ded241bb8"), old_state: Active, new_state: Terminated }
+[2m2025-08-03T18:24:59.831860Z[0m [34mDEBUG[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Handling event: StateChanged { session_id: SessionId("sess_f78b4847-bf8d-4906-9716-f88ded241bb8"), old_state: Active, new_state: Terminated }
+[2m2025-08-03T18:24:59.831869Z[0m [34mDEBUG[0m [2mrvoip_session_core::manager::events[0m[2m:[0m No subscribers listening for event, but this is acceptable
+[2m2025-08-03T18:24:59.831877Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Session sess_f78b4847-bf8d-4906-9716-f88ded241bb8 state changed: Active -> Terminated
+[2m2025-08-03T18:24:59.831884Z[0m [34mDEBUG[0m [2mrvoip_session_core::media::coordinator[0m[2m:[0m Handling session terminated event for: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:59.831891Z[0m [33m WARN[0m [2mrvoip_session_core::media::coordinator[0m[2m:[0m No media session found for SIP session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:59.932995Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::manager[0m[2m:[0m ✅ BYE-SEND: Successfully sent BYE for session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8 (tx: Key(z9hG4bK-2b2a575290a34f09a31db623ddbee2bc:BYE:client), dialog: 15d1d082-fd5d-49d1-b545-3b40de13f73f)
+[2m2025-08-03T18:24:59.933150Z[0m [32m INFO[0m [2mrvoip_session_core::dialog::manager[0m[2m:[0m Terminated session: sess_f78b4847-bf8d-4906-9716-f88ded241bb8
+[2m2025-08-03T18:24:59.933182Z[0m [32m INFO[0m [2mrvoip_client_core::client::calls[0m[2m:[0m Successfully terminated session for call 21eaf4e6-297c-4888-a3c8-167867adc95b
+[2m2025-08-03T18:24:59.933281Z[0m [32m INFO[0m [2mrvoip_client_core::client::calls[0m[2m:[0m Hung up call 21eaf4e6-297c-4888-a3c8-167867adc95b
+[2m2025-08-03T18:25:00.433953Z[0m [32m INFO[0m [2mrvoip_session_core::manager::cleanup[0m[2m:[0m Cleanup manager stopped
+[2m2025-08-03T18:25:00.434190Z[0m [32m INFO[0m [2mrvoip_session_core::manager::events[0m[2m:[0m Session event processor stopped
+[2m2025-08-03T18:25:00.434209Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Stopping UnifiedDialogApi
+[2m2025-08-03T18:25:00.434222Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Stopping UnifiedDialogManager
+[2m2025-08-03T18:25:00.434233Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager stopping
+[2m2025-08-03T18:25:00.434305Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m 🛑 Global transaction event processor received shutdown signal
+[2m2025-08-03T18:25:00.434322Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m 🏁 Global transaction event processor for dialog-core stopped
+📨 EVENT LOOP: Received session coordination event in background task
+🎪 SESSION COORDINATION: Received event: DialogStateChanged { dialog_id: DialogId(15d1d082-fd5d-49d1-b545-3b40de13f73f), new_state: "Terminated", previous_state: "Confirmed" }
+[2m2025-08-03T18:25:00.434454Z[0m [34mDEBUG[0m [2mrvoip_session_core::dialog::coordinator[0m[2m:[0m Unhandled session coordination event: DialogStateChanged { dialog_id: DialogId(15d1d082-fd5d-49d1-b545-3b40de13f73f), new_state: "Terminated", previous_state: "Confirmed" }
+[2m2025-08-03T18:25:00.434462Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager stopped successfully
+[2m2025-08-03T18:25:00.434474Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m UnifiedDialogManager stopped successfully
+[2m2025-08-03T18:25:00.434486Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m SessionCoordinator stopped
+[2m2025-08-03T18:25:00.434505Z[0m [32m INFO[0m [2mrvoip_client_core::client::manager[0m[2m:[0m ClientManager stopped
+[2m2025-08-03T18:25:00.434530Z[0m [32m INFO[0m [2mrvoip_session_core::manager::cleanup[0m[2m:[0m Cleanup manager stopped
+[2m2025-08-03T18:25:00.434636Z[0m [32m INFO[0m [2mrvoip_session_core::manager::events[0m[2m:[0m Session event processor stopped
+[2m2025-08-03T18:25:00.434648Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Stopping UnifiedDialogApi
+[2m2025-08-03T18:25:00.434662Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Stopping UnifiedDialogManager
+[2m2025-08-03T18:25:00.434670Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager stopping
+[2m2025-08-03T18:25:00.434707Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m 🛑 Global transaction event processor received shutdown signal
+[2m2025-08-03T18:25:00.434716Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m 🏁 Global transaction event processor for dialog-core stopped
+[2m2025-08-03T18:25:00.434806Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager stopped successfully
+[2m2025-08-03T18:25:00.434817Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m UnifiedDialogManager stopped successfully
+[2m2025-08-03T18:25:00.434826Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m SessionCoordinator stopped
+[2m2025-08-03T18:25:00.434839Z[0m [32m INFO[0m [2mrvoip_client_core::client::manager[0m[2m:[0m ClientManager stopped
+[2m2025-08-03T18:25:00.435029Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m Client A input.wav: 80044 bytes
+[2m2025-08-03T18:25:00.435056Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m Client A output.wav: 44 bytes
+[2m2025-08-03T18:25:00.435112Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m Client B input.wav: 80044 bytes
+[2m2025-08-03T18:25:00.435157Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m Client B output.wav: 44 bytes
+[2m2025-08-03T18:25:00.435167Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m ✅ Test completed successfully!
+[2m2025-08-03T18:25:00.435177Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m Check the following files:
+[2m2025-08-03T18:25:00.435190Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m   - tests/audio_exchange_test/client_a/input.wav (440Hz tone)
+[2m2025-08-03T18:25:00.435200Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m   - tests/audio_exchange_test/client_a/output.wav (should contain 880Hz from Client B)
+[2m2025-08-03T18:25:00.435208Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m   - tests/audio_exchange_test/client_b/input.wav (880Hz tone)
+[2m2025-08-03T18:25:00.435222Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m   - tests/audio_exchange_test/client_b/output.wav (should contain 440Hz from Client A)
+[2m2025-08-03T18:25:00.435342Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m Client B: Received 0 total frames
+[2m2025-08-03T18:25:00.435730Z[0m [32m INFO[0m [2maudio_exchange_test[0m[2m:[0m Client A: Received 0 total frames
+test test_audio_exchange_between_clients ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.26s
+

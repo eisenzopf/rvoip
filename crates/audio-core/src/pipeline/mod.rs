@@ -423,6 +423,47 @@ impl AudioPipeline {
         format: AudioFormat,
         state: Arc<RwLock<PipelineState>>,
     ) {
+        // Check if this is a test audio device
+        #[cfg(feature = "test-audio")]
+        {
+            if let Some(test_device) = device.as_any().downcast_ref::<crate::device::test_audio::TestAudioDevice>() {
+                eprintln!("🧪 Starting TEST audio capture from: {}", device.info().name);
+                
+                let mut frame_count = 0u64;
+                let mut interval = interval(Duration::from_millis(format.frame_size_ms as u64));
+                
+                loop {
+                    // Check if we should stop
+                    {
+                        let current_state = state.read().await;
+                        if *current_state == PipelineState::Stopping || *current_state == PipelineState::Stopped {
+                            break;
+                        }
+                    }
+                    
+                    interval.tick().await;
+                    
+                    // Try to read a frame from the test device
+                    if let Some(frame) = test_device.read_frame().await {
+                        frame_count += 1;
+                        if frame_count <= 5 || frame_count % 100 == 0 {
+                            eprintln!("🧪 Read test audio frame #{}: {} samples", frame_count, frame.samples.len());
+                        }
+                        
+                        if tx.send(frame).await.is_err() {
+                            break; // Pipeline channel closed
+                        }
+                    } else {
+                        // No frame available, wait a bit
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                }
+                
+                eprintln!("🛑 Test audio capture stopped after {} frames", frame_count);
+                return;
+            }
+        }
+        
         #[cfg(feature = "device-cpal")]
         {
             // Try to use real CPAL audio capture
@@ -544,6 +585,49 @@ impl AudioPipeline {
         state: Arc<RwLock<PipelineState>>,
         frames_played: Arc<AtomicU64>,
     ) {
+        // Check if this is a test audio device
+        #[cfg(feature = "test-audio")]
+        {
+            if let Some(test_device) = device.as_any().downcast_ref::<crate::device::test_audio::TestAudioDevice>() {
+                eprintln!("🧪 Starting TEST audio playback to: {}", device.info().name);
+                
+                let mut frame_count = 0u64;
+                
+                loop {
+                    // Check if we should stop
+                    {
+                        let current_state = state.read().await;
+                        if *current_state == PipelineState::Stopping || *current_state == PipelineState::Stopped {
+                            break;
+                        }
+                    }
+                    
+                    // Receive frame from pipeline
+                    match rx.recv().await {
+                        Some(frame) => {
+                            frame_count += 1;
+                            if frame_count <= 5 || frame_count % 100 == 0 {
+                                eprintln!("🧪 Writing test audio frame #{}: {} samples", frame_count, frame.samples.len());
+                            }
+                            
+                            // Write to test device
+                            if let Err(e) = test_device.write_frame(frame).await {
+                                eprintln!("❌ Failed to write to test device: {}", e);
+                            }
+                            
+                            frames_played.fetch_add(1, Ordering::SeqCst);
+                        }
+                        None => {
+                            break; // Channel closed
+                        }
+                    }
+                }
+                
+                eprintln!("🛑 Test audio playback stopped after {} frames", frame_count);
+                return;
+            }
+        }
+        
         #[cfg(feature = "device-cpal")]
         {
             // Try to use real CPAL audio playback

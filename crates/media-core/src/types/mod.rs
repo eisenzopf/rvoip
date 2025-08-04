@@ -6,6 +6,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 use bytes::Bytes;
+use serde::{Serialize, Deserialize};
 
 // Include specialized type modules
 pub mod conference;
@@ -141,7 +142,7 @@ pub struct MediaPacket {
 }
 
 /// Audio frame with PCM data and format information
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioFrame {
     /// PCM audio data (interleaved samples)
     pub samples: Vec<i16>,
@@ -150,9 +151,31 @@ pub struct AudioFrame {
     /// Number of channels
     pub channels: u8,
     /// Frame duration
+    #[serde(with = "duration_ms")]
     pub duration: Duration,
     /// Timestamp
     pub timestamp: u32,
+}
+
+/// Custom serialization for Duration as milliseconds
+mod duration_ms {
+    use serde::{Deserialize, Serialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(duration.as_millis() as u64)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = u64::deserialize(deserializer)?;
+        Ok(Duration::from_millis(millis))
+    }
 }
 
 impl AudioFrame {

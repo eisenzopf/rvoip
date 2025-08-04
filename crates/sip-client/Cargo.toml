@@ -49,6 +49,7 @@ tokio-test = "0.4"
 tracing-test = "0.2"
 mockall = "0.12"
 serial_test = "3.1"
+hound = "3.5"
 
 [features]
 default = ["simple-api", "advanced-api", "audio-processing"]
@@ -67,6 +68,7 @@ g711-only = ["rvoip-codec-core/g711"]
 
 # Development features
 mock-audio = ["rvoip-audio-core/device-mock"]
+test-audio = ["rvoip-audio-core/test-audio"]
 examples = []
 
 # Examples will be added in later phases

@@ -174,6 +174,9 @@ pub struct SipClientConfig {
     pub call_timeout: Duration,
     /// Enable automatic call recording
     pub auto_record: bool,
+    /// Test audio configuration (when test-audio feature is enabled)
+    #[cfg(feature = "test-audio")]
+    pub test_audio_buffers: Option<Arc<crate::test_audio::TestAudioBuffers>>,
     /// Registration TTL in seconds
     pub registration_ttl: u32,
 }
@@ -191,6 +194,8 @@ impl Default for SipClientConfig {
             registration: None,
             call_timeout: Duration::from_secs(30),
             auto_record: false,
+            #[cfg(feature = "test-audio")]
+            test_audio_buffers: None,
             registration_ttl: 3600,
         }
     }

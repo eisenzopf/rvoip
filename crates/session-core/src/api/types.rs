@@ -474,80 +474,9 @@ pub fn parse_sdp_connection(sdp: &str) -> Result<SdpInfo> {
 // AUDIO STREAMING TYPES
 // =============================================================================
 
-/// Audio frame for session-core, with conversions to/from media-core::AudioFrame
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AudioFrame {
-    /// PCM audio data (interleaved samples)
-    pub samples: Vec<i16>,
-    /// Sample rate in Hz
-    pub sample_rate: u32,
-    /// Number of channels
-    pub channels: u8,
-    /// Frame timestamp (from RTP or local clock)
-    pub timestamp: u32,
-}
-
-impl AudioFrame {
-    /// Create a new audio frame
-    pub fn new(samples: Vec<i16>, sample_rate: u32, channels: u8, timestamp: u32) -> Self {
-        Self {
-            samples,
-            sample_rate,
-            channels,
-            timestamp,
-        }
-    }
-    
-    /// Get the duration of this frame in milliseconds
-    pub fn duration_ms(&self) -> f64 {
-        let sample_count = self.samples.len() / self.channels as usize;
-        (sample_count as f64 * 1000.0) / self.sample_rate as f64
-    }
-    
-    /// Get the number of samples per channel
-    pub fn samples_per_channel(&self) -> usize {
-        self.samples.len() / self.channels as usize
-    }
-    
-    /// Check if frame is mono
-    pub fn is_mono(&self) -> bool {
-        self.channels == 1
-    }
-    
-    /// Check if frame is stereo
-    pub fn is_stereo(&self) -> bool {
-        self.channels == 2
-    }
-    
-    /// Get the duration as a Duration struct
-    pub fn duration(&self) -> Duration {
-        Duration::from_secs_f64(self.duration_ms() / 1000.0)
-    }
-}
-
-/// Convert from media-core::AudioFrame to session-core::AudioFrame
-impl From<rvoip_media_core::AudioFrame> for AudioFrame {
-    fn from(media_frame: rvoip_media_core::AudioFrame) -> Self {
-        Self {
-            samples: media_frame.samples,
-            sample_rate: media_frame.sample_rate,
-            channels: media_frame.channels,
-            timestamp: media_frame.timestamp,
-        }
-    }
-}
-
-/// Convert from session-core::AudioFrame to media-core::AudioFrame
-impl From<AudioFrame> for rvoip_media_core::AudioFrame {
-    fn from(session_frame: AudioFrame) -> Self {
-        Self::new(
-            session_frame.samples,
-            session_frame.sample_rate,
-            session_frame.channels,
-            session_frame.timestamp,
-        )
-    }
-}
+/// Re-export AudioFrame from media-core to unify the type across the codebase
+/// This eliminates unnecessary conversions and potential issues
+pub use rvoip_media_core::types::AudioFrame;
 
 /// Configuration for audio streaming
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -636,13 +565,13 @@ impl AudioStreamConfig {
 pub struct AudioFrameSubscriber {
     /// The session ID this subscriber is associated with
     session_id: SessionId,
-    /// Receiver for audio frames
-    receiver: std::sync::mpsc::Receiver<AudioFrame>,
+    /// Receiver for audio frames (async tokio channel for non-blocking operation)
+    receiver: tokio::sync::mpsc::Receiver<AudioFrame>,
 }
 
 impl AudioFrameSubscriber {
     /// Create a new audio frame subscriber
-    pub fn new(session_id: SessionId, receiver: std::sync::mpsc::Receiver<AudioFrame>) -> Self {
+    pub fn new(session_id: SessionId, receiver: tokio::sync::mpsc::Receiver<AudioFrame>) -> Self {
         Self {
             session_id,
             receiver,
@@ -654,13 +583,13 @@ impl AudioFrameSubscriber {
         &self.session_id
     }
     
-    /// Receive the next audio frame (blocking)
+    /// Receive the next audio frame (async)
     /// 
     /// # Returns
-    /// - `Ok(audio_frame)` - Audio frame ready for playback
-    /// - `Err(RecvError)` - Channel is closed or session ended
-    pub fn recv(&self) -> std::result::Result<AudioFrame, std::sync::mpsc::RecvError> {
-        self.receiver.recv()
+    /// - `Some(audio_frame)` - Audio frame ready for playback
+    /// - `None` - Channel is closed or session ended
+    pub async fn recv(&mut self) -> Option<AudioFrame> {
+        self.receiver.recv().await
     }
     
     /// Try to receive an audio frame (non-blocking)
@@ -669,28 +598,13 @@ impl AudioFrameSubscriber {
     /// - `Ok(audio_frame)` - Audio frame ready for playback
     /// - `Err(TryRecvError::Empty)` - No frame available right now
     /// - `Err(TryRecvError::Disconnected)` - Channel is closed or session ended
-    pub fn try_recv(&self) -> std::result::Result<AudioFrame, std::sync::mpsc::TryRecvError> {
+    pub fn try_recv(&mut self) -> std::result::Result<AudioFrame, tokio::sync::mpsc::error::TryRecvError> {
         self.receiver.try_recv()
-    }
-    
-    /// Receive audio frame with timeout
-    /// 
-    /// # Returns
-    /// - `Ok(audio_frame)` - Audio frame ready for playback
-    /// - `Err(RecvTimeoutError::Timeout)` - Timeout reached
-    /// - `Err(RecvTimeoutError::Disconnected)` - Channel is closed or session ended
-    pub fn recv_timeout(&self, timeout: Duration) -> std::result::Result<AudioFrame, std::sync::mpsc::RecvTimeoutError> {
-        self.receiver.recv_timeout(timeout)
     }
     
     /// Check if the subscriber is still connected to the session
     pub fn is_connected(&self) -> bool {
-        // For a freshly created receiver, it should always be connected initially
-        // The channel is only disconnected if the sender is dropped
-        // Since we create the channel in the same function, it should be connected
-        // We can't reliably check connection without potentially consuming messages
-        // so we'll assume connected unless we get a disconnected error during actual recv
-        true
+        !self.receiver.is_closed()
     }
 }
 

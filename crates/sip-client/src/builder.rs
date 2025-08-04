@@ -101,6 +101,13 @@ impl SipClientBuilder {
         self
     }
     
+    /// Set test audio buffers (only available with test-audio feature)
+    #[cfg(feature = "test-audio")]
+    pub fn test_audio_buffers(mut self, buffers: std::sync::Arc<crate::test_audio::TestAudioBuffers>) -> Self {
+        self.config.test_audio_buffers = Some(buffers);
+        self
+    }
+    
     /// Build the SIP client
     #[cfg(feature = "simple-api")]
     pub async fn build(self) -> SipClientResult<crate::simple::SipClient> {

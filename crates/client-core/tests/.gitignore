@@ -15,6 +15,7 @@ bump_version.sh
 Cargo.toml.backup
 test_vectors/
 target/
+*.wav
 
 ## Editor
 *.swp

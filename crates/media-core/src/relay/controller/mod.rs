@@ -35,6 +35,7 @@ use crate::processing::audio::{
     AdvancedVadResult, AdvancedAgcResult, AdvancedAecResult
 };
 use crate::codec::audio::G711Codec;
+use crate::codec::audio::common::AudioCodec;
 use codec_core::codecs::g711::G711Variant;
 use crate::codec::mapping::CodecMapper;
 use crate::types::SampleRate;
@@ -111,7 +112,7 @@ pub struct MediaSessionController {
     pub(super) simd_processor: SimdProcessor,
     
     /// Audio frame callbacks for sending decoded frames to session-core
-    pub(super) audio_frame_callbacks: RwLock<HashMap<DialogId, mpsc::Sender<AudioFrame>>>,
+    pub(super) audio_frame_callbacks: Arc<RwLock<HashMap<DialogId, mpsc::Sender<AudioFrame>>>>,
     
     /// Codec mapper for payload type resolution
     pub(super) codec_mapper: Arc<CodecMapper>,
@@ -191,7 +192,7 @@ impl MediaSessionController {
             default_processor_config,
             g711_codec,
             simd_processor,
-            audio_frame_callbacks: RwLock::new(HashMap::new()),
+            audio_frame_callbacks: Arc::new(RwLock::new(HashMap::new())),
             codec_mapper,
             rtp_bridge,
         }
@@ -292,7 +293,7 @@ impl MediaSessionController {
             default_processor_config,
             g711_codec,
             simd_processor,
-            audio_frame_callbacks: RwLock::new(HashMap::new()),
+            audio_frame_callbacks: Arc::new(RwLock::new(HashMap::new())),
             codec_mapper,
             rtp_bridge,
         })
@@ -339,14 +340,17 @@ impl MediaSessionController {
             ssrc: Some(rand::random()), // Generate random SSRC
             payload_type, // Use negotiated payload type
             clock_rate,   // Use codec-appropriate clock rate
-            jitter_buffer_size: Some(50),
-            max_packet_age_ms: Some(200),
-            enable_jitter_buffer: true,
+            jitter_buffer_size: Some(500), // Increased from 50 to handle burst traffic
+            max_packet_age_ms: Some(1000), // Increased from 200ms to 1s for localhost testing
+            enable_jitter_buffer: false, // Disabled to reduce processing overhead
         };
         
         // Create actual RTP session
         let rtp_session = RtpSession::new(rtp_config).await
             .map_err(|e| Error::config(format!("Failed to create RTP session: {}", e)))?;
+        
+        // Subscribe to RTP session events before wrapping
+        let rtp_events = rtp_session.subscribe();
         
         // Wrap RTP session
         let rtp_wrapper = RtpSessionWrapper {
@@ -387,6 +391,9 @@ impl MediaSessionController {
             dialog_id: dialog_id.clone(),
             session_id: dialog_id.clone(),
         });
+
+        // Spawn task to handle RTP events for this session
+        self.spawn_rtp_event_handler(dialog_id.clone(), rtp_events, payload_type);
 
         info!("✅ Created media session with REAL RTP session: {} (port: {}, codec: {}, PT: {}, clock: {}Hz)", 
               dialog_id, 
@@ -630,6 +637,129 @@ impl MediaSessionController {
             debug!("📤 Sent audio frame to session-core for dialog: {}", dialog_id);
         }
         Ok(())
+    }
+    
+    /// Spawn a task to handle RTP events and decode audio
+    fn spawn_rtp_event_handler(
+        &self,
+        dialog_id: DialogId,
+        mut rtp_events: tokio::sync::broadcast::Receiver<rtp_core::session::RtpSessionEvent>,
+        expected_payload_type: u8,
+    ) {
+        let audio_frame_callbacks = self.audio_frame_callbacks.clone();
+        let codec_mapper = self.codec_mapper.clone();
+        
+        // Create G.711 codecs outside the loop for efficiency
+        let mut g711_ulaw = G711Codec::mu_law(8000, 1).expect("Failed to create μ-law codec");
+        let mut g711_alaw = G711Codec::a_law(8000, 1).expect("Failed to create A-law codec");
+        
+        tokio::spawn(async move {
+            info!("🎧 Started RTP event handler for dialog: {}", dialog_id);
+            
+            loop {
+                match rtp_events.recv().await {
+                    Ok(event) => {
+                        match event {
+                            rtp_core::session::RtpSessionEvent::PacketReceived(packet) => {
+                                // Count RTP packets for debugging
+                                static RTP_COUNTERS: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<String, u64>>> = 
+                                    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+                                
+                                let rtp_count = {
+                                    let mut counters = RTP_COUNTERS.lock().unwrap();
+                                    let count = counters.entry(dialog_id.to_string()).or_insert(0);
+                                    *count += 1;
+                                    *count
+                                };
+                                
+                                if rtp_count % 10 == 0 || rtp_count == 100 || rtp_count == 101 || rtp_count > 100 && rtp_count < 110 {
+                                    info!("📦 Received RTP packet #{} for dialog {}: PT={}, seq={}, ts={}, payload_size={}", 
+                                        rtp_count, dialog_id, packet.header.payload_type, 
+                                        packet.header.sequence_number, packet.header.timestamp, packet.payload.len());
+                                }
+                                
+                                // Decode based on payload type
+                                let audio_frame = match packet.header.payload_type {
+                                    0 => {
+                                        // PCMU (μ-law)
+                                        match g711_ulaw.decode(&packet.payload) {
+                                            Ok(frame) => frame,
+                                            Err(e) => {
+                                                warn!("Failed to decode PCMU for dialog {}: {}", dialog_id, e);
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    8 => {
+                                        // PCMA (A-law)
+                                        match g711_alaw.decode(&packet.payload) {
+                                            Ok(frame) => frame,
+                                            Err(e) => {
+                                                warn!("Failed to decode PCMA for dialog {}: {}", dialog_id, e);
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    _ => {
+                                        debug!("Unsupported payload type {} for dialog {}", 
+                                            packet.header.payload_type, dialog_id);
+                                        continue;
+                                    }
+                                };
+                                
+                                // Check for callback each time (it might be registered later)
+                                let callbacks = audio_frame_callbacks.read().await;
+                                if let Some(sender) = callbacks.get(&dialog_id) {
+                                    // Count frames for debugging
+                                    static FRAME_COUNTERS: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<String, u64>>> = 
+                                        once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+                                    
+                                    let frame_count = {
+                                        let mut counters = FRAME_COUNTERS.lock().unwrap();
+                                        let count = counters.entry(dialog_id.to_string()).or_insert(0);
+                                        *count += 1;
+                                        *count
+                                    };
+                                    
+                                    // Use try_send to avoid blocking the RTP event handler
+                                    match sender.try_send(audio_frame) {
+                                        Ok(_) => {
+                                            if frame_count % 10 == 0 || frame_count == 100 || frame_count == 101 {
+                                                info!("✅ Sent decoded audio frame #{} to callback for dialog {}", frame_count, dialog_id);
+                                            }
+                                        }
+                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                            warn!("Audio frame buffer full for dialog {} at frame #{}, dropping frame", dialog_id, frame_count);
+                                        }
+                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                            error!("❌ Audio frame channel closed for dialog {} at frame #{} - THIS IS THE 100-FRAME BUG!", dialog_id, frame_count);
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    debug!("No audio frame callback registered yet for dialog {}", dialog_id);
+                                }
+                            }
+                            rtp_core::session::RtpSessionEvent::NewStreamDetected { ssrc, .. } => {
+                                info!("🎵 New RTP stream detected for dialog {}: SSRC={:08x}", dialog_id, ssrc);
+                            }
+                            _ => {
+                                // Other events we don't need to handle
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        error!("❌ RTP event handler lagged {} events for dialog {} - PACKET LOSS!", n, dialog_id);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("RTP event channel closed for dialog {}, stopping handler", dialog_id);
+                        break;
+                    }
+                }
+            }
+            
+            info!("🛑 RTP event handler stopped for dialog: {}", dialog_id);
+        });
     }
 }
 

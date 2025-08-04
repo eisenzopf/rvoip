@@ -463,10 +463,40 @@ impl SipClient {
     }
     
     async fn create_audio_manager(config: &SipClientConfig) -> SipClientResult<Arc<rvoip_audio_core::AudioDeviceManager>> {
-        let manager = rvoip_audio_core::AudioDeviceManager::new().await?;
+        #[cfg(feature = "test-audio")]
+        {
+            // Check if test audio buffers are configured
+            if let Some(test_buffers) = &config.test_audio_buffers {
+                tracing::info!("🧪 Creating AudioDeviceManager with test audio provider");
+                
+                // Create test audio provider with appropriate buffers for this client
+                let test_buffers_for_audio = if config.sip_identity.contains("peer_a") {
+                    rvoip_audio_core::device::test_audio::TestAudioBuffers {
+                        input_buffer: test_buffers.b_to_a.clone(),  // A reads from B
+                        output_buffer: test_buffers.a_to_b.clone(), // A writes to B
+                    }
+                } else {
+                    rvoip_audio_core::device::test_audio::TestAudioBuffers {
+                        input_buffer: test_buffers.a_to_b.clone(),  // B reads from A
+                        output_buffer: test_buffers.b_to_a.clone(), // B writes to A
+                    }
+                };
+                
+                let provider = rvoip_audio_core::device::test_audio::TestAudioProvider::new(
+                    test_buffers_for_audio,
+                    config.sip_identity.clone(),
+                );
+                
+                let manager = rvoip_audio_core::AudioDeviceManager::with_test_provider(provider).await
+                    .map_err(|e| SipClientError::AudioCore(e))?;
+                
+                return Ok(Arc::new(manager));
+            }
+        }
         
-        // TODO: Configure audio devices based on config
-        
+        // Use standard audio manager
+        let manager = rvoip_audio_core::AudioDeviceManager::new().await
+            .map_err(|e| SipClientError::AudioCore(e))?;
         Ok(Arc::new(manager))
     }
     
@@ -644,6 +674,7 @@ impl SipClient {
                             sample_rate: audio_frame.format.sample_rate as u32,
                             channels: audio_frame.format.channels as u8,
                             timestamp: audio_frame.timestamp,
+                            duration: std::time::Duration::from_millis(20), // 20ms frame
                         };
                         
                         // Send to RTP via client-core
@@ -704,7 +735,7 @@ impl SipClient {
         let playback_handle = tokio::spawn(async move {
             let mut pipeline = playback_pipeline;
             let mut frame_count = 0u64;
-            while let Ok(session_frame) = audio_subscriber.recv() {
+            while let Some(session_frame) = audio_subscriber.recv().await {
                 // Convert from session-core AudioFrame to audio-core AudioFrame
                 let format = rvoip_audio_core::types::AudioFormat {
                     sample_rate: session_frame.sample_rate,

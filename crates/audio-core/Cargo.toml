@@ -70,6 +70,7 @@ default = ["format-conversion", "device-cpal"]
 # Device backend features
 device-cpal = ["cpal"]
 device-mock = []
+test-audio = ["device-mock"]
 
 # Format conversion feature (placeholder - dependencies removed as not actually used)
 format-conversion = []

@@ -208,7 +208,7 @@ impl UdpRtpTransport {
                 // Receive packet
                 match rtp_socket.recv_from(&mut buffer).await {
                     Ok((size, addr)) => {
-                        debug!("UDP recv_from returned {} bytes from {}", size, addr);
+                        info!("🔵 UDP recv_from returned {} bytes from {}", size, addr);
                         
                         // Check if it looks like an RTP or RTCP packet
                         if size < 8 {
