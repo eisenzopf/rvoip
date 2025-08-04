@@ -429,8 +429,10 @@ impl AudioPipeline {
             if let Some(test_device) = device.as_any().downcast_ref::<crate::device::test_audio::TestAudioDevice>() {
                 eprintln!("🧪 Starting TEST audio capture from: {}", device.info().name);
                 
+                // Ensure device is started
+                test_device.start();
+                
                 let mut frame_count = 0u64;
-                let mut interval = interval(Duration::from_millis(format.frame_size_ms as u64));
                 
                 loop {
                     // Check if we should stop
@@ -441,9 +443,8 @@ impl AudioPipeline {
                         }
                     }
                     
-                    interval.tick().await;
-                    
                     // Try to read a frame from the test device
+                    // This will wait for proper timing and return silence if no data
                     if let Some(frame) = test_device.read_frame().await {
                         frame_count += 1;
                         if frame_count <= 5 || frame_count % 100 == 0 {
@@ -454,11 +455,13 @@ impl AudioPipeline {
                             break; // Pipeline channel closed
                         }
                     } else {
-                        // No frame available, wait a bit
-                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        // Device stopped or error
+                        break;
                     }
                 }
                 
+                // Stop the device
+                test_device.stop();
                 eprintln!("🛑 Test audio capture stopped after {} frames", frame_count);
                 return;
             }
@@ -591,7 +594,11 @@ impl AudioPipeline {
             if let Some(test_device) = device.as_any().downcast_ref::<crate::device::test_audio::TestAudioDevice>() {
                 eprintln!("🧪 Starting TEST audio playback to: {}", device.info().name);
                 
+                // Ensure device is started
+                test_device.start();
+                
                 let mut frame_count = 0u64;
+                let frame_timeout = Duration::from_millis(100); // Timeout for receiving frames
                 
                 loop {
                     // Check if we should stop
@@ -602,9 +609,9 @@ impl AudioPipeline {
                         }
                     }
                     
-                    // Receive frame from pipeline
-                    match rx.recv().await {
-                        Some(frame) => {
+                    // Receive frame from pipeline with timeout
+                    match tokio::time::timeout(frame_timeout, rx.recv()).await {
+                        Ok(Some(frame)) => {
                             frame_count += 1;
                             if frame_count <= 5 || frame_count % 100 == 0 {
                                 eprintln!("🧪 Writing test audio frame #{}: {} samples", frame_count, frame.samples.len());
@@ -617,12 +624,19 @@ impl AudioPipeline {
                             
                             frames_played.fetch_add(1, Ordering::SeqCst);
                         }
-                        None => {
-                            break; // Channel closed
+                        Ok(None) => {
+                            // Channel closed
+                            break;
+                        }
+                        Err(_) => {
+                            // Timeout - continue to check if we should stop
+                            continue;
                         }
                     }
                 }
                 
+                // Stop the device
+                test_device.stop();
                 eprintln!("🛑 Test audio playback stopped after {} frames", frame_count);
                 return;
             }

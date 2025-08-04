@@ -16,6 +16,35 @@ use async_trait::async_trait;
 use rvoip_client_core::events::ClientEventHandler;
 use tokio::task::JoinHandle;
 
+// Helper function to establish media for a call
+async fn establish_media_for_call(client: &Arc<rvoip_client_core::Client>, call_id: &CallId) -> Result<(), Box<dyn std::error::Error>> {
+    tracing::info!("🔗 Establishing media flow for call {}", call_id);
+    
+    // Get media info to find RTP ports
+    let media_info = client.get_call_media_info(call_id).await?;
+    
+    tracing::info!("📡 Media info - Local RTP: {:?}, Remote RTP: {:?}", 
+        media_info.local_rtp_port, media_info.remote_rtp_port);
+    
+    if let Some(remote_rtp_port) = media_info.remote_rtp_port {
+        // For local testing, assume remote is also on 127.0.0.1
+        // In production, the remote address would come from SDP negotiation
+        let remote_addr = format!("127.0.0.1:{}", remote_rtp_port);
+        
+        tracing::info!("📡 Establishing media to remote RTP address: {}", remote_addr);
+        match client.establish_media(call_id, &remote_addr).await {
+            Ok(_) => tracing::info!("✅ Media flow established for call {} to {}", call_id, remote_addr),
+            Err(e) => tracing::error!("❌ Failed to establish media for call {}: {}", call_id, e),
+        }
+    } else {
+        tracing::warn!("⚠️ No remote RTP port available for call {} - waiting for SDP negotiation", call_id);
+        // This might happen if we're the caller and haven't received the answer yet
+        // The media will be established when we receive the 200 OK with SDP answer
+    }
+    
+    Ok(())
+}
+
 /// Simple SIP client with easy-to-use API
 #[derive(Clone)]
 pub struct SipClient {
@@ -158,8 +187,8 @@ impl SipClient {
         // Store call
         self.inner.calls.write().insert(call_id, call.clone());
         
-        // Start audio pipeline connected to RTP transport
-        self.setup_audio_pipeline(&call).await?;
+        // Don't setup audio pipeline yet - wait until media is established
+        // This will be done in the CallStateChanged event handler
         
         // Initialize quality adaptation for the call
         let codecs = vec![codec_core::CodecType::G711Pcmu, codec_core::CodecType::G711Pcma];
@@ -181,8 +210,8 @@ impl SipClient {
         // Update call state
         *call.state.write() = CallState::Connected;
         
-        // Start audio pipeline connected to RTP transport
-        self.setup_audio_pipeline(&call).await?;
+        // Don't setup audio pipeline yet - wait until media is established
+        // This will be done in the CallStateChanged event handler
         
         // Initialize quality adaptation for the call
         let codecs = vec![codec_core::CodecType::G711Pcmu, codec_core::CodecType::G711Pcma];
@@ -469,16 +498,19 @@ impl SipClient {
             if let Some(test_buffers) = &config.test_audio_buffers {
                 tracing::info!("🧪 Creating AudioDeviceManager with test audio provider");
                 
-                // Create test audio provider with appropriate buffers for this client
+                // Create test audio provider with buffers for this client
+                // Each client gets its own input/output buffers that simulate hardware:
+                // - Input buffer: Where WAV feeder puts audio (simulates microphone)
+                // - Output buffer: Where audio pipeline writes received audio (simulates speakers)
                 let test_buffers_for_audio = if config.sip_identity.contains("peer_a") {
                     rvoip_audio_core::device::test_audio::TestAudioBuffers {
-                        input_buffer: test_buffers.b_to_a.clone(),  // A reads from B
-                        output_buffer: test_buffers.a_to_b.clone(), // A writes to B
+                        input_buffer: test_buffers.a_input.clone(),   // A's microphone buffer
+                        output_buffer: test_buffers.a_output.clone(), // A's speaker buffer
                     }
                 } else {
                     rvoip_audio_core::device::test_audio::TestAudioBuffers {
-                        input_buffer: test_buffers.a_to_b.clone(),  // B reads from A
-                        output_buffer: test_buffers.b_to_a.clone(), // B writes to A
+                        input_buffer: test_buffers.b_input.clone(),   // B's microphone buffer
+                        output_buffer: test_buffers.b_output.clone(), // B's speaker buffer
                     }
                 };
                 
@@ -499,6 +531,7 @@ impl SipClient {
             .map_err(|e| SipClientError::AudioCore(e))?;
         Ok(Arc::new(manager))
     }
+    
     
     fn create_codec_registry(config: &SipClientConfig) -> SipClientResult<Arc<codec_core::CodecRegistry>> {
         let mut registry = codec_core::CodecRegistry::new();
@@ -735,7 +768,14 @@ impl SipClient {
         let playback_handle = tokio::spawn(async move {
             let mut pipeline = playback_pipeline;
             let mut frame_count = 0u64;
+            tracing::info!("🎧 Playback task started for call {}", call_id_playback);
+            
             while let Some(session_frame) = audio_subscriber.recv().await {
+                frame_count += 1;
+                if frame_count <= 5 || frame_count % 50 == 0 {
+                    tracing::info!("🔊 Received audio frame #{} from RTP: {} samples", 
+                        frame_count, session_frame.samples.len());
+                }
                 // Convert from session-core AudioFrame to audio-core AudioFrame
                 let format = rvoip_audio_core::types::AudioFormat {
                     sample_rate: session_frame.sample_rate,
@@ -982,6 +1022,28 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                 // We can't mutate the Call struct directly since it's behind an Arc
                 // This would need to be refactored to store connect_time separately
                 // For now, we'll skip updating connect_time
+                
+                // Establish media flow and setup audio pipeline when call connects
+                let client = self.inner.client.clone();
+                let call_id = status_info.call_id;
+                let sip_client = self.inner.clone();
+                let call_clone = call.clone();
+                tokio::spawn(async move {
+                    // First establish media
+                    if let Err(e) = establish_media_for_call(&client, &call_id).await {
+                        tracing::error!("Failed to establish media for call {}: {}", call_id, e);
+                        return;
+                    }
+                    
+                    // Give media paths a moment to stabilize
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    
+                    // Now setup audio pipeline
+                    let temp_client = SipClient { inner: sip_client };
+                    if let Err(e) = temp_client.setup_audio_pipeline(&call_clone).await {
+                        tracing::error!("Failed to setup audio pipeline for call {}: {}", call_id, e);
+                    }
+                });
             }
             
             // Emit state change event

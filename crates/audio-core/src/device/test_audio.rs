@@ -9,7 +9,9 @@ use crate::{
 };
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
+use tokio::time::{Duration, Instant, sleep};
 
 /// Shared audio buffers for test devices
 #[derive(Debug, Clone)]
@@ -36,11 +38,54 @@ impl Default for TestAudioBuffers {
     }
 }
 
+/// Frame scheduler for maintaining proper audio timing
+#[derive(Debug)]
+struct FrameScheduler {
+    frame_duration: Duration,
+    last_frame_time: Mutex<Option<Instant>>,
+    frame_counter: Mutex<u64>,
+}
+
+impl FrameScheduler {
+    fn new(frame_duration_ms: u64) -> Self {
+        Self {
+            frame_duration: Duration::from_millis(frame_duration_ms),
+            last_frame_time: Mutex::new(None),
+            frame_counter: Mutex::new(0),
+        }
+    }
+    
+    async fn wait_for_next_frame(&self) {
+        let mut last_time = self.last_frame_time.lock().await;
+        let now = Instant::now();
+        
+        if let Some(last) = *last_time {
+            let elapsed = now.duration_since(last);
+            if elapsed < self.frame_duration {
+                sleep(self.frame_duration - elapsed).await;
+            }
+        }
+        
+        *last_time = Some(Instant::now());
+        let mut counter = self.frame_counter.lock().await;
+        *counter += 1;
+    }
+    
+    async fn reset(&self) {
+        *self.last_frame_time.lock().await = None;
+        *self.frame_counter.lock().await = 0;
+    }
+}
+
 /// Test audio device that reads/writes to memory buffers
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TestAudioDevice {
     info: AudioDeviceInfo,
     buffers: TestAudioBuffers,
+    scheduler: Arc<FrameScheduler>,
+    is_running: Arc<AtomicBool>,
+    /// Default format for generating silence frames
+    default_format: AudioFormat,
 }
 
 impl TestAudioDevice {
@@ -53,7 +98,13 @@ impl TestAudioDevice {
         );
         info.is_default = true;
         
-        Self { info, buffers }
+        Self {
+            info,
+            buffers,
+            scheduler: Arc::new(FrameScheduler::new(20)), // 20ms frames
+            is_running: Arc::new(AtomicBool::new(true)),
+            default_format: AudioFormat::pcm_8khz_mono(),
+        }
     }
     
     /// Create a test output device (speaker)
@@ -65,16 +116,58 @@ impl TestAudioDevice {
         );
         info.is_default = true;
         
-        Self { info, buffers }
+        Self {
+            info,
+            buffers,
+            scheduler: Arc::new(FrameScheduler::new(20)), // 20ms frames
+            is_running: Arc::new(AtomicBool::new(true)),
+            default_format: AudioFormat::pcm_8khz_mono(),
+        }
     }
     
-    /// Read an audio frame from the input buffer
+    /// Start the device (for pipeline integration)
+    pub fn start(&self) {
+        self.is_running.store(true, Ordering::SeqCst);
+    }
+    
+    /// Stop the device
+    pub fn stop(&self) {
+        self.is_running.store(false, Ordering::SeqCst);
+    }
+    
+    /// Check if device is running
+    pub fn is_running(&self) -> bool {
+        self.is_running.load(Ordering::SeqCst)
+    }
+    
+    /// Generate a silence frame
+    fn generate_silence_frame(&self) -> AudioFrame {
+        let samples_per_frame = (self.default_format.sample_rate * 20 / 1000) as usize;
+        AudioFrame::new(
+            vec![0i16; samples_per_frame],
+            self.default_format.clone(),
+            0,
+        )
+    }
+    
+    /// Read an audio frame from the input buffer (continuous mode)
     pub async fn read_frame(&self) -> Option<AudioFrame> {
-        if self.info.direction == AudioDirection::Input {
-            self.buffers.input_buffer.lock().await.pop_front()
-        } else {
-            None
+        if self.info.direction != AudioDirection::Input {
+            return None;
         }
+        
+        if !self.is_running() {
+            return None;
+        }
+        
+        // Wait for the next frame time
+        self.scheduler.wait_for_next_frame().await;
+        
+        // Try to get a frame from the buffer
+        let frame = self.buffers.input_buffer.lock().await.pop_front();
+        
+        // If no frame available, generate silence to maintain continuous stream
+        Some(frame.unwrap_or_else(|| self.generate_silence_frame()))
     }
     
     /// Write an audio frame to the output buffer
@@ -112,6 +205,15 @@ impl TestAudioDevice {
         } else {
             None
         }
+    }
+}
+
+impl std::fmt::Debug for TestAudioDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestAudioDevice")
+            .field("info", &self.info)
+            .field("is_running", &self.is_running())
+            .finish()
     }
 }
 

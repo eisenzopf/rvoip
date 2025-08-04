@@ -141,68 +141,96 @@ impl WavAudioSink {
     }
 }
 
-/// Feed audio frames from WAV source to the test audio buffer
+/// Feed audio frames from WAV source to the test audio input buffer
 async fn feed_wav_audio(
     name: &str,
     mut source: WavAudioSource,
     test_buffers: Arc<rvoip_sip_client::test_audio::TestAudioBuffers>,
     is_peer_a: bool,
-) {
+) -> usize {
     info!("🎤 {} starting WAV audio feeder", name);
     
-    // Get the appropriate buffer based on which peer this is
+    // Get the appropriate input buffer (simulates microphone)
     let audio_buffer = if is_peer_a {
-        test_buffers.a_to_b.clone() // Peer A sends to B
+        test_buffers.a_input.clone() // Peer A's microphone
     } else {
-        test_buffers.b_to_a.clone() // Peer B sends to A
+        test_buffers.b_input.clone() // Peer B's microphone
     };
     
+    let mut frame_count = 0;
     while let Some(frame) = source.next_frame() {
         audio_buffer.lock().await.push_back(frame);
+        frame_count += 1;
+        
+        if frame_count % 50 == 0 {
+            debug!("{} fed {} frames to input", name, frame_count);
+        }
         
         // Simulate real-time audio capture
         sleep(Duration::from_millis(FRAME_DURATION_MS as u64)).await;
     }
     
-    info!("✅ {} WAV audio feeder completed", name);
+    info!("✅ {} WAV audio feeder completed, sent {} frames", name, frame_count);
+    frame_count
 }
 
-/// Collect audio frames from test audio buffer to WAV sink
+/// Collect audio frames from test audio output buffer to WAV sink
 async fn collect_wav_audio(
     name: &str,
     test_buffers: Arc<rvoip_sip_client::test_audio::TestAudioBuffers>,
     is_peer_a: bool,
-    duration: Duration,
+    expected_frames: usize,
 ) -> WavAudioSink {
-    info!("🔊 {} starting WAV audio collector", name);
+    info!("🔊 {} starting WAV audio collector (expecting {} frames)", name, expected_frames);
     
-    // Get the appropriate buffer based on which peer this is
+    // Get the appropriate output buffer (simulates speakers)
     let audio_buffer = if is_peer_a {
-        test_buffers.b_to_a.clone() // Peer A receives from B
+        test_buffers.a_output.clone() // Peer A's speakers
     } else {
-        test_buffers.a_to_b.clone() // Peer B receives from A
+        test_buffers.b_output.clone() // Peer B's speakers
     };
     
     let mut sink = WavAudioSink::new(SAMPLE_RATE);
+    let mut frame_count = 0;
+    let timeout_duration = Duration::from_millis(100);
+    let max_wait_time = Duration::from_secs(10); // Maximum time to wait for all frames
     let start = std::time::Instant::now();
     
-    while start.elapsed() < duration {
-        if let Some(frame) = audio_buffer.lock().await.pop_front() {
-            sink.add_frame(frame);
-        } else {
-            // No frame available, wait a bit
-            sleep(Duration::from_millis(5)).await;
+    while frame_count < expected_frames && start.elapsed() < max_wait_time {
+        match timeout(timeout_duration, async {
+            audio_buffer.lock().await.pop_front()
+        }).await {
+            Ok(Some(frame)) => {
+                sink.add_frame(frame);
+                frame_count += 1;
+                
+                if frame_count % 50 == 0 {
+                    debug!("{} collected {} frames from output", name, frame_count);
+                }
+            }
+            _ => {
+                // No frame available within timeout, continue waiting
+                sleep(Duration::from_millis(5)).await;
+            }
         }
     }
     
-    info!("✅ {} WAV audio collector completed, collected {} samples", 
-        name, sink.samples.len());
+    info!("✅ {} WAV audio collector completed, collected {} frames ({} samples)", 
+        name, frame_count, sink.samples.len());
     
     sink
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_full_roundtrip_with_wav_files() {
+    // Run the actual test with a timeout
+    match timeout(Duration::from_secs(20), test_full_roundtrip_impl()).await {
+        Ok(result) => result,
+        Err(_) => panic!("Test timed out after 20 seconds"),
+    }
+}
+
+async fn test_full_roundtrip_impl() {
     // Initialize logging
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -259,39 +287,11 @@ async fn test_full_roundtrip_with_wav_files() {
     client_b.start().await.expect("Failed to start client B");
     info!("✅ Started both SIP clients");
     
-    // Start audio feeders and collectors
-    let peer_a_source = WavAudioSource::new(peer_a_samples.clone(), SAMPLE_RATE);
-    let peer_b_source = WavAudioSource::new(peer_b_samples.clone(), SAMPLE_RATE);
+    // Calculate expected number of frames
+    let expected_frames = (DURATION_SECS * 1000.0 / FRAME_DURATION_MS as f32) as usize;
+    info!("📊 Expecting {} frames for {} seconds of audio", expected_frames, DURATION_SECS);
     
-    // Start feeding audio from WAV files
-    let feeder_a = tokio::spawn(feed_wav_audio(
-        "Peer A",
-        peer_a_source,
-        test_buffers.clone(),
-        true, // is_peer_a
-    ));
-    
-    let feeder_b = tokio::spawn(feed_wav_audio(
-        "Peer B", 
-        peer_b_source,
-        test_buffers.clone(),
-        false, // is_peer_a
-    ));
-    
-    // Start collecting audio
-    let collector_a = tokio::spawn(collect_wav_audio(
-        "Peer A",
-        test_buffers.clone(),
-        true, // is_peer_a
-        Duration::from_secs_f32(DURATION_SECS + 1.0), // Extra time for processing
-    ));
-    
-    let collector_b = tokio::spawn(collect_wav_audio(
-        "Peer B",
-        test_buffers.clone(),
-        false, // is_peer_a
-        Duration::from_secs_f32(DURATION_SECS + 1.0),
-    ));
+    // We'll start feeders and collectors after the call is connected
     
     // Client B answers incoming calls
     let client_b_clone = client_b.clone();
@@ -326,19 +326,69 @@ async fn test_full_roundtrip_with_wav_files() {
         Err(_) => panic!("Call answer timeout"),
     }
     
-    // Let audio exchange happen
-    info!("🎵 Exchanging audio for {} seconds", DURATION_SECS);
-    sleep(Duration::from_secs_f32(DURATION_SECS + 0.5)).await;
+    // Wait a bit for media paths to be established
+    info!("⏳ Waiting for media paths to be established...");
+    sleep(Duration::from_millis(500)).await;
+    
+    // Now start audio feeders and collectors
+    info!("🎵 Starting audio feeders and collectors");
+    let peer_a_source = WavAudioSource::new(peer_a_samples.clone(), SAMPLE_RATE);
+    let peer_b_source = WavAudioSource::new(peer_b_samples.clone(), SAMPLE_RATE);
+    
+    // Start feeding audio from WAV files
+    let feeder_a = tokio::spawn(feed_wav_audio(
+        "Peer A",
+        peer_a_source,
+        test_buffers.clone(),
+        true, // is_peer_a
+    ));
+    
+    let feeder_b = tokio::spawn(feed_wav_audio(
+        "Peer B", 
+        peer_b_source,
+        test_buffers.clone(),
+        false, // is_peer_a
+    ));
+    
+    // Start collecting audio
+    let collector_a = tokio::spawn(collect_wav_audio(
+        "Peer A",
+        test_buffers.clone(),
+        true, // is_peer_a
+        expected_frames,
+    ));
+    
+    let collector_b = tokio::spawn(collect_wav_audio(
+        "Peer B",
+        test_buffers.clone(),
+        false, // is_peer_a
+        expected_frames,
+    ));
+    
+    // Wait for feeders to complete
+    info!("⏳ Waiting for audio feeders to complete...");
+    let frames_sent_a = feeder_a.await.expect("Feeder A failed");
+    let frames_sent_b = feeder_b.await.expect("Feeder B failed");
+    info!("📤 Audio feeders completed - A sent {} frames, B sent {} frames", frames_sent_a, frames_sent_b);
+    
+    // Give extra time for audio to propagate through the system
+    info!("⏳ Waiting for audio propagation...");
+    sleep(Duration::from_secs(1)).await;
+    
+    // Wait for collectors to complete (they should have all frames now)
+    info!("⏳ Waiting for audio collectors to complete...");
+    let sink_a = collector_a.await.expect("Collector A failed");
+    let sink_b = collector_b.await.expect("Collector B failed");
+    
+    // Small delay before hanging up to ensure any buffered audio is processed
+    sleep(Duration::from_millis(500)).await;
     
     // Hang up the call
     info!("📞 Hanging up");
     client_a.hangup(&call.id).await.expect("Failed to hang up");
     
-    // Wait for audio tasks to complete
-    let _ = feeder_a.await;
-    let _ = feeder_b.await;
-    let sink_a = collector_a.await.expect("Collector A failed");
-    let sink_b = collector_b.await.expect("Collector B failed");
+    // Wait for hangup to propagate
+    sleep(Duration::from_millis(500)).await;
     
     // Save output WAV files
     info!("💾 Saving output WAV files");
@@ -347,7 +397,11 @@ async fn test_full_roundtrip_with_wav_files() {
     sink_b.save(&peer_b_dir.join("output.wav"))
         .expect("Failed to save peer B output");
     
-    // Clean up
+    // Clean up - stop clients before aborting tasks
+    client_a.stop().await.expect("Failed to stop client A");
+    client_b.stop().await.expect("Failed to stop client B");
+    
+    // Abort the answer task
     answer_task.abort();
     
     info!("✅ Test completed successfully!");
