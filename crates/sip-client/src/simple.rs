@@ -16,6 +16,19 @@ use async_trait::async_trait;
 use rvoip_client_core::events::ClientEventHandler;
 use tokio::task::JoinHandle;
 
+// Helper function to parse IP address from SDP
+fn extract_ip_from_sdp(sdp: &str) -> Option<String> {
+    // Look for connection line: c=IN IP4 <ip_address>
+    for line in sdp.lines() {
+        if line.starts_with("c=IN IP4 ") {
+            if let Some(ip) = line.strip_prefix("c=IN IP4 ") {
+                return Some(ip.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 // Helper function to establish media for a call
 async fn establish_media_for_call(client: &Arc<rvoip_client_core::Client>, call_id: &CallId) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("🔗 Establishing media flow for call {}", call_id);
@@ -27,9 +40,23 @@ async fn establish_media_for_call(client: &Arc<rvoip_client_core::Client>, call_
         media_info.local_rtp_port, media_info.remote_rtp_port);
     
     if let Some(remote_rtp_port) = media_info.remote_rtp_port {
-        // For local testing, assume remote is also on 127.0.0.1
-        // In production, the remote address would come from SDP negotiation
-        let remote_addr = format!("127.0.0.1:{}", remote_rtp_port);
+        // Extract remote IP from SDP
+        let remote_ip = if let Some(ref sdp) = media_info.remote_sdp {
+            tracing::debug!("🔍 Parsing remote SDP to extract IP address");
+            tracing::debug!("📄 Remote SDP:\n{}", sdp);
+            extract_ip_from_sdp(sdp).map(|ip| {
+                tracing::info!("✅ Extracted remote IP from SDP: {}", ip);
+                ip
+            }).unwrap_or_else(|| {
+                tracing::warn!("⚠️ Could not extract IP from SDP, falling back to localhost");
+                "127.0.0.1".to_string()
+            })
+        } else {
+            tracing::warn!("⚠️ No remote SDP available, falling back to localhost");
+            "127.0.0.1".to_string()
+        };
+        
+        let remote_addr = format!("{}:{}", remote_ip, remote_rtp_port);
         
         tracing::info!("📡 Establishing media to remote RTP address: {}", remote_addr);
         match client.establish_media(call_id, &remote_addr).await {
@@ -575,7 +602,7 @@ impl SipClient {
         // Use a proper RTP port (different from SIP port)
         let rtp_port = self.inner.config.local_address.port() + 4000; // e.g., 5060 -> 9060
         
-        Ok(format!(
+        let sdp = format!(
             "v=0\r\n\
              o=- 0 0 IN IP4 {}\r\n\
              s=-\r\n\
@@ -585,7 +612,10 @@ impl SipClient {
              a=rtpmap:0 PCMU/8000\r\n\
              a=rtpmap:8 PCMA/8000\r\n",
             local_ip, local_ip, rtp_port
-        ))
+        );
+        
+        tracing::info!("📋 Created SDP offer with IP {} and RTP port {}", local_ip, rtp_port);
+        Ok(sdp)
     }
     
     async fn create_sdp_answer(&self, _call: &Call) -> SipClientResult<String> {
