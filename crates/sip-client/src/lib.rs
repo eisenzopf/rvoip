@@ -62,6 +62,9 @@ pub mod recovery;
 pub mod reconnect;
 pub mod degradation;
 
+#[cfg(feature = "test-audio")]
+pub mod test_audio;
+
 #[cfg(test)]
 mod simple_tests;
 

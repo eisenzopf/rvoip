@@ -8,6 +8,9 @@ pub(crate) mod cpal_backend;
 #[cfg(feature = "device-cpal")]
 pub(crate) mod cpal_stream;
 
+#[cfg(feature = "test-audio")]
+pub mod test_audio;
+
 /// Audio device trait for platform abstraction
 pub trait AudioDevice: Send + Sync + std::fmt::Debug {
     /// Get device information
@@ -28,17 +31,38 @@ pub trait AudioDevice: Send + Sync + std::fmt::Debug {
 /// Audio device manager for discovering and managing audio devices
 #[derive(Clone)]
 pub struct AudioDeviceManager {
-    // Placeholder implementation
+    #[cfg(feature = "test-audio")]
+    test_provider: Option<std::sync::Arc<test_audio::TestAudioProvider>>,
 }
 
 impl AudioDeviceManager {
     /// Create a new audio device manager
     pub async fn new() -> crate::error::AudioResult<Self> {
-        Ok(Self {})
+        Ok(Self {
+            #[cfg(feature = "test-audio")]
+            test_provider: None,
+        })
+    }
+    
+    /// Create a new audio device manager with test provider
+    #[cfg(feature = "test-audio")]
+    pub async fn with_test_provider(provider: test_audio::TestAudioProvider) -> crate::error::AudioResult<Self> {
+        Ok(Self {
+            test_provider: Some(std::sync::Arc::new(provider)),
+        })
     }
 
     /// List available audio devices
     pub async fn list_devices(&self, direction: crate::types::AudioDirection) -> crate::error::AudioResult<Vec<crate::types::AudioDeviceInfo>> {
+        #[cfg(feature = "test-audio")]
+        if let Some(provider) = &self.test_provider {
+            let device = match direction {
+                crate::types::AudioDirection::Input => provider.get_input_device(),
+                crate::types::AudioDirection::Output => provider.get_output_device(),
+            };
+            return Ok(vec![device.info().clone()]);
+        }
+        
         #[cfg(feature = "device-cpal")]
         {
             cpal_backend::list_cpal_devices(direction)
@@ -76,6 +100,14 @@ impl AudioDeviceManager {
 
     /// Get the default device for the specified direction
     pub async fn get_default_device(&self, direction: crate::types::AudioDirection) -> crate::error::AudioResult<std::sync::Arc<dyn AudioDevice>> {
+        #[cfg(feature = "test-audio")]
+        if let Some(provider) = &self.test_provider {
+            return Ok(match direction {
+                crate::types::AudioDirection::Input => provider.get_input_device(),
+                crate::types::AudioDirection::Output => provider.get_output_device(),
+            });
+        }
+        
         #[cfg(feature = "device-cpal")]
         {
             cpal_backend::get_default_cpal_device(direction)

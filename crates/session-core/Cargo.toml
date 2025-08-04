@@ -52,6 +52,7 @@ proptest.workspace = true
 tracing-appender = "0.2"
 fastrand = "2.0"
 serial_test = "3.1"
+hound = "3.5"
 
 # Example binaries
 [[bin]]

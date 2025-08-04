@@ -1,0 +1,19 @@
+[package]
+name = "audio-exchange-test-integration"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "audio_exchange_test"
+path = "audio_exchange_test.rs"
+
+[workspace]
+
+[dependencies]
+rvoip-session-core = { path = "../.." }
+tokio = { version = "1", features = ["full"] }
+hound = "3.5"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+futures = "0.3"

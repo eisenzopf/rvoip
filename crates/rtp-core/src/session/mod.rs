@@ -261,9 +261,10 @@ impl RtpSession {
         let transport = Arc::new(UdpRtpTransport::new(transport_config).await?);
         
         // Create channels for internal communication
-        let (sender_tx, sender_rx) = mpsc::channel(100);
-        let (receiver_tx, receiver_rx) = mpsc::channel(100);
-        let (event_tx, _) = broadcast::channel(100);
+        // Increased capacity to handle longer sessions without dropping packets
+        let (sender_tx, sender_rx) = mpsc::channel(1000);
+        let (receiver_tx, receiver_rx) = mpsc::channel(1000);
+        let (event_tx, _) = broadcast::channel(1000);
         
         // Create scheduler if needed
         let scheduler = Some(RtpScheduler::new(
@@ -416,251 +417,185 @@ impl RtpSession {
         let mut transport_events = recv_transport.subscribe();
         
         let recv_task = tokio::spawn(async move {
-            let mut buffer = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
-            
-            // Create a basic select loop to handle both direct packet reception
-            // and events from the transport
+            // IMPORTANT: Only handle events from transport, no direct packet reception
+            // to avoid race conditions where two tasks read from the same socket
             loop {
-                tokio::select! {
-                    // Handle direct packet reception from the transport
-                    result = recv_transport.receive_packet(&mut buffer) => {
-                match result {
-                    Ok((size, addr)) => {
-                                // Process RTP packet
-                        if size < RTP_MIN_HEADER_SIZE {
-                            warn!("Received packet too small to be RTP: {} bytes", size);
-                            continue;
+                match transport_events.recv().await {
+                    Ok(crate::traits::RtpEvent::RtcpReceived { data, source }) => {
+                        // Try to parse the RTCP packet
+                        if let Ok(rtcp_packet) = crate::packet::rtcp::RtcpPacket::parse(&data) {
+                            // Handle the RTCP packet based on its type
+                            match rtcp_packet {
+                                crate::packet::rtcp::RtcpPacket::Goodbye(bye) => {
+                                    // Extract the SSRC and reason
+                                    if !bye.sources.is_empty() {
+                                        let source_ssrc = bye.sources[0];
+                                        
+                                        // Broadcast BYE event
+                                        let _ = event_tx_recv.send(RtpSessionEvent::Bye {
+                                            ssrc: source_ssrc,
+                                            reason: bye.reason,
+                                        });
+                                        
+                                        info!("Received RTCP BYE from SSRC={:08x}", source_ssrc);
+                                    }
+                                },
+                                crate::packet::rtcp::RtcpPacket::SenderReport(sr) => {
+                                    // Process sender report
+                                    let report_ssrc = sr.ssrc;
+                                    
+                                    debug!("Received RTCP SR from SSRC={:08x}", report_ssrc);
+                                    
+                                    // Update stream statistics if this stream exists
+                                    if let Ok(mut streams) = streams_map.lock() {
+                                        if let Some(stream) = streams.get_mut(&report_ssrc) {
+                                            // Update the stream's RTCP SR info
+                                            // This will be used for calculating round-trip time
+                                            stream.update_last_sr_info(
+                                                sr.ntp_timestamp.to_u32(),
+                                                std::time::Instant::now(),
+                                            );
+                                            
+                                            debug!("Updated RTCP SR info for stream SSRC={:08x}", report_ssrc);
+                                        }
+                                    }
+                                    
+                                    // If media sync is enabled, update it
+                                    if let Some(sync) = &media_sync {
+                                        if let Ok(mut media_sync) = sync.write() {
+                                            // Update synchronization data
+                                            media_sync.update_from_sr(report_ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
+                                        }
+                                    }
+                                    
+                                    // Emit SR event for external processing
+                                    let _ = event_tx_recv.send(RtpSessionEvent::RtcpSenderReport { 
+                                        ssrc: report_ssrc,
+                                        ntp_timestamp: sr.ntp_timestamp,
+                                        rtp_timestamp: sr.rtp_timestamp,
+                                        packet_count: sr.sender_packet_count,
+                                        octet_count: sr.sender_octet_count,
+                                        report_blocks: sr.report_blocks,
+                                    });
+                                },
+                                crate::packet::rtcp::RtcpPacket::ReceiverReport(rr) => {
+                                    // Process receiver report
+                                    let report_ssrc = rr.ssrc;
+                                    
+                                    debug!("Received RTCP RR from SSRC={:08x} with {} report blocks", 
+                                          report_ssrc, rr.report_blocks.len());
+                                    
+                                    // If there's a report block about our SSRC, process it
+                                    for block in &rr.report_blocks {
+                                        if block.ssrc == ssrc {
+                                            debug!("Processing report block about our SSRC={:08x}", ssrc);
+                                            
+                                            // Update session stats with packet loss info
+                                            if let Ok(mut stats) = stats_recv.lock() {
+                                                stats.packets_lost = block.cumulative_lost as u64;
+                                                
+                                                // Calculate packet loss percentage
+                                                let fraction_lost = block.fraction_lost as f64 / 256.0;
+                                                debug!("Packet loss: {}% (fraction={})", 
+                                                       fraction_lost * 100.0, block.fraction_lost);
+                                            }
+                                        }
+                                    }
+                                    
+                                    // Emit RR event for external processing
+                                    let _ = event_tx_recv.send(RtpSessionEvent::RtcpReceiverReport { 
+                                        ssrc: report_ssrc,
+                                        report_blocks: rr.report_blocks,
+                                    });
+                                },
+                                // Handle other RTCP packet types as needed
+                                _ => {
+                                    // For now, we're just logging other packet types
+                                    trace!("Received RTCP packet: {:?}", rtcp_packet);
+                                }
+                            }
+                        } else {
+                            warn!("Failed to parse RTCP packet");
+                        }
+                    }
+                    Ok(crate::traits::RtpEvent::MediaReceived { payload_type, timestamp, payload, source, ssrc: ssrc_from_event, marker, .. }) => {
+                        // Handle RTP packets received via transport events
+                        // This is the ONLY path for RTP packets to avoid race conditions
+                        
+                        // Reconstruct minimal RTP header for processing
+                        let header = RtpHeader {
+                            version: 2,
+                            padding: false,
+                            extension: false,
+                            cc: 0,
+                            marker,
+                            payload_type,
+                            sequence_number: 0, // Will be set by stream tracking
+                            timestamp,
+                            ssrc,
+                            csrc: vec![],
+                            extensions: None,
+                        };
+                        
+                        let packet = RtpPacket {
+                            header,
+                            payload: payload.clone(),
+                        };
+                        
+                        // Update stats
+                        if let Ok(mut session_stats) = stats_recv.lock() {
+                            session_stats.packets_received += 1;
+                            session_stats.bytes_received += payload.len() as u64 + 12; // payload + header
+                            session_stats.remote_addr = Some(source);
                         }
                         
-                        // Parse RTP packet
-                        match RtpPacket::parse(&buffer[..size]) {
-                            Ok(packet) => {
-                                        // Extract the SSRC from the packet
-                                        let packet_ssrc = packet.header.ssrc;
-                                        debug!("Received packet with SSRC={:08x}, seq={}, timestamp={}",
-                                               packet_ssrc, packet.header.sequence_number, packet.header.timestamp);
-                                        
-                                // Update stats
-                                if let Ok(mut session_stats) = stats_recv.lock() {
-                                    session_stats.packets_received += 1;
-                                    session_stats.bytes_received += size as u64;
-                                    session_stats.remote_addr = Some(addr);
+                        // Use the SSRC from the event
+                        let packet_ssrc = ssrc_from_event;
+                        
+                        // Get or create the stream for this SSRC
+                        let (is_new_stream, output_packet) = {
+                            let mut streams = match streams_map.lock() {
+                                Ok(streams) => streams,
+                                Err(e) => {
+                                    error!("Failed to lock streams map: {}", e);
+                                    continue;
                                 }
-                                
-                                        // Get or create the stream for this SSRC
-                                        let (is_new_stream, output_packet) = {
-                                            let mut streams = match streams_map.lock() {
-                                                Ok(streams) => streams,
-                                                Err(e) => {
-                                                    error!("Failed to lock streams map: {}", e);
-                                                    continue;
-                                                }
-                                            };
-                                            
-                                            // Check if this is a new stream
-                                            let is_new = !streams.contains_key(&packet_ssrc);
-                                            if is_new {
-                                                debug!("Creating new stream for SSRC={:08x}", packet_ssrc);
-                                    } else {
-                                                debug!("Found existing stream for SSRC={:08x}", packet_ssrc);
-                                            }
-                                            
-                                            // Get or create the stream for this SSRC
-                                            let stream = streams.entry(packet_ssrc).or_insert_with(|| {
-                                                info!("New RTP stream detected with SSRC={:08x}", packet_ssrc);
-                                                if jitter_buffer_enabled {
-                                                    debug!("Creating stream with jitter buffer for SSRC={:08x}", packet_ssrc);
-                                                    RtpStream::with_jitter_buffer(
-                                                        packet_ssrc, 
-                                                        clock_rate, 
-                                                        jitter_size, 
-                                                        max_age_ms as u64
-                                                    )
-                                                } else {
-                                                    debug!("Creating stream without jitter buffer for SSRC={:08x}", packet_ssrc);
-                                                    RtpStream::new(packet_ssrc, clock_rate)
-                                                }
-                                            });
-                                            
-                                            // Make sure the stream is initialized with the first sequence number
-                                            // This ensures all streams are properly initialized even if their packets
-                                            // are being held in the jitter buffer or discarded for some reason
-                                            if is_new {
-                                                stream.ensure_initialized(packet.header.sequence_number);
-                                                debug!("Initialized new stream for SSRC={:08x} with seq={}", 
-                                                       packet_ssrc, packet.header.sequence_number);
-                                            }
-                                
-                                // Process the packet and get the output packet (if any)
-                                            let output = stream.process_packet(packet.clone());
-                                            if output.is_some() {
-                                                debug!("Stream {:08x} returned a packet for delivery", packet_ssrc);
-                                            } else {
-                                                debug!("Stream {:08x} held the packet in jitter buffer", packet_ssrc);
-                                            }
-                                            
-                                            (is_new, output)
-                                        };
-                                        
-                                        // If this is a new stream, emit the NewStreamDetected event
-                                        if is_new_stream {
-                                            // Broadcast new stream event
-                                            debug!("Emitting NewStreamDetected event for SSRC={:08x}", packet_ssrc);
-                                            let _ = event_tx_recv.send(RtpSessionEvent::NewStreamDetected {
-                                                ssrc: packet_ssrc,
-                                            });
-                                        }
-                                        
-                                        // If we have an output packet, forward it
-                                        if let Some(output) = output_packet {
-                                            // Update jitter stats - get the stream again
-                                            if let Ok(streams) = streams_map.lock() {
-                                                if let Some(stream) = streams.get(&packet_ssrc) {
-                                    if let Ok(mut session_stats) = stats_recv.lock() {
-                                        session_stats.jitter_ms = stream.get_jitter_ms();
-                                        
-                                        // Update other stream-specific stats
-                                        let stream_stats = stream.get_stats();
-                                                        session_stats.packets_lost = stream_stats.packets_lost;
-                                                        session_stats.packets_duplicated = stream_stats.duplicates;
-                                                        session_stats.packets_out_of_order = 0; // TODO: Track this
-                                                    }
-                                                }
-                                    }
-                                    
-                                    // Forward the packet to the receiver channel
-                                            if let Err(e) = receiver_tx.send(output.clone()).await {
-                                        error!("Failed to forward RTP packet to receiver: {}", e);
-                                    }
-                                    
-                                    // Broadcast packet received event
-                                            debug!("Emitting PacketReceived event for SSRC={:08x}", packet_ssrc);
-                                            let _ = event_tx_recv.send(RtpSessionEvent::PacketReceived(output));
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Failed to parse RTP packet: {}", e);
-                            }
+                            };
+                            
+                            let is_new = !streams.contains_key(&packet_ssrc);
+                            let stream = streams.entry(packet_ssrc).or_insert_with(|| {
+                                info!("New RTP stream detected with SSRC={:08x}", packet_ssrc);
+                                RtpStream::new(packet_ssrc, clock_rate)
+                            });
+                            
+                            // For simplified processing without full RTP header,
+                            // just forward the packet immediately
+                            (is_new, Some(packet.clone()))
+                        };
+                        
+                        // If this is a new stream, emit the NewStreamDetected event
+                        if is_new_stream {
+                            let _ = event_tx_recv.send(RtpSessionEvent::NewStreamDetected {
+                                ssrc: packet_ssrc,
+                            });
                         }
+                        
+                        // Forward the packet
+                        if let Some(output) = output_packet {
+                            if let Err(e) = receiver_tx.send(output.clone()).await {
+                                error!("Failed to forward RTP packet to receiver: {}", e);
+                            }
+                            
+                            // Broadcast packet received event
+                            let _ = event_tx_recv.send(RtpSessionEvent::PacketReceived(output));
+                        }
+                    }
+                    Ok(crate::traits::RtpEvent::Error(e)) => {
+                        error!("Transport error: {}", e);
+                        let _ = event_tx_recv.send(RtpSessionEvent::Error(e));
                     }
                     Err(e) => {
-                                error!("Error receiving from transport: {}", e);
-                                continue;
-                            }
-                        }
-                    }
-                    
-                    // Handle events from the transport (like RTCP packets)
-                    event = transport_events.recv() => {
-                        match event {
-                            Ok(crate::traits::RtpEvent::RtcpReceived { data, source }) => {
-                                // Try to parse the RTCP packet
-                                if let Ok(rtcp_packet) = crate::packet::rtcp::RtcpPacket::parse(&data) {
-                                    // Handle the RTCP packet based on its type
-                                    match rtcp_packet {
-                                        crate::packet::rtcp::RtcpPacket::Goodbye(bye) => {
-                                            // Extract the SSRC and reason
-                                            if !bye.sources.is_empty() {
-                                                let source_ssrc = bye.sources[0];
-                                                
-                                                // Broadcast BYE event
-                                                let _ = event_tx_recv.send(RtpSessionEvent::Bye {
-                                                    ssrc: source_ssrc,
-                                                    reason: bye.reason,
-                                                });
-                                                
-                                                info!("Received RTCP BYE from SSRC={:08x}", source_ssrc);
-                                            }
-                                        },
-                                        crate::packet::rtcp::RtcpPacket::SenderReport(sr) => {
-                                            // Process sender report
-                                            let report_ssrc = sr.ssrc;
-                                            
-                                            debug!("Received RTCP SR from SSRC={:08x}", report_ssrc);
-                                            
-                                            // Update stream statistics if this stream exists
-                                            if let Ok(mut streams) = streams_map.lock() {
-                                                if let Some(stream) = streams.get_mut(&report_ssrc) {
-                                                    // Update the stream's RTCP SR info
-                                                    // This will be used for calculating round-trip time
-                                                    stream.update_last_sr_info(
-                                                        sr.ntp_timestamp.to_u32(),
-                                                        std::time::Instant::now(),
-                                                    );
-                                                    
-                                                    debug!("Updated RTCP SR info for stream SSRC={:08x}", report_ssrc);
-                                                }
-                                            }
-                                            
-                                            // If media sync is enabled, update it
-                                            if let Some(sync) = &media_sync {
-                                                if let Ok(mut media_sync) = sync.write() {
-                                                    // Update synchronization data
-                                                    media_sync.update_from_sr(report_ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
-                                                }
-                                            }
-                                            
-                                            // Emit SR event for external processing
-                                            let _ = event_tx_recv.send(RtpSessionEvent::RtcpSenderReport { 
-                                                ssrc: report_ssrc,
-                                                ntp_timestamp: sr.ntp_timestamp,
-                                                rtp_timestamp: sr.rtp_timestamp,
-                                                packet_count: sr.sender_packet_count,
-                                                octet_count: sr.sender_octet_count,
-                                                report_blocks: sr.report_blocks,
-                                            });
-                                        },
-                                        crate::packet::rtcp::RtcpPacket::ReceiverReport(rr) => {
-                                            // Process receiver report
-                                            let report_ssrc = rr.ssrc;
-                                            
-                                            debug!("Received RTCP RR from SSRC={:08x} with {} report blocks", 
-                                                  report_ssrc, rr.report_blocks.len());
-                                            
-                                            // If there's a report block about our SSRC, process it
-                                            for block in &rr.report_blocks {
-                                                if block.ssrc == ssrc {
-                                                    debug!("Processing report block about our SSRC={:08x}", ssrc);
-                                                    
-                                                    // Update session stats with packet loss info
-                                                    if let Ok(mut stats) = stats_recv.lock() {
-                                                        stats.packets_lost = block.cumulative_lost as u64;
-                                                        
-                                                        // Calculate packet loss percentage
-                                                        let fraction_lost = block.fraction_lost as f64 / 256.0;
-                                                        debug!("Packet loss: {}% (fraction={})", 
-                                                               fraction_lost * 100.0, block.fraction_lost);
-                                                    }
-                                                }
-                                            }
-                                            
-                                            // Emit RR event for external processing
-                                            let _ = event_tx_recv.send(RtpSessionEvent::RtcpReceiverReport { 
-                                                ssrc: report_ssrc,
-                                                report_blocks: rr.report_blocks,
-                                            });
-                                        },
-                                        // Handle other RTCP packet types as needed
-                                        _ => {
-                                            // For now, we're just logging other packet types
-                                            trace!("Received RTCP packet: {:?}", rtcp_packet);
-                                        }
-                                    }
-                                } else {
-                                    warn!("Failed to parse RTCP packet");
-                                }
-                            }
-                            Ok(crate::traits::RtpEvent::MediaReceived { .. }) => {
-                                // This is handled by the direct packet reception above
-                            }
-                            Ok(crate::traits::RtpEvent::Error(e)) => {
-                                error!("Transport error: {}", e);
-                                let _ = event_tx_recv.send(RtpSessionEvent::Error(e));
-                            }
-                            Err(e) => {
-                                debug!("Transport event channel error: {}", e);
-                            }
-                        }
+                        debug!("Transport event channel error: {}", e);
                     }
                 }
             }

@@ -30,10 +30,11 @@ impl MediaSessionController {
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
         
         let mut session = rtp_session.lock().await;
+        let payload_len = payload.len();
         session.send_packet(timestamp, Bytes::from(payload), false).await
             .map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
         
-        debug!("✅ Sent RTP packet for dialog: {} (timestamp: {})", dialog_id, timestamp);
+        info!("📤 Sent RTP packet for dialog: {} (timestamp: {}, payload: {} bytes)", dialog_id, timestamp, payload_len);
         Ok(())
     }
     

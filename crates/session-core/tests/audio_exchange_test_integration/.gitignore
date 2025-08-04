@@ -14,6 +14,8 @@ publish_order.sh
 bump_version.sh
 Cargo.toml.backup
 test_vectors/
+target/
+*.wav
 
 ## Editor
 *.swp
@@ -33,7 +35,6 @@ Session.vim
 .dir-locals.el
 Cargo.lock
 Cargo.backup
-*.wav
 
 ## Tool
 .valgrindrc

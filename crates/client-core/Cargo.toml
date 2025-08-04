@@ -50,6 +50,8 @@ tokio-test = "0.4"
 tracing-test = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serial_test = "3.1"
+hound = "3.5"
+async-trait = "0.1"
 
 [features]
 default = []
