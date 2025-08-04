@@ -145,6 +145,7 @@ async fn run_receiver(name: String, port: u16) -> Result<(), Box<dyn std::error:
                     codec.bright_white(),
                     format!("(Call ID: {})", call_id).bright_black()
                 );
+                println!("{}", "⏳ Establishing media paths...".bright_black());
             }
             
             SipClientEvent::CallEnded { .. } => {
