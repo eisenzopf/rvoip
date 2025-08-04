@@ -74,6 +74,7 @@ OPTIONS:
     -t, --target <TARGET>          Target IP address of the receiver
     -P, --target-port <PORT>       Target port [default: 5060]
     -p, --port <PORT>             Your local port [default: 5061]
+    -i, --ip <IP>                 IP address to bind to [default: auto-detect]
 ```
 
 ## Troubleshooting
