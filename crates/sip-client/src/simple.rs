@@ -1049,6 +1049,7 @@ impl SipClient {
         let audio_tasks = AudioPipelineTasks {
             capture_task: capture_handle,
             playback_task: playback_handle,
+            rtp_monitor_task: None,
         };
         
         self.inner.audio_tasks.write().insert(call.id, audio_tasks);
@@ -1063,6 +1064,9 @@ impl SipClient {
             // Cancel the tasks
             tasks.capture_task.abort();
             tasks.playback_task.abort();
+            if let Some(monitor_task) = tasks.rtp_monitor_task {
+                monitor_task.abort();
+            }
             
             // Wait for tasks to finish (with timeout)
             let timeout = tokio::time::Duration::from_secs(1);
@@ -1294,6 +1298,9 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                     // Abort any running audio tasks
                     audio_tasks.capture_task.abort();
                     audio_tasks.playback_task.abort();
+                    if let Some(monitor_task) = audio_tasks.rtp_monitor_task {
+                        monitor_task.abort();
+                    }
                     tracing::debug!("🧹 Cleaned up audio pipelines for call {}", status_info.call_id);
                 }
                 
