@@ -183,26 +183,26 @@ impl PlatformSocketStrategy {
             use winapi::um::winsock2 as ws2;
             use winapi::shared::ws2def;
             
-            let socket = socket.as_raw_socket() as ws2::SOCKET;
+            let raw_socket = socket.as_raw_socket() as ws2::SOCKET;
             
             // Set receive buffer size
             let size = self.buffer_size as i32;
             let optval = &size as *const i32 as *const libc::c_char;
             let optlen = std::mem::size_of::<i32>() as i32;
             
-            if unsafe { ws2::setsockopt(socket, ws2::SOL_SOCKET, ws2::SO_RCVBUF, optval, optlen) } != 0 {
+            if unsafe { ws2::setsockopt(raw_socket, ws2::SOL_SOCKET, ws2::SO_RCVBUF, optval, optlen) } != 0 {
                 return Err(io::Error::last_os_error());
             }
             
             // Set send buffer size
-            if unsafe { ws2::setsockopt(socket, ws2::SOL_SOCKET, ws2::SO_SNDBUF, optval, optlen) } != 0 {
+            if unsafe { ws2::setsockopt(raw_socket, ws2::SOL_SOCKET, ws2::SO_SNDBUF, optval, optlen) } != 0 {
                 return Err(io::Error::last_os_error());
             }
             
             // Set SO_REUSEADDR if needed
             if self.use_reuse_addr {
                 let optval = &1 as *const i32 as *const libc::c_char;
-                if unsafe { ws2::setsockopt(socket, ws2::SOL_SOCKET, ws2::SO_REUSEADDR, optval, optlen) } != 0 {
+                if unsafe { ws2::setsockopt(raw_socket, ws2::SOL_SOCKET, ws2::SO_REUSEADDR, optval, optlen) } != 0 {
                     return Err(io::Error::last_os_error());
                 }
             }
@@ -211,7 +211,7 @@ impl PlatformSocketStrategy {
             if self.set_ipv6_only && socket.local_addr()?.is_ipv6() {
                 let optval = if self.ipv6_only { &1 } else { &0 } as *const i32 as *const libc::c_char;
                 const IPV6_V6ONLY: i32 = 27; // Defined in ws2ipdef.h but not in winapi crate
-                if unsafe { ws2::setsockopt(socket, ws2def::IPPROTO_IPV6, IPV6_V6ONLY, optval, optlen) } != 0 {
+                if unsafe { ws2::setsockopt(raw_socket, ws2def::IPPROTO_IPV6 as i32, IPV6_V6ONLY, optval, optlen) } != 0 {
                     return Err(io::Error::last_os_error());
                 }
             }
