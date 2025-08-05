@@ -85,6 +85,8 @@ struct AudioPipelineTasks {
     capture_task: JoinHandle<()>,
     /// Playback task handle
     playback_task: JoinHandle<()>,
+    /// RTP monitor task handle
+    rtp_monitor_task: Option<JoinHandle<()>>,
 }
 
 struct SipClientInner {
@@ -301,6 +303,13 @@ impl SipClient {
         
         if let Some(call) = self.inner.calls.read().get(call_id) {
             *call.state.write() = CallState::OnHold;
+            
+            // Emit hold event
+            self.inner.events.emit(SipClientEvent::CallOnHold {
+                call: call.clone(),
+            });
+            
+            tracing::info!("⏸️ Call {} put on hold", call_id);
         }
         
         Ok(())
@@ -312,9 +321,118 @@ impl SipClient {
         
         if let Some(call) = self.inner.calls.read().get(call_id) {
             *call.state.write() = CallState::Connected;
+            
+            // Emit resume event
+            self.inner.events.emit(SipClientEvent::CallResumed {
+                call: call.clone(),
+            });
+            
+            tracing::info!("▶️ Call {} resumed", call_id);
         }
         
         Ok(())
+    }
+    
+    /// Send DTMF digits during a call
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rvoip_sip_client::SipClient;
+    /// # async fn example(client: &SipClient, call_id: &rvoip_sip_client::CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Navigate an IVR menu
+    /// client.send_dtmf(call_id, "1#").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_dtmf(&self, call_id: &CallId, digits: &str) -> SipClientResult<()> {
+        // Validate DTMF digits
+        for digit in digits.chars() {
+            match digit {
+                '0'..='9' | '*' | '#' | 'A'..='D' => {},
+                _ => {
+                    return Err(SipClientError::InvalidInput {
+                        field: "digits".to_string(),
+                        reason: format!("Invalid DTMF digit: '{}'", digit),
+                    });
+                }
+            }
+        }
+        
+        // Check if call exists and is connected
+        let call = self.get_call(call_id)?;
+        let state = *call.state.read();
+        if state != CallState::Connected {
+            return Err(SipClientError::InvalidState {
+                message: format!("Cannot send DTMF in call state: {:?}", state),
+            });
+        }
+        
+        // Send DTMF via client-core
+        match self.inner.client.send_dtmf(call_id, digits).await {
+            Ok(_) => {
+                tracing::info!("📞 Sent DTMF digits '{}' on call {}", digits, call_id);
+                
+                // Emit DTMF sent event
+                self.inner.events.emit(SipClientEvent::DtmfSent {
+                    call: call.clone(),
+                    digits: digits.to_string(),
+                });
+                
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to send DTMF on call {}: {}", call_id, e);
+                Err(SipClientError::Internal {
+                    message: format!("Failed to send DTMF: {}", e),
+                })
+            }
+        }
+    }
+    
+    /// Transfer a call to another party
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rvoip_sip_client::SipClient;
+    /// # async fn example(client: &SipClient, call_id: &rvoip_sip_client::CallId) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Transfer to another extension
+    /// client.transfer(call_id, "sip:support@example.com").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn transfer(&self, call_id: &CallId, target_uri: &str) -> SipClientResult<()> {
+        // Check if call exists and is connected
+        let call = self.get_call(call_id)?;
+        let state = *call.state.read();
+        if state != CallState::Connected && state != CallState::OnHold {
+            return Err(SipClientError::InvalidState {
+                message: format!("Cannot transfer call in state: {:?}", state),
+            });
+        }
+        
+        // Perform transfer via client-core
+        match self.inner.client.transfer_call(call_id, target_uri).await {
+            Ok(_) => {
+                tracing::info!("📞 Transferring call {} to {}", call_id, target_uri);
+                
+                // Update call state
+                *call.state.write() = CallState::Transferring;
+                
+                // Emit transfer event
+                self.inner.events.emit(SipClientEvent::CallTransferred {
+                    call: call.clone(),
+                    target: target_uri.to_string(),
+                });
+                
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to transfer call {}: {}", call_id, e);
+                Err(SipClientError::Internal {
+                    message: format!("Failed to transfer call: {}", e),
+                })
+            }
+        }
     }
     
     /// Subscribe to events (requires StreamExt)
@@ -618,9 +736,89 @@ impl SipClient {
         Ok(sdp)
     }
     
-    async fn create_sdp_answer(&self, _call: &Call) -> SipClientResult<String> {
-        // TODO: Create proper SDP answer based on offer
-        self.create_sdp_offer().await
+    async fn create_sdp_answer(&self, call: &Call) -> SipClientResult<String> {
+        // Get the remote SDP offer to base our answer on
+        let media_info = self.inner.client.get_call_media_info(&call.id).await
+            .map_err(|e| SipClientError::Internal {
+                message: format!("Failed to get media info: {}", e),
+            })?;
+        
+        // Parse remote SDP to extract codec preferences
+        let remote_codecs = if let Some(ref remote_sdp) = media_info.remote_sdp {
+            self.parse_codecs_from_sdp(remote_sdp)
+        } else {
+            vec![]
+        };
+        
+        // Get local IP from the configured address
+        let local_ip = self.inner.config.local_address.ip();
+        
+        // Use a proper RTP port (different from SIP port)
+        let rtp_port = self.inner.config.local_address.port() + 4000;
+        
+        // Build answer based on what codecs we support that the remote also supports
+        let mut supported_codecs = Vec::new();
+        let mut rtpmap_lines = Vec::new();
+        
+        // Check which codecs we both support
+        for codec in &remote_codecs {
+            match codec.as_str() {
+                "0" => {
+                    // PCMU - we support this
+                    supported_codecs.push("0");
+                    rtpmap_lines.push("a=rtpmap:0 PCMU/8000");
+                }
+                "8" => {
+                    // PCMA - we support this
+                    supported_codecs.push("8");
+                    rtpmap_lines.push("a=rtpmap:8 PCMA/8000");
+                }
+                _ => {
+                    // We don't support other codecs yet
+                }
+            }
+        }
+        
+        // If no common codecs, default to PCMU/PCMA
+        if supported_codecs.is_empty() {
+            supported_codecs.push("0");
+            supported_codecs.push("8");
+            rtpmap_lines.push("a=rtpmap:0 PCMU/8000");
+            rtpmap_lines.push("a=rtpmap:8 PCMA/8000");
+        }
+        
+        let codec_list = supported_codecs.join(" ");
+        let rtpmap_section = rtpmap_lines.join("\r\n");
+        
+        let sdp = format!(
+            "v=0\r\n\
+             o=- 0 0 IN IP4 {}\r\n\
+             s=-\r\n\
+             c=IN IP4 {}\r\n\
+             t=0 0\r\n\
+             m=audio {} RTP/AVP {}\r\n\
+             {}\r\n",
+            local_ip, local_ip, rtp_port, codec_list, rtpmap_section
+        );
+        
+        tracing::info!("📋 Created SDP answer with IP {} and RTP port {}", local_ip, rtp_port);
+        tracing::debug!("📄 SDP answer:\n{}", sdp);
+        Ok(sdp)
+    }
+    
+    fn parse_codecs_from_sdp(&self, sdp: &str) -> Vec<String> {
+        // Simple SDP parser to extract codec numbers from m=audio line
+        for line in sdp.lines() {
+            if line.starts_with("m=audio ") {
+                // Format: m=audio <port> RTP/AVP <codec1> <codec2> ...
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() > 3 {
+                    // Skip "m=audio", port, and "RTP/AVP"
+                    return parts[3..].iter().map(|s| s.to_string()).collect();
+                }
+            }
+        }
+        vec![]
     }
     
     async fn setup_audio_pipeline(&self, call: &Arc<Call>) -> SipClientResult<()> {
@@ -1081,8 +1279,33 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                 call: call.clone(),
                 previous_state: old_state,
                 new_state,
-                reason: status_info.reason,
+                reason: status_info.reason.clone(),
             });
+            
+            // Emit CallEnded event when transitioning to terminated state
+            if new_state == CallState::Terminated && old_state != CallState::Terminated {
+                tracing::info!("📞 Call {} ended - emitting CallEnded event", status_info.call_id);
+                self.inner.events.emit(SipClientEvent::CallEnded {
+                    call: call.clone(),
+                });
+                
+                // Clean up audio pipelines if they exist
+                if let Some(audio_tasks) = self.inner.audio_tasks.write().remove(&status_info.call_id) {
+                    // Abort any running audio tasks
+                    audio_tasks.capture_task.abort();
+                    audio_tasks.playback_task.abort();
+                    tracing::debug!("🧹 Cleaned up audio pipelines for call {}", status_info.call_id);
+                }
+                
+                // Remove call from active calls after a short delay to allow final events to process
+                let calls = self.inner.calls.clone();
+                let call_id = status_info.call_id;
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    calls.write().remove(&call_id);
+                    tracing::debug!("🧹 Removed call {} from active calls", call_id);
+                });
+            }
         }
     }
     

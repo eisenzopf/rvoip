@@ -80,6 +80,13 @@ pub enum SipClientError {
         codec: String,
         details: String,
     },
+    
+    /// Invalid input
+    #[error("Invalid input for {field}: {reason}")]
+    InvalidInput {
+        field: String,
+        reason: String,
+    },
 }
 
 // Note: Clone is not implemented because some wrapped errors don't implement Clone.
@@ -132,6 +139,14 @@ impl SipClientError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal {
             message: message.into(),
+        }
+    }
+    
+    /// Create an invalid input error
+    pub fn invalid_input(field: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self::InvalidInput {
+            field: field.into(),
+            reason: reason.into(),
         }
     }
 }
