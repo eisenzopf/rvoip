@@ -30,6 +30,7 @@ rvoip-media-core.workspace = true
 rvoip-session-core.workspace = true
 rvoip-call-engine.workspace = true
 rvoip-client-core.workspace = true
+rvoip-sip-client.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true
