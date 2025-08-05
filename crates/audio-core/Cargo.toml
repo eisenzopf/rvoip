@@ -28,10 +28,8 @@ rvoip-client-core = { workspace = true, optional = true }
 # Audio device access
 cpal = { version = "0.15", optional = true }
 
-# Audio processing and format conversion - NOT USED (no imports found)
-# samplerate = { version = "0.2", optional = true }
-# rubato = { version = "0.15", optional = true }
-# dasp = { version = "0.11", features = ["signal"], optional = true }
+# Audio processing and format conversion
+dasp = { version = "0.11", features = ["std", "signal", "interpolate", "interpolate-linear"], optional = true }
 
 # For audio file decoding in tests - NOT USED
 # symphonia = { version = "0.5", features = ["mp3", "wav"], optional = true }
@@ -72,9 +70,9 @@ device-cpal = ["cpal"]
 device-mock = []
 test-audio = ["device-mock"]
 
-# Format conversion feature (placeholder - dependencies removed as not actually used)
-format-conversion = []
-# format-advanced = ["format-conversion", "dasp"]
+# Format conversion features
+format-conversion = ["dasp"]
+format-advanced = ["format-conversion"]
 
 # Client integration features
 client-integration = ["rvoip-client-core"]
