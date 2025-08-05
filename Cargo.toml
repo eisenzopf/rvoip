@@ -37,7 +37,7 @@ default-members = [
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
 [workspace.package]
-version = "0.1.17"  # 🎯 SINGLE VERSION TO MANAGE!
+version = "0.1.18"  # 🎯 SINGLE VERSION TO MANAGE!
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/eisenzopf/rvoip"
