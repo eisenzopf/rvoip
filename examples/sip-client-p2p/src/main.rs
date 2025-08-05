@@ -6,7 +6,7 @@
 use clap::{Parser, Subcommand};
 use colored::*;
 use local_ip_address::local_ip;
-use rvoip_sip_client::{SipClient, SipClientBuilder, SipClientEvent, AudioDirection};
+use rvoip::sip_client::{SipClient, SipClientBuilder, SipClientEvent, AudioDirection};
 use std::io::{self, Write};
 use tracing::error;
 
@@ -64,7 +64,7 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter("sip_client_p2p=info,rvoip_sip_client=info")
+        .with_env_filter("sip_client_p2p=info,rvoip=info")
         .init();
     
     let cli = Cli::parse();
