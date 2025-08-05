@@ -31,26 +31,14 @@ cpal = { version = "0.15", optional = true }
 # Audio processing and format conversion
 dasp = { version = "0.11", features = ["std", "signal", "interpolate", "interpolate-linear"], optional = true }
 
-# For audio file decoding in tests - NOT USED
-# symphonia = { version = "0.5", features = ["mp3", "wav"], optional = true }
-
-
 # Async runtime and utilities
 tokio = { version = "1.0", features = ["full"] }
-# async-trait = "0.1"  # NOT USED
-# futures = "0.3"      # NOT USED
 
 # Data structures and utilities
 uuid = { version = "1.0", features = ["v4", "serde"] }
-# bytes = "1.0"        # NOT USED
-# dashmap = "5.5"      # NOT USED
 serde = { version = "1.0", features = ["derive"] }
-# serde_json = "1.0"   # NOT USED
-# parking_lot = "0.12" # NOT USED
 
 # Logging and error handling
-# tracing = "0.1"      # NOT USED
-# anyhow = "1.0"       # NOT USED
 thiserror = "1.0"
 
 # Time and synchronization
