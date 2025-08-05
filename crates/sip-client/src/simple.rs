@@ -230,10 +230,7 @@ impl SipClient {
     pub async fn answer(&self, call_id: &CallId) -> SipClientResult<()> {
         let call = self.get_call(call_id)?;
         
-        // Create SDP answer
-        let sdp = self.create_sdp_answer(&call).await?;
-        
-        // Answer via client-core (this will send our SDP answer)
+        // Answer via client-core (it will generate its own SDP answer)
         self.inner.client.answer_call(call_id).await?;
         
         // Update call state
@@ -736,90 +733,6 @@ impl SipClient {
         Ok(sdp)
     }
     
-    async fn create_sdp_answer(&self, call: &Call) -> SipClientResult<String> {
-        // Get the remote SDP offer to base our answer on
-        let media_info = self.inner.client.get_call_media_info(&call.id).await
-            .map_err(|e| SipClientError::Internal {
-                message: format!("Failed to get media info: {}", e),
-            })?;
-        
-        // Parse remote SDP to extract codec preferences
-        let remote_codecs = if let Some(ref remote_sdp) = media_info.remote_sdp {
-            self.parse_codecs_from_sdp(remote_sdp)
-        } else {
-            vec![]
-        };
-        
-        // Get local IP from the configured address
-        let local_ip = self.inner.config.local_address.ip();
-        
-        // Use a proper RTP port (different from SIP port)
-        let rtp_port = self.inner.config.local_address.port() + 4000;
-        
-        // Build answer based on what codecs we support that the remote also supports
-        let mut supported_codecs = Vec::new();
-        let mut rtpmap_lines = Vec::new();
-        
-        // Check which codecs we both support
-        for codec in &remote_codecs {
-            match codec.as_str() {
-                "0" => {
-                    // PCMU - we support this
-                    supported_codecs.push("0");
-                    rtpmap_lines.push("a=rtpmap:0 PCMU/8000");
-                }
-                "8" => {
-                    // PCMA - we support this
-                    supported_codecs.push("8");
-                    rtpmap_lines.push("a=rtpmap:8 PCMA/8000");
-                }
-                _ => {
-                    // We don't support other codecs yet
-                }
-            }
-        }
-        
-        // If no common codecs, default to PCMU/PCMA
-        if supported_codecs.is_empty() {
-            supported_codecs.push("0");
-            supported_codecs.push("8");
-            rtpmap_lines.push("a=rtpmap:0 PCMU/8000");
-            rtpmap_lines.push("a=rtpmap:8 PCMA/8000");
-        }
-        
-        let codec_list = supported_codecs.join(" ");
-        let rtpmap_section = rtpmap_lines.join("\r\n");
-        
-        let sdp = format!(
-            "v=0\r\n\
-             o=- 0 0 IN IP4 {}\r\n\
-             s=-\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio {} RTP/AVP {}\r\n\
-             {}\r\n",
-            local_ip, local_ip, rtp_port, codec_list, rtpmap_section
-        );
-        
-        tracing::info!("📋 Created SDP answer with IP {} and RTP port {}", local_ip, rtp_port);
-        tracing::debug!("📄 SDP answer:\n{}", sdp);
-        Ok(sdp)
-    }
-    
-    fn parse_codecs_from_sdp(&self, sdp: &str) -> Vec<String> {
-        // Simple SDP parser to extract codec numbers from m=audio line
-        for line in sdp.lines() {
-            if line.starts_with("m=audio ") {
-                // Format: m=audio <port> RTP/AVP <codec1> <codec2> ...
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() > 3 {
-                    // Skip "m=audio", port, and "RTP/AVP"
-                    return parts[3..].iter().map(|s| s.to_string()).collect();
-                }
-            }
-        }
-        vec![]
-    }
     
     async fn setup_audio_pipeline(&self, call: &Arc<Call>) -> SipClientResult<()> {
         use rvoip_audio_core::pipeline::AudioPipeline;
