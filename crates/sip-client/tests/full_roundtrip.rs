@@ -244,6 +244,10 @@ async fn test_full_roundtrip_impl() {
     let peer_a_dir = test_dir.join("peer_a");
     let peer_b_dir = test_dir.join("peer_b");
     
+    // Actually create the directories
+    std::fs::create_dir_all(&peer_a_dir).expect("Failed to create peer_a directory");
+    std::fs::create_dir_all(&peer_b_dir).expect("Failed to create peer_b directory");
+    
     // Generate and save input WAV files
     info!("🎵 Generating test tones");
     let peer_a_samples = generate_tone(PEER_A_FREQUENCY, SAMPLE_RATE, DURATION_SECS);
