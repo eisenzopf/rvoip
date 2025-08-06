@@ -226,6 +226,18 @@ impl MediaSessionController {
     /// This method accepts raw PCM audio, encodes it using the configured codec,
     /// and sends it via RTP
     pub async fn encode_and_send_audio_frame(&self, dialog_id: &DialogId, pcm_samples: Vec<i16>, timestamp: u32) -> Result<()> {
+        // Check if transmission is enabled for this dialog
+        {
+            let rtp_sessions = self.rtp_sessions.read().await;
+            if let Some(wrapper) = rtp_sessions.get(dialog_id) {
+                if !wrapper.transmission_enabled {
+                    // Transmission is muted, don't send the packet
+                    debug!("🔇 Audio transmission muted for dialog: {}, dropping frame", dialog_id);
+                    return Ok(());
+                }
+            }
+        }
+        
         // Get session info to determine codec
         let codec_payload_type = {
             let sessions = self.sessions.read().await;
