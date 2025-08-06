@@ -198,6 +198,11 @@ pub struct AdvancedProcessorSet {
 }
 
 /// RTP session wrapper for MediaSessionController
+/// 
+/// This wrapper manages both the RTP session and its associated audio state.
+/// It supports two levels of audio control:
+/// - `transmission_enabled`: Whether to send any RTP packets at all
+/// - `is_muted`: Whether to replace audio with silence (while still sending RTP)
 pub struct RtpSessionWrapper {
     /// The actual RTP session
     pub session: Arc<tokio::sync::Mutex<RtpSession>>,
@@ -210,5 +215,14 @@ pub struct RtpSessionWrapper {
     /// Audio transmitter for outgoing audio
     pub audio_transmitter: Option<super::audio_generation::AudioTransmitter>,
     /// Whether audio transmission is enabled
+    /// 
+    /// When false, no RTP packets are sent at all. This is used when the
+    /// session is completely stopped or paused.
     pub transmission_enabled: bool,
+    /// Whether audio is muted (send silence instead of actual audio)
+    /// 
+    /// When true, RTP packets continue to be sent but audio samples are
+    /// replaced with silence. This maintains RTP flow for NAT traversal
+    /// and prevents remote endpoint timeouts.
+    pub is_muted: bool,
 } 

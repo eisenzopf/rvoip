@@ -2,6 +2,19 @@
 //!
 //! This module provides the high-level interface for session-core to control
 //! media sessions. It manages the lifecycle of media sessions tied to SIP dialogs.
+//!
+//! ## Audio Muting
+//!
+//! The controller implements production-ready audio muting using silence-based
+//! approach. When `set_audio_muted()` is called, the RTP stream continues but
+//! audio samples are replaced with silence before encoding. This maintains:
+//!
+//! - Continuous RTP sequence numbers and timestamps
+//! - NAT traversal and firewall state
+//! - Compatibility with all SIP endpoints
+//! - Instant mute/unmute without renegotiation
+//!
+//! Use `set_audio_muted()` and `is_audio_muted()` for muting functionality.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -360,6 +373,7 @@ impl MediaSessionController {
             created_at: std::time::Instant::now(),
             audio_transmitter: None,
             transmission_enabled: false,
+            is_muted: false,
         };
         
         // Create media session info

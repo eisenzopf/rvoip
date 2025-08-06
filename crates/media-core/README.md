@@ -485,6 +485,54 @@ The library provides cutting-edge audio processing algorithms competitive with c
 - **Codec Negotiation**: SDP capability exchange and matching
 - **Event Propagation**: Media events to SIP layer
 
+### Audio Muting Implementation
+
+The media-core library implements production-ready audio muting that maintains RTP flow by sending silence packets instead of dropping RTP transmission. This approach ensures compatibility with NAT traversal, firewalls, and all SIP endpoints.
+
+```rust
+use rvoip_media_core::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let controller = MediaSessionController::new();
+    let dialog_id = DialogId::new("call-123");
+    
+    // Start media session
+    controller.start_media(dialog_id.clone(), config).await?;
+    
+    // Mute audio - RTP continues with silence packets
+    controller.set_audio_muted(&dialog_id, true).await?;
+    
+    // Audio frames are now replaced with silence before encoding
+    // This maintains:
+    // - Continuous RTP sequence numbers and timestamps
+    // - NAT binding keepalive (prevents timeout)
+    // - Remote endpoint connectivity
+    // - Codec state consistency
+    
+    // Check mute status
+    let is_muted = controller.is_audio_muted(&dialog_id).await?;
+    
+    // Unmute to resume normal audio
+    controller.set_audio_muted(&dialog_id, false).await?;
+    
+    Ok(())
+}
+```
+
+**Technical Implementation:**
+- **Silence Generation**: PCM samples replaced with zeros before codec encoding
+- **Codec Compatibility**: Works with all codecs (G.711, Opus, G.729)
+- **State Tracking**: Per-session mute state in `RtpSessionWrapper`
+- **Processing Pipeline**: Muting occurs in `encode_and_send_audio_frame()`
+
+**Key Benefits:**
+- **NAT Traversal**: Prevents binding timeouts by maintaining packet flow
+- **Compatibility**: Works with all SIP endpoints and middleboxes
+- **Instant Toggle**: No renegotiation required for mute/unmute
+- **Professional Quality**: Follows VoIP industry best practices
+- **No Packet Loss**: Remote endpoint sees continuous RTP stream
+
 ### RTP-Core Integration
 
 - **MediaTransport**: Seamless RTP packet handling

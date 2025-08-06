@@ -745,6 +745,7 @@ Initializing → Dialing → Ringing → Connected → OnHold → Transferring �
 - **Quality Monitoring**: MOS scores, jitter, packet loss from real media
 - **RTP Coordination**: Automatic RTP session creation and cleanup
 - **Audio Processing**: Echo cancellation, noise suppression integration
+- **Silence-Based Muting**: Production-ready muting that maintains RTP flow
 
 ### Dialog-Core Integration
 

@@ -2,6 +2,18 @@
 //!
 //! This module handles all RTP-related operations including session management,
 //! packet transmission, remote address updates, and media flow control.
+//!
+//! # Muting Behavior
+//! 
+//! Audio muting is implemented by sending silence packets rather than stopping
+//! RTP transmission. This approach:
+//! - Maintains continuous RTP flow preventing NAT timeouts
+//! - Preserves sequence numbers and timestamps
+//! - Ensures compatibility with all SIP endpoints
+//! - Provides instant mute/unmute without renegotiation
+//!
+//! When `set_audio_muted(true)` is called, subsequent audio frames are replaced
+//! with silence (PCM zeros) before encoding and transmission.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -148,6 +160,51 @@ impl MediaSessionController {
         Ok(())
     }
     
+    /// Set audio muted state for a dialog (send silence when muted)
+    /// 
+    /// When muted, the RTP stream continues but audio frames are replaced with
+    /// silence before encoding. This maintains RTP flow and prevents issues with
+    /// NAT traversal, session timers, and remote endpoint timeout detection.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `dialog_id` - The dialog/session to mute or unmute
+    /// * `muted` - `true` to mute (send silence), `false` to unmute (send actual audio)
+    /// 
+    /// # Returns
+    /// 
+    /// Returns `Ok(())` if the mute state was successfully updated, or an error if
+    /// the dialog was not found.
+    /// 
+    /// # Example
+    /// 
+    /// ```no_run
+    /// # use media_core::relay::controller::MediaSessionController;
+    /// # use media_core::types::DialogId;
+    /// # async fn example(controller: &MediaSessionController) -> Result<(), Box<dyn std::error::Error>> {
+    /// let dialog_id = DialogId::new("call-123");
+    /// 
+    /// // Mute the microphone (start sending silence)
+    /// controller.set_audio_muted(&dialog_id, true).await?;
+    /// 
+    /// // Later, unmute to resume normal audio
+    /// controller.set_audio_muted(&dialog_id, false).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn set_audio_muted(&self, dialog_id: &DialogId, muted: bool) -> Result<()> {
+        info!("🔇 Setting audio muted={} for dialog: {}", muted, dialog_id);
+        
+        let mut rtp_sessions = self.rtp_sessions.write().await;
+        let wrapper = rtp_sessions.get_mut(dialog_id)
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        
+        wrapper.is_muted = muted;
+        
+        info!("✅ Audio muted={} set for dialog: {}", muted, dialog_id);
+        Ok(())
+    }
+    
     /// Check if audio transmission is active for a dialog
     pub async fn is_audio_transmission_active(&self, dialog_id: &DialogId) -> bool {
         let rtp_sessions = self.rtp_sessions.read().await;
@@ -223,20 +280,63 @@ impl MediaSessionController {
     }
     
     /// Encode and send audio frame (for session-core to delegate encoding)
+    /// 
     /// This method accepts raw PCM audio, encodes it using the configured codec,
-    /// and sends it via RTP
+    /// and sends it via RTP. If the session is muted, the audio samples are replaced
+    /// with silence before encoding to maintain continuous RTP flow.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `dialog_id` - The dialog/session to send audio for
+    /// * `pcm_samples` - Raw 16-bit PCM audio samples
+    /// * `timestamp` - RTP timestamp for the audio frame
+    /// 
+    /// # Behavior
+    /// 
+    /// - If `transmission_enabled` is false, the frame is dropped entirely
+    /// - If `is_muted` is true, the PCM samples are replaced with zeros (silence)
+    /// - The (possibly silenced) audio is then encoded according to the session's codec
+    /// - The encoded packet is sent via RTP
+    /// 
+    /// # Example
+    /// 
+    /// ```no_run
+    /// # use media_core::relay::controller::MediaSessionController;
+    /// # use media_core::types::DialogId;
+    /// # async fn example(controller: &MediaSessionController) -> Result<(), Box<dyn std::error::Error>> {
+    /// let dialog_id = DialogId::new("call-123");
+    /// let audio_samples = vec![0i16; 160]; // 20ms of audio at 8kHz
+    /// let timestamp = 12345u32;
+    /// 
+    /// // This will send silence if muted, or the actual audio if not muted
+    /// controller.encode_and_send_audio_frame(&dialog_id, audio_samples, timestamp).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn encode_and_send_audio_frame(&self, dialog_id: &DialogId, pcm_samples: Vec<i16>, timestamp: u32) -> Result<()> {
-        // Check if transmission is enabled for this dialog
-        {
+        // Check if transmission is enabled and if audio is muted
+        let (is_muted, is_enabled) = {
             let rtp_sessions = self.rtp_sessions.read().await;
             if let Some(wrapper) = rtp_sessions.get(dialog_id) {
-                if !wrapper.transmission_enabled {
-                    // Transmission is muted, don't send the packet
-                    debug!("🔇 Audio transmission muted for dialog: {}, dropping frame", dialog_id);
-                    return Ok(());
-                }
+                (wrapper.is_muted, wrapper.transmission_enabled)
+            } else {
+                (false, true)
             }
+        };
+        
+        if !is_enabled {
+            // Transmission is disabled, don't send anything
+            debug!("🔇 Audio transmission disabled for dialog: {}, dropping frame", dialog_id);
+            return Ok(());
         }
+        
+        // Replace with silence if muted
+        let pcm_samples = if is_muted {
+            debug!("🔇 Audio muted for dialog: {}, sending silence", dialog_id);
+            vec![0i16; pcm_samples.len()]  // PCM silence is zero
+        } else {
+            pcm_samples
+        };
         
         // Get session info to determine codec
         let codec_payload_type = {
