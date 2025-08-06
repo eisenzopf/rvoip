@@ -34,6 +34,8 @@ Session.vim
 Cargo.lock
 Cargo.backup
 *.wav
+# Test output directories
+crates/sip-client/tests/full_roundtrip/
 
 ## Tool
 .valgrindrc
