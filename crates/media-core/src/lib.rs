@@ -11,6 +11,19 @@
 //! - **Codec Framework**: Audio codec support (G.711, Opus, etc.)
 //! - **Audio Processing**: AEC, AGC, VAD, noise suppression
 //! - **Quality Monitoring**: Real-time quality metrics and adaptation
+//! 
+//! ## Audio Muting
+//! 
+//! The media-core library implements silence-based muting that maintains continuous
+//! RTP packet flow. When a session is muted, audio samples are replaced with silence
+//! before encoding, preserving:
+//! 
+//! - RTP sequence numbers and timestamps
+//! - NAT traversal and binding keepalive
+//! - Compatibility with all SIP endpoints
+//! - Instant mute/unmute without renegotiation
+//! 
+//! Use `MediaSessionController::set_audio_muted()` for production-ready muting.
 //!
 //! ## Quick Start
 //!

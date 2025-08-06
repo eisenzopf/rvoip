@@ -2,6 +2,15 @@
 //!
 //! Main interface for media operations, using real MediaSessionController from media-core.
 //! This manager coordinates between SIP sessions and media-core components.
+//!
+//! # Audio Muting
+//!
+//! The MediaManager supports silence-based muting through the `set_audio_muted` method.
+//! When muted, RTP packets continue to flow but contain silence, maintaining:
+//! - NAT traversal and keepalive
+//! - Continuous sequence numbers
+//! - Compatibility with all endpoints
+//! - Instant mute/unmute without renegotiation
 
 use crate::api::types::SessionId;
 use crate::errors::Result;
@@ -797,6 +806,24 @@ impl MediaManager {
             .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
         
         tracing::info!("✅ Stopped audio transmission for session: {}", session_id);
+        Ok(())
+    }
+    
+    /// Set audio muted state for a session (send silence when muted)
+    pub async fn set_audio_muted(&self, session_id: &SessionId, muted: bool) -> super::MediaResult<()> {
+        tracing::debug!("Setting audio muted={} for session: {}", muted, session_id);
+        
+        // Find dialog ID for this session
+        let dialog_id = {
+            let mapping = self.session_mapping.read().await;
+            mapping.get(session_id).cloned()
+                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+        };
+        
+        self.controller.set_audio_muted(&dialog_id, muted).await
+            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        
+        tracing::info!("✅ Set audio muted={} for session: {}", muted, session_id);
         Ok(())
     }
     

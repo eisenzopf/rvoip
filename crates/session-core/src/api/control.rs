@@ -135,19 +135,33 @@
 //!         "1234#"
 //!     ).await?;
 //!     
-//!     // 5. Hold the call
+//!     // 5. Mute the microphone (sends silence packets)
+//!     SessionControl::set_audio_muted(
+//!         &coordinator,
+//!         session.id(),
+//!         true
+//!     ).await?;
+//!     
+//!     // 6. Hold the call
 //!     SessionControl::hold_session(
 //!         &coordinator,
 //!         session.id()
 //!     ).await?;
 //!     
-//!     // 6. Resume the call
+//!     // 7. Resume the call
 //!     SessionControl::resume_session(
 //!         &coordinator,
 //!         session.id()
 //!     ).await?;
 //!     
-//!     // 7. End the call
+//!     // 8. Unmute the microphone
+//!     SessionControl::set_audio_muted(
+//!         &coordinator,
+//!         session.id(),
+//!         false
+//!     ).await?;
+//!     
+//!     // 9. End the call
 //!     SessionControl::terminate_session(
 //!         &coordinator,
 //!         session.id()
@@ -263,7 +277,25 @@ pub trait SessionControl {
     /// Get media information for a session
     async fn get_media_info(&self, session_id: &SessionId) -> Result<Option<MediaInfo>>;
     
-    /// Mute/unmute audio
+    /// Mute/unmute audio for a session
+    /// 
+    /// This implements silence-based muting where RTP packets continue to flow
+    /// but audio is replaced with silence. This approach maintains NAT bindings
+    /// and is compatible with all SIP endpoints.
+    /// 
+    /// # Arguments
+    /// * `session_id` - The session to mute/unmute
+    /// * `muted` - `true` to send silence, `false` to send normal audio
+    /// 
+    /// # Behavior
+    /// - RTP packets continue flowing to prevent NAT timeouts
+    /// - Audio frames are replaced with silence when muted
+    /// - No SIP renegotiation required
+    /// - Instant mute/unmute effect
+    /// 
+    /// # Returns
+    /// Returns `Ok(())` on success, or an error if the session doesn't exist
+    /// or is in an invalid state
     async fn set_audio_muted(&self, session_id: &SessionId, muted: bool) -> Result<()>;
     
     /// Enable/disable video
@@ -649,18 +681,11 @@ impl SessionControl for Arc<SessionCoordinator> {
             ));
         }
         
-        // For now, we'll use the media manager to stop/start audio transmission
-        if muted {
-            self.media_manager.stop_audio_transmission(session_id).await
-                .map_err(|e| SessionError::MediaIntegration { 
-                    message: format!("Failed to mute audio: {}", e) 
-                })?;
-        } else {
-            self.media_manager.start_audio_transmission(session_id).await
-                .map_err(|e| SessionError::MediaIntegration { 
-                    message: format!("Failed to unmute audio: {}", e) 
-                })?;
-        }
+        // Use the media manager to set mute state (sends silence when muted)
+        self.media_manager.set_audio_muted(session_id, muted).await
+            .map_err(|e| SessionError::MediaIntegration { 
+                message: format!("Failed to set audio mute state: {}", e) 
+            })?;
         
         // Send media event
         let _ = self.event_tx.send(SessionEvent::MediaEvent {
