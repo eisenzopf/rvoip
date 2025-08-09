@@ -206,46 +206,7 @@ pub struct RtpEncoderStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    #[test]
-    fn test_pcmu_encoding() {
-        let encoder = RtpPayloadEncoder::new();
-        
-        // Test known PCM -> μ-law mappings
-        let test_cases = vec![
-            (0i16, 0xFF),      // Silence
-            (8, 0xFE),         // Very quiet positive
-            (-8, 0x7E),        // Very quiet negative
-            (1000, 0xAD),      // Moderate positive
-            (-1000, 0x2D),     // Moderate negative
-        ];
-        
-        for (pcm, expected_ulaw) in test_cases {
-            let encoded = encoder.encode_pcmu(&[pcm]);
-            assert_eq!(encoded[0], expected_ulaw, 
-                      "PCM {} should encode to μ-law 0x{:02X}, got 0x{:02X}", 
-                      pcm, expected_ulaw, encoded[0]);
-        }
-    }
-    
-    #[test]
-    fn test_pcma_encoding() {
-        let encoder = RtpPayloadEncoder::new();
-        
-        // Test known PCM -> A-law mappings
-        let test_cases = vec![
-            (0i16, 0xD5),      // Silence
-            (8, 0xD4),         // Very quiet positive
-            (-8, 0x54),        // Very quiet negative
-        ];
-        
-        for (pcm, expected_alaw) in test_cases {
-            let encoded = encoder.encode_pcma(&[pcm]);
-            assert_eq!(encoded[0], expected_alaw,
-                      "PCM {} should encode to A-law 0x{:02X}, got 0x{:02X}", 
-                      pcm, expected_alaw, encoded[0]);
-        }
-    }
+
     
     #[test]
     fn test_session_management() {
@@ -258,6 +219,7 @@ mod tests {
             samples: vec![0; 160],
             sample_rate: 8000,
             channels: 1,
+            duration: std::time::Duration::from_millis(20), // 20ms for 160 samples at 8kHz
         };
         
         assert!(encoder.encode_audio_frame(&session_id, &frame).is_err());

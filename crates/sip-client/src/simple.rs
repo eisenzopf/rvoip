@@ -299,11 +299,15 @@ impl SipClient {
         self.inner.client.hold_call(call_id).await?;
         
         if let Some(call) = self.inner.calls.read().get(call_id) {
+            let previous_state = *call.state.read();
             *call.state.write() = CallState::OnHold;
             
-            // Emit hold event
-            self.inner.events.emit(SipClientEvent::CallOnHold {
+            // Emit state change event
+            self.inner.events.emit(SipClientEvent::CallStateChanged {
                 call: call.clone(),
+                previous_state,
+                new_state: CallState::OnHold,
+                reason: Some("Call put on hold".to_string()),
             });
             
             tracing::info!("⏸️ Call {} put on hold", call_id);
@@ -317,11 +321,15 @@ impl SipClient {
         self.inner.client.resume_call(call_id).await?;
         
         if let Some(call) = self.inner.calls.read().get(call_id) {
+            let previous_state = *call.state.read();
             *call.state.write() = CallState::Connected;
             
-            // Emit resume event
-            self.inner.events.emit(SipClientEvent::CallResumed {
+            // Emit state change event
+            self.inner.events.emit(SipClientEvent::CallStateChanged {
                 call: call.clone(),
+                previous_state,
+                new_state: CallState::Connected,
+                reason: Some("Call resumed".to_string()),
             });
             
             tracing::info!("▶️ Call {} resumed", call_id);
@@ -622,11 +630,16 @@ impl SipClient {
     // Helper methods
     
     async fn create_client(config: &SipClientConfig) -> SipClientResult<Arc<rvoip_client_core::Client>> {
-        let client = rvoip_client_core::ClientBuilder::new()
+        let mut builder = rvoip_client_core::ClientBuilder::new()
             .local_address(config.local_address)
-            .user_agent(&config.user_agent)
-            .build()
-            .await?;
+            .user_agent(&config.user_agent);
+        
+        // Add music-on-hold file if configured
+        if let Some(ref path) = config.music_on_hold_path {
+            builder = builder.with_music_on_hold_file(path);
+        }
+        
+        let client = builder.build().await?;
         
         client.start().await?;
         

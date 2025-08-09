@@ -121,6 +121,10 @@ pub struct MediaConfig {
     /// Enable automatic gain control
     pub auto_gain_control: bool,
     
+    /// Path to music-on-hold WAV file
+    /// If None, silence will be sent during hold
+    pub music_on_hold_path: Option<std::path::PathBuf>,
+    
     /// Maximum bandwidth in kbps
     pub max_bandwidth_kbps: Option<u32>,
     
@@ -141,6 +145,7 @@ impl Default for MediaConfig {
             echo_cancellation: true,
             noise_suppression: true,
             auto_gain_control: true,
+            music_on_hold_path: None,
             max_bandwidth_kbps: None,
             preferred_ptime: Some(20),
             custom_sdp_attributes: std::collections::HashMap::new(),

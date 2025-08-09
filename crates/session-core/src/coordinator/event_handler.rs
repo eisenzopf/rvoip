@@ -141,12 +141,13 @@ impl SessionCoordinator {
         old_state: CallState,
         new_state: CallState,
     ) -> Result<()> {
-        tracing::info!("Session {} state changed: {:?} -> {:?}", session_id, old_state, new_state);
+        println!("🔄 handle_state_changed called: {} {:?} -> {:?}", session_id, old_state, new_state);
 
         match (old_state, new_state.clone()) {
             // Call becomes active
             (CallState::Ringing, CallState::Active) |
             (CallState::Initiating, CallState::Active) => {
+                println!("📞 Starting media session for newly active call: {}", session_id);
                 self.start_media_session(&session_id).await?;
                 
                 // Notify handler that call is established
@@ -164,8 +165,17 @@ impl SessionCoordinator {
                         let local_sdp = media_info.as_ref().and_then(|m| m.local_sdp.clone());
                         let remote_sdp = media_info.as_ref().and_then(|m| m.remote_sdp.clone());
                         
+                        // Store SDP in the registry so hold/resume can access it
+                        if local_sdp.is_some() || remote_sdp.is_some() {
+                            if let Err(e) = self.registry.update_session_sdp(&session_id, local_sdp.clone(), remote_sdp.clone()).await {
+                                tracing::error!("Failed to store SDP in registry: {}", e);
+                            } else {
+                                tracing::info!("Stored SDP in registry for session {}", session_id);
+                            }
+                        }
+                        
                         tracing::info!("Notifying handler about call {} establishment", session_id);
-                        handler.on_call_established(session, local_sdp, remote_sdp).await;
+                        handler.on_call_established(session.as_call_session().clone(), local_sdp, remote_sdp).await;
                     }
                 }
             }
@@ -207,16 +217,15 @@ impl SessionCoordinator {
         self.stop_media_session(&session_id).await?;
 
         // Update session state to Terminated before notifying handler
-        let mut session_for_handler = None;
-        if let Ok(Some(mut session)) = self.registry.get_session(&session_id).await {
-            let old_state = session.state.clone();
-            session.state = CallState::Terminated;
+        let mut call_session_for_handler = None;
+        if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+            let old_state = session.state().clone();
             
-            // Store the session for handler notification
-            session_for_handler = Some(session.clone());
+            // Store the call session for handler notification
+            call_session_for_handler = Some(session.as_call_session().clone());
             
-            // Update the session in registry
-            if let Err(e) = self.registry.register_session(session_id.clone(), session).await {
+            // Update the session state in registry
+            if let Err(e) = self.registry.update_session_state(&session_id, CallState::Terminated).await {
                 tracing::error!("Failed to update session to Terminated state: {}", e);
             } else {
                 // Emit state change event
@@ -231,10 +240,10 @@ impl SessionCoordinator {
         // Notify handler
         if let Some(handler) = &self.handler {
             println!("🔔 COORDINATOR: Handler exists, checking for session {}", session_id);
-            if let Some(session) = session_for_handler {
+            if let Some(call_session) = call_session_for_handler {
                 println!("✅ COORDINATOR: Found session {}, calling handler.on_call_ended", session_id);
                 tracing::info!("Notifying handler about session {} termination", session_id);
-                handler.on_call_ended(session, &reason).await;
+                handler.on_call_ended(call_session, &reason).await;
             } else {
                 println!("❌ COORDINATOR: Session {} not found in registry", session_id);
             }
@@ -262,14 +271,12 @@ impl SessionCoordinator {
                 tracing::info!("Media creation event for {}: {}", session_id, event);
                 
                 // Just update session state to Active - the state change handler will create media
-                if let Ok(Some(mut session)) = self.registry.get_session(&session_id).await {
-                    let old_state = session.state.clone();
+                if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                    let old_state = session.state().clone();
                     
                     // Only update if not already Active
                     if !matches!(old_state, CallState::Active) {
-                        session.state = CallState::Active;
-                        
-                        if let Err(e) = self.registry.register_session(session_id.clone(), session).await {
+                        if let Err(e) = self.registry.update_session_state(&session_id, CallState::Active).await {
                             tracing::error!("Failed to update session state: {}", e);
                         } else {
                             // Publish state change event - this will trigger media creation
@@ -321,6 +328,13 @@ impl SessionCoordinator {
                                         tracing::error!("Failed to update media session with remote SDP: {}", e);
                                     } else {
                                         tracing::info!("Updated media session with remote SDP for session {}", session_id);
+                                        
+                                        // Store the negotiated SDP in the registry
+                                        if let Err(e) = self.registry.update_session_sdp(&session_id, Some(our_offer.clone()), Some(sdp.clone())).await {
+                                            tracing::error!("Failed to store negotiated SDP in registry: {}", e);
+                                        } else {
+                                            tracing::info!("Stored negotiated SDP in registry for session {}", session_id);
+                                        }
                                         
                                         // Now establish media flow to the remote endpoint
                                         // The establish_media_flow will also start audio transmission
@@ -424,6 +438,13 @@ impl SessionCoordinator {
                                 tracing::error!("Failed to update media session with remote SDP: {}", e);
                             } else {
                                 tracing::info!("Updated media session with remote SDP (offer) for session {}", session_id);
+                                
+                                // Store the negotiated SDP in the registry
+                                if let Err(e) = self.registry.update_session_sdp(&session_id, Some(our_answer.clone()), Some(their_offer.clone())).await {
+                                    tracing::error!("Failed to store negotiated SDP in registry: {}", e);
+                                } else {
+                                    tracing::info!("Stored negotiated SDP in registry for session {}", session_id);
+                                }
                             }
                             
                             // Send event with the generated answer

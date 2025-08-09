@@ -38,7 +38,7 @@ fn test_audio_frame_utility_methods() {
     
     // Verify duration calculation
     let expected_duration_ms = 4.0 * 1000.0 / 8000.0; // 4 samples at 8kHz
-    assert!((mono_frame.duration_ms() - expected_duration_ms).abs() < 0.001);
+    assert!((mono_frame.duration.as_secs_f64() * 1000.0 - expected_duration_ms).abs() < 0.001);
     
     // Test stereo frame
     let stereo_frame = AudioFrame::new(vec![1, 2, 3, 4, 5, 6], 16000, 2, 0);
@@ -48,10 +48,10 @@ fn test_audio_frame_utility_methods() {
     
     // Verify duration calculation for stereo
     let expected_stereo_duration_ms = 3.0 * 1000.0 / 16000.0; // 3 samples per channel at 16kHz
-    assert!((stereo_frame.duration_ms() - expected_stereo_duration_ms).abs() < 0.001);
+    assert!((stereo_frame.duration.as_secs_f64() * 1000.0 - expected_stereo_duration_ms).abs() < 0.001);
     
-    // Test Duration method
-    let duration = mono_frame.duration();
+    // Test Duration field
+    let duration = mono_frame.duration;
     let expected_duration = Duration::from_secs_f64(expected_duration_ms / 1000.0);
     assert!((duration.as_secs_f64() - expected_duration.as_secs_f64()).abs() < 0.001);
     
@@ -261,7 +261,7 @@ fn test_realistic_audio_streaming_scenario() {
     
     // Verify duration is approximately 20ms
     let expected_duration_ms = 20.0;
-    assert!((session_frame.duration_ms() - expected_duration_ms).abs() < 0.1);
+    assert!((session_frame.duration.as_secs_f64() * 1000.0 - expected_duration_ms).abs() < 0.1);
     
     // Test conversion to media-core frame
     let media_frame: rvoip_media_core::AudioFrame = session_frame.clone().into();

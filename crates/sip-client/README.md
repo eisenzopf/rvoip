@@ -197,6 +197,37 @@ match event {
 - Conference calls
 - Video calls
 
+## Testing
+
+The sip-client crate includes comprehensive tests, including integration tests that simulate full audio roundtrips between SIP clients.
+
+### Running All Tests
+
+Some tests require the `test-audio` feature to be enabled. To run all tests including the full roundtrip test:
+
+```bash
+# Using cargo alias (recommended)
+cargo test-all
+
+# Or explicitly with features
+cargo test --features test-audio
+
+# Or use the provided script
+./run-all-tests.sh
+```
+
+### Running Specific Tests
+
+```bash
+# Run just the full roundtrip test
+cargo test-roundtrip
+
+# Run tests with all features
+cargo test-everything
+```
+
+The full roundtrip test (`tests/full_roundtrip.rs`) creates two SIP clients that exchange audio through WAV files, providing end-to-end validation of the audio pipeline.
+
 ## Troubleshooting
 
 ### "Not receiving audio"

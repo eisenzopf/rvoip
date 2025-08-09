@@ -58,6 +58,9 @@ pub mod performance; // New performance optimization module
 pub mod codec;
 pub mod relay;
 
+// Audio utilities
+pub mod audio;
+
 // Re-export core types
 pub use error::{Error, Result};
 pub use types::*;

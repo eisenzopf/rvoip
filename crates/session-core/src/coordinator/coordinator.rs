@@ -10,10 +10,10 @@ use crate::api::{
 };
 use crate::errors::{Result, SessionError};
 use crate::manager::{
-    registry::SessionRegistry,
     events::{SessionEventProcessor, SessionEvent},
     cleanup::CleanupManager,
 };
+use super::registry::InternalSessionRegistry;
 use crate::dialog::{DialogManager, SessionDialogCoordinator, DialogBuilder};
 use crate::media::{MediaManager, SessionMediaCoordinator};
 use crate::conference::{ConferenceManager};
@@ -25,7 +25,7 @@ use dashmap::DashMap;
 /// The main coordinator for the entire session system
 pub struct SessionCoordinator {
     // Core services
-    pub registry: Arc<SessionRegistry>,
+    pub registry: Arc<InternalSessionRegistry>,
     pub event_processor: Arc<SessionEventProcessor>,
     pub cleanup_manager: Arc<CleanupManager>,
     
@@ -64,7 +64,7 @@ impl SessionCoordinator {
         handler: Option<Arc<dyn CallHandler>>,
     ) -> Result<Arc<Self>> {
         // Create core services
-        let registry = Arc::new(SessionRegistry::new());
+        let registry = Arc::new(InternalSessionRegistry::new());
         let event_processor = Arc::new(SessionEventProcessor::new());
         let cleanup_manager = Arc::new(CleanupManager::new());
 
@@ -92,6 +92,7 @@ impl SessionCoordinator {
             echo_cancellation: config.media_config.echo_cancellation,
             noise_suppression: config.media_config.noise_suppression,
             auto_gain_control: config.media_config.auto_gain_control,
+            music_on_hold_path: config.media_config.music_on_hold_path.clone(),
             max_bandwidth_kbps: config.media_config.max_bandwidth_kbps,
             preferred_ptime: config.media_config.preferred_ptime,
             custom_sdp_attributes: config.media_config.custom_sdp_attributes.clone(),
@@ -220,15 +221,31 @@ impl SessionCoordinator {
 
     /// Start media session
     pub(crate) async fn start_media_session(&self, session_id: &SessionId) -> Result<()> {
-        // Check if media session already exists
+        println!("🚀 start_media_session called for {}", session_id);
+        
+        // Check if media session already exists for THIS specific session
         if let Ok(Some(_)) = self.media_manager.get_media_info(session_id).await {
-            tracing::debug!("Media session already exists for {}, skipping creation", session_id);
+            println!("⏭️ Media session already exists for {}, skipping duplicate creation", session_id);
             return Ok(());
         }
         
-        self.media_coordinator.on_session_created(session_id).await
-            .map_err(|e| SessionError::internal(&format!("Failed to start media: {}", e)))?;
-        Ok(())
+        // Also check if session mapping exists directly for THIS specific session
+        if self.media_manager.has_session_mapping(session_id).await {
+            println!("⏭️ Session mapping exists for {}, skipping media creation", session_id);
+            return Ok(());
+        }
+        
+        println!("🎬 Creating new media session for {}", session_id);
+        match self.media_coordinator.on_session_created(session_id).await {
+            Ok(()) => {
+                println!("✅ Successfully started media session for {}", session_id);
+                Ok(())
+            }
+            Err(e) => {
+                println!("❌ FAILED to create media session for {}: {}", session_id, e);
+                Err(SessionError::internal(&format!("Failed to start media: {}", e)))
+            }
+        }
     }
 
     /// Stop media session
@@ -299,6 +316,55 @@ impl SessionCoordinator {
     pub fn event_processor(&self) -> Option<Arc<SessionEventProcessor>> {
         Some(self.event_processor.clone())
     }
+    
+    /// Start music-on-hold for a session
+    pub(crate) async fn start_music_on_hold(&self, session_id: &SessionId) -> Result<()> {
+        // Check if MoH file is configured
+        if let Some(moh_path) = &self.config.media_config.music_on_hold_path {
+            tracing::info!("Starting music-on-hold from: {}", moh_path.display());
+            
+            // Load WAV file using media-core
+            match rvoip_media_core::audio::load_music_on_hold(moh_path).await {
+                Ok(ulaw_samples) => {
+                    // Start transmitting MoH
+                    self.media_manager.start_audio_transmission_with_custom_audio(
+                        session_id,
+                        ulaw_samples,
+                        true  // repeat the music
+                    ).await
+                    .map_err(|e| SessionError::MediaIntegration { 
+                        message: format!("Failed to start MoH transmission: {}", e) 
+                    })?;
+                    
+                    tracing::info!("Music-on-hold started for session: {}", session_id);
+                    Ok(())
+                }
+                Err(e) => {
+                    // Return error so caller can fallback to mute
+                    Err(SessionError::MediaIntegration { 
+                        message: format!("Failed to load MoH file: {}", e) 
+                    })
+                }
+            }
+        } else {
+            // No MoH configured, return error so caller uses mute
+            Err(SessionError::ConfigError(
+                "No music-on-hold file configured".to_string()
+            ))
+        }
+    }
+    
+    /// Stop music-on-hold and resume microphone audio
+    pub(crate) async fn stop_music_on_hold(&self, session_id: &SessionId) -> Result<()> {
+        // Resume normal microphone audio
+        self.media_manager.start_audio_transmission(session_id).await
+            .map_err(|e| SessionError::MediaIntegration { 
+                message: format!("Failed to resume microphone audio: {}", e) 
+            })?;
+        
+        tracing::info!("Music-on-hold stopped, microphone resumed for session: {}", session_id);
+        Ok(())
+    }
 }
 
 impl std::fmt::Debug for SessionCoordinator {
@@ -308,4 +374,4 @@ impl std::fmt::Debug for SessionCoordinator {
             .field("has_handler", &self.handler.is_some())
             .finish()
     }
-} 
+}

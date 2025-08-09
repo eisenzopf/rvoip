@@ -108,6 +108,12 @@ impl SipClientBuilder {
         self
     }
     
+    /// Set music-on-hold WAV file path
+    pub fn music_on_hold_file(mut self, path: &std::path::Path) -> Self {
+        self.config.music_on_hold_path = Some(path.to_path_buf());
+        self
+    }
+    
     /// Build the SIP client
     #[cfg(feature = "simple-api")]
     pub async fn build(self) -> SipClientResult<crate::simple::SipClient> {

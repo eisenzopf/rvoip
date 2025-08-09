@@ -9,11 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::types::{SessionId, CallSession};
-use crate::bridge::types::{BridgeId, BridgeConfig};
-use crate::manager::SessionManager;
 use crate::errors::Result;
 
-use super::bridge::{BridgeInfo, BridgeEvent};
+use super::bridge::{BridgeId, BridgeInfo, BridgeEvent};
 
 /// Server-oriented session manager with bridge capabilities
 #[async_trait]
@@ -38,9 +36,6 @@ pub trait ServerSessionManager: Send + Sync {
     
     /// Create a pre-allocated outgoing session (for agent registration)
     async fn create_outgoing_session(&self) -> Result<SessionId>;
-    
-    /// Get underlying session manager for basic operations
-    fn session_manager(&self) -> &SessionManager;
 }
 
 /// Configuration for server-oriented session management

@@ -179,6 +179,8 @@ pub struct SipClientConfig {
     pub test_audio_buffers: Option<Arc<crate::test_audio::TestAudioBuffers>>,
     /// Registration TTL in seconds
     pub registration_ttl: u32,
+    /// Path to music-on-hold WAV file
+    pub music_on_hold_path: Option<std::path::PathBuf>,
 }
 
 impl Default for SipClientConfig {
@@ -197,6 +199,7 @@ impl Default for SipClientConfig {
             #[cfg(feature = "test-audio")]
             test_audio_buffers: None,
             registration_ttl: 3600,
+            music_on_hold_path: None,
         }
     }
 }

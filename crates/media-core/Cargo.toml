@@ -64,6 +64,9 @@ biquad = "0.4"               # Used in AGC v2 for digital filters
 opus = { version = "0.3", optional = true }
 # g729 = { version = "0.3", optional = true }  # Commented out due to missing dependency
 
+# WAV file support
+hound = "3.5"
+
 [features]
 default = ["pcmu", "pcma"]
 pcmu = []
@@ -75,4 +78,6 @@ all-codecs = ["pcmu", "pcma", "g722", "opus"]  # removed g729 due to missing dep
 
 [dev-dependencies]
 tokio-test = "0.4"
-serial_test = "3.0" 
+serial_test = "3.0"
+tempfile = "3.8"
+reqwest = { version = "0.11", features = ["blocking"] } 

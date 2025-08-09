@@ -179,8 +179,8 @@ impl MediaSessionController {
     /// # Example
     /// 
     /// ```no_run
-    /// # use media_core::relay::controller::MediaSessionController;
-    /// # use media_core::types::DialogId;
+    /// # use rvoip_media_core::relay::controller::MediaSessionController;
+    /// # use rvoip_media_core::types::DialogId;
     /// # async fn example(controller: &MediaSessionController) -> Result<(), Box<dyn std::error::Error>> {
     /// let dialog_id = DialogId::new("call-123");
     /// 
@@ -301,8 +301,8 @@ impl MediaSessionController {
     /// # Example
     /// 
     /// ```no_run
-    /// # use media_core::relay::controller::MediaSessionController;
-    /// # use media_core::types::DialogId;
+    /// # use rvoip_media_core::relay::controller::MediaSessionController;
+    /// # use rvoip_media_core::types::DialogId;
     /// # async fn example(controller: &MediaSessionController) -> Result<(), Box<dyn std::error::Error>> {
     /// let dialog_id = DialogId::new("call-123");
     /// let audio_samples = vec![0i16; 160]; // 20ms of audio at 8kHz
