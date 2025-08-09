@@ -113,14 +113,14 @@ pub use errors::{SessionError, Result};
 pub use api::*;
 
 // Re-export SessionManager for direct access
-pub use manager::SessionManager;
+// pub use manager::SessionManager; // Using coordinator directly
 
 // Prelude module for common imports
 pub mod prelude {
     pub use crate::api::*;
     pub use crate::errors::{SessionError, Result};
     pub use crate::manager::events::{SessionEvent, SessionEventProcessor};
-    pub use crate::manager::SessionManager;
+    // pub use crate::manager::SessionManager; // Disabled - using SessionCoordinator directly
     pub use crate::dialog::DialogManager;  // NEW
     pub use crate::conference::prelude::*; // NEW - Conference functionality
     

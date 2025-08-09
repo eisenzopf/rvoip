@@ -17,6 +17,7 @@ pub mod types;
 pub mod bridge;
 pub mod stats;
 pub mod rtp_encoder;
+pub mod sdp_utils;
 
 // Re-exports for convenience
 pub use manager::MediaManager;
@@ -24,6 +25,13 @@ pub use coordinator::SessionMediaCoordinator;
 pub use types::*;
 pub use bridge::MediaBridge;
 pub use stats::{CallStatistics, MediaStatistics, RtpSessionStats, QualityMetrics, QualityThresholds};
+pub use sdp_utils::{
+    MediaDirection,
+    generate_hold_sdp,
+    generate_resume_sdp,
+    parse_media_directions,
+    validate_hold_response,
+};
 
 /// Media integration result type
 pub type MediaResult<T> = Result<T, MediaError>;

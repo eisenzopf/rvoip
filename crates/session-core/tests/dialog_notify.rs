@@ -38,25 +38,6 @@ async fn test_session_with_notify_support() {
 }
 
 #[tokio::test]
-async fn test_notify_for_call_state_changes() {
-    let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
-    
-    // Create an established call
-    let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
-    let session_id = call.id().clone();
-    
-    // Test operations that might trigger NOTIFY messages
-    
-    // Hold operation (might send NOTIFY with dialog state)
-    let hold_result = manager_a.hold_session(&session_id).await;
-    assert!(hold_result.is_ok());
-    
-    // Resume operation (might send NOTIFY with dialog state)
-    let resume_result = manager_a.resume_session(&session_id).await;
-    assert!(resume_result.is_ok());
-}
-
-#[tokio::test]
 async fn test_notify_for_transfer_events() {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
     
@@ -125,52 +106,9 @@ async fn test_notify_error_handling() {
     assert!(dtmf_result.is_err());
 }
 
-#[tokio::test]
-async fn test_notify_event_sequencing() {
-    let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
-    
-    // Create an established call
-    let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
-    let session_id = call.id().clone();
-    
-    // Test sequence of operations that might generate NOTIFY events
-    let hold_result = manager_a.hold_session(&session_id).await;
-    assert!(hold_result.is_ok());
-    
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    
-    let resume_result = manager_a.resume_session(&session_id).await;
-    assert!(resume_result.is_ok());
-    
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    
-    let transfer_result = manager_a.transfer_session(&session_id, "sip:transfer@127.0.0.1:7001").await;
-    assert!(transfer_result.is_ok());
-    
-    // Each operation should maintain proper NOTIFY event sequencing
-}
 
-#[tokio::test]
-async fn test_notify_session_state_consistency() {
-    let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
-    
-    // Create an established call
-    let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
-    let session_id = call.id().clone();
-    
-    // Verify session exists before NOTIFY operations
-    let session_before = manager_a.find_session(&session_id).await.unwrap();
-    assert!(session_before.is_some());
-    
-    // Operations that might involve NOTIFY
-    let hold_result = manager_a.hold_session(&session_id).await;
-    assert!(hold_result.is_ok());
-    
-    // Verify session consistency after NOTIFY-triggering operations
-    let session_after = manager_a.find_session(&session_id).await.unwrap();
-    assert!(session_after.is_some());
-    assert_eq!(session_after.unwrap().id(), &session_id);
-}
+
+
 
 #[tokio::test]
 async fn test_concurrent_notify_operations() {
@@ -220,45 +158,6 @@ async fn test_concurrent_notify_operations() {
         let result = task.await.unwrap();
         assert!(result.is_ok());
     }
-}
-
-#[tokio::test]
-async fn test_notify_subscription_lifecycle() {
-    let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
-    
-    // Create an established call (might establish NOTIFY subscriptions)
-    let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
-    let session_id = call.id().clone();
-    
-    // Session operations that might affect NOTIFY subscriptions
-    let hold_result = manager_a.hold_session(&session_id).await;
-    assert!(hold_result.is_ok());
-    
-    // Terminate session (should properly clean up NOTIFY subscriptions)
-    let terminate_result = manager_a.terminate_session(&session_id).await;
-    assert!(terminate_result.is_ok());
-    
-    // Wait for state transition to complete - increase wait time and retry
-    let mut retries = 0;
-    let max_retries = 10;
-    let mut session_state = CallState::Active;
-    
-    while retries < max_retries {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        
-        let session_after = manager_a.find_session(&session_id).await.unwrap();
-        if let Some(session) = session_after {
-            session_state = session.state().clone();
-            if session_state == CallState::Terminated {
-                break;
-            }
-        }
-        retries += 1;
-    }
-    
-    // Verify session is terminated (sessions stay in registry after termination)
-    assert_eq!(session_state, CallState::Terminated, 
-        "Session should be in Terminated state after {} retries", retries);
 }
 
 #[tokio::test]

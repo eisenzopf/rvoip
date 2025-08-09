@@ -505,6 +505,7 @@ impl MediaConfigConverter {
             echo_cancellation: true,
             noise_suppression: true,
             auto_gain_control: true,
+            music_on_hold_path: None,
             max_bandwidth_kbps: None,
             preferred_ptime: Some(20),
             custom_sdp_attributes: std::collections::HashMap::new(),

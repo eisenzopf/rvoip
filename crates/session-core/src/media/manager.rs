@@ -472,10 +472,32 @@ impl MediaManager {
     
     /// Create a new media session for a SIP session using real MediaSessionController
     pub async fn create_media_session(&self, session_id: &SessionId) -> super::MediaResult<MediaSessionInfo> {
-        tracing::debug!("Creating media session for SIP session: {}", session_id);
+        println!("📹 create_media_session called for: {}", session_id);
         
         // Create dialog ID for media session (use session ID as base)
         let dialog_id = DialogId::new(format!("media-{}", session_id));
+        println!("📹 Using dialog_id: {}", dialog_id);
+        
+        // Check if this media session already exists
+        if let Some(existing_info) = self.controller.get_session_info(&dialog_id).await {
+            println!("📹 Media session already exists in controller for {}, reusing", dialog_id);
+            
+            // Ensure session mapping exists
+            {
+                let mut mapping = self.session_mapping.write().await;
+                mapping.insert(session_id.clone(), dialog_id.clone());
+            }
+            
+            // Ensure zero-copy config exists
+            {
+                let mut configs = self.zero_copy_config.write().await;
+                configs.insert(session_id.clone(), ZeroCopyConfig::default());
+            }
+            
+            let session_info = MediaSessionInfo::from(existing_info);
+            println!("📹 Reused existing media session: {} for SIP session: {}", dialog_id, session_id);
+            return Ok(session_info);
+        }
         
         // Create media configuration using the manager's configured preferences
         let media_config = convert_to_media_core_config(
@@ -484,18 +506,31 @@ impl MediaManager {
             None, // Will be set later when remote SDP is processed
         );
         
+        println!("📹 Starting new media session in controller for {}", dialog_id);
         // Start media session using real MediaSessionController
-        self.controller.start_media(dialog_id.clone(), media_config).await
-            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        match self.controller.start_media(dialog_id.clone(), media_config).await {
+            Ok(()) => {
+                println!("📹 MediaSessionController.start_media SUCCESS for {}", dialog_id);
+            }
+            Err(e) => {
+                println!("📹 MediaSessionController.start_media FAILED for {}: {}", dialog_id, e);
+                return Err(MediaError::MediaEngine { source: Box::new(e) });
+            }
+        }
         
+        println!("📹 Getting session info from controller for {}", dialog_id);
         // Get session info from controller
         let media_session_info = self.controller.get_session_info(&dialog_id).await
-            .ok_or_else(|| MediaError::SessionNotFound { session_id: dialog_id.to_string() })?;
+            .ok_or_else(|| {
+                println!("📹 get_session_info returned None for {}", dialog_id);
+                MediaError::SessionNotFound { session_id: dialog_id.to_string() }
+            })?;
         
         // Store session mapping
         {
             let mut mapping = self.session_mapping.write().await;
             mapping.insert(session_id.clone(), dialog_id.clone());
+            println!("📹 Stored session mapping: {} -> {}", session_id, dialog_id);
         }
         
         // Initialize zero-copy configuration for new session
@@ -507,8 +542,7 @@ impl MediaManager {
         // Convert to our MediaSessionInfo type
         let session_info = MediaSessionInfo::from(media_session_info);
         
-        tracing::info!("✅ Created media session: {} for SIP session: {} with real MediaSessionController + zero-copy enabled", 
-                      dialog_id, session_id);
+        println!("📹 Successfully created NEW media session: {} for SIP session: {}", dialog_id, session_id);
         
         Ok(session_info)
     }
@@ -591,6 +625,12 @@ impl MediaManager {
         
         tracing::info!("✅ Terminated media session: {} for SIP session: {} (including zero-copy cleanup)", dialog_id, session_id);
         Ok(())
+    }
+    
+    /// Check if a session has a media mapping (for duplicate creation prevention)
+    pub async fn has_session_mapping(&self, session_id: &SessionId) -> bool {
+        let mapping = self.session_mapping.read().await;
+        mapping.contains_key(session_id)
     }
     
     /// Get media information for a session
@@ -811,19 +851,29 @@ impl MediaManager {
     
     /// Set audio muted state for a session (send silence when muted)
     pub async fn set_audio_muted(&self, session_id: &SessionId, muted: bool) -> super::MediaResult<()> {
-        tracing::debug!("Setting audio muted={} for session: {}", muted, session_id);
+        println!("🔇 MediaManager::set_audio_muted called for session: {} muted={}", session_id, muted);
         
         // Find dialog ID for this session
         let dialog_id = {
             let mapping = self.session_mapping.read().await;
+            println!("🔍 Session mapping contents: {:?}", mapping.keys().collect::<Vec<_>>());
             mapping.get(session_id).cloned()
-                .ok_or_else(|| MediaError::SessionNotFound { session_id: session_id.to_string() })?
+                .ok_or_else(|| {
+                    println!("❌ Session mapping not found for: {}", session_id);
+                    MediaError::SessionNotFound { session_id: session_id.to_string() }
+                })?
         };
         
-        self.controller.set_audio_muted(&dialog_id, muted).await
-            .map_err(|e| MediaError::MediaEngine { source: Box::new(e) })?;
+        println!("✅ Found dialog_id: {} for session: {}", dialog_id, session_id);
         
-        tracing::info!("✅ Set audio muted={} for session: {}", muted, session_id);
+        println!("📞 Calling media-core set_audio_muted for dialog: {} muted={}", dialog_id, muted);
+        self.controller.set_audio_muted(&dialog_id, muted).await
+            .map_err(|e| {
+                println!("❌ Media-core set_audio_muted failed: {}", e);
+                MediaError::MediaEngine { source: Box::new(e) }
+            })?;
+        
+        println!("✅ Successfully set audio muted={} for session {} (dialog {})", muted, session_id, dialog_id);
         Ok(())
     }
     

@@ -21,6 +21,12 @@ pub struct Session {
     /// Core call session data (public API compatible)
     pub call_session: CallSession,
     
+    /// Local SDP for hold/resume operations
+    pub local_sdp: Option<String>,
+    
+    /// Remote SDP for reference
+    pub remote_sdp: Option<String>,
+    
     /// When this session was created
     pub created_at: std::time::Instant,
     
@@ -37,6 +43,8 @@ impl Session {
             dialog_id: None,
             media_session_id: None,
             call_session,
+            local_sdp: None,
+            remote_sdp: None,
             created_at: now,
             updated_at: now,
         }

@@ -456,6 +456,7 @@ impl ClientManager {
             max_bandwidth_kbps: config.media.max_bandwidth_kbps,
             preferred_ptime: config.media.preferred_ptime,
             custom_sdp_attributes: config.media.custom_sdp_attributes.clone(),
+            music_on_hold_path: config.media.music_on_hold_path.clone(),
         };
         
         // Note: If media port is 0, it signals automatic allocation

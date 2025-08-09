@@ -3,6 +3,7 @@
 use crate::api::types::{CallSession, SessionId, SessionStats, CallState};
 use crate::errors::{Result, SessionError};
 use crate::manager::events::SessionEvent;
+use crate::session::Session;
 use super::SessionCoordinator;
 
 impl SessionCoordinator {
@@ -23,8 +24,14 @@ impl SessionCoordinator {
             started_at: Some(std::time::Instant::now()),
         };
 
+        // Create internal session from call session
+        let mut session = Session::from_call_session(call.clone());
+        if let Some(ref sdp_str) = sdp {
+            session.local_sdp = Some(sdp_str.clone());
+        }
+
         // Register session
-        self.registry.register_session(session_id.clone(), call.clone()).await?;
+        self.registry.register_session(session).await?;
 
         // Send events
         if let Some(ref local_sdp) = sdp {
@@ -54,7 +61,7 @@ impl SessionCoordinator {
     /// Terminate a session
     pub async fn terminate_session(&self, session_id: &SessionId) -> Result<()> {
         // Check if session exists
-        if self.registry.get_session(session_id).await?.is_none() {
+        if self.registry.get_public_session(session_id).await?.is_none() {
             return Err(SessionError::session_not_found(&session_id.0));
         }
         
@@ -104,7 +111,7 @@ impl SessionCoordinator {
         let session_id = SessionId::new();
         
         // Pre-register session in registry without creating dialog yet
-        let session = CallSession {
+        let call_session = CallSession {
             id: session_id.clone(),
             from: String::new(), // Will be set when actually used
             to: String::new(),
@@ -112,14 +119,16 @@ impl SessionCoordinator {
             started_at: None,
         };
         
-        self.registry.register_session(session_id.clone(), session).await?;
+        // Create internal session
+        let session = Session::from_call_session(call_session);
+        self.registry.register_session(session).await?;
         
         Ok(session_id)
     }
 
     /// Find a session by ID
     pub async fn find_session(&self, session_id: &SessionId) -> Result<Option<CallSession>> {
-        self.registry.get_session(session_id).await
+        self.registry.get_public_session(session_id).await
     }
 
     /// List active sessions

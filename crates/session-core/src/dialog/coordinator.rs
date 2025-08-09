@@ -15,7 +15,9 @@ use crate::api::{
     types::{SessionId, CallSession, IncomingCall, CallDecision, CallState},
     handlers::CallHandler,
 };
-use crate::manager::{registry::SessionRegistry, events::SessionEvent};
+use crate::session::Session;
+use crate::manager::events::SessionEvent;
+use crate::coordinator::registry::InternalSessionRegistry;
 use crate::dialog::{DialogError, DialogResult};
 use dashmap::DashMap;
 use tracing;
@@ -24,7 +26,7 @@ use tracing;
 /// (parallel to SessionMediaCoordinator)
 pub struct SessionDialogCoordinator {
     dialog_api: Arc<UnifiedDialogApi>,
-    registry: Arc<SessionRegistry>,
+    registry: Arc<InternalSessionRegistry>,
     handler: Option<Arc<dyn CallHandler>>,
     session_events_tx: mpsc::Sender<SessionEvent>,
     dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
@@ -37,7 +39,7 @@ impl SessionDialogCoordinator {
     /// Create a new session dialog coordinator
     pub fn new(
         dialog_api: Arc<UnifiedDialogApi>,
-        registry: Arc<SessionRegistry>,
+        registry: Arc<InternalSessionRegistry>,
         handler: Option<Arc<dyn CallHandler>>,
         session_events_tx: mpsc::Sender<SessionEvent>,
         dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
@@ -193,7 +195,9 @@ impl SessionDialogCoordinator {
         
         tracing::info!("Created session {} for incoming call dialog {}", session_id, dialog_id);
         
-        self.registry.register_session(session_id.clone(), session.clone()).await
+        // Create internal session from call session
+        let internal_session = Session::from_call_session(session.clone());
+        self.registry.register_session(internal_session).await
             .map_err(|e| DialogError::Coordination {
                 message: format!("Failed to register session: {}", e),
             })?;
@@ -468,7 +472,7 @@ impl SessionDialogCoordinator {
                     Ok(session_ids) => {
                         for session_id in session_ids {
                             if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                                if matches!(session.state, CallState::Initiating) {
+                                if matches!(session.state(), CallState::Initiating) {
                                     tracing::info!("Alternative correlation: mapping dialog {} to session {}", dialog_id, session_id);
                                     
                                     // Map this dialog to the session for future reference
@@ -602,8 +606,8 @@ impl SessionDialogCoordinator {
                 Ok(session_ids) => {
                     for session_id in session_ids {
                         if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                            if matches!(session.state, CallState::Initiating | CallState::Active) {
-                                tracing::info!("🔧 ACK SENT: Alternative media creation for session {} after ACK (state: {:?})", session_id, session.state);
+                            if matches!(session.state(), CallState::Initiating | CallState::Active) {
+                                tracing::info!("🔧 ACK SENT: Alternative media creation for session {} after ACK (state: {:?})", session_id, session.state());
                                 
                                 // Store final negotiated SDP if provided
                                 if let Some(ref sdp) = negotiated_sdp {
@@ -679,8 +683,8 @@ impl SessionDialogCoordinator {
                 Ok(session_ids) => {
                                          for session_id in session_ids {
                          if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                             if matches!(session.state, CallState::Initiating | CallState::Active) {
-                                 tracing::info!("🔧 ACK RECEIVED: Alternative media creation for session {} after ACK (state: {:?})", session_id, session.state);
+                             if matches!(session.state(), CallState::Initiating | CallState::Active) {
+                                 tracing::info!("🔧 ACK RECEIVED: Alternative media creation for session {} after ACK (state: {:?})", session_id, session.state());
                                 
                                 // Store final negotiated SDP if provided
                                 if let Some(ref sdp) = negotiated_sdp {
@@ -1032,22 +1036,25 @@ impl SessionDialogCoordinator {
     
     /// Update session state and send event
     async fn update_session_state(&self, session_id: SessionId, new_state: CallState) -> DialogResult<()> {
-        if let Ok(Some(mut call)) = self.registry.get_session(&session_id).await {
-            let old_state = call.state.clone();
-            call.state = new_state.clone();
-            
-            self.registry.register_session(session_id.clone(), call).await
-                .map_err(|e| DialogError::Coordination {
-                    message: format!("Failed to update session state: {}", e),
-                })?;
-            
-            // Send state changed event
-            self.send_session_event(SessionEvent::StateChanged {
+        // Get the current state before updating
+        let old_state = if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+            session.state().clone()
+        } else {
+            return Err(DialogError::SessionNotFound { session_id: session_id.0 });
+        };
+        
+        // Update the state using the internal registry
+        self.registry.update_session_state(&session_id, new_state.clone()).await
+            .map_err(|e| DialogError::Coordination {
+                message: format!("Failed to update session state: {}", e),
+            })?;
+        
+        // Send state changed event
+        self.send_session_event(SessionEvent::StateChanged {
                 session_id,
                 old_state,
                 new_state,
             }).await?;
-        }
         
         Ok(())
     }

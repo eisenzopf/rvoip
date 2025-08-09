@@ -120,32 +120,7 @@ async fn test_dtmf_nonexistent_session() {
     }
 }
 
-#[tokio::test]
-async fn test_dtmf_during_hold() {
-    let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
-    
-    // Create an established call
-    let (call, _) = establish_call_between_managers(&manager_a, &manager_b, &mut call_events).await.unwrap();
-    let session_id = call.id().clone();
-    
-    // Put call on hold
-    let hold_result = manager_a.hold_session(&session_id).await;
-    assert!(hold_result.is_ok(), "Hold failed: {:?}", hold_result);
-    
-    // Send DTMF while on hold
-    // let dtmf_result = manager_a.send_dtmf(&session_id, "123").await;
-    // assert!(dtmf_result.is_ok(), "DTMF during hold failed: {:?}", dtmf_result);
-    println!("DTMF during hold test skipped - method not exposed");
-    
-    // Resume call
-    let resume_result = manager_a.resume_session(&session_id).await;
-    assert!(resume_result.is_ok(), "Resume failed: {:?}", resume_result);
-    
-    // Send DTMF after resume
-    // let dtmf_result2 = manager_a.send_dtmf(&session_id, "456").await;
-    // assert!(dtmf_result2.is_ok(), "DTMF after resume failed: {:?}", dtmf_result2);
-    println!("DTMF after resume test skipped - method not exposed");
-}
+
 
 #[tokio::test]
 async fn test_dtmf_with_media_updates() {

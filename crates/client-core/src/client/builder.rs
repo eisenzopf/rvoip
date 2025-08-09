@@ -1002,6 +1002,35 @@ impl ClientBuilder {
         self
     }
     
+    /// Set the path to a music-on-hold file
+    /// 
+    /// Configures a WAV file to be played when calls are put on hold.
+    /// The file should be an 8kHz mono WAV file for best compatibility.
+    /// If not set, calls on hold will use silence/mute instead.
+    /// 
+    /// # Arguments
+    /// 
+    /// * `path` - Path to the WAV file to use for music-on-hold
+    /// 
+    /// # Examples
+    /// 
+    /// ```rust
+    /// use rvoip_client_core::ClientBuilder;
+    /// use std::path::Path;
+    /// 
+    /// # tokio_test::block_on(async {
+    /// let client = ClientBuilder::new()
+    ///     .local_address("127.0.0.1:5060".parse().unwrap())
+    ///     .with_music_on_hold_file(Path::new("/path/to/music.wav"))
+    ///     .build()
+    ///     .await.unwrap();
+    /// # })
+    /// ```
+    pub fn with_music_on_hold_file(mut self, path: &std::path::Path) -> Self {
+        self.config.media.music_on_hold_path = Some(path.to_path_buf());
+        self
+    }
+    
     /// Build and initialize the SIP client
     /// 
     /// Consumes the builder and creates a fully configured `ClientManager` instance.

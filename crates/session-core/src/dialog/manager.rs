@@ -9,14 +9,14 @@ use rvoip_dialog_core::{
     DialogId,
 };
 use crate::api::types::{SessionId, CallSession, CallState, MediaInfo};
-use crate::manager::registry::SessionRegistry;
+use crate::coordinator::registry::InternalSessionRegistry;
 use crate::dialog::{DialogError, DialogResult, SessionDialogHandle};
 
 /// Dialog manager for session-level dialog operations
 /// (parallel to MediaManager)
 pub struct DialogManager {
     dialog_api: Arc<UnifiedDialogApi>,
-    registry: Arc<SessionRegistry>,
+    registry: Arc<InternalSessionRegistry>,
     dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
 }
 
@@ -24,7 +24,7 @@ impl DialogManager {
     /// Create a new dialog manager
     pub fn new(
         dialog_api: Arc<UnifiedDialogApi>,
-        registry: Arc<SessionRegistry>,
+        registry: Arc<InternalSessionRegistry>,
         dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
     ) -> Self {
         Self {
@@ -111,15 +111,24 @@ impl DialogManager {
     pub async fn hold_session(&self, session_id: &SessionId) -> DialogResult<()> {
         let dialog_id = self.get_dialog_id_for_session(session_id)?;
         
+        // Get current SDP from session
+        let current_sdp = self.get_current_sdp(session_id).await?;
+        
+        // Generate hold SDP with sendonly
+        let hold_sdp = crate::media::generate_hold_sdp(&current_sdp)
+            .map_err(|e| DialogError::SipProcessing {
+                message: format!("Failed to generate hold SDP: {}", e),
+            })?;
+        
         // Send re-INVITE with hold SDP via dialog-core unified API
         let _tx_key = self.dialog_api
-            .send_update(&dialog_id, Some("SDP with hold attributes".to_string()))
+            .send_update(&dialog_id, Some(hold_sdp))
             .await
             .map_err(|e| DialogError::DialogCore {
                 source: Box::new(e),
             })?;
             
-        tracing::info!("Holding session: {}", session_id);
+        tracing::info!("Holding session: {} with proper SDP", session_id);
         Ok(())
     }
     
@@ -127,15 +136,24 @@ impl DialogManager {
     pub async fn resume_session(&self, session_id: &SessionId) -> DialogResult<()> {
         let dialog_id = self.get_dialog_id_for_session(session_id)?;
         
-        // Send re-INVITE with active SDP via dialog-core unified API
+        // Get current SDP from session
+        let current_sdp = self.get_current_sdp(session_id).await?;
+        
+        // Generate resume SDP with sendrecv
+        let resume_sdp = crate::media::generate_resume_sdp(&current_sdp)
+            .map_err(|e| DialogError::SipProcessing {
+                message: format!("Failed to generate resume SDP: {}", e),
+            })?;
+        
+        // Send re-INVITE with resume SDP via dialog-core unified API
         let _tx_key = self.dialog_api
-            .send_update(&dialog_id, Some("SDP with active media".to_string()))
+            .send_update(&dialog_id, Some(resume_sdp))
             .await
             .map_err(|e| DialogError::DialogCore {
                 source: Box::new(e),
             })?;
             
-        tracing::info!("Resuming session: {}", session_id);
+        tracing::info!("Resuming session: {} with proper SDP", session_id);
         Ok(())
     }
     
@@ -456,6 +474,42 @@ impl DialogManager {
     /// Get the dialog API reference (for advanced usage)
     pub fn dialog_api(&self) -> &Arc<UnifiedDialogApi> {
         &self.dialog_api
+    }
+    
+    /// Get current SDP for a session
+    async fn get_current_sdp(&self, session_id: &SessionId) -> DialogResult<String> {
+        // Get internal session from registry
+        let session = self.registry
+            .get_session(session_id)
+            .await
+            .map_err(|_| DialogError::SessionNotFound {
+                session_id: session_id.0.clone(),
+            })?
+            .ok_or_else(|| DialogError::SessionNotFound {
+                session_id: session_id.0.clone(),
+            })?;
+        
+        // Get local SDP from internal session
+        session.local_sdp
+            .ok_or_else(|| DialogError::SipProcessing {
+                message: "No local SDP found for session".to_string(),
+            })
+    }
+    
+    /// Update session SDP after offer/answer exchange
+    pub async fn update_session_sdp(
+        &self, 
+        session_id: &SessionId, 
+        local_sdp: Option<String>, 
+        remote_sdp: Option<String>
+    ) -> DialogResult<()> {
+        // Update session SDP using internal registry
+        self.registry.update_session_sdp(session_id, local_sdp, remote_sdp).await
+            .map_err(|e| DialogError::SipProcessing {
+                message: format!("Failed to update session SDP: {}", e),
+            })?;
+        
+        Ok(())
     }
 }
 

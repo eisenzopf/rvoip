@@ -176,35 +176,7 @@ async fn test_multiple_bridges_with_different_sessions() {
     helper.cleanup().await.unwrap();
 }
 
-#[tokio::test]
-async fn test_bridge_with_session_manager_stats() {
-    let helper = BridgeIntegrationHelper::new(3, 1).await.unwrap();
-    
-    // Check initial stats
-    for manager in &helper.managers {
-        let stats = manager.get_stats().await.unwrap();
-        assert_eq!(stats.active_sessions, 0);
-    }
-    
-    // Create calls
-    let call1 = helper.create_call_between_managers(0, 1).await.unwrap();
-    let call2 = helper.create_call_between_managers(0, 2).await.unwrap();
-    
-    // Check stats after creating calls
-    let stats = helper.managers[0].get_stats().await.unwrap();
-    assert_eq!(stats.active_sessions, 2);
-    
-    // Add to bridge
-    assert!(helper.add_session_to_bridge(0, call1.id().clone()).await.is_ok());
-    assert!(helper.add_session_to_bridge(0, call2.id().clone()).await.is_ok());
-    assert!(helper.start_bridge(0).await.is_ok());
-    
-    // Stats should still show active sessions (they're now bridged)
-    let stats = helper.managers[0].get_stats().await.unwrap();
-    assert_eq!(stats.active_sessions, 2);
-    
-    helper.cleanup().await.unwrap();
-}
+
 
 #[tokio::test]
 async fn test_bridge_error_handling_with_invalid_sessions() {

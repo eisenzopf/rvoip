@@ -506,7 +506,7 @@ pub use server_types::{
     IncomingCallEvent, CallerInfo,
 };
 
-// Re-export server configuration types from server module
+// Re-export server functionality
 pub use server::{
     ServerConfig, TransportProtocol, ServerSessionManager,
     create_full_server_manager,
@@ -514,7 +514,7 @@ pub use server::{
 
 // Re-export conference functionality (make it public)
 pub use crate::conference::{
-    ConferenceManager, ConferenceApi, ConferenceCoordinator,
+    ConferenceManager, ConferenceApi, // ConferenceCoordinator uses old SessionManager
     ConferenceId, ConferenceConfig, ConferenceEvent,
     ConferenceRoom, ConferenceParticipant,
 };

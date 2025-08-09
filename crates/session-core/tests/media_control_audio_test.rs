@@ -47,7 +47,7 @@ async fn test_audio_frame_subscriber_creation() {
     let session_id = create_test_session(&coordinator).await;
     
     // Test creating an audio frame subscriber
-    let subscriber = coordinator.subscribe_to_audio_frames(&session_id).await
+    let mut subscriber = coordinator.subscribe_to_audio_frames(&session_id).await
         .expect("Failed to create audio frame subscriber");
     
     // Verify subscriber properties
@@ -56,10 +56,10 @@ async fn test_audio_frame_subscriber_creation() {
     
     // Test non-blocking receive (should return Empty since no frames are being sent)
     match subscriber.try_recv() {
-        Err(std::sync::mpsc::TryRecvError::Empty) => {
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
             // This is expected - no frames available
         }
-        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
             panic!("Subscriber should be connected");
         }
         Ok(_) => {
@@ -251,7 +251,7 @@ async fn test_audio_frame_properties() {
     assert!(!frame.is_mono());
     
     // Test duration calculation
-    let duration_ms = frame.duration_ms();
+    let duration_ms = frame.duration.as_secs_f64() * 1000.0;
     let expected_duration = (4.0 * 1000.0) / 8000.0; // 4 samples per channel * 1000ms / 8000Hz
     assert!((duration_ms - expected_duration).abs() < 0.01);
 }
@@ -295,20 +295,23 @@ async fn test_audio_frame_subscriber_timeout() {
     let session_id = create_test_session(&coordinator).await;
     
     // Create subscriber
-    let subscriber = coordinator.subscribe_to_audio_frames(&session_id).await
+    let mut subscriber = coordinator.subscribe_to_audio_frames(&session_id).await
         .expect("Failed to create audio frame subscriber");
     
     // Test timeout receive (should timeout since no frames are being sent)
-    let result = subscriber.recv_timeout(Duration::from_millis(100));
+    let result = tokio::time::timeout(
+        Duration::from_millis(100),
+        subscriber.recv()
+    ).await;
     
     match result {
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            // This is expected
+        Err(_) => {
+            // This is expected - timeout elapsed
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+        Ok(None) => {
             panic!("Subscriber should be connected");
         }
-        Ok(_) => {
+        Ok(Some(_)) => {
             panic!("Didn't expect to receive a frame");
         }
     }

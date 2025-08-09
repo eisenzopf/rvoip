@@ -177,6 +177,7 @@ use crate::api::media::MediaControl;
 use crate::coordinator::SessionCoordinator;
 use crate::errors::{Result, SessionError};
 use crate::manager::events::SessionEvent;
+use crate::session::Session;
 use std::sync::Arc;
 
 /// Main session control trait for managing SIP sessions
@@ -374,8 +375,9 @@ impl SessionControl for Arc<SessionCoordinator> {
             started_at: Some(std::time::Instant::now()),
         };
         
-        // Register the session
-        self.registry.register_session(session_id.clone(), call.clone()).await?;
+        // Create and register internal session
+        let session = Session::from_call_session(call.clone());
+        self.registry.register_session(session).await?;
         
         // Create media session to allocate port
         self.media_manager.create_media_session(&session_id).await
@@ -398,6 +400,9 @@ impl SessionControl for Arc<SessionCoordinator> {
         let local_rtp_port = media_info
             .and_then(|info| info.local_rtp_port)
             .unwrap_or(0);
+        
+        // Store the generated SDP in the registry for hold/resume
+        self.registry.update_session_sdp(&session_id, Some(sdp_offer.clone()), None).await?;
         
         Ok(PreparedCall {
             session_id,
@@ -481,23 +486,34 @@ impl SessionControl for Arc<SessionCoordinator> {
             ));
         }
         
-        // Use dialog manager to send hold request
+        // Start music-on-hold or mute audio
+        if let Err(e) = self.start_music_on_hold(session_id).await {
+            println!("🎵 Failed to start music-on-hold for {}, falling back to mute: {}", session_id, e);
+            // Fallback to muting if MoH fails
+            println!("🔇 Attempting to mute audio for session: {}", session_id);
+            self.media_manager.set_audio_muted(session_id, true).await
+                .map_err(|e| {
+                    println!("❌ MUTE FAILED for {}: {}", session_id, e);
+                    SessionError::MediaIntegration { 
+                        message: format!("Failed to mute audio for hold: {}", e) 
+                    }
+                })?;
+            println!("✅ Audio muted successfully for {}", session_id);
+        }
+        
+        // Use dialog manager to send hold request with proper SDP
         self.dialog_manager.hold_session(session_id).await
             .map_err(|e| SessionError::internal(&format!("Failed to hold session: {}", e)))?;
         
-        // Update session state
-        if let Ok(Some(mut session)) = self.registry.get_session(session_id).await {
-            let old_state = session.state.clone();
-            session.state = CallState::OnHold;
-            self.registry.register_session(session_id.clone(), session).await?;
-            
-            // Emit state change event
-            let _ = self.event_tx.send(SessionEvent::StateChanged {
-                session_id: session_id.clone(),
-                old_state,
-                new_state: CallState::OnHold,
-            }).await;
-        }
+        // Update session state using internal registry
+        self.registry.update_session_state(session_id, CallState::OnHold).await?;
+        
+        // Emit state change event
+        let _ = self.event_tx.send(SessionEvent::StateChanged {
+            session_id: session_id.clone(),
+            old_state: CallState::Active,
+            new_state: CallState::OnHold,
+        }).await;
         
         Ok(())
     }
@@ -514,23 +530,31 @@ impl SessionControl for Arc<SessionCoordinator> {
             ));
         }
         
-        // Use dialog manager to send resume request
+        // Use dialog manager to send resume request with proper SDP
         self.dialog_manager.resume_session(session_id).await
             .map_err(|e| SessionError::internal(&format!("Failed to resume session: {}", e)))?;
         
-        // Update session state
-        if let Ok(Some(mut session)) = self.registry.get_session(session_id).await {
-            let old_state = session.state.clone();
-            session.state = CallState::Active;
-            self.registry.register_session(session_id.clone(), session).await?;
-            
-            // Emit state change event
-            let _ = self.event_tx.send(SessionEvent::StateChanged {
-                session_id: session_id.clone(),
-                old_state,
-                new_state: CallState::Active,
-            }).await;
-        }
+        // Stop music-on-hold and resume microphone audio
+        self.stop_music_on_hold(session_id).await
+            .map_err(|e| SessionError::MediaIntegration { 
+                message: format!("Failed to resume audio: {}", e) 
+            })?;
+        
+        // Unmute the audio (it was muted during hold)
+        self.media_manager.set_audio_muted(session_id, false).await
+            .map_err(|e| SessionError::MediaIntegration { 
+                message: format!("Failed to unmute audio: {}", e) 
+            })?;
+        
+        // Update session state using internal registry
+        self.registry.update_session_state(session_id, CallState::Active).await?;
+        
+        // Emit state change event
+        let _ = self.event_tx.send(SessionEvent::StateChanged {
+            session_id: session_id.clone(),
+            old_state: CallState::OnHold,
+            new_state: CallState::Active,
+        }).await;
         
         Ok(())
     }
@@ -552,18 +576,14 @@ impl SessionControl for Arc<SessionCoordinator> {
             .map_err(|e| SessionError::internal(&format!("Failed to transfer session: {}", e)))?;
         
         // Update session state
-        if let Ok(Some(mut session)) = self.registry.get_session(session_id).await {
-            let old_state = session.state.clone();
-            session.state = CallState::Transferring;
-            self.registry.register_session(session_id.clone(), session).await?;
-            
-            // Emit state change event
-            let _ = self.event_tx.send(SessionEvent::StateChanged {
-                session_id: session_id.clone(),
-                old_state,
-                new_state: CallState::Transferring,
-            }).await;
-        }
+        self.registry.update_session_state(session_id, CallState::Transferring).await?;
+        
+        // Emit state change event
+        let _ = self.event_tx.send(SessionEvent::StateChanged {
+            session_id: session_id.clone(),
+            old_state: CallState::Active, // Assume it was active before transfer
+            new_state: CallState::Transferring,
+        }).await;
         
         Ok(())
     }
@@ -848,8 +868,9 @@ impl SessionControl for Arc<SessionCoordinator> {
                 started_at: Some(std::time::Instant::now()),
             };
             
-            // Register the new session
-            self.registry.register_session(call.id.clone(), new_session.clone()).await?;
+            // Create and register internal session
+            let internal_session = Session::from_call_session(new_session.clone());
+            self.registry.register_session(internal_session).await?;
             new_session
         };
         
@@ -872,18 +893,17 @@ impl SessionControl for Arc<SessionCoordinator> {
             .map_err(|e| SessionError::internal(&format!("Failed to accept call: {}", e)))?;
         
         // Update session state to Active
-        if let Ok(Some(mut session)) = self.registry.get_session(&call.id).await {
-            let old_state = session.state.clone();
-            session.state = CallState::Active;
-            self.registry.register_session(call.id.clone(), session.clone()).await?;
-            
-            // Emit state change event
-            let _ = self.event_tx.send(SessionEvent::StateChanged {
-                session_id: call.id.clone(),
-                old_state,
-                new_state: CallState::Active,
-            }).await;
-            
+        self.registry.update_session_state(&call.id, CallState::Active).await?;
+        
+        // Emit state change event
+        let _ = self.event_tx.send(SessionEvent::StateChanged {
+            session_id: call.id.clone(),
+            old_state: CallState::Ringing,
+            new_state: CallState::Active,
+        }).await;
+        
+        // Get the updated session and call the handler
+        if let Ok(Some(session)) = self.registry.get_public_session(&call.id).await {
             // Call the handler's on_call_established
             if let Some(handler) = &self.handler {
                 handler.on_call_established(
@@ -923,10 +943,9 @@ impl SessionControl for Arc<SessionCoordinator> {
             .map_err(|e| SessionError::internal(&format!("Failed to reject call: {}", e)))?;
         
         // Update session state if it exists
-        if let Ok(Some(mut session)) = self.registry.get_session(&call.id).await {
-            let old_state = session.state.clone();
-            session.state = CallState::Failed(reason.to_string());
-            self.registry.register_session(call.id.clone(), session).await?;
+        if let Ok(Some(session)) = self.registry.get_session(&call.id).await {
+            let old_state = session.state().clone();
+            self.registry.update_session_state(&call.id, CallState::Failed(reason.to_string())).await?;
             
             // Emit state change event
             let _ = self.event_tx.send(SessionEvent::StateChanged {

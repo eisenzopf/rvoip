@@ -281,10 +281,11 @@ pub async fn create_session_manager_pair() -> Result<(Arc<SessionCoordinator>, A
     // Get unique ports for this test
     let (port_a, port_b) = get_test_ports();
     
-    // Create two session managers on different ports
+    // Create two session managers on different SIP and media ports
     let manager_a = SessionManagerBuilder::new()
         .with_local_address("sip:alice@127.0.0.1")
         .with_sip_port(port_a)
+        .with_media_ports(20000, 21000)  // Manager A uses RTP ports 20000-21000
         .with_handler(Arc::new(media_test_utils::TestCallHandler::new(true)))
         .build()
         .await?;
@@ -292,6 +293,7 @@ pub async fn create_session_manager_pair() -> Result<(Arc<SessionCoordinator>, A
     let manager_b = SessionManagerBuilder::new()
         .with_local_address("sip:bob@127.0.0.1")
         .with_sip_port(port_b)
+        .with_media_ports(22000, 23000)  // Manager B uses RTP ports 22000-23000
         .with_handler(Arc::new(media_test_utils::TestCallHandler::new(true)))
         .build()
         .await?;

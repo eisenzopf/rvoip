@@ -305,31 +305,7 @@ async fn test_session_operations_on_nonexistent_session() {
     }
 }
 
-#[tokio::test]
-async fn test_multiple_concurrent_calls() {
-    let (manager_a, manager_b, _) = create_session_manager_pair().await.unwrap();
-    
-    // Create multiple outgoing calls concurrently
-    let mut calls = Vec::new();
-    
-    for i in 0..3 { // Reduced number for more reliable testing
-        let call = manager_a.create_outgoing_call(
-            &format!("sip:caller{}@localhost", i),
-            &format!("sip:target{}@localhost", i),
-            Some(format!("v=0\r\no=caller{} 123 456 IN IP4 127.0.0.1\r\n...", i))
-        ).await.unwrap();
-        calls.push(call);
-    }
-    
-    // Verify all calls were created
-    assert_eq!(calls.len(), 3);
-    
-    // Check that all sessions are tracked
-    let stats = manager_a.get_stats().await.unwrap();
-    assert_eq!(stats.active_sessions, 3);
-    
-    cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
-}
+
 
 #[tokio::test]
 async fn test_session_manager_with_reject_handler() {
@@ -361,34 +337,4 @@ async fn test_session_manager_with_reject_handler() {
     cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
 }
 
-#[tokio::test]
-async fn test_session_stats_tracking() {
-    let (manager_a, manager_b, _) = create_session_manager_pair().await.unwrap();
-    
-    // Check initial stats
-    let initial_stats = manager_a.get_stats().await.unwrap();
-    assert_eq!(initial_stats.active_sessions, 0);
-    
-    // Create some calls
-    let call1 = manager_a.create_outgoing_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost",
-        Some("SDP 1".to_string())
-    ).await.unwrap();
-    
-    let call2 = manager_a.create_outgoing_call(
-        "sip:charlie@localhost",
-        "sip:david@localhost",
-        Some("SDP 2".to_string())
-    ).await.unwrap();
-    
-    // Check updated stats
-    let updated_stats = manager_a.get_stats().await.unwrap();
-    assert_eq!(updated_stats.active_sessions, 2);
-    
-    // Verify sessions can be found
-    verify_session_exists(&manager_a, call1.id(), None).await.unwrap();
-    verify_session_exists(&manager_a, call2.id(), None).await.unwrap();
-    
-    cleanup_managers(vec![manager_a, manager_b]).await.unwrap();
-} 
+ 

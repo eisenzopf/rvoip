@@ -444,6 +444,26 @@ impl SessionManagerBuilder {
         self
     }
     
+    /// Set music-on-hold WAV file path
+    /// 
+    /// When a call is placed on hold, this WAV file will be played to the remote party.
+    /// If not set or the file cannot be loaded, silence will be sent instead.
+    /// 
+    /// # Arguments
+    /// * `path` - Path to a WAV file (ideally 8kHz mono for best performance)
+    /// 
+    /// # Example
+    /// ```rust
+    /// use rvoip_session_core::SessionManagerBuilder;
+    /// 
+    /// let builder = SessionManagerBuilder::new()
+    ///     .with_music_on_hold_file("/usr/share/sounds/music_on_hold.wav");
+    /// ```
+    pub fn with_music_on_hold_file<P: Into<std::path::PathBuf>>(mut self, path: P) -> Self {
+        self.config.media_config.music_on_hold_path = Some(path.into());
+        self
+    }
+    
     /// Set media configuration
     /// 
     /// Configure media preferences including codecs, audio processing, and SDP attributes.

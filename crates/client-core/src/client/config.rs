@@ -326,6 +326,9 @@ pub struct MediaConfig {
     
     /// Additional custom SDP (Session Description Protocol) attributes
     pub custom_sdp_attributes: HashMap<String, String>,
+    
+    /// Path to music-on-hold file (optional)
+    pub music_on_hold_path: Option<std::path::PathBuf>,
 }
 
 impl Default for MediaConfig {
@@ -343,6 +346,7 @@ impl Default for MediaConfig {
             rtp_port_end: 20000,
             preferred_ptime: Some(20),
             custom_sdp_attributes: HashMap::new(),
+            music_on_hold_path: None,
         }
     }
 }

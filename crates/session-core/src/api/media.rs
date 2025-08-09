@@ -319,7 +319,8 @@
 //! 
 //! ```rust
 //! use std::sync::Arc;
-//! use rvoip_session_core::{SessionCoordinator, SessionId, MediaControl, AudioFrame, AudioStreamConfig};
+//! use rvoip_session_core::{SessionCoordinator, SessionId, MediaControl};
+//! use rvoip_session_core::types::{AudioFrame, AudioStreamConfig};
 //! 
 //! async fn setup_audio_devices(
 //!     coordinator: Arc<SessionCoordinator>,
@@ -341,11 +342,11 @@
 //!     MediaControl::start_audio_stream(&coordinator, &session_id).await?;
 //!     
 //!     // Subscribe to receive decoded audio frames for speaker playback
-//!     let audio_subscriber = MediaControl::subscribe_to_audio_frames(&coordinator, &session_id).await?;
+//!     let mut audio_subscriber = MediaControl::subscribe_to_audio_frames(&coordinator, &session_id).await?;
 //!     
 //!     // Spawn a task to handle audio playback
 //!     tokio::spawn(async move {
-//!         while let Ok(audio_frame) = audio_subscriber.recv() {
+//!         while let Some(audio_frame) = audio_subscriber.recv().await {
 //!             // Send frame to speaker/audio device
 //!             play_audio_frame_to_speaker(audio_frame).await;
 //!         }

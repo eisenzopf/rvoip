@@ -6,6 +6,8 @@ use rvoip_session_core::api::control::SessionControl;
 // established too quickly for CANCEL. See dialog_cancel_proper.rs 
 // for actual early dialog CANCEL testing.
 
+use serial_test::serial;
+
 mod common;
 
 use std::sync::Arc;
@@ -105,6 +107,7 @@ let handler = Arc::new(CancelTestHandler::new());
 }
 
 #[tokio::test]
+#[serial]
 async fn test_outgoing_call_creation_for_cancel() {
     let (manager_a, _manager_b, _) = create_session_manager_pair().await.unwrap();
     
@@ -121,6 +124,7 @@ async fn test_outgoing_call_creation_for_cancel() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_call_termination_established() {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
     
@@ -152,6 +156,7 @@ async fn test_call_termination_established() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_multiple_bye_terminations() {
     // Create a single call and verify BYE termination works
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
@@ -189,6 +194,7 @@ async fn test_multiple_bye_terminations() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_cancel_nonexistent_session() {
     let (manager_a, _manager_b, _) = create_session_manager_pair().await.unwrap();
     
@@ -200,6 +206,7 @@ async fn test_cancel_nonexistent_session() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_cancel_timing_scenarios() {
     let (manager_a, manager_b, _) = create_session_manager_pair().await.unwrap();
     let target_addr = manager_b.get_bound_address();
@@ -225,6 +232,7 @@ async fn test_cancel_timing_scenarios() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_cancel_after_provisional_response() {
     let (manager_a, manager_b, _) = create_session_manager_pair().await.unwrap();
     let target_addr = manager_b.get_bound_address();
@@ -249,6 +257,7 @@ async fn test_cancel_after_provisional_response() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_session_state_management_during_bye() {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
     
@@ -291,6 +300,7 @@ async fn test_session_state_management_during_bye() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_bye_statistics_tracking() {
     let (manager_a, manager_b, mut call_events) = create_session_manager_pair().await.unwrap();
     
@@ -331,6 +341,7 @@ async fn test_bye_statistics_tracking() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_concurrent_bye_terminations() {
     // Test concurrent BYE terminations on two established calls
     let (manager_a1, manager_b1, mut call_events1) = create_session_manager_pair().await.unwrap();

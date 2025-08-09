@@ -442,28 +442,6 @@ async fn test_concurrent_quality_monitoring() {
     }
 }
 
-/// Test quality monitoring memory and CPU usage
-#[tokio::test]
-async fn test_quality_monitoring_performance() {
-    let (session_manager, media_engine) = create_test_session_manager_with_media().await.unwrap();
-    
-    let mut memory_monitor = MemoryMonitor::new();
-    
-    // TODO: Implement performance testing
-    // - Establish quality monitoring for multiple sessions
-    // - Measure CPU usage during quality analysis
-    // - Monitor memory usage growth over time
-    // - Test performance under high packet rates
-    // - Verify real-time processing capabilities
-    
-    memory_monitor.update_peak();
-    let memory_usage = memory_monitor.get_memory_increase();
-    
-    // Validate reasonable memory usage
-    assert!(memory_usage < 50 * 1024 * 1024, "Quality monitoring should use < 50MB");
-    assert!(true, "Test stubbed - implement with real performance monitoring");
-}
-
 /// Test real quality-based codec switching behavior
 #[tokio::test]
 async fn test_quality_based_codec_switching() {
