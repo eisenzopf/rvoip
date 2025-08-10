@@ -1103,6 +1103,57 @@ impl CallHandler for ClientCallHandler {
     /// // 5. Clean up active mappings
     /// # }
     /// ```
+    /// Handle call state changes
+    /// 
+    /// This method is called when a session changes state. When the state changes to
+    /// Terminating, we send our cleanup confirmation to allow Phase 2 to proceed.
+    async fn on_call_state_changed(&self, session_id: &SessionId, old_state: &CallState, new_state: &CallState, reason: Option<&str>) {
+        // Map session to client call and update state
+        if let Some(call_id) = self.call_mapping.get(session_id).map(|entry| *entry.value()) {
+            // Update call info with new state
+            if let Some(mut call_info_ref) = self.call_info.get_mut(&call_id) {
+                let new_client_state = self.map_session_state_to_client_state(new_state);
+                let old_client_state = self.map_session_state_to_client_state(old_state);
+                call_info_ref.state = new_client_state.clone();
+                
+                // Emit state change event
+                let status_info = CallStatusInfo {
+                    call_id,
+                    new_state: new_client_state.clone(),
+                    previous_state: Some(old_client_state),
+                    reason: reason.map(|s| s.to_string()),
+                    timestamp: Utc::now(),
+                };
+                
+                // Broadcast event
+                if let Some(event_tx) = &self.event_tx {
+                    let _ = event_tx.send(crate::events::ClientEvent::CallStateChanged { 
+                        info: status_info.clone(),
+                        priority: crate::events::EventPriority::Normal,
+                    });
+                }
+                
+                // Forward to client event handler
+                if let Some(handler) = self.client_event_handler.read().await.as_ref() {
+                    handler.on_call_state_changed(status_info).await;
+                }
+            }
+            
+            // IMPORTANT: When transitioning to Terminating, send cleanup confirmation
+            // This tells session-core that client-core has completed its cleanup
+            if matches!(new_state, CallState::Terminating) {
+                if let Some(session_event_tx) = self.session_event_tx.read().await.as_ref() {
+                    use rvoip_session_core::manager::events::SessionEvent;
+                    let _ = session_event_tx.send(SessionEvent::CleanupConfirmation {
+                        session_id: session_id.clone(),
+                        layer: "Client".to_string(),
+                    }).await;
+                    tracing::debug!("Sent cleanup confirmation for session {} from client-core (Terminating state)", session_id);
+                }
+            }
+        }
+    }
+    
     async fn on_call_ended(&self, session: CallSession, reason: &str) {
         // Map session to client call and emit event
         if let Some(call_id) = self.call_mapping.get(&session.id).map(|entry| *entry.value()) {
@@ -1163,16 +1214,8 @@ impl CallHandler for ClientCallHandler {
             self.call_mapping.remove(&session.id);
             self.session_mapping.remove(&call_id);
             
-            // Send cleanup confirmation back to session-core
-            // This confirms that client-core has completed its cleanup for this session
-            if let Some(session_event_tx) = self.session_event_tx.read().await.as_ref() {
-                use rvoip_session_core::manager::events::SessionEvent;
-                let _ = session_event_tx.send(SessionEvent::CleanupConfirmation {
-                    session_id: session.id.clone(),
-                    layer: "Client".to_string(),
-                }).await;
-                tracing::debug!("Sent cleanup confirmation for session {} from client-core", session.id);
-            }
+            // Note: We already sent cleanup confirmation in on_call_state_changed when
+            // transitioning to Terminating state, so we don't need to send it again here
         }
     }
     
