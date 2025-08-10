@@ -48,8 +48,8 @@ async fn test_wait_for_answer_already_active() {
     
     // Manually update state to Active (simulating answered call)
     if let Ok(Some(mut session)) = manager.registry.get_session(&session_id).await {
-        session.state = CallState::Active;
-        let _ = manager.registry.register_session(session_id.clone(), session).await;
+        session.update_call_state(CallState::Active).unwrap();
+        let _ = manager.registry.register_session(session).await;
     }
     
     // wait_for_answer should return immediately since it's already active
@@ -116,8 +116,8 @@ async fn test_wait_for_answer_failed_state() {
     
     // Manually update state to Failed
     if let Ok(Some(mut session)) = manager.registry.get_session(&session_id).await {
-        session.state = CallState::Failed("Test failure".to_string());
-        let _ = manager.registry.register_session(session_id.clone(), session).await;
+        session.update_call_state(CallState::Failed("Test failure".to_string())).unwrap();
+        let _ = manager.registry.register_session(session).await;
     }
     
     // wait_for_answer should return error for failed call
@@ -180,9 +180,9 @@ async fn test_wait_for_answer_with_state_transition() {
         
         // Update state to Active
         if let Ok(Some(mut session)) = manager_clone.registry.get_session(&session_id_clone).await {
-            let old_state = session.state.clone();
-            session.state = CallState::Active;
-            let _ = manager_clone.registry.register_session(session_id_clone.clone(), session).await;
+            let old_state = session.state().clone();
+            session.update_call_state(CallState::Active).unwrap();
+            let _ = manager_clone.registry.register_session(session).await;
             
             // Emit state change event
             let _ = manager_clone.event_tx.send(rvoip_session_core::manager::events::SessionEvent::StateChanged {

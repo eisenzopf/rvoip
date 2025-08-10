@@ -413,39 +413,6 @@ async fn test_cpu_usage_characteristics() {
     println!("CPU usage test completed successfully with real media sessions");
 }
 
-/// Test session cleanup performance and efficiency
-#[tokio::test]
-async fn test_session_cleanup_performance() {
-    let (session_manager, media_engine) = create_test_session_manager_with_media().await.unwrap();
-    
-    // TODO: Implement cleanup performance testing
-    // - Create large number of sessions
-    // - Terminate all sessions simultaneously
-    // - Measure cleanup time
-    // - Verify no resource leaks during cleanup
-    // - Test cleanup under abnormal termination scenarios
-    
-    let session_count = 50;
-    let cleanup_start = Instant::now();
-    
-    // TODO: Actual session cleanup testing
-    // - Create sessions
-    // - Terminate sessions
-    // - Measure cleanup efficiency
-    
-    let cleanup_duration = cleanup_start.elapsed();
-    let cleanup_per_session = cleanup_duration / session_count;
-    
-    println!("Cleanup performance:");
-    println!("  Total time: {:?}", cleanup_duration);
-    println!("  Per session: {:?}", cleanup_per_session);
-    
-    // TODO: Validate cleanup performance requirements
-    // assert!(cleanup_per_session < Duration::from_millis(10), "Cleanup per session should be < 10ms");
-    
-    assert!(true, "Test stubbed - implement session cleanup performance testing");
-}
-
 /// Test real performance monitoring and metrics collection
 #[tokio::test]
 async fn test_performance_monitoring_overhead() {

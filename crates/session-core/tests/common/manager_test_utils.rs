@@ -15,8 +15,8 @@ use rvoip_session_core::{
         handlers::CallHandler,
         builder::SessionManagerBuilder,
     },
+    coordinator::registry::InternalSessionRegistry,
     manager::{
-        registry::SessionRegistry,
         events::{SessionEvent, SessionEventProcessor, SessionEventSubscriber},
         cleanup::CleanupManager,
     },
@@ -127,42 +127,45 @@ pub fn create_test_call_session(session_id: SessionId, from: &str, to: &str, sta
 
 /// Registry test helper for direct registry testing
 pub struct RegistryTestHelper {
-    registry: Arc<SessionRegistry>,
+    registry: Arc<InternalSessionRegistry>,
     test_sessions: Vec<CallSession>,
 }
 
 impl RegistryTestHelper {
     pub fn new() -> Self {
         Self {
-            registry: Arc::new(SessionRegistry::new()),
+            registry: Arc::new(InternalSessionRegistry::new()),
             test_sessions: Vec::new(),
         }
     }
 
     pub async fn add_test_session(&mut self, from: &str, to: &str, state: CallState) -> SessionId {
         let session_id = SessionId::new();
-        let session = create_test_call_session(session_id.clone(), from, to, state);
+        let call_session = create_test_call_session(session_id.clone(), from, to, state);
+        let session = rvoip_session_core::session::Session::from_call_session(call_session.clone());
         
-        self.registry.register_session(session_id.clone(), session.clone()).await
+        self.registry.register_session(session).await
             .expect("Failed to register test session");
-        self.test_sessions.push(session);
+        self.test_sessions.push(call_session);
         
         session_id
     }
 
     pub async fn verify_session_count(&self, expected: usize) {
-        let count = self.registry.active_session_count().await;
+        let sessions = self.registry.list_active_sessions().await
+            .expect("Failed to list active sessions");
+        let count = sessions.len();
         assert_eq!(count, expected, "Registry session count mismatch");
     }
 
     pub async fn verify_session_exists(&self, session_id: &SessionId) -> CallSession {
-        self.registry.get_session(session_id).await
+        self.registry.get_public_session(session_id).await
             .expect("Registry operation failed")
             .expect(&format!("Session {} should exist", session_id))
     }
 
     pub async fn verify_session_not_exists(&self, session_id: &SessionId) {
-        let session = self.registry.get_session(session_id).await
+        let session = self.registry.get_public_session(session_id).await
             .expect("Registry operation failed");
         assert!(session.is_none(), "Session {} should not exist", session_id);
     }
@@ -171,7 +174,7 @@ impl RegistryTestHelper {
         self.registry.get_stats().await.expect("Failed to get registry stats")
     }
 
-    pub fn registry(&self) -> &Arc<SessionRegistry> {
+    pub fn registry(&self) -> &Arc<InternalSessionRegistry> {
         &self.registry
     }
 
