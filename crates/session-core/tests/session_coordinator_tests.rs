@@ -290,9 +290,9 @@ async fn test_media_session_coordination() {
 
     // Simulate call becoming active
     if let Ok(Some(mut session)) = coordinator.registry.get_session(&call.id).await {
-        let old_state = session.state.clone();
-        session.state = CallState::Active;
-        coordinator.registry.register_session(call.id.clone(), session).await.unwrap();
+        let old_state = session.state().clone();
+        session.update_call_state(CallState::Active).unwrap();
+        coordinator.registry.register_session(session).await.unwrap();
         
         // Send state change event
         let _ = coordinator.event_tx.send(SessionEvent::StateChanged {
@@ -365,8 +365,8 @@ async fn test_call_state_transitions() {
     // Test hold/resume
     // First make the call active
     if let Ok(Some(mut session)) = coordinator.registry.get_session(&call.id).await {
-        session.state = CallState::Active;
-        coordinator.registry.register_session(call.id.clone(), session).await.unwrap();
+        session.update_call_state(CallState::Active).unwrap();
+        coordinator.registry.register_session(session).await.unwrap();
     }
 
     // Hold the call
@@ -424,8 +424,8 @@ async fn test_dtmf_sending() {
 
     // Make the call active
     if let Ok(Some(mut session)) = coordinator.registry.get_session(&call.id).await {
-        session.state = CallState::Active;
-        coordinator.registry.register_session(call.id.clone(), session).await.unwrap();
+        session.update_call_state(CallState::Active).unwrap();
+        coordinator.registry.register_session(session).await.unwrap();
     }
 
     // Send DTMF
@@ -505,9 +505,9 @@ async fn test_event_handler_callbacks() {
 
     // Simulate call establishment
     if let Ok(Some(mut session)) = coordinator.registry.get_session(&call.id).await {
-        let old_state = session.state.clone();
-        session.state = CallState::Active;
-        coordinator.registry.register_session(call.id.clone(), session.clone()).await.unwrap();
+        let old_state = session.state().clone();
+        session.update_call_state(CallState::Active).unwrap();
+        coordinator.registry.register_session(session.clone()).await.unwrap();
         
         // Send state change event
         let _ = coordinator.event_tx.send(SessionEvent::StateChanged {
@@ -518,7 +518,7 @@ async fn test_event_handler_callbacks() {
         
         // Manually trigger the handler callback since we're simulating
         if let Some(hdlr) = &coordinator.handler {
-            hdlr.on_call_established(session, None, None).await;
+            hdlr.on_call_established(session.into_call_session(), None, None).await;
         }
     }
 
