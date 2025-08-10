@@ -96,8 +96,8 @@ impl DialogManager {
                 message: format!("Failed to send 200 OK to BYE: {}", e),
             })?;
         
-        // Send session coordination event
-        let event = SessionCoordinationEvent::CallTerminated {
+        // Send session coordination event (Phase 1 - terminating)
+        let event = SessionCoordinationEvent::CallTerminating {
             dialog_id: dialog_id.clone(),
             reason: "BYE received".to_string(),
         };

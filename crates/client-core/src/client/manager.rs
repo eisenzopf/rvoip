@@ -431,15 +431,6 @@ impl ClientManager {
         // Create channel for call establishment notifications
         let (call_established_tx, call_established_rx) = tokio::sync::mpsc::unbounded_channel();
         
-        // Create call handler
-        let call_handler = Arc::new(ClientCallHandler::new(
-            call_mapping.clone(),
-            session_mapping.clone(),
-            call_info.clone(),
-            incoming_calls.clone(),
-        ).with_event_tx(event_tx.clone())
-        .with_call_established_tx(call_established_tx));
-        
 
         
         // Build session coordinator with media preferences
@@ -463,6 +454,15 @@ impl ClientManager {
         // The actual port will be allocated by session-core when creating media sessions
         // This is the proper layered approach that respects the architecture
 
+        // Create the call handler
+        let call_handler = Arc::new(ClientCallHandler::new(
+            call_mapping.clone(),
+            session_mapping.clone(),
+            call_info.clone(),
+            incoming_calls.clone(),
+        ).with_event_tx(event_tx.clone())
+        .with_call_established_tx(call_established_tx.clone()));
+        
         // Create session manager using session-core builder with media preferences
         let coordinator = SessionManagerBuilder::new()
             .with_local_address(&format!("sip:client@{}", config.local_sip_addr.ip()))
@@ -478,6 +478,9 @@ impl ClientManager {
                 message: format!("Failed to create session coordinator: {}", e) 
             })?;
         
+        // Now set the session event channel on the call handler
+        // This allows client-core to send cleanup confirmations back to session-core
+        call_handler.set_session_event_tx(coordinator.event_tx.clone()).await;
 
             
         let mut stats = ClientStats {

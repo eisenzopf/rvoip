@@ -52,9 +52,19 @@ impl SessionCoordinator {
                 }
             }
             
+            SessionEvent::SessionTerminating { session_id, reason } => {
+                println!("🎯 COORDINATOR: Matched SessionTerminating event (Phase 1) for {} - {}", session_id, reason);
+                self.handle_session_terminating(session_id, reason).await?;
+            }
+            
             SessionEvent::SessionTerminated { session_id, reason } => {
-                println!("🎯 COORDINATOR: Matched SessionTerminated event for {} - {}", session_id, reason);
+                println!("🎯 COORDINATOR: Matched SessionTerminated event (Phase 2) for {} - {}", session_id, reason);
                 self.handle_session_terminated(session_id, reason).await?;
+            }
+            
+            SessionEvent::CleanupConfirmation { session_id, layer } => {
+                println!("🧹 COORDINATOR: Cleanup confirmation from {} for session {}", layer, session_id);
+                self.handle_cleanup_confirmation(session_id, layer).await?;
             }
             
             SessionEvent::MediaEvent { session_id, event } => {
@@ -204,7 +214,118 @@ impl SessionCoordinator {
         Ok(())
     }
 
-    /// Handle session terminated event
+    /// Handle session terminating event (Phase 1 - prepare for cleanup)
+    async fn handle_session_terminating(
+        &self,
+        session_id: SessionId,
+        reason: String,
+    ) -> Result<()> {
+        println!("🟡 COORDINATOR: handle_session_terminating called for session {} (Phase 1) with reason: {}", session_id, reason);
+        tracing::info!("Session {} terminating (Phase 1): {}", session_id, reason);
+
+        // Update session state to Terminating
+        if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+            let old_state = session.state().clone();
+            
+            // Update the session state to Terminating
+            if let Err(e) = self.registry.update_session_state(&session_id, CallState::Terminating).await {
+                tracing::error!("Failed to update session to Terminating state: {}", e);
+            } else {
+                // Emit state change event
+                let _ = self.event_tx.send(SessionEvent::StateChanged {
+                    session_id: session_id.clone(),
+                    old_state: old_state.clone(),
+                    new_state: CallState::Terminating,
+                }).await;
+            }
+            
+            // Notify handler about terminating state (Phase 1)
+            if let Some(handler) = &self.handler {
+                let call_session = session.as_call_session().clone();
+                handler.on_call_state_changed(&session_id, &old_state, &CallState::Terminating, Some(&reason)).await;
+            }
+        }
+        
+        // Start tracking cleanup
+        use super::coordinator::CleanupTracker;
+        use std::time::Instant;
+        
+        let mut pending_cleanups = self.pending_cleanups.lock().await;
+        pending_cleanups.insert(session_id.clone(), CleanupTracker {
+            media_done: false,
+            client_done: false,
+            started_at: Instant::now(),
+            reason: reason.clone(),
+        });
+        
+        // Stop media gracefully
+        self.stop_media_session(&session_id).await?;
+        
+        Ok(())
+    }
+
+    /// Handle cleanup confirmation from a layer
+    async fn handle_cleanup_confirmation(
+        &self,
+        session_id: SessionId,
+        layer: String,
+    ) -> Result<()> {
+        println!("🧹 COORDINATOR: handle_cleanup_confirmation called for session {} from layer {}", session_id, layer);
+        tracing::info!("Cleanup confirmation from {} for session {}", layer, session_id);
+        
+        use super::coordinator::CleanupLayer;
+        use std::time::Duration;
+        
+        let mut pending_cleanups = self.pending_cleanups.lock().await;
+        
+        if let Some(tracker) = pending_cleanups.get_mut(&session_id) {
+            // Mark the appropriate layer as done
+            match layer.as_str() {
+                "Media" => {
+                    tracker.media_done = true;
+                    println!("✓ Media cleanup complete for session {}", session_id);
+                }
+                "Client" => {
+                    tracker.client_done = true;
+                    println!("✓ Client cleanup complete for session {}", session_id);
+                }
+                layer => {
+                    tracing::warn!("Unknown cleanup layer: {}", layer);
+                }
+            }
+            
+            // Check if all cleanup is complete or if we've timed out
+            let elapsed = tracker.started_at.elapsed();
+            let timeout = Duration::from_secs(5);
+            let all_done = tracker.media_done && tracker.client_done;
+            let timed_out = elapsed > timeout;
+            
+            if all_done || timed_out {
+                if timed_out {
+                    tracing::warn!("Cleanup timeout for session {} after {:?}", session_id, elapsed);
+                } else {
+                    tracing::info!("All cleanup complete for session {} in {:?}", session_id, elapsed);
+                }
+                
+                // Remove from pending cleanups
+                let reason = tracker.reason.clone();
+                pending_cleanups.remove(&session_id);
+                
+                // Trigger Phase 2 - final termination
+                println!("🔴 Triggering Phase 2 termination for session {}", session_id);
+                let _ = self.event_tx.send(SessionEvent::SessionTerminated {
+                    session_id: session_id.clone(),
+                    reason,
+                }).await;
+            }
+        } else {
+            tracing::warn!("Received cleanup confirmation for unknown session: {}", session_id);
+        }
+        
+        Ok(())
+    }
+
+    /// Handle session terminated event (Phase 2 - final cleanup)
     async fn handle_session_terminated(
         &self,
         session_id: SessionId,

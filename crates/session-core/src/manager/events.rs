@@ -77,10 +77,22 @@ pub enum SessionEvent {
         reason: Option<String>,
     },
     
-    /// Session was terminated
+    /// Session is terminating (Phase 1 - cleanup in progress)
+    SessionTerminating {
+        session_id: SessionId,
+        reason: String,
+    },
+    
+    /// Session was terminated (Phase 2 - cleanup complete)
     SessionTerminated { 
         session_id: SessionId, 
         reason: String,
+    },
+    
+    /// Cleanup confirmation from a layer
+    CleanupConfirmation {
+        session_id: SessionId,
+        layer: String,
     },
     
     /// Media event

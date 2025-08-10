@@ -1,7 +1,7 @@
 //! Core SessionCoordinator structure and initialization
 
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Mutex};
 use crate::api::{
     types::{SessionId, SessionStats, MediaInfo},
     handlers::CallHandler,
@@ -20,7 +20,25 @@ use crate::conference::{ConferenceManager};
 use crate::sdp::{SdpNegotiator, NegotiatedMediaConfig, SdpRole};
 use rvoip_dialog_core::events::SessionCoordinationEvent;
 use std::collections::HashMap;
+use std::time::Instant;
 use dashmap::DashMap;
+
+/// Tracks cleanup status for each layer during two-phase termination
+#[derive(Debug, Clone)]
+pub struct CleanupTracker {
+    pub media_done: bool,
+    pub client_done: bool,
+    pub started_at: Instant,
+    pub reason: String,
+}
+
+/// Identifies which layer is confirming cleanup
+#[derive(Debug, Clone)]
+pub enum CleanupLayer {
+    Media,
+    Client,
+    Dialog,
+}
 
 /// The main coordinator for the entire session system
 pub struct SessionCoordinator {
@@ -55,6 +73,9 @@ pub struct SessionCoordinator {
     
     // Negotiated media configs
     pub negotiated_configs: Arc<RwLock<HashMap<SessionId, NegotiatedMediaConfig>>>,
+    
+    // Two-phase termination tracking
+    pub pending_cleanups: Arc<Mutex<HashMap<SessionId, CleanupTracker>>>,
 }
 
 impl SessionCoordinator {
@@ -149,6 +170,7 @@ impl SessionCoordinator {
             event_tx: event_tx.clone(),
             bridge_event_subscribers: Arc::new(RwLock::new(Vec::new())),
             negotiated_configs: Arc::new(RwLock::new(HashMap::new())),
+            pending_cleanups: Arc::new(Mutex::new(HashMap::new())),
         });
 
         // Initialize subsystems
@@ -252,6 +274,14 @@ impl SessionCoordinator {
     pub(crate) async fn stop_media_session(&self, session_id: &SessionId) -> Result<()> {
         self.media_coordinator.on_session_terminated(session_id).await
             .map_err(|e| SessionError::internal(&format!("Failed to stop media: {}", e)))?;
+        
+        // Send cleanup confirmation for media layer
+        // Media cleanup is synchronous, so we can immediately confirm
+        let _ = self.event_tx.send(SessionEvent::CleanupConfirmation {
+            session_id: session_id.clone(),
+            layer: "Media".to_string(),
+        }).await;
+        
         Ok(())
     }
 

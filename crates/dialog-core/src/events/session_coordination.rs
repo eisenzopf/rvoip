@@ -56,7 +56,16 @@ pub enum SessionCoordinationEvent {
         dialog_id: DialogId,
     },
     
-    /// Call has been terminated
+    /// Call is terminating (Phase 1 - cleanup in progress)
+    CallTerminating {
+        /// Dialog ID for the terminating call
+        dialog_id: DialogId,
+        
+        /// Reason for termination
+        reason: String,
+    },
+    
+    /// Call has been terminated (Phase 2 - cleanup complete)
     CallTerminated {
         /// Dialog ID for the terminated call
         dialog_id: DialogId,
@@ -186,5 +195,14 @@ pub enum SessionCoordinationEvent {
         
         /// Final negotiated SDP if available
         negotiated_sdp: Option<String>,
+    },
+    
+    /// Cleanup confirmation from a layer
+    CleanupConfirmation {
+        /// Dialog ID for the cleanup
+        dialog_id: DialogId,
+        
+        /// Which layer is confirming cleanup
+        layer: String, // "media", "client", etc.
     },
 } 

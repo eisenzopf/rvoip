@@ -1165,7 +1165,7 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                 rvoip_client_core::call::CallState::Proceeding => CallState::Initiating,
                 rvoip_client_core::call::CallState::Ringing => CallState::Ringing,
                 rvoip_client_core::call::CallState::Connected => CallState::Connected,
-                rvoip_client_core::call::CallState::Terminating => CallState::Terminated,
+                rvoip_client_core::call::CallState::Terminating => CallState::Terminating,
                 rvoip_client_core::call::CallState::Terminated => CallState::Terminated,
                 rvoip_client_core::call::CallState::Failed => CallState::Terminated,
                 rvoip_client_core::call::CallState::Cancelled => CallState::Terminated,
