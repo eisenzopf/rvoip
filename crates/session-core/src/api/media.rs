@@ -658,9 +658,30 @@ impl MediaControl for Arc<SessionCoordinator> {
     }
     
     async fn send_audio_frame(&self, session_id: &SessionId, audio_frame: crate::api::types::AudioFrame) -> Result<()> {
-        // Validate session exists
-        if SessionControl::get_session(self, session_id).await?.is_none() {
-            return Err(crate::errors::SessionError::SessionNotFound(session_id.to_string()));
+        // Check session state and handle terminating sessions gracefully
+        match SessionControl::get_session(self, session_id).await? {
+            Some(session) => {
+                match session.state() {
+                    crate::api::types::CallState::Terminating => {
+                        // Phase 1: Session is terminating, stop sending audio gracefully
+                        tracing::debug!("Session {} is terminating, stopping audio transmission gracefully", session_id);
+                        return Ok(()); // Don't error, just silently drop the frame
+                    }
+                    crate::api::types::CallState::Terminated => {
+                        // Phase 2: Session fully terminated
+                        tracing::debug!("Session {} terminated, ignoring audio frame", session_id);
+                        return Ok(()); // Don't error, just silently drop the frame
+                    }
+                    _ => {
+                        // Normal operation - continue processing
+                    }
+                }
+            }
+            None => {
+                // Session not found - likely terminated, handle gracefully
+                tracing::debug!("Session {} not found (likely terminated), ignoring audio frame", session_id);
+                return Ok(()); // Don't error, just silently drop the frame
+            }
         }
         
         // Get the media manager

@@ -115,6 +115,10 @@ impl SessionDialogCoordinator {
                 self.handle_call_answered(dialog_id, session_answer).await?;
             }
             
+            SessionCoordinationEvent::CallTerminating { dialog_id, reason } => {
+                self.handle_call_terminating(dialog_id, reason).await?;
+            }
+            
             SessionCoordinationEvent::CallTerminated { dialog_id, reason } => {
                 self.handle_call_terminated(dialog_id, reason).await?;
             }
@@ -143,6 +147,10 @@ impl SessionDialogCoordinator {
             SessionCoordinationEvent::CallProgress { dialog_id, status_code, reason_phrase } => {
                 tracing::debug!("Call progress for dialog {}: {} {}", dialog_id, status_code, reason_phrase);
                 // Progress events like 100 Trying don't change session state
+            }
+            
+            SessionCoordinationEvent::CleanupConfirmation { dialog_id, layer } => {
+                self.handle_cleanup_confirmation(dialog_id, layer).await?;
             }
             
             _ => {
@@ -722,13 +730,62 @@ impl SessionDialogCoordinator {
         Ok(())
     }
     
-    /// Handle call terminated coordination event
+    /// Handle cleanup confirmation from a layer
+    async fn handle_cleanup_confirmation(
+        &self,
+        dialog_id: DialogId,
+        layer: String,
+    ) -> DialogResult<()> {
+        tracing::info!("Cleanup confirmation received from {} for dialog {}", layer, dialog_id);
+        
+        if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+            let session_id = session_id_ref.value().clone();
+            
+            // Forward the cleanup confirmation to the session event system
+            self.send_session_event(SessionEvent::CleanupConfirmation {
+                session_id: session_id.clone(),
+                layer,
+            }).await?;
+        } else {
+            tracing::warn!("No session found for cleanup confirmation from dialog {}", dialog_id);
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle call terminating coordination event (Phase 1)
+    async fn handle_call_terminating(
+        &self,
+        dialog_id: DialogId,
+        reason: String,
+    ) -> DialogResult<()> {
+        tracing::info!("handle_call_terminating called for dialog {} (Phase 1): {}", dialog_id, reason);
+        
+        if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+            let session_id = session_id_ref.value().clone();
+            tracing::info!("Call terminating (Phase 1) for session {}: {} - {}", session_id, dialog_id, reason);
+            
+            // Send session terminating event (Phase 1)
+            self.send_session_event(SessionEvent::SessionTerminating {
+                session_id: session_id.clone(),
+                reason: reason.clone(),
+            }).await?;
+            
+            // Keep dialog_to_session mapping for now
+        } else {
+            tracing::warn!("No session found for terminating dialog {}", dialog_id);
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle call terminated coordination event (Phase 2)
     async fn handle_call_terminated(
         &self,
         dialog_id: DialogId,
         reason: String,
     ) -> DialogResult<()> {
-        tracing::info!("handle_call_terminated called for dialog {}: {}", dialog_id, reason);
+        tracing::info!("handle_call_terminated called for dialog {} (Phase 2): {}", dialog_id, reason);
         
         if let Some((_, session_id)) = self.dialog_to_session.remove(&dialog_id) {
             tracing::info!("Call terminated for session {}: {} - {}", session_id, dialog_id, reason);

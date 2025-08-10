@@ -13,4 +13,4 @@ mod server_manager;
 pub mod registry;
 
 // Re-exports
-pub use coordinator::SessionCoordinator; 
+pub use coordinator::{SessionCoordinator, CleanupTracker, CleanupLayer}; 

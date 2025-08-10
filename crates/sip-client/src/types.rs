@@ -26,6 +26,8 @@ pub enum CallState {
     OnHold,
     /// Call is being transferred
     Transferring,
+    /// Call is terminating (cleanup in progress)
+    Terminating,
     /// Call has ended
     Terminated,
 }

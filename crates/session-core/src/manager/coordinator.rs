@@ -97,6 +97,12 @@ impl SessionCoordinator {
                 self.handle_state_changed(session_id, old_state, new_state).await?;
             }
             
+            SessionEvent::SessionTerminating { session_id, reason } => {
+                // Handle terminating phase - no special action needed here
+                // as the event handler already processes this
+                tracing::debug!("Session {} terminating (Phase 1): {}", session_id, reason);
+            }
+            
             SessionEvent::SessionTerminated { session_id, reason } => {
                 self.handle_session_terminated(session_id, reason).await?;
             }
@@ -210,6 +216,11 @@ impl SessionCoordinator {
             
             SessionEvent::AudioStreamStopped { session_id, stream_id, reason } => {
                 self.handle_audio_stream_stopped(session_id, stream_id, reason).await?;
+            }
+            
+            SessionEvent::CleanupConfirmation { session_id, layer } => {
+                // Cleanup confirmations are handled by the main coordinator
+                tracing::debug!("Cleanup confirmation from {} for session {} - handled by main coordinator", layer, session_id);
             }
         }
         

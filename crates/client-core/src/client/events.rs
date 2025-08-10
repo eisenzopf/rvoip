@@ -103,6 +103,12 @@ pub struct ClientCallHandler {
     /// This channel is used to notify ClientManager when a call transitions to 
     /// the Connected state, allowing it to set up audio frame subscription.
     pub(crate) call_established_tx: Option<tokio::sync::mpsc::UnboundedSender<CallId>>,
+    
+    /// Channel for sending events back to session-core
+    /// 
+    /// This channel is used to send cleanup confirmations and other events
+    /// back to the session coordinator. We use RwLock to allow setting it after creation.
+    pub session_event_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<rvoip_session_core::manager::events::SessionEvent>>>>,
 }
 
 impl std::fmt::Debug for ClientCallHandler {
@@ -158,6 +164,7 @@ impl ClientCallHandler {
             incoming_calls,
             event_tx: None,
             call_established_tx: None,
+            session_event_tx: Arc::new(RwLock::new(None)),
         }
     }
     
@@ -198,6 +205,14 @@ impl ClientCallHandler {
     pub(crate) fn with_call_established_tx(mut self, tx: tokio::sync::mpsc::UnboundedSender<CallId>) -> Self {
         self.call_established_tx = Some(tx);
         self
+    }
+    
+    /// Set the session event channel
+    /// 
+    /// This internal method is used to provide a channel for sending events
+    /// back to the session coordinator, particularly for cleanup confirmations.
+    pub(crate) async fn set_session_event_tx(&self, tx: tokio::sync::mpsc::Sender<rvoip_session_core::manager::events::SessionEvent>) {
+        *self.session_event_tx.write().await = Some(tx);
     }
     
     /// Register an event handler to receive processed client events
@@ -1143,9 +1158,21 @@ impl CallHandler for ClientCallHandler {
                 handler.on_call_state_changed(status_info).await;
             }
             
-            // Clean up mappings but keep call_info for history
+            // Phase 2: Clean up mappings but keep call_info for history
+            // This is now safe because we're in Phase 2 (final cleanup)
             self.call_mapping.remove(&session.id);
             self.session_mapping.remove(&call_id);
+            
+            // Send cleanup confirmation back to session-core
+            // This confirms that client-core has completed its cleanup for this session
+            if let Some(session_event_tx) = self.session_event_tx.read().await.as_ref() {
+                use rvoip_session_core::manager::events::SessionEvent;
+                let _ = session_event_tx.send(SessionEvent::CleanupConfirmation {
+                    session_id: session.id.clone(),
+                    layer: "Client".to_string(),
+                }).await;
+                tracing::debug!("Sent cleanup confirmation for session {} from client-core", session.id);
+            }
         }
     }
     
