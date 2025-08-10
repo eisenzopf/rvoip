@@ -205,16 +205,11 @@ mod event_handling_tests {
             metadata: HashMap::new(),
         });
         
-        // Call on_call_ended
-        let session = rvoip_session_core::api::types::CallSession {
-            id: session_id.clone(),
-            from: "sip:alice@example.com".to_string(),
-            to: "sip:bob@example.com".to_string(),
-            state: rvoip_session_core::api::types::CallState::Terminated,
-            started_at: Some(std::time::Instant::now()),
-        };
+        // Call on_call_state_changed to transition to Terminating state
+        let old_state = rvoip_session_core::api::types::CallState::Active;
+        let new_state = rvoip_session_core::api::types::CallState::Terminating;
         
-        handler.on_call_ended(session, "Test cleanup").await;
+        handler.on_call_state_changed(&session_id, &old_state, &new_state, Some("Test cleanup")).await;
         
         // Verify cleanup confirmation was sent
         use tokio::time::{timeout, Duration};
