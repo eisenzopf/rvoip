@@ -342,10 +342,7 @@ impl SessionCoordinator {
         if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
             let old_state = session.state().clone();
             
-            // Store the call session for handler notification
-            call_session_for_handler = Some(session.as_call_session().clone());
-            
-            // Update the session state in registry
+            // Update the session state in registry FIRST
             if let Err(e) = self.registry.update_session_state(&session_id, CallState::Terminated).await {
                 tracing::error!("Failed to update session to Terminated state: {}", e);
             } else {
@@ -355,6 +352,11 @@ impl SessionCoordinator {
                     old_state,
                     new_state: CallState::Terminated,
                 }).await;
+            }
+            
+            // Now get the updated session with Terminated state for handler notification
+            if let Ok(Some(updated_session)) = self.registry.get_session(&session_id).await {
+                call_session_for_handler = Some(updated_session.as_call_session().clone());
             }
         }
 
