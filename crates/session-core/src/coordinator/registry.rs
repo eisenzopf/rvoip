@@ -113,10 +113,14 @@ impl InternalSessionRegistry {
         }
     }
 
-    /// List all active session IDs
+    /// List all active session IDs (excludes terminated sessions)
     pub async fn list_active_sessions(&self) -> Result<Vec<SessionId>> {
         let sessions = self.sessions.read().await;
-        Ok(sessions.keys().cloned().collect())
+        Ok(sessions
+            .iter()
+            .filter(|(_, session)| !matches!(session.state(), CallState::Terminated))
+            .map(|(id, _)| id.clone())
+            .collect())
     }
 
     /// Get statistics about sessions

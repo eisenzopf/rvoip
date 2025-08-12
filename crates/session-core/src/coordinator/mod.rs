@@ -10,7 +10,9 @@ mod session_ops;
 mod bridge_ops;
 mod sip_client;
 mod server_manager;
+pub mod transfer;
 pub mod registry;
 
 // Re-exports
-pub use coordinator::{SessionCoordinator, CleanupTracker, CleanupLayer}; 
+pub use coordinator::{SessionCoordinator, CleanupTracker, CleanupLayer};
+pub use transfer::TransferHandler; 

@@ -297,7 +297,9 @@ impl SessionCoordinator {
             // Check if all cleanup is complete or if we've timed out
             let elapsed = tracker.started_at.elapsed();
             let timeout = Duration::from_secs(5);
-            let all_done = tracker.media_done && tracker.client_done;
+            // For now, only require media cleanup since client cleanup is not being sent
+            // TODO: Implement proper client cleanup for dialog-core
+            let all_done = tracker.media_done; // Only checking media for now
             let timed_out = elapsed > timeout;
             
             if all_done || timed_out {

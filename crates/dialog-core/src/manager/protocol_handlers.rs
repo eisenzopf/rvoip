@@ -16,6 +16,8 @@ use std::net::SocketAddr;
 use tracing::debug;
 
 use rvoip_sip_core::{Request, Response, Method, StatusCode};
+use rvoip_sip_core::types::refer_to::ReferTo;
+use rvoip_sip_core::types::header::TypedHeaderTrait;
 use rvoip_transaction_core::TransactionKey;
 use crate::errors::{DialogError, DialogResult};
 use super::core::DialogManager;
@@ -287,12 +289,12 @@ impl MethodHandler for DialogManager {
         }
     }
     
-    /// Handle REFER requests (simple forwarding to session layer)
+    /// Handle REFER requests (call transfer)
     async fn handle_refer_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         debug!("Processing REFER request from {}", source);
         
         if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
-            // Forward to session layer for call transfer handling
+            // Create server transaction
             let server_transaction = self.transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
@@ -302,14 +304,56 @@ impl MethodHandler for DialogManager {
             
             let transaction_id = server_transaction.id().clone();
             
-            let event = crate::events::SessionCoordinationEvent::ReInvite {
+            // Parse Refer-To header using sip-core's ReferTo type
+            let refer_to = request.typed_header::<ReferTo>()
+                .ok_or_else(|| DialogError::ProtocolError {
+                    message: "Missing or invalid Refer-To header".to_string(),
+                })?
+                .clone();
+            
+            // Extract optional Referred-By header
+            let referred_by = request.get_header_value(&rvoip_sip_core::HeaderName::ReferredBy)
+                .map(|s| s.to_string());
+            
+            // Extract optional Replaces header (for attended transfer)
+            // Note: Replaces is not a standard HeaderName in sip-core yet, 
+            // so we'll look for it as a raw header
+            let replaces = request.all_headers().iter()
+                .find(|h| h.name().to_string().eq_ignore_ascii_case("replaces"))
+                .map(|h| {
+                    let header_str = h.to_string();
+                    header_str.split(':')
+                        .nth(1)
+                        .map(|s| s.trim().to_string())
+                })
+                .flatten();
+            
+            // Create new dedicated transfer event instead of ReInvite
+            let event = crate::events::SessionCoordinationEvent::TransferRequest {
                 dialog_id: dialog_id.clone(),
-                transaction_id,
-                request: request.clone(),
+                transaction_id: transaction_id.clone(),
+                refer_to,
+                referred_by,
+                replaces,
             };
             
+            // Forward to session layer
             self.notify_session_layer(event).await?;
-            debug!("REFER request forwarded to session layer for dialog {}", dialog_id);
+            debug!("REFER request forwarded to session layer as TransferRequest for dialog {}", dialog_id);
+            
+            // Send 202 Accepted response after successful processing
+            // This is the standard response for REFER per RFC 3515
+            let response = rvoip_transaction_core::utils::response_builders::create_response(
+                &request, 
+                StatusCode::Accepted
+            );
+            
+            self.transaction_manager.send_response(&transaction_id, response).await
+                .map_err(|e| DialogError::TransactionError {
+                    message: format!("Failed to send 202 Accepted response to REFER: {}", e),
+                })?;
+            
+            debug!("Sent 202 Accepted for REFER request");
             Ok(())
         } else {
             // REFER outside dialog - send 481
