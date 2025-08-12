@@ -18,6 +18,7 @@ use crate::api::{
 use crate::session::Session;
 use crate::manager::events::SessionEvent;
 use crate::coordinator::registry::InternalSessionRegistry;
+use crate::coordinator::transfer::TransferHandler;
 use crate::dialog::{DialogError, DialogResult};
 use dashmap::DashMap;
 use tracing;
@@ -33,6 +34,8 @@ pub struct SessionDialogCoordinator {
     session_to_dialog: Arc<dashmap::DashMap<SessionId, DialogId>>,
     // Store incoming SDP offers for negotiation
     incoming_sdp_offers: Arc<DashMap<SessionId, String>>,
+    // Transfer handler
+    transfer_handler: Arc<TransferHandler>,
 }
 
 impl SessionDialogCoordinator {
@@ -46,6 +49,13 @@ impl SessionDialogCoordinator {
         session_to_dialog: Arc<dashmap::DashMap<SessionId, DialogId>>,
         incoming_sdp_offers: Arc<DashMap<SessionId, String>>,
     ) -> Self {
+        // Create transfer handler
+        let transfer_handler = Arc::new(TransferHandler::new(
+            dialog_api.clone(),
+            registry.clone(),
+            dialog_to_session.clone(),
+        ));
+        
         Self {
             dialog_api,
             registry,
@@ -54,6 +64,7 @@ impl SessionDialogCoordinator {
             dialog_to_session,
             session_to_dialog,
             incoming_sdp_offers,
+            transfer_handler,
         }
     }
     
@@ -151,6 +162,26 @@ impl SessionDialogCoordinator {
             
             SessionCoordinationEvent::CleanupConfirmation { dialog_id, layer } => {
                 self.handle_cleanup_confirmation(dialog_id, layer).await?;
+            }
+            
+            SessionCoordinationEvent::TransferRequest { 
+                dialog_id, 
+                transaction_id, 
+                refer_to, 
+                referred_by, 
+                replaces 
+            } => {
+                tracing::info!("Received TransferRequest event for dialog {}", dialog_id);
+                self.transfer_handler.handle_refer_request(
+                    dialog_id,
+                    transaction_id,
+                    refer_to,
+                    referred_by,
+                    replaces,
+                ).await
+                    .map_err(|e| DialogError::Coordination {
+                        message: format!("Failed to handle transfer request: {}", e),
+                    })?;
             }
             
             _ => {
@@ -1140,6 +1171,13 @@ impl SessionDialogCoordinator {
 
 impl Clone for SessionDialogCoordinator {
     fn clone(&self) -> Self {
+        // Create a new transfer handler for the cloned instance
+        let transfer_handler = Arc::new(TransferHandler::new(
+            Arc::clone(&self.dialog_api),
+            Arc::clone(&self.registry),
+            Arc::clone(&self.dialog_to_session),
+        ));
+        
         Self {
             dialog_api: Arc::clone(&self.dialog_api),
             registry: Arc::clone(&self.registry),
@@ -1148,6 +1186,7 @@ impl Clone for SessionDialogCoordinator {
             dialog_to_session: Arc::clone(&self.dialog_to_session),
             session_to_dialog: Arc::clone(&self.session_to_dialog),
             incoming_sdp_offers: Arc::clone(&self.incoming_sdp_offers),
+            transfer_handler,
         }
     }
 }

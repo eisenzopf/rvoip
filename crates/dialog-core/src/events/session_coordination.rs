@@ -7,6 +7,7 @@
 use std::net::SocketAddr;
 
 use rvoip_sip_core::{Request, Response, Uri};
+use rvoip_sip_core::types::refer_to::ReferTo;
 use rvoip_transaction_core::TransactionKey;
 
 use crate::dialog::DialogId;
@@ -204,5 +205,23 @@ pub enum SessionCoordinationEvent {
         
         /// Which layer is confirming cleanup
         layer: String, // "media", "client", etc.
+    },
+    
+    /// Call transfer request received (REFER)
+    TransferRequest {
+        /// Dialog ID for the call being transferred
+        dialog_id: DialogId,
+        
+        /// Transaction ID for the REFER request
+        transaction_id: TransactionKey,
+        
+        /// The parsed Refer-To header (target of transfer)
+        refer_to: ReferTo,
+        
+        /// Optional Referred-By header (who initiated transfer)
+        referred_by: Option<String>,
+        
+        /// Optional Replaces header (for attended transfer)
+        replaces: Option<String>,
     },
 } 
