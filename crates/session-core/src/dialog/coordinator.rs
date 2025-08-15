@@ -41,7 +41,7 @@ pub struct SessionDialogCoordinator {
     // Track From URI for faster UAC-side correlation
     fromuri_to_session: Arc<dashmap::DashMap<String, SessionId>>,
     // Transfer handler
-    transfer_handler: Arc<TransferHandler>,
+    pub transfer_handler: Arc<TransferHandler>,
 }
 
 impl SessionDialogCoordinator {

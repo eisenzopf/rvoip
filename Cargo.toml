@@ -37,7 +37,7 @@ default-members = [
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
 [workspace.package]
-version = "0.1.25"  # 🎯 SINGLE VERSION TO MANAGE!
+version = "0.1.26"  # 🎯 SINGLE VERSION TO MANAGE!
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/eisenzopf/rvoip"
@@ -118,19 +118,19 @@ collapsible_else_if = "allow"
 
 [workspace.dependencies]
 # 🎯 INTERNAL CRATES - Include version for publishing to crates.io!
-rvoip-sip-core = { path = "crates/sip-core", version = "0.1.25" }
-rvoip-sip-transport = { path = "crates/sip-transport", version = "0.1.25" }
-rvoip-transaction-core = { path = "crates/transaction-core", version = "0.1.25" }
-rvoip-dialog-core = { path = "crates/dialog-core", version = "0.1.25" }
-rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.25" }
-rvoip-media-core = { path = "crates/media-core", version = "0.1.25" }
-rvoip-session-core = { path = "crates/session-core", version = "0.1.25" }
-rvoip-call-engine = { path = "crates/call-engine", version = "0.1.25" }
-rvoip-client-core = { path = "crates/client-core", version = "0.1.25" }
-rvoip-codec-core = { path = "crates/codec-core", version = "0.1.25" }
-rvoip-audio-core = { path = "crates/audio-core", version = "0.1.25" }
-rvoip-sip-client = { path = "crates/sip-client", version = "0.1.25", features = ["simple-api"] }
-rvoip = { path = "crates/rvoip", version = "0.1.25" }
+rvoip-sip-core = { path = "crates/sip-core", version = "0.1.26" }
+rvoip-sip-transport = { path = "crates/sip-transport", version = "0.1.26" }
+rvoip-transaction-core = { path = "crates/transaction-core", version = "0.1.26" }
+rvoip-dialog-core = { path = "crates/dialog-core", version = "0.1.26" }
+rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.26" }
+rvoip-media-core = { path = "crates/media-core", version = "0.1.26" }
+rvoip-session-core = { path = "crates/session-core", version = "0.1.26" }
+rvoip-call-engine = { path = "crates/call-engine", version = "0.1.26" }
+rvoip-client-core = { path = "crates/client-core", version = "0.1.26" }
+rvoip-codec-core = { path = "crates/codec-core", version = "0.1.26" }
+rvoip-audio-core = { path = "crates/audio-core", version = "0.1.26" }
+rvoip-sip-client = { path = "crates/sip-client", version = "0.1.26", features = ["simple-api"] }
+rvoip = { path = "crates/rvoip", version = "0.1.26" }
 
 # External dependencies
 tokio = { version = "1.36", features = ["full"] }

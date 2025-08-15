@@ -74,8 +74,9 @@ mod advanced_tests;
 // Re-export main types
 pub use error::{SipClientError, SipClientResult};
 pub use builder::SipClientBuilder;
-pub use types::{Call, CallId, CallState, AudioConfig, CodecConfig};
+pub use types::{Call, CallId, CallState, AudioConfig, CodecConfig, SipClientConfig};
 pub use events::{SipClientEvent, EventStream};
+pub use simple::SipClient as SimpleSipClient;
 
 // Re-export audio types that users need
 pub use rvoip_audio_core::AudioDirection;

@@ -87,6 +87,10 @@ pub enum SipClientError {
         field: String,
         reason: String,
     },
+    
+    /// Transfer failed
+    #[error("Transfer failed: {reason}")]
+    TransferFailed { reason: String },
 }
 
 // Note: Clone is not implemented because some wrapped errors don't implement Clone.

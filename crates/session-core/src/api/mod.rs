@@ -113,18 +113,17 @@
 //!         .await?;
 //!     
 //!     // 2. Start the coordinator to begin accepting calls
-//!     SessionControl::start(&coordinator).await?;
+//!     coordinator.start().await?;
 //!     
 //!     // 3. Make an outgoing call
-//!     let session = SessionControl::create_outgoing_call(
-//!         &coordinator,
+//!     let session = coordinator.create_outgoing_call(
 //!         "sip:alice@example.com",
 //!         "sip:bob@192.168.1.100",
 //!         None  // SDP will be generated automatically
 //!     ).await?;
 //!     
 //!     // 4. Clean shutdown when done
-//!     SessionControl::stop(&coordinator).await?;
+//!     coordinator.stop().await?;
 //!     Ok(())
 //! }
 //! ```
@@ -260,22 +259,19 @@
 //!         // For this example, we'll accept all calls with a simple SDP
 //!         if call.sdp.is_some() {
 //!             // Generate SDP answer using MediaControl
-//!             let answer = MediaControl::generate_sdp_answer(
-//!                 coordinator,
+//!             let answer = coordinator.generate_sdp_answer(
 //!                 &call.id,
 //!                 call.sdp.as_ref().unwrap()
 //!             ).await?;
 //!             
 //!             // Accept the call
-//!             SessionControl::accept_incoming_call(
-//!                 coordinator,
+//!             coordinator.accept_incoming_call(
 //!                 &call,
 //!                 Some(answer)
 //!             ).await?;
 //!         } else {
 //!             // Reject calls without SDP
-//!             SessionControl::reject_incoming_call(
-//!                 coordinator,
+//!             coordinator.reject_incoming_call(
 //!                 &call,
 //!                 "No SDP offer"
 //!             ).await?;
@@ -301,7 +297,7 @@
 //!         .build()
 //!         .await?;
 //! 
-//!     SessionControl::start(&coordinator).await?;
+//!     coordinator.start().await?;
 //!     Ok(())
 //! }
 //! ```
@@ -324,7 +320,7 @@
 //!     // In a real implementation, you would process queued calls in background:
 //!     // - Check queue.dequeue() periodically
 //!     // - Accept/reject calls based on agent availability
-//!     // - Use SessionControl::accept_incoming_call() or reject_incoming_call()
+//!     // - Use coordinator.accept_incoming_call() or reject_incoming_call()
 //!     
 //!     Ok(())
 //! }
@@ -424,7 +420,7 @@
 //! 
 //! 1. **Use the Builder Pattern** - Configure all settings before building
 //! 2. **Handle Errors Properly** - All network operations can fail
-//! 3. **Monitor Call Quality** - Use MediaControl::get_media_statistics()
+//! 3. **Monitor Call Quality** - Use coordinator.get_media_statistics()
 //! 4. **Clean Up Resources** - Always call terminate_session() when done
 //! 5. **Choose the Right Pattern** - Immediate for simple cases, deferred for complex
 //! 6. **Use Type Safety** - Leverage Rust's type system for compile-time checks
@@ -442,7 +438,7 @@
 //!     from: &str,
 //!     to: &str
 //! ) {
-//!     match SessionControl::create_outgoing_call(&coordinator, from, to, None).await {
+//!     match coordinator.create_outgoing_call(from, to, None).await {
 //!         Ok(session) => {
 //!             println!("Call created: {}", session.id());
 //!         }
