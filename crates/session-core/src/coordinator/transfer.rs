@@ -159,7 +159,7 @@ impl TransferHandler {
     }
 
     /// Create a REFER subscription
-    async fn create_refer_subscription(
+    pub async fn create_refer_subscription(
         &self,
         dialog_id: &DialogId,
         session_id: &SessionId,
@@ -180,19 +180,19 @@ impl TransferHandler {
     }
 
     /// Update subscription with transfer session ID
-    async fn update_subscription(&self, event_id: &str, transfer_session_id: SessionId) {
+    pub async fn update_subscription(&self, event_id: &str, transfer_session_id: SessionId) {
         if let Some(mut sub) = self.subscriptions.write().await.get_mut(event_id) {
             sub.transfer_session_id = Some(transfer_session_id);
         }
     }
 
     /// Remove a subscription
-    async fn remove_subscription(&self, event_id: &str) {
+    pub async fn remove_subscription(&self, event_id: &str) {
         self.subscriptions.write().await.remove(event_id);
     }
 
     /// Send NOTIFY for transfer progress
-    async fn send_transfer_notify(
+    pub async fn send_transfer_notify(
         &self,
         dialog_id: &DialogId,
         event_id: &str,
@@ -406,7 +406,7 @@ impl TransferHandler {
     }
 
     /// Clean up expired subscriptions (older than 5 minutes)
-    async fn cleanup_expired_subscriptions(&self) {
+    pub async fn cleanup_expired_subscriptions(&self) {
         let mut subs = self.subscriptions.write().await;
         let now = std::time::Instant::now();
         let expiry = std::time::Duration::from_secs(300); // 5 minutes

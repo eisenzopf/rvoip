@@ -461,25 +461,38 @@ impl AdvancedSipClient {
         call_id: &CallId, 
         target_uri: &str
     ) -> SipClientResult<()> {
-        let calls = self.calls.read().await;
-        let call_state = calls.get(call_id)
-            .ok_or_else(|| SipClientError::CallNotFound { 
-                call_id: call_id.to_string() 
-            })?;
-        
-        // For now, just use the URI as a string
-        // TODO: Add proper URI parsing when available
+        // Get call and verify state
+        let call = {
+            let calls = self.calls.read().await;
+            let call_state = calls.get(call_id)
+                .ok_or_else(|| SipClientError::CallNotFound { 
+                    call_id: call_id.to_string() 
+                })?;
+            
+            // Check if call is in a valid state for transfer
+            let current_state = *call_state.call.state.read();
+            if current_state != CallState::Connected && current_state != CallState::OnHold {
+                return Err(SipClientError::InvalidState {
+                    message: format!("Cannot transfer call in state: {:?}", current_state),
+                });
+            }
+            
+            call_state.call.clone()
+        };
         
         // Perform transfer via client-core
-        // TODO: client-core doesn't expose transfer API yet
-        return Err(SipClientError::NotImplemented {
-            feature: "call_transfer".to_string(),
-        });
+        self.core_client.transfer_call(call_id, target_uri).await
+            .map_err(|e| SipClientError::TransferFailed { 
+                reason: e.to_string() 
+            })?;
         
+        // Emit transfer event
         self.event_emitter.emit(SipClientEvent::CallTransferred { 
-            call: call_state.call.clone(),
+            call: call.clone(),
             target: target_uri.to_string(),
         });
+        
+        tracing::info!("📞 Initiated transfer of call {} to {}", call_id, target_uri);
         
         Ok(())
     }
