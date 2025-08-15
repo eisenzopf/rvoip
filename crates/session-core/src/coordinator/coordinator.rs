@@ -240,6 +240,16 @@ impl SessionCoordinator {
     pub fn get_bound_address(&self) -> std::net::SocketAddr {
         self.dialog_manager.get_bound_address()
     }
+    
+    /// Get a reference to the dialog coordinator
+    pub fn dialog_coordinator(&self) -> &Arc<SessionDialogCoordinator> {
+        &self.dialog_coordinator
+    }
+    
+    /// Get a reference to the configuration
+    pub fn config(&self) -> &SessionManagerConfig {
+        &self.config
+    }
 
     /// Start media session
     pub(crate) async fn start_media_session(&self, session_id: &SessionId) -> Result<()> {

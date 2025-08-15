@@ -417,8 +417,13 @@ impl SessionControl for Arc<SessionCoordinator> {
         &self,
         prepared_call: &PreparedCall,
     ) -> Result<CallSession> {
+        // CRITICAL: Track From URI BEFORE creating dialog
+        // This ensures the mapping exists when the 200 OK arrives
+        // Use the configured local_address which dialog-core will actually use
+        self.dialog_coordinator().track_from_uri(prepared_call.session_id.clone(), &self.config().local_address);
+        
         // Send the INVITE with the prepared SDP
-        self.dialog_manager
+        let dialog_handle = self.dialog_manager
             .create_outgoing_call(
                 prepared_call.session_id.clone(),
                 &prepared_call.from,
@@ -427,6 +432,13 @@ impl SessionControl for Arc<SessionCoordinator> {
             )
             .await
             .map_err(|e| SessionError::internal(&format!("Failed to initiate call: {}", e)))?;
+        
+        // Set session-to-dialog mapping in the coordinator
+        self.dialog_coordinator().map_session_to_dialog(
+            prepared_call.session_id.clone(), 
+            dialog_handle.dialog_id.clone(),
+            None  // Call-ID will be tracked when we see the first SIP message
+        );
         
         // Return the session
         self.get_session(&prepared_call.session_id).await?

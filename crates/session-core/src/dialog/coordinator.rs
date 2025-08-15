@@ -34,6 +34,12 @@ pub struct SessionDialogCoordinator {
     session_to_dialog: Arc<dashmap::DashMap<SessionId, DialogId>>,
     // Store incoming SDP offers for negotiation
     incoming_sdp_offers: Arc<DashMap<SessionId, String>>,
+    // CRITICAL FIX: Track Call-ID to session mapping for dialog transitions
+    callid_to_session: Arc<dashmap::DashMap<String, SessionId>>,
+    // WORKAROUND: Track From tag to session for outgoing calls since dialog IDs change
+    fromtag_to_session: Arc<dashmap::DashMap<String, SessionId>>,
+    // Track From URI for faster UAC-side correlation
+    fromuri_to_session: Arc<dashmap::DashMap<String, SessionId>>,
     // Transfer handler
     transfer_handler: Arc<TransferHandler>,
 }
@@ -64,6 +70,9 @@ impl SessionDialogCoordinator {
             dialog_to_session,
             session_to_dialog,
             incoming_sdp_offers,
+            callid_to_session: Arc::new(dashmap::DashMap::new()),
+            fromtag_to_session: Arc::new(dashmap::DashMap::new()),
+            fromuri_to_session: Arc::new(dashmap::DashMap::new()),
             transfer_handler,
         }
     }
@@ -231,6 +240,23 @@ impl SessionDialogCoordinator {
         
         // PHASE 17.4: Also track session to dialog mapping for BYE lookups
         self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
+        
+        // CRITICAL FIX: Track From tag and Call-ID for incoming calls (UAS side)
+        // When we receive an INVITE as UAS, the From tag is the remote tag
+        if let Some(from_header) = request.from() {
+            if let Some(from_tag) = from_header.tag() {
+                let tag_str = from_tag.to_string();
+                self.fromtag_to_session.insert(tag_str.clone(), session_id.clone());
+                tracing::info!("📞 UAS: Stored From tag {} for incoming session {}", tag_str, session_id);
+            }
+        }
+        
+        // Also track Call-ID for fallback correlation
+        if let Some(call_id) = request.call_id() {
+            let call_id_str = call_id.to_string();
+            self.callid_to_session.insert(call_id_str.clone(), session_id.clone());
+            tracing::info!("📞 UAS: Stored Call-ID {} for incoming session {}", call_id_str, session_id);
+        }
         
         tracing::info!("Created session {} for incoming call dialog {}", session_id, dialog_id);
         
@@ -447,6 +473,37 @@ impl SessionDialogCoordinator {
             return Ok(());
         }
         
+        // CRITICAL: Track From tag for responses to help find sessions when dialog IDs change
+        // This is a workaround for dialog-core creating new dialog IDs on state transitions
+        println!("🔍 Checking dialog {} for From tag tracking", dialog_id);
+        
+        // Try to store From tag mapping if we know this dialog
+        if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+            let session_id = session_id_ref.value().clone();
+            
+            // Extract From tag if present
+            if let Some(from_header) = response.from() {
+                if let Some(tag) = from_header.tag() {
+                    let from_tag = tag.to_string();
+                    if !self.fromtag_to_session.contains_key(&from_tag) {
+                        self.fromtag_to_session.insert(from_tag.clone(), session_id.clone());
+                        println!("📞 Stored From tag {} for session {}", from_tag, session_id);
+                    }
+                }
+            }
+            
+            // Also store Call-ID for completeness
+            if let Some(call_id_header) = response.call_id() {
+                let call_id_str = call_id_header.0.clone();
+                if !self.callid_to_session.contains_key(&call_id_str) {
+                    self.callid_to_session.insert(call_id_str.clone(), session_id.clone());
+                    println!("📞 Stored Call-ID {} for session {}", call_id_str, session_id);
+                }
+            }
+        } else {
+            println!("❌ No session found for dialog {} to store From tag", dialog_id);
+        }
+        
         // Handle INVITE responses
         if response.status_code() == 200 && tx_id_str.contains("INVITE") && tx_id_str.contains("client") {
             println!("🚀 SESSION COORDINATION: This is a 200 OK to INVITE - sending automatic ACK");
@@ -495,37 +552,110 @@ impl SessionDialogCoordinator {
             }
             
             // CRITICAL FIX: Update session state to Active for outgoing calls
-            if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
-                let session_id = session_id_ref.value().clone();
-                println!("📞 SESSION COORDINATION: Updating session {} state to Active for successful outgoing call", session_id);
-                
-                                                    // DON'T update to Active yet - wait for media creation after ACK!
-                tracing::info!("📞 200 OK received for session {} - keeping in Initiating state until media ready", session_id);
+            println!("🔍 DIALOG COORDINATOR: Looking for session mapped to dialog {}", dialog_id);
+            
+            // Try to find session first by dialog ID
+            let session_id = if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+                let sid = session_id_ref.value().clone();
+                println!("✅ DIALOG COORDINATOR: Found session {} for dialog {}", sid, dialog_id);
+                Some(sid)
             } else {
-                tracing::debug!("No session found for dialog {} - trying alternative correlation", dialog_id);
-                
-                // ALTERNATIVE APPROACH: Try to find session by checking all active sessions
-                // Look for sessions in Initiating state and update the first one to Active
-                // This handles the timing issue where responses arrive before dialog mapping
-                match self.registry.list_active_sessions().await {
-                    Ok(session_ids) => {
-                        for session_id in session_ids {
-                            if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                                if matches!(session.state(), CallState::Initiating) {
-                                    tracing::info!("Alternative correlation: mapping dialog {} to session {}", dialog_id, session_id);
+                // Dialog ID not found - try From tag lookup
+                // This happens when dialog transitions from Early to Confirmed  
+                if let Some(from_header) = response.from() {
+                    if let Some(tag) = from_header.tag() {
+                        let from_tag = tag.to_string();
+                        println!("🔍 DIALOG COORDINATOR: Dialog {} not found, trying From tag {}", dialog_id, from_tag);
+                        
+                        if let Some(session_id_ref) = self.fromtag_to_session.get(&from_tag) {
+                            let sid = session_id_ref.value().clone();
+                            println!("✅ DIALOG COORDINATOR: Found session {} via From tag {}", sid, from_tag);
+                            
+                            // Update mappings with new dialog ID
+                            self.dialog_to_session.insert(dialog_id.clone(), sid.clone());
+                            self.session_to_dialog.insert(sid.clone(), dialog_id.clone());
+                            
+                            // Also store From tag for this new dialog  
+                            self.fromtag_to_session.insert(from_tag, sid.clone());
+                            
+                            Some(sid)
+                        } else {
+                            // Try Call-ID as final fallback
+                            if let Some(call_id_header) = response.call_id() {
+                                let call_id_str = call_id_header.0.clone();
+                                println!("🔍 DIALOG COORDINATOR: From tag {} not found, trying Call-ID {}", from_tag, call_id_str);
+                                
+                                if let Some(session_id_ref) = self.callid_to_session.get(&call_id_str) {
+                                    let sid = session_id_ref.value().clone();
+                                    println!("✅ DIALOG COORDINATOR: Found session {} via Call-ID {}", sid, call_id_str);
                                     
-                                    // Map this dialog to the session for future reference
-                                    self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
+                                    // Update all mappings
+                                    self.dialog_to_session.insert(dialog_id.clone(), sid.clone());
+                                    self.session_to_dialog.insert(sid.clone(), dialog_id.clone());
+                                    self.fromtag_to_session.insert(from_tag, sid.clone());
                                     
-                                                                                                    // DON'T update to Active yet - wait for media creation after ACK!
-                    tracing::info!("📞 200 OK received for session {} via alternative correlation - keeping in Initiating state until media ready", session_id);
-                                    break; // Found and updated one session, stop looking
+                                    Some(sid)
+                                } else {
+                                    println!("❌ DIALOG COORDINATOR: No session found for From tag {} or Call-ID {}", from_tag, call_id_str);
+                                    None
                                 }
+                            } else {
+                                println!("❌ DIALOG COORDINATOR: No session found for From tag {}", from_tag);
+                                None
                             }
                         }
+                    } else {
+                        println!("❌ DIALOG COORDINATOR: No From tag in response");
+                        None
                     }
-                    Err(e) => {
-                        tracing::warn!("Alternative lookup failed to list active sessions: {}", e);
+                } else {
+                    println!("❌ DIALOG COORDINATOR: No From header in response");
+                    None
+                }
+            };
+            
+            if let Some(session_id) = session_id {
+                println!("📞 SESSION COORDINATION: Processing 200 OK for session {} (UAC side)", session_id);
+                
+                // WORKAROUND: Since dialog-core doesn't generate AckSent events,
+                // we'll trigger media creation right after sending the ACK
+                // The handle_ack_sent call above should have triggered this, but
+                // if session mapping failed, we need to do it here
+                tracing::info!("📞 200 OK received for session {} - triggering UAC media creation", session_id);
+                
+                // Send MediaEvent for UAC side
+                self.send_session_event(SessionEvent::MediaEvent {
+                    session_id: session_id.clone(),
+                    event: "rfc_compliant_media_creation_uac".to_string(),
+                }).await.unwrap_or_else(|e| {
+                    tracing::error!("Failed to send UAC media creation event: {}", e);
+                });
+            } else {
+                println!("❌ DIALOG COORDINATOR: Could not find session for dialog {}", dialog_id);
+                tracing::warn!("No session found for dialog {} - attempting fallback correlation", dialog_id);
+                
+                // FINAL FALLBACK: For 200 OK to INVITE on UAC side, use indexed From URI lookup
+                // This is a workaround for dialog-core creating new dialog IDs
+                if let Some(from_header) = response.from() {
+                    let from_uri = from_header.address().uri.to_string();
+                    
+                    // Use indexed lookup instead of iterating through all sessions
+                    if let Some(session_ref) = self.fromuri_to_session.get(&from_uri) {
+                        let sid = session_ref.value().clone();
+                        
+                        // Update mappings for future use
+                        self.dialog_to_session.insert(dialog_id.clone(), sid.clone());
+                        self.session_to_dialog.insert(sid.clone(), dialog_id.clone());
+                        
+                        // Send MediaEvent for UAC side
+                        self.send_session_event(SessionEvent::MediaEvent {
+                            session_id: sid.clone(),
+                            event: "rfc_compliant_media_creation_uac".to_string(),
+                        }).await.unwrap_or_else(|e| {
+                            tracing::error!("Failed to send UAC media creation event: {}", e);
+                        });
+                    } else {
+                        tracing::warn!("No session found for From URI {} in fallback", from_uri);
                     }
                 }
             }
@@ -611,13 +741,46 @@ impl SessionDialogCoordinator {
     async fn handle_ack_sent(
         &self,
         dialog_id: DialogId,
-        _transaction_id: rvoip_dialog_core::TransactionKey,
+        transaction_id: rvoip_dialog_core::TransactionKey,
         negotiated_sdp: Option<String>,
     ) -> DialogResult<()> {
-        if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
-            let session_id = session_id_ref.value().clone();
-            tracing::info!("✅ RFC 3261: ACK SENT for session {} - creating media session (UAC side)", session_id);
+        // First try direct dialog-to-session mapping
+        let session_id = if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
+            let sid = session_id_ref.value().clone();
+            tracing::info!("✅ RFC 3261: ACK SENT for session {} via direct mapping - creating media session (UAC side)", sid);
+            Some(sid)
+        } else {
+            // Try transaction-based correlation like we do for ACK received
+            let tx_str = transaction_id.to_string();
+            tracing::debug!("🔍 ACK SENT: No direct mapping for dialog {}, checking transaction {}", dialog_id, tx_str);
             
+            // Extract Call-ID from transaction (format: method|call-id|from-tag|...)
+            if tx_str.contains("call-") {
+                let call_id_start = tx_str.find("call-").unwrap_or(0);
+                let call_id_part = &tx_str[call_id_start..];
+                let call_id_end = call_id_part.find('|').unwrap_or(call_id_part.len());
+                let call_id = &call_id_part[..call_id_end];
+                
+                if let Some(session_ref) = self.callid_to_session.get(call_id) {
+                    let sid = session_ref.value().clone();
+                    tracing::info!("✅ ACK SENT: Found session {} via Call-ID {} correlation", sid, call_id);
+                    
+                    // Update dialog mapping for future use
+                    self.dialog_to_session.insert(dialog_id.clone(), sid.clone());
+                    self.session_to_dialog.insert(sid.clone(), dialog_id.clone());
+                    
+                    Some(sid)
+                } else {
+                    tracing::warn!("⚠️ ACK SENT: No session found for Call-ID {}", call_id);
+                    None
+                }
+            } else {
+                tracing::warn!("⚠️ ACK SENT: Could not extract Call-ID from transaction {}", tx_str);
+                None
+            }
+        };
+        
+        if let Some(session_id) = session_id {
             // Store final negotiated SDP if provided
             if let Some(ref sdp) = negotiated_sdp {
                 self.send_session_event(SessionEvent::SdpEvent {
@@ -637,48 +800,7 @@ impl SessionDialogCoordinator {
                 tracing::error!("Failed to send RFC compliant media create event: {}", e);
             });
         } else {
-            tracing::debug!("🔍 ACK SENT: No direct session mapping found for dialog {} - using alternative correlation", dialog_id);
-            
-            // CRITICAL FIX: Handle media creation even with alternative correlation
-            // Look for the session that was established via alternative correlation
-            match self.registry.list_active_sessions().await {
-                Ok(session_ids) => {
-                    for session_id in session_ids {
-                        if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                            if matches!(session.state(), CallState::Initiating | CallState::Active) {
-                                tracing::info!("🔧 ACK SENT: Alternative media creation for session {} after ACK (state: {:?})", session_id, session.state());
-                                
-                                // Store final negotiated SDP if provided
-                                if let Some(ref sdp) = negotiated_sdp {
-                                    self.send_session_event(SessionEvent::SdpEvent {
-                                        session_id: session_id.clone(),
-                                        event_type: "final_negotiated_sdp".to_string(),
-                                        sdp: sdp.clone(),
-                                    }).await.unwrap_or_else(|e| {
-                                        tracing::error!("Failed to send final negotiated SDP event: {}", e);
-                                    });
-                                }
-                                
-                                // RFC 3261 COMPLIANT: Create media session after ACK is sent (UAC side)
-                                self.send_session_event(SessionEvent::MediaEvent {
-                                    session_id: session_id.clone(),
-                                    event: "rfc_compliant_media_creation_uac".to_string(),
-                                }).await.unwrap_or_else(|e| {
-                                    tracing::error!("Failed to send RFC compliant media create event: {}", e);
-                                });
-                                
-                                // Also map this dialog for future reference
-                                self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
-                                
-                                break; // Only create media for one session (first Active one found)
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to find session for ACK sent alternative correlation: {}", e);
-                }
-            }
+            tracing::warn!("⚠️ ACK SENT: No session found for dialog {} after all correlation attempts", dialog_id);
         }
         
         Ok(())
@@ -688,7 +810,7 @@ impl SessionDialogCoordinator {
     async fn handle_ack_received(
         &self,
         dialog_id: DialogId,
-        _transaction_id: rvoip_dialog_core::TransactionKey,
+        transaction_id: rvoip_dialog_core::TransactionKey,
         negotiated_sdp: Option<String>,
     ) -> DialogResult<()> {
         if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
@@ -716,45 +838,56 @@ impl SessionDialogCoordinator {
         } else {
             tracing::debug!("🔍 ACK RECEIVED: No direct session mapping found for dialog {} - using alternative correlation", dialog_id);
             
-            // CRITICAL FIX: Handle media creation even with alternative correlation  
-            // Look for the session that was established via alternative correlation
-            match self.registry.list_active_sessions().await {
-                Ok(session_ids) => {
-                                         for session_id in session_ids {
-                         if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                             if matches!(session.state(), CallState::Initiating | CallState::Active) {
-                                 tracing::info!("🔧 ACK RECEIVED: Alternative media creation for session {} after ACK (state: {:?})", session_id, session.state());
-                                
-                                // Store final negotiated SDP if provided
-                                if let Some(ref sdp) = negotiated_sdp {
-                                    self.send_session_event(SessionEvent::SdpEvent {
-                                        session_id: session_id.clone(),
-                                        event_type: "final_negotiated_sdp".to_string(),
-                                        sdp: sdp.clone(),
-                                    }).await.unwrap_or_else(|e| {
-                                        tracing::error!("Failed to send final negotiated SDP event: {}", e);
-                                    });
-                                }
-                                
-                                // RFC 3261 COMPLIANT: Create media session after ACK is received (UAS side)
-                                self.send_session_event(SessionEvent::MediaEvent {
-                                    session_id: session_id.clone(),
-                                    event: "rfc_compliant_media_creation_uas".to_string(),
-                                }).await.unwrap_or_else(|e| {
-                                    tracing::error!("Failed to send RFC compliant media create event: {}", e);
-                                });
-                                
-                                // Also map this dialog for future reference
-                                self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
-                                
-                                break; // Only create media for one session (first Active one found)
-                            }
-                        }
-                    }
+            // IMPROVED: Try transaction-based correlation
+            let tx_str = transaction_id.to_string();
+            tracing::info!("🔍 ACK RECEIVED: Using transaction-based correlation for dialog {}, tx: {}", dialog_id, tx_str);
+            
+            // Extract Call-ID from transaction (format: method|call-id|from-tag|...)
+            let session_id = if tx_str.contains("call-") {
+                let call_id_start = tx_str.find("call-").unwrap_or(0);
+                let call_id_part = &tx_str[call_id_start..];
+                let call_id_end = call_id_part.find('|').unwrap_or(call_id_part.len());
+                let call_id = &call_id_part[..call_id_end];
+                
+                if let Some(session_ref) = self.callid_to_session.get(call_id) {
+                    let sid = session_ref.value().clone();
+                    tracing::info!("✅ ACK RECEIVED: Found session {} via Call-ID {} correlation", sid, call_id);
+                    
+                    // Update dialog mapping for future use
+                    self.dialog_to_session.insert(dialog_id.clone(), sid.clone());
+                    self.session_to_dialog.insert(sid.clone(), dialog_id.clone());
+                    
+                    Some(sid)
+                } else {
+                    tracing::warn!("⚠️ ACK RECEIVED: No session found for Call-ID {}", call_id);
+                    None
                 }
-                Err(e) => {
-                    tracing::error!("Failed to find session for ACK received alternative correlation: {}", e);
+            } else {
+                tracing::warn!("⚠️ ACK RECEIVED: Could not extract Call-ID from transaction {}", tx_str);
+                None
+            };
+            
+            if let Some(session_id) = session_id {
+                // Store final negotiated SDP if provided
+                if let Some(ref sdp) = negotiated_sdp {
+                    self.send_session_event(SessionEvent::SdpEvent {
+                        session_id: session_id.clone(),
+                        event_type: "final_negotiated_sdp".to_string(),
+                        sdp: sdp.clone(),
+                    }).await.unwrap_or_else(|e| {
+                        tracing::error!("Failed to send final negotiated SDP event: {}", e);
+                    });
                 }
+                
+                // RFC 3261 COMPLIANT: Create media session after ACK is received (UAS side)
+                self.send_session_event(SessionEvent::MediaEvent {
+                    session_id: session_id.clone(),
+                    event: "rfc_compliant_media_creation_uas".to_string(),
+                }).await.unwrap_or_else(|e| {
+                    tracing::error!("Failed to send RFC compliant media create event: {}", e);
+                });
+            } else {
+                tracing::warn!("⚠️ ACK RECEIVED: No session found for dialog {} after correlation attempts", dialog_id);
             }
         }
         
@@ -872,6 +1005,9 @@ impl SessionDialogCoordinator {
             
             // NOW remove the dialog mapping after sending the event
             self.dialog_to_session.remove(&dialog_id);
+            
+            // Also clean up From URI mappings for this session
+            self.untrack_from_uri_for_session(&session_id);
             
             // PHASE 0.24: Enhanced cleanup logging
             tracing::debug!("🧹 BYE-CLEANUP: Removed dialog mapping for {} (session: {})", dialog_id, session_id);
@@ -1148,6 +1284,39 @@ impl SessionDialogCoordinator {
     }
     
     /// Send a session event
+    /// Map session to dialog (for outgoing calls)
+    pub fn map_session_to_dialog(&self, session_id: SessionId, dialog_id: DialogId, call_id: Option<String>) {
+        self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
+        self.dialog_to_session.insert(dialog_id, session_id.clone());
+        
+        // Also track Call-ID to session mapping if provided
+        if let Some(cid) = call_id {
+            self.callid_to_session.insert(cid, session_id);
+        }
+        
+        tracing::info!("📍 Mapped session-to-dialog bidirectionally");
+    }
+    
+    /// Track From URI for a session (for faster UAC-side correlation)
+    pub fn track_from_uri(&self, session_id: SessionId, from_uri: &str) {
+        self.fromuri_to_session.insert(from_uri.to_string(), session_id.clone());
+        tracing::info!("Tracked From URI {} for session {}", from_uri, session_id);
+    }
+    
+    pub fn untrack_from_uri_for_session(&self, session_id: &SessionId) {
+        // Find and remove all From URI mappings for this session
+        let uris_to_remove: Vec<String> = self.fromuri_to_session
+            .iter()
+            .filter(|entry| entry.value() == session_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+            
+        for uri in uris_to_remove {
+            self.fromuri_to_session.remove(&uri);
+            tracing::debug!("Untracked From URI {} for session {}", uri, session_id);
+        }
+    }
+    
     async fn send_session_event(&self, event: SessionEvent) -> DialogResult<()> {
         self.session_events_tx
             .send(event)
@@ -1186,6 +1355,9 @@ impl Clone for SessionDialogCoordinator {
             dialog_to_session: Arc::clone(&self.dialog_to_session),
             session_to_dialog: Arc::clone(&self.session_to_dialog),
             incoming_sdp_offers: Arc::clone(&self.incoming_sdp_offers),
+            callid_to_session: Arc::clone(&self.callid_to_session),
+            fromtag_to_session: Arc::clone(&self.fromtag_to_session),
+            fromuri_to_session: Arc::clone(&self.fromuri_to_session),
             transfer_handler,
         }
     }
