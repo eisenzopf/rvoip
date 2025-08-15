@@ -367,7 +367,7 @@ async fn test_concurrent_api_operations_real_transport() -> Result<(), Box<dyn s
     // Create multiple dialogs concurrently
     let mut handles = Vec::new();
     
-    for i in 0..3 {
+    for i in 0..5 {  // Test with 5 concurrent dialogs
         let server_clone = Arc::clone(&env.server);
         let server_addr = env.server_addr;
         let handle = tokio::spawn(async move {

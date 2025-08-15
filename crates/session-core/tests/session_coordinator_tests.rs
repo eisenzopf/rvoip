@@ -12,6 +12,7 @@ mod common;
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::collections::HashSet;
 use tokio::sync::mpsc;
 use rvoip_session_core::{
     SessionCoordinator,
@@ -306,10 +307,13 @@ async fn test_multiple_concurrent_calls() {
         .await
         .expect("Failed to subscribe to Alice events");
 
-    // Create multiple calls sequentially with delays to avoid overwhelming the system
-    // Reducing to 2 calls for more reliable testing
+    // Create multiple calls concurrently - testing with 100 calls
     let mut calls = vec![];
-    for i in 0..2 {
+    let mut call_ids = HashSet::new();  // Use HashSet for faster lookups
+    const NUM_CALLS: usize = 100;
+    
+    // Create all calls first without waiting for them to become active
+    for i in 0..NUM_CALLS {
         let alice_addr = format!("sip:alice{}@127.0.0.1:{}", i, alice_port);
         let bob_addr = format!("sip:bob@127.0.0.1:{}", bob_port);
         
@@ -319,44 +323,90 @@ async fn test_multiple_concurrent_calls() {
             None,
         ).await.expect("Failed to create call");
         
-        println!("Created call {}: {}", i, call.id);
-        calls.push(call.clone());
+        if i % 10 == 0 {
+            println!("Created call {}: {}", i, call.id);
+        }
+        call_ids.insert(call.id.clone());
+        calls.push(call);
         
-        // Wait for this call to become active before creating the next one
-        let active = common::wait_for_state_change(
-            &mut alice_events,
-            &call.id,
-            Duration::from_secs(5)  // Increased timeout
-        ).await;
-        assert!(active.is_some(), "Call {} should become active", call.id);
-        assert_eq!(active.unwrap().1, CallState::Active);
-        println!("Call {} is now active", call.id);
-        
-        // Small delay between calls to avoid overwhelming the system
-        tokio::time::sleep(Duration::from_millis(200)).await;  // Increased delay
+        // Very small delay between call creation to avoid overwhelming the system
+        // but still stress test concurrency
+        if i % 10 == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
+    
+    println!("Created {} calls total", NUM_CALLS);
 
-    // Verify all calls were created
-    assert_eq!(calls.len(), 2);
+    // Now collect state change events for all calls
+    let mut active_calls = std::collections::HashSet::new();
+    let start = std::time::Instant::now();
+    let timeout = Duration::from_secs(60);  // Increased timeout for 100 calls
+    let mut last_progress = 0;
+    
+    // Keep collecting events until all calls are active or timeout
+    println!("Starting event collection loop...");
+    while active_calls.len() < NUM_CALLS && start.elapsed() < timeout {
+        match tokio::time::timeout(Duration::from_millis(100), alice_events.receive()).await {
+            Ok(Ok(event)) => {
+                // Log all events for debugging (commented for now)
+                // println!("Received event: {:?}", event);
+                
+                if let SessionEvent::StateChanged { session_id, old_state, new_state } = event {
+                    if call_ids.contains(&session_id) && new_state == CallState::Active {
+                        active_calls.insert(session_id.clone());
+                        
+                        // Report progress every 10 calls
+                        if active_calls.len() % 10 == 0 && active_calls.len() != last_progress {
+                            last_progress = active_calls.len();
+                            println!("Progress: {}/{} calls active ({:.1}s elapsed)", 
+                                     active_calls.len(), NUM_CALLS, start.elapsed().as_secs_f64());
+                        }
+                    }
+                }
+            },
+            Ok(Err(e)) => {
+                println!("Error receiving event: {:?}", e);
+            },
+            Err(_) => {
+                // Timeout - continue collecting events
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    
+    // Debug: show which calls became active
+    println!("Active calls collected: {} out of {}", active_calls.len(), NUM_CALLS);
+    if active_calls.len() < NUM_CALLS && active_calls.len() > 0 {
+        // Show a sample of active calls if not all are active
+        println!("Sample of active calls:");
+        for (i, id) in active_calls.iter().take(5).enumerate() {
+            println!("  - {}", id);
+        }
+    }
+    
+    // Verify all calls became active
+    assert_eq!(active_calls.len(), NUM_CALLS, "All {} calls should become active", NUM_CALLS);
+    println!("All {} calls are now active", NUM_CALLS);
 
     // Verify stats on Alice side
     let stats = alice.get_stats()
         .await
         .expect("Failed to get stats");
-    assert_eq!(stats.active_sessions, 2);
-    assert_eq!(stats.total_sessions, 2);
+    assert_eq!(stats.active_sessions, NUM_CALLS);
+    assert_eq!(stats.total_sessions, NUM_CALLS);
 
     // List all sessions on Alice side
     let sessions = alice.list_active_sessions()
         .await
         .expect("Failed to list sessions");
-    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions.len(), NUM_CALLS);
 
-    // Verify Bob also has 2 active sessions
+    // Verify Bob also has NUM_CALLS active sessions
     let bob_sessions = bob.list_active_sessions()
         .await
         .expect("Failed to list Bob's sessions");
-    assert_eq!(bob_sessions.len(), 2, "Bob should have 2 active sessions");
+    assert_eq!(bob_sessions.len(), NUM_CALLS, "Bob should have {} active sessions", NUM_CALLS);
 
     // Terminate all calls from Alice
     for call in &calls {

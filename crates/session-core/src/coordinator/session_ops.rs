@@ -49,11 +49,28 @@ impl SessionCoordinator {
             call_state: call.state.clone(),
         }).await.map_err(|_| SessionError::internal("Failed to send session created event"))?;
         
+        // CRITICAL: Track From URI BEFORE creating dialog
+        // This ensures the mapping exists when the 200 OK arrives
+        // Track the 'from' parameter, not config.local_address
+        // The 100 calls test uses different From URIs for each call
+        self.dialog_coordinator.track_from_uri(session_id.clone(), from);
+        
         // Create dialog
-        self.dialog_manager
+        let dialog_handle = self.dialog_manager
             .create_outgoing_call(session_id.clone(), from, to, sdp)
             .await
             .map_err(|e| SessionError::internal(&format!("Failed to create call: {}", e)))?;
+        
+        // CRITICAL FIX: Also set session-to-dialog mapping in the coordinator
+        // This ensures bidirectional mapping for proper event routing
+        self.dialog_coordinator.map_session_to_dialog(
+            session_id.clone(), 
+            dialog_handle.dialog_id.clone(),
+            None  // Call-ID will be tracked when we see the first SIP message
+        );
+        
+        tracing::info!("📍 SESSION OPS: Mapped session {} to dialog {} for outgoing call", 
+                     session_id, dialog_handle.dialog_id);
             
         Ok(call)
     }

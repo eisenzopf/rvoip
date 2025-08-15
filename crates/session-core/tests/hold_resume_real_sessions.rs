@@ -162,11 +162,12 @@ async fn test_hold_resume_between_real_sessions() -> std::result::Result<(), Box
     
     println!("Created outgoing call with session ID: {}", alice_session.id());
     
-    // Wait for call to be established
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for call to be established (give more time for both sides)
+    tokio::time::sleep(Duration::from_secs(2)).await;
     
     // Check Bob received the call
     let bob_events = bob_handler.get_events().await;
+    println!("Bob's events: {:?}", bob_events);
     assert!(bob_events.iter().any(|e| e.contains("incoming_call")), "Bob didn't receive the call");
     assert!(bob_events.iter().any(|e| e.contains("call_established")), "Call wasn't established on Bob's side");
     
@@ -293,8 +294,13 @@ async fn test_hold_without_moh_fallback() -> std::result::Result<(), Box<dyn std
         &prepared
     ).await?;
     
-    // Wait for establishment
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for establishment - need to ensure call is Active before hold
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    
+    // Verify Alice's call is active before attempting hold
+    let alice_session_state = SessionControl::get_session(&alice, &alice_session.id).await?
+        .expect("Alice's session should exist");
+    assert_eq!(alice_session_state.state(), &CallState::Active, "Alice's call should be active before hold");
     
     // Test hold (should fallback to mute since no MoH file)
     println!("Testing hold without MoH (should fallback to mute)...");

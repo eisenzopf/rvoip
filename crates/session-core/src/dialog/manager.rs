@@ -79,6 +79,7 @@ impl DialogManager {
         // Map dialog to session
         self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
         
+        println!("📍 DIALOG MANAGER: Mapped dialog {} to session {}", dialog_id, session_id);
         tracing::info!("Created outgoing call: {} -> {} (dialog: {})", from, to, dialog_id);
         
         Ok(SessionDialogHandle::new(session_id, dialog_id).with_call_handle(call_handle))

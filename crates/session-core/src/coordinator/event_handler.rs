@@ -22,7 +22,7 @@ impl SessionCoordinator {
     }
 
     /// Handle a session event
-    async fn handle_event(&self, event: SessionEvent) -> Result<()> {
+    async fn handle_event(self: &Arc<Self>, event: SessionEvent) -> Result<()> {
         println!("🎯 COORDINATOR: Handling event: {:?}", event);
         tracing::debug!("Handling event: {:?}", event);
 
@@ -121,7 +121,7 @@ impl SessionCoordinator {
 
     /// Handle session created event
     async fn handle_session_created(
-        &self,
+        self: &Arc<Self>,
         session_id: SessionId,
         _from: String,
         _to: String,
@@ -136,7 +136,14 @@ impl SessionCoordinator {
             }
             CallState::Active => {
                 tracing::warn!("Session {} created in Active state, starting media", session_id);
-                self.start_media_session(&session_id).await?;
+                // Spawn media session creation in background
+                let self_clone = self.clone();
+                let session_id_clone = session_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = self_clone.start_media_session(&session_id_clone).await {
+                        tracing::error!("Failed to start media session for {}: {}", session_id_clone, e);
+                    }
+                });
             }
             _ => {}
         }
@@ -145,8 +152,8 @@ impl SessionCoordinator {
     }
 
     /// Handle session state change
-    async fn handle_state_changed(
-        &self,
+    pub(crate) async fn handle_state_changed(
+        self: &Arc<Self>,
         session_id: SessionId,
         old_state: CallState,
         new_state: CallState,
@@ -158,35 +165,50 @@ impl SessionCoordinator {
             (CallState::Ringing, CallState::Active) |
             (CallState::Initiating, CallState::Active) => {
                 println!("📞 Starting media session for newly active call: {}", session_id);
-                self.start_media_session(&session_id).await?;
                 
-                // Notify handler that call is established
-                if let Some(handler) = &self.handler {
-                    if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                        // Get SDP information if available
-                        let media_info = self.media_manager.get_media_info(&session_id).await.ok().flatten();
-                        
-                        tracing::info!("Media info available: {}", media_info.is_some());
-                        if let Some(ref info) = media_info {
-                            tracing::info!("Local SDP length: {:?}", info.local_sdp.as_ref().map(|s| s.len()));
-                            tracing::info!("Remote SDP length: {:?}", info.remote_sdp.as_ref().map(|s| s.len()));
-                        }
-                        
-                        let local_sdp = media_info.as_ref().and_then(|m| m.local_sdp.clone());
-                        let remote_sdp = media_info.as_ref().and_then(|m| m.remote_sdp.clone());
-                        
-                        // Store SDP in the registry so hold/resume can access it
-                        if local_sdp.is_some() || remote_sdp.is_some() {
-                            if let Err(e) = self.registry.update_session_sdp(&session_id, local_sdp.clone(), remote_sdp.clone()).await {
-                                tracing::error!("Failed to store SDP in registry: {}", e);
-                            } else {
-                                tracing::info!("Stored SDP in registry for session {}", session_id);
-                            }
-                        }
-                        
-                        tracing::info!("Notifying handler about call {} establishment", session_id);
-                        handler.on_call_established(session.as_call_session().clone(), local_sdp, remote_sdp).await;
+                // Spawn media session creation in background to avoid blocking event processing
+                let self_clone = self.clone();
+                let session_id_clone = session_id.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = self_clone.start_media_session(&session_id_clone).await {
+                        tracing::error!("Failed to start media session for {}: {}", session_id_clone, e);
                     }
+                });
+                
+                // Notify handler that call is established (also in background)
+                if let Some(handler) = &self.handler {
+                    let handler_clone = handler.clone();
+                    let registry_clone = self.registry.clone();
+                    let media_manager_clone = self.media_manager.clone();
+                    let session_id_clone = session_id.clone();
+                    
+                    tokio::spawn(async move {
+                        if let Ok(Some(session)) = registry_clone.get_session(&session_id_clone).await {
+                            // Get SDP information if available
+                            let media_info = media_manager_clone.get_media_info(&session_id_clone).await.ok().flatten();
+                            
+                            tracing::info!("Media info available: {}", media_info.is_some());
+                            if let Some(ref info) = media_info {
+                                tracing::info!("Local SDP length: {:?}", info.local_sdp.as_ref().map(|s| s.len()));
+                                tracing::info!("Remote SDP length: {:?}", info.remote_sdp.as_ref().map(|s| s.len()));
+                            }
+                            
+                            let local_sdp = media_info.as_ref().and_then(|m| m.local_sdp.clone());
+                            let remote_sdp = media_info.as_ref().and_then(|m| m.remote_sdp.clone());
+                            
+                            // Store SDP in the registry so hold/resume can access it
+                            if local_sdp.is_some() || remote_sdp.is_some() {
+                                if let Err(e) = registry_clone.update_session_sdp(&session_id_clone, local_sdp.clone(), remote_sdp.clone()).await {
+                                    tracing::error!("Failed to store SDP in registry: {}", e);
+                                } else {
+                                    tracing::info!("Stored SDP in registry for session {}", session_id_clone);
+                                }
+                            }
+                            
+                            tracing::info!("Notifying handler about call {} establishment", session_id_clone);
+                            handler_clone.on_call_established(session.as_call_session().clone(), local_sdp, remote_sdp).await;
+                        }
+                    });
                 }
             }
             
@@ -338,6 +360,9 @@ impl SessionCoordinator {
 
         // Stop media
         self.stop_media_session(&session_id).await?;
+        
+        // Clean up From URI mappings for this session
+        self.dialog_coordinator.untrack_from_uri_for_session(&session_id);
 
         // Update session state to Terminated before notifying handler
         let mut call_session_for_handler = None;
@@ -404,12 +429,52 @@ impl SessionCoordinator {
                         if let Err(e) = self.registry.update_session_state(&session_id, CallState::Active).await {
                             tracing::error!("Failed to update session state: {}", e);
                         } else {
-                            // Publish state change event - this will trigger media creation
-                            let _ = self.event_tx.send(SessionEvent::StateChanged {
-                                session_id,
-                                old_state,
-                                new_state: CallState::Active,
+                            // Handle state change directly instead of sending another event
+                            // This avoids potential deadlock when processing multiple concurrent events
+                            let new_state = CallState::Active;
+                            
+                            // First publish to subscribers
+                            println!("📢 Publishing StateChanged event: {} -> {}", old_state, new_state);
+                            let publish_result = self.event_processor.publish_event(SessionEvent::StateChanged {
+                                session_id: session_id.clone(),
+                                old_state: old_state.clone(),
+                                new_state: new_state.clone(),
                             }).await;
+                            
+                            if let Err(e) = publish_result {
+                                tracing::error!("Failed to publish StateChanged event: {:?}", e);
+                            } else {
+                                println!("✅ Successfully published StateChanged for session {}", session_id);
+                            }
+                            
+                            // Start media session for the newly active call
+                            // Since we transitioned from Initiating/Ringing to Active
+                            println!("📞 Starting media session for newly active call: {}", session_id);
+                            
+                            // Start media session directly (already non-blocking internally)
+                            if let Err(e) = self.start_media_session(&session_id).await {
+                                tracing::error!("Failed to start media session for {}: {}", session_id, e);
+                            }
+                            
+                            // Notify handler that call is established (important for incoming calls)
+                            if let Some(handler) = &self.handler {
+                                let handler_clone = handler.clone();
+                                let registry_clone = self.registry.clone();
+                                let media_manager_clone = self.media_manager.clone();
+                                let session_id_clone = session_id.clone();
+                                
+                                tokio::spawn(async move {
+                                    if let Ok(Some(session)) = registry_clone.get_session(&session_id_clone).await {
+                                        // Get SDP information if available
+                                        let media_info = media_manager_clone.get_media_info(&session_id_clone).await.ok().flatten();
+                                        let local_sdp = media_info.as_ref().and_then(|m| m.local_sdp.clone());
+                                        let remote_sdp = media_info.as_ref().and_then(|m| m.remote_sdp.clone());
+                                        
+                                        tracing::info!("Notifying handler about call {} establishment (from media event)", session_id_clone);
+                                        handler_clone.on_call_established(session.as_call_session().clone(), local_sdp, remote_sdp).await;
+                                    }
+                                });
+                            }
                         }
                     } else {
                         tracing::debug!("Session {} already Active, skipping state update", session_id);
