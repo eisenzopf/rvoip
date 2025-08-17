@@ -146,6 +146,7 @@ impl SessionCoordinator {
             dialog_to_session,
             session_to_dialog,
             Arc::new(DashMap::new()),
+            event_processor.clone(),
         ));
 
         let media_coordinator = Arc::new(SessionMediaCoordinator::new(

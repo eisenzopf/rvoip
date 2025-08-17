@@ -50,6 +50,19 @@ pub enum WarningCategory {
     Resource,
 }
 
+/// Transfer status for session transfers
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SessionTransferStatus {
+    /// Transfer is being attempted
+    Trying,
+    /// Transfer target is ringing
+    Ringing,
+    /// Transfer completed successfully
+    Success,
+    /// Transfer failed
+    Failed(String),
+}
+
 /// Session events that can be published through the event system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionEvent {
@@ -141,6 +154,20 @@ pub enum SessionEvent {
     /// Session was resumed from hold
     SessionResumed {
         session_id: SessionId,
+    },
+    
+    /// Incoming transfer request received
+    IncomingTransferRequest {
+        session_id: SessionId,
+        target_uri: String,
+        referred_by: Option<String>,
+        replaces: Option<String>,
+    },
+    
+    /// Transfer progress update
+    TransferProgress {
+        session_id: SessionId,
+        status: SessionTransferStatus,
     },
     
     /// Media update requested (e.g., re-INVITE with new SDP)

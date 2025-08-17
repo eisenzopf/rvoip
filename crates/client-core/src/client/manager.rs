@@ -481,6 +481,12 @@ impl ClientManager {
         // Now set the session event channel on the call handler
         // This allows client-core to send cleanup confirmations back to session-core
         call_handler.set_session_event_tx(coordinator.event_tx.clone()).await;
+        
+        // Subscribe to session events to handle transfer events
+        let session_event_subscriber = coordinator.event_processor.subscribe().await
+            .map_err(|e| ClientError::InternalError {
+                message: format!("Failed to subscribe to session events: {}", e)
+            })?;
 
             
         let mut stats = ClientStats {
@@ -496,6 +502,10 @@ impl ClientManager {
 
         
         let audio_setup_calls = Arc::new(DashMap::new());
+        
+        // Clone for the session event task
+        let event_tx_for_session = event_tx.clone();
+        let session_mapping_for_session = session_mapping.clone();
         
         // Create the client manager
         let client = Arc::new(Self {
@@ -527,6 +537,70 @@ impl ClientManager {
         
         // Store the task handle
         *client.audio_setup_task.lock().await = Some(audio_setup_task);
+        
+        // Spawn task to process session events and convert them to client events
+        let mut session_event_sub = session_event_subscriber;
+        tokio::spawn(async move {
+            use rvoip_session_core::manager::events::{SessionEvent, SessionTransferStatus};
+            use crate::events::{ClientEvent, TransferStatus, EventPriority};
+            
+            loop {
+                match session_event_sub.receive().await {
+                    Ok(SessionEvent::IncomingTransferRequest { session_id, target_uri, referred_by, replaces }) => {
+                        // Find the call ID for this session
+                        let call_id = session_mapping_for_session.iter()
+                            .find(|entry| entry.value() == &session_id)
+                            .map(|entry| *entry.key());
+                        
+                        if let Some(call_id) = call_id {
+                            let event = ClientEvent::IncomingTransferRequest {
+                                call_id,
+                                target_uri,
+                                referred_by,
+                                is_attended: replaces.is_some(),
+                                priority: EventPriority::High,
+                            };
+                            
+                            if let Err(e) = event_tx_for_session.send(event) {
+                                tracing::warn!("Failed to send IncomingTransferRequest event: {}", e);
+                            }
+                        }
+                    }
+                    Ok(SessionEvent::TransferProgress { session_id, status }) => {
+                        // Find the call ID for this session
+                        let call_id = session_mapping_for_session.iter()
+                            .find(|entry| entry.value() == &session_id)
+                            .map(|entry| *entry.key());
+                        
+                        if let Some(call_id) = call_id {
+                            let transfer_status = match status {
+                                SessionTransferStatus::Trying => TransferStatus::Accepted,
+                                SessionTransferStatus::Ringing => TransferStatus::Ringing,
+                                SessionTransferStatus::Success => TransferStatus::Completed,
+                                SessionTransferStatus::Failed(reason) => TransferStatus::Failed(reason),
+                            };
+                            
+                            let event = ClientEvent::TransferProgress {
+                                call_id,
+                                status: transfer_status,
+                                priority: EventPriority::Normal,
+                            };
+                            
+                            if let Err(e) = event_tx_for_session.send(event) {
+                                tracing::warn!("Failed to send TransferProgress event: {}", e);
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        // Ignore other session events
+                    }
+                    Err(e) => {
+                        tracing::debug!("Session event receiver ended: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
         
         Ok(client)
     }

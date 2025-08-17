@@ -94,12 +94,34 @@ pub enum SipClientEvent {
         device: Option<String>,
     },
     
-    /// Call was transferred
+    /// Call was transferred (outgoing transfer)
     CallTransferred {
         /// The call that was transferred
         call: std::sync::Arc<Call>,
         /// Target URI for the transfer
         target: String,
+    },
+    
+    /// Incoming transfer request received
+    IncomingTransferRequest {
+        /// The call being transferred
+        call: std::sync::Arc<Call>,
+        /// Target URI to transfer to
+        target_uri: String,
+        /// Who initiated the transfer (optional)
+        referred_by: Option<String>,
+        /// Whether this is attended transfer (has Replaces)
+        is_attended: bool,
+    },
+    
+    /// Transfer progress notification
+    TransferProgress {
+        /// Call ID of the original call
+        call_id: CallId,
+        /// Transfer status
+        status: TransferStatus,
+        /// Optional message
+        message: Option<String>,
     },
     
     /// Call was put on hold
@@ -325,6 +347,19 @@ pub enum SipClientEvent {
     
     /// Audio devices restored after reconnection
     AudioDevicesRestored,
+}
+
+/// Transfer status for tracking transfer progress
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferStatus {
+    /// Transfer accepted, attempting to call target
+    Accepted,
+    /// Target is ringing
+    Ringing,
+    /// Transfer completed successfully
+    Completed,
+    /// Transfer failed
+    Failed(String),
 }
 
 /// Error categories for event classification

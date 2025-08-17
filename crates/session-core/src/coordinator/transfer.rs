@@ -21,6 +21,7 @@ use rvoip_sip_core::{Request, Response, StatusCode, Method};
 use crate::api::types::{SessionId, CallState};
 use crate::coordinator::registry::InternalSessionRegistry;
 use crate::errors::SessionError;
+use crate::manager::events::{SessionEvent, SessionTransferStatus, SessionEventProcessor};
 
 type SessionResult<T> = Result<T, SessionError>;
 
@@ -41,6 +42,8 @@ pub struct TransferHandler {
     dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
     /// Active REFER subscriptions indexed by event ID
     subscriptions: Arc<RwLock<HashMap<String, ReferSubscription>>>,
+    /// Event processor for publishing transfer events
+    event_processor: Arc<SessionEventProcessor>,
 }
 
 impl TransferHandler {
@@ -49,12 +52,14 @@ impl TransferHandler {
         dialog_api: Arc<rvoip_dialog_core::api::unified::UnifiedDialogApi>,
         registry: Arc<InternalSessionRegistry>,
         dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
+        event_processor: Arc<SessionEventProcessor>,
     ) -> Self {
         Self {
             dialog_api,
             registry,
             dialog_to_session,
             subscriptions: Arc::new(RwLock::new(HashMap::new())),
+            event_processor,
         }
     }
 
@@ -85,6 +90,14 @@ impl TransferHandler {
         // Validate we have an active session for this dialog
         let session_id = self.get_session_id_for_dialog(&dialog_id).await?;
         
+        // Emit IncomingTransferRequest event
+        let _ = self.event_processor.publish_event(SessionEvent::IncomingTransferRequest {
+            session_id: session_id.clone(),
+            target_uri: target_uri.clone(),
+            referred_by: referred_by.clone(),
+            replaces: replaces.clone(),
+        }).await;
+        
         // Check if this is an attended transfer (has Replaces parameter)
         if let Some(replaces_value) = replaces {
             info!("Attended transfer with Replaces: {}", replaces_value);
@@ -106,6 +119,12 @@ impl TransferHandler {
             "SIP/2.0 100 Trying\r\n",
             false, // subscription not terminated
         ).await?;
+        
+        // Emit transfer progress - Trying
+        let _ = self.event_processor.publish_event(SessionEvent::TransferProgress {
+            session_id: session_id.clone(),
+            status: SessionTransferStatus::Trying,
+        }).await;
         
         // Initiate new call to transfer target
         let transfer_result = self.initiate_transfer_call(
@@ -317,6 +336,12 @@ impl TransferHandler {
                                     "SIP/2.0 180 Ringing\r\n",
                                     false,
                                 ).await;
+                                
+                                // Emit transfer progress - Ringing
+                                let _ = handler.event_processor.publish_event(SessionEvent::TransferProgress {
+                                    session_id: original_session_id.clone(),
+                                    status: SessionTransferStatus::Ringing,
+                                }).await;
                             }
                             CallState::Active => {
                                 // Transfer succeeded - send 200 OK NOTIFY
@@ -326,6 +351,12 @@ impl TransferHandler {
                                     "SIP/2.0 200 OK\r\n",
                                     true, // terminate subscription
                                 ).await;
+                                
+                                // Emit transfer progress - Success
+                                let _ = handler.event_processor.publish_event(SessionEvent::TransferProgress {
+                                    session_id: original_session_id.clone(),
+                                    status: SessionTransferStatus::Success,
+                                }).await;
                                 
                                 // Terminate original call properly (this will send BYE)
                                 // We need to get the dialog ID for the original session
@@ -425,6 +456,7 @@ impl Clone for TransferHandler {
             registry: self.registry.clone(),
             dialog_to_session: self.dialog_to_session.clone(),
             subscriptions: self.subscriptions.clone(),
+            event_processor: self.event_processor.clone(),
         }
     }
 }

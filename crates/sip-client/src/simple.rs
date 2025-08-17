@@ -1123,6 +1123,35 @@ impl SipClientEventHandler {
             ClientEvent::NetworkEvent { connected, reason, .. } => {
                 self.on_network_event(connected, reason).await;
             }
+            ClientEvent::IncomingTransferRequest { call_id, target_uri, referred_by, is_attended, .. } => {
+                // Find the call and emit the transfer request event
+                if let Some(call) = self.inner.calls.read().get(&call_id) {
+                    self.inner.events.emit(SipClientEvent::IncomingTransferRequest {
+                        call: call.clone(),
+                        target_uri,
+                        referred_by,
+                        is_attended,
+                    });
+                }
+            }
+            ClientEvent::TransferProgress { call_id, status, .. } => {
+                // Convert and emit transfer progress
+                use crate::events::TransferStatus as SipTransferStatus;
+                use rvoip_client_core::events::TransferStatus as ClientTransferStatus;
+                
+                let sip_status = match status {
+                    ClientTransferStatus::Accepted => SipTransferStatus::Accepted,
+                    ClientTransferStatus::Ringing => SipTransferStatus::Ringing,
+                    ClientTransferStatus::Completed => SipTransferStatus::Completed,
+                    ClientTransferStatus::Failed(reason) => SipTransferStatus::Failed(reason),
+                };
+                
+                self.inner.events.emit(SipClientEvent::TransferProgress {
+                    call_id,
+                    status: sip_status,
+                    message: None,
+                });
+            }
         }
     }
 }

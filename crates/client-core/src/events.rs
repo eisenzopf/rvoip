@@ -437,6 +437,19 @@ pub enum EventPriority {
     Critical,
 }
 
+/// Transfer status for tracking transfer progress
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferStatus {
+    /// Transfer accepted, attempting to call target
+    Accepted,
+    /// Target is ringing
+    Ringing,
+    /// Transfer completed successfully
+    Completed,
+    /// Transfer failed
+    Failed(String),
+}
+
 /// Comprehensive client event types
 /// 
 /// Unified event type that encompasses all possible events in the VoIP client,
@@ -513,6 +526,28 @@ pub enum ClientEvent {
         /// Priority of this event
         priority: EventPriority,
     },
+    /// Incoming transfer request received
+    IncomingTransferRequest {
+        /// Call ID being transferred
+        call_id: CallId,
+        /// Target URI to transfer to
+        target_uri: String,
+        /// Who initiated the transfer (optional)
+        referred_by: Option<String>,
+        /// Whether this is attended transfer (has Replaces)
+        is_attended: bool,
+        /// Priority of this event
+        priority: EventPriority,
+    },
+    /// Transfer progress update
+    TransferProgress {
+        /// Call ID of the original call
+        call_id: CallId,
+        /// Transfer status
+        status: TransferStatus,
+        /// Priority of this event
+        priority: EventPriority,
+    },
 }
 
 impl ClientEvent {
@@ -543,6 +578,8 @@ impl ClientEvent {
             ClientEvent::RegistrationStatusChanged { priority, .. } => priority.clone(),
             ClientEvent::ClientError { priority, .. } => priority.clone(),
             ClientEvent::NetworkEvent { priority, .. } => priority.clone(),
+            ClientEvent::IncomingTransferRequest { priority, .. } => priority.clone(),
+            ClientEvent::TransferProgress { priority, .. } => priority.clone(),
         }
     }
     
@@ -784,6 +821,14 @@ pub trait ClientEventHandler: Send + Sync {
             }
             ClientEvent::NetworkEvent { connected, reason, .. } => {
                 self.on_network_event(connected, reason).await;
+            }
+            ClientEvent::IncomingTransferRequest { .. } => {
+                // Default implementation does nothing for transfer requests
+                // Apps can override ClientEventHandler to handle these
+            }
+            ClientEvent::TransferProgress { .. } => {
+                // Default implementation does nothing for transfer progress
+                // Apps can override ClientEventHandler to handle these
             }
         }
     }
