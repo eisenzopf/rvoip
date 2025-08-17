@@ -91,6 +91,7 @@ impl SessionManager {
             dialog_to_session,
             session_to_dialog,
             incoming_sdp_offers,
+            event_processor.clone(),
         ));
 
         // Create media manager with configured local bind address

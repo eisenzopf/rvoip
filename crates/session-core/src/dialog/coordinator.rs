@@ -42,6 +42,8 @@ pub struct SessionDialogCoordinator {
     fromuri_to_session: Arc<dashmap::DashMap<String, SessionId>>,
     // Transfer handler
     pub transfer_handler: Arc<TransferHandler>,
+    // Event processor (passed in from coordinator)
+    event_processor: Arc<crate::manager::events::SessionEventProcessor>,
 }
 
 impl SessionDialogCoordinator {
@@ -54,12 +56,14 @@ impl SessionDialogCoordinator {
         dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
         session_to_dialog: Arc<dashmap::DashMap<SessionId, DialogId>>,
         incoming_sdp_offers: Arc<DashMap<SessionId, String>>,
+        event_processor: Arc<crate::manager::events::SessionEventProcessor>,
     ) -> Self {
-        // Create transfer handler
+        // Create transfer handler with event processor
         let transfer_handler = Arc::new(TransferHandler::new(
             dialog_api.clone(),
             registry.clone(),
             dialog_to_session.clone(),
+            event_processor.clone(),
         ));
         
         Self {
@@ -74,6 +78,7 @@ impl SessionDialogCoordinator {
             fromtag_to_session: Arc::new(dashmap::DashMap::new()),
             fromuri_to_session: Arc::new(dashmap::DashMap::new()),
             transfer_handler,
+            event_processor,
         }
     }
     
@@ -1345,6 +1350,7 @@ impl Clone for SessionDialogCoordinator {
             Arc::clone(&self.dialog_api),
             Arc::clone(&self.registry),
             Arc::clone(&self.dialog_to_session),
+            Arc::clone(&self.event_processor),
         ));
         
         Self {
@@ -1359,6 +1365,7 @@ impl Clone for SessionDialogCoordinator {
             fromtag_to_session: Arc::clone(&self.fromtag_to_session),
             fromuri_to_session: Arc::clone(&self.fromuri_to_session),
             transfer_handler,
+            event_processor: Arc::clone(&self.event_processor),
         }
     }
 }
