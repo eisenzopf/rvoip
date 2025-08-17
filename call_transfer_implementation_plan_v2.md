@@ -3,6 +3,46 @@
 ## Executive Summary
 This revised plan leverages existing SIP parsing infrastructure (ReferTo header in sip-core) and creates a dedicated transfer.rs module to avoid overloading coordinator.rs. We will create a new `TransferRequest` event in the `SessionCoordinationEvent` enum to provide type safety and clear semantic separation from other SIP methods.
 
+## RFC-Compliant Transfer Steps
+
+### Blind Transfer (Unattended Transfer) - RFC 3515/5589
+According to the SIP RFCs, a proper blind transfer follows these steps:
+
+**Actors:** Alice (transferor), Bob (transferee), Charlie (transfer target)
+
+1. **Active Call:** Alice and Bob are in an active call
+2. **Hold:** Alice puts Bob on hold (sends re-INVITE with sendonly/inactive)
+3. **REFER Request:** Alice sends REFER to Bob with `Refer-To: <sip:Charlie>`
+4. **Accept REFER:** Bob responds with 202 Accepted to Alice
+5. **Initial NOTIFY:** Bob sends NOTIFY to Alice with "SIP/2.0 100 Trying"
+6. **New Call:** Bob sends INVITE to Charlie (new dialog)
+7. **Progress NOTIFY:** Bob sends NOTIFY to Alice with "SIP/2.0 180 Ringing" when Charlie's phone rings
+8. **Connect:** When Charlie answers, Bob connects with Charlie
+9. **Success NOTIFY:** Bob sends NOTIFY to Alice with "SIP/2.0 200 OK"
+10. **Terminate Original:** Bob sends BYE to Alice to end original call
+11. **Complete:** Bob and Charlie are now connected, Alice's call is terminated
+
+### Attended Transfer (Consultative Transfer) - RFC 3891/5589
+For completeness, attended transfer follows these steps:
+
+1. **Active Call:** Alice and Bob are in an active call
+2. **Hold:** Alice puts Bob on hold
+3. **Consult Call:** Alice calls Charlie separately (new dialog)
+4. **Consultation:** Alice talks to Charlie ("Bob is on line 1")
+5. **REFER with Replaces:** Alice sends REFER to Bob with `Refer-To: <sip:Charlie?Replaces=dialog-id>`
+6. **Accept:** Bob responds with 202 Accepted
+7. **INVITE with Replaces:** Bob sends INVITE to Charlie with Replaces header
+8. **Replace Dialog:** Charlie's phone replaces Alice's call with Bob's call
+9. **Success:** Bob and Charlie connected, both Alice's calls terminated
+
+### Key RFC Requirements
+- **RFC 3515 (REFER Method):** Defines REFER and implicit subscription
+- **RFC 5589 (Call Transfer):** Standard transfer flows
+- **RFC 3891 (Replaces):** For attended transfers
+- **202 Accepted:** REFER must be immediately accepted, not wait for completion
+- **NOTIFY Required:** Transferee MUST send NOTIFY messages for progress
+- **Subscription:** REFER creates implicit subscription for transfer events
+
 ## Problem Statement
 When a remote party attempts to transfer a call, they send a REFER request. Currently:
 - Dialog-core receives the REFER and forwards it as a `ReInvite` event
@@ -735,14 +775,364 @@ match event {
    - Unit tests for each component
    - Integration test for complete flow
 
+## Library Assessment Results
+
+### sip-client Library - PARTIAL SUPPORT ✅❌
+**Implemented (Transferor Role):**
+- ✅ `transfer_call()` method in both Simple and Advanced clients
+- ✅ `CallTransferred` event when initiating transfers
+- ✅ Proper error handling for transfer failures
+
+**Missing (Transferee Role):**
+- ❌ `IncomingTransferRequest` event type for receiving REFER
+- ❌ Handler for incoming REFER requests
+- ❌ Cannot act as transferee (Bob receiving REFER from Alice)
+
+### client-core Library - FULL TRANSFEROR SUPPORT ✅
+**Implemented:**
+- ✅ `transfer_call()` method with proper validation
+- ✅ Call state validation before transfer
+- ✅ URI validation for transfer targets
+- ✅ `attended_transfer()` method for consultative transfers
+- ✅ Proper session mapping and state management
+
+**Missing:**
+- ❌ Handling for incoming REFER requests (transferee role)
+- ❌ Events for transfer progress notifications
+
+### session-core Library - MOSTLY COMPLETE ✅
+**Implemented:**
+- ✅ `transfer_session()` method in SessionControl API
+- ✅ `TransferHandler` module with RFC-compliant implementation
+- ✅ `TransferRequest` event in SessionCoordinationEvent enum
+- ✅ REFER subscription management
+- ✅ NOTIFY sending capability
+- ✅ Proper 202 Accepted response logic
+- ✅ Transfer monitoring with progress updates
+
+**Needs Verification:**
+- ⚠️ Dialog-core API methods for sending NOTIFY
+- ⚠️ Integration testing of complete flow
+
+## Critical Gap Analysis
+
+The main issue preventing Bob from completing transfers: **rvoip_sip_client cannot act as a transferee**. When Bob receives a REFER from Alice:
+
+1. ❌ No `IncomingTransferRequest` event in SipClientEvent enum
+2. ❌ No handling in rvoip_sip_client for transfer requests  
+3. ❌ REFER not responded to with 202 Accepted
+4. ❌ No NOTIFY messages sent for progress
+5. ❌ No new INVITE sent to Charlie
+
+## Implementation Status
+
+### Completed Components
+1. ✅ Transferor implementation (Alice sending REFER)
+2. ✅ session-core TransferHandler with RFC compliance
+3. ✅ client-core transfer_call method
+4. ✅ sip-client transfer_call method
+5. ✅ TransferRequest event in SessionCoordinationEvent
+6. ✅ Tests for blind transfer at session-core level
+7. ✅ Instance methods pattern (no static functions)
+
+## Detailed Implementation Plan for Transferee Functionality
+
+### Phase 1: Add IncomingTransferRequest Event (30 minutes)
+
+#### File: `/crates/sip-client/src/events.rs`
+
+**Add new event variant:**
+```rust
+pub enum SipClientEvent {
+    // ... existing events ...
+    
+    /// Incoming transfer request received
+    IncomingTransferRequest {
+        /// The call being transferred
+        call: std::sync::Arc<Call>,
+        /// Target URI to transfer to
+        target_uri: String,
+        /// Who initiated the transfer (optional)
+        referred_by: Option<String>,
+        /// Whether this is attended transfer (has Replaces)
+        is_attended: bool,
+    },
+    
+    /// Transfer progress notification
+    TransferProgress {
+        /// Call ID of the original call
+        call_id: CallId,
+        /// Transfer status
+        status: TransferStatus,
+        /// Optional message
+        message: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum TransferStatus {
+    /// Transfer accepted, attempting to call target
+    Accepted,
+    /// Target is ringing
+    Ringing,
+    /// Transfer completed successfully
+    Completed,
+    /// Transfer failed
+    Failed(String),
+}
+```
+
+### Phase 2: Wire Session Events to Client Events (1 hour)
+
+#### File: `/crates/sip-client/src/simple.rs`
+
+**Add handler in event processing loop:**
+```rust
+// In the session event handler match statement, add:
+SessionEvent::IncomingTransferRequest { 
+    session_id, 
+    target_uri, 
+    referred_by,
+    replaces 
+} => {
+    // Find the call for this session
+    if let Some(call) = self.find_call_by_session(&session_id) {
+        // Emit IncomingTransferRequest event
+        self.inner.events.emit(SipClientEvent::IncomingTransferRequest {
+            call: call.clone(),
+            target_uri: target_uri.clone(),
+            referred_by,
+            is_attended: replaces.is_some(),
+        });
+        
+        // Automatically accept and process the transfer
+        tokio::spawn({
+            let inner = self.inner.clone();
+            let call_id = call.id;
+            async move {
+                // The session-core TransferHandler will handle the actual transfer
+                // We just need to track progress and update UI
+                tracing::info!("Processing incoming transfer request for call {}", call_id);
+            }
+        });
+    }
+}
+
+SessionEvent::TransferProgress { session_id, status } => {
+    if let Some(call) = self.find_call_by_session(&session_id) {
+        let transfer_status = match status {
+            SessionTransferStatus::Trying => TransferStatus::Accepted,
+            SessionTransferStatus::Ringing => TransferStatus::Ringing,
+            SessionTransferStatus::Success => TransferStatus::Completed,
+            SessionTransferStatus::Failed(reason) => TransferStatus::Failed(reason),
+        };
+        
+        self.inner.events.emit(SipClientEvent::TransferProgress {
+            call_id: call.id,
+            status: transfer_status,
+            message: None,
+        });
+    }
+}
+```
+
+### Phase 3: Add Session Events for Transfer (1 hour)
+
+#### File: `/crates/session-core/src/events.rs`
+
+**Add new session events:**
+```rust
+pub enum SessionEvent {
+    // ... existing events ...
+    
+    /// Incoming transfer request
+    IncomingTransferRequest {
+        session_id: SessionId,
+        target_uri: String,
+        referred_by: Option<String>,
+        replaces: Option<String>,
+    },
+    
+    /// Transfer progress update
+    TransferProgress {
+        session_id: SessionId,
+        status: SessionTransferStatus,
+    },
+}
+
+pub enum SessionTransferStatus {
+    Trying,
+    Ringing,
+    Success,
+    Failed(String),
+}
+```
+
+### Phase 4: Connect TransferHandler to Event System (1.5 hours)
+
+#### File: `/crates/session-core/src/coordinator/transfer.rs`
+
+**Modify to emit events:**
+```rust
+impl TransferHandler {
+    /// Handle incoming REFER request and emit events
+    pub async fn handle_refer_request(
+        &self,
+        dialog_id: DialogId,
+        transaction_id: TransactionKey,
+        refer_to: ReferTo,
+        referred_by: Option<String>,
+        replaces: Option<String>,
+    ) -> SessionResult<()> {
+        // ... existing validation ...
+        
+        // Emit IncomingTransferRequest event
+        if let Some(session_id) = self.get_session_id_for_dialog(&dialog_id).await.ok() {
+            self.coordinator.emit_event(SessionEvent::IncomingTransferRequest {
+                session_id: session_id.clone(),
+                target_uri: target_uri.clone(),
+                referred_by: referred_by.clone(),
+                replaces: replaces.clone(),
+            }).await;
+        }
+        
+        // ... rest of existing implementation ...
+    }
+    
+    /// Send transfer progress events
+    async fn emit_progress(&self, session_id: &SessionId, status: SessionTransferStatus) {
+        self.coordinator.emit_event(SessionEvent::TransferProgress {
+            session_id: session_id.clone(),
+            status,
+        }).await;
+    }
+}
+```
+
+### Phase 5: Handle Transfer in UI (1 hour)
+
+#### File: `/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip_sip_client/src/components/app.rs`
+
+**Add transfer handling to coroutine:**
+```rust
+// In the event processing match statement:
+SipClientEvent::IncomingTransferRequest { 
+    call, 
+    target_uri, 
+    referred_by, 
+    is_attended 
+} => {
+    info!("Incoming transfer request: {} wants to transfer call {} to {}", 
+          referred_by.as_deref().unwrap_or("Remote party"),
+          call.id,
+          target_uri);
+    
+    // Update UI to show transfer in progress
+    if let Some(mut call_info) = call_info_mut() {
+        call_info.state = CallState::Transferring;
+        call_info.transfer_target = Some(target_uri.clone());
+    }
+    
+    // The actual transfer is handled automatically by session-core
+    // We just track the progress
+}
+
+SipClientEvent::TransferProgress { call_id, status, message } => {
+    match status {
+        TransferStatus::Accepted => {
+            info!("Transfer accepted, calling target...");
+        }
+        TransferStatus::Ringing => {
+            info!("Transfer target is ringing...");
+        }
+        TransferStatus::Completed => {
+            info!("Transfer completed successfully");
+            // Call will be terminated automatically
+        }
+        TransferStatus::Failed(reason) => {
+            error!("Transfer failed: {}", reason);
+            // Revert to previous state
+            if let Some(mut call_info) = call_info_mut() {
+                call_info.state = CallState::Connected;
+                call_info.transfer_target = None;
+            }
+        }
+    }
+}
+```
+
+### Phase 6: Update Call State Display (30 minutes)
+
+#### File: `/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip_sip_client/src/components/call_interface_screen.rs`
+
+**Add transfer status display:**
+```rust
+// In the render method, add transfer status:
+if call_state == Some(CallState::Transferring) {
+    ui.label("Transfer in progress...");
+    if let Some(target) = &call_info.transfer_target {
+        ui.label(format!("Transferring to: {}", target));
+    }
+}
+```
+
+### Phase 7: Testing (2 hours)
+
+#### Test Scenarios:
+1. **Basic Transfer Test:**
+   - Alice calls Bob
+   - Alice transfers Bob to Charlie
+   - Verify Bob receives IncomingTransferRequest
+   - Verify Bob sends 202 Accepted
+   - Verify Bob calls Charlie
+   - Verify NOTIFY sent to Alice
+   - Verify Alice's call terminates
+
+2. **Transfer Failure Test:**
+   - Alice transfers Bob to invalid URI
+   - Verify Bob sends failure NOTIFY
+   - Verify original call preserved
+
+3. **Concurrent Transfer Test:**
+   - Multiple transfers happening simultaneously
+   - Verify each handled independently
+
+## Implementation Order
+
+1. **Start with Session-Core** (Already complete)
+   - ✅ TransferHandler implementation
+   - ✅ Event emission hooks
+
+2. **Add Events to sip-client** (30 min)
+   - Add IncomingTransferRequest event
+   - Add TransferProgress event
+   - Add TransferStatus enum
+
+3. **Wire Events in Simple Client** (1 hour)
+   - Handle session events
+   - Emit client events
+   - Track transfer state
+
+4. **Update UI Components** (1 hour)
+   - Handle new events in app.rs
+   - Update call interface display
+   - Show transfer progress
+
+5. **Integration Testing** (2 hours)
+   - End-to-end transfer scenarios
+   - Error cases
+   - UI responsiveness
+
+## Total Estimated Time: 5.5 hours
+
 ## Success Criteria
 
 1. ✅ `TransferRequest` event properly added to `SessionCoordinationEvent` enum
-2. ✅ Dialog-core parses REFER and creates `TransferRequest` events (not `ReInvite`)
-3. ✅ Incoming REFER requests receive 202 Accepted (not 501)
-4. ✅ Transfer target receives new INVITE with correct headers
-5. ✅ Original caller receives NOTIFY updates with transfer progress
-6. ✅ Successful transfer terminates original call gracefully
-7. ✅ Failed transfer preserves original call
-8. ✅ All unit tests pass
-9. ✅ Integration tests demonstrate end-to-end transfer
+2. ⏳ Bob responds with 202 Accepted when receiving REFER
+3. ⏳ Bob initiates new call to Charlie
+4. ⏳ Bob sends NOTIFY progress updates to Alice
+5. ⏳ Successful transfer terminates original call
+6. ⏳ Failed transfer preserves original call
+7. ⏳ UI shows transfer progress
+8. ⏳ All integration tests pass
+9. ⏳ Works with real SIP clients (Linphone, etc.)
