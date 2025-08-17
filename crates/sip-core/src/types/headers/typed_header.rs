@@ -295,6 +295,10 @@ impl TypedHeader {
                 Some(unsafe { &*(h as *const _ as *const T) }),
             TypedHeader::RSeq(h) if type_id_t == std::any::TypeId::of::<crate::types::rseq::RSeq>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
+            TypedHeader::ReferTo(h) if type_id_t == std::any::TypeId::of::<crate::types::refer_to::ReferTo>() =>
+                Some(unsafe { &*(h as *const _ as *const T) }),
+            TypedHeader::ReferredBy(h) if type_id_t == std::any::TypeId::of::<crate::types::referred_by::ReferredBy>() =>
+                Some(unsafe { &*(h as *const _ as *const T) }),
             _ => None,
         }
     }

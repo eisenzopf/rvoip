@@ -240,7 +240,28 @@ impl DialogManager {
             TransactionEvent::NonInviteRequest { request, source, .. } => {
                 debug!("Processing new incoming {} request from transaction {}", request.method(), transaction_id);
                 
-                // Handle non-INVITE requests (REGISTER, OPTIONS, etc.)
+                // For REFER requests, check if they belong to an existing dialog
+                if request.method() == Method::Refer {
+                    // Try to find the dialog using Call-ID, From tag, and To tag
+                    if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
+                        debug!("REFER request belongs to existing dialog {}", dialog_id);
+                        
+                        // Store the transaction-to-dialog mapping
+                        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
+                        
+                        // Process the REFER in the context of the existing dialog
+                        return self.process_transaction_event(transaction_id, &dialog_id, 
+                            TransactionEvent::NonInviteRequest { 
+                                transaction_id: transaction_id.clone(), 
+                                request, 
+                                source 
+                            }).await;
+                    } else {
+                        debug!("REFER request does not match any existing dialog");
+                    }
+                }
+                
+                // Handle non-INVITE requests (REGISTER, OPTIONS, etc.) or REFER without dialog
                 self.handle_request(request, source).await
             },
             
