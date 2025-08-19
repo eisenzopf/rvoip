@@ -554,6 +554,53 @@ pub trait CallHandler: Send + Sync + std::fmt::Debug {
             None => tracing::warn!("Warning ({:?}): {}", category, message),
         }
     }
+    
+    /// Called when an incoming transfer request (REFER) is received
+    /// 
+    /// This method is called when a SIP REFER request is received, requesting
+    /// that this session be transferred to another party.
+    /// 
+    /// # Arguments
+    /// * `session_id` - The session being requested to transfer
+    /// * `target_uri` - The SIP URI to transfer to
+    /// * `referred_by` - Optional URI of who requested the transfer
+    /// 
+    /// # Returns
+    /// * `true` to accept the transfer (sends 202 Accepted and initiates new call)
+    /// * `false` to reject the transfer (sends 603 Decline)
+    async fn on_incoming_transfer_request(
+        &self,
+        session_id: &SessionId,
+        target_uri: &str,
+        referred_by: Option<&str>
+    ) -> bool {
+        // Default: accept transfers
+        tracing::info!(
+            "Call {} received transfer request to {} (referred by: {:?})",
+            session_id, target_uri, referred_by
+        );
+        true
+    }
+    
+    /// Called when transfer progress updates occur
+    /// 
+    /// This method provides updates on the progress of an outgoing transfer
+    /// that was initiated via transfer_session().
+    /// 
+    /// # Arguments
+    /// * `session_id` - The session that initiated the transfer
+    /// * `status` - The current transfer status
+    async fn on_transfer_progress(
+        &self,
+        session_id: &SessionId,
+        status: &crate::manager::events::SessionTransferStatus
+    ) {
+        // Default: log the progress
+        tracing::info!(
+            "Call {} transfer progress: {:?}",
+            session_id, status
+        );
+    }
 }
 
 /// Automatically accepts all incoming calls

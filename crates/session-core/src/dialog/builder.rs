@@ -69,8 +69,9 @@ impl DialogBuilder {
         let session_config = &self.config_converter;
         
         // Use the configured bind address from session config
+        // Never bind to 0.0.0.0 - use 127.0.0.1 as default
         let bind_addr = if session_config.session_config().local_bind_addr.ip().is_unspecified() {
-            format!("0.0.0.0:{}", session_config.session_config().sip_port)
+            format!("127.0.0.1:{}", session_config.session_config().sip_port)
         } else {
             session_config.session_config().local_bind_addr.to_string()
         };

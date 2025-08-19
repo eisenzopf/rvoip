@@ -13,7 +13,7 @@ use crate::dialog::{DialogError, DialogResult, DialogSessionMap};
 /// Dialog bridge for session-dialog event integration
 /// (parallel to MediaBridge)
 pub struct DialogBridge {
-    session_events_tx: mpsc::Sender<SessionEvent>,
+    event_processor: Arc<crate::manager::events::SessionEventProcessor>,
     dialog_events_tx: mpsc::Sender<SessionCoordinationEvent>,
     dialog_to_session: Arc<dashmap::DashMap<rvoip_dialog_core::DialogId, SessionId>>,
 }
@@ -21,12 +21,12 @@ pub struct DialogBridge {
 impl DialogBridge {
     /// Create a new dialog bridge
     pub fn new(
-        session_events_tx: mpsc::Sender<SessionEvent>,
+        event_processor: Arc<crate::manager::events::SessionEventProcessor>,
         dialog_events_tx: mpsc::Sender<SessionCoordinationEvent>,
         dialog_to_session: Arc<dashmap::DashMap<rvoip_dialog_core::DialogId, SessionId>>,
     ) -> Self {
         Self {
-            session_events_tx,
+            event_processor,
             dialog_events_tx,
             dialog_to_session,
         }
@@ -41,11 +41,11 @@ impl DialogBridge {
         let session_event = self.convert_dialog_to_session_event(dialog_event)?;
         
         // Send to session event processor
-        self.session_events_tx
-            .send(session_event)
+        self.event_processor
+            .publish_event(session_event)
             .await
             .map_err(|e| DialogError::Coordination {
-                message: format!("Failed to send session event: {}", e),
+                message: format!("Failed to publish session event: {}", e),
             })?;
             
         Ok(())

@@ -491,7 +491,7 @@ async fn test_media_session_coordination() {
         coordinator.registry.register_session(session).await.unwrap();
         
         // Send state change event
-        let _ = coordinator.event_tx.send(SessionEvent::StateChanged {
+        let _ = coordinator.event_processor.publish_event(SessionEvent::StateChanged {
             session_id: call.id.clone(),
             old_state,
             new_state: CallState::Active,
@@ -768,7 +768,7 @@ async fn test_event_handler_callbacks() {
         coordinator.registry.register_session(session.clone()).await.unwrap();
         
         // Send state change event
-        let _ = coordinator.event_tx.send(SessionEvent::StateChanged {
+        let _ = coordinator.event_processor.publish_event(SessionEvent::StateChanged {
             session_id: call.id.clone(),
             old_state,
             new_state: CallState::Active,

@@ -185,7 +185,7 @@ async fn test_wait_for_answer_with_state_transition() {
             let _ = manager_clone.registry.register_session(session).await;
             
             // Emit state change event
-            let _ = manager_clone.event_tx.send(rvoip_session_core::manager::events::SessionEvent::StateChanged {
+            let _ = manager_clone.event_processor.publish_event(rvoip_session_core::manager::events::SessionEvent::StateChanged {
                 session_id: session_id_clone,
                 old_state,
                 new_state: CallState::Active,

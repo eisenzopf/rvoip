@@ -29,7 +29,7 @@ pub struct SessionDialogCoordinator {
     dialog_api: Arc<UnifiedDialogApi>,
     registry: Arc<InternalSessionRegistry>,
     handler: Option<Arc<dyn CallHandler>>,
-    session_events_tx: mpsc::Sender<SessionEvent>,
+    // Removed mpsc sender - now using unified event processor only
     dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
     session_to_dialog: Arc<dashmap::DashMap<SessionId, DialogId>>,
     // Store incoming SDP offers for negotiation
@@ -52,17 +52,17 @@ impl SessionDialogCoordinator {
         dialog_api: Arc<UnifiedDialogApi>,
         registry: Arc<InternalSessionRegistry>,
         handler: Option<Arc<dyn CallHandler>>,
-        session_events_tx: mpsc::Sender<SessionEvent>,
+        event_processor: Arc<crate::manager::events::SessionEventProcessor>,
         dialog_to_session: Arc<dashmap::DashMap<DialogId, SessionId>>,
         session_to_dialog: Arc<dashmap::DashMap<SessionId, DialogId>>,
         incoming_sdp_offers: Arc<DashMap<SessionId, String>>,
-        event_processor: Arc<crate::manager::events::SessionEventProcessor>,
     ) -> Self {
         // Create transfer handler with event processor
         let transfer_handler = Arc::new(TransferHandler::new(
             dialog_api.clone(),
             registry.clone(),
             dialog_to_session.clone(),
+            session_to_dialog.clone(),
             event_processor.clone(),
         ));
         
@@ -70,7 +70,7 @@ impl SessionDialogCoordinator {
             dialog_api,
             registry,
             handler,
-            session_events_tx,
+            // Removed mpsc sender field
             dialog_to_session,
             session_to_dialog,
             incoming_sdp_offers,
@@ -185,17 +185,26 @@ impl SessionDialogCoordinator {
                 referred_by, 
                 replaces 
             } => {
+                println!("🔀 TRANSFER: Received TransferRequest event for dialog {}", dialog_id);
                 tracing::info!("Received TransferRequest event for dialog {}", dialog_id);
-                self.transfer_handler.handle_refer_request(
+                println!("🔀 TRANSFER: Calling transfer_handler.handle_refer_request");
+                match self.transfer_handler.handle_refer_request(
                     dialog_id,
                     transaction_id,
                     refer_to,
                     referred_by,
                     replaces,
-                ).await
-                    .map_err(|e| DialogError::Coordination {
-                        message: format!("Failed to handle transfer request: {}", e),
-                    })?;
+                ).await {
+                    Ok(()) => {
+                        println!("✅ TRANSFER: Successfully handled transfer request");
+                    },
+                    Err(e) => {
+                        println!("❌ TRANSFER: Failed to handle transfer request: {}", e);
+                        return Err(DialogError::Coordination {
+                            message: format!("Failed to handle transfer request: {}", e),
+                        });
+                    }
+                }
             }
             
             _ => {
@@ -230,15 +239,11 @@ impl SessionDialogCoordinator {
             dialog_id, from_uri, to_uri
         );
         
-        // Create session for the dialog
+        // IMPORTANT: Do NOT create a session here!
+        // The main coordinator (coordinator/event_handler.rs) will create the session
+        // when it processes the IncomingCall event that we forward below.
+        // We just create a session ID to track the dialog-to-session mapping.
         let session_id = SessionId::new();
-        let session = CallSession {
-            id: session_id.clone(),
-            from: from_uri.clone(),
-            to: to_uri.clone(),
-            state: CallState::Initiating,
-            started_at: None,
-        };
         
         // Track dialog to session mapping
         self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
@@ -263,47 +268,27 @@ impl SessionDialogCoordinator {
             tracing::info!("📞 UAS: Stored Call-ID {} for incoming session {}", call_id_str, session_id);
         }
         
-        tracing::info!("Created session {} for incoming call dialog {}", session_id, dialog_id);
+        tracing::info!("Dialog coordinator mapped dialog {} to session {} (will be created by main coordinator)", dialog_id, session_id);
         
-        // Create internal session from call session
-        let internal_session = Session::from_call_session(session.clone());
-        self.registry.register_session(internal_session).await
-            .map_err(|e| DialogError::Coordination {
-                message: format!("Failed to register session: {}", e),
-            })?;
+        // DO NOT create or register session here!
+        // The main coordinator will do that when processing the IncomingCall event.
         
-        // Send session created event
-        self.send_session_event(SessionEvent::SessionCreated {
+        // Forward the IncomingCall event to the main coordinator
+        // The main coordinator will:
+        // 1. Create the session
+        // 2. Register it
+        // 3. Send SessionCreated event
+        // 4. Call the handler
+        self.send_session_event(SessionEvent::IncomingCall {
             session_id: session_id.clone(),
-            from: session.from.clone(),
-            to: session.to.clone(),
-            call_state: session.state.clone(),
+            dialog_id: dialog_id.clone(),
+            from: from_uri,
+            to: to_uri,
+            sdp: Some(String::from_utf8_lossy(request.body()).to_string()).filter(|s| !s.is_empty()),
+            headers: self.extract_sip_headers(&request),
         }).await?;
         
-        // Handle the call with the configured handler
-        if let Some(handler) = &self.handler {
-            tracing::info!("Calling handler.on_incoming_call for session {}", session_id);
-            
-            let incoming_call = IncomingCall {
-                id: session_id.clone(),
-                from: from_uri,
-                to: to_uri,
-                sdp: Some(String::from_utf8_lossy(request.body()).to_string()).filter(|s| !s.is_empty()),
-                headers: self.extract_sip_headers(&request),
-                received_at: std::time::Instant::now(),
-            };
-            
-            // Store the SDP offer if present
-            if let Some(ref sdp) = incoming_call.sdp {
-                self.incoming_sdp_offers.insert(session_id.clone(), sdp.clone());
-            }
-            
-            let decision = handler.on_incoming_call(incoming_call).await;
-            tracing::info!("Handler decision for session {}: {:?}", session_id, decision);
-            self.process_call_decision(session_id, dialog_id, decision).await?;
-        } else {
-            tracing::warn!("No handler configured for incoming call");
-        }
+        tracing::info!("Forwarded IncomingCall event to main coordinator for session {}", session_id);
         
         Ok(())
     }
@@ -1078,6 +1063,14 @@ impl SessionDialogCoordinator {
                 self.handle_invite_reinvite(dialog_id, transaction_id, request).await?;
             }
             
+            rvoip_sip_core::Method::Notify => {
+                // Handle NOTIFY for REFER subscriptions - just acknowledge with 200 OK
+                tracing::info!("Received NOTIFY for dialog {}, sending 200 OK", dialog_id);
+                if let Err(e) = self.send_response(&transaction_id, 200, "OK").await {
+                    tracing::error!("Failed to send 200 OK response to NOTIFY: {}", e);
+                }
+            }
+            
             _ => {
                 tracing::warn!("Unhandled ReInvite method {} for dialog {}", method, dialog_id);
                 // Send 501 Not Implemented response
@@ -1323,8 +1316,8 @@ impl SessionDialogCoordinator {
     }
     
     async fn send_session_event(&self, event: SessionEvent) -> DialogResult<()> {
-        self.session_events_tx
-            .send(event)
+        self.event_processor
+            .publish_event(event)
             .await
             .map_err(|e| DialogError::Coordination {
                 message: format!("Failed to send session event: {}", e),
@@ -1350,6 +1343,7 @@ impl Clone for SessionDialogCoordinator {
             Arc::clone(&self.dialog_api),
             Arc::clone(&self.registry),
             Arc::clone(&self.dialog_to_session),
+            Arc::clone(&self.session_to_dialog),
             Arc::clone(&self.event_processor),
         ));
         
@@ -1357,7 +1351,7 @@ impl Clone for SessionDialogCoordinator {
             dialog_api: Arc::clone(&self.dialog_api),
             registry: Arc::clone(&self.registry),
             handler: self.handler.clone(),
-            session_events_tx: self.session_events_tx.clone(),
+            event_processor: self.event_processor.clone(),
             dialog_to_session: Arc::clone(&self.dialog_to_session),
             session_to_dialog: Arc::clone(&self.session_to_dialog),
             incoming_sdp_offers: Arc::clone(&self.incoming_sdp_offers),
@@ -1365,7 +1359,6 @@ impl Clone for SessionDialogCoordinator {
             fromtag_to_session: Arc::clone(&self.fromtag_to_session),
             fromuri_to_session: Arc::clone(&self.fromuri_to_session),
             transfer_handler,
-            event_processor: Arc::clone(&self.event_processor),
         }
     }
 }

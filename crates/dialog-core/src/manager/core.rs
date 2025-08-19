@@ -249,13 +249,9 @@ impl DialogManager {
                         // Store the transaction-to-dialog mapping
                         self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
                         
-                        // Process the REFER in the context of the existing dialog
-                        return self.process_transaction_event(transaction_id, &dialog_id, 
-                            TransactionEvent::NonInviteRequest { 
-                                transaction_id: transaction_id.clone(), 
-                                request, 
-                                source 
-                            }).await;
+                        // REFER within a dialog should be handled by the protocol handler
+                        // which will emit the TransferRequest event to session-core
+                        return self.handle_refer(request, source).await;
                     } else {
                         debug!("REFER request does not match any existing dialog");
                     }

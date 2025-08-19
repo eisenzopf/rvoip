@@ -328,21 +328,9 @@ impl MethodHandler for DialogManager {
                 })
                 .flatten();
             
-            // Create new dedicated transfer event instead of ReInvite
-            let event = crate::events::SessionCoordinationEvent::TransferRequest {
-                dialog_id: dialog_id.clone(),
-                transaction_id: transaction_id.clone(),
-                refer_to,
-                referred_by,
-                replaces,
-            };
-            
-            // Forward to session layer
-            self.notify_session_layer(event).await?;
-            debug!("REFER request forwarded to session layer as TransferRequest for dialog {}", dialog_id);
-            
-            // Send 202 Accepted response after successful processing
-            // This is the standard response for REFER per RFC 3515
+            // Send 202 Accepted response FIRST before processing
+            // This is required by RFC 3515 - we must send 202 immediately
+            // to indicate we've accepted the REFER for processing
             let response = rvoip_transaction_core::utils::response_builders::create_response(
                 &request, 
                 StatusCode::Accepted
@@ -354,6 +342,19 @@ impl MethodHandler for DialogManager {
                 })?;
             
             debug!("Sent 202 Accepted for REFER request");
+            
+            // Now forward to session layer for processing
+            // The session layer can now safely send NOTIFY since 202 has been sent
+            let event = crate::events::SessionCoordinationEvent::TransferRequest {
+                dialog_id: dialog_id.clone(),
+                transaction_id: transaction_id.clone(),
+                refer_to,
+                referred_by,
+                replaces,
+            };
+            
+            self.notify_session_layer(event).await?;
+            debug!("REFER request forwarded to session layer as TransferRequest for dialog {}", dialog_id);
             Ok(())
         } else {
             // REFER outside dialog - send 481

@@ -35,14 +35,14 @@ impl SessionCoordinator {
 
         // Send events
         if let Some(ref local_sdp) = sdp {
-            self.event_tx.send(SessionEvent::SdpEvent {
+            self.publish_event(SessionEvent::SdpEvent {
                 session_id: session_id.clone(),
                 event_type: "local_sdp_offer".to_string(),
                 sdp: local_sdp.clone(),
             }).await.map_err(|_| SessionError::internal("Failed to send SDP event"))?;
         }
 
-        self.event_tx.send(SessionEvent::SessionCreated {
+        self.publish_event(SessionEvent::SessionCreated {
             session_id: session_id.clone(),
             from: call.from.clone(),
             to: call.to.clone(),

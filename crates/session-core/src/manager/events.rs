@@ -156,6 +156,16 @@ pub enum SessionEvent {
         session_id: SessionId,
     },
     
+    /// Incoming call received (forwarded from dialog coordinator)
+    IncomingCall {
+        session_id: SessionId,
+        dialog_id: rvoip_dialog_core::DialogId,
+        from: String,
+        to: String,
+        sdp: Option<String>,
+        headers: std::collections::HashMap<String, String>,
+    },
+    
     /// Incoming transfer request received
     IncomingTransferRequest {
         session_id: SessionId,
