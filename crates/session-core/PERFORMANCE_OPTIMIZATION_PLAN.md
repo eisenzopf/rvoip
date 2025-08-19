@@ -876,345 +876,12 @@ impl SessionCoordinator {
 ```
 
 **Tasks**:
-- [ ] Audit all HashMap/DashMap insertions for clone elimination
-- [ ] Replace with entry API where possible
-- [ ] Use Arc for frequently accessed configuration values
-- [ ] Wrap large configs in Arc at initialization
-- [ ] Update all config access to use references
-- [ ] Remove individual field cloning in hot paths
-- [ ] Consider Cow<'static, str> for static config strings
-- [ ] Split Participant into shared/mutable parts for conferences
-- [ ] Implement partial update methods for complex structures
-- [ ] Benchmark memory allocation reduction (target: 40%+ improvement)
-
-### 5.2 Event Broadcasting & Filtering Optimization  
-**Files**: `src/manager/events.rs`, event processing hot paths
-
-**Current Problem**: Event broadcasting inefficiency and lack of filtering
-```rust
-// Problem: Large events cloned for each subscriber
-// Problem: No event filtering at source - all events go to all subscribers
-```
-
-**Solution**: Arc-based event sharing with intelligent filtering
-```rust
-// Use Arc for event payloads to eliminate cloning
-pub enum SessionEvent {
-    // Small events stay as-is
-    SessionCreated { session_id: SessionId, from: String, to: String },
-    
-    // Large events use Arc
-    MediaInfo(Arc<MediaInfoData>),
-    QualityMetrics(Arc<QualityMetricsData>),
-    RtpStatistics(Arc<RtpStatisticsData>),
-}
-
-// Add event filtering at subscription level
-pub struct FilteredSubscriber {
-    filter: Arc<dyn Fn(&SessionEvent) -> bool + Send + Sync>,
-    tx: mpsc::Sender<Arc<SessionEvent>>,
-    subscriber_id: SubscriberId,
-}
-
-pub struct EventFilter {
-    event_types: HashSet<EventTypeId>,
-    session_filter: Option<HashSet<SessionId>>,
-    priority_filter: Option<EventPriority>,
-}
-
-impl RvoipFederatedBus {
-    pub async fn subscribe_filtered(&self, filter: EventFilter) -> Result<FilteredSubscriber> {
-        let (tx, rx) = mpsc::channel(1000);
-        
-        let subscriber = FilteredSubscriber {
-            filter: Arc::new(move |event| filter.matches(event)),
-            tx,
-            subscriber_id: SubscriberId::new(),
-        };
-        
-        self.add_filtered_subscriber(subscriber.clone()).await?;
-        Ok(subscriber)
-    }
-    
-    async fn broadcast_event_filtered(&self, event: Arc<SessionEvent>) -> Result<()> {
-        // Apply filters before sending to reduce unnecessary work
-        let matching_subscribers: Vec<_> = self.subscribers
-            .iter()
-            .filter(|sub| (sub.filter)(&event))
-            .collect();
-            
-        // Send only to matching subscribers
-        for subscriber in matching_subscribers {
-            if let Err(_) = subscriber.tx.try_send(event.clone()) {
-                // Handle backpressure or remove slow subscribers
-                self.handle_slow_subscriber(subscriber.subscriber_id).await;
-            }
-        }
-        
-        Ok(())
-    }
-}
-
-// Event batching for high-frequency events
-pub struct EventBatcher {
-    pending_batches: DashMap<EventTypeId, Vec<Arc<SessionEvent>>>,
-    batch_configs: HashMap<EventTypeId, BatchConfig>,
-    flush_scheduler: Arc<FlushScheduler>,
-}
-
-pub struct BatchConfig {
-    max_size: usize,
-    max_age: Duration,
-    priority: EventPriority,
-}
-```
-
-**Tasks**:
-- [ ] Wrap large event payloads in Arc to eliminate cloning
-- [ ] Implement filtered subscription system  
-- [ ] Add event batching for high-frequency events (RTP stats, quality metrics)
-- [ ] Create intelligent subscriber management (remove slow subscribers)
-- [ ] Add event type filtering at source level
-- [ ] Implement session-specific event filtering
-- [ ] Add priority-based event filtering
-- [ ] Consider using crossbeam-channel for better performance
-- [ ] Performance test: 80%+ reduction in event-related allocations
-- [ ] Latency test: Filtering overhead <10μs per event
-
-### 5.3 Comprehensive Performance Testing & Validation
-**Files**: `benches/`, `tests/performance/`
-
-**Current Problem**: No comprehensive performance testing infrastructure
-
-**Solution**: Complete performance testing and validation suite
-```rust
-// Performance benchmarks for all critical paths
-#[cfg(test)]
-mod performance_tests {
-    use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
-    
-    fn bench_event_processing(c: &mut Criterion) {
-        let mut group = c.benchmark_group("event_processing");
-        
-        // Test different event volumes
-        for event_count in [1000, 10000, 100000].iter() {
-            group.bench_with_input(
-                BenchmarkId::new("federated_bus", event_count),
-                event_count,
-                |b, &event_count| {
-                    b.iter(|| {
-                        // Benchmark federated bus with specified event count
-                    });
-                },
-            );
-        }
-    }
-    
-    fn bench_session_operations(c: &mut Criterion) {
-        // Benchmark session creation, state transitions, termination
-    }
-    
-    fn bench_memory_usage(c: &mut Criterion) {
-        // Memory allocation benchmarks
-    }
-}
-
-// Load testing infrastructure
-pub struct LoadTestRunner {
-    concurrent_sessions: usize,
-    events_per_second: usize,
-    test_duration: Duration,
-    deployment_config: DeploymentConfig,
-}
-
-impl LoadTestRunner {
-    pub async fn run_load_test(&self) -> LoadTestResults {
-        // Create concurrent sessions
-        // Generate realistic event load
-        // Measure performance metrics
-        // Validate all functionality works under load
-    }
-}
-```
-
-**Tasks**:
-- [ ] Create comprehensive benchmark suite for all critical paths
-- [ ] Add memory allocation tracking and measurement
-- [ ] Implement load testing with 100+ concurrent sessions
-- [ ] Add CPU profiling for hot path identification
-- [ ] Create performance regression detection
-- [ ] Add network latency simulation for distributed testing
-- [ ] Benchmark all deployment modes (monolithic to fully distributed)
-- [ ] Add performance monitoring and alerting
-- [ ] Performance targets validation:
-  - [ ] 60-80% reduction in thread spawning vs original
-  - [ ] 30-40% reduction in memory allocations vs original
-  - [ ] 500K+ events/sec in monolithic mode
-  - [ ] 100K+ events/sec in distributed mode
-  - [ ] <1ms latency for critical events
-  - [ ] Clean shutdown within 2 seconds
-
-## Implementation Guidelines
-
-### Federated Architecture Principles
-- ✅ Use infra-common StaticFastPath for maximum event throughput (900K+ events/sec)
-- ✅ Implement planes as independent, deployable units (Transport/Media/Signaling)
-- ✅ Design for flexible deployment (monolithic → fully distributed)
-- ✅ Use event affinity to optimize local vs network routing
-- ✅ Implement graceful degradation and automatic failover
-
-### Performance Optimization Rules
-- ✅ Use `Arc<T>` for data shared across planes and tasks
-- ✅ Implement `Copy` for small enums and IDs (<= 16 bytes)
-- ✅ Use tracked task spawning with cancellation support
-- ✅ Pass references when ownership isn't needed
-- ✅ Use entry API for HashMap operations
-- ✅ Clone once, reference many times
-- ✅ Batch high-frequency events for network efficiency
-
-### Task Management Rules
-- ✅ All tokio::spawn must be tracked with LayerTaskManager
-- ✅ Implement cancellation tokens for graceful shutdown
-- ✅ Use timeout fallbacks for all async operations
-- ✅ Monitor task counts and detect leaks
-
-### Event System Rules
-- ✅ Classify events by affinity (IntraPlane/InterPlane/Broadcast)
-- ✅ Use adaptive batching for high-volume events
-- ✅ Implement filtering at subscription level
-- ✅ Use Arc for large event payloads
-
-### Don'ts
-- ❌ Don't use untracked tokio::spawn (causes shutdown hangs)
-- ❌ Don't clone in loops without caching
-- ❌ Don't clone both key and value for maps
-- ❌ Don't clone Arc multiple times for same task
-- ❌ Don't clone strings when &str suffices
-- ❌ Don't create plane coupling (maintain independence)
-- ❌ Don't hardcode deployment topology
-
-## Success Metrics
-
-### Performance Targets (vs Current Implementation)
-- **Thread reduction**: 60-80% fewer threads through federated event bus
-- **Memory allocations**: 30-40% reduction through Arc optimization
-- **Event throughput**: 10x improvement using infra-common (500K+ events/sec)
-- **Network efficiency**: 50%+ reduction in distributed mode overhead
-- **Shutdown latency**: <2 seconds for any deployment mode
-
-### Deployment Flexibility Targets
-- **Zero code changes** to switch between deployment modes
-- **Runtime configuration** support for all deployment scenarios
-- **Automatic service discovery** and health monitoring
-- **Seamless failover** within 30 seconds for distributed deployments
-
-### Code Quality Metrics
-- Maintain existing functionality with zero breaking changes
-- Comprehensive test coverage including performance regression tests
-- Clear documentation for federated architecture patterns
-- Consistent deployment configuration across all scenarios
-
-## Rollout Plan
-
-1. **Week 1**: Phase 1 & 2 (Critical hot paths)
-2. **Week 2**: Phase 3 & 4 (Collections and advanced)
-3. **Week 3**: Phase 5 (Testing and validation)
-4. **Week 4**: Performance validation and rollout
-
-## Risk Mitigation
-
-### Potential Risks
-1. **Arc deadlocks**: Mitigate with consistent lock ordering
-2. **Breaking API changes**: Use deprecation warnings
-3. **Performance regression**: Benchmark each change
-4. **Thread safety issues**: Comprehensive testing
-
-### Rollback Plan
-- Each phase can be rolled back independently
-- Git tags for each phase completion
-- Performance benchmarks before each merge
-
-## Appendix: Profiling Commands
-
-```bash
-# Memory profiling
-cargo build --release
-valgrind --tool=massif --massif-out-file=massif.out target/release/your_binary
-ms_print massif.out > memory_profile.txt
-
-# CPU profiling
-cargo build --release
-perf record -g target/release/your_binary
-perf report
-
-# Allocation tracking
-cargo build --release --features dhat-heap
-DHAT_OUTPUT=dhat.json target/release/your_binary
-
-# Benchmark specific functions
-cargo bench --bench session_benchmarks
-```
-
-## Review Checklist
-
-Before considering this optimization complete:
-- [ ] All phases implemented and tested
-- [ ] Performance targets met
-- [ ] No regression in functionality
-- [ ] Documentation updated
-- [ ] Team code review completed
-- [ ] Production metrics validated
-
----
-
-## Phase 6: Shutdown and Cleanup Optimization
-
-### 6.1 Critical Shutdown Issues (High Priority)
-
-**Current Problem**: Tests hanging during cleanup due to untracked async tasks and incomplete shutdown cascade
-
-**Root Cause Analysis**:
-- **Untracked async task proliferation** across all layers
-- **Incomplete event-based cleanup coordination** 
-- **Mixed responsibility model** between event-driven and direct cleanup
-
-#### 6.1.1 Session-Core Shutdown Issues
-**Files**: `src/coordinator/coordinator.rs`, `src/coordinator/event_handler.rs`
-
-**Critical Gaps**:
-```rust
-// PROBLEM: Fire-and-forget event handler tasks
-tokio::spawn(async move {
-    if let Err(e) = self_clone.handle_event(event).await {
-        tracing::error!("Error handling event: {}", e);
-    }
-}); // <- Never tracked, never cleaned up
-```
-
-**Solution**:
-```rust
-// Task lifecycle management
-pub struct LayerTaskManager {
-    cancel_token: CancellationToken,
-    task_handles: Vec<JoinHandle<()>>,
-}
-
-impl SessionCoordinator {
-    async fn spawn_tracked_task<F>(&self, future: F) 
-    where F: Future<Output = ()> + Send + 'static {
-        let handle = tokio::spawn(future);
-        self.task_manager.track(handle);
-    }
-}
-```
-
-**Tasks**:
 - [ ] Implement TaskManager for tracking spawned tasks
 - [ ] Replace all tokio::spawn with tracked spawning
 - [ ] Add graceful shutdown with cancellation tokens
 - [ ] Complete media layer integration in stop() cascade
 
-#### 6.1.2 Dialog-Core Shutdown Issues  
+#### 5.1.2 Dialog-Core Shutdown Issues  
 **Files**: `src/dialog/manager.rs`
 
 **Critical Gaps**:
@@ -1259,7 +926,7 @@ impl DialogManager {
 - [ ] Clean up dialog-to-session mappings in stop()
 - [ ] Implement select! with cancellation for all spawned tasks
 
-#### 6.1.3 Media-Core Shutdown Issues
+#### 5.1.3 Media-Core Shutdown Issues
 **Files**: Media layer components
 
 **Critical Gaps**:
@@ -1302,9 +969,9 @@ impl MediaEngine {
 - [ ] Track and cancel monitoring tasks
 - [ ] Integrate with session-core cleanup events
 
-### 6.2 Shutdown Architecture Redesign
+### 5.2 Shutdown Architecture Redesign
 
-#### 6.2.1 Hybrid Cleanup Strategy
+#### 5.2.1 Hybrid Cleanup Strategy
 
 **Event-Based Coordination** (for cross-layer synchronization):
 ```rust
@@ -1338,7 +1005,7 @@ impl SessionCoordinator {
 }
 ```
 
-#### 6.2.2 Shutdown Sequence Redesign
+#### 5.2.2 Shutdown Sequence Redesign
 
 **Current Broken Sequence**:
 ```
@@ -1363,9 +1030,9 @@ Spawned tasks continue running indefinitely
 - [ ] Create force cleanup fallback paths
 - [ ] Add shutdown validation and leak detection
 
-### 6.3 Task Lifecycle Management Standards
+### 5.3 Task Lifecycle Management Standards
 
-#### 6.3.1 Standardized Task Spawning
+#### 5.3.1 Standardized Task Spawning
 ```rust
 // All layers must use tracked spawning
 pub trait TaskSpawner {
@@ -1379,7 +1046,7 @@ pub trait TaskSpawner {
 }
 ```
 
-#### 6.3.2 Cancellation Token Propagation
+#### 5.3.2 Cancellation Token Propagation
 ```rust
 // Every long-running task must accept cancellation
 async fn long_running_operation(cancel_token: CancellationToken) {
@@ -1403,7 +1070,7 @@ async fn long_running_operation(cancel_token: CancellationToken) {
 - [ ] Create task lifecycle documentation
 - [ ] Add task leak detection in tests
 
-### 6.4 Success Metrics for Shutdown Optimization
+### 5.4 Success Metrics for Shutdown Optimization
 
 **Functional Targets**:
 - [ ] All tests complete without hanging (0 timeout failures)
@@ -1417,30 +1084,127 @@ async fn long_running_operation(cancel_token: CancellationToken) {
 - [ ] Memory fully reclaimed within 1 second of shutdown
 - [ ] No dangling network connections or file handles
 
-### 6.5 Implementation Priority
+### 5.5 Implementation Priority
 
-**Phase 6A: Critical Fixes (Week 1)**
+**Phase 5A: Critical Fixes (Week 1)**
 1. Fix untracked event handler tasks in SessionCoordinator
 2. Fix untracked BYE timeout tasks in DialogManager  
 3. Implement basic task tracking with abort capability
 4. Add timeout protection to all shutdown operations
 
-**Phase 6B: Architecture (Week 2)**
+**Phase 5B: Architecture (Week 2)**
 1. Complete media layer cleanup integration
 2. Implement cancellation token propagation
 3. Enhanced shutdown phase coordination
 4. Task lifecycle management standards
 
-**Phase 6C: Validation (Week 3)**
+**Phase 5C: Validation (Week 3)**
 1. Comprehensive shutdown testing
 2. Resource leak detection
 3. Performance validation under load
 4. Integration testing across all layers
 
-**Immediate Action Required**: Phase 6A items are blocking current development and must be prioritized over performance optimizations.
+**Immediate Action Required**: Phase 5A items are blocking current development and must be prioritized.
+
+## Implementation Guidelines
+
+### Federated Architecture Principles
+- ✅ Use infra-common StaticFastPath for maximum event throughput (900K+ events/sec)
+- ✅ Implement planes as independent, deployable units (Transport/Media/Signaling)
+- ✅ Design for flexible deployment (monolithic → fully distributed)
+- ✅ Use event affinity to optimize local vs network routing
+- ✅ Implement graceful degradation and automatic failover
+
+### Task Management Rules
+- ✅ All tokio::spawn must be tracked with LayerTaskManager
+- ✅ Implement cancellation tokens for graceful shutdown
+- ✅ Use timeout fallbacks for all async operations
+- ✅ Monitor task counts and detect leaks
+
+### Event System Rules
+- ✅ Classify events by affinity (IntraPlane/InterPlane/Broadcast)
+- ✅ Use adaptive batching for high-volume events
+- ✅ Implement proper cleanup confirmation events
+
+### Don'ts
+- ❌ Don't use untracked tokio::spawn (causes shutdown hangs)
+- ❌ Don't create plane coupling (maintain independence)
+- ❌ Don't hardcode deployment topology
+- ❌ Don't forget cleanup confirmation events
+
+## Success Metrics
+
+### Architecture Targets
+- **Thread reduction**: 60-80% fewer threads through federated event bus
+- **Event throughput**: 10x improvement using infra-common (500K+ events/sec)
+- **Network efficiency**: 50%+ reduction in distributed mode overhead
+- **Shutdown latency**: <2 seconds for any deployment mode
+
+### Deployment Flexibility Targets
+- **Zero code changes** to switch between deployment modes
+- **Runtime configuration** support for all deployment scenarios
+- **Automatic service discovery** and health monitoring
+- **Seamless failover** within 30 seconds for distributed deployments
+
+### Code Quality Metrics
+- Maintain existing functionality with zero breaking changes
+- Comprehensive test coverage including performance regression tests
+- Clear documentation for federated architecture patterns
+- Consistent deployment configuration across all scenarios
+
+## Rollout Plan
+
+1. **Week 1**: Phase 1 & 2 (Federated foundation and plane abstraction)
+2. **Week 2**: Phase 3 & 4 (Network transport and deployment)
+3. **Week 3**: Phase 5 (Shutdown and cleanup optimization)
+4. **Week 4**: Integration testing and validation
+
+## Risk Mitigation
+
+### Potential Risks
+1. **Untracked tasks**: Mitigate with TaskManager tracking
+2. **Breaking API changes**: Use deprecation warnings
+3. **Shutdown hangs**: Implement timeout fallbacks
+4. **Thread safety issues**: Comprehensive testing
+
+### Rollback Plan
+- Each phase can be rolled back independently
+- Git tags for each phase completion
+- Performance benchmarks before each merge
+
+## Appendix: Profiling Commands
+
+```bash
+# Memory profiling
+cargo build --release
+valgrind --tool=massif --massif-out-file=massif.out target/release/your_binary
+ms_print massif.out > memory_profile.txt
+
+# CPU profiling
+cargo build --release
+perf record -g target/release/your_binary
+perf report
+
+# Allocation tracking
+cargo build --release --features dhat-heap
+DHAT_OUTPUT=dhat.json target/release/your_binary
+
+# Benchmark specific functions
+cargo bench --bench session_benchmarks
+```
+
+## Review Checklist
+
+Before considering this optimization complete:
+- [ ] All phases implemented and tested
+- [ ] Performance targets met
+- [ ] No regression in functionality
+- [ ] Documentation updated
+- [ ] Team code review completed
+- [ ] Production metrics validated
 
 ---
 
 *Last Updated: 2025-08-19*
 *Author: Performance Optimization Team* 
-*Status: Updated with Critical Shutdown Issues*
+*Status: Removed Performance Optimization Phase*
