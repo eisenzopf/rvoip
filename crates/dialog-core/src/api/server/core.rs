@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use rvoip_transaction_core::{TransactionManager, TransactionEvent};
+use crate::transaction::{TransactionManager, TransactionEvent};
 use crate::manager::DialogManager;
 use crate::events::SessionCoordinationEvent;
 use super::super::{ApiResult, ApiError, DialogApi, DialogStats};

@@ -23,7 +23,7 @@ workspace = true
 # session-core uses dialog-core for SIP and media-core for media processing
 # Following proper separation of concerns: NO direct rtp-core dependency
 rvoip-sip-core.workspace = true
-rvoip-transaction-core.workspace = true
+# transaction-core has been merged into dialog-core
 rvoip-dialog-core.workspace = true
 rvoip-sip-transport.workspace = true
 rvoip-media-core.workspace = true

@@ -22,7 +22,7 @@ use std::net::SocketAddr;
 use tracing::{debug, info};
 
 use rvoip_sip_core::{Request, Method};
-use rvoip_transaction_core::TransactionKey;
+use crate::transaction::TransactionKey;
 use crate::dialog::{DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;

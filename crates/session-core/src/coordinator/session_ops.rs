@@ -170,7 +170,7 @@ impl SessionCoordinator {
         _headers: Option<Vec<(&str, &str)>>,
     ) -> Result<()> {
         // Parse the transaction ID
-        let tx_key: rvoip_transaction_core::TransactionKey = transaction_id.parse()
+        let tx_key: rvoip_dialog_core::transaction::TransactionKey = transaction_id.parse()
             .map_err(|e| SessionError::internal(&format!("Invalid transaction ID: {}", e)))?;
         
         // Map status code to SIP status

@@ -3,7 +3,7 @@
 use rvoip_session_core::coordinator::transfer::ReferSubscription;
 use rvoip_session_core::api::types::{SessionId, CallState};
 use rvoip_dialog_core::DialogId;
-use rvoip_transaction_core::TransactionKey;
+use rvoip_dialog_core::transaction::TransactionKey;
 use rvoip_sip_core::types::refer_to::ReferTo;
 use std::str::FromStr;
 use std::sync::Arc;

@@ -108,6 +108,9 @@ impl RvoipFederatedBus {
     
     /// Create with custom configuration
     pub fn with_config(config: FederatedBusConfig) -> Self {
+        // Register SessionEvent as a StaticEvent type
+        infra_common::events::registry::register_static_event::<SessionEvent>();
+        
         let implementation = if config.use_static_fast_path {
             ImplementationType::StaticFastPath
         } else {

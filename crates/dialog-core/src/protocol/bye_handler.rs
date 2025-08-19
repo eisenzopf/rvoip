@@ -20,7 +20,7 @@
 use tracing::{debug, info};
 
 use rvoip_sip_core::{Request, StatusCode};
-use rvoip_transaction_core::{TransactionKey, utils::response_builders};
+use crate::transaction::{TransactionKey, utils::response_builders};
 use crate::dialog::DialogId;
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;

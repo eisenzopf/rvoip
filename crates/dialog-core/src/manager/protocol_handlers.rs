@@ -18,7 +18,7 @@ use tracing::debug;
 use rvoip_sip_core::{Request, Response, Method, StatusCode};
 use rvoip_sip_core::types::refer_to::ReferTo;
 use rvoip_sip_core::types::header::TypedHeaderTrait;
-use rvoip_transaction_core::TransactionKey;
+use crate::transaction::TransactionKey;
 use crate::errors::{DialogError, DialogResult};
 use super::core::DialogManager;
 use super::session_coordination::SessionCoordinator;
@@ -155,7 +155,7 @@ impl ProtocolHandlers for DialogManager {
                 })?;
             
             let transaction_id = server_transaction.id().clone();
-            let response = rvoip_transaction_core::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -277,7 +277,7 @@ impl MethodHandler for DialogManager {
                 })?;
             
             let transaction_id = server_transaction.id().clone();
-            let response = rvoip_transaction_core::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -331,7 +331,7 @@ impl MethodHandler for DialogManager {
             // Send 202 Accepted response FIRST before processing
             // This is required by RFC 3515 - we must send 202 immediately
             // to indicate we've accepted the REFER for processing
-            let response = rvoip_transaction_core::utils::response_builders::create_response(
+            let response = crate::transaction::utils::response_builders::create_response(
                 &request, 
                 StatusCode::Accepted
             );
@@ -366,7 +366,7 @@ impl MethodHandler for DialogManager {
                 })?;
             
             let transaction_id = server_transaction.id().clone();
-            let response = rvoip_transaction_core::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -438,7 +438,7 @@ impl MethodHandler for DialogManager {
                 })?;
             
             let transaction_id = server_transaction.id().clone();
-            let response = rvoip_transaction_core::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -471,7 +471,7 @@ impl DialogManager {
             Method::Refer,
         ];
         
-        let response = rvoip_transaction_core::utils::response_builders::create_ok_response_for_options(request, &allowed_methods);
+        let response = crate::transaction::utils::response_builders::create_ok_response_for_options(request, &allowed_methods);
         
         self.transaction_manager.send_response(transaction_id, response).await
             .map_err(|e| DialogError::TransactionError {

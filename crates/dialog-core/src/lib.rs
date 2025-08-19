@@ -14,7 +14,7 @@
 //!      ↓
 //! dialog-core (SIP Protocol)  ← THIS CRATE
 //!      ↓  
-//! transaction-core (Reliability)
+//! [transaction layer - now internal] (Reliability)
 //!      ↓
 //! sip-transport (Network)
 //! ```
@@ -32,8 +32,8 @@
 //!
 //! ```rust,no_run
 //! use rvoip_dialog_core::api::{DialogServer, DialogApi};
-//! use rvoip_transaction_core::{TransactionManager};
-//! use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
+//! use rvoip_dialog_core::transaction::{TransactionManager};
+//! use rvoip_dialog_core::transaction::transport::{TransportManager, TransportManagerConfig};
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
@@ -73,8 +73,8 @@
 //!
 //! ```rust,no_run
 //! use rvoip_dialog_core::api::{DialogClient, DialogApi};
-//! use rvoip_transaction_core::{TransactionManager};
-//! use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
+//! use rvoip_dialog_core::transaction::{TransactionManager};
+//! use rvoip_dialog_core::transaction::transport::{TransportManager, TransportManagerConfig};
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
@@ -129,6 +129,9 @@ pub mod sdp;
 pub mod recovery;
 pub mod events;
 
+// Transaction layer (merged from transaction-core)
+pub mod transaction;
+
 // **NEW**: Configuration system (unified and legacy)
 pub mod config;
 
@@ -156,4 +159,4 @@ pub use api::{ApiResult, ApiError, DialogStats};
 
 // Re-export for convenience
 pub use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
-pub use rvoip_transaction_core::TransactionKey; 
+pub use transaction::TransactionKey; 

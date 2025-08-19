@@ -22,11 +22,13 @@ workspace = true
 [dependencies]
 # 🎯 INTERNAL CRATES - Use workspace dependencies
 rvoip-sip-core.workspace = true
-rvoip-transaction-core.workspace = true
+rvoip-sip-transport.workspace = true
+# transaction-core has been merged into this crate
 
 # External dependencies from workspace
 tokio.workspace = true
 async-trait.workspace = true
+futures.workspace = true
 dashmap.workspace = true
 uuid.workspace = true
 bytes.workspace = true

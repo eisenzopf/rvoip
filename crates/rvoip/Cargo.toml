@@ -23,7 +23,7 @@ workspace = true
 # 🎯 ALL INTERNAL CRATES - Use workspace dependencies (no version needed!)
 rvoip-sip-core.workspace = true
 rvoip-sip-transport.workspace = true
-rvoip-transaction-core.workspace = true
+# transaction-core has been merged into dialog-core
 rvoip-dialog-core.workspace = true
 rvoip-rtp-core.workspace = true
 rvoip-media-core.workspace = true

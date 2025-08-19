@@ -402,6 +402,9 @@ mod tests {
             }, format!("task_{}", i));
         }
         
+        // Give tasks a moment to register
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        
         assert!(manager.active_task_count() > 0);
         
         // Graceful shutdown should work

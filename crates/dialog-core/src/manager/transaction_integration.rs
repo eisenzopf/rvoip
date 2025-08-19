@@ -15,8 +15,9 @@
 use std::net::SocketAddr;
 use tracing::{debug, warn, info};
 use rvoip_sip_core::{Request, Response, Method};
-use rvoip_transaction_core::{TransactionKey, TransactionEvent, TransactionState};
-use rvoip_transaction_core::builders::{dialog_utils, dialog_quick};
+use crate::transaction::{TransactionKey, TransactionEvent, TransactionState};
+use crate::transaction::builders::{dialog_utils, dialog_quick};
+use crate::transaction::dialog::{request_builder_from_dialog_template, DialogRequestTemplate};
 use crate::errors::DialogResult;
 use crate::dialog::DialogId;
 use crate::events::{DialogEvent, SessionCoordinationEvent};
@@ -133,7 +134,7 @@ impl TransactionIntegration for DialogManager {
                         },
                         None => {
                             // Initial INVITE: No remote tag yet, creating new dialog
-                            use rvoip_transaction_core::client::builders::InviteBuilder;
+                            use crate::transaction::client::builders::InviteBuilder;
                             
                             let mut invite_builder = InviteBuilder::new()
                                 .from_detailed(
@@ -305,7 +306,7 @@ impl TransactionIntegration for DialogManager {
                     })?;
                     
                     // Use dialog template + utility function
-                    let template_struct = dialog_utils::DialogRequestTemplate {
+                    let template_struct = DialogRequestTemplate {
                         call_id: template.call_id,
                         from_uri: template.local_uri.to_string(),
                         from_tag: local_tag,
@@ -318,7 +319,7 @@ impl TransactionIntegration for DialogManager {
                         contact: None,
                     };
                     
-                    dialog_utils::request_builder_from_dialog_template(
+                    request_builder_from_dialog_template(
                         &template_struct,
                         method.clone(),
                         body_string,
