@@ -1,4 +1,4 @@
-//! G.711 payload format handler
+//! G.711 payload format handler (moved from rtp-core)
 //!
 //! This module implements payload format handling for G.711 µ-law and A-law audio.
 //! G.711 is defined in RFC 3551 and is a commonly used codec for VoIP.
@@ -190,4 +190,4 @@ mod tests {
         // 160 bytes of G.711 = 20ms
         assert_eq!(format.duration_from_packet_size(160), 20);
     }
-} 
+}

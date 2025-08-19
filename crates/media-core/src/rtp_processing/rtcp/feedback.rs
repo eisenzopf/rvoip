@@ -1,15 +1,15 @@
-//! RTCP Feedback Mechanisms
+//! RTCP Feedback Mechanisms (moved from rtp-core)
 //!
 //! This module implements advanced RTCP feedback packets for real-time media quality adaptation,
 //! including Picture Loss Indication (PLI), Full Intra Request (FIR), Slice Loss Indication (SLI),
 //! Temporal-Spatial Trade-off (TSTO), Receiver Estimated Max Bitrate (REMB), and 
 //! Transport-wide Congestion Control feedback.
 
-pub mod packets;
-// generators and algorithms modules moved to media-core
-
-use crate::{Result, RtpSsrc};
 use std::time::Instant;
+use crate::api::error::MediaError;
+
+/// RTP SSRC type
+pub type RtpSsrc = u32;
 
 /// Feedback packet types as defined in RFC 4585 and extensions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,45 +287,104 @@ impl FeedbackContext {
     }
 }
 
+/// Stream statistics for feedback generation
+#[derive(Debug, Clone)]
+pub struct StreamStats {
+    /// Stream direction
+    pub direction: StreamDirection,
+    /// Stream SSRC
+    pub ssrc: u32,
+    /// Media type
+    pub media_type: MediaFrameType,
+    /// Total packets processed
+    pub packet_count: u64,
+    /// Total bytes processed
+    pub byte_count: u64,
+    /// Packets lost
+    pub packets_lost: u32,
+    /// Fraction lost (0.0-1.0)
+    pub fraction_lost: f32,
+    /// Jitter in milliseconds
+    pub jitter_ms: f32,
+    /// Round-trip time
+    pub rtt_ms: Option<f32>,
+    /// Current bitrate in bps
+    pub bitrate_bps: u32,
+    /// Discard rate
+    pub discard_rate: f32,
+    /// Remote address
+    pub remote_addr: std::net::SocketAddr,
+}
+
+impl Default for StreamStats {
+    fn default() -> Self {
+        Self {
+            direction: StreamDirection::default(),
+            ssrc: 0,
+            media_type: MediaFrameType::default(),
+            packet_count: 0,
+            byte_count: 0,
+            packets_lost: 0,
+            fraction_lost: 0.0,
+            jitter_ms: 0.0,
+            rtt_ms: None,
+            bitrate_bps: 0,
+            discard_rate: 0.0,
+            remote_addr: "0.0.0.0:0".parse().unwrap(),
+        }
+    }
+}
+
+/// Stream direction for statistics
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamDirection {
+    #[default]
+    Inbound,
+    Outbound,
+}
+
+/// Media frame type for statistics
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MediaFrameType {
+    #[default]
+    Audio,
+    Video,
+    Data,
+}
+
 /// Trait for feedback packet generation
 pub trait FeedbackGenerator {
     /// Generate feedback decision based on current conditions
-    fn generate_feedback(&self, context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision>;
+    fn generate_feedback(&self, context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision, MediaError>;
     
     /// Update internal state with new statistics
-    fn update_statistics(&mut self, stats: &crate::api::common::stats::StreamStats);
+    fn update_statistics(&mut self, stats: &StreamStats);
     
     /// Get the feedback generator name
     fn name(&self) -> &'static str;
 }
 
 /// Factory for creating feedback generators
-/// NOTE: Feedback generator implementations have been moved to media-core.
-/// Use media_core::rtp_processing::rtcp for actual generators.
 pub struct FeedbackGeneratorFactory;
 
 impl FeedbackGeneratorFactory {
     /// Create a loss-based feedback generator
     pub fn create_loss_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::LossFeedbackGenerator")
+        Box::new(crate::rtp_processing::rtcp::generators::LossFeedbackGenerator::new())
     }
     
     /// Create a congestion-based feedback generator
     pub fn create_congestion_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::CongestionFeedbackGenerator")
+        Box::new(crate::rtp_processing::rtcp::generators::CongestionFeedbackGenerator::new())
     }
     
     /// Create a quality-based feedback generator
     pub fn create_quality_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::QualityFeedbackGenerator")
+        Box::new(crate::rtp_processing::rtcp::generators::QualityFeedbackGenerator::new())
     }
     
     /// Create a comprehensive feedback generator (combines all strategies)
     pub fn create_comprehensive_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::ComprehensiveFeedbackGenerator")
+        Box::new(crate::rtp_processing::rtcp::generators::ComprehensiveFeedbackGenerator::new())
     }
-} 
+}

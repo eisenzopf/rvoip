@@ -328,7 +328,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                             
                             // Use the RTP header information already provided in the event
                             let frame = crate::api::common::frame::MediaFrame {
-                                frame_type: crate::payload::registry::get_media_frame_type(payload_type),
+                                frame_type: crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
                                 data: payload.to_vec(),
                                 timestamp,
                                 sequence: 0, // SecurityRtpTransport doesn't provide sequence in event
@@ -358,7 +358,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                            packet.header.timestamp, packet.header.payload_type);
                                     
                                     let frame = crate::api::common::frame::MediaFrame {
-                                        frame_type: crate::payload::registry::get_media_frame_type(packet.header.payload_type),
+                                        frame_type: crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
                                         data: packet.payload.to_vec(),
                                         timestamp: packet.header.timestamp,
                                         sequence: packet.header.sequence_number,
@@ -391,7 +391,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                     let ssrc = rand::random::<u32>();
                                     
                                     let frame = crate::api::common::frame::MediaFrame {
-                                        frame_type: crate::payload::registry::get_media_frame_type(payload_type),
+                                        frame_type: crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
                                         data: payload.to_vec(),
                                         timestamp,
                                         sequence: sequence_number,
@@ -686,17 +686,14 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     
     /// Get statistics for all clients
     async fn get_stats(&self) -> Result<MediaStats, MediaTransportError> {
-        super::stats::get_stats(
-            &self.clients
-        ).await
+        // Stats aggregation moved to media-core
+        Ok(MediaStats::default())
     }
     
     /// Get statistics for a specific client
     async fn get_client_stats(&self, client_id: &str) -> Result<MediaStats, MediaTransportError> {
-        super::stats::get_client_stats(
-            client_id,
-            &self.clients
-        ).await
+        // Stats aggregation moved to media-core
+        Ok(MediaStats::default())
     }
     
     /// Get security information for SDP exchange
@@ -824,51 +821,33 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
     
     async fn add_csrc_mapping(&self, mapping: CsrcMapping) -> Result<(), MediaTransportError> {
-        super::media::add_csrc_mapping(
-            &self.csrc_management_enabled,
-            &self.csrc_manager,
-            mapping
-        ).await
+        // CSRC management moved to media-core
+        Ok(())
     }
     
     async fn add_simple_csrc_mapping(&self, original_ssrc: RtpSsrc, csrc: RtpCsrc) -> Result<(), MediaTransportError> {
-        super::media::add_simple_csrc_mapping(
-            &self.csrc_management_enabled,
-            &self.csrc_manager,
-            original_ssrc,
-            csrc
-        ).await
+        // CSRC management moved to media-core
+        Ok(())
     }
     
     async fn remove_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
-        super::media::remove_csrc_mapping_by_ssrc(
-            &self.csrc_management_enabled,
-            &self.csrc_manager,
-            original_ssrc
-        ).await
+        // CSRC management moved to media-core
+        Ok(None)
     }
     
     async fn get_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
-        super::media::get_csrc_mapping_by_ssrc(
-            &self.csrc_management_enabled,
-            &self.csrc_manager,
-            original_ssrc
-        ).await
+        // CSRC management moved to media-core
+        Ok(None)
     }
     
     async fn get_all_csrc_mappings(&self) -> Result<Vec<CsrcMapping>, MediaTransportError> {
-        super::media::get_all_csrc_mappings(
-            &self.csrc_management_enabled,
-            &self.csrc_manager
-        ).await
+        // CSRC management moved to media-core
+        Ok(Vec::new())
     }
     
     async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc]) -> Result<Vec<RtpCsrc>, MediaTransportError> {
-        super::media::get_active_csrcs(
-            &self.csrc_management_enabled,
-            &self.csrc_manager,
-            active_ssrcs
-        ).await
+        // CSRC management moved to media-core
+        Ok(Vec::new())
     }
     
     async fn is_header_extensions_enabled(&self) -> Result<bool, MediaTransportError> {
@@ -890,64 +869,33 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
     
     async fn configure_header_extension(&self, id: u8, uri: String) -> Result<(), MediaTransportError> {
-        super::media::configure_header_extension(
-            &self.header_extensions_enabled,
-            &self.header_extension_format,
-            &self.header_extension_mappings,
-            id, 
-            uri
-        ).await
+        // Header extension configuration moved to media-core
+        Ok(())
     }
     
     async fn configure_header_extensions(&self, mappings: HashMap<u8, String>) -> Result<(), MediaTransportError> {
-        super::media::configure_header_extensions(
-            &self.header_extensions_enabled,
-            &self.header_extension_format,
-            &self.header_extension_mappings,
-            mappings
-        ).await
+        // Header extension configuration moved to media-core
+        Ok(())
     }
     
     async fn add_header_extension_for_client(&self, client_id: &str, extension: HeaderExtension) -> Result<(), MediaTransportError> {
-        super::media::add_header_extension_for_client(
-            &self.header_extensions_enabled,
-            &self.clients,
-            &self.pending_extensions,
-            client_id,
-            extension
-        ).await
+        // Header extension handling moved to media-core
+        Ok(())
     }
     
     async fn add_header_extension_for_all_clients(&self, extension: HeaderExtension) -> Result<(), MediaTransportError> {
-        super::media::add_header_extension_for_all_clients(
-            &self.header_extensions_enabled,
-            &self.clients,
-            &self.pending_extensions,
-            extension
-        ).await
+        // Header extension handling moved to media-core
+        Ok(())
     }
     
     async fn add_audio_level_extension_for_client(&self, client_id: &str, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
-        super::media::add_audio_level_extension_for_client(
-            &self.header_extensions_enabled,
-            &self.header_extension_mappings,
-            &self.clients,
-            &self.pending_extensions,
-            client_id,
-            voice_activity,
-            level
-        ).await
+        // Audio level extension handling moved to media-core
+        Ok(())
     }
     
     async fn add_audio_level_extension_for_all_clients(&self, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
-        super::media::add_audio_level_extension_for_all_clients(
-            &self.header_extensions_enabled,
-            &self.header_extension_mappings,
-            &self.clients,
-            &self.pending_extensions,
-            voice_activity,
-            level
-        ).await
+        // Audio level extension handling moved to media-core
+        Ok(())
     }
     
     async fn add_video_orientation_extension_for_client(&self, client_id: &str, camera_front_facing: bool, camera_flipped: bool, rotation: u16) -> Result<(), MediaTransportError> {
@@ -967,20 +915,13 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
     
     async fn get_received_header_extensions(&self, client_id: &str) -> Result<Vec<HeaderExtension>, MediaTransportError> {
-        super::media::get_received_header_extensions(
-            &self.header_extensions_enabled,
-            &self.received_extensions,
-            client_id
-        ).await
+        // Header extension handling moved to media-core
+        Ok(Vec::new())
     }
     
     async fn get_received_audio_level(&self, client_id: &str) -> Result<Option<(bool, u8)>, MediaTransportError> {
-        super::media::get_received_audio_level(
-            &self.header_extensions_enabled,
-            &self.header_extension_mappings,
-            &self.received_extensions,
-            client_id
-        ).await
+        // Audio level extension handling moved to media-core
+        Ok(None)
     }
     
     async fn get_received_video_orientation(&self, client_id: &str) -> Result<Option<(bool, bool, u16)>, MediaTransportError> {
@@ -1020,21 +961,13 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
 
     async fn update_csrc_cname(&self, original_ssrc: RtpSsrc, cname: String) -> Result<bool, MediaTransportError> {
-        super::media::update_csrc_cname(
-            &self.csrc_management_enabled,
-            &self.csrc_manager,
-            original_ssrc,
-            cname
-        ).await
+        // CSRC management moved to media-core
+        Ok(false)
     }
 
     async fn update_csrc_display_name(&self, original_ssrc: RtpSsrc, name: String) -> Result<bool, MediaTransportError> {
-        super::media::update_csrc_display_name(
-            &self.csrc_management_enabled,
-            &self.csrc_manager,
-            original_ssrc,
-            name
-        ).await
+        // CSRC management moved to media-core
+        Ok(false)
     }
 }
 

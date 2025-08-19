@@ -1,7 +1,7 @@
-//! Traits for RTP payload format handlers
+//! Traits for RTP payload format handlers (moved from rtp-core)
 //!
 //! This module defines the interfaces that payload format handlers must implement
-//! to work with the RTP system.
+//! to work with the RTP system. Moved from rtp-core as part of Transport/Media separation.
 
 use bytes::Bytes;
 use std::any::Any;
@@ -75,4 +75,4 @@ pub trait PayloadFormatFactory: Send + Sync {
     
     /// Check if this factory can create a handler for the given payload type
     fn can_handle(&self, payload_type: u8) -> bool;
-} 
+}

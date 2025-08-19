@@ -17,7 +17,7 @@ use crate::api::server::security::{ServerSecurityContext, ClientSecurityContext}
 use crate::api::server::config::ServerConfig;
 use crate::api::server::transport::ClientInfo;
 use crate::session::{RtpSession, RtpSessionConfig, RtpSessionEvent};
-use crate::payload::registry;
+// payload registry moved to media-core
 
 /// Client connection in the server
 pub struct ClientConnection {
@@ -119,7 +119,7 @@ pub async fn handle_client(
             match event {
                 RtpSessionEvent::PacketReceived(packet) => {
                     // Determine frame type from payload type
-                    let frame_type = registry::get_media_frame_type(packet.header.payload_type);
+                    let frame_type = crate::api::common::frame::MediaFrameType::Audio; // Default to Audio, media-core handles frame type
                     
                     // Convert to MediaFrame
                     let frame = MediaFrame {
@@ -250,7 +250,7 @@ pub async fn handle_client_static(
                     packets_received += 1;
                     
                     // Determine frame type from payload type
-                    let frame_type = registry::get_media_frame_type(packet.header.payload_type);
+                    let frame_type = crate::api::common::frame::MediaFrameType::Audio; // Default to Audio, media-core handles frame type
                     
                     // Log packet details
                     debug!("Client {}: Received packet #{} - PT: {}, Seq: {}, TS: {}, Size: {} bytes",

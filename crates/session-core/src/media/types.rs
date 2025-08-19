@@ -34,8 +34,8 @@ pub use rvoip_media_core::{
 // Use media-core state enum directly
 pub use rvoip_media_core::MediaSessionState;
 
-// Import RTP and performance types from correct locations
-use rvoip_rtp_core::RtpPacket;
+// Import RTP and performance types from media-core (proper separation of concerns)
+use rvoip_media_core::prelude::RtpPacket;
 use rvoip_media_core::performance::pool::PoolStats;
 use rvoip_media_core::relay::controller::codec_fallback::FallbackMode;
 

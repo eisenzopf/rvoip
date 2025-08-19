@@ -58,66 +58,8 @@ pub struct ServerMetrics {
     pub uptime: Duration,
 }
 
-/// Calculate Mean Opinion Score (MOS) based on R-factor
-/// 
-/// This implements the ITU-T G.107 E-model for calculating MOS from R-factor.
-pub fn calculate_mos_from_rfactor(r_factor: f32) -> f32 {
-    if r_factor < 0.0 {
-        return 1.0;
-    } else if r_factor > 100.0 {
-        return 4.5;
-    }
-    
-    // MOS calculation according to ITU-T G.107
-    if r_factor < 0.0 {
-        1.0
-    } else if r_factor < 6.52 {
-        1.0
-    } else if r_factor < 100.0 {
-        1.0 + 0.035 * r_factor + 0.000007 * r_factor * (r_factor - 60.0) * (100.0 - r_factor)
-    } else {
-        4.5
-    }
-}
-
-/// Calculate R-factor from network metrics
-pub fn calculate_rfactor(
-    packet_loss_percent: f32,
-    jitter_ms: f32,
-    rtt_ms: f32,
-) -> f32 {
-    // Base R-factor for G.711 is 93.2
-    let r0 = 93.2;
-    
-    // Impairment due to packet loss (according to simplified E-model)
-    let is = if packet_loss_percent <= 0.0 {
-        0.0
-    } else {
-        // Non-linear effect of packet loss
-        2.0 + 14.0 * (1.0 - (1.0 - packet_loss_percent / 100.0).powf(30.0))
-    };
-    
-    // Impairment due to jitter (simplified model)
-    let ij = if jitter_ms < 1.0 {
-        0.0
-    } else {
-        0.8 + 0.5 * jitter_ms.sqrt()
-    };
-    
-    // Impairment due to delay (simplified model)
-    let id = if rtt_ms < 100.0 {
-        0.0
-    } else if rtt_ms < 300.0 {
-        (rtt_ms - 100.0) / 20.0
-    } else {
-        10.0 + (rtt_ms - 300.0) / 10.0
-    };
-    
-    // Total R-factor (capped between 0 and 100)
-    let r = r0 - is - id - ij;
-    
-    r.max(0.0).min(100.0)
-}
+// MOS and R-factor calculations moved to media-core
+// Use media_core::rtp_processing::rtcp::{calculate_mos_from_rfactor, calculate_rfactor} instead
 
 /// Get server metrics
 pub async fn get_server_metrics(

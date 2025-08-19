@@ -1,15 +1,16 @@
-//! Payload format handlers for RTP
+//! RTP Payload format handlers (moved from rtp-core)
 //!
 //! This module provides implementations for various RTP payload formats
-//! as defined in RFC 3551 and other RFCs.
+//! as defined in RFC 3551 and other RFCs. Moved from rtp-core as part
+//! of the Transport/Media plane separation.
 
 pub mod registry;
 pub mod traits;
-mod g711;
-mod g722;
-mod opus;
-mod vp8;
-mod vp9;
+pub mod g711;
+pub mod g722;
+pub mod opus;
+pub mod vp8;
+pub mod vp9;
 
 pub use traits::{PayloadFormat, PayloadFormatFactory};
 pub use g711::{G711UPayloadFormat, G711APayloadFormat};
@@ -183,4 +184,4 @@ pub fn create_payload_format(
         // Add other payload formats as they are implemented
         _ => None,
     }
-} 
+}

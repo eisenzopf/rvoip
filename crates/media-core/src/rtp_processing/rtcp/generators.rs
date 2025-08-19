@@ -1,17 +1,18 @@
-//! Feedback Generation Algorithms
+//! Feedback Generation Algorithms (moved from rtp-core)
 //!
 //! This module implements intelligent feedback generators that analyze network conditions,
 //! packet loss patterns, and quality metrics to make decisions about when to generate
 //! RTCP feedback packets for optimal media quality adaptation.
 
-use crate::{Result, RtpSsrc};
-use crate::feedback::{
-    FeedbackGenerator, FeedbackContext, FeedbackConfig, FeedbackDecision, 
-    FeedbackPriority, QualityDegradation, CongestionState
-};
-use crate::api::common::stats::StreamStats;
 use std::time::{Instant, Duration};
 use std::collections::VecDeque;
+use tracing::{debug, warn};
+
+use crate::api::error::MediaError;
+use super::feedback::{
+    FeedbackGenerator, FeedbackContext, FeedbackConfig, FeedbackDecision, 
+    FeedbackPriority, QualityDegradation, CongestionState, StreamStats
+};
 
 /// Loss-based feedback generator
 /// Generates PLI/FIR packets based on packet loss patterns
@@ -127,7 +128,7 @@ impl LossFeedbackGenerator {
 }
 
 impl FeedbackGenerator for LossFeedbackGenerator {
-    fn generate_feedback(&self, context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision> {
+    fn generate_feedback(&self, context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision, MediaError> {
         let loss_rate = self.current_loss_rate();
         
         if self.should_generate_fir(context, config) {
@@ -332,7 +333,7 @@ impl CongestionFeedbackGenerator {
 }
 
 impl FeedbackGenerator for CongestionFeedbackGenerator {
-    fn generate_feedback(&self, _context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision> {
+    fn generate_feedback(&self, _context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision, MediaError> {
         if self.should_generate_remb(config) {
             Ok(FeedbackDecision::Remb {
                 bitrate_bps: self.estimated_bandwidth,
@@ -516,7 +517,7 @@ impl QualityFeedbackGenerator {
 }
 
 impl FeedbackGenerator for QualityFeedbackGenerator {
-    fn generate_feedback(&self, _context: &FeedbackContext, _config: &FeedbackConfig) -> Result<FeedbackDecision> {
+    fn generate_feedback(&self, _context: &FeedbackContext, _config: &FeedbackConfig) -> Result<FeedbackDecision, MediaError> {
         if let Some(latest_quality) = self.quality_history.back() {
             // Only generate feedback if quality is degrading or already poor
             match self.quality_trend {
@@ -629,7 +630,7 @@ impl ComprehensiveFeedbackGenerator {
 }
 
 impl FeedbackGenerator for ComprehensiveFeedbackGenerator {
-    fn generate_feedback(&self, context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision> {
+    fn generate_feedback(&self, context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision, MediaError> {
         // Check rate limiting
         if let Some(last) = self.last_feedback {
             let interval_ms = 1000 / config.max_feedback_rate;  // Convert rate to interval
@@ -657,4 +658,4 @@ impl FeedbackGenerator for ComprehensiveFeedbackGenerator {
     fn name(&self) -> &'static str {
         "ComprehensiveFeedbackGenerator"
     }
-} 
+}

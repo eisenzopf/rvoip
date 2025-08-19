@@ -23,7 +23,7 @@ use crate::buffer::{PacketPriority, TransmitBufferConfig, TransmitBufferStats};
 
 pub mod default;
 mod core;
-mod media;
+// media module moved to media-core
 mod rtcp;
 mod security;
 mod ssrc;

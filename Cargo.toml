@@ -15,6 +15,7 @@ members = [
     "crates/audio-core",
     "crates/sip-client",
     "crates/rvoip",
+    "crates/infra-common",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,
@@ -33,6 +34,7 @@ default-members = [
     "crates/audio-core",
     "crates/sip-client",
     "crates/rvoip",
+    "crates/infra-common",
 ]
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
@@ -131,6 +133,7 @@ rvoip-codec-core = { path = "crates/codec-core", version = "0.1.26" }
 rvoip-audio-core = { path = "crates/audio-core", version = "0.1.26" }
 rvoip-sip-client = { path = "crates/sip-client", version = "0.1.26", features = ["simple-api"] }
 rvoip = { path = "crates/rvoip", version = "0.1.26" }
+infra-common = { path = "crates/infra-common", version = "0.1.26" }
 
 # External dependencies
 tokio = { version = "1.36", features = ["full"] }

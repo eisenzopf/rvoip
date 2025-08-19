@@ -81,8 +81,9 @@ pub fn setup_logging(config: LoggingConfig) -> Result<()> {
     
     if config.json {
         // Setup JSON formatting
-        let fmt = fmt::format().json();
-        subscriber.event_format(fmt).init();
+        subscriber.with_writer(std::io::stdout)
+            .json()
+            .init();
     } else {
         subscriber.init();
     }
