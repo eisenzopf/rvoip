@@ -24,7 +24,7 @@
 //!
 //! ```rust,no_run
 //! use rvoip_dialog_core::api::{DialogClient, DialogApi, ClientConfig};
-//! use rvoip_transaction_core::TransactionManager;
+//! use crate::transaction::TransactionManager;
 //! use std::sync::Arc;
 //!
 //! #[tokio::main]
@@ -65,7 +65,7 @@
 //!
 //! ```rust,no_run
 //! use rvoip_dialog_core::api::{DialogClient, ClientConfig};
-//! use rvoip_transaction_core::TransactionManager;
+//! use crate::transaction::TransactionManager;
 //! use std::sync::Arc;
 //!
 //! # async fn setup_example() -> Result<(), Box<dyn std::error::Error>> {
@@ -122,7 +122,7 @@
 //! });
 //! # Ok(())
 //! # }
-//! # async fn setup_dependencies() -> Result<(std::sync::Arc<rvoip_transaction_core::TransactionManager>, rvoip_dialog_core::api::ClientConfig), Box<dyn std::error::Error>> { unimplemented!() }
+//! # async fn setup_dependencies() -> Result<(std::sync::Arc<crate::transaction::TransactionManager>, rvoip_dialog_core::api::ClientConfig), Box<dyn std::error::Error>> { unimplemented!() }
 //! ```
 //!
 //! ## Usage Patterns
@@ -185,7 +185,7 @@
 //! ```rust,no_run
 //! use rvoip_dialog_core::api::DialogClient;
 //! use rvoip_sip_core::StatusCode;
-//! use rvoip_transaction_core::TransactionKey;
+//! use crate::transaction::TransactionKey;
 //!
 //! # async fn response_handling(client: DialogClient) -> Result<(), Box<dyn std::error::Error>> {
 //! # let transaction_id: TransactionKey = unimplemented!();
@@ -385,8 +385,8 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::{info, debug, warn};
 
-use rvoip_transaction_core::{TransactionManager, TransactionKey, TransactionEvent};
-use rvoip_transaction_core::builders::dialog_quick;
+use crate::transaction::{TransactionManager, TransactionKey, TransactionEvent};
+use crate::transaction::builders::dialog_quick;
 use rvoip_sip_core::{Uri, Method, Response, StatusCode};
 
 use crate::manager::DialogManager;
@@ -421,7 +421,7 @@ use super::{
 ///
 /// ```rust,no_run
 /// use rvoip_dialog_core::api::{DialogClient, ClientConfig};
-/// use rvoip_transaction_core::TransactionManager;
+/// use crate::transaction::TransactionManager;
 /// use std::sync::Arc;
 ///
 /// # async fn dependency_injection() -> Result<(), Box<dyn std::error::Error>> {
@@ -439,7 +439,7 @@ use super::{
 ///
 /// ```rust,no_run
 /// use rvoip_dialog_core::api::{DialogClient, ClientConfig};
-/// use rvoip_transaction_core::{TransactionManager, TransactionEvent};
+/// use crate::transaction::{TransactionManager, TransactionEvent};
 /// use tokio::sync::mpsc;
 /// use std::sync::Arc;
 ///
@@ -458,7 +458,7 @@ use super::{
 ///
 /// ```rust,no_run
 /// use rvoip_dialog_core::api::{DialogClient, DialogApi, ClientConfig};
-/// use rvoip_transaction_core::TransactionManager;
+/// use crate::transaction::TransactionManager;
 /// use std::sync::Arc;
 ///
 /// #[tokio::main]
@@ -717,7 +717,7 @@ impl DialogClient {
     ///
     /// ```rust,no_run
     /// use rvoip_dialog_core::api::{DialogClient, DialogApi, ClientConfig};
-    /// use rvoip_transaction_core::{TransactionManager, TransactionEvent};
+    /// use crate::transaction::{TransactionManager, TransactionEvent};
     /// use tokio::sync::mpsc;
     /// use std::sync::Arc;
     ///
@@ -762,7 +762,7 @@ impl DialogClient {
     ///
     /// ```rust,no_run
     /// use rvoip_dialog_core::api::{DialogClient, ClientConfig, DialogApi};
-    /// use rvoip_transaction_core::{TransactionManager, TransactionEvent};
+    /// use crate::transaction::{TransactionManager, TransactionEvent};
     /// use tokio::sync::mpsc;
     /// use std::sync::Arc;
     ///
@@ -848,7 +848,7 @@ impl DialogClient {
     ///
     /// ```rust,no_run
     /// use rvoip_dialog_core::api::{DialogClient, DialogApi, ClientConfig};
-    /// use rvoip_transaction_core::TransactionManager;
+    /// use crate::transaction::TransactionManager;
     /// use std::sync::Arc;
     ///
     /// # async fn basic_usage() -> Result<(), Box<dyn std::error::Error>> {
@@ -872,7 +872,7 @@ impl DialogClient {
     ///
     /// ```rust,no_run
     /// use rvoip_dialog_core::api::{DialogClient, ClientConfig};
-    /// use rvoip_transaction_core::TransactionManager;
+    /// use crate::transaction::TransactionManager;
     /// use std::sync::Arc;
     ///
     /// # async fn testing_pattern() -> Result<(), Box<dyn std::error::Error>> {
@@ -894,7 +894,7 @@ impl DialogClient {
     ///
     /// ```rust,no_run
     /// use rvoip_dialog_core::api::{DialogClient, ClientConfig, DialogApi};
-    /// use rvoip_transaction_core::TransactionManager;
+    /// use crate::transaction::TransactionManager;
     /// use std::sync::Arc;
     ///
     /// # async fn infrastructure_integration(existing_tx_mgr: Arc<TransactionManager>) -> Result<(), Box<dyn std::error::Error>> {

@@ -4,7 +4,7 @@ resolver = "2"
 members = [
     "crates/sip-core",
     "crates/sip-transport",
-    "crates/transaction-core",
+    # transaction-core has been merged into dialog-core
     "crates/dialog-core",
     "crates/rtp-core",
     "crates/media-core",
@@ -23,7 +23,7 @@ members = [
 default-members = [
     "crates/sip-core",
     "crates/sip-transport",
-    "crates/transaction-core",
+    # transaction-core has been merged into dialog-core
     "crates/dialog-core",
     "crates/rtp-core",
     "crates/media-core",
@@ -122,7 +122,7 @@ collapsible_else_if = "allow"
 # 🎯 INTERNAL CRATES - Include version for publishing to crates.io!
 rvoip-sip-core = { path = "crates/sip-core", version = "0.1.26" }
 rvoip-sip-transport = { path = "crates/sip-transport", version = "0.1.26" }
-rvoip-transaction-core = { path = "crates/transaction-core", version = "0.1.26" }
+# transaction-core has been merged into dialog-core
 rvoip-dialog-core = { path = "crates/dialog-core", version = "0.1.26" }
 rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.26" }
 rvoip-media-core = { path = "crates/media-core", version = "0.1.26" }

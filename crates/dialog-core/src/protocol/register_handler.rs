@@ -119,14 +119,14 @@ impl DialogManager {
     /// Send basic REGISTER response (for auto-response mode)
     pub async fn send_basic_register_response(
         &self,
-        transaction_id: &rvoip_transaction_core::TransactionKey,
+        transaction_id: &crate::transaction::TransactionKey,
         request: &Request,
         expires: u32,
     ) -> DialogResult<()> {
         use rvoip_sip_core::StatusCode;
         
         // Create basic 200 OK response for REGISTER
-        let response = rvoip_transaction_core::utils::response_builders::create_response(request, StatusCode::Ok);
+        let response = crate::transaction::utils::response_builders::create_response(request, StatusCode::Ok);
         
         // TODO: Could add Contact header with the registered URI and expires
         // For basic auto-response, just send 200 OK

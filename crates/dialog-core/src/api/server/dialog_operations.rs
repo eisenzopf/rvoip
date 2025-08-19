@@ -6,7 +6,7 @@
 use tracing::debug;
 
 use rvoip_sip_core::{Response, Method, Uri};
-use rvoip_transaction_core::TransactionKey;
+use crate::transaction::TransactionKey;
 use crate::dialog::{DialogId, DialogState, Dialog};
 use super::super::{ApiResult, ApiError};
 use super::super::common::DialogHandle;

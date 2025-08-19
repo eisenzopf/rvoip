@@ -144,7 +144,7 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::{info, debug};
 
-use rvoip_transaction_core::{TransactionManager, TransactionKey, TransactionEvent};
+use crate::transaction::{TransactionManager, TransactionKey, TransactionEvent};
 use rvoip_sip_core::{Request, Response, Method, StatusCode};
 
 use crate::config::DialogManagerConfig;
@@ -820,7 +820,7 @@ impl UnifiedDialogApi {
     /// # }
     /// ```
     pub async fn create(config: DialogManagerConfig) -> ApiResult<Self> {
-        use rvoip_transaction_core::{TransactionManager, transport::{TransportManager, TransportManagerConfig}};
+        use crate::transaction::{TransactionManager, transport::{TransportManager, TransportManagerConfig}};
         
         info!("Creating UnifiedDialogApi with automatic transport setup in {:?} mode", Self::mode_name(&config));
         

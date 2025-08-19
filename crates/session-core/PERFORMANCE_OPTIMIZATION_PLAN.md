@@ -201,6 +201,48 @@ Phase 1 provides the **foundational architecture** for all subsequent optimizati
 
 ---
 
+## Phase 1.5: Consolidate Transaction-Core into Dialog-Core (NEW - Priority)
+
+### 1.5.1 Merge Transaction-Core into Dialog-Core
+**Files**: `crates/transaction-core/`, `crates/dialog-core/`
+
+**Current Problem**: Unnecessary separation between tightly coupled layers
+```rust
+// Current: Two separate crates with heavy interdependence
+dialog-core → transaction-core (direct dependency)
+// Transaction-core is ONLY used by dialog-core
+// Creates unnecessary inter-crate communication overhead
+```
+
+**Solution**: Roll transaction-core into dialog-core as internal modules
+```rust
+// dialog-core structure after merge
+pub mod dialog_core {
+    pub mod dialog;           // Existing dialog management
+    pub mod transaction;      // Merged from transaction-core
+    pub mod state_machine;    // Combined state handling
+    pub mod sip_processing;   // Unified SIP message processing
+}
+```
+
+**Benefits**:
+- **Simpler dependency graph**: One less crate to manage
+- **Better performance**: No inter-crate overhead
+- **Easier maintenance**: Related code in same crate
+- **Natural hierarchy**: Transactions are subset of dialog functionality
+
+**Tasks**:
+- [ ] Move transaction-core modules into dialog-core/src/transaction/
+- [ ] Update dialog-core imports to use internal transaction module
+- [ ] Remove transaction-core from workspace and dependencies
+- [ ] Merge transaction and dialog state machines where appropriate
+- [ ] Consolidate shared utilities and types
+- [ ] Update all dependent crates (session-core, sip-client, etc.)
+- [ ] Run integration tests to ensure no functionality loss
+- [ ] Update documentation to reflect consolidated structure
+
+---
+
 ## Phase 2: Plane Abstraction & Task Management (Week 2)
 
 ### 2.1 Three-Plane Federated Architecture

@@ -251,7 +251,7 @@ impl Default for SessionManagerConfig {
 pub struct SessionManagerBuilder {
     config: SessionManagerConfig,
     handler: Option<Arc<dyn CallHandler>>,
-    transaction_manager: Option<Arc<rvoip_transaction_core::TransactionManager>>,
+    transaction_manager: Option<Arc<rvoip_dialog_core::transaction::TransactionManager>>,
 }
 
 impl SessionManagerBuilder {
@@ -635,7 +635,7 @@ impl SessionManagerBuilder {
     ///     //     .with_transaction_manager(tm);
     /// }
     /// ```
-    pub fn with_transaction_manager(mut self, tm: Arc<rvoip_transaction_core::TransactionManager>) -> Self {
+    pub fn with_transaction_manager(mut self, tm: Arc<rvoip_dialog_core::transaction::TransactionManager>) -> Self {
         self.transaction_manager = Some(tm);
         self
     }
@@ -666,7 +666,7 @@ impl SessionManagerBuilder {
     /// ```
     pub async fn build_with_transaction_manager(
         self,
-        _transaction_manager: Arc<rvoip_transaction_core::TransactionManager>,
+        _transaction_manager: Arc<rvoip_dialog_core::transaction::TransactionManager>,
     ) -> Result<Arc<SessionCoordinator>> {
         // For now, just use regular build
         // In the future, we'll integrate the transaction manager into dialog subsystem

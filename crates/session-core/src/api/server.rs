@@ -78,7 +78,7 @@ pub enum TransportProtocol {
 
 /// Factory function to create a server session manager
 pub async fn create_full_server_manager(
-    transaction_manager: Arc<rvoip_transaction_core::TransactionManager>,
+    transaction_manager: Arc<rvoip_dialog_core::transaction::TransactionManager>,
     config: ServerConfig,
 ) -> Result<Arc<dyn ServerSessionManager>> {
     // TODO: Implement server-specific session manager

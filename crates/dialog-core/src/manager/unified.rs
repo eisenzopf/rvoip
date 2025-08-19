@@ -110,7 +110,7 @@ use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tracing::{info, debug, warn, error};
 
-use rvoip_transaction_core::{TransactionManager, TransactionKey, TransactionEvent};
+use crate::transaction::{TransactionManager, TransactionKey, TransactionEvent};
 use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
 
 use crate::config::DialogManagerConfig;

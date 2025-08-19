@@ -12,7 +12,7 @@ use rvoip_sip_core::{
     Uri, HeaderName, TypedHeader
 };
 
-use rvoip_transaction_core::utils::DialogRequestTemplate;
+use crate::transaction::utils::DialogRequestTemplate;
 
 use super::dialog_state::DialogState;
 use super::dialog_id::DialogId;

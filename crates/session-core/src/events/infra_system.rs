@@ -17,7 +17,7 @@ use crate::errors::{Result, SessionError};
 /// Make SessionEvent compatible with infra-common's Event trait
 impl Event for SessionEvent {
     fn event_type() -> &'static str {
-        "session_event"
+        "rvoip_session_core::manager::events::SessionEvent"
     }
 
     fn priority() -> EventPriority {
@@ -44,6 +44,9 @@ pub struct InfraSessionEventSystem {
 impl InfraSessionEventSystem {
     /// Create a new high-performance event system using StaticFastPath
     pub fn new() -> Self {
+        // Register SessionEvent as a StaticEvent type
+        infra_common::events::registry::register_static_event::<SessionEvent>();
+        
         let inner = EventSystemBuilder::new()
             .implementation(ImplementationType::StaticFastPath)
             .channel_capacity(10_000)  // High capacity for performance
@@ -59,6 +62,9 @@ impl InfraSessionEventSystem {
     
     /// Create with custom configuration
     pub fn with_config(capacity: usize) -> Self {
+        // Register SessionEvent as a StaticEvent type
+        infra_common::events::registry::register_static_event::<SessionEvent>();
+        
         let inner = EventSystemBuilder::new()
             .implementation(ImplementationType::StaticFastPath)
             .channel_capacity(capacity)

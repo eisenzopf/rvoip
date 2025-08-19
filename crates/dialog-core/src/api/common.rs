@@ -100,7 +100,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use rvoip_sip_core::{Method, StatusCode, Response};
-use rvoip_transaction_core::TransactionKey;
+use crate::transaction::TransactionKey;
 use crate::manager::DialogManager;
 use crate::dialog::{DialogId, Dialog, DialogState};
 use super::{ApiResult, ApiError};
@@ -573,7 +573,7 @@ impl CallHandle {
         
         // Build 200 OK response with SDP and proper To tag for dialog establishment
         let response = {
-            use rvoip_transaction_core::utils::response_builders;
+            use crate::transaction::utils::response_builders;
             
             // Use the dialog-aware response builder that adds To tags
             // Get the actual local address from the dialog handle

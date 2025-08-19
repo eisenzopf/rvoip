@@ -21,7 +21,7 @@
 use crate::dialog::DialogId;
 use crate::errors::DialogResult;
 use rvoip_sip_core::Request;
-use rvoip_transaction_core::TransactionKey;
+use crate::transaction::TransactionKey;
 use super::core::DialogManager;
 
 /// Trait for message routing operations

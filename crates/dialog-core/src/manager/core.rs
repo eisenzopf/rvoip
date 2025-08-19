@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn, error};
 
-use rvoip_transaction_core::{TransactionManager, TransactionKey, TransactionEvent};
+use crate::transaction::{TransactionManager, TransactionKey, TransactionEvent};
 use rvoip_sip_core::{Request, Response, Method};
 
 use crate::dialog::{DialogId, Dialog, DialogState};

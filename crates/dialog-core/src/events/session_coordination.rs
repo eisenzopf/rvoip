@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 
 use rvoip_sip_core::{Request, Response, Uri};
 use rvoip_sip_core::types::refer_to::ReferTo;
-use rvoip_transaction_core::TransactionKey;
+use crate::transaction::TransactionKey;
 
 use crate::dialog::DialogId;
 
