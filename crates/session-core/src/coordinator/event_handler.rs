@@ -2,19 +2,33 @@
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use crate::api::types::{SessionId, CallState};
+use crate::api::types::{SessionId, CallState, IncomingCall, CallDecision};
 use crate::errors::{Result, SessionError};
 use crate::manager::events::SessionEvent;
+use crate::session::Session;
 use super::SessionCoordinator;
 
 impl SessionCoordinator {
-    /// Main event loop that handles all session events
-    pub(crate) async fn run_event_loop(self: Arc<Self>, mut event_rx: mpsc::Receiver<SessionEvent>) {
-        tracing::info!("Starting main coordinator event loop");
+    /// Main event loop that handles all session events using broadcast channel
+    pub(crate) async fn run_event_loop(self: Arc<Self>) {
+        tracing::info!("Starting main coordinator event loop (unified broadcast)");
 
-        while let Some(event) = event_rx.recv().await {
-            if let Err(e) = self.handle_event(event).await {
-                tracing::error!("Error handling event: {}", e);
+        // Subscribe to the unified broadcast channel
+        match self.event_processor.subscribe().await {
+            Ok(mut subscriber) => {
+                while let Ok(event) = subscriber.receive().await {
+                    // Non-blocking: spawn event handling to avoid deadlocks
+                    // The state machines should handle out-of-order events
+                    let self_clone = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = self_clone.handle_event(event).await {
+                            tracing::error!("Error handling event: {}", e);
+                        }
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to subscribe to event processor: {}", e);
             }
         }
 
@@ -26,16 +40,18 @@ impl SessionCoordinator {
         println!("🎯 COORDINATOR: Handling event: {:?}", event);
         tracing::debug!("Handling event: {:?}", event);
 
-        // Publish event to subscribers BEFORE internal processing
-        // This ensures subscribers see events in real-time, even if processing takes time
-        if let Err(e) = self.event_processor.publish_event(event.clone()).await {
-            tracing::error!("Failed to publish event to subscribers: {}", e);
-            // Continue processing even if publishing fails
-        }
+        // Event is already published through the broadcast channel
+        // since this handler is now a subscriber to that channel
+        // No need to re-publish here
 
         match event {
             SessionEvent::SessionCreated { session_id, from, to, call_state } => {
                 self.handle_session_created(session_id, from, to, call_state).await?;
+            }
+            
+            SessionEvent::IncomingCall { session_id, dialog_id, from, to, sdp, headers } => {
+                // Handle incoming call forwarded from dialog coordinator
+                self.handle_incoming_call(session_id, dialog_id, from, to, sdp, headers).await?;
             }
             
             SessionEvent::StateChanged { session_id, old_state, new_state } => {
@@ -109,6 +125,33 @@ impl SessionCoordinator {
             
             SessionEvent::RegistrationRequest { transaction_id, from_uri, contact_uri, expires } => {
                 self.handle_registration_request(transaction_id, from_uri, contact_uri, expires).await?;
+            }
+            
+            SessionEvent::IncomingTransferRequest { session_id, target_uri, referred_by, .. } => {
+                // Notify handler about incoming transfer request
+                if let Some(handler) = &self.handler {
+                    let accept = handler.on_incoming_transfer_request(
+                        &session_id, 
+                        &target_uri, 
+                        referred_by.as_deref()
+                    ).await;
+                    
+                    if !accept {
+                        // Handler rejected the transfer
+                        tracing::info!("Handler rejected transfer request for session {}", session_id);
+                        // TODO: Send 603 Decline response through dialog layer
+                    } else {
+                        tracing::info!("Handler accepted transfer request for session {}", session_id);
+                        // The transfer will proceed as normal
+                    }
+                }
+            }
+            
+            SessionEvent::TransferProgress { session_id, status } => {
+                // Notify handler about transfer progress
+                if let Some(handler) = &self.handler {
+                    handler.on_transfer_progress(&session_id, &status).await;
+                }
             }
             
             _ => {
@@ -254,7 +297,7 @@ impl SessionCoordinator {
                 tracing::error!("Failed to update session to Terminating state: {}", e);
             } else {
                 // Emit state change event
-                let _ = self.event_tx.send(SessionEvent::StateChanged {
+                let _ = self.publish_event(SessionEvent::StateChanged {
                     session_id: session_id.clone(),
                     old_state: old_state.clone(),
                     new_state: CallState::Terminating,
@@ -337,7 +380,7 @@ impl SessionCoordinator {
                 
                 // Trigger Phase 2 - final termination
                 println!("🔴 Triggering Phase 2 termination for session {}", session_id);
-                let _ = self.event_tx.send(SessionEvent::SessionTerminated {
+                let _ = self.publish_event(SessionEvent::SessionTerminated {
                     session_id: session_id.clone(),
                     reason,
                 }).await;
@@ -374,7 +417,7 @@ impl SessionCoordinator {
                 tracing::error!("Failed to update session to Terminated state: {}", e);
             } else {
                 // Emit state change event
-                let _ = self.event_tx.send(SessionEvent::StateChanged {
+                let _ = self.publish_event(SessionEvent::StateChanged {
                     session_id: session_id.clone(),
                     old_state,
                     new_state: CallState::Terminated,
@@ -638,7 +681,7 @@ impl SessionCoordinator {
                             }
                             
                             // Send event with the generated answer
-                            let _ = self.event_tx.send(SessionEvent::SdpEvent {
+                            let _ = self.publish_event(SessionEvent::SdpEvent {
                                 session_id,
                                 event_type: "generated_sdp_answer".to_string(),
                                 sdp: our_answer,
@@ -666,6 +709,88 @@ impl SessionCoordinator {
             }
             _ => {
                 tracing::warn!("Unknown SDP negotiation role: {}", role);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle incoming call event forwarded from dialog coordinator
+    async fn handle_incoming_call(
+        &self,
+        session_id: SessionId,
+        dialog_id: rvoip_dialog_core::DialogId,
+        from: String,
+        to: String,
+        sdp: Option<String>,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        tracing::info!("🎯 COORDINATOR: Handling IncomingCall for session {} from dialog {}", session_id, dialog_id);
+        
+        // Create the session
+        let mut session = Session::new(session_id.clone());
+        session.call_session.from = from.clone();
+        session.call_session.to = to.clone();
+        session.call_session.state = CallState::Initiating;
+        
+        // Register the session
+        self.registry.register_session(session).await?;
+        
+        // Send SessionCreated event
+        self.publish_event(SessionEvent::SessionCreated {
+            session_id: session_id.clone(),
+            from: from.clone(),
+            to: to.clone(),
+            call_state: CallState::Initiating,
+        }).await?;
+        
+        // Call the handler to decide whether to accept or reject
+        if let Some(handler) = &self.handler {
+            let incoming_call = IncomingCall {
+                id: session_id.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                sdp,
+                headers,
+                received_at: std::time::Instant::now(),
+            };
+            
+            let decision = handler.on_incoming_call(incoming_call).await;
+            tracing::info!("Handler decision for session {}: {:?}", session_id, decision);
+            
+            // Process the decision through the dialog coordinator
+            match decision {
+                CallDecision::Accept(sdp_answer) => {
+                    // Accept the call through dialog manager
+                    if let Err(e) = self.dialog_manager.accept_incoming_call(&session_id, sdp_answer).await {
+                        tracing::error!("Failed to accept incoming call {}: {}", session_id, e);
+                    }
+                }
+                CallDecision::Reject(reason) => {
+                    // Reject the call through dialog manager
+                    // For now, just terminate the session
+                    if let Err(e) = self.dialog_manager.terminate_session(&session_id).await {
+                        tracing::error!("Failed to reject incoming call {}: {}", session_id, e);
+                    }
+                }
+                CallDecision::Defer => {
+                    // The handler will decide later
+                    tracing::info!("Call decision deferred for session {}", session_id);
+                }
+                CallDecision::Forward(target) => {
+                    // Forward/transfer the call to another destination
+                    tracing::info!("Call forwarded to {} for session {}", target, session_id);
+                    // For now, just reject the original call
+                    if let Err(e) = self.dialog_manager.terminate_session(&session_id).await {
+                        tracing::error!("Failed to forward call {}: {}", session_id, e);
+                    }
+                }
+            }
+        } else {
+            tracing::warn!("No handler configured for incoming call");
+            // Auto-reject if no handler
+            if let Err(e) = self.dialog_manager.terminate_session(&session_id).await {
+                tracing::error!("Failed to auto-reject incoming call {}: {}", session_id, e);
             }
         }
         

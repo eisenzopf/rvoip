@@ -65,8 +65,8 @@ pub struct SessionCoordinator {
     // Configuration
     pub config: SessionManagerConfig,
     
-    // Event channels
-    pub event_tx: mpsc::Sender<SessionEvent>,
+    // Event processing - now using unified broadcast channel only
+    // Internal events are also published through the broadcast channel
     
     // Bridge event subscribers
     pub bridge_event_subscribers: Arc<RwLock<Vec<mpsc::UnboundedSender<BridgeEvent>>>>,
@@ -76,6 +76,10 @@ pub struct SessionCoordinator {
     
     // Two-phase termination tracking
     pub pending_cleanups: Arc<Mutex<HashMap<SessionId, CleanupTracker>>>,
+    
+    // Shutdown handles for event loops
+    event_loop_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    dialog_event_loop_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl SessionCoordinator {
@@ -132,8 +136,8 @@ impl SessionCoordinator {
             media_manager.clone(),
         ));
 
-        // Create event channels
-        let (event_tx, event_rx) = mpsc::channel(1000);
+        // Create dialog coordination channel only
+        // Internal events now use the broadcast channel from event_processor
         let (dialog_coord_tx, dialog_coord_rx) = mpsc::channel(1000);
         
         // Create subsystem coordinators
@@ -142,11 +146,10 @@ impl SessionCoordinator {
             dialog_api,
             registry.clone(),
             handler.clone(),
-            event_tx.clone(),
+            event_processor.clone(),
             dialog_to_session,
             session_to_dialog,
             Arc::new(DashMap::new()),
-            event_processor.clone(),
         ));
 
         let media_coordinator = Arc::new(SessionMediaCoordinator::new(
@@ -168,14 +171,15 @@ impl SessionCoordinator {
             sdp_negotiator,
             handler,
             config,
-            event_tx: event_tx.clone(),
             bridge_event_subscribers: Arc::new(RwLock::new(Vec::new())),
             negotiated_configs: Arc::new(RwLock::new(HashMap::new())),
             pending_cleanups: Arc::new(Mutex::new(HashMap::new())),
+            event_loop_handle: Arc::new(Mutex::new(None)),
+            dialog_event_loop_handle: Arc::new(Mutex::new(None)),
         });
 
         // Initialize subsystems
-        coordinator.initialize(event_rx, dialog_coord_tx, dialog_coord_rx).await?;
+        coordinator.initialize(dialog_coord_tx, dialog_coord_rx).await?;
 
         Ok(coordinator)
     }
@@ -183,7 +187,6 @@ impl SessionCoordinator {
     /// Initialize all subsystems and start event loops
     async fn initialize(
         self: &Arc<Self>,
-        event_rx: mpsc::Receiver<SessionEvent>,
         dialog_coord_tx: mpsc::Sender<SessionCoordinationEvent>,
         dialog_coord_rx: mpsc::Receiver<SessionCoordinationEvent>,
     ) -> Result<()> {
@@ -198,17 +201,25 @@ impl SessionCoordinator {
 
         // Start dialog event loop
         let dialog_coordinator = self.dialog_coordinator.clone();
-        tokio::spawn(async move {
+        let dialog_handle = tokio::spawn(async move {
             if let Err(e) = dialog_coordinator.start_event_loop(dialog_coord_rx).await {
                 tracing::error!("Dialog event loop error: {}", e);
             }
         });
+        
+        // Store the dialog event loop handle
+        let mut dialog_event_loop_handle = self.dialog_event_loop_handle.lock().await;
+        *dialog_event_loop_handle = Some(dialog_handle);
 
-        // Start main event loop
+        // Start main event loop using broadcast channel
         let coordinator = self.clone();
-        tokio::spawn(async move {
-            coordinator.run_event_loop(event_rx).await;
+        let handle = tokio::spawn(async move {
+            coordinator.run_event_loop().await;
         });
+        
+        // Store the handle for clean shutdown
+        let mut event_loop_handle = self.event_loop_handle.lock().await;
+        *event_loop_handle = Some(handle);
 
         tracing::info!("SessionCoordinator initialized on port {}", self.config.sip_port);
         Ok(())
@@ -221,19 +232,97 @@ impl SessionCoordinator {
         
         self.cleanup_manager.start().await?;
         
+        // No need for separate broadcast listener - the main event loop now handles everything
+        
         tracing::info!("SessionCoordinator started");
         Ok(())
     }
 
     /// Stop all subsystems
     pub async fn stop(&self) -> Result<()> {
-        self.cleanup_manager.stop().await?;
-        self.event_processor.stop().await?;
+        tracing::info!("🛑 STOP: SessionCoordinator stop() called");
+        println!("🛑 STOP: SessionCoordinator stop() called");
         
-        self.dialog_manager.stop().await
-            .map_err(|e| SessionError::internal(&format!("Failed to stop dialog manager: {}", e)))?;
+        // First, terminate all active sessions
+        let active_session_ids = self.registry.list_active_sessions().await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to list active sessions during shutdown: {}", e);
+                println!("⚠️ STOP: Failed to list active sessions: {}", e);
+                Vec::new()
+            });
+        
+        if !active_session_ids.is_empty() {
+            tracing::info!("Terminating {} active sessions before shutdown", active_session_ids.len());
+            println!("🛑 STOP: Found {} active sessions to terminate", active_session_ids.len());
+            for session_id in active_session_ids {
+                tracing::debug!("Terminating session {}", session_id);
+                println!("  📍 STOP: Terminating session {}", session_id);
+                // Try to terminate gracefully through dialog manager, but don't fail if it errors
+                if let Err(e) = self.dialog_manager.terminate_session(&session_id).await {
+                    tracing::warn!("Failed to terminate session {} during shutdown: {}", session_id, e);
+                    println!("  ⚠️ STOP: Failed to terminate session {}: {}", session_id, e);
+                }
+            }
+            // Give sessions a moment to terminate
+            println!("🛑 STOP: Waiting 100ms for sessions to terminate...");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        } else {
+            println!("🛑 STOP: No active sessions to terminate");
+        }
+        
+        // Stop accepting new events
+        println!("🛑 STOP: Stopping event processor...");
+        self.event_processor.stop().await?;
+        println!("🛑 STOP: Event processor stopped");
+        
+        // Cancel the main event loop task
+        println!("🛑 STOP: Acquiring event loop handle lock...");
+        let mut event_loop_handle = self.event_loop_handle.lock().await;
+        if let Some(handle) = event_loop_handle.take() {
+            tracing::debug!("Aborting main event loop task...");
+            println!("🛑 STOP: Aborting main event loop task...");
+            handle.abort();
+            // Wait a brief moment for abort to take effect
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            println!("🛑 STOP: Main event loop aborted");
+        }
+        
+        // Cancel the dialog event loop task
+        println!("🛑 STOP: Acquiring dialog event loop handle lock...");
+        let mut dialog_event_loop_handle = self.dialog_event_loop_handle.lock().await;
+        if let Some(handle) = dialog_event_loop_handle.take() {
+            tracing::debug!("Aborting dialog event loop task...");
+            println!("🛑 STOP: Aborting dialog event loop task...");
+            handle.abort();
+            // Wait a brief moment for abort to take effect
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            println!("🛑 STOP: Dialog event loop aborted");
+        }
+        
+        // Now stop the subsystems
+        println!("🛑 STOP: Stopping cleanup manager...");
+        self.cleanup_manager.stop().await?;
+        println!("🛑 STOP: Cleanup manager stopped");
+        
+        println!("🛑 STOP: Stopping dialog manager...");
+        // Add timeout to dialog manager stop to prevent hanging
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.dialog_manager.stop()
+        ).await {
+            Ok(Ok(())) => println!("🛑 STOP: Dialog manager stopped"),
+            Ok(Err(e)) => {
+                println!("⚠️ STOP: Dialog manager stop failed: {}", e);
+                tracing::warn!("Failed to stop dialog manager: {}", e);
+            }
+            Err(_) => {
+                println!("⚠️ STOP: Dialog manager stop timed out after 2 seconds");
+                tracing::warn!("Dialog manager stop timed out");
+            }
+        }
             
         tracing::info!("SessionCoordinator stopped");
+        println!("✅ STOP: SessionCoordinator fully stopped");
         Ok(())
     }
 
@@ -245,6 +334,11 @@ impl SessionCoordinator {
     /// Get a reference to the dialog coordinator
     pub fn dialog_coordinator(&self) -> &Arc<SessionDialogCoordinator> {
         &self.dialog_coordinator
+    }
+    
+    /// Helper method to publish events through the unified broadcast channel
+    pub async fn publish_event(&self, event: SessionEvent) -> Result<()> {
+        self.event_processor.publish_event(event).await
     }
     
     /// Get a reference to the configuration
@@ -288,7 +382,7 @@ impl SessionCoordinator {
         
         // Send cleanup confirmation for media layer
         // Media cleanup is synchronous, so we can immediately confirm
-        let _ = self.event_tx.send(SessionEvent::CleanupConfirmation {
+        let _ = self.publish_event(SessionEvent::CleanupConfirmation {
             session_id: session_id.clone(),
             layer: "Media".to_string(),
         }).await;
@@ -313,7 +407,7 @@ impl SessionCoordinator {
         self.negotiated_configs.write().await.insert(session_id.clone(), negotiated.clone());
         
         // Emit event
-        let _ = self.event_tx.send(SessionEvent::MediaNegotiated {
+        let _ = self.publish_event(SessionEvent::MediaNegotiated {
             session_id: session_id.clone(),
             local_addr: negotiated.local_addr,
             remote_addr: negotiated.remote_addr,
@@ -338,7 +432,7 @@ impl SessionCoordinator {
         self.negotiated_configs.write().await.insert(session_id.clone(), negotiated.clone());
         
         // Emit event
-        let _ = self.event_tx.send(SessionEvent::MediaNegotiated {
+        let _ = self.publish_event(SessionEvent::MediaNegotiated {
             session_id: session_id.clone(),
             local_addr: negotiated.local_addr,
             remote_addr: negotiated.remote_addr,

@@ -160,16 +160,23 @@ impl DialogManager {
     
     /// Transfer a session to another destination
     pub async fn transfer_session(&self, session_id: &SessionId, target: &str) -> DialogResult<()> {
+        println!("🔍 DIALOG_MANAGER: transfer_session called for {} to {}", session_id, target);
         let dialog_id = self.get_dialog_id_for_session(session_id)?;
+        println!("🔍 DIALOG_MANAGER: Found dialog_id {} for session {}", dialog_id, session_id);
         
         // Send REFER request via dialog-core unified API
+        println!("🔍 DIALOG_MANAGER: About to call dialog_api.send_refer");
         let _tx_key = self.dialog_api
             .send_refer(&dialog_id, target.to_string(), None)
             .await
-            .map_err(|e| DialogError::DialogCore {
-                source: Box::new(e),
+            .map_err(|e| {
+                println!("❌ DIALOG_MANAGER: send_refer failed: {}", e);
+                DialogError::DialogCore {
+                    source: Box::new(e),
+                }
             })?;
-            
+        
+        println!("✅ DIALOG_MANAGER: send_refer completed successfully");    
         tracing::info!("Transferring session {} to {}", session_id, target);
         Ok(())
     }

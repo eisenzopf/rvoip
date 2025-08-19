@@ -509,6 +509,29 @@ pub async fn accept_call(
     Ok(session)
 }
 
+/// Transfer a call to another destination
+/// 
+/// This function initiates a blind transfer (REFER) to move an active call to another party.
+/// 
+/// # Arguments
+/// * `session_manager` - The session coordinator instance
+/// * `session_id` - ID of the session to transfer
+/// * `target` - SIP URI of the transfer target
+/// 
+/// # Returns
+/// Ok(()) if the transfer was successfully initiated
+/// 
+/// # Errors
+/// Returns an error if the session doesn't exist or cannot be transferred
+pub async fn transfer_call(
+    session_manager: &Arc<SessionCoordinator>,
+    session_id: &SessionId,
+    target: &str,
+) -> Result<()> {
+    use crate::api::control::SessionControl;
+    SessionControl::transfer_session(session_manager, session_id, target).await
+}
+
 /// Reject an incoming call
 /// 
 /// This function rejects a pending incoming call.

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use crate::api::types::SessionId;
-use crate::manager::core::SessionManager;
+use crate::coordinator::SessionCoordinator;
 use crate::errors::Result;
 use super::types::*;
 use super::manager::ConferenceManager;
@@ -13,15 +13,15 @@ use super::api::ConferenceApi;
 
 /// Coordinates between conference management and session management
 pub struct ConferenceCoordinator {
-    session_manager: Arc<SessionManager>,
+    session_coordinator: Arc<SessionCoordinator>,
     conference_manager: Arc<ConferenceManager>,
 }
 
 impl ConferenceCoordinator {
     /// Create a new conference coordinator
-    pub fn new(session_manager: Arc<SessionManager>, conference_manager: Arc<ConferenceManager>) -> Self {
+    pub fn new(session_coordinator: Arc<SessionCoordinator>, conference_manager: Arc<ConferenceManager>) -> Self {
         Self {
-            session_manager,
+            session_coordinator,
             conference_manager,
         }
     }

@@ -190,7 +190,19 @@ impl TransactionIntegration for DialogManager {
                         crate::errors::DialogError::protocol_error("REFER request requires remote tag in established dialog")
                     })?;
                     
-                    let target_uri = body_string.clone().unwrap_or_else(|| "sip:unknown".to_string());
+                    // Extract the target URI from the body if it's in the old format ("Refer-To: <uri>")
+                    // Otherwise use it directly as the target URI
+                    let target_uri = if let Some(body) = body_string.clone() {
+                        // Check if it's in the old format with "Refer-To: " prefix
+                        if body.starts_with("Refer-To: ") {
+                            body.trim_start_matches("Refer-To: ").trim_end_matches("\r\n").to_string()
+                        } else {
+                            body
+                        }
+                    } else {
+                        "sip:unknown".to_string()
+                    };
+                    
                     dialog_quick::refer_for_dialog(
                         &template.call_id,
                         &template.local_uri.to_string(),

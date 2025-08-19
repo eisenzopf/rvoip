@@ -521,7 +521,7 @@ impl SessionControl for Arc<SessionCoordinator> {
         self.registry.update_session_state(session_id, CallState::OnHold).await?;
         
         // Emit state change event
-        let _ = self.event_tx.send(SessionEvent::StateChanged {
+        let _ = self.publish_event(SessionEvent::StateChanged {
             session_id: session_id.clone(),
             old_state: CallState::Active,
             new_state: CallState::OnHold,
@@ -562,7 +562,7 @@ impl SessionControl for Arc<SessionCoordinator> {
         self.registry.update_session_state(session_id, CallState::Active).await?;
         
         // Emit state change event
-        let _ = self.event_tx.send(SessionEvent::StateChanged {
+        let _ = self.publish_event(SessionEvent::StateChanged {
             session_id: session_id.clone(),
             old_state: CallState::OnHold,
             new_state: CallState::Active,
@@ -572,9 +572,15 @@ impl SessionControl for Arc<SessionCoordinator> {
     }
     
     async fn transfer_session(&self, session_id: &SessionId, target: &str) -> Result<()> {
+        println!("🎯 API: transfer_session called for {} to {}", session_id, target);
+        
         // Check if session exists
+        println!("🎯 API: About to call get_session");
         let session = self.get_session(session_id).await?
             .ok_or_else(|| SessionError::session_not_found(&session_id.0))?;
+        println!("🎯 API: get_session returned");
+        
+        println!("🎯 API: Session found, state: {:?}", session.state());
         
         // Only transfer if session is active or on hold
         if !matches!(session.state(), CallState::Active | CallState::OnHold) {
@@ -583,15 +589,22 @@ impl SessionControl for Arc<SessionCoordinator> {
             ));
         }
         
+        println!("🎯 API: Calling dialog_manager.transfer_session");
+        
         // Use dialog manager to send transfer request
         self.dialog_manager.transfer_session(session_id, target).await
-            .map_err(|e| SessionError::internal(&format!("Failed to transfer session: {}", e)))?;
+            .map_err(|e| {
+                println!("❌ API: dialog_manager.transfer_session failed: {}", e);
+                SessionError::internal(&format!("Failed to transfer session: {}", e))
+            })?;
+        
+        println!("✅ API: dialog_manager.transfer_session succeeded");
         
         // Update session state
         self.registry.update_session_state(session_id, CallState::Transferring).await?;
         
         // Emit state change event
-        let _ = self.event_tx.send(SessionEvent::StateChanged {
+        let _ = self.publish_event(SessionEvent::StateChanged {
             session_id: session_id.clone(),
             old_state: CallState::Active, // Assume it was active before transfer
             new_state: CallState::Transferring,
@@ -631,7 +644,7 @@ impl SessionControl for Arc<SessionCoordinator> {
             })?;
         
         // Send SDP event
-        let _ = self.event_tx.send(SessionEvent::SdpEvent {
+        let _ = self.publish_event(SessionEvent::SdpEvent {
             session_id: session_id.clone(),
             event_type: "media_update".to_string(),
             sdp: sdp.to_string(),
@@ -720,7 +733,7 @@ impl SessionControl for Arc<SessionCoordinator> {
             })?;
         
         // Send media event
-        let _ = self.event_tx.send(SessionEvent::MediaEvent {
+        let _ = self.publish_event(SessionEvent::MediaEvent {
             session_id: session_id.clone(),
             event: format!("audio_muted={}", muted),
         }).await;
@@ -741,7 +754,7 @@ impl SessionControl for Arc<SessionCoordinator> {
         }
         
         // Send media event (actual video implementation would require SDP renegotiation)
-        let _ = self.event_tx.send(SessionEvent::MediaEvent {
+        let _ = self.publish_event(SessionEvent::MediaEvent {
             session_id: session_id.clone(),
             event: format!("video_enabled={}", enabled),
         }).await;
@@ -908,7 +921,7 @@ impl SessionControl for Arc<SessionCoordinator> {
         self.registry.update_session_state(&call.id, CallState::Active).await?;
         
         // Emit state change event
-        let _ = self.event_tx.send(SessionEvent::StateChanged {
+        let _ = self.publish_event(SessionEvent::StateChanged {
             session_id: call.id.clone(),
             old_state: CallState::Ringing,
             new_state: CallState::Active,
@@ -960,7 +973,7 @@ impl SessionControl for Arc<SessionCoordinator> {
             self.registry.update_session_state(&call.id, CallState::Failed(reason.to_string())).await?;
             
             // Emit state change event
-            let _ = self.event_tx.send(SessionEvent::StateChanged {
+            let _ = self.publish_event(SessionEvent::StateChanged {
                 session_id: call.id.clone(),
                 old_state,
                 new_state: CallState::Failed(reason.to_string()),

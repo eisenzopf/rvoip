@@ -131,6 +131,8 @@ pub fn refer_for_dialog(
     route_set: Option<Vec<Uri>>
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
+    let target_uri_str = target_uri.into();
+    
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
         from_uri: from_uri.into(),
@@ -144,13 +146,33 @@ pub fn refer_for_dialog(
         contact: None,
     };
     
-    let refer_body = format!("Refer-To: {}\r\n", target_uri.into());
-    request_builder_from_dialog_template(
+    // Build the REFER request without a body - we'll add the Refer-To header separately
+    let mut request = request_builder_from_dialog_template(
         &template, 
         Method::Refer, 
-        Some(refer_body), 
-        Some("message/sipfrag".to_string())
-    )
+        None,  // No body - Refer-To is a header, not body content
+        None   // No content type needed
+    )?;
+    
+    // Add the Refer-To header using the proper SIP type
+    use rvoip_sip_core::types::refer_to::ReferTo;
+    use rvoip_sip_core::types::address::Address;
+    use rvoip_sip_core::types::uri::Uri;
+    use rvoip_sip_core::types::TypedHeader;
+    use std::str::FromStr;
+    
+    // Parse the target URI and create a ReferTo header
+    if let Ok(parsed_uri) = Uri::from_str(&target_uri_str) {
+        let address = Address::new(parsed_uri);
+        let refer_to = ReferTo::new(address);
+        
+        // Add the ReferTo header to the request
+        request.headers.push(TypedHeader::ReferTo(refer_to));
+    } else {
+        return Err(Error::Other(format!("Invalid Refer-To URI: {}", target_uri_str)));
+    }
+    
+    Ok(request)
 }
 
 /// Quick UPDATE request creation for session modification
@@ -659,9 +681,14 @@ mod tests {
         assert_eq!(refer_request.call_id().unwrap().value(), "call-456");
         assert_eq!(refer_request.cseq().unwrap().seq, 2);
         
-        // Check that Refer-To is in the body
-        let body_str = String::from_utf8_lossy(refer_request.body());
-        assert!(body_str.contains("Refer-To: sip:charlie@example.com"));
+        // Check that Refer-To is in the headers, not the body
+        use rvoip_sip_core::types::refer_to::ReferTo;
+        let refer_to_header = refer_request.typed_header::<ReferTo>();
+        assert!(refer_to_header.is_some(), "Refer-To header should be present");
+        assert_eq!(refer_to_header.unwrap().uri().to_string(), "sip:charlie@example.com");
+        
+        // Body should be empty since Refer-To is now a header
+        assert_eq!(refer_request.body().len(), 0, "Body should be empty");
     }
     
     #[tokio::test]

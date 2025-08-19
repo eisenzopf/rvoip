@@ -286,6 +286,8 @@ impl SessionManagerBuilder {
     /// ```
     pub fn with_sip_port(mut self, port: u16) -> Self {
         self.config.sip_port = port;
+        // Also update the local_bind_addr port to match
+        self.config.local_bind_addr.set_port(port);
         self
     }
     

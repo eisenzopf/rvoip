@@ -86,7 +86,22 @@ async fn test_refer_creates_transfer_request_event() {
     // For now, we'll just verify the request is well-formed
     assert_eq!(refer_request.method(), Method::Refer);
     
-    println!("✅ REFER request created successfully");
+    // CRITICAL: Verify Refer-To is a header, NOT in the body
+    let refer_to_header = refer_request.typed_header::<ReferTo>();
+    assert!(refer_to_header.is_some(), "ReferTo header MUST be present as a header");
+    assert_eq!(
+        refer_to_header.unwrap().uri().to_string(), 
+        "sip:charlie@127.0.0.1:40003",
+        "ReferTo header must contain correct target URI"
+    );
+    
+    // CRITICAL: Body must be empty - Refer-To is a header
+    assert_eq!(
+        refer_request.body().len(), 0,
+        "REFER body MUST be empty - Refer-To is a header, not body content"
+    );
+    
+    println!("✅ REFER request created successfully with proper structure");
     
     // Clean up
     dialog_api.stop().await.expect("Failed to stop dialog API");
@@ -115,14 +130,25 @@ async fn test_refer_without_dialog_returns_481() {
     // Verify the request is well-formed
     assert_eq!(refer_request.method(), Method::Refer);
     
-    // Verify the ReferTo header is present
+    // CRITICAL: Verify the ReferTo header is present AS A HEADER
     let refer_to_header = refer_request.typed_header::<ReferTo>();
-    assert!(refer_to_header.is_some(), "ReferTo header should be present");
+    assert!(refer_to_header.is_some(), "ReferTo header MUST be present as a header");
     
     // Verify the target URI
     if let Some(refer_to) = refer_to_header {
         assert_eq!(refer_to.uri().to_string(), "sip:charlie@127.0.0.1:40012");
     }
+    
+    // CRITICAL: Body must NOT contain Refer-To
+    let body_str = String::from_utf8_lossy(refer_request.body());
+    assert!(
+        !body_str.contains("Refer-To:"),
+        "Body must NOT contain Refer-To text - it's a header"
+    );
+    assert_eq!(
+        refer_request.body().len(), 0,
+        "REFER body should be empty"
+    );
     
     println!("✅ REFER without dialog request created successfully");
     
