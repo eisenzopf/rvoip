@@ -835,55 +835,42 @@ impl HealthMonitor {
 - [ ] Performance test: Service discovery overhead <10ms
 - [ ] Reliability test: Automatic failover within 30 seconds
 
-## Phase 5: Performance Optimization & Clone Elimination (Week 5)
+## Phase 5: Shutdown and Cleanup Optimization
 
-### 5.1 Advanced Clone Elimination & Memory Optimization
-**Files**: `src/coordinator/registry.rs`, `src/dialog/manager.rs`, all collection usage
+### 5.1 Critical Shutdown Issues (High Priority)
+**Current Problem**: Tests hanging during cleanup due to untracked async tasks and incomplete shutdown cascade
 
-**Current Problem**: Remaining clone inefficiencies in hot paths
+**Root Cause Analysis**:
+- **Untracked async task proliferation** across all layers
+- **Incomplete event-based cleanup coordination** 
+- **Mixed responsibility model** between event-driven and direct cleanup
+
+#### 5.1.1 Session-Core Shutdown Issues
+**Files**: `src/coordinator/coordinator.rs`, `src/coordinator/event_handler.rs`
+
+**Critical Gaps**:
 ```rust
-// Problem: HashMap/DashMap operations with excessive cloning
-mapping.insert(session_id.clone(), dialog_id.clone());
-configs.insert(session_id.clone(), config.clone());
-
-// Problem: Configuration cloning throughout the stack
-preferred_codecs: config.media_config.preferred_codecs.clone(),
-music_on_hold_path: config.media_config.music_on_hold_path.clone(),
+// PROBLEM: Fire-and-forget event handler tasks
+tokio::spawn(async move {
+    if let Err(e) = self_clone.handle_event(event).await {
+        tracing::error!("Error handling event: {}", e);
+    }
+}); // <- Never tracked, never cleaned up
 ```
 
-**Solution**: Comprehensive Arc usage and entry API optimization
+**Solution**:
 ```rust
-// Use entry API to avoid double lookups and cloning
-mapping.entry(session_id.clone())
-    .or_insert_with(|| dialog_id.clone());
-
-// Share entire config structures with Arc
-pub struct SessionCoordinator {
-    config: Arc<SessionManagerConfig>,
-    media_config: Arc<MediaConfig>,
+// Task lifecycle management
+pub struct LayerTaskManager {
+    cancel_token: CancellationToken,
+    task_handles: Vec<JoinHandle<()>>,
 }
 
-// Use references for read-only access
-fn get_codecs(&self) -> &[String] {
-    &self.config.media_config.preferred_codecs
-}
-
-// Large data structures use Arc for sharing  
-pub struct MediaInfo {
-    pub local_sdp: Option<Arc<String>>,
-    pub remote_sdp: Option<Arc<String>>,
-    pub codec: Arc<String>,
-}
-
-// Conference participant optimization
-pub struct Participant {
-    shared: Arc<ParticipantShared>,
-    mutable: RwLock<ParticipantMutable>,
-}
-
-impl Participant {
-    pub fn update_status(&self, status: ParticipantStatus) {
-        self.mutable.write().unwrap().status = status;
+impl SessionCoordinator {
+    async fn spawn_tracked_task<F>(&self, future: F) 
+    where F: Future<Output = ()> + Send + 'static {
+        let handle = tokio::spawn(future);
+        self.task_manager.track(handle);
     }
 }
 ```
