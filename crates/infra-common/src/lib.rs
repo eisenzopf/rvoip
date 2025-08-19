@@ -24,6 +24,7 @@ pub mod config;
 pub mod lifecycle;
 pub mod logging;
 pub mod errors;
+pub mod planes;
 
 /// Re-export commonly used types
 pub use events::bus::EventBus;
