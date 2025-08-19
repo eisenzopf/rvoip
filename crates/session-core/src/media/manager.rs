@@ -24,10 +24,11 @@ use tracing::warn;
 use tokio::sync::{RwLock, Mutex, mpsc};
 use async_trait::async_trait;
 
-// Import RTP types from media-core for zero-copy processing
-use rvoip_rtp_core::RtpPacket;
+// Import RTP types from media-core (media-core provides the abstraction)
+// session-core should NOT directly import from rtp-core - use media-core's abstractions
 use rvoip_media_core::performance::pool::PoolStats;
 use rvoip_media_core::{MediaSessionId as MediaCoreSessionId};
+use rvoip_media_core::prelude::RtpPacket;
 use crate::manager::events::SessionEventProcessor;
 
 // Add integration imports for new codec detection and fallback systems
@@ -368,7 +369,7 @@ impl MediaManager {
     }
     
     /// Get RTP/RTCP statistics for a session
-    pub async fn get_rtp_statistics(&self, session_id: &SessionId) -> super::MediaResult<Option<rvoip_rtp_core::session::RtpSessionStats>> {
+    pub async fn get_rtp_statistics(&self, session_id: &SessionId) -> super::MediaResult<Option<rvoip_media_core::RtpSessionStats>> {
         let dialog_id = self.get_dialog_id(session_id).await?;
         Ok(self.controller.get_rtp_statistics(&dialog_id).await)
     }

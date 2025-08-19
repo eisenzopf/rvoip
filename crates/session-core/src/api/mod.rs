@@ -467,6 +467,8 @@
 //! - [SIP_CLIENT_DESIGN.md](https://github.com/yourusername/rvoip/blob/main/crates/session-core/SIP_CLIENT_DESIGN.md) - SipClient design
 
 pub mod types;
+pub mod optimized_types; // NEW - Memory-optimized types with Arc sharing
+pub mod compatibility;   // NEW - Migration utilities for optimized types
 pub mod handlers;
 pub mod builder;
 pub mod control;
@@ -485,6 +487,17 @@ pub use types::{
     SessionId, CallSession, CallState, IncomingCall, CallDecision, 
     SessionStats, MediaInfo, PreparedCall, CallDirection, TerminationReason,
     SdpInfo, parse_sdp_connection,
+};
+
+// Re-export optimized types for performance-critical code
+pub use optimized_types::{
+    OptimizedSessionId, OptimizedCallState, OptimizedMediaInfo, OptimizedQualityMetrics,
+};
+
+// Re-export compatibility utilities for gradual migration
+pub use compatibility::{
+    ToOptimized, FromOptimized, SessionIdAdapter,
+    helpers as compatibility_helpers,
 };
 pub use handlers::CallHandler;
 pub use builder::{SessionManagerBuilder, SessionManagerConfig, MediaConfig};

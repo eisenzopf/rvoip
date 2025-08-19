@@ -20,15 +20,18 @@ workspace = true
 
 [dependencies]
 # 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
+# session-core uses dialog-core for SIP and media-core for media processing
+# Following proper separation of concerns: NO direct rtp-core dependency
 rvoip-sip-core.workspace = true
 rvoip-transaction-core.workspace = true
 rvoip-dialog-core.workspace = true
-rvoip-rtp-core.workspace = true
 rvoip-sip-transport.workspace = true
 rvoip-media-core.workspace = true
+infra-common.workspace = true
 
 # External dependencies from workspace
 tokio.workspace = true
+tokio-util = "0.7"
 thiserror.workspace = true
 anyhow.workspace = true
 bytes.workspace = true

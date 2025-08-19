@@ -104,6 +104,7 @@ pub mod coordination;
 pub mod bridge;
 pub mod conference;    // NEW - Conference functionality
 pub mod coordinator;
+pub mod events;        // NEW - High-performance federated event system
 
 // Core error types
 mod errors;

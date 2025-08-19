@@ -69,7 +69,7 @@ pub mod srtp;
 pub mod stats;
 pub mod time;
 pub mod traits;
-pub mod payload;
+// payload module moved to media-core
 pub mod buffer;
 pub mod csrc;
 pub mod rtcp;
@@ -128,12 +128,8 @@ pub use transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
 pub use traits::{MediaTransport, RtpEvent};
 pub use traits::media_transport::RtpMediaTransport;
 
-// Re-export payload format types
-pub use payload::{
-    PayloadType, PayloadFormat, PayloadFormatFactory, create_payload_format,
-    G711UPayloadFormat, G711APayloadFormat, G722PayloadFormat, 
-    OpusPayloadFormat, OpusBandwidth, Vp8PayloadFormat, Vp9PayloadFormat
-};
+// Payload format types moved to media-core
+// Use media_core::rtp_processing::payload instead
 
 pub use csrc::{CsrcMapping, CsrcManager, MAX_CSRC_COUNT};
 
@@ -151,14 +147,8 @@ pub use feedback::packets::{
     FeedbackPacket, PliPacket, FirPacket, SliPacket, TstoPacket, 
     RembPacket, TransportCcPacket, RTCP_HEADER_SIZE
 };
-pub use feedback::generators::{
-    LossFeedbackGenerator, CongestionFeedbackGenerator, QualityFeedbackGenerator, 
-    ComprehensiveFeedbackGenerator
-};
-pub use feedback::algorithms::{
-    GoogleCongestionControl, SimpleBandwidthEstimator, QualityAssessment, 
-    QualityMetrics, PacketFeedback
-};
+// Feedback generators and algorithms moved to media-core
+// Use media_core::rtp_processing::rtcp instead
 
 // Re-export the new API components for easier access
 pub use api::client::{MediaTransportClient, ClientFactory, ClientConfig, ClientConfigBuilder};

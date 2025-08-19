@@ -1,4 +1,4 @@
-//! G.722 payload format handler
+//! G.722 payload format handler (moved from rtp-core)
 //!
 //! This module implements payload format handling for G.722 audio.
 //! G.722 is defined in RFC 3551 with payload type 9.
@@ -122,4 +122,4 @@ mod tests {
         // 160 bytes of G.722 = 320 samples at 16kHz = 20ms
         assert_eq!(format.duration_from_packet_size(160), 20);
     }
-} 
+}

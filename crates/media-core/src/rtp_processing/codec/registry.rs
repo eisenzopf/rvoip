@@ -1,11 +1,11 @@
-//! Payload Type Registry
+//! Payload Type Registry (moved from rtp-core)
 //!
 //! This module provides a centralized, RFC 3551-compliant payload type registry
 //! to replace hardcoded payload type logic across the codebase.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use crate::api::common::frame::MediaFrameType;
+use crate::api::types::MediaFrameType;
 
 /// Payload type information
 #[derive(Debug, Clone, PartialEq)]
@@ -225,16 +225,6 @@ impl PayloadTypeRegistry {
         
         // Video payload types (RFC 3551)
         self.add_static_type(PayloadTypeInfo {
-            payload_type: 24,
-            media_type: MediaFrameType::Video,
-            codec_name: "unassigned".to_string(),
-            clock_rate: 0,
-            channels: None,
-            is_dynamic: false,
-            rfc_reference: Some("RFC 3551".to_string()),
-        });
-        
-        self.add_static_type(PayloadTypeInfo {
             payload_type: 25,
             media_type: MediaFrameType::Video,
             codec_name: "CelB".to_string(),
@@ -423,6 +413,12 @@ impl PayloadTypeRegistry {
     }
 }
 
+impl Default for PayloadTypeRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Get the global payload type registry
 pub fn get_global_registry() -> &'static PayloadTypeRegistry {
     PAYLOAD_REGISTRY.get_or_init(|| PayloadTypeRegistry::new())
@@ -502,4 +498,4 @@ mod tests {
         // Test dynamic range (unregistered)
         assert_eq!(registry.get_media_frame_type(100), MediaFrameType::Data);
     }
-} 
+}

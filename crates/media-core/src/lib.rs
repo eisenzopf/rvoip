@@ -44,6 +44,7 @@
 //! ```
 
 // Core modules
+pub mod api;         // NEW - API types and errors for moved functionality
 pub mod error;
 pub mod types;
 pub mod engine;
@@ -53,6 +54,7 @@ pub mod quality;     // New quality monitoring module
 pub mod integration; // New integration module
 pub mod buffer;      // New buffer module
 pub mod performance; // New performance optimization module
+pub mod rtp_processing; // NEW - RTP media processing (moved from rtp-core)
 
 // Working modules from old implementation (to be refactored)
 pub mod codec;
