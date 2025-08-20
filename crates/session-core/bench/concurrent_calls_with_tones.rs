@@ -11,6 +11,7 @@ use tracing::info;
 use rand::Rng;
 
 use rvoip_session_core::api::*;
+use rvoip_session_core::api::types::AudioFrame;
 
 mod tone_generator;
 mod metrics;
@@ -25,6 +26,7 @@ use audio_validator::{AudioValidator, AudioCapture};
 struct ClientHandler {
     established_calls: Arc<Mutex<Vec<String>>>,
     audio_validator: Arc<AudioValidator>,
+    coordinator: Arc<Mutex<Option<Arc<SessionCoordinator>>>>,
 }
 
 impl ClientHandler {
@@ -32,7 +34,12 @@ impl ClientHandler {
         Self {
             established_calls: Arc::new(Mutex::new(Vec::new())),
             audio_validator,
+            coordinator: Arc::new(Mutex::new(None)),
         }
+    }
+    
+    async fn set_coordinator(&self, coordinator: Arc<SessionCoordinator>) {
+        *self.coordinator.lock().await = Some(coordinator);
     }
 }
 
@@ -44,6 +51,7 @@ impl CallHandler for ClientHandler {
     
     async fn on_call_established(&self, call: CallSession, _local_sdp: Option<String>, _remote_sdp: Option<String>) {
         let call_id = call.id.0.clone();
+        let session_id = call.id.clone();
         info!("Client: Call {} established, starting 440Hz tone", &call_id[..8.min(call_id.len())]);
         
         // Store session
@@ -52,28 +60,49 @@ impl CallHandler for ClientHandler {
         // Check if this call is selected for audio capture
         let is_selected = self.audio_validator.is_selected(&call_id).await;
         
-        // Start sending 440Hz tone for 10 seconds
+        // Start sending 440Hz tone for 10 seconds through real media session
         let validator = self.audio_validator.clone();
-        tokio::spawn(async move {
-            // Generate 10 seconds of 440Hz tone
+        let coordinator_opt = self.coordinator.lock().await.clone();
+        
+        if let Some(coordinator) = coordinator_opt {
+            tokio::spawn(async move {
+            // Generate 10 seconds of 440Hz tone at 8kHz
             let samples = generate_tone(440.0, 8000, Duration::from_secs(10));
-            let packets = create_rtp_packets(&samples, rand::random(), 8000, 0);
             
-            // Send packets at 50 packets/second (20ms intervals)
-            for packet in packets {
-                // In real implementation, would send via session.send_rtp(packet)
-                // For now, simulate sending
-                tokio::time::sleep(Duration::from_millis(20)).await;
+            // Send audio in 20ms chunks (160 samples at 8kHz)
+            const SAMPLES_PER_FRAME: usize = 160;
+            let mut sent_frames = 0;
+            
+            for chunk in samples.chunks(SAMPLES_PER_FRAME) {
+                // Create audio frame
+                let frame = AudioFrame {
+                    samples: chunk.to_vec(),
+                    sample_rate: 8000,
+                    channels: 1,
+                    duration: Duration::from_millis(20), // 20ms per frame
+                    timestamp: (sent_frames * SAMPLES_PER_FRAME) as u32,
+                };
                 
-                // If selected for capture, decode and store our own audio
-                if is_selected {
-                    let decoded = decode_rtp_payload(&packet.payload);
-                    validator.capture_client_audio(&call_id, decoded).await;
+                // Send through real media session
+                if let Err(e) = MediaControl::send_audio_frame(&coordinator, &session_id, frame.clone()).await {
+                    tracing::debug!("Failed to send audio frame: {}", e);
+                    break;
                 }
+                
+                // If selected for capture, store the audio we're sending
+                if is_selected {
+                    validator.capture_client_audio(&call_id, chunk.to_vec()).await;
+                }
+                
+                sent_frames += 1;
+                
+                // Wait 20ms before next frame
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
             
-            info!("Client: Finished sending tone for call {}", &call_id[..8.min(call_id.len())]);
-        });
+            info!("Client: Finished sending tone for call {} ({} frames)", &call_id[..8.min(call_id.len())], sent_frames);
+            });
+        }
     }
     
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
@@ -88,6 +117,7 @@ impl CallHandler for ClientHandler {
 struct ServerHandler {
     received_calls: Arc<Mutex<Vec<String>>>,
     audio_validator: Arc<AudioValidator>,
+    coordinator: Arc<Mutex<Option<Arc<SessionCoordinator>>>>,
 }
 
 impl ServerHandler {
@@ -95,7 +125,12 @@ impl ServerHandler {
         Self {
             received_calls: Arc::new(Mutex::new(Vec::new())),
             audio_validator,
+            coordinator: Arc::new(Mutex::new(None)),
         }
+    }
+    
+    async fn set_coordinator(&self, coordinator: Arc<SessionCoordinator>) {
+        *self.coordinator.lock().await = Some(coordinator);
     }
 }
 
@@ -109,6 +144,7 @@ impl CallHandler for ServerHandler {
     
     async fn on_call_established(&self, call: CallSession, _local_sdp: Option<String>, _remote_sdp: Option<String>) {
         let call_id = call.id.0.clone();
+        let session_id = call.id.clone();
         info!("Server: Call {} established, starting 880Hz tone", &call_id[..8.min(call_id.len())]);
         
         // Store session
@@ -117,27 +153,49 @@ impl CallHandler for ServerHandler {
         // Check if this call is selected for audio capture
         let is_selected = self.audio_validator.is_selected(&call_id).await;
         
-        // Start sending 880Hz tone for 10 seconds
+        // Start sending 880Hz tone for 10 seconds through real media session
         let validator = self.audio_validator.clone();
-        tokio::spawn(async move {
-            // Generate 10 seconds of 880Hz tone
+        let coordinator_opt = self.coordinator.lock().await.clone();
+        
+        if let Some(coordinator) = coordinator_opt {
+            tokio::spawn(async move {
+            // Generate 10 seconds of 880Hz tone at 8kHz
             let samples = generate_tone(880.0, 8000, Duration::from_secs(10));
-            let packets = create_rtp_packets(&samples, rand::random(), 8000, 0);
             
-            // Send packets at 50 packets/second (20ms intervals)
-            for packet in packets {
-                // In real implementation, would send via session.send_rtp(packet)
-                tokio::time::sleep(Duration::from_millis(20)).await;
+            // Send audio in 20ms chunks (160 samples at 8kHz)
+            const SAMPLES_PER_FRAME: usize = 160;
+            let mut sent_frames = 0;
+            
+            for chunk in samples.chunks(SAMPLES_PER_FRAME) {
+                // Create audio frame
+                let frame = AudioFrame {
+                    samples: chunk.to_vec(),
+                    sample_rate: 8000,
+                    channels: 1,
+                    duration: Duration::from_millis(20), // 20ms per frame
+                    timestamp: (sent_frames * SAMPLES_PER_FRAME) as u32,
+                };
                 
-                // If selected for capture, decode and store our own audio
-                if is_selected {
-                    let decoded = decode_rtp_payload(&packet.payload);
-                    validator.capture_server_audio(&call_id, decoded).await;
+                // Send through real media session
+                if let Err(e) = MediaControl::send_audio_frame(&coordinator, &session_id, frame.clone()).await {
+                    tracing::debug!("Failed to send audio frame: {}", e);
+                    break;
                 }
+                
+                // If selected for capture, store the audio we're sending
+                if is_selected {
+                    validator.capture_server_audio(&call_id, chunk.to_vec()).await;
+                }
+                
+                sent_frames += 1;
+                
+                // Wait 20ms before next frame
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
             
-            info!("Server: Finished sending tone for call {}", &call_id[..8.min(call_id.len())]);
-        });
+            info!("Server: Finished sending tone for call {} ({} frames)", &call_id[..8.min(call_id.len())], sent_frames);
+            });
+        }
     }
     
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
@@ -169,7 +227,7 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
     // Create audio validator
     let audio_validator = Arc::new(AudioValidator::new());
     
-    // Create server SessionManager
+    // Create server handler
     let server_handler = Arc::new(ServerHandler::new(audio_validator.clone()));
     info!("Creating server SessionManager on port 5060...");
     let server = SessionManagerBuilder::new()
@@ -180,7 +238,10 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
         .build()
         .await?;
     
-    // Create client SessionManager
+    // Set coordinator in handler
+    server_handler.set_coordinator(server.clone()).await;
+    
+    // Create client handler  
     let client_handler = Arc::new(ClientHandler::new(audio_validator.clone()));
     info!("Creating client SessionManager on port 5061...");
     let client = SessionManagerBuilder::new()
@@ -190,6 +251,9 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
         .with_handler(client_handler.clone())
         .build()
         .await?;
+    
+    // Set coordinator in handler
+    client_handler.set_coordinator(client.clone()).await;
     
     // Start both session managers
     SessionControl::start(&server).await?;

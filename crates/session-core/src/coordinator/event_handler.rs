@@ -37,7 +37,7 @@ impl SessionCoordinator {
 
     /// Handle a session event
     async fn handle_event(self: &Arc<Self>, event: SessionEvent) -> Result<()> {
-        println!("🎯 COORDINATOR: Handling event: {:?}", event);
+        tracing::debug!("🎯 COORDINATOR: Handling event: {:?}", event);
         tracing::debug!("Handling event: {:?}", event);
 
         // Event is already published through the broadcast channel
@@ -69,17 +69,17 @@ impl SessionCoordinator {
             }
             
             SessionEvent::SessionTerminating { session_id, reason } => {
-                println!("🎯 COORDINATOR: Matched SessionTerminating event (Phase 1) for {} - {}", session_id, reason);
+                tracing::debug!("🎯 COORDINATOR: Matched SessionTerminating event (Phase 1) for {} - {}", session_id, reason);
                 self.handle_session_terminating(session_id, reason).await?;
             }
             
             SessionEvent::SessionTerminated { session_id, reason } => {
-                println!("🎯 COORDINATOR: Matched SessionTerminated event (Phase 2) for {} - {}", session_id, reason);
+                tracing::debug!("🎯 COORDINATOR: Matched SessionTerminated event (Phase 2) for {} - {}", session_id, reason);
                 self.handle_session_terminated(session_id, reason).await?;
             }
             
             SessionEvent::CleanupConfirmation { session_id, layer } => {
-                println!("🧹 COORDINATOR: Cleanup confirmation from {} for session {}", layer, session_id);
+                tracing::debug!("🧹 COORDINATOR: Cleanup confirmation from {} for session {}", layer, session_id);
                 self.handle_cleanup_confirmation(session_id, layer).await?;
             }
             
@@ -218,13 +218,13 @@ impl SessionCoordinator {
         old_state: CallState,
         new_state: CallState,
     ) -> Result<()> {
-        println!("🔄 handle_state_changed called: {} {:?} -> {:?}", session_id, old_state, new_state);
+        tracing::debug!("🔄 handle_state_changed called: {} {:?} -> {:?}", session_id, old_state, new_state);
 
         match (old_state, new_state.clone()) {
             // Call becomes active
             (CallState::Ringing, CallState::Active) |
             (CallState::Initiating, CallState::Active) => {
-                println!("📞 Starting media session for newly active call: {}", session_id);
+                tracing::debug!("📞 Starting media session for newly active call: {}", session_id);
                 
                 // Spawn media session creation in background to avoid blocking event processing
                 let self_clone = self.clone();
@@ -302,7 +302,7 @@ impl SessionCoordinator {
         session_id: SessionId,
         reason: String,
     ) -> Result<()> {
-        println!("🟡 COORDINATOR: handle_session_terminating called for session {} (Phase 1) with reason: {}", session_id, reason);
+        tracing::debug!("🟡 COORDINATOR: handle_session_terminating called for session {} (Phase 1) with reason: {}", session_id, reason);
         tracing::info!("Session {} terminating (Phase 1): {}", session_id, reason);
 
         // Update session state to Terminating
@@ -352,7 +352,7 @@ impl SessionCoordinator {
         session_id: SessionId,
         layer: String,
     ) -> Result<()> {
-        println!("🧹 COORDINATOR: handle_cleanup_confirmation called for session {} from layer {}", session_id, layer);
+        tracing::debug!("🧹 COORDINATOR: handle_cleanup_confirmation called for session {} from layer {}", session_id, layer);
         tracing::info!("Cleanup confirmation from {} for session {}", layer, session_id);
         
         use super::coordinator::CleanupLayer;
@@ -365,11 +365,11 @@ impl SessionCoordinator {
             match layer.as_str() {
                 "Media" => {
                     tracker.media_done = true;
-                    println!("✓ Media cleanup complete for session {}", session_id);
+                    tracing::debug!("✓ Media cleanup complete for session {}", session_id);
                 }
                 "Client" => {
                     tracker.client_done = true;
-                    println!("✓ Client cleanup complete for session {}", session_id);
+                    tracing::debug!("✓ Client cleanup complete for session {}", session_id);
                 }
                 layer => {
                     tracing::warn!("Unknown cleanup layer: {}", layer);
@@ -396,7 +396,7 @@ impl SessionCoordinator {
                 pending_cleanups.remove(&session_id);
                 
                 // Trigger Phase 2 - final termination
-                println!("🔴 Triggering Phase 2 termination for session {}", session_id);
+                tracing::debug!("🔴 Triggering Phase 2 termination for session {}", session_id);
                 let _ = self.publish_event(SessionEvent::SessionTerminated {
                     session_id: session_id.clone(),
                     reason,
@@ -415,7 +415,7 @@ impl SessionCoordinator {
         session_id: SessionId,
         reason: String,
     ) -> Result<()> {
-        println!("🔴 COORDINATOR: handle_session_terminated called for session {} with reason: {}", session_id, reason);
+        tracing::debug!("🔴 COORDINATOR: handle_session_terminated called for session {} with reason: {}", session_id, reason);
         tracing::info!("Session {} terminated: {}", session_id, reason);
 
         // Stop media
@@ -449,16 +449,16 @@ impl SessionCoordinator {
 
         // Notify handler
         if let Some(handler) = &self.handler {
-            println!("🔔 COORDINATOR: Handler exists, checking for session {}", session_id);
+            tracing::debug!("🔔 COORDINATOR: Handler exists, checking for session {}", session_id);
             if let Some(call_session) = call_session_for_handler {
-                println!("✅ COORDINATOR: Found session {}, calling handler.on_call_ended", session_id);
+                tracing::debug!("✅ COORDINATOR: Found session {}, calling handler.on_call_ended", session_id);
                 tracing::info!("Notifying handler about session {} termination", session_id);
                 handler.on_call_ended(call_session, &reason).await;
             } else {
-                println!("❌ COORDINATOR: Session {} not found in registry", session_id);
+                tracing::debug!("❌ COORDINATOR: Session {} not found in registry", session_id);
             }
         } else {
-            println!("⚠️ COORDINATOR: No handler configured");
+            tracing::debug!("⚠️ COORDINATOR: No handler configured");
         }
 
         // Don't unregister immediately - let cleanup handle it later
@@ -494,7 +494,7 @@ impl SessionCoordinator {
                             let new_state = CallState::Active;
                             
                             // First publish to subscribers
-                            println!("📢 Publishing StateChanged event: {} -> {}", old_state, new_state);
+                            tracing::debug!("📢 Publishing StateChanged event: {} -> {}", old_state, new_state);
                             let publish_result = self.event_processor.publish_event(SessionEvent::StateChanged {
                                 session_id: session_id.clone(),
                                 old_state: old_state.clone(),
@@ -504,12 +504,12 @@ impl SessionCoordinator {
                             if let Err(e) = publish_result {
                                 tracing::error!("Failed to publish StateChanged event: {:?}", e);
                             } else {
-                                println!("✅ Successfully published StateChanged for session {}", session_id);
+                                tracing::debug!("✅ Successfully published StateChanged for session {}", session_id);
                             }
                             
                             // Start media session for the newly active call
                             // Since we transitioned from Initiating/Ringing to Active
-                            println!("📞 Starting media session for newly active call: {}", session_id);
+                            tracing::debug!("📞 Starting media session for newly active call: {}", session_id);
                             
                             // Start media session directly (already non-blocking internally)
                             if let Err(e) = self.start_media_session(&session_id).await {
@@ -819,7 +819,7 @@ impl SessionCoordinator {
     /// Handle shutdown initiated event - start the shutdown sequence
     async fn handle_shutdown_initiated(&self, reason: Option<String>) -> Result<()> {
         tracing::info!("🛑 Shutdown initiated: {:?}", reason);
-        println!("📤 SHUTDOWN: Broadcasting shutdown request to all components");
+        tracing::debug!("📤 SHUTDOWN: Broadcasting shutdown request to all components");
         
         // First, tell all components to prepare for shutdown
         // They should stop accepting new work but continue processing existing work
@@ -835,7 +835,7 @@ impl SessionCoordinator {
     /// Handle component ready for shutdown
     async fn handle_shutdown_ready(&self, component: String) -> Result<()> {
         tracing::info!("Component {} is ready for shutdown", component);
-        println!("📥 SHUTDOWN: {} is ready for shutdown", component);
+        tracing::debug!("📥 SHUTDOWN: {} is ready for shutdown", component);
         
         // Components report ready when they've stopped accepting new work
         // We can proceed with shutting them down
@@ -846,7 +846,7 @@ impl SessionCoordinator {
     /// Handle shutdown now for a specific component
     async fn handle_shutdown_now(&self, component: String) -> Result<()> {
         tracing::info!("Shutting down component: {}", component);
-        println!("🔻 SHUTDOWN: Shutting down {} now", component);
+        tracing::debug!("🔻 SHUTDOWN: Shutting down {} now", component);
         
         match component.as_str() {
             "UdpTransport" => {
@@ -886,27 +886,27 @@ impl SessionCoordinator {
     /// Handle component shutdown complete
     async fn handle_shutdown_complete(&self, component: String) -> Result<()> {
         tracing::info!("Component {} has completed shutdown", component);
-        println!("✅ SHUTDOWN: {} has completed shutdown", component);
+        tracing::debug!("✅ SHUTDOWN: {} has completed shutdown", component);
         
         // When a component completes, trigger the next one in sequence
         match component.as_str() {
             "UdpTransport" => {
                 // Transport done, now shutdown transaction manager
-                println!("📤 SHUTDOWN: Transport done, shutting down TransactionManager");
+                tracing::debug!("📤 SHUTDOWN: Transport done, shutting down TransactionManager");
                 self.publish_event(SessionEvent::ShutdownNow {
                     component: "TransactionManager".to_string(),
                 }).await?;
             }
             "TransactionManager" => {
                 // Transaction done, now shutdown dialog manager
-                println!("📤 SHUTDOWN: TransactionManager done, shutting down DialogManager");
+                tracing::debug!("📤 SHUTDOWN: TransactionManager done, shutting down DialogManager");
                 self.publish_event(SessionEvent::ShutdownNow {
                     component: "DialogManager".to_string(),
                 }).await?;
             }
             "DialogManager" => {
                 // All components done, signal system shutdown complete
-                println!("📤 SHUTDOWN: All components done, system shutdown complete");
+                tracing::debug!("📤 SHUTDOWN: All components done, system shutdown complete");
                 self.publish_event(SessionEvent::SystemShutdownComplete).await?;
             }
             _ => {}

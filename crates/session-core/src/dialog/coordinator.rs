@@ -90,14 +90,14 @@ impl SessionDialogCoordinator {
     /// Initialize session coordination with dialog-core
     pub async fn initialize(&self, session_events_tx: mpsc::Sender<SessionCoordinationEvent>) -> DialogResult<()> {
         // Set up session coordination with dialog-core
-        println!("🔗 SETUP: Setting up session coordination with dialog-core");
+        tracing::debug!("🔗 SETUP: Setting up session coordination with dialog-core");
         self.dialog_api
             .set_session_coordinator(session_events_tx)
             .await
             .map_err(|e| DialogError::Coordination {
                 message: format!("Failed to set session coordinator: {}", e),
             })?;
-        println!("✅ SETUP: Session coordination setup complete");
+        tracing::debug!("✅ SETUP: Session coordination setup complete");
         
         Ok(())
     }
@@ -108,17 +108,17 @@ impl SessionDialogCoordinator {
         mut session_events_rx: mpsc::Receiver<SessionCoordinationEvent>,
     ) -> DialogResult<()> {
         // Spawn task to handle session coordination events
-        println!("🎬 SPAWN: Starting session coordination event loop");
+        tracing::debug!("🎬 SPAWN: Starting session coordination event loop");
         let coordinator = self.clone();
         tokio::spawn(async move {
-            println!("📡 EVENT LOOP: Session coordination event loop started");
+            tracing::debug!("📡 EVENT LOOP: Session coordination event loop started");
             while let Some(event) = session_events_rx.recv().await {
-                println!("📨 EVENT LOOP: Received session coordination event in background task");
+                tracing::debug!("📨 EVENT LOOP: Received session coordination event in background task");
                 if let Err(e) = coordinator.handle_session_coordination_event(event).await {
                     tracing::error!("Error handling session coordination event: {}", e);
                 }
             }
-            println!("🏁 EVENT LOOP: Session coordination event loop ended");
+            tracing::debug!("🏁 EVENT LOOP: Session coordination event loop ended");
         });
         
         Ok(())
@@ -126,7 +126,7 @@ impl SessionDialogCoordinator {
     
     /// Handle session coordination events from dialog-core
     pub async fn handle_session_coordination_event(&self, event: SessionCoordinationEvent) -> DialogResult<()> {
-        println!("🎪 SESSION COORDINATION: Received event: {:?}", event);
+        tracing::debug!("🎪 SESSION COORDINATION: Received event: {:?}", event);
         match event {
             SessionCoordinationEvent::IncomingCall { dialog_id, transaction_id, request, source } => {
                 self.handle_incoming_call(dialog_id, transaction_id, request, source).await?;
@@ -185,9 +185,9 @@ impl SessionDialogCoordinator {
                 referred_by, 
                 replaces 
             } => {
-                println!("🔀 TRANSFER: Received TransferRequest event for dialog {}", dialog_id);
+                tracing::debug!("🔀 TRANSFER: Received TransferRequest event for dialog {}", dialog_id);
                 tracing::info!("Received TransferRequest event for dialog {}", dialog_id);
-                println!("🔀 TRANSFER: Calling transfer_handler.handle_refer_request");
+                tracing::debug!("🔀 TRANSFER: Calling transfer_handler.handle_refer_request");
                 match self.transfer_handler.handle_refer_request(
                     dialog_id,
                     transaction_id,
@@ -196,10 +196,10 @@ impl SessionDialogCoordinator {
                     replaces,
                 ).await {
                     Ok(()) => {
-                        println!("✅ TRANSFER: Successfully handled transfer request");
+                        tracing::debug!("✅ TRANSFER: Successfully handled transfer request");
                     },
                     Err(e) => {
-                        println!("❌ TRANSFER: Failed to handle transfer request: {}", e);
+                        tracing::debug!("❌ TRANSFER: Failed to handle transfer request: {}", e);
                         return Err(DialogError::Coordination {
                             message: format!("Failed to handle transfer request: {}", e),
                         });
@@ -412,7 +412,7 @@ impl SessionDialogCoordinator {
         let tx_id_str = transaction_id.to_string();
         tracing::info!("🔍 RESPONSE HANDLER: status={}, tx_id='{}', dialog={}", 
                       response.status_code(), tx_id_str, dialog_id);
-        println!("🎯 SESSION COORDINATION: Received response {} for dialog {}", response.status_code(), dialog_id);
+        tracing::debug!("🎯 SESSION COORDINATION: Received response {} for dialog {}", response.status_code(), dialog_id);
         
         // Handle BYE responses first - check transaction type before status code
         if tx_id_str.contains("BYE") && tx_id_str.contains("client") {
@@ -465,7 +465,7 @@ impl SessionDialogCoordinator {
         
         // CRITICAL: Track From tag for responses to help find sessions when dialog IDs change
         // This is a workaround for dialog-core creating new dialog IDs on state transitions
-        println!("🔍 Checking dialog {} for From tag tracking", dialog_id);
+        tracing::debug!("🔍 Checking dialog {} for From tag tracking", dialog_id);
         
         // Try to store From tag mapping if we know this dialog
         if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
@@ -477,7 +477,7 @@ impl SessionDialogCoordinator {
                     let from_tag = tag.to_string();
                     if !self.fromtag_to_session.contains_key(&from_tag) {
                         self.fromtag_to_session.insert(from_tag.clone(), session_id.clone());
-                        println!("📞 Stored From tag {} for session {}", from_tag, session_id);
+                        tracing::debug!("📞 Stored From tag {} for session {}", from_tag, session_id);
                     }
                 }
             }
@@ -487,16 +487,16 @@ impl SessionDialogCoordinator {
                 let call_id_str = call_id_header.0.clone();
                 if !self.callid_to_session.contains_key(&call_id_str) {
                     self.callid_to_session.insert(call_id_str.clone(), session_id.clone());
-                    println!("📞 Stored Call-ID {} for session {}", call_id_str, session_id);
+                    tracing::debug!("📞 Stored Call-ID {} for session {}", call_id_str, session_id);
                 }
             }
         } else {
-            println!("❌ No session found for dialog {} to store From tag", dialog_id);
+            tracing::debug!("❌ No session found for dialog {} to store From tag", dialog_id);
         }
         
         // Handle INVITE responses
         if response.status_code() == 200 && tx_id_str.contains("INVITE") && tx_id_str.contains("client") {
-            println!("🚀 SESSION COORDINATION: This is a 200 OK to INVITE - sending automatic ACK");
+            tracing::debug!("🚀 SESSION COORDINATION: This is a 200 OK to INVITE - sending automatic ACK");
             
             // Extract SDP from 200 OK response body if present
             let response_body = String::from_utf8_lossy(response.body());
@@ -519,7 +519,7 @@ impl SessionDialogCoordinator {
             // Send ACK for 2xx response using the proper dialog-core API
             match self.dialog_api.send_ack_for_2xx_response(&dialog_id, &transaction_id, &response).await {
                 Ok(_) => {
-                    println!("✅ SESSION COORDINATION: Successfully sent ACK for 200 OK response");
+                    tracing::debug!("✅ SESSION COORDINATION: Successfully sent ACK for 200 OK response");
                     tracing::info!("ACK sent successfully for dialog {} transaction {}", dialog_id, transaction_id);
                     
                     // RFC 3261: Trigger UAC side media creation directly since ACK was sent
@@ -536,18 +536,18 @@ impl SessionDialogCoordinator {
                     }
                 }
                 Err(e) => {
-                    println!("❌ SESSION COORDINATION: Failed to send ACK: {}", e);
+                    tracing::debug!("❌ SESSION COORDINATION: Failed to send ACK: {}", e);
                     tracing::error!("Failed to send ACK for dialog {} transaction {}: {}", dialog_id, transaction_id, e);
                 }
             }
             
             // CRITICAL FIX: Update session state to Active for outgoing calls
-            println!("🔍 DIALOG COORDINATOR: Looking for session mapped to dialog {}", dialog_id);
+            tracing::debug!("🔍 DIALOG COORDINATOR: Looking for session mapped to dialog {}", dialog_id);
             
             // Try to find session first by dialog ID
             let session_id = if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
                 let sid = session_id_ref.value().clone();
-                println!("✅ DIALOG COORDINATOR: Found session {} for dialog {}", sid, dialog_id);
+                tracing::debug!("✅ DIALOG COORDINATOR: Found session {} for dialog {}", sid, dialog_id);
                 Some(sid)
             } else {
                 // Dialog ID not found - try From tag lookup
@@ -555,11 +555,11 @@ impl SessionDialogCoordinator {
                 if let Some(from_header) = response.from() {
                     if let Some(tag) = from_header.tag() {
                         let from_tag = tag.to_string();
-                        println!("🔍 DIALOG COORDINATOR: Dialog {} not found, trying From tag {}", dialog_id, from_tag);
+                        tracing::debug!("🔍 DIALOG COORDINATOR: Dialog {} not found, trying From tag {}", dialog_id, from_tag);
                         
                         if let Some(session_id_ref) = self.fromtag_to_session.get(&from_tag) {
                             let sid = session_id_ref.value().clone();
-                            println!("✅ DIALOG COORDINATOR: Found session {} via From tag {}", sid, from_tag);
+                            tracing::debug!("✅ DIALOG COORDINATOR: Found session {} via From tag {}", sid, from_tag);
                             
                             // Update mappings with new dialog ID
                             self.dialog_to_session.insert(dialog_id.clone(), sid.clone());
@@ -573,11 +573,11 @@ impl SessionDialogCoordinator {
                             // Try Call-ID as final fallback
                             if let Some(call_id_header) = response.call_id() {
                                 let call_id_str = call_id_header.0.clone();
-                                println!("🔍 DIALOG COORDINATOR: From tag {} not found, trying Call-ID {}", from_tag, call_id_str);
+                                tracing::debug!("🔍 DIALOG COORDINATOR: From tag {} not found, trying Call-ID {}", from_tag, call_id_str);
                                 
                                 if let Some(session_id_ref) = self.callid_to_session.get(&call_id_str) {
                                     let sid = session_id_ref.value().clone();
-                                    println!("✅ DIALOG COORDINATOR: Found session {} via Call-ID {}", sid, call_id_str);
+                                    tracing::debug!("✅ DIALOG COORDINATOR: Found session {} via Call-ID {}", sid, call_id_str);
                                     
                                     // Update all mappings
                                     self.dialog_to_session.insert(dialog_id.clone(), sid.clone());
@@ -586,26 +586,26 @@ impl SessionDialogCoordinator {
                                     
                                     Some(sid)
                                 } else {
-                                    println!("❌ DIALOG COORDINATOR: No session found for From tag {} or Call-ID {}", from_tag, call_id_str);
+                                    tracing::debug!("❌ DIALOG COORDINATOR: No session found for From tag {} or Call-ID {}", from_tag, call_id_str);
                                     None
                                 }
                             } else {
-                                println!("❌ DIALOG COORDINATOR: No session found for From tag {}", from_tag);
+                                tracing::debug!("❌ DIALOG COORDINATOR: No session found for From tag {}", from_tag);
                                 None
                             }
                         }
                     } else {
-                        println!("❌ DIALOG COORDINATOR: No From tag in response");
+                        tracing::debug!("❌ DIALOG COORDINATOR: No From tag in response");
                         None
                     }
                 } else {
-                    println!("❌ DIALOG COORDINATOR: No From header in response");
+                    tracing::debug!("❌ DIALOG COORDINATOR: No From header in response");
                     None
                 }
             };
             
             if let Some(session_id) = session_id {
-                println!("📞 SESSION COORDINATION: Processing 200 OK for session {} (UAC side)", session_id);
+                tracing::debug!("📞 SESSION COORDINATION: Processing 200 OK for session {} (UAC side)", session_id);
                 
                 // WORKAROUND: Since dialog-core doesn't generate AckSent events,
                 // we'll trigger media creation right after sending the ACK
@@ -621,7 +621,7 @@ impl SessionDialogCoordinator {
                     tracing::error!("Failed to send UAC media creation event: {}", e);
                 });
             } else {
-                println!("❌ DIALOG COORDINATOR: Could not find session for dialog {}", dialog_id);
+                tracing::debug!("❌ DIALOG COORDINATOR: Could not find session for dialog {}", dialog_id);
                 tracing::warn!("No session found for dialog {} - attempting fallback correlation", dialog_id);
                 
                 // FINAL FALLBACK: For 200 OK to INVITE on UAC side, use indexed From URI lookup
@@ -965,7 +965,7 @@ impl SessionDialogCoordinator {
     /// Handle successful BYE response (200 OK) for UAC
     async fn handle_bye_success(&self, dialog_id: DialogId) -> DialogResult<()> {
         tracing::info!("📞 BYE-SUCCESS: Processing successful BYE for dialog {}", dialog_id);
-        println!("📞 BYE-SUCCESS: Processing successful BYE for dialog {}", dialog_id);
+        tracing::debug!("📞 BYE-SUCCESS: Processing successful BYE for dialog {}", dialog_id);
         
         // PHASE 0.24: Add detailed success metrics
         let start_time = std::time::Instant::now();
@@ -991,7 +991,7 @@ impl SessionDialogCoordinator {
             
             tracing::info!("✅ BYE-SUCCESS: Generated SessionTerminated event for UAC session {} in {:?}", 
                          session_id, start_time.elapsed());
-            println!("✅ BYE-SUCCESS: Generated SessionTerminated event for UAC session {}", session_id);
+            tracing::debug!("✅ BYE-SUCCESS: Generated SessionTerminated event for UAC session {}", session_id);
             
             // NOW remove the dialog mapping after sending the event
             self.dialog_to_session.remove(&dialog_id);
@@ -1008,7 +1008,7 @@ impl SessionDialogCoordinator {
             
         } else {
             tracing::warn!("❌ BYE-SUCCESS: No session found for dialog {} - mapping may have been removed prematurely", dialog_id);
-            println!("❌ BYE-SUCCESS: No session found for dialog {}", dialog_id);
+            tracing::debug!("❌ BYE-SUCCESS: No session found for dialog {}", dialog_id);
             
             // PHASE 0.24: Still remove dialog if no session (cleanup)
             self.dialog_to_session.remove(&dialog_id);

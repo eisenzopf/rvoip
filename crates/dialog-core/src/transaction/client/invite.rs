@@ -669,7 +669,7 @@ impl ClientInviteTransaction {
         events_tx: mpsc::Sender<TransactionEvent>,
         timer_config_override: Option<TimerSettings>,
     ) -> Result<Self> {
-        println!("Creating new ClientInviteTransaction: {}", id);
+        tracing::trace!("Creating new ClientInviteTransaction: {}", id);
         
         if request.method() != Method::Invite {
             return Err(Error::Other("Request must be INVITE for INVITE client transaction".to_string()));
@@ -706,9 +706,9 @@ impl ClientInviteTransaction {
         
         // Spawn the generic event loop runner
         let event_loop_handle = tokio::spawn(async move {
-            println!("Starting event loop for INVITE Client transaction: {}", id_for_logging);
+            tracing::trace!("Starting event loop for INVITE Client transaction: {}", id_for_logging);
             run_transaction_loop(data_for_runner, logic_for_runner, local_cmd_rx).await;
-            println!("Event loop for INVITE Client transaction ended: {}", id_for_logging);
+            tracing::trace!("Event loop for INVITE Client transaction ended: {}", id_for_logging);
         });
 
         // Store the handle for cleanup
@@ -716,7 +716,7 @@ impl ClientInviteTransaction {
             *handle_guard = Some(event_loop_handle);
         }
         
-        println!("Created ClientInviteTransaction: {}", id);
+        tracing::trace!("Created ClientInviteTransaction: {}", id);
         
         Ok(Self { data, logic })
     }
@@ -735,12 +735,12 @@ impl ClientTransaction for ClientInviteTransaction {
         let tx_id = self.data.id.clone(); // Get ID for logging
         
         Box::pin(async move {
-            println!("ClientInviteTransaction::initiate called for {}", tx_id);
+            tracing::trace!("ClientInviteTransaction::initiate called for {}", tx_id);
             let current_state = data.state.get();
-            println!("Current state is {:?}", current_state);
+            tracing::trace!("Current state is {:?}", current_state);
             
             if current_state != TransactionState::Initial {
-                println!("Invalid state transition: {:?} -> Calling", current_state);
+                tracing::trace!("Invalid state transition: {:?} -> Calling", current_state);
                 return Err(Error::invalid_state_transition(
                     kind,
                     current_state,
@@ -749,24 +749,24 @@ impl ClientTransaction for ClientInviteTransaction {
                 ));
             }
 
-            println!("Sending TransitionTo(Calling) command for {}", tx_id);
+            tracing::trace!("Sending TransitionTo(Calling) command for {}", tx_id);
             match data.cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Calling)).await {
                 Ok(_) => {
-                    println!("Successfully sent TransitionTo command for {}", tx_id);
+                    tracing::trace!("Successfully sent TransitionTo command for {}", tx_id);
                     // Wait a small amount of time to allow the transaction runner to process the command
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     
                     // Verify state change
                     let new_state = data.state.get();
-                    println!("State after sending command: {:?}", new_state);
+                    tracing::trace!("State after sending command: {:?}", new_state);
                     if new_state != TransactionState::Calling {
-                        println!("WARNING: State didn't change to Calling, still: {:?}", new_state);
+                        tracing::trace!("WARNING: State didn't change to Calling, still: {:?}", new_state);
                     }
                     
                     Ok(())
                 },
                 Err(e) => {
-                    println!("Failed to send command: {}", e);
+                    tracing::trace!("Failed to send command: {}", e);
                     Err(Error::Other(format!("Failed to send command: {}", e)))
                 }
             }

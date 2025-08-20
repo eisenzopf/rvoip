@@ -130,14 +130,14 @@ impl SessionManager {
         self.event_processor.start().await?;
         
         // Initialize dialog coordination (high-level delegation)
-        println!("🔗 SETUP: Initializing dialog coordination via DialogCoordinator");
+        tracing::debug!("🔗 SETUP: Initializing dialog coordination via DialogCoordinator");
         self.dialog_coordinator
             .initialize(dialog_coordination_tx)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to initialize dialog coordinator: {}", e)))?;
         
         // Start dialog event loop (delegated to coordinator)
-        println!("🎬 SPAWN: Starting dialog coordination event loop");
+        tracing::debug!("🎬 SPAWN: Starting dialog coordination event loop");
         let dialog_coordinator_clone = self.dialog_coordinator.clone();
         tokio::spawn(async move {
             if let Err(e) = dialog_coordinator_clone.start_event_loop(dialog_coordination_rx).await {
@@ -159,7 +159,7 @@ impl SessionManager {
         ));
 
         // Start the session coordinator event loop
-        println!("🌉 BRIDGE: Starting session coordinator event loop");
+        tracing::debug!("🌉 BRIDGE: Starting session coordinator event loop");
         let coordinator_clone = session_coordinator.clone();
         tokio::spawn(async move {
             if let Err(e) = coordinator_clone.start_coordination_loop().await {

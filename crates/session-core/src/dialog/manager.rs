@@ -81,7 +81,7 @@ impl DialogManager {
         // Map dialog to session
         self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
         
-        println!("📍 DIALOG MANAGER: Mapped dialog {} to session {}", dialog_id, session_id);
+        tracing::trace!("📍 DIALOG MANAGER: Mapped dialog {} to session {}", dialog_id, session_id);
         tracing::info!("Created outgoing call: {} -> {} (dialog: {})", from, to, dialog_id);
         
         Ok(SessionDialogHandle::new(session_id, dialog_id).with_call_handle(call_handle))
@@ -162,23 +162,23 @@ impl DialogManager {
     
     /// Transfer a session to another destination
     pub async fn transfer_session(&self, session_id: &SessionId, target: &str) -> DialogResult<()> {
-        println!("🔍 DIALOG_MANAGER: transfer_session called for {} to {}", session_id, target);
+        tracing::trace!("🔍 DIALOG_MANAGER: transfer_session called for {} to {}", session_id, target);
         let dialog_id = self.get_dialog_id_for_session(session_id)?;
-        println!("🔍 DIALOG_MANAGER: Found dialog_id {} for session {}", dialog_id, session_id);
+        tracing::trace!("🔍 DIALOG_MANAGER: Found dialog_id {} for session {}", dialog_id, session_id);
         
         // Send REFER request via dialog-core unified API
-        println!("🔍 DIALOG_MANAGER: About to call dialog_api.send_refer");
+        tracing::trace!("🔍 DIALOG_MANAGER: About to call dialog_api.send_refer");
         let _tx_key = self.dialog_api
             .send_refer(&dialog_id, target.to_string(), None)
             .await
             .map_err(|e| {
-                println!("❌ DIALOG_MANAGER: send_refer failed: {}", e);
+                tracing::trace!("❌ DIALOG_MANAGER: send_refer failed: {}", e);
                 DialogError::DialogCore {
                     source: Box::new(e),
                 }
             })?;
         
-        println!("✅ DIALOG_MANAGER: send_refer completed successfully");    
+        tracing::trace!("✅ DIALOG_MANAGER: send_refer completed successfully");    
         tracing::info!("Transferring session {} to {}", session_id, target);
         Ok(())
     }
