@@ -309,6 +309,20 @@ pub enum TransactionEvent {
         /// The network address from which the ACK was received.
         source: SocketAddr,
     },
+    
+    // ========== GRACEFUL SHUTDOWN EVENTS ==========
+    
+    /// Shutdown request received from dialog layer
+    ShutdownRequested,
+    
+    /// Transaction manager is ready for shutdown
+    ShutdownReady,
+    
+    /// Transaction manager should shutdown now
+    ShutdownNow,
+    
+    /// Transaction manager shutdown complete
+    ShutdownComplete,
 }
 
 #[cfg(test)]

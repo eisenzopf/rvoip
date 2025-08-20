@@ -846,10 +846,11 @@ impl UnifiedDialogApi {
             })?;
         
         // Create transaction manager with global events automatically
+        // Use larger channel capacity for high-concurrency scenarios (e.g., 500+ concurrent calls)
         let (transaction_manager, global_rx) = TransactionManager::with_transport_manager(
             transport,
             transport_rx,
-            Some(100),
+            Some(10000),  // Increased from 100 to handle high concurrent call volumes
         ).await
             .map_err(|e| ApiError::Internal { 
                 message: format!("Failed to create transaction manager: {}", e) 

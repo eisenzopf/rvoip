@@ -31,8 +31,9 @@ use crate::transaction::{
     Transaction, TransactionState, TransactionKey, TransactionEvent,
     InternalTransactionCommand, AtomicTransactionState
 };
+use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::timer::TimerSettings;
-use crate::transaction::runner::{AsRefState, AsRefKey, HasTransactionEvents, HasTransport, HasCommandSender};
+use crate::transaction::runner::{AsRefState, AsRefKey, HasTransactionEvents, HasTransport, HasCommandSender, HasLifecycle};
 
 /// Command sender for transaction event loops.
 ///
@@ -66,6 +67,9 @@ pub struct ServerTransactionData {
     
     /// Current transaction state (Trying/Proceeding, Completed, Confirmed, Terminated)
     pub state: Arc<AtomicTransactionState>,
+    
+    /// Transaction lifecycle state for robust shutdown coordination
+    pub lifecycle: Arc<std::sync::atomic::AtomicU8>, // Using AtomicU8 for TransactionLifecycle
     
     /// Original request that initiated this transaction
     pub request: Arc<Mutex<Request>>,
@@ -162,5 +166,36 @@ impl HasTransport for ServerTransactionData {
 impl HasCommandSender for ServerTransactionData {
     fn get_self_command_sender(&self) -> mpsc::Sender<InternalTransactionCommand> {
         self.cmd_tx.clone()
+    }
+}
+
+/// Implementation of HasLifecycle trait for ServerTransactionData
+impl HasLifecycle for ServerTransactionData {
+    /// Get the current lifecycle state
+    fn get_lifecycle(&self) -> TransactionLifecycle {
+        let val = self.lifecycle.load(std::sync::atomic::Ordering::Acquire);
+        match val {
+            0 => TransactionLifecycle::Active,
+            1 => TransactionLifecycle::Terminating,
+            2 => TransactionLifecycle::Draining, 
+            3 => TransactionLifecycle::Destroyed,
+            _ => TransactionLifecycle::Active, // Default fallback
+        }
+    }
+    
+    /// Set the lifecycle state
+    fn set_lifecycle(&self, new_lifecycle: TransactionLifecycle) {
+        let val = match new_lifecycle {
+            TransactionLifecycle::Active => 0,
+            TransactionLifecycle::Terminating => 1,
+            TransactionLifecycle::Draining => 2,
+            TransactionLifecycle::Destroyed => 3,
+        };
+        self.lifecycle.store(val, std::sync::atomic::Ordering::Release);
+    }
+    
+    /// Check if transaction should emit events to TU (not in Terminating/Draining states)
+    fn should_emit_events(&self) -> bool {
+        matches!(self.get_lifecycle(), TransactionLifecycle::Active)
     }
 } 

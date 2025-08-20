@@ -308,6 +308,35 @@ pub enum SessionEvent {
         /// Reason for stopping
         reason: String,
     },
+    
+    // ========== GRACEFUL SHUTDOWN EVENTS ==========
+    
+    /// Shutdown initiated by session coordinator
+    ShutdownInitiated {
+        /// Optional reason for shutdown
+        reason: Option<String>,
+    },
+    
+    /// Component ready for shutdown
+    ShutdownReady {
+        /// Component name (e.g., "DialogManager", "TransactionManager", "UdpTransport")
+        component: String,
+    },
+    
+    /// Shutdown signal for a specific component
+    ShutdownNow {
+        /// Component name to shutdown
+        component: String,
+    },
+    
+    /// Component shutdown complete
+    ShutdownComplete {
+        /// Component name that finished shutdown
+        component: String,
+    },
+    
+    /// All systems shutdown complete
+    SystemShutdownComplete,
 }
 
 /// Simple subscriber wrapper for session events

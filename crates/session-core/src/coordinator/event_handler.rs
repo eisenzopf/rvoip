@@ -154,6 +154,23 @@ impl SessionCoordinator {
                 }
             }
             
+            // Shutdown events - orchestrate proper shutdown sequence
+            SessionEvent::ShutdownInitiated { reason } => {
+                self.handle_shutdown_initiated(reason).await?;
+            }
+            SessionEvent::ShutdownReady { component } => {
+                self.handle_shutdown_ready(component).await?;
+            }
+            SessionEvent::ShutdownNow { component } => {
+                self.handle_shutdown_now(component).await?;
+            }
+            SessionEvent::ShutdownComplete { component } => {
+                self.handle_shutdown_complete(component).await?;
+            }
+            SessionEvent::SystemShutdownComplete => {
+                tracing::info!("System shutdown complete");
+            }
+            
             _ => {
                 tracing::debug!("Unhandled event type");
             }
@@ -792,6 +809,107 @@ impl SessionCoordinator {
             if let Err(e) = self.dialog_manager.terminate_session(&session_id).await {
                 tracing::error!("Failed to auto-reject incoming call {}: {}", session_id, e);
             }
+        }
+        
+        Ok(())
+    }
+    
+    // ========== SHUTDOWN EVENT HANDLERS ==========
+    
+    /// Handle shutdown initiated event - start the shutdown sequence
+    async fn handle_shutdown_initiated(&self, reason: Option<String>) -> Result<()> {
+        tracing::info!("🛑 Shutdown initiated: {:?}", reason);
+        println!("📤 SHUTDOWN: Broadcasting shutdown request to all components");
+        
+        // First, tell all components to prepare for shutdown
+        // They should stop accepting new work but continue processing existing work
+        
+        // Start with bottom layer - Transport
+        self.publish_event(SessionEvent::ShutdownNow {
+            component: "UdpTransport".to_string(),
+        }).await?;
+        
+        Ok(())
+    }
+    
+    /// Handle component ready for shutdown
+    async fn handle_shutdown_ready(&self, component: String) -> Result<()> {
+        tracing::info!("Component {} is ready for shutdown", component);
+        println!("📥 SHUTDOWN: {} is ready for shutdown", component);
+        
+        // Components report ready when they've stopped accepting new work
+        // We can proceed with shutting them down
+        
+        Ok(())
+    }
+    
+    /// Handle shutdown now for a specific component
+    async fn handle_shutdown_now(&self, component: String) -> Result<()> {
+        tracing::info!("Shutting down component: {}", component);
+        println!("🔻 SHUTDOWN: Shutting down {} now", component);
+        
+        match component.as_str() {
+            "UdpTransport" => {
+                // Transport doesn't have direct access, it will be stopped via TransactionManager
+                // Just emit completion for now
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                self.publish_event(SessionEvent::ShutdownComplete {
+                    component: "UdpTransport".to_string(),
+                }).await?;
+            }
+            "TransactionManager" => {
+                // Transaction manager shutdown is triggered via dialog manager
+                // Just emit completion for now
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                self.publish_event(SessionEvent::ShutdownComplete {
+                    component: "TransactionManager".to_string(),
+                }).await?;
+            }
+            "DialogManager" => {
+                // Actually stop the dialog manager
+                if let Err(e) = self.dialog_manager.stop().await {
+                    tracing::warn!("Error stopping dialog manager: {}", e);
+                }
+                // Emit completion
+                self.publish_event(SessionEvent::ShutdownComplete {
+                    component: "DialogManager".to_string(),
+                }).await?;
+            }
+            _ => {
+                tracing::warn!("Unknown component for shutdown: {}", component);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle component shutdown complete
+    async fn handle_shutdown_complete(&self, component: String) -> Result<()> {
+        tracing::info!("Component {} has completed shutdown", component);
+        println!("✅ SHUTDOWN: {} has completed shutdown", component);
+        
+        // When a component completes, trigger the next one in sequence
+        match component.as_str() {
+            "UdpTransport" => {
+                // Transport done, now shutdown transaction manager
+                println!("📤 SHUTDOWN: Transport done, shutting down TransactionManager");
+                self.publish_event(SessionEvent::ShutdownNow {
+                    component: "TransactionManager".to_string(),
+                }).await?;
+            }
+            "TransactionManager" => {
+                // Transaction done, now shutdown dialog manager
+                println!("📤 SHUTDOWN: TransactionManager done, shutting down DialogManager");
+                self.publish_event(SessionEvent::ShutdownNow {
+                    component: "DialogManager".to_string(),
+                }).await?;
+            }
+            "DialogManager" => {
+                // All components done, signal system shutdown complete
+                println!("📤 SHUTDOWN: All components done, system shutdown complete");
+                self.publish_event(SessionEvent::SystemShutdownComplete).await?;
+            }
+            _ => {}
         }
         
         Ok(())

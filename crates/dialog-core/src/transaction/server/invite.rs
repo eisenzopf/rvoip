@@ -771,11 +771,13 @@ impl ServerInviteTransaction {
         }
 
         let timer_config = timer_config_override.unwrap_or_default();
-        let (cmd_tx, local_cmd_rx) = mpsc::channel(32);
+        // Use larger channel capacity for high-concurrency scenarios (e.g., 500+ concurrent calls)
+        let (cmd_tx, local_cmd_rx) = mpsc::channel(1000); // Increased from 32 for high-concurrency support
 
         let data = Arc::new(ServerTransactionData {
             id: id.clone(),
             state: Arc::new(AtomicTransactionState::new(TransactionState::Proceeding)),
+            lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)), // TransactionLifecycle::Active
             request: Arc::new(Mutex::new(request.clone())),
             last_response: Arc::new(Mutex::new(None)),
             remote_addr,

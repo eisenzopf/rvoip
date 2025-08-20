@@ -182,6 +182,40 @@ use crate::transaction::TransactionKind;
 /// Represents the state of a SIP transaction, aligned with the state machines
 /// defined in RFC 3261 (Section 17).
 ///
+/// Lifecycle states for robust transaction shutdown management.
+/// 
+/// This enum tracks the overall lifecycle of a transaction beyond just the RFC 3261 states,
+/// providing proper coordination during shutdown to prevent "channel closed" errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransactionLifecycle {
+    /// Normal processing state - transaction is actively processing messages
+    Active,
+    
+    /// Terminal state reached but still accepting late messages during grace period
+    /// - Transaction has reached RFC 3261 terminal state (Terminated/Completed)
+    /// - Command channel remains open to accept stragglers
+    /// - No events sent to Transaction User
+    Terminating,
+    
+    /// Grace period for processing late-arriving messages
+    /// - Silently processes messages to prevent errors
+    /// - Does not emit events to Transaction User  
+    /// - Command channel still open
+    Draining,
+    
+    /// Fully cleaned up and removed from all data structures
+    /// - Command channel closed
+    /// - Removed from HashMap
+    /// - All resources released
+    Destroyed,
+}
+
+impl Default for TransactionLifecycle {
+    fn default() -> Self {
+        TransactionLifecycle::Active
+    }
+}
+
 /// The state determines how a transaction reacts to incoming messages (requests or responses)
 /// and timers. Different transaction kinds (Client/Server, INVITE/Non-INVITE)
 /// follow different state machines.

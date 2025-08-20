@@ -657,11 +657,13 @@ impl ClientNonInviteTransaction {
         timer_config_override: Option<TimerSettings>,
     ) -> Result<Self> {
         let timer_config = timer_config_override.unwrap_or_default();
-        let (cmd_tx, local_cmd_rx) = mpsc::channel(32); // Renamed cmd_rx to local_cmd_rx to avoid conflict after ClientTransactionData change
+        // Use larger channel capacity for high-concurrency scenarios (e.g., 500+ concurrent calls)
+        let (cmd_tx, local_cmd_rx) = mpsc::channel(1000); // Increased from 32 for high-concurrency support
 
         let data = Arc::new(ClientTransactionData {
             id: id.clone(),
             state: Arc::new(AtomicTransactionState::new(TransactionState::Initial)),
+            lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)), // TransactionLifecycle::Active
             request: Arc::new(Mutex::new(request.clone())),
             last_response: Arc::new(Mutex::new(None)),
             remote_addr,
@@ -693,6 +695,12 @@ impl ClientNonInviteTransaction {
         }
         
         Ok(Self { data, logic })
+    }
+}
+
+impl CommonClientTransaction for ClientNonInviteTransaction {
+    fn data(&self) -> &Arc<ClientTransactionData> {
+        &self.data
     }
 }
 

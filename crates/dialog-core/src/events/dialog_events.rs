@@ -36,4 +36,18 @@ pub enum DialogEvent {
     RecoveryCompleted {
         dialog_id: DialogId,
     },
+    
+    // ========== GRACEFUL SHUTDOWN EVENTS ==========
+    
+    /// Shutdown request received from session layer
+    ShutdownRequested,
+    
+    /// Dialog manager is ready for shutdown
+    ShutdownReady,
+    
+    /// Dialog manager should shutdown now
+    ShutdownNow,
+    
+    /// Dialog manager shutdown complete
+    ShutdownComplete,
 } 

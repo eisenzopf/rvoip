@@ -220,6 +220,15 @@ impl TransportEventAdapter {
                     }
                 ))
             }
+            
+            // Shutdown events - not propagated to cross-crate events
+            TransportEvent::ShutdownRequested |
+            TransportEvent::ShutdownReady |
+            TransportEvent::ShutdownNow |
+            TransportEvent::ShutdownComplete => {
+                // These are internal coordination events, not cross-crate
+                None
+            }
         }
     }
     
