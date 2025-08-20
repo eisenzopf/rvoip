@@ -58,6 +58,20 @@ pub enum TransportEvent {
     
     /// Transport has been closed
     Closed,
+    
+    // ========== GRACEFUL SHUTDOWN EVENTS ==========
+    
+    /// Shutdown request received from transaction layer
+    ShutdownRequested,
+    
+    /// Transport is ready for shutdown
+    ShutdownReady,
+    
+    /// Transport should shutdown now
+    ShutdownNow,
+    
+    /// Transport shutdown complete
+    ShutdownComplete,
 }
 
 /// Represents a transport layer for SIP messages.

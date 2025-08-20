@@ -65,7 +65,7 @@ use rvoip_sip_core::Request;
 /// This trait defines operations that both INVITE and non-INVITE client transactions must support.
 /// It encapsulates the functionality required to initiate transactions, process responses,
 /// and track state according to the SIP specification.
-pub trait ClientTransaction: Transaction + Send + Sync + 'static {
+pub trait ClientTransaction: Transaction + CommonClientTransaction + Send + Sync + 'static {
     /// Initiates the transaction by sending the first request.
     ///
     /// For INVITE transactions, this starts Timers A/B and moves the transaction to the Calling state.

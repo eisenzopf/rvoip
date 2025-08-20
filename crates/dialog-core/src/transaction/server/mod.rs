@@ -68,7 +68,7 @@ use rvoip_sip_core::json::ext::SipMessageJson;
 /// It encapsulates the functionality required to process requests, send responses, and track state
 /// according to the SIP specification.
 #[async_trait]
-pub trait ServerTransaction: Transaction + TransactionAsync + Send + Sync + 'static {
+pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransaction + Send + Sync + 'static {
     /// Processes an incoming request associated with this transaction.
     ///
     /// This handles various types of requests that may arrive for this transaction:

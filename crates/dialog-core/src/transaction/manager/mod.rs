@@ -193,13 +193,16 @@ use crate::transaction::{
     Transaction, TransactionAsync, TransactionState, TransactionKind, TransactionKey, TransactionEvent,
     InternalTransactionCommand,
 };
+use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::client::{
     ClientTransaction, 
     ClientInviteTransaction, 
     ClientNonInviteTransaction,
     TransactionExt,
+    CommonClientTransaction,
 };
-use crate::transaction::server::{ServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction};
+use crate::transaction::runner::HasLifecycle;
+use crate::transaction::server::{ServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction, CommonServerTransaction};
 use crate::transaction::timer::{Timer, TimerManager, TimerFactory, TimerSettings};
 use crate::transaction::method::{cancel, update, ack};
 use crate::transaction::utils::{transaction_key_from_message, generate_branch, create_ack_from_invite};
@@ -1348,19 +1351,60 @@ impl TransactionManager {
         Ok(rx)
     }
 
-    /// Shutdown the transaction manager
+    /// Shutdown the transaction manager gracefully - BOTTOM-UP
+    /// 
+    /// This performs a graceful shutdown in BOTTOM-UP order:
+    /// 1. Close the transport layer (UDP) first
+    /// 2. Stop the message processing loop
+    /// 3. Drain any remaining messages
+    /// 4. Clear active transactions
+    /// 5. Clear event subscribers
     pub async fn shutdown(&self) {
+        info!("TransactionManager shutting down gracefully");
+        
+        // Step 1: Stop the message processing loop FIRST
+        // This prevents new messages from being processed
         {
-             let mut running = self.running.lock().await;
-             *running = false;
-        } // Release lock
-
-        // Clear all transactions
+            let mut running = self.running.lock().await;
+            *running = false;
+        }
+        debug!("Message processing loop signaled to stop");
+        
+        // Step 2: Transport should already be closed by this point via events
+        // But ensure it's closed just in case
+        if let Err(e) = self.transport.close().await {
+            debug!("Transport close during shutdown: {}", e);
+        }
+        
+        // Step 3: Small drain period for in-flight messages
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        
+        // Step 4: Clear all active transactions
+        let client_count = self.client_transactions.lock().await.len();
+        let server_count = self.server_transactions.lock().await.len();
+        if client_count > 0 || server_count > 0 {
+            debug!("Clearing {} client and {} server transactions", client_count, server_count);
+        }
         self.client_transactions.lock().await.clear();
         self.server_transactions.lock().await.clear();
         self.transaction_destinations.lock().await.clear();
-
-        debug!("Transaction manager shutdown");
+        
+        // Step 5: Emit TransactionEvent::ShutdownComplete
+        // Broadcast to all event subscribers
+        Self::broadcast_event(
+            TransactionEvent::ShutdownComplete,
+            &self.events_tx,
+            &self.event_subscribers,
+            Some(&self.transaction_to_subscribers),
+            Some(self.clone()),
+        ).await;
+        
+        // Step 5: Clear event subscribers
+        self.event_subscribers.lock().await.clear();
+        self.subscriber_to_transactions.lock().await.clear();
+        self.transaction_to_subscribers.lock().await.clear();
+        
+        info!("TransactionManager shutdown complete - BOTTOM-UP");
     }
 
     /// Broadcasts a transaction event to all subscribers.
@@ -1461,8 +1505,56 @@ impl TransactionManager {
     }
 
     /// Handle transaction termination event and clean up terminated transactions
+    /// Uses lifecycle-based removal instead of immediate cleanup
     async fn process_transaction_terminated(&self, transaction_id: &TransactionKey) {
-        debug!(%transaction_id, "Processing transaction termination");
+        debug!(%transaction_id, "Processing transaction termination - monitoring lifecycle for cleanup");
+        
+        // Start monitoring lifecycle state for proper cleanup timing
+        let manager = self.clone();
+        let tx_id = transaction_id.clone();
+        
+        tokio::spawn(async move {
+            // Poll lifecycle state until Destroyed
+            let mut cleanup_attempts = 0;
+            loop {
+                // Check if transaction is ready for cleanup
+                let should_cleanup = {
+                    // Try both client and server transactions
+                    let client_txs = manager.client_transactions.lock().await;
+                    let server_txs = manager.server_transactions.lock().await;
+                    
+                    let client_ready = client_txs.get(&tx_id)
+                        .map(|tx| tx.data().get_lifecycle() == TransactionLifecycle::Destroyed)
+                        .unwrap_or(false);
+                    let server_ready = server_txs.get(&tx_id)
+                        .map(|tx| tx.data().get_lifecycle() == TransactionLifecycle::Destroyed) 
+                        .unwrap_or(false);
+                    
+                    client_ready || server_ready
+                };
+                
+                if should_cleanup {
+                    debug!(%tx_id, "Transaction lifecycle is Destroyed, performing cleanup");
+                    manager.remove_terminated_transaction(&tx_id).await;
+                    break;
+                } 
+                
+                cleanup_attempts += 1;
+                if cleanup_attempts > 50 { // 5 second timeout
+                    warn!(%tx_id, "Lifecycle cleanup timeout, forcing removal");
+                    manager.remove_terminated_transaction(&tx_id).await;
+                    break;
+                }
+                
+                // Check every 100ms
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        });
+    }
+    
+    /// Actually remove a terminated transaction from all maps
+    async fn remove_terminated_transaction(&self, transaction_id: &TransactionKey) {
+        debug!(%transaction_id, "Removing terminated transaction after grace period");
         
         let mut terminated = false;
         
@@ -1584,8 +1676,14 @@ impl TransactionManager {
                 // Use tokio::select to wait for a message from either the transport or internal channel
                 tokio::select! {
                     Some(message_event) = receiver.recv() => {
-                        if let Err(e) = manager_arc.handle_transport_event(message_event).await {
-                            error!("Error handling transport message: {}", e);
+                        // Check if we're still running before processing
+                        let still_running = *manager_arc.running.lock().await;
+                        if still_running {
+                            if let Err(e) = manager_arc.handle_transport_event(message_event).await {
+                                error!("Error handling transport message: {}", e);
+                            }
+                        } else {
+                            debug!("Skipping transport event processing - shutting down");
                         }
                     }
                     Some(transaction_event) = internal_rx.recv() => {

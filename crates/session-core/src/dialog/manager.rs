@@ -48,6 +48,8 @@ impl DialogManager {
     
     /// Stop the dialog API
     pub async fn stop(&self) -> DialogResult<()> {
+        // Stop the underlying dialog-core DialogManager
+        // It will emit DialogEvent::ShutdownComplete when done
         self.dialog_api
             .stop()
             .await
@@ -456,6 +458,11 @@ impl DialogManager {
         self.dialog_api.config().local_address()
     }
     
+    /// Get access to the underlying dialog API for shutdown coordination
+    pub fn dialog_api(&self) -> &Arc<UnifiedDialogApi> {
+        &self.dialog_api
+    }
+    
     /// Get dialog statistics
     pub fn get_dialog_stats(&self) -> DialogManagerStats {
         DialogManagerStats {
@@ -479,10 +486,6 @@ impl DialogManager {
             .any(|entry| entry.value() == session_id)
     }
     
-    /// Get the dialog API reference (for advanced usage)
-    pub fn dialog_api(&self) -> &Arc<UnifiedDialogApi> {
-        &self.dialog_api
-    }
     
     /// Get current SDP for a session
     async fn get_current_sdp(&self, session_id: &SessionId) -> DialogResult<String> {

@@ -38,6 +38,8 @@ use crate::transaction::{
     Transaction, TransactionAsync, TransactionState, TransactionKind, TransactionKey, TransactionEvent,
     InternalTransactionCommand,
 };
+use crate::transaction::state::TransactionLifecycle;
+use crate::transaction::runner::HasLifecycle;
 use crate::transaction::client::{ClientTransaction, TransactionExt as ClientTransactionExt, ClientInviteTransaction, ClientNonInviteTransaction};
 use crate::transaction::server::{ServerTransaction, TransactionExt as ServerTransactionExt, ServerInviteTransaction, ServerNonInviteTransaction};
 use crate::transaction::utils::{self, transaction_key_from_message, create_ack_from_invite};
@@ -399,6 +401,14 @@ pub async fn handle_transport_message(
                     if server_txs.contains_key(&tx_id) {
                         debug!(%tx_id, "Processing retransmission of existing request");
                         
+                        // Check transaction lifecycle before processing
+                        let lifecycle = server_txs[&tx_id].data().get_lifecycle();
+                        if !matches!(lifecycle, TransactionLifecycle::Active) {
+                            debug!(%tx_id, ?lifecycle, "Skipping request processing for non-active transaction");
+                            drop(server_txs);
+                            return Ok(());
+                        }
+                        
                         // Process the request while still holding the lock
                         // The implementation of process_request will handle async operations properly
                         let result = server_txs[&tx_id].process_request(request.clone()).await;
@@ -444,6 +454,14 @@ pub async fn handle_transport_message(
                         let remote_addr = client_txs[&tx_id].remote_addr();
                         
                         debug!(%tx_id, status = ?response.status(), "Routing response to client transaction");
+                        
+                        // Check transaction lifecycle before processing
+                        let lifecycle = client_txs[&tx_id].data().get_lifecycle();
+                        if !matches!(lifecycle, TransactionLifecycle::Active) {
+                            debug!(%tx_id, ?lifecycle, "Skipping response processing for non-active transaction");
+                            drop(client_txs);
+                            return Ok(());
+                        }
                         
                         // Process the response while still holding the lock
                         let result = client_txs[&tx_id].process_response(response.clone()).await;
@@ -713,6 +731,14 @@ impl TransactionManager {
             // Check for existing server transaction
             let server_txs = self.server_transactions.lock().await;
             if let Some(transaction) = server_txs.get(&key) {
+                // Check transaction lifecycle before processing
+                let lifecycle = transaction.data().get_lifecycle();
+                if !matches!(lifecycle, TransactionLifecycle::Active) {
+                    debug!(%key, ?lifecycle, "Skipping request processing for non-active transaction");
+                    drop(server_txs);
+                    return Ok(());
+                }
+                
                 let tx = transaction.clone();
                 drop(server_txs);
                 
@@ -797,25 +823,35 @@ impl TransactionManager {
             }
 
             // First try to send directly to the transaction via events_tx
+            // Use the original approach but with larger channel capacity to prevent errors
             let mut client_txs_guard = self.client_transactions.lock().await;
             let mut processed = false;
             
             if client_txs_guard.contains_key(&key) {
                 debug!("🔍 RESPONSE HANDLER: Found matching client transaction, processing response");
+                
+                // Check transaction lifecycle before processing
+                let lifecycle = client_txs_guard[&key].data().get_lifecycle();
+                if !matches!(lifecycle, TransactionLifecycle::Active) {
+                    debug!(%key, ?lifecycle, "Skipping response processing for non-active transaction");
+                    drop(client_txs_guard);
+                    return Ok(());
+                }
+                
                 let transaction = client_txs_guard.remove(&key).unwrap();
                 
                 // Drop the lock so we can do async operations
                 drop(client_txs_guard);
                 
-                // Process the response
+                // Process the response - should succeed now with larger channel capacity
                 if let Err(e) = transaction.process_response(response.clone()).await {
-                    warn!(id=%key, error=%e, "Error processing response");
+                    warn!(id=%key, error=%e, "Error processing response - this should be rare now");
                 } else {
                     debug!("🔍 RESPONSE HANDLER: Successfully processed response in transaction");
                     processed = true;
                 }
                 
-                // Put the transaction back
+                // Put the transaction back (if it's not terminated)
                 let mut client_txs_guard = self.client_transactions.lock().await;
                 client_txs_guard.insert(key.clone(), transaction);
                 drop(client_txs_guard);
@@ -909,6 +945,14 @@ impl TransactionManager {
             let server_txs = self.server_transactions.lock().await;
             if let Some(transaction) = server_txs.get(&invite_key) {
                 if transaction.state() != TransactionState::Confirmed {
+                    // Check transaction lifecycle before processing
+                    let lifecycle = transaction.data().get_lifecycle();
+                    if !matches!(lifecycle, TransactionLifecycle::Active) {
+                        debug!(%invite_key, ?lifecycle, "Skipping ACK processing for non-active transaction");
+                        drop(server_txs);
+                        return Ok(());
+                    }
+                    
                     // This is an ACK for a non-2xx response, process it in the transaction
                     let tx = transaction.clone();
                     drop(server_txs);

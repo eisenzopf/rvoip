@@ -274,91 +274,148 @@ impl SessionCoordinator {
         Ok(())
     }
 
-    /// Stop all subsystems
+    /// Stop all subsystems in proper order with verification
+    /// 
+    /// Orchestrates shutdown in proper order with confirmation at each step:
+    /// 1. Send ShutdownInitiated event
+    /// 2. Wait for components to acknowledge and shutdown in order
+    /// 3. Clean up remaining resources
     pub async fn stop(&self) -> Result<()> {
-        tracing::info!("🛑 STOP: SessionCoordinator stop() called");
-        println!("🛑 STOP: SessionCoordinator stop() called");
+        tracing::info!("🛑 SessionCoordinator stop() called - event-based shutdown");
+        println!("🛑 SHUTDOWN: SessionCoordinator stop() called - event-based shutdown with acknowledgments");
         
-        // First, terminate all active sessions
+        // Create a temporary event subscriber to track shutdown progress
+        let mut shutdown_subscriber = match self.event_processor.subscribe().await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::error!("Failed to subscribe to events for shutdown: {}", e);
+                // Fallback to direct shutdown
+                return self.direct_shutdown().await;
+            }
+        };
+        
+        // Step 1: Initiate shutdown
+        println!("📤 SHUTDOWN: Sending ShutdownInitiated event");
+        self.publish_event(SessionEvent::ShutdownInitiated {
+            reason: Some("Coordinator stop() called".to_string()),
+        }).await?;
+        
+        // Step 2: Wait for acknowledgments with timeout
+        let timeout = std::time::Duration::from_secs(5);
+        let start = std::time::Instant::now();
+        
+        // Track which components have completed
+        let mut transport_done = false;
+        let mut transaction_done = false;
+        let mut dialog_done = false;
+        
+        while !transport_done || !transaction_done || !dialog_done {
+            if start.elapsed() > timeout {
+                println!("⚠️ SHUTDOWN: Timeout waiting for components, forcing shutdown");
+                break;
+            }
+            
+            // Wait for shutdown events with a small timeout
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                shutdown_subscriber.receive()
+            ).await {
+                Ok(Ok(event)) => {
+                    match event {
+                        SessionEvent::ShutdownComplete { component } => {
+                            println!("✅ SHUTDOWN: {} completed shutdown", component);
+                            match component.as_str() {
+                                "UdpTransport" => transport_done = true,
+                                "TransactionManager" => transaction_done = true,
+                                "DialogManager" => dialog_done = true,
+                                _ => {}
+                            }
+                        }
+                        SessionEvent::SystemShutdownComplete => {
+                            println!("✅ SHUTDOWN: System shutdown complete");
+                            break;
+                        }
+                        _ => {} // Ignore other events during shutdown
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!("Error receiving shutdown event: {}", e);
+                }
+                Err(_) => {
+                    // Timeout on receive, continue checking
+                }
+            }
+        }
+        
+        // Step 3: Stop event processor (after all shutdown events processed)
+        println!("🛑 SHUTDOWN: Stopping event processor...");
+        self.event_processor.stop().await?;
+        println!("✅ SHUTDOWN: Event processor stopped");
+        
+        // Step 4: Cancel event loop tasks
+        println!("🛑 SHUTDOWN: Cancelling event loops...");
+        let mut event_loop_handle = self.event_loop_handle.lock().await;
+        if let Some(handle) = event_loop_handle.take() {
+            handle.abort();
+        }
+        
+        let mut dialog_event_loop_handle = self.dialog_event_loop_handle.lock().await;
+        if let Some(handle) = dialog_event_loop_handle.take() {
+            handle.abort();
+        }
+        println!("✅ SHUTDOWN: Event loops cancelled");
+        
+        // Step 5: Stop cleanup manager
+        println!("🛑 SHUTDOWN: Stopping cleanup manager...");
+        self.cleanup_manager.stop().await?;
+        println!("✅ SHUTDOWN: Cleanup manager stopped");
+        
+        // Step 6: Clean up remaining sessions
         let active_session_ids = self.registry.list_active_sessions().await
             .unwrap_or_else(|e| {
-                tracing::warn!("Failed to list active sessions during shutdown: {}", e);
-                println!("⚠️ STOP: Failed to list active sessions: {}", e);
+                tracing::warn!("Failed to list active sessions: {}", e);
                 Vec::new()
             });
         
         if !active_session_ids.is_empty() {
-            tracing::info!("Terminating {} active sessions before shutdown", active_session_ids.len());
-            println!("🛑 STOP: Found {} active sessions to terminate", active_session_ids.len());
+            println!("🛑 SHUTDOWN: Cleaning up {} remaining sessions", active_session_ids.len());
             for session_id in active_session_ids {
-                tracing::debug!("Terminating session {}", session_id);
-                println!("  📍 STOP: Terminating session {}", session_id);
-                // Try to terminate gracefully through dialog manager, but don't fail if it errors
-                if let Err(e) = self.dialog_manager.terminate_session(&session_id).await {
-                    tracing::warn!("Failed to terminate session {} during shutdown: {}", session_id, e);
-                    println!("  ⚠️ STOP: Failed to terminate session {}: {}", session_id, e);
-                }
+                let _ = self.stop_media_session(&session_id).await;
+                let _ = self.registry.unregister_session(&session_id).await;
             }
-            // Give sessions a moment to terminate
-            println!("🛑 STOP: Waiting 100ms for sessions to terminate...");
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        } else {
-            println!("🛑 STOP: No active sessions to terminate");
         }
         
-        // Stop accepting new events
-        println!("🛑 STOP: Stopping event processor...");
+        tracing::info!("SessionCoordinator stopped - event-based shutdown complete");
+        println!("✅ SHUTDOWN: SessionCoordinator fully stopped");
+        Ok(())
+    }
+    
+    /// Direct shutdown fallback when event system is unavailable
+    async fn direct_shutdown(&self) -> Result<()> {
+        println!("⚠️ SHUTDOWN: Using direct shutdown fallback");
+        
+        // Direct stop of dialog manager
+        if let Err(e) = self.dialog_manager.stop().await {
+            tracing::warn!("Dialog manager stop error: {}", e);
+        }
+        
+        // Small drain
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        
+        // Stop event processor
         self.event_processor.stop().await?;
-        println!("🛑 STOP: Event processor stopped");
         
-        // Cancel the main event loop task
-        println!("🛑 STOP: Acquiring event loop handle lock...");
-        let mut event_loop_handle = self.event_loop_handle.lock().await;
-        if let Some(handle) = event_loop_handle.take() {
-            tracing::debug!("Aborting main event loop task...");
-            println!("🛑 STOP: Aborting main event loop task...");
+        // Cancel loops
+        if let Some(handle) = self.event_loop_handle.lock().await.take() {
             handle.abort();
-            // Wait a brief moment for abort to take effect
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            println!("🛑 STOP: Main event loop aborted");
+        }
+        if let Some(handle) = self.dialog_event_loop_handle.lock().await.take() {
+            handle.abort();
         }
         
-        // Cancel the dialog event loop task
-        println!("🛑 STOP: Acquiring dialog event loop handle lock...");
-        let mut dialog_event_loop_handle = self.dialog_event_loop_handle.lock().await;
-        if let Some(handle) = dialog_event_loop_handle.take() {
-            tracing::debug!("Aborting dialog event loop task...");
-            println!("🛑 STOP: Aborting dialog event loop task...");
-            handle.abort();
-            // Wait a brief moment for abort to take effect
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            println!("🛑 STOP: Dialog event loop aborted");
-        }
-        
-        // Now stop the subsystems
-        println!("🛑 STOP: Stopping cleanup manager...");
+        // Stop cleanup manager
         self.cleanup_manager.stop().await?;
-        println!("🛑 STOP: Cleanup manager stopped");
         
-        println!("🛑 STOP: Stopping dialog manager...");
-        // Add timeout to dialog manager stop to prevent hanging
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            self.dialog_manager.stop()
-        ).await {
-            Ok(Ok(())) => println!("🛑 STOP: Dialog manager stopped"),
-            Ok(Err(e)) => {
-                println!("⚠️ STOP: Dialog manager stop failed: {}", e);
-                tracing::warn!("Failed to stop dialog manager: {}", e);
-            }
-            Err(_) => {
-                println!("⚠️ STOP: Dialog manager stop timed out after 2 seconds");
-                tracing::warn!("Dialog manager stop timed out");
-            }
-        }
-            
-        tracing::info!("SessionCoordinator stopped");
-        println!("✅ STOP: SessionCoordinator fully stopped");
         Ok(())
     }
 

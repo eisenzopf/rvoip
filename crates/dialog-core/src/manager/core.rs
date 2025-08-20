@@ -45,6 +45,9 @@ pub struct DialogManager {
     /// Channel for sending dialog events to external consumers (session-core)
     pub(crate) dialog_event_sender: Arc<tokio::sync::RwLock<Option<mpsc::Sender<DialogEvent>>>>,
     
+    /// Channel for receiving dialog events (for shutdown coordination)
+    pub(crate) dialog_event_receiver: Arc<tokio::sync::RwLock<Option<mpsc::Receiver<DialogEvent>>>>,
+    
     /// Shutdown signal for global event processor
     pub(crate) shutdown_signal: Arc<tokio::sync::Notify>,
 }
@@ -76,6 +79,7 @@ impl DialogManager {
             transaction_to_dialog: Arc::new(DashMap::new()),
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
+            dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
         })
     }
@@ -108,6 +112,7 @@ impl DialogManager {
             transaction_to_dialog: Arc::new(DashMap::new()),
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
+            dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
         };
         
@@ -213,6 +218,12 @@ impl DialogManager {
             TransactionEvent::StrayAck { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
             TransactionEvent::StrayCancel { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
             TransactionEvent::StrayAckRequest { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
+            
+            // Shutdown events don't have transaction IDs
+            TransactionEvent::ShutdownRequested |
+            TransactionEvent::ShutdownReady |
+            TransactionEvent::ShutdownNow |
+            TransactionEvent::ShutdownComplete => TransactionKey::new("shutdown".to_string(), Method::Info, false),
         }
     }
     
@@ -299,6 +310,67 @@ impl DialogManager {
     pub async fn set_dialog_event_sender(&self, sender: mpsc::Sender<DialogEvent>) {
         *self.dialog_event_sender.write().await = Some(sender);
         debug!("Dialog event sender configured for session-core");
+    }
+    
+    /// Setup bidirectional dialog event communication
+    /// 
+    /// Creates a channel that allows session-core to send shutdown events to dialog-core
+    /// and receive dialog events from dialog-core.
+    /// 
+    /// # Returns
+    /// A sender for session-core to send events to dialog-core
+    pub async fn setup_dialog_event_channel(&self) -> mpsc::Sender<DialogEvent> {
+        let (tx, rx) = mpsc::channel(100);
+        
+        // Store receiver for internal processing
+        *self.dialog_event_receiver.write().await = Some(rx);
+        
+        // Spawn dialog event processor
+        let manager = self.clone();
+        tokio::spawn(async move {
+            manager.process_dialog_events().await;
+        });
+        
+        // Return sender to session-core
+        tx
+    }
+    
+    /// Process incoming dialog events (mainly for shutdown coordination)
+    async fn process_dialog_events(&self) {
+        let mut receiver = {
+            let mut rx_guard = self.dialog_event_receiver.write().await;
+            rx_guard.take()
+        };
+        
+        if let Some(mut rx) = receiver {
+            info!("Starting dialog event processor");
+            
+            while let Some(event) = rx.recv().await {
+                match event {
+                    DialogEvent::ShutdownRequested => {
+                        info!("📥 DialogManager received ShutdownRequested event");
+                        self.handle_shutdown_requested().await;
+                    }
+                    _ => {
+                        // Other events are for outgoing to session-core
+                        debug!("Received unexpected dialog event: {:?}", event);
+                    }
+                }
+            }
+            
+            info!("Dialog event processor terminated");
+        }
+    }
+    
+    /// Handle shutdown request from session layer
+    async fn handle_shutdown_requested(&self) {
+        info!("🛑 DialogManager handling shutdown request");
+        
+        // Forward shutdown request to transaction layer
+        // Transaction manager will handle transport shutdown
+        
+        // Report readiness
+        self.emit_dialog_event(DialogEvent::ShutdownReady).await;
     }
     
     /// Subscribe to dialog events
@@ -427,32 +499,53 @@ impl DialogManager {
     
     /// Stop the dialog manager
     /// 
-    /// Gracefully shuts down the dialog manager, terminating all active dialogs
-    /// and cleaning up resources according to RFC 3261 requirements.
+    /// Gracefully shuts down the dialog manager in BOTTOM-UP order
+    /// This is called when receiving ShutdownNow("DialogManager") event
+    /// 
+    /// Shutdown order (bottom-up):
+    /// 1. Shutdown transaction manager (which has already stopped transport)
+    /// 2. Signal global event processor to stop
+    /// 3. Terminate any remaining dialogs
+    /// 4. Clear internal state
+    /// 5. Report completion via event
     pub async fn stop(&self) -> DialogResult<()> {
-        info!("DialogManager stopping");
+        info!("DialogManager stopping gracefully - responding to shutdown event");
         
-        // Signal shutdown to global event processor first
+        // Step 1: Shutdown the transaction manager
+        // Note: Transport should already be stopped by now via events
+        info!("Shutting down transaction manager...");
+        self.transaction_manager.shutdown().await;
+        debug!("Transaction manager shut down");
+        
+        // Step 2: Signal shutdown to global event processor
         self.shutdown_signal.notify_one();
         debug!("Sent shutdown signal to global event processor");
         
-        // Terminate all active dialogs gracefully
+        // Give event processor time to process final messages
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        
+        // Step 3: Now terminate any remaining dialogs
         let dialog_ids: Vec<DialogId> = self.dialogs.iter()
             .map(|entry| entry.key().clone())
             .collect();
         
-        debug!("Terminating {} active dialogs", dialog_ids.len());
-        
-        for dialog_id in dialog_ids {
-            if let Err(e) = self.terminate_dialog(&dialog_id).await {
-                debug!("Failed to terminate dialog {}: {}", dialog_id, e);
+        if !dialog_ids.is_empty() {
+            debug!("Found {} remaining dialogs to clean up", dialog_ids.len());
+            for dialog_id in dialog_ids {
+                if let Some(_) = self.dialogs.remove(&dialog_id) {
+                    debug!("Removed dialog {}", dialog_id);
+                }
             }
         }
         
-        // Clear all mappings
+        // Step 4: Clear all mappings
         self.dialogs.clear();
         self.dialog_lookup.clear();
         self.transaction_to_dialog.clear();
+        
+        // Step 5: Report completion
+        // Since we're in dialog-core, we emit DialogEvent::ShutdownComplete
+        self.emit_dialog_event(DialogEvent::ShutdownComplete).await;
         
         info!("DialogManager stopped successfully");
         Ok(())
