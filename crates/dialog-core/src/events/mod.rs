@@ -5,7 +5,9 @@
 
 pub mod dialog_events;
 pub mod session_coordination;
+pub mod adapter;
 
 // Re-export main event types
 pub use dialog_events::DialogEvent;
-pub use session_coordination::SessionCoordinationEvent; 
+pub use session_coordination::SessionCoordinationEvent;
+pub use adapter::DialogEventAdapter; 

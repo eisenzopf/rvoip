@@ -88,6 +88,13 @@ impl SessionCoordinator {
         config: SessionManagerConfig,
         handler: Option<Arc<dyn CallHandler>>,
     ) -> Result<Arc<Self>> {
+        // Increase file descriptor limit to handle many concurrent RTP sessions
+        // Each RTP session needs at least one socket (file descriptor)
+        // With 500+ concurrent calls, we need thousands of file descriptors
+        if let Err(e) = Self::increase_file_descriptor_limit() {
+            tracing::warn!("Failed to increase file descriptor limit: {}. System may not handle high concurrent call volumes.", e);
+        }
+        
         // Create core services
         let registry = Arc::new(InternalSessionRegistry::new());
         let event_processor = Arc::new(SessionEventProcessor::new());
@@ -182,6 +189,35 @@ impl SessionCoordinator {
         coordinator.initialize(dialog_coord_tx, dialog_coord_rx).await?;
 
         Ok(coordinator)
+    }
+    
+    /// Increase the file descriptor limit for high concurrent call volumes
+    /// 
+    /// This is necessary because each RTP session requires at least one UDP socket,
+    /// and each socket uses a file descriptor. For 500+ concurrent calls, we need
+    /// thousands of file descriptors available.
+    fn increase_file_descriptor_limit() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use rlimit::{Resource, setrlimit, getrlimit};
+        
+        // First, get the current limits
+        let (soft, hard) = getrlimit(Resource::NOFILE)?;
+        
+        // We want at least 10,000 file descriptors for high concurrency
+        const DESIRED_LIMIT: u64 = 10000;
+        
+        // Only increase if current limit is lower
+        if soft < DESIRED_LIMIT {
+            // Try to set to our desired limit, but respect the hard limit
+            let new_limit = DESIRED_LIMIT.min(hard);
+            setrlimit(Resource::NOFILE, new_limit, new_limit)?;
+            
+            tracing::info!("Increased file descriptor limit from {} to {} (hard limit: {})", 
+                         soft, new_limit, hard);
+        } else {
+            tracing::debug!("File descriptor limit already sufficient: {} (hard: {})", soft, hard);
+        }
+        
+        Ok(())
     }
 
     /// Initialize all subsystems and start event loops
@@ -499,6 +535,12 @@ impl SessionCoordinator {
         
         tracing::info!("Music-on-hold stopped, microphone resumed for session: {}", session_id);
         Ok(())
+    }
+    
+    /// Get the event sender for compatibility with existing code
+    /// This provides access to the broadcast sender from the event processor
+    pub async fn event_tx(&self) -> Result<tokio::sync::mpsc::Sender<crate::manager::events::SessionEvent>> {
+        self.event_processor.create_mpsc_forwarder().await
     }
 }
 

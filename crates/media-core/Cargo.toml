@@ -21,6 +21,7 @@ workspace = true
 [dependencies]
 # 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
 rvoip-rtp-core.workspace = true
+infra-common.workspace = true
 
 # Codec support
 rvoip-codec-core.workspace = true
@@ -29,11 +30,13 @@ rvoip-codec-core.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Async support
+async-trait = "0.1"
+tokio.workspace = true
+anyhow.workspace = true
+
 # Error handling
 thiserror = "1.0"
-
-# Async runtime
-tokio = { version = "1.35", features = ["full"] }
 async-std = "1.0"
 
 # Bytes handling

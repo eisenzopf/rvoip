@@ -180,30 +180,56 @@ impl PortAllocator {
                 Ok((socket_addr, None))
             },
             PairingStrategy::Adjacent => {
-                // Find an available even port for RTP
-                let rtp_port = match self.find_available_even_port(ip).await {
-                    Some(port) => port,
-                    None => return Err(Error::Transport("No available even ports for RTP".to_string())),
-                };
-                
-                let rtcp_port = rtp_port + 1;
-                
-                // Verify the RTCP port is available
-                if !self.is_port_available(ip, rtcp_port).await {
-                    // Release the RTP port since we can't use the pair
-                    self.release_port(ip, rtp_port).await;
-                    return Err(Error::Transport(format!("RTCP port {} is not available", rtcp_port)));
+                // Need to atomically allocate an even/odd port pair
+                let mut retries = 0;
+                while retries < self.config.allocation_retries {
+                    // Get a candidate even port
+                    let mut port = match self.config.allocation_strategy {
+                        AllocationStrategy::Sequential => self.get_next_sequential_port().await,
+                        AllocationStrategy::Random => self.get_random_port().await,
+                        AllocationStrategy::Incremental => self.get_next_incremental_port().await,
+                    };
+                    
+                    // Make sure it's even
+                    if port % 2 != 0 {
+                        port -= 1;
+                        if port < self.config.port_range_start {
+                            port = self.config.port_range_start + (self.config.port_range_start % 2);
+                        }
+                    }
+                    
+                    let rtp_port = port;
+                    let rtcp_port = port + 1;
+                    
+                    // Check range validity
+                    if rtcp_port > self.config.port_range_end {
+                        retries += 1;
+                        continue;
+                    }
+                    
+                    // Try to claim both ports atomically
+                    let mut allocated = self.allocated_ports.lock().await;
+                    if !allocated.contains(&rtp_port) && !allocated.contains(&rtcp_port) {
+                        // Both are free, claim them
+                        allocated.insert(rtp_port);
+                        allocated.insert(rtcp_port);
+                        drop(allocated);
+                        
+                        // Track this allocation
+                        self.track_allocation(session_id, rtp_port).await?;
+                        self.track_allocation(session_id, rtcp_port).await?;
+                        
+                        let rtp_addr = SocketAddr::new(ip, rtp_port);
+                        let rtcp_addr = SocketAddr::new(ip, rtcp_port);
+                        
+                        debug!("Allocated adjacent ports {} and {} for session {}", rtp_port, rtcp_port, session_id);
+                        return Ok((rtp_addr, Some(rtcp_addr)));
+                    }
+                    
+                    retries += 1;
                 }
                 
-                // Mark both ports as allocated
-                let rtp_addr = SocketAddr::new(ip, rtp_port);
-                let rtcp_addr = SocketAddr::new(ip, rtcp_port);
-                
-                // Track this allocation
-                self.track_allocation(session_id, rtp_port).await?;
-                self.track_allocation(session_id, rtcp_port).await?;
-                
-                Ok((rtp_addr, Some(rtcp_addr)))
+                return Err(Error::Transport("Failed to allocate adjacent port pair after maximum retries".to_string()));
             },
             PairingStrategy::Separate => {
                 // Allocate two separate ports
@@ -374,21 +400,30 @@ impl PortAllocator {
         }
     }
     
-    /// Try to claim a port
+    /// Try to claim a port atomically
     async fn claim_port(&self, ip: IpAddr, port: u16) -> bool {
-        if !self.is_port_available(ip, port).await {
+        // Check if port is in valid range
+        if port < self.config.port_range_start || port > self.config.port_range_end {
             return false;
         }
         
-        // If validation is required, actually try to bind the socket
+        // Lock allocated ports ONCE and hold it through the entire operation
+        let mut allocated = self.allocated_ports.lock().await;
+        
+        // Check if already allocated while holding the lock
+        if allocated.contains(&port) {
+            return false;
+        }
+        
+        // If validation is required, try to bind the socket
         if self.config.validate_ports {
             let addr = SocketAddr::new(ip, port);
             
-            // Before trying to bind, add to our allocated ports to avoid race conditions
-            {
-                let mut allocated = self.allocated_ports.lock().await;
-                allocated.insert(port);
-            }
+            // Mark as allocated BEFORE releasing the lock for binding test
+            allocated.insert(port);
+            
+            // Temporarily release the lock for the bind operation
+            drop(allocated);
             
             // Try binding
             match UdpSocket::bind(addr).await {
@@ -423,8 +458,7 @@ impl PortAllocator {
                 }
             }
         } else {
-            // No validation required, just mark as allocated
-            let mut allocated = self.allocated_ports.lock().await;
+            // No validation required, just mark as allocated atomically
             allocated.insert(port);
             true
         }
@@ -523,6 +557,49 @@ impl PortAllocator {
 pub struct GlobalPortAllocator;
 
 impl GlobalPortAllocator {
+    /// Configure the global port allocator with a custom port range
+    /// This must be called BEFORE the first call to instance() to take effect
+    pub async fn configure(start_port: u16, end_port: u16) -> Result<()> {
+        // Create the static Mutex if it doesn't exist
+        static INSTANCE: once_cell::sync::OnceCell<Mutex<Option<Arc<PortAllocator>>>> = once_cell::sync::OnceCell::new();
+        let static_mutex = INSTANCE.get_or_init(|| Mutex::new(None));
+        
+        // Lock the mutex and check if allocator already exists
+        let mut allocator = static_mutex.lock().await;
+        
+        if allocator.is_some() {
+            // Allocator already exists, we can't reconfigure it
+            return Err(Error::Transport(
+                "Cannot reconfigure GlobalPortAllocator after it has been initialized".to_string()
+            ));
+        }
+        
+        // Create a new allocator with the specified range
+        let mut config = PortAllocatorConfig::default();
+        config.port_range_start = start_port;
+        config.port_range_end = end_port;
+        
+        // Adjust platform-specific settings
+        match PlatformType::current() {
+            PlatformType::Windows => {
+                config.allocation_retries = 15;
+            },
+            PlatformType::MacOS => {
+                config.allocation_retries = 12;
+            },
+            PlatformType::Linux => {
+                config.allocation_retries = 8;
+            },
+            _ => {}
+        }
+        
+        let port_allocator = PortAllocator::with_config(config.clone());
+        *allocator = Some(Arc::new(port_allocator));
+        
+        info!("Configured global port allocator with range {}-{}", start_port, end_port);
+        Ok(())
+    }
+    
     /// Get the global port allocator instance
     pub async fn instance() -> Arc<PortAllocator> {
         // Create the static Mutex if it doesn't exist

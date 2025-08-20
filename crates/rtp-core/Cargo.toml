@@ -19,8 +19,12 @@ description = "RTP/RTCP protocol implementation for the rvoip stack"
 [lints]
 workspace = true
 [dependencies]
+# Internal crates
+infra-common.workspace = true
+
 bytes = "1.5.0"
 thiserror = "1.0.56"
+anyhow.workspace = true
 tokio = { version = "1.35.1", features = ["rt", "rt-multi-thread", "sync", "net", "time", "macros", "full"] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3"

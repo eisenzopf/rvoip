@@ -63,6 +63,9 @@ pub mod relay;
 // Audio utilities
 pub mod audio;
 
+// Event system and cross-crate communication
+pub mod events;
+
 // Re-export core types
 pub use error::{Error, Result};
 pub use types::*;

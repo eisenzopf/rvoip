@@ -8,6 +8,7 @@ pub mod transport;
 pub mod error;
 pub mod factory;
 pub mod manager;
+pub mod events;
 
 // Internal modules
 #[cfg(test)]
@@ -40,5 +41,6 @@ pub mod prelude {
         bind_udp, bind_tcp,
         factory::TransportFactory,
         manager::TransportManager,
+        events::TransportEventAdapter,
     };
 } 

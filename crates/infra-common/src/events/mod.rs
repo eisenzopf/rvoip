@@ -185,3 +185,7 @@ pub mod zero_copy;
 pub mod system;
 pub mod builder;
 
+// Phase 2.5: Global Event Coordination for Monolithic Event Integration
+pub mod coordinator;
+pub mod cross_crate;
+
