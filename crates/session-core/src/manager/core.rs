@@ -190,13 +190,14 @@ impl SessionManager {
 
     /// Stop the session manager
     pub async fn stop(&self) -> Result<()> {
-        self.cleanup_manager.stop().await?;
-        self.event_processor.stop().await?;
-        
-        // Stop dialog manager (high-level delegation)
+        // Stop dialog manager first to prevent new events from being generated
         self.dialog_manager.stop()
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to stop dialog manager: {}", e)))?;
+        
+        // Then stop the cleanup manager and event processor
+        self.cleanup_manager.stop().await?;
+        self.event_processor.stop().await?;
             
         tracing::info!("SessionManager stopped");
         Ok(())

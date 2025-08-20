@@ -511,7 +511,8 @@ impl SessionEventProcessor {
                 }
             }
         } else {
-            tracing::warn!("Event processor not running, dropping event");
+            // During shutdown, this is expected - use debug level
+            tracing::debug!("Event processor not running (shutdown in progress), dropping event");
         }
         Ok(())
     }
