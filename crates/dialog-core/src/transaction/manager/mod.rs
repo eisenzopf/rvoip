@@ -1379,12 +1379,54 @@ impl TransactionManager {
         // Step 3: Small drain period for in-flight messages
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         
-        // Step 4: Clear all active transactions
+        // Step 4: Wait for all transactions to reach Destroyed lifecycle state
         let client_count = self.client_transactions.lock().await.len();
         let server_count = self.server_transactions.lock().await.len();
         if client_count > 0 || server_count > 0 {
-            debug!("Clearing {} client and {} server transactions", client_count, server_count);
+            debug!("Waiting for {} client and {} server transactions to reach Destroyed state", client_count, server_count);
+            
+            // Give transactions time to process their lifecycle transitions
+            let mut wait_iterations = 0;
+            loop {
+                // Check if all transactions have reached Destroyed state
+                let mut all_destroyed = true;
+                
+                {
+                    let client_txs = self.client_transactions.lock().await;
+                    for tx in client_txs.values() {
+                        if tx.data().get_lifecycle() != TransactionLifecycle::Destroyed {
+                            all_destroyed = false;
+                            break;
+                        }
+                    }
+                }
+                
+                if all_destroyed {
+                    let server_txs = self.server_transactions.lock().await;
+                    for tx in server_txs.values() {
+                        if tx.data().get_lifecycle() != TransactionLifecycle::Destroyed {
+                            all_destroyed = false;
+                            break;
+                        }
+                    }
+                }
+                
+                if all_destroyed {
+                    debug!("All transactions reached Destroyed state");
+                    break;
+                }
+                
+                wait_iterations += 1;
+                if wait_iterations > 20 { // 2 second timeout
+                    warn!("Timeout waiting for transactions to reach Destroyed state, forcing cleanup");
+                    break;
+                }
+                
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
         }
+        
+        // Now clear the transaction maps
         self.client_transactions.lock().await.clear();
         self.server_transactions.lock().await.clear();
         self.transaction_destinations.lock().await.clear();
@@ -1459,7 +1501,12 @@ impl TransactionManager {
         
         // Send to primary channel if it's available
         if let Err(e) = primary_tx.send(event.clone()).await {
-            warn!("Failed to send event to primary channel: {}", e);
+            // During shutdown, channel closed errors are expected
+            if e.to_string().contains("channel closed") {
+                debug!("Primary event channel closed during shutdown (expected)");
+            } else {
+                warn!("Failed to send event to primary channel: {}", e);
+            }
         }
         
         // Send to interested subscribers only
@@ -1478,7 +1525,13 @@ impl TransactionManager {
                 
                 if should_send {
                     if let Err(e) = sub.send(event.clone()).await {
-                        warn!("Failed to send event to subscriber {}: {}", idx, e);
+                        // During shutdown, channel closed errors are expected - use debug level
+                        // Check if this is a channel closed error during shutdown
+                        if e.to_string().contains("channel closed") {
+                            debug!("Subscriber {} channel closed during shutdown (expected)", idx);
+                        } else {
+                            warn!("Failed to send event to subscriber {}: {}", idx, e);
+                        }
                     }
                 }
             }
@@ -1486,7 +1539,12 @@ impl TransactionManager {
             // No transaction filtering, send to all (backward compatibility)
             for (idx, sub) in subs.iter().enumerate() {
                 if let Err(e) = sub.send(event.clone()).await {
-                    warn!("Failed to send event to subscriber {}: {}", idx, e);
+                    // During shutdown, channel closed errors are expected - use debug level
+                    if e.to_string().contains("channel closed") {
+                        debug!("Subscriber {} channel closed during shutdown (expected)", idx);
+                    } else {
+                        warn!("Failed to send event to subscriber {}: {}", idx, e);
+                    }
                 }
             }
         }

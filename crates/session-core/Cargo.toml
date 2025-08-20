@@ -57,6 +57,10 @@ tracing-appender = "0.2"
 fastrand = "2.0"
 serial_test = "3.1"
 hound = "3.5"
+# Benchmark dependencies
+sysinfo = "0.30"
+rustfft = "6.1"
+rvoip-rtp-core.workspace = true
 
 # Example binaries
 [[bin]]
@@ -78,3 +82,8 @@ path = "examples/api_best_practices/uac_client_clean.rs"
 [[bin]]
 name = "uas_server_clean"
 path = "examples/api_best_practices/uas_server_clean.rs"
+
+[[bench]]
+name = "concurrent_calls_with_tones"
+path = "bench/concurrent_calls_with_tones.rs"
+harness = false
