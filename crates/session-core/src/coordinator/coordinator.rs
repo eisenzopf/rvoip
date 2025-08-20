@@ -282,7 +282,7 @@ impl SessionCoordinator {
     /// 3. Clean up remaining resources
     pub async fn stop(&self) -> Result<()> {
         tracing::info!("🛑 SessionCoordinator stop() called - event-based shutdown");
-        println!("🛑 SHUTDOWN: SessionCoordinator stop() called - event-based shutdown with acknowledgments");
+        tracing::debug!("🛑 SHUTDOWN: SessionCoordinator stop() called - event-based shutdown with acknowledgments");
         
         // Create a temporary event subscriber to track shutdown progress
         let mut shutdown_subscriber = match self.event_processor.subscribe().await {
@@ -295,7 +295,7 @@ impl SessionCoordinator {
         };
         
         // Step 1: Initiate shutdown
-        println!("📤 SHUTDOWN: Sending ShutdownInitiated event");
+        tracing::debug!("📤 SHUTDOWN: Sending ShutdownInitiated event");
         self.publish_event(SessionEvent::ShutdownInitiated {
             reason: Some("Coordinator stop() called".to_string()),
         }).await?;
@@ -311,7 +311,7 @@ impl SessionCoordinator {
         
         while !transport_done || !transaction_done || !dialog_done {
             if start.elapsed() > timeout {
-                println!("⚠️ SHUTDOWN: Timeout waiting for components, forcing shutdown");
+                tracing::debug!("⚠️ SHUTDOWN: Timeout waiting for components, forcing shutdown");
                 break;
             }
             
@@ -323,7 +323,7 @@ impl SessionCoordinator {
                 Ok(Ok(event)) => {
                     match event {
                         SessionEvent::ShutdownComplete { component } => {
-                            println!("✅ SHUTDOWN: {} completed shutdown", component);
+                            tracing::debug!("✅ SHUTDOWN: {} completed shutdown", component);
                             match component.as_str() {
                                 "UdpTransport" => transport_done = true,
                                 "TransactionManager" => transaction_done = true,
@@ -332,7 +332,7 @@ impl SessionCoordinator {
                             }
                         }
                         SessionEvent::SystemShutdownComplete => {
-                            println!("✅ SHUTDOWN: System shutdown complete");
+                            tracing::debug!("✅ SHUTDOWN: System shutdown complete");
                             break;
                         }
                         _ => {} // Ignore other events during shutdown
@@ -348,12 +348,12 @@ impl SessionCoordinator {
         }
         
         // Step 3: Stop event processor (after all shutdown events processed)
-        println!("🛑 SHUTDOWN: Stopping event processor...");
+        tracing::debug!("🛑 SHUTDOWN: Stopping event processor...");
         self.event_processor.stop().await?;
-        println!("✅ SHUTDOWN: Event processor stopped");
+        tracing::debug!("✅ SHUTDOWN: Event processor stopped");
         
         // Step 4: Cancel event loop tasks
-        println!("🛑 SHUTDOWN: Cancelling event loops...");
+        tracing::debug!("🛑 SHUTDOWN: Cancelling event loops...");
         let mut event_loop_handle = self.event_loop_handle.lock().await;
         if let Some(handle) = event_loop_handle.take() {
             handle.abort();
@@ -363,12 +363,12 @@ impl SessionCoordinator {
         if let Some(handle) = dialog_event_loop_handle.take() {
             handle.abort();
         }
-        println!("✅ SHUTDOWN: Event loops cancelled");
+        tracing::debug!("✅ SHUTDOWN: Event loops cancelled");
         
         // Step 5: Stop cleanup manager
-        println!("🛑 SHUTDOWN: Stopping cleanup manager...");
+        tracing::debug!("🛑 SHUTDOWN: Stopping cleanup manager...");
         self.cleanup_manager.stop().await?;
-        println!("✅ SHUTDOWN: Cleanup manager stopped");
+        tracing::debug!("✅ SHUTDOWN: Cleanup manager stopped");
         
         // Step 6: Clean up remaining sessions
         let active_session_ids = self.registry.list_active_sessions().await
@@ -378,7 +378,7 @@ impl SessionCoordinator {
             });
         
         if !active_session_ids.is_empty() {
-            println!("🛑 SHUTDOWN: Cleaning up {} remaining sessions", active_session_ids.len());
+            tracing::debug!("🛑 SHUTDOWN: Cleaning up {} remaining sessions", active_session_ids.len());
             for session_id in active_session_ids {
                 let _ = self.stop_media_session(&session_id).await;
                 let _ = self.registry.unregister_session(&session_id).await;
@@ -386,13 +386,13 @@ impl SessionCoordinator {
         }
         
         tracing::info!("SessionCoordinator stopped - event-based shutdown complete");
-        println!("✅ SHUTDOWN: SessionCoordinator fully stopped");
+        tracing::debug!("✅ SHUTDOWN: SessionCoordinator fully stopped");
         Ok(())
     }
     
     /// Direct shutdown fallback when event system is unavailable
     async fn direct_shutdown(&self) -> Result<()> {
-        println!("⚠️ SHUTDOWN: Using direct shutdown fallback");
+        tracing::debug!("⚠️ SHUTDOWN: Using direct shutdown fallback");
         
         // Direct stop of dialog manager
         if let Err(e) = self.dialog_manager.stop().await {
@@ -441,28 +441,28 @@ impl SessionCoordinator {
 
     /// Start media session
     pub(crate) async fn start_media_session(&self, session_id: &SessionId) -> Result<()> {
-        println!("🚀 start_media_session called for {}", session_id);
+        tracing::debug!("🚀 start_media_session called for {}", session_id);
         
         // Check if media session already exists for THIS specific session
         if let Ok(Some(_)) = self.media_manager.get_media_info(session_id).await {
-            println!("⏭️ Media session already exists for {}, skipping duplicate creation", session_id);
+            tracing::debug!("⏭️ Media session already exists for {}, skipping duplicate creation", session_id);
             return Ok(());
         }
         
         // Also check if session mapping exists directly for THIS specific session
         if self.media_manager.has_session_mapping(session_id).await {
-            println!("⏭️ Session mapping exists for {}, skipping media creation", session_id);
+            tracing::debug!("⏭️ Session mapping exists for {}, skipping media creation", session_id);
             return Ok(());
         }
         
-        println!("🎬 Creating new media session for {}", session_id);
+        tracing::debug!("🎬 Creating new media session for {}", session_id);
         match self.media_coordinator.on_session_created(session_id).await {
             Ok(()) => {
-                println!("✅ Successfully started media session for {}", session_id);
+                tracing::debug!("✅ Successfully started media session for {}", session_id);
                 Ok(())
             }
             Err(e) => {
-                println!("❌ FAILED to create media session for {}: {}", session_id, e);
+                tracing::debug!("❌ FAILED to create media session for {}: {}", session_id, e);
                 Err(SessionError::internal(&format!("Failed to start media: {}", e)))
             }
         }

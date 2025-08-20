@@ -238,7 +238,7 @@ impl DialogManager {
     async fn handle_unassociated_transaction_event(&self, transaction_id: &TransactionKey, event: TransactionEvent) -> DialogResult<()> {
         match event {
             TransactionEvent::InviteRequest { request, source, .. } => {
-                println!("🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from {}", source);
+                tracing::debug!("🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from {}", source);
                 debug!("Processing new incoming INVITE request from transaction {}", transaction_id);
                 
                 // This is a new incoming INVITE - create dialog and process it

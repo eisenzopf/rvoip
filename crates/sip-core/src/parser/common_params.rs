@@ -183,7 +183,7 @@ pub fn params_to_hashmap(params: Vec<Param>) -> HashMap<String, Option<String>> 
 // tag-param = "tag" EQUAL token
 pub fn tag_param(input: &[u8]) -> ParseResult<Param> {
     // Add debug logging
-    eprintln!("Attempting to parse tag from: {:?}", input);
+    // eprintln!("Attempting to parse tag from: {:?}", input);
     
     // Use match explicitly to handle errors better
     match preceded(tag_no_case(b"tag"), preceded(equal, token))(input) {
@@ -191,18 +191,18 @@ pub fn tag_param(input: &[u8]) -> ParseResult<Param> {
             // Handle UTF-8 conversion safely
             match str::from_utf8(tag_bytes) {
                 Ok(s) => {
-                    eprintln!("Successfully parsed tag: {}", s);
+                    // eprintln!("Successfully parsed tag: {}", s);
                     Ok((rem, Param::Tag(s.to_string())))
                 },
                 Err(e) => {
-                    eprintln!("UTF-8 error in tag: {:?}", e);
+                    // eprintln!("UTF-8 error in tag: {:?}", e);
                     // Use properly imported types
                     Err(nom::Err::Failure(nom::error::Error::new(tag_bytes, nom::error::ErrorKind::Tag)))
                 }
             }
         },
         Err(e) => {
-            eprintln!("Failed to parse tag parameter: {:?}", e);
+            // eprintln!("Failed to parse tag parameter: {:?}", e);
             Err(e)
         }
     }

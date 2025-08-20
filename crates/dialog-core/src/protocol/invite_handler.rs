@@ -76,16 +76,16 @@ impl DialogManager {
         request: Request,
         source: SocketAddr,
     ) -> DialogResult<()> {
-        println!("🔍 INVITE HANDLER: Processing initial INVITE request from {}", source);
+        tracing::debug!("🔍 INVITE HANDLER: Processing initial INVITE request from {}", source);
         debug!("Processing initial INVITE request");
         
         // Create early dialog
         let dialog_id = self.create_early_dialog_from_invite(&request).await?;
-        println!("🔍 INVITE HANDLER: Created early dialog {}", dialog_id);
+        tracing::debug!("🔍 INVITE HANDLER: Created early dialog {}", dialog_id);
         
         // Associate transaction with dialog
         self.associate_transaction_with_dialog(&transaction_id, &dialog_id);
-        println!("🔍 INVITE HANDLER: Associated transaction {} with dialog {}", transaction_id, dialog_id);
+        tracing::debug!("🔍 INVITE HANDLER: Associated transaction {} with dialog {}", transaction_id, dialog_id);
         
         // Send session coordination event
         let event = SessionCoordinationEvent::IncomingCall {
@@ -95,9 +95,9 @@ impl DialogManager {
             source,
         };
         
-        println!("🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog {}", dialog_id);
+        tracing::debug!("🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog {}", dialog_id);
         self.notify_session_layer(event).await?;
-        println!("🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog {}", dialog_id);
+        tracing::debug!("🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog {}", dialog_id);
         info!("Initial INVITE processed, created dialog {}", dialog_id);
         Ok(())
     }

@@ -473,15 +473,15 @@ impl MediaManager {
     
     /// Create a new media session for a SIP session using real MediaSessionController
     pub async fn create_media_session(&self, session_id: &SessionId) -> super::MediaResult<MediaSessionInfo> {
-        println!("📹 create_media_session called for: {}", session_id);
+        tracing::trace!("📹 create_media_session called for: {}", session_id);
         
         // Create dialog ID for media session (use session ID as base)
         let dialog_id = DialogId::new(format!("media-{}", session_id));
-        println!("📹 Using dialog_id: {}", dialog_id);
+        tracing::trace!("📹 Using dialog_id: {}", dialog_id);
         
         // Check if this media session already exists
         if let Some(existing_info) = self.controller.get_session_info(&dialog_id).await {
-            println!("📹 Media session already exists in controller for {}, reusing", dialog_id);
+            tracing::trace!("📹 Media session already exists in controller for {}, reusing", dialog_id);
             
             // Ensure session mapping exists
             {
@@ -496,7 +496,7 @@ impl MediaManager {
             }
             
             let session_info = MediaSessionInfo::from(existing_info);
-            println!("📹 Reused existing media session: {} for SIP session: {}", dialog_id, session_id);
+            tracing::trace!("📹 Reused existing media session: {} for SIP session: {}", dialog_id, session_id);
             return Ok(session_info);
         }
         
@@ -507,23 +507,23 @@ impl MediaManager {
             None, // Will be set later when remote SDP is processed
         );
         
-        println!("📹 Starting new media session in controller for {}", dialog_id);
+        tracing::trace!("📹 Starting new media session in controller for {}", dialog_id);
         // Start media session using real MediaSessionController
         match self.controller.start_media(dialog_id.clone(), media_config).await {
             Ok(()) => {
-                println!("📹 MediaSessionController.start_media SUCCESS for {}", dialog_id);
+                tracing::trace!("📹 MediaSessionController.start_media SUCCESS for {}", dialog_id);
             }
             Err(e) => {
-                println!("📹 MediaSessionController.start_media FAILED for {}: {}", dialog_id, e);
+                tracing::trace!("📹 MediaSessionController.start_media FAILED for {}: {}", dialog_id, e);
                 return Err(MediaError::MediaEngine { source: Box::new(e) });
             }
         }
         
-        println!("📹 Getting session info from controller for {}", dialog_id);
+        tracing::trace!("📹 Getting session info from controller for {}", dialog_id);
         // Get session info from controller
         let media_session_info = self.controller.get_session_info(&dialog_id).await
             .ok_or_else(|| {
-                println!("📹 get_session_info returned None for {}", dialog_id);
+                tracing::trace!("📹 get_session_info returned None for {}", dialog_id);
                 MediaError::SessionNotFound { session_id: dialog_id.to_string() }
             })?;
         
@@ -531,7 +531,7 @@ impl MediaManager {
         {
             let mut mapping = self.session_mapping.write().await;
             mapping.insert(session_id.clone(), dialog_id.clone());
-            println!("📹 Stored session mapping: {} -> {}", session_id, dialog_id);
+            tracing::trace!("📹 Stored session mapping: {} -> {}", session_id, dialog_id);
         }
         
         // Initialize zero-copy configuration for new session
@@ -543,7 +543,7 @@ impl MediaManager {
         // Convert to our MediaSessionInfo type
         let session_info = MediaSessionInfo::from(media_session_info);
         
-        println!("📹 Successfully created NEW media session: {} for SIP session: {}", dialog_id, session_id);
+        tracing::trace!("📹 Successfully created NEW media session: {} for SIP session: {}", dialog_id, session_id);
         
         Ok(session_info)
     }

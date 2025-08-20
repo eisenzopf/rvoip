@@ -105,30 +105,30 @@ where
     let mut timer_handles = TH::default();
     let tx_id = data.as_ref_key().clone();
 
-    println!("Transaction loop starting for {}", tx_id);
-    println!("Initial state: {:?}", data.as_ref_state().get());
+    tracing::trace!("Transaction loop starting for {}", tx_id);
+    tracing::trace!("Initial state: {:?}", data.as_ref_state().get());
     debug!(id = %tx_id, test_mode = is_test_mode, "Generic transaction loop starting. Initial state: {:?}", data.as_ref_state().get());
 
     while let Some(command) = cmd_rx.recv().await {
         let current_state = data.as_ref_state().get();
         let tx_id_clone = data.as_ref_key().clone();
 
-        println!("Received command: {:?} for transaction {}", command, tx_id_clone);
+        tracing::trace!("Received command: {:?} for transaction {}", command, tx_id_clone);
         debug!(id=%tx_id_clone, ?command, "Transaction received command");
         
         match command {
             InternalTransactionCommand::TransitionTo(requested_new_state) => {
-                println!("Processing TransitionTo({:?}) current state: {:?}", requested_new_state, current_state);
+                tracing::trace!("Processing TransitionTo({:?}) current state: {:?}", requested_new_state, current_state);
                 debug!(id=%tx_id_clone, current_state=?current_state, new_state=?requested_new_state, "Processing state transition");
                 
                 if current_state == requested_new_state {
-                    println!("Already in requested state, no transition needed: {:?}", current_state);
+                    tracing::trace!("Already in requested state, no transition needed: {:?}", current_state);
                     trace!(id=%tx_id_clone, state=?current_state, "Already in requested state, no transition needed.");
                     continue;
                 }
 
                 if let Err(e) = AtomicTransactionState::validate_transition(logic.kind(), current_state, requested_new_state) {
-                    println!("Invalid state transition: {:?} -> {:?}, error: {}", current_state, requested_new_state, e);
+                    tracing::trace!("Invalid state transition: {:?} -> {:?}, error: {}", current_state, requested_new_state, e);
                     error!(id=%tx_id_clone, error=%e, "Invalid state transition: {:?} -> {:?}", current_state, requested_new_state);
                     let _ = data.get_tu_event_sender().send(TransactionEvent::Error {
                         transaction_id: Some(tx_id_clone.clone()),
@@ -137,11 +137,11 @@ where
                     continue;
                 }
 
-                println!("Valid state transition: {:?} -> {:?}", current_state, requested_new_state);
+                tracing::trace!("Valid state transition: {:?} -> {:?}", current_state, requested_new_state);
                 debug!(id=%tx_id_clone, "State transition: {:?} -> {:?}", current_state, requested_new_state);
                 logic.cancel_all_specific_timers(&mut timer_handles);
                 let previous_state = data.as_ref_state().set(requested_new_state);
-                println!("State successfully changed to: {:?}", requested_new_state);
+                tracing::trace!("State successfully changed to: {:?}", requested_new_state);
                 debug!(id=%tx_id_clone, "State changed from {:?} to {:?}", previous_state, requested_new_state);
 
                 // Handle lifecycle transition if entering terminal state
@@ -168,7 +168,7 @@ where
                 
                     match result {
                         Ok(Ok(())) => {
-                            println!("Sent StateChanged event result: Success");
+                            tracing::trace!("Sent StateChanged event result: Success");
                         }
                         Ok(Err(e)) => {
                             // Channel is closed
@@ -191,7 +191,7 @@ where
                         Err(_) => {
                             // Timeout - channel is likely full, log but continue
                             warn!(id=%tx_id_clone, "Timeout sending StateChanged event - channel may be congested");
-                            println!("Sent StateChanged event result: Timeout (channel congested)");
+                            tracing::trace!("Sent StateChanged event result: Timeout (channel congested)");
                             // Don't terminate on timeout - just continue processing
                         }
                     }
@@ -385,7 +385,7 @@ where
     }
 
     let final_state = data.as_ref_state().get();
-    println!("Transaction loop ending for {}. Final state: {:?}", data.as_ref_key(), final_state);
+    tracing::trace!("Transaction loop ending for {}. Final state: {:?}", data.as_ref_key(), final_state);
     logic.cancel_all_specific_timers(&mut timer_handles);
     debug!(id = %data.as_ref_key().branch, final_state=?final_state, "Generic transaction loop ended.");
 

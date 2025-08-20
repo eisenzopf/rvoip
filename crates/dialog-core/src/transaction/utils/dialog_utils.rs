@@ -94,13 +94,13 @@ pub fn create_request_from_dialog_template(
         vec![Param::branch(&generate_branch())]
     ).unwrap_or_else(|e| {
         // Log the error for debugging
-        eprintln!("Failed to create Via header with local address {}: {}", local_address, e);
+        tracing::error!("Failed to create Via header with local address {}: {}", local_address, e);
         
         // Try a simpler fallback without branch parameter
         Via::new("SIP", "2.0", "UDP", &local_address.ip().to_string(), Some(local_address.port()), vec![])
             .unwrap_or_else(|e2| {
                 // Log the second error and panic - we should never reach this point
-                eprintln!("Critical error: Failed to create Via header even without branch parameter: {}", e2);
+                tracing::error!("Critical error: Failed to create Via header even without branch parameter: {}", e2);
                 panic!("Unable to create Via header with local address {}", local_address);
             })
     });

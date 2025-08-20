@@ -227,8 +227,13 @@ impl AudioValidator {
             let client_check = if result.client_tone.is_valid { "✅" } else { "❌" };
             let server_check = if result.server_tone.is_valid { "✅" } else { "❌" };
             
-            println!("║ Call {:8}: {} Duration: {:.2}s │ 440Hz: {} │ 880Hz: {} │ SNR: {:.1}dB ║",
-                &result.call_id[..8],
+            let call_id_display = if result.call_id.len() >= 8 {
+                result.call_id[..8].to_string()
+            } else {
+                format!("{:8}", result.call_id)
+            };
+            println!("║ Call {}: {} Duration: {:.2}s │ 440Hz: {} │ 880Hz: {} │ SNR: {:.1}dB ║",
+                call_id_display,
                 duration_check,
                 result.duration,
                 client_check,

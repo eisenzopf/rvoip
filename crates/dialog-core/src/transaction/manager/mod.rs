@@ -1783,9 +1783,9 @@ impl TransactionManager {
         debug!(method=%request.method(), destination=%destination, "Creating client transaction");
         
         // Debug the Via headers in the request
-        println!("Request Via headers before transaction creation:");
+        tracing::trace!("Request Via headers before transaction creation:");
         for (i, via) in request.via_headers().iter().enumerate() {
-            println!("  Via[{}]: {}", i, via);
+            tracing::trace!("  Via[{}]: {}", i, via);
         }
         
         // Extract branch parameter from the top Via header or generate a new one
@@ -1818,7 +1818,7 @@ impl TransactionManager {
         if request.method() == Method::Cancel {
             // Since CANCEL already has a Via header with the correct branch from create_cancel_request,
             // we don't need to modify it further
-            println!("CANCEL request detected - not adding Via header");
+            tracing::trace!("CANCEL request detected - not adding Via header");
         } else {
             // For other methods, ensure the request has a Via header with our branch
             // Create a Via header with the branch parameter
@@ -1838,15 +1838,15 @@ impl TransactionManager {
             }
         }
         
-        println!("Request Via headers after potential modification:");
+        tracing::trace!("Request Via headers after potential modification:");
         for (i, via) in modified_request.via_headers().iter().enumerate() {
-            println!("  Via[{}]: {}", i, via);
+            tracing::trace!("  Via[{}]: {}", i, via);
         }
         
         // Create the appropriate transaction based on the request method
         let transaction: Box<dyn ClientTransaction + Send> = match modified_request.method() {
             Method::Invite => {
-                println!("Creating ClientInviteTransaction: {}", key);
+                tracing::trace!("Creating ClientInviteTransaction: {}", key);
                 let tx = ClientInviteTransaction::new(
                     key.clone(),
                     modified_request.clone(),
@@ -1855,7 +1855,7 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request)
                 )?;
-                println!("Created ClientInviteTransaction: {}", key);
+                tracing::trace!("Created ClientInviteTransaction: {}", key);
                 Box::new(tx)
             },
             Method::Cancel => {

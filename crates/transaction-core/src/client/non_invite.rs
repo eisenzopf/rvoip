@@ -703,12 +703,12 @@ impl ClientTransaction for ClientNonInviteTransaction {
         let tx_id = self.data.id.clone(); // Get ID for logging
         
         Box::pin(async move {
-            println!("ClientNonInviteTransaction::initiate called for {}", tx_id);
+            tracing::trace!("ClientNonInviteTransaction::initiate called for {}", tx_id);
             let current_state = data.state.get();
-            println!("Current state is {:?}", current_state);
+            tracing::trace!("Current state is {:?}", current_state);
             
             if current_state != TransactionState::Initial {
-                println!("Invalid state transition: {:?} -> Trying", current_state);
+                tracing::trace!("Invalid state transition: {:?} -> Trying", current_state);
                 // Corrected Error::invalid_state_transition call
                 return Err(Error::invalid_state_transition(
                     kind, // Pass the correct kind
@@ -718,24 +718,24 @@ impl ClientTransaction for ClientNonInviteTransaction {
                 ));
             }
 
-            println!("Sending TransitionTo(Trying) command for {}", tx_id);
+            tracing::trace!("Sending TransitionTo(Trying) command for {}", tx_id);
             match data.cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Trying)).await {
                 Ok(_) => {
-                    println!("Successfully sent TransitionTo command for {}", tx_id);
+                    tracing::trace!("Successfully sent TransitionTo command for {}", tx_id);
                     // Wait a small amount of time to allow the transaction runner to process the command
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                     
                     // Verify state change
                     let new_state = data.state.get();
-                    println!("State after sending command: {:?}", new_state);
+                    tracing::trace!("State after sending command: {:?}", new_state);
                     if new_state != TransactionState::Trying {
-                        println!("WARNING: State didn't change to Trying, still: {:?}", new_state);
+                        tracing::trace!("WARNING: State didn't change to Trying, still: {:?}", new_state);
                     }
                     
                     Ok(())
                 },
                 Err(e) => {
-                    println!("Failed to send command: {}", e);
+                    tracing::trace!("Failed to send command: {}", e);
                     Err(Error::Other(format!("Failed to send command: {}", e)))
                 }
             }
