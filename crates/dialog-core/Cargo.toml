@@ -23,6 +23,7 @@ workspace = true
 # 🎯 INTERNAL CRATES - Use workspace dependencies
 rvoip-sip-core.workspace = true
 rvoip-sip-transport.workspace = true
+infra-common.workspace = true
 # transaction-core has been merged into this crate
 
 # External dependencies from workspace

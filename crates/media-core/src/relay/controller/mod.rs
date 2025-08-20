@@ -107,6 +107,8 @@ pub struct MediaSessionController {
     conference_event_rx: RwLock<Option<mpsc::UnboundedReceiver<ConferenceMixingEvent>>>,
     /// Quality monitor for conference sessions
     pub(super) quality_monitor: Option<Arc<QualityMonitor>>,
+    /// Port allocator for RTP ports (if custom range specified)
+    port_allocator: Option<Arc<PortAllocator>>,
     
     // Performance library integration fields
     /// Global performance metrics for all sessions
@@ -197,6 +199,7 @@ impl MediaSessionController {
             conference_event_tx,
             conference_event_rx: RwLock::new(Some(conference_event_rx)),
             quality_monitor: None,
+            port_allocator: None,  // Use GlobalPortAllocator by default
             // Performance fields
             performance_metrics,
             frame_pool,
@@ -217,17 +220,25 @@ impl MediaSessionController {
         self.rtp_bridge.add_rtp_event_callback(callback).await;
     }
 
-    /// Create a new media session controller with custom port range (deprecated - use new() instead)
-    pub fn with_port_range(_base_port: u16, _max_port: u16) -> Self {
-        // Port allocation is now handled by rtp-core's GlobalPortAllocator
-        // These parameters are ignored for compatibility
-        Self::new()
+    /// Create a new media session controller with custom port range
+    pub fn with_port_range(base_port: u16, max_port: u16) -> Self {
+        let mut controller = Self::new();
+        
+        // Create a custom port allocator with the specified range
+        let mut config = PortAllocatorConfig::default();
+        config.port_range_start = base_port;
+        config.port_range_end = max_port;
+        
+        controller.port_allocator = Some(Arc::new(PortAllocator::with_config(config)));
+        info!("Created MediaSessionController with custom port range {}-{}", base_port, max_port);
+        
+        controller
     }
     
     /// Create a new media session controller with conference audio mixing enabled
     pub async fn with_conference_mixing(
-        _base_port: u16, 
-        _max_port: u16, 
+        base_port: u16, 
+        max_port: u16, 
         conference_config: ConferenceMixingConfig
     ) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -287,6 +298,12 @@ impl MediaSessionController {
             fallback_manager,
         ));
         
+        // Create a custom port allocator with the specified range
+        let mut port_config = PortAllocatorConfig::default();
+        port_config.port_range_start = base_port;
+        port_config.port_range_end = max_port;
+        let port_allocator = Some(Arc::new(PortAllocator::with_config(port_config)));
+        
         Ok(Self {
             relay: None,
             sessions: RwLock::new(HashMap::new()),
@@ -298,6 +315,7 @@ impl MediaSessionController {
             conference_event_tx,
             conference_event_rx: RwLock::new(Some(conference_event_rx)),
             quality_monitor: None,
+            port_allocator,
             // Performance fields
             performance_metrics,
             frame_pool,
@@ -324,10 +342,17 @@ impl MediaSessionController {
             }
         }
 
-        // Allocate RTP port using rtp-core's dynamic allocator
-        let global_allocator = GlobalPortAllocator::instance().await;
+        // Allocate RTP port using either our local allocator or the global one
+        let allocator = if let Some(ref port_alloc) = self.port_allocator {
+            // Use our custom port allocator with configured range
+            port_alloc.clone()
+        } else {
+            // Fall back to global allocator
+            GlobalPortAllocator::instance().await
+        };
+        
         let dialog_session_id = format!("dialog_{}", dialog_id);
-        let (local_rtp_addr, _) = global_allocator
+        let (local_rtp_addr, _) = allocator
             .allocate_port_pair(&dialog_session_id, Some(config.local_addr.ip()))
             .await
             .map_err(|e| Error::config(format!("Failed to allocate RTP port: {}", e)))?;
@@ -447,11 +472,18 @@ impl MediaSessionController {
             }
         }
 
-        // Release port via GlobalPortAllocator
+        // Release port via the appropriate allocator
         if session_info.rtp_port.is_some() {
-            let global_allocator = GlobalPortAllocator::instance().await;
+            let allocator = if let Some(ref port_alloc) = self.port_allocator {
+                // Use our custom port allocator
+                port_alloc.clone()
+            } else {
+                // Fall back to global allocator
+                GlobalPortAllocator::instance().await
+            };
+            
             let dialog_session_id = format!("dialog_{}", dialog_id);
-            if let Err(e) = global_allocator.release_session(&dialog_session_id).await {
+            if let Err(e) = allocator.release_session(&dialog_session_id).await {
                 warn!("Failed to release ports for dialog {}: {}", dialog_id, e);
             }
         }

@@ -47,6 +47,7 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 async-trait.workspace = true
 futures.workspace = true
+rlimit = "0.10"
 
 [dev-dependencies]
 tokio.workspace = true

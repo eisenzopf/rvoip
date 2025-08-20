@@ -507,6 +507,35 @@ impl SessionEventProcessor {
         // Filtering can be done by the subscriber if needed
         self.subscribe().await
     }
+    
+    /// Get a clone of the broadcast sender for compatibility with existing code
+    /// This allows other components to publish events directly
+    pub async fn get_sender(&self) -> Result<broadcast::Sender<SessionEvent>> {
+        let sender_guard = self.sender.read().await;
+        if let Some(sender) = sender_guard.as_ref() {
+            Ok(sender.clone())
+        } else {
+            Err(crate::errors::SessionError::internal("Event processor not running"))
+        }
+    }
+    
+    /// Create an mpsc::Sender that forwards to the broadcast system for compatibility
+    /// This enables components expecting mpsc channels to work with our broadcast system
+    pub async fn create_mpsc_forwarder(&self) -> Result<tokio::sync::mpsc::Sender<SessionEvent>> {
+        let broadcast_sender = self.get_sender().await?;
+        let (mpsc_tx, mut mpsc_rx) = tokio::sync::mpsc::channel(1000);
+        
+        // Spawn a task to forward mpsc messages to broadcast
+        tokio::spawn(async move {
+            while let Some(event) = mpsc_rx.recv().await {
+                if let Err(e) = broadcast_sender.send(event) {
+                    tracing::warn!("Failed to forward event to broadcast system: {}", e);
+                }
+            }
+        });
+        
+        Ok(mpsc_tx)
+    }
 
     /// Check if the event processor is running
     pub async fn is_running(&self) -> bool {

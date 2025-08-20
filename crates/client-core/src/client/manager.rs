@@ -480,7 +480,11 @@ impl ClientManager {
         
         // Now set the session event channel on the call handler
         // This allows client-core to send cleanup confirmations back to session-core
-        call_handler.set_session_event_tx(coordinator.event_tx.clone()).await;
+        let session_event_tx = coordinator.event_tx().await
+            .map_err(|e| ClientError::InternalError {
+                message: format!("Failed to get session event sender: {}", e)
+            })?;
+        call_handler.set_session_event_tx(session_event_tx).await;
         
         // Subscribe to session events to handle transfer events
         let session_event_subscriber = coordinator.event_processor.subscribe().await
@@ -503,8 +507,8 @@ impl ClientManager {
         
         let audio_setup_calls = Arc::new(DashMap::new());
         
-        // Clone for the session event task
-        let event_tx_for_session = event_tx.clone();
+        // Clone for the client event task (it handles session events and converts them to client events)
+        let client_event_tx_for_session = event_tx.clone();
         let session_mapping_for_session = session_mapping.clone();
         
         // Create the client manager
@@ -561,7 +565,7 @@ impl ClientManager {
                                 priority: EventPriority::High,
                             };
                             
-                            if let Err(e) = event_tx_for_session.send(event) {
+                            if let Err(e) = client_event_tx_for_session.send(event) {
                                 tracing::warn!("Failed to send IncomingTransferRequest event: {}", e);
                             }
                         }
@@ -586,7 +590,7 @@ impl ClientManager {
                                 priority: EventPriority::Normal,
                             };
                             
-                            if let Err(e) = event_tx_for_session.send(event) {
+                            if let Err(e) = client_event_tx_for_session.send(event) {
                                 tracing::warn!("Failed to send TransferProgress event: {}", e);
                             }
                         }
