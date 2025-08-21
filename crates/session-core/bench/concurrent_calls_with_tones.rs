@@ -354,7 +354,8 @@ impl CallHandler for ServerHandler {
             if is_selected {
                 info!("Server: Call {} is selected for audio capture", &call_id[..8.min(call_id.len())]);
                 let validator = self.audio_validator.clone();
-                let call_id_recv = call_id.clone();
+                // Use SIP Call-ID for audio capture if available, otherwise use session ID
+                let call_id_recv = call.sip_call_id.clone().unwrap_or(call_id.clone());
                 let session_id_recv = session_id.clone();
                 let coordinator_recv = coordinator.clone();
                 
