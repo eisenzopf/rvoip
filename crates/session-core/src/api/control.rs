@@ -440,6 +440,7 @@ impl SessionControl for Arc<SessionCoordinator> {
                 &prepared_call.from,
                 &prepared_call.to,
                 Some(prepared_call.sdp_offer.clone()),
+                call_id.clone(),
             )
             .await
             .map_err(|e| SessionError::internal(&format!("Failed to initiate call: {}", e)))?;
@@ -462,7 +463,7 @@ impl SessionControl for Arc<SessionCoordinator> {
         to: &str,
         sdp: Option<String>,
     ) -> Result<CallSession> {
-        SessionCoordinator::create_outgoing_call(self, from, to, sdp).await
+        SessionCoordinator::create_outgoing_call(self, from, to, sdp, None).await
     }
     
     async fn terminate_session(&self, session_id: &SessionId) -> Result<()> {

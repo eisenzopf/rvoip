@@ -156,7 +156,7 @@ pub async fn create_call(
     from: Option<&str>,
 ) -> Result<CallSession> {
     let from_uri = from.unwrap_or("sip:user@localhost");
-    manager.create_outgoing_call(from_uri, to, None).await
+    manager.create_outgoing_call(from_uri, to, None, None).await
 }
 
 /// Create an outgoing call with custom SDP
@@ -201,7 +201,7 @@ pub async fn create_call_with_sdp(
     sdp: String,
 ) -> Result<CallSession> {
     let from_uri = from.unwrap_or("sip:user@localhost");
-    manager.create_outgoing_call(from_uri, to, Some(sdp)).await
+    manager.create_outgoing_call(from_uri, to, Some(sdp), None).await
 }
 
 /// Generate an SDP offer for making calls

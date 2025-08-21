@@ -13,8 +13,12 @@ impl SessionCoordinator {
         from: &str,
         to: &str,
         sdp: Option<String>,
+        sip_call_id: Option<String>,
     ) -> Result<CallSession> {
         let session_id = SessionId::new();
+        
+        // Generate Call-ID if not provided (UAC responsibility per RFC 3261)
+        let sip_call_id = sip_call_id.or_else(|| Some(format!("call-{}", uuid::Uuid::new_v4())));
         
         let call = CallSession {
             id: session_id.clone(),
@@ -22,7 +26,7 @@ impl SessionCoordinator {
             to: to.to_string(),
             state: CallState::Initiating,
             started_at: Some(std::time::Instant::now()),
-            sip_call_id: None,
+            sip_call_id: sip_call_id.clone(),
         };
 
         // Create internal session from call session
@@ -56,9 +60,9 @@ impl SessionCoordinator {
         // The 100 calls test uses different From URIs for each call
         self.dialog_coordinator.track_from_uri(session_id.clone(), from);
         
-        // Create dialog
+        // Create dialog with the Call-ID
         let dialog_handle = self.dialog_manager
-            .create_outgoing_call(session_id.clone(), from, to, sdp)
+            .create_outgoing_call(session_id.clone(), from, to, sdp, sip_call_id.clone())
             .await
             .map_err(|e| SessionError::internal(&format!("Failed to create call: {}", e)))?;
         
@@ -67,7 +71,7 @@ impl SessionCoordinator {
         self.dialog_coordinator.map_session_to_dialog(
             session_id.clone(), 
             dialog_handle.dialog_id.clone(),
-            None  // Call-ID will be tracked when we see the first SIP message
+            sip_call_id.clone()  // Pass the Call-ID for tracking
         );
         
         tracing::info!("📍 SESSION OPS: Mapped session {} to dialog {} for outgoing call", 
