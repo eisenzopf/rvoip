@@ -64,6 +64,18 @@ impl CallHandler for ClientHandler {
         // Store session
         self.established_calls.lock().await.push(call_id.clone());
         
+        // Register call for potential audio capture (UAC needs to register in on_call_established)
+        let call_count = self.established_calls.lock().await.len() - 1; // 0-based index
+        if self.audio_validator.should_capture_index(call_count).await {
+            if let Some(ref sip_call_id) = call.sip_call_id {
+                self.audio_validator.register_call_for_index(call_count, sip_call_id.clone()).await;
+                info!("Client: Registered Call-ID {} for audio capture", sip_call_id);
+            } else {
+                self.audio_validator.register_call_for_index(call_count, call_id.clone()).await;
+                info!("Client: Registered session ID {} for audio capture", &call_id[..8.min(call_id.len())]);
+            }
+        }
+        
         // Log the Call-ID for debugging
         if let Some(ref sip_call_id) = call.sip_call_id {
             info!("Client: Call {} has Call-ID: {}", &call_id[..8.min(call_id.len())], sip_call_id);
