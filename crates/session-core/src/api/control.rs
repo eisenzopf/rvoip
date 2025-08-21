@@ -366,6 +366,9 @@ impl SessionControl for Arc<SessionCoordinator> {
         // Create a session ID
         let session_id = SessionId::new();
         
+        // Generate a Call-ID for this outgoing call (UAC generates the Call-ID per RFC 3261)
+        let sip_call_id = format!("call-{}", uuid::Uuid::new_v4());
+        
         // Create the call session in preparing state
         let call = CallSession {
             id: session_id.clone(),
@@ -373,7 +376,7 @@ impl SessionControl for Arc<SessionCoordinator> {
             to: to.to_string(),
             state: CallState::Initiating,
             started_at: Some(std::time::Instant::now()),
-            sip_call_id: None, // Will be populated when we get the response
+            sip_call_id: Some(sip_call_id.clone()),
         };
         
         // Create and register internal session
@@ -423,6 +426,13 @@ impl SessionControl for Arc<SessionCoordinator> {
         // Use the configured local_address which dialog-core will actually use
         self.dialog_coordinator().track_from_uri(prepared_call.session_id.clone(), &self.config().local_address);
         
+        // Get the Call-ID from the session (we generated it when preparing the call)
+        let call_id = if let Ok(Some(session)) = self.get_session(&prepared_call.session_id).await {
+            session.sip_call_id.clone()
+        } else {
+            None
+        };
+        
         // Send the INVITE with the prepared SDP
         let dialog_handle = self.dialog_manager
             .create_outgoing_call(
@@ -434,11 +444,11 @@ impl SessionControl for Arc<SessionCoordinator> {
             .await
             .map_err(|e| SessionError::internal(&format!("Failed to initiate call: {}", e)))?;
         
-        // Set session-to-dialog mapping in the coordinator
+        // Set session-to-dialog mapping in the coordinator with the Call-ID
         self.dialog_coordinator().map_session_to_dialog(
             prepared_call.session_id.clone(), 
             dialog_handle.dialog_id.clone(),
-            None  // Call-ID will be tracked when we see the first SIP message
+            call_id
         );
         
         // Return the session
