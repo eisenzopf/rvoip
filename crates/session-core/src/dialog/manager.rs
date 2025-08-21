@@ -67,10 +67,11 @@ impl DialogManager {
         from: &str,
         to: &str,
         sdp: Option<String>,
+        call_id: Option<String>,
     ) -> DialogResult<SessionDialogHandle> {
         // Create SIP INVITE and dialog using dialog-core unified API
         let call_handle = self.dialog_api
-            .make_call(from, to, sdp)
+            .make_call_with_id(from, to, sdp, call_id)
             .await
             .map_err(|e| DialogError::DialogCreation {
                 reason: format!("Failed to create call via dialog-core: {}", e),

@@ -374,6 +374,17 @@ impl UnifiedDialogManager {
         to_uri: &str,
         sdp_offer: Option<String>,
     ) -> ApiResult<CallHandle> {
+        self.make_call_with_id(from_uri, to_uri, sdp_offer, None).await
+    }
+
+    /// Make an outgoing call with specific Call-ID
+    pub async fn make_call_with_id(
+        &self,
+        from_uri: &str,
+        to_uri: &str,
+        sdp_offer: Option<String>,
+        call_id: Option<String>,
+    ) -> ApiResult<CallHandle> {
         // Check if outgoing calls are supported
         if !self.config.supports_outgoing_calls() {
             error!("Cannot make outgoing call: Outgoing calls not supported in {:?} mode", 
@@ -402,7 +413,7 @@ impl UnifiedDialogManager {
             })?;
         
         // Create outgoing dialog
-        let dialog_id = self.core.create_outgoing_dialog(from_uri, to_uri, None).await
+        let dialog_id = self.core.create_outgoing_dialog(from_uri, to_uri, call_id).await
             .map_err(|e| {
                 error!("Failed to create outgoing dialog: {}", e);
                 ApiError::from(e)

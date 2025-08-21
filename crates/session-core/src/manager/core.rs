@@ -209,8 +209,12 @@ impl SessionManager {
         from: &str,
         to: &str,
         sdp: Option<String>,
+        sip_call_id: Option<String>,
     ) -> Result<CallSession> {
         let session_id = SessionId::new();
+        
+        // Generate Call-ID if not provided (UAC responsibility per RFC 3261)
+        let sip_call_id = sip_call_id.or_else(|| Some(format!("call-{}", uuid::Uuid::new_v4())));
         
         // Create the call session first
         let call = CallSession {
@@ -219,6 +223,7 @@ impl SessionManager {
             to: to.to_string(),
             state: crate::api::types::CallState::Initiating,
             started_at: Some(std::time::Instant::now()),
+            sip_call_id: sip_call_id.clone(),
         };
 
         // Register the session BEFORE creating the dialog to ensure it exists
@@ -243,7 +248,7 @@ impl SessionManager {
         
         // Create SIP INVITE and dialog using DialogManager (high-level delegation)
         let _dialog_handle = self.dialog_manager
-            .create_outgoing_call(session_id.clone(), from, to, sdp)
+            .create_outgoing_call(session_id.clone(), from, to, sdp, sip_call_id)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to create call via dialog manager: {}", e)))?;
         tracing::info!("Created outgoing call: {} -> {}", from, to);

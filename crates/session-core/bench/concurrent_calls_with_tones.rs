@@ -69,7 +69,7 @@ impl CallHandler for ClientHandler {
         if self.audio_validator.should_capture_index(call_count).await {
             if let Some(ref sip_call_id) = call.sip_call_id {
                 self.audio_validator.register_call_for_index(call_count, sip_call_id.clone()).await;
-                info!("Client: Registered Call-ID {} for audio capture", sip_call_id);
+                info!("UAC on_call_established: Registered Call-ID {} (index {}) for audio capture", sip_call_id, call_count);
             } else {
                 self.audio_validator.register_call_for_index(call_count, call_id.clone()).await;
                 info!("Client: Registered session ID {} for audio capture", &call_id[..8.min(call_id.len())]);
@@ -296,7 +296,7 @@ impl CallHandler for ServerHandler {
             // Register using the SIP Call-ID if available, otherwise the session ID
             if let Some(ref sip_call_id) = call.sip_call_id {
                 self.audio_validator.register_call_for_index(call_index, sip_call_id.clone()).await;
-                info!("Server: Registered Call-ID {} for audio capture", sip_call_id);
+                info!("UAS on_incoming_call: Registered Call-ID {} (index {}) for audio capture", sip_call_id, call_index);
             } else {
                 self.audio_validator.register_call_for_index(call_index, call.id.0.clone()).await;
             }

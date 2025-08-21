@@ -433,6 +433,29 @@ impl UnifiedDialogApi {
     ) -> ApiResult<CallHandle> {
         self.manager.make_call(from_uri, to_uri, sdp_offer).await
     }
+
+    /// Make an outgoing call with a specific Call-ID
+    ///
+    /// Like `make_call` but allows specifying the Call-ID to use for the SIP dialog.
+    /// This is useful when the call originator needs to control the Call-ID.
+    ///
+    /// # Arguments
+    /// * `from_uri` - The calling party's SIP URI
+    /// * `to_uri` - The called party's SIP URI  
+    /// * `sdp_offer` - Optional SDP offer for media negotiation
+    /// * `call_id` - Optional Call-ID to use (will be generated if None)
+    ///
+    /// # Returns
+    /// A `CallHandle` for controlling the established call
+    pub async fn make_call_with_id(
+        &self,
+        from_uri: &str,
+        to_uri: &str,
+        sdp_offer: Option<String>,
+        call_id: Option<String>,
+    ) -> ApiResult<CallHandle> {
+        self.manager.make_call_with_id(from_uri, to_uri, sdp_offer, call_id).await
+    }
     
     /// Create an outgoing dialog without sending INVITE (Client/Hybrid modes only)
     ///
