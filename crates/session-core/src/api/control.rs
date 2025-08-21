@@ -373,6 +373,7 @@ impl SessionControl for Arc<SessionCoordinator> {
             to: to.to_string(),
             state: CallState::Initiating,
             started_at: Some(std::time::Instant::now()),
+            sip_call_id: None, // Will be populated when we get the response
         };
         
         // Create and register internal session
@@ -858,6 +859,8 @@ impl SessionControl for Arc<SessionCoordinator> {
     }
     
     async fn accept_incoming_call(&self, call: &IncomingCall, sdp_answer: Option<String>) -> Result<CallSession> {
+        tracing::info!("accept_incoming_call: call {} has SDP offer: {}", call.id, call.sdp.is_some());
+        
         // Check if session already exists
         if let Ok(Some(session)) = self.get_session(&call.id).await {
             // Check if already accepted
@@ -891,6 +894,7 @@ impl SessionControl for Arc<SessionCoordinator> {
                 to: call.to.clone(),
                 state: CallState::Ringing,
                 started_at: Some(std::time::Instant::now()),
+                sip_call_id: call.sip_call_id.clone(),
             };
             
             // Create and register internal session
@@ -901,15 +905,21 @@ impl SessionControl for Arc<SessionCoordinator> {
         
         // If we have SDP in the offer and no answer provided, generate one
         let final_sdp_answer = if call.sdp.is_some() && sdp_answer.is_none() {
-            // Use MediaControl to generate answer
-            match MediaControl::generate_sdp_answer(self, &call.id, call.sdp.as_ref().unwrap()).await {
-                Ok(answer) => Some(answer),
+            tracing::info!("Generating SDP answer for call {} because no answer was provided", call.id);
+            // Use the public generate_sdp_answer function which calls negotiate_sdp_as_uas
+            // This ensures the MediaNegotiated event is published
+            match generate_sdp_answer(self, &call.id, call.sdp.as_ref().unwrap()).await {
+                Ok(answer) => {
+                    tracing::info!("Generated SDP answer for call {}", call.id);
+                    Some(answer)
+                },
                 Err(e) => {
                     tracing::warn!("Failed to generate SDP answer: {}", e);
                     None
                 }
             }
         } else {
+            tracing::info!("Using provided SDP answer for call {} (provided: {})", call.id, sdp_answer.is_some());
             sdp_answer
         };
         
@@ -927,17 +937,12 @@ impl SessionControl for Arc<SessionCoordinator> {
             new_state: CallState::Active,
         }).await;
         
-        // Get the updated session and call the handler
+        // Get the updated session
+        // Note: on_call_established will be called by the coordinator when all conditions are met:
+        // 1. Dialog is established (Active state)
+        // 2. Media session is ready
+        // 3. SDP negotiation is complete
         if let Ok(Some(session)) = self.registry.get_public_session(&call.id).await {
-            // Call the handler's on_call_established
-            if let Some(handler) = &self.handler {
-                handler.on_call_established(
-                    session.clone(),
-                    final_sdp_answer,
-                    call.sdp.clone()
-                ).await;
-            }
-            
             Ok(session)
         } else {
             Err(SessionError::session_not_found(&call.id.0))

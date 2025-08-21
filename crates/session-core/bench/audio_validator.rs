@@ -1,70 +1,69 @@
-/// Audio capture and validation for benchmark verification
+/// Audio capture and validation for benchmark verification using WAV files
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
 use tokio::sync::Mutex;
 use rustfft::{FftPlanner, num_complex::Complex32};
 use rand::Rng;
 
-#[derive(Debug, Clone)]
-pub struct AudioCapture {
-    pub call_id: String,
-    pub client_audio: Vec<i16>,  // Audio sent by client (440Hz)
-    pub server_audio: Vec<i16>,  // Audio sent by server (880Hz)
-    pub start_time: Instant,
-    pub end_time: Option<Instant>,
-    pub packet_count: usize,
-}
-
-impl AudioCapture {
-    pub fn new(call_id: String) -> Self {
-        Self {
-            call_id,
-            client_audio: Vec::new(),
-            server_audio: Vec::new(),
-            start_time: Instant::now(),
-            end_time: None,
-            packet_count: 0,
-        }
-    }
-    
-    pub fn duration(&self) -> Duration {
-        self.end_time.unwrap_or_else(Instant::now) - self.start_time
-    }
-}
+use crate::wav_writer::{WavCaptureManager, analyze_wav_file};
 
 #[derive(Debug)]
 pub struct AudioValidator {
-    captures: Arc<Mutex<HashMap<String, AudioCapture>>>,
-    selected_calls: Arc<Mutex<HashSet<String>>>,
+    selected_indices: Arc<Mutex<HashSet<usize>>>,  // Store indices instead of call IDs
+    selected_calls: Arc<Mutex<HashSet<String>>>,    // Actual call IDs that get selected
+    wav_manager: Arc<WavCaptureManager>,
+    saved_files: Arc<Mutex<Vec<(String, PathBuf)>>>,
 }
 
 impl AudioValidator {
     pub fn new() -> Self {
+        // Create samples directory in the bench folder
+        let output_dir = PathBuf::from("/Users/jonathan/Documents/Work/Rudeless_Ventures/rvoip/crates/session-core/bench/samples");
+        let wav_manager = Arc::new(WavCaptureManager::new(output_dir));
+        
+        // Clean up old files
+        let _ = wav_manager.cleanup_old_files();
+        
         Self {
-            captures: Arc::new(Mutex::new(HashMap::new())),
+            selected_indices: Arc::new(Mutex::new(HashSet::new())),
             selected_calls: Arc::new(Mutex::new(HashSet::new())),
+            wav_manager,
+            saved_files: Arc::new(Mutex::new(Vec::new())),
         }
     }
     
-    /// Select random calls to capture audio from
-    pub async fn select_random_calls(&self, call_ids: &[String], count: usize) {
+    /// Select random call indices to capture audio from
+    pub async fn select_random_indices(&self, total_calls: usize, count: usize) -> Vec<usize> {
         let mut rng = rand::thread_rng();
-        let mut selected = self.selected_calls.lock().await;
-        let mut captures = self.captures.lock().await;
+        let mut selected = self.selected_indices.lock().await;
         
         // Select random indices
         let mut indices = HashSet::new();
-        while indices.len() < count.min(call_ids.len()) {
-            indices.insert(rng.gen_range(0..call_ids.len()));
+        while indices.len() < count.min(total_calls) {
+            indices.insert(rng.gen_range(0..total_calls));
         }
         
-        // Add selected calls
-        for idx in indices {
-            let call_id = &call_ids[idx];
-            selected.insert(call_id.clone());
-            captures.insert(call_id.clone(), AudioCapture::new(call_id.clone()));
-            println!("Selected call #{} (ID: {}) for audio capture", idx, call_id);
+        // Store selected indices
+        for &idx in &indices {
+            selected.insert(idx);
+            println!("Selected call index {} for audio capture", idx);
+        }
+        
+        indices.into_iter().collect()
+    }
+    
+    /// Check if a call index should be captured
+    pub async fn should_capture_index(&self, index: usize) -> bool {
+        self.selected_indices.lock().await.contains(&index)
+    }
+    
+    /// Register an actual call ID for a selected index
+    pub async fn register_call_for_index(&self, index: usize, call_id: String) {
+        if self.should_capture_index(index).await {
+            self.selected_calls.lock().await.insert(call_id.clone());
+            self.wav_manager.init_capture(call_id.clone()).await;
+            println!("Registered call {} (index {}) for audio capture", call_id, index);
         }
     }
     
@@ -73,29 +72,25 @@ impl AudioValidator {
         self.selected_calls.lock().await.contains(call_id)
     }
     
-    /// Capture audio from client (called when receiving RTP at server)
-    pub async fn capture_client_audio(&self, call_id: &str, samples: Vec<i16>) {
-        let mut captures = self.captures.lock().await;
-        if let Some(capture) = captures.get_mut(call_id) {
-            capture.client_audio.extend(samples);
-            capture.packet_count += 1;
+    /// Capture audio received by client (from server)
+    pub async fn capture_client_received(&self, call_id: &str, samples: Vec<i16>) {
+        if self.is_selected(call_id).await {
+            self.wav_manager.add_client_received(call_id, &samples).await;
         }
     }
     
-    /// Capture audio from server (called when receiving RTP at client)
-    pub async fn capture_server_audio(&self, call_id: &str, samples: Vec<i16>) {
-        let mut captures = self.captures.lock().await;
-        if let Some(capture) = captures.get_mut(call_id) {
-            capture.server_audio.extend(samples);
+    /// Capture audio received by server (from client)
+    pub async fn capture_server_received(&self, call_id: &str, samples: Vec<i16>) {
+        if self.is_selected(call_id).await {
+            self.wav_manager.add_server_received(call_id, &samples).await;
         }
     }
     
-    /// Mark call as ended
-    pub async fn end_call(&self, call_id: &str) {
-        let mut captures = self.captures.lock().await;
-        if let Some(capture) = captures.get_mut(call_id) {
-            capture.end_time = Some(Instant::now());
-        }
+    /// Save all captured audio to WAV files
+    pub async fn save_wav_files(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let files = self.wav_manager.save_all().await?;
+        *self.saved_files.lock().await = files;
+        Ok(())
     }
     
     /// Detect the dominant frequency in audio samples using FFT
@@ -191,68 +186,114 @@ impl AudioValidator {
         }
     }
     
-    /// Validate all captured audio
+    /// Validate all captured audio by analyzing WAV files
     pub async fn validate_all(&self) -> Vec<ValidationResult> {
-        let captures = self.captures.lock().await;
+        // First save all WAV files
+        if let Err(e) = self.save_wav_files().await {
+            eprintln!("Failed to save WAV files: {}", e);
+            return Vec::new();
+        }
+        
+        let saved_files = self.saved_files.lock().await;
         let mut results = Vec::new();
         
-        for (call_id, capture) in captures.iter() {
-            let client_validation = Self::validate_tone(&capture.client_audio, 440.0, 8000);
-            let server_validation = Self::validate_tone(&capture.server_audio, 880.0, 8000);
-            
-            let result = ValidationResult {
-                call_id: call_id.clone(),
-                duration: capture.duration().as_secs_f32(),
-                client_tone: client_validation,
-                server_tone: server_validation,
-                snr: Self::calculate_snr(&capture.client_audio),
-                packet_count: capture.packet_count,
-            };
-            
-            results.push(result);
+        println!("\nSaved {} WAV files to analyze", saved_files.len());
+        
+        for (call_id, wav_path) in saved_files.iter() {
+            match analyze_wav_file(wav_path) {
+                Ok(analysis) => {
+                    // Analyze left channel (client received 880Hz from server)
+                    let client_validation = Self::validate_pure_tone(&analysis.left_channel, 880.0, 8000);
+                    
+                    // Analyze right channel (server received 440Hz from client)
+                    let server_validation = Self::validate_pure_tone(&analysis.right_channel, 440.0, 8000);
+                    
+                    let result = ValidationResult {
+                        call_id: call_id.clone(),
+                        wav_file: wav_path.clone(),
+                        duration: analysis.duration_secs,
+                        client_channel: client_validation,
+                        server_channel: server_validation,
+                        snr: Self::calculate_snr(&analysis.left_channel)
+                            .max(Self::calculate_snr(&analysis.right_channel)),
+                    };
+                    
+                    results.push(result);
+                }
+                Err(e) => {
+                    eprintln!("Failed to analyze WAV file {}: {}", wav_path.display(), e);
+                }
+            }
         }
         
         results.sort_by_key(|r| r.call_id.clone());
         results
     }
     
+    /// Validate a single pure tone channel
+    fn validate_pure_tone(samples: &[i16], expected_freq: f32, sample_rate: u32) -> ChannelValidation {
+        // Detect the dominant frequency in the pure signal
+        let validation = Self::validate_tone(samples, expected_freq, sample_rate);
+        
+        ChannelValidation {
+            expected_frequency: expected_freq,
+            detected_frequency: validation.detected_frequency,
+            frequency_error_percent: validation.frequency_error_percent,
+            is_valid: validation.is_valid,
+        }
+    }
+    
     /// Print validation results
     pub fn print_validation_results(results: &[ValidationResult]) {
         println!("\n╠════════════════════════════════════════════════════════════════╣");
-        println!("║                    AUDIO VALIDATION                            ║");
+        println!("║                  WAV FILE AUDIO VALIDATION                     ║");
         println!("╠════════════════════════════════════════════════════════════════╣");
         
-        for result in results {
-            let duration_check = if (result.duration - 10.0).abs() < 0.5 { "✅" } else { "❌" };
-            let client_check = if result.client_tone.is_valid { "✅" } else { "❌" };
-            let server_check = if result.server_tone.is_valid { "✅" } else { "❌" };
-            
-            let call_id_display = if result.call_id.len() >= 8 {
-                result.call_id[..8].to_string()
-            } else {
-                format!("{:8}", result.call_id)
-            };
-            println!("║ Call {}: {} Duration: {:.2}s │ 440Hz: {} │ 880Hz: {} │ SNR: {:.1}dB ║",
-                call_id_display,
-                duration_check,
-                result.duration,
-                client_check,
-                server_check,
-                result.snr,
-            );
+        if results.is_empty() {
+            println!("║  No WAV files were saved for analysis                          ║");
+            println!("║  Check that calls were established and audio was captured      ║");
+        } else {
+            for result in results {
+                let duration_check = if (result.duration - 10.0).abs() < 0.5 { "✅" } else { "❌" };
+                let client_check = if result.client_channel.is_valid { "✅" } else { "❌" };
+                let server_check = if result.server_channel.is_valid { "✅" } else { "❌" };
+                
+                let call_id_display = if result.call_id.len() >= 8 {
+                    result.call_id[..8].to_string()
+                } else {
+                    format!("{:8}", result.call_id)
+                };
+                
+                println!("║ Call {}:                                                  ║", call_id_display);
+                println!("║   Duration: {} {:.2}s │ SNR: {:.1}dB                          ║",
+                    duration_check, result.duration, result.snr);
+                println!("║   Client received 880Hz: {} ({:.1}% error)                    ║",
+                    client_check, 
+                    result.client_channel.frequency_error_percent);
+                println!("║   Server received 440Hz: {} ({:.1}% error)                    ║",
+                    server_check,
+                    result.server_channel.frequency_error_percent);
+                println!("║   WAV File: {}                                    ║", 
+                    result.wav_file.file_name().unwrap().to_string_lossy());
+                println!("║                                                                 ║");
+            }
         }
         
         // Calculate aggregate stats
-        let avg_snr = results.iter().map(|r| r.snr).sum::<f32>() / results.len() as f32;
-        let all_valid = results.iter().all(|r| r.client_tone.is_valid && r.server_tone.is_valid);
-        let avg_packets = results.iter().map(|r| r.packet_count).sum::<usize>() / results.len();
+        if !results.is_empty() {
+            let avg_snr = results.iter().map(|r| r.snr).sum::<f32>() / results.len() as f32;
+            let all_valid = results.iter().all(|r| r.client_channel.is_valid && r.server_channel.is_valid);
+            let files_saved = results.len();
+            
+            println!("╠════════════════════════════════════════════════════════════════╣");
+            println!("║ Audio Quality Summary:                                         ║");
+            println!("║   WAV Files Saved: {}                                          ║", files_saved);
+            println!("║   Average SNR: {:.1} dB                                        ║", avg_snr);
+            println!("║   All Channels Valid: {}                                     ║", 
+                if all_valid { "✅ Yes" } else { "❌ No " });
+            println!("║   Output Directory: bench/samples/                             ║");
+        }
         
-        println!("╠════════════════════════════════════════════════════════════════╣");
-        println!("║ Audio Quality Metrics:                                         ║");
-        println!("║   Average SNR: {:.1} dB                                        ║", avg_snr);
-        println!("║   All Tones Detected: {}                                     ║", 
-            if all_valid { "✅ Yes" } else { "❌ No " });
-        println!("║   Avg Packets/Call: {}                                       ║", avg_packets);
         println!("╚════════════════════════════════════════════════════════════════╝");
     }
 }
@@ -267,11 +308,19 @@ pub struct ToneValidation {
 }
 
 #[derive(Debug)]
+pub struct ChannelValidation {
+    pub expected_frequency: f32,
+    pub detected_frequency: Option<f32>,
+    pub frequency_error_percent: f32,
+    pub is_valid: bool,
+}
+
+#[derive(Debug)]
 pub struct ValidationResult {
     pub call_id: String,
+    pub wav_file: PathBuf,
     pub duration: f32,
-    pub client_tone: ToneValidation,
-    pub server_tone: ToneValidation,
+    pub client_channel: ChannelValidation,
+    pub server_channel: ChannelValidation,
     pub snr: f32,
-    pub packet_count: usize,
 }

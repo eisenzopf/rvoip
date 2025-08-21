@@ -1256,6 +1256,11 @@ impl SessionDialogCoordinator {
             .map_err(|e| format!("Failed to send response with body: {}", e))
     }
     
+    /// Get dialog ID for a session
+    pub async fn get_dialog_id_for_session(&self, session_id: &SessionId) -> Option<DialogId> {
+        self.session_to_dialog.get(session_id).map(|entry| entry.value().clone())
+    }
+    
     /// Update session state and send event
     async fn update_session_state(&self, session_id: SessionId, new_state: CallState) -> DialogResult<()> {
         // Get the current state before updating
@@ -1327,11 +1332,17 @@ impl SessionDialogCoordinator {
     }
     
     /// Extract relevant SIP headers from request
-    fn extract_sip_headers(&self, _request: &rvoip_sip_core::Request) -> std::collections::HashMap<String, String> {
-        // For now, return empty headers map
-        // TODO: Implement proper header extraction when needed
-        // The complex header API makes this non-trivial, so we'll defer this
-        std::collections::HashMap::new()
+    fn extract_sip_headers(&self, request: &rvoip_sip_core::Request) -> std::collections::HashMap<String, String> {
+        let mut headers = std::collections::HashMap::new();
+        
+        // Extract Call-ID header
+        if let Some(call_id) = request.call_id() {
+            headers.insert("Call-ID".to_string(), call_id.0.clone());
+        }
+        
+        // Add other headers as needed in the future
+        
+        headers
     }
 
 }

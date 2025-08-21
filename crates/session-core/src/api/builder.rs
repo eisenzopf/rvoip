@@ -205,7 +205,7 @@ impl Default for SessionManagerConfig {
         Self {
             sip_port: 5060,
             local_address: "sip:user@localhost".to_string(),
-            local_bind_addr: "0.0.0.0:5060".parse().unwrap(), // Bind to all interfaces with standard SIP port
+            local_bind_addr: "127.0.0.1:5060".parse().unwrap(), // Default to localhost for safety
             media_port_start: 10000,
             media_port_end: 20000,
             enable_stun: false,

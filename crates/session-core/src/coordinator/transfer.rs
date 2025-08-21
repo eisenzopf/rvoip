@@ -325,6 +325,7 @@ impl TransferHandler {
             to: target_uri.to_string(),
             state: CallState::Initiating,
             started_at: None,
+            sip_call_id: None,
         };
         
         // Register the new session

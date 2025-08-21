@@ -62,6 +62,7 @@ impl ServerSessionManager for Arc<SessionCoordinator> {
             to: "sip:pending@internal".to_string(),   // Placeholder - will be updated when used
             state: crate::api::types::CallState::Initiating, // Special state for pre-allocated sessions
             started_at: Some(std::time::Instant::now()),
+            sip_call_id: None,
         };
         
         // Create internal session from call session
