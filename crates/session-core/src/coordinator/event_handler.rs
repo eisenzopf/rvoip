@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use crate::api::types::{SessionId, CallState, IncomingCall, CallDecision};
+use crate::api::types::{SessionId, CallState, CallSession, IncomingCall, CallDecision};
+use crate::api::control::generate_sdp_answer;
 use crate::errors::{Result, SessionError};
 use crate::manager::events::SessionEvent;
 use crate::session::Session;
@@ -154,6 +155,74 @@ impl SessionCoordinator {
                 }
             }
             
+            SessionEvent::MediaSessionReady { session_id, dialog_id: _ } => {
+                tracing::info!("Media session ready for {} - checking readiness", session_id);
+                
+                // Update readiness tracking
+                {
+                    let mut readiness_map = self.session_readiness.write().await;
+                    let readiness = readiness_map.entry(session_id.clone()).or_default();
+                    readiness.media_session_ready = true;
+                    
+                    // Store the call session if we don't have it yet
+                    if readiness.call_session.is_none() {
+                        if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                            readiness.call_session = Some(session.as_call_session().clone());
+                        }
+                    }
+                    
+                    tracing::debug!("Session {} readiness: dialog={}, media={}, sdp={}", 
+                        session_id, 
+                        readiness.dialog_established,
+                        readiness.media_session_ready,
+                        readiness.sdp_negotiated
+                    );
+                }
+                
+                // Check if all conditions are met
+                self.check_and_trigger_call_established(&session_id).await;
+            }
+            
+            SessionEvent::MediaNegotiated { session_id, local_addr, remote_addr, codec } => {
+                tracing::info!("Media negotiated for {} - codec: {}, {}↔{}", 
+                    session_id, codec, local_addr, remote_addr);
+                
+                // Update readiness tracking
+                {
+                    let mut readiness_map = self.session_readiness.write().await;
+                    let readiness = readiness_map.entry(session_id.clone()).or_default();
+                    readiness.sdp_negotiated = true;
+                    
+                    // Fetch and store the SDPs from media manager
+                    if let Ok(Some(media_info)) = self.media_manager.get_media_info(&session_id).await {
+                        readiness.local_sdp = media_info.local_sdp;
+                        readiness.remote_sdp = media_info.remote_sdp;
+                        tracing::debug!("Stored SDP for session {} - local: {}, remote: {}", 
+                            session_id,
+                            readiness.local_sdp.is_some(),
+                            readiness.remote_sdp.is_some()
+                        );
+                    }
+                    
+                    // Store the call session if we don't have it yet
+                    if readiness.call_session.is_none() {
+                        if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                            readiness.call_session = Some(session.as_call_session().clone());
+                        }
+                    }
+                    
+                    tracing::debug!("Session {} readiness: dialog={}, media={}, sdp={}", 
+                        session_id,
+                        readiness.dialog_established,
+                        readiness.media_session_ready,
+                        readiness.sdp_negotiated
+                    );
+                }
+                
+                // Check if all conditions are met
+                self.check_and_trigger_call_established(&session_id).await;
+            }
+            
             // Shutdown events - orchestrate proper shutdown sequence
             SessionEvent::ShutdownInitiated { reason } => {
                 self.handle_shutdown_initiated(reason).await?;
@@ -220,6 +289,35 @@ impl SessionCoordinator {
     ) -> Result<()> {
         tracing::debug!("🔄 handle_state_changed called: {} {:?} -> {:?}", session_id, old_state, new_state);
 
+        // Check if dialog is now active/established
+        if new_state == CallState::Active {
+            tracing::info!("Dialog established for session {}", session_id);
+            
+            // Update readiness tracking
+            {
+                let mut readiness_map = self.session_readiness.write().await;
+                let readiness = readiness_map.entry(session_id.clone()).or_default();
+                readiness.dialog_established = true;
+                
+                // Store the call session
+                if readiness.call_session.is_none() {
+                    if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                        readiness.call_session = Some(session.as_call_session().clone());
+                    }
+                }
+                
+                tracing::debug!("Session {} readiness: dialog={}, media={}, sdp={}", 
+                    session_id,
+                    readiness.dialog_established,
+                    readiness.media_session_ready,
+                    readiness.sdp_negotiated
+                );
+            }
+            
+            // Check if all conditions are met
+            self.check_and_trigger_call_established(&session_id).await;
+        }
+
         match (old_state, new_state.clone()) {
             // Call becomes active
             (CallState::Ringing, CallState::Active) |
@@ -227,6 +325,7 @@ impl SessionCoordinator {
                 tracing::debug!("📞 Starting media session for newly active call: {}", session_id);
                 
                 // Spawn media session creation in background to avoid blocking event processing
+                // The MediaSessionReady event will be published when media is ready
                 let self_clone = self.clone();
                 let session_id_clone = session_id.clone();
                 tokio::spawn(async move {
@@ -234,42 +333,6 @@ impl SessionCoordinator {
                         tracing::error!("Failed to start media session for {}: {}", session_id_clone, e);
                     }
                 });
-                
-                // Notify handler that call is established (also in background)
-                if let Some(handler) = &self.handler {
-                    let handler_clone = handler.clone();
-                    let registry_clone = self.registry.clone();
-                    let media_manager_clone = self.media_manager.clone();
-                    let session_id_clone = session_id.clone();
-                    
-                    tokio::spawn(async move {
-                        if let Ok(Some(session)) = registry_clone.get_session(&session_id_clone).await {
-                            // Get SDP information if available
-                            let media_info = media_manager_clone.get_media_info(&session_id_clone).await.ok().flatten();
-                            
-                            tracing::info!("Media info available: {}", media_info.is_some());
-                            if let Some(ref info) = media_info {
-                                tracing::info!("Local SDP length: {:?}", info.local_sdp.as_ref().map(|s| s.len()));
-                                tracing::info!("Remote SDP length: {:?}", info.remote_sdp.as_ref().map(|s| s.len()));
-                            }
-                            
-                            let local_sdp = media_info.as_ref().and_then(|m| m.local_sdp.clone());
-                            let remote_sdp = media_info.as_ref().and_then(|m| m.remote_sdp.clone());
-                            
-                            // Store SDP in the registry so hold/resume can access it
-                            if local_sdp.is_some() || remote_sdp.is_some() {
-                                if let Err(e) = registry_clone.update_session_sdp(&session_id_clone, local_sdp.clone(), remote_sdp.clone()).await {
-                                    tracing::error!("Failed to store SDP in registry: {}", e);
-                                } else {
-                                    tracing::info!("Stored SDP in registry for session {}", session_id_clone);
-                                }
-                            }
-                            
-                            tracing::info!("Notifying handler about call {} establishment", session_id_clone);
-                            handler_clone.on_call_established(session.as_call_session().clone(), local_sdp, remote_sdp).await;
-                        }
-                    });
-                }
             }
             
             // Call goes on hold
@@ -418,6 +481,14 @@ impl SessionCoordinator {
         tracing::debug!("🔴 COORDINATOR: handle_session_terminated called for session {} with reason: {}", session_id, reason);
         tracing::info!("Session {} terminated: {}", session_id, reason);
 
+        // Clean up readiness tracking
+        {
+            let mut readiness_map = self.session_readiness.write().await;
+            if readiness_map.remove(&session_id).is_some() {
+                tracing::debug!("Cleaned up readiness tracking for session {}", session_id);
+            }
+        }
+
         // Stop media
         self.stop_media_session(&session_id).await?;
         
@@ -512,29 +583,14 @@ impl SessionCoordinator {
                             tracing::debug!("📞 Starting media session for newly active call: {}", session_id);
                             
                             // Start media session directly (already non-blocking internally)
+                            // The MediaSessionReady event will be published when media is ready,
+                            // and that's when we'll notify the handler about call establishment
                             if let Err(e) = self.start_media_session(&session_id).await {
                                 tracing::error!("Failed to start media session for {}: {}", session_id, e);
                             }
                             
-                            // Notify handler that call is established (important for incoming calls)
-                            if let Some(handler) = &self.handler {
-                                let handler_clone = handler.clone();
-                                let registry_clone = self.registry.clone();
-                                let media_manager_clone = self.media_manager.clone();
-                                let session_id_clone = session_id.clone();
-                                
-                                tokio::spawn(async move {
-                                    if let Ok(Some(session)) = registry_clone.get_session(&session_id_clone).await {
-                                        // Get SDP information if available
-                                        let media_info = media_manager_clone.get_media_info(&session_id_clone).await.ok().flatten();
-                                        let local_sdp = media_info.as_ref().and_then(|m| m.local_sdp.clone());
-                                        let remote_sdp = media_info.as_ref().and_then(|m| m.remote_sdp.clone());
-                                        
-                                        tracing::info!("Notifying handler about call {} establishment (from media event)", session_id_clone);
-                                        handler_clone.on_call_established(session.as_call_session().clone(), local_sdp, remote_sdp).await;
-                                    }
-                                });
-                            }
+                            // NOTE: on_call_established is now called from MediaSessionReady handler
+                            // to ensure both dialog and media are ready before notifying the handler
                         }
                     } else {
                         tracing::debug!("Session {} already Active, skipping state update", session_id);
@@ -734,7 +790,7 @@ impl SessionCoordinator {
     
     /// Handle incoming call event forwarded from dialog coordinator
     async fn handle_incoming_call(
-        &self,
+        self: &Arc<Self>,
         session_id: SessionId,
         dialog_id: rvoip_dialog_core::DialogId,
         from: String,
@@ -749,6 +805,8 @@ impl SessionCoordinator {
         session.call_session.from = from.clone();
         session.call_session.to = to.clone();
         session.call_session.state = CallState::Initiating;
+        // Extract and store Call-ID if available
+        session.call_session.sip_call_id = headers.get("Call-ID").cloned();
         
         // Register the session
         self.registry.register_session(session).await?;
@@ -763,6 +821,9 @@ impl SessionCoordinator {
         
         // Call the handler to decide whether to accept or reject
         if let Some(handler) = &self.handler {
+            // Extract Call-ID from headers if available
+            let sip_call_id = headers.get("Call-ID").cloned();
+            
             let incoming_call = IncomingCall {
                 id: session_id.clone(),
                 from: from.clone(),
@@ -770,15 +831,30 @@ impl SessionCoordinator {
                 sdp,
                 headers,
                 received_at: std::time::Instant::now(),
+                sip_call_id,
             };
             
-            let decision = handler.on_incoming_call(incoming_call).await;
+            let decision = handler.on_incoming_call(incoming_call.clone()).await;
             tracing::info!("Handler decision for session {}: {:?}", session_id, decision);
             
             // Process the decision through the dialog coordinator
             match decision {
-                CallDecision::Accept(sdp_answer) => {
-                    // Accept the call through dialog manager
+                CallDecision::Accept(mut sdp_answer) => {
+                    // If no SDP answer provided but we have an offer, generate one
+                    if sdp_answer.is_none() && incoming_call.sdp.is_some() {
+                        tracing::info!("Generating SDP answer for incoming call {}", session_id);
+                        match generate_sdp_answer(self, &session_id, incoming_call.sdp.as_ref().unwrap()).await {
+                            Ok(answer) => {
+                                tracing::info!("Generated SDP answer for call {}", session_id);
+                                sdp_answer = Some(answer);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to generate SDP answer: {}", e);
+                            }
+                        }
+                    }
+                    
+                    // Accept the call through dialog manager with the SDP answer
                     if let Err(e) = self.dialog_manager.accept_incoming_call(&session_id, sdp_answer).await {
                         tracing::error!("Failed to accept incoming call {}: {}", session_id, e);
                     }
@@ -910,6 +986,66 @@ impl SessionCoordinator {
                 self.publish_event(SessionEvent::SystemShutdownComplete).await?;
             }
             _ => {}
+        }
+        
+        Ok(())
+    }
+
+    /// Check if all conditions are met and trigger on_call_established
+    async fn check_and_trigger_call_established(&self, session_id: &SessionId) -> Result<()> {
+        let mut readiness_map = self.session_readiness.write().await;
+        
+        if let Some(readiness) = readiness_map.get_mut(session_id) {
+            // Check if all three conditions are met
+            if readiness.dialog_established && readiness.media_session_ready && readiness.sdp_negotiated {
+                tracing::info!("All conditions met for session {}, triggering on_call_established", session_id);
+                
+                // Get the call session and SDP info
+                let call_session = readiness.call_session.clone();
+                let local_sdp = readiness.local_sdp.clone();
+                let remote_sdp = readiness.remote_sdp.clone();
+                
+                // Remove from tracking since we're done
+                readiness_map.remove(session_id);
+                
+                // Drop the lock before calling the handler
+                drop(readiness_map);
+                
+                // Trigger the callback
+                if let Some(session) = call_session {
+                    self.trigger_call_established(session, local_sdp, remote_sdp).await?;
+                }
+            } else {
+                tracing::debug!(
+                    "Session {} readiness: dialog={}, media={}, sdp={}", 
+                    session_id,
+                    readiness.dialog_established,
+                    readiness.media_session_ready,
+                    readiness.sdp_negotiated
+                );
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Trigger the on_call_established callback with complete information
+    async fn trigger_call_established(
+        &self,
+        call_session: CallSession,
+        local_sdp: Option<String>,
+        remote_sdp: Option<String>,
+    ) -> Result<()> {
+        tracing::info!(
+            "Triggering on_call_established for session {} with SDP (local: {}, remote: {})",
+            call_session.id,
+            local_sdp.is_some(),
+            remote_sdp.is_some()
+        );
+        
+        // Call the handler
+        if let Some(handler) = &self.handler {
+            handler.on_call_established(call_session, local_sdp, remote_sdp).await;
         }
         
         Ok(())

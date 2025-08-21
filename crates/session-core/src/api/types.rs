@@ -161,6 +161,8 @@ pub struct CallSession {
     pub to: String,
     pub state: CallState,
     pub started_at: Option<Instant>,
+    /// SIP Call-ID header value that uniquely identifies this call across UAC and UAS
+    pub sip_call_id: Option<String>,
 }
 
 impl CallSession {
@@ -234,6 +236,8 @@ pub struct IncomingCall {
     pub sdp: Option<String>,
     pub headers: std::collections::HashMap<String, String>,
     pub received_at: Instant,
+    /// SIP Call-ID header value that uniquely identifies this call across UAC and UAS
+    pub sip_call_id: Option<String>,
 }
 
 impl IncomingCall {

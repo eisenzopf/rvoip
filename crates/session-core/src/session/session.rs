@@ -58,6 +58,7 @@ impl Session {
             to: String::new(),
             state: CallState::Initiating,
             started_at: Some(std::time::Instant::now()),
+            sip_call_id: None,
         };
         Self::from_call_session(call_session)
     }

@@ -22,6 +22,7 @@ impl SessionCoordinator {
             to: to.to_string(),
             state: CallState::Initiating,
             started_at: Some(std::time::Instant::now()),
+            sip_call_id: None,
         };
 
         // Create internal session from call session
@@ -134,6 +135,7 @@ impl SessionCoordinator {
             to: String::new(),
             state: CallState::Initiating,
             started_at: None,
+            sip_call_id: None,
         };
         
         // Create internal session

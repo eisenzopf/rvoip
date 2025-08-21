@@ -194,6 +194,12 @@ pub enum SessionEvent {
         codec: String,
     },
     
+    /// Media session is ready (both dialog and media established)
+    MediaSessionReady {
+        session_id: SessionId,
+        dialog_id: Option<rvoip_dialog_core::DialogId>,
+    },
+    
     /// SDP negotiation requested
     SdpNegotiationRequested {
         session_id: SessionId,

@@ -345,6 +345,7 @@ pub fn create_incoming_call(
         sdp,
         headers,
         received_at: std::time::Instant::now(),
+        sip_call_id: None,
     }
 }
 
@@ -378,6 +379,7 @@ pub fn create_call_session(
         to: incoming.to.clone(),
         state: CallState::Initiating,
         started_at: Some(std::time::Instant::now()),
+        sip_call_id: incoming.sip_call_id.clone(),
     }
 }
 

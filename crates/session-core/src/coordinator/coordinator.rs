@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock, Mutex};
 use crate::api::{
-    types::{SessionId, SessionStats, MediaInfo},
+    types::{SessionId, SessionStats, MediaInfo, CallSession, CallState},
     handlers::CallHandler,
     builder::{SessionManagerConfig, MediaConfig},
     bridge::BridgeEvent,
@@ -22,6 +22,23 @@ use rvoip_dialog_core::events::SessionCoordinationEvent;
 use std::collections::HashMap;
 use std::time::Instant;
 use dashmap::DashMap;
+
+/// Tracks the readiness state of a session for calling on_call_established
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SessionReadiness {
+    pub(crate) dialog_established: bool,
+    pub(crate) media_session_ready: bool,
+    pub(crate) sdp_negotiated: bool,
+    pub(crate) call_session: Option<CallSession>,
+    pub(crate) local_sdp: Option<String>,
+    pub(crate) remote_sdp: Option<String>,
+}
+
+impl SessionReadiness {
+    fn is_fully_ready(&self) -> bool {
+        self.dialog_established && self.media_session_ready && self.sdp_negotiated
+    }
+}
 
 /// Tracks cleanup status for each layer during two-phase termination
 #[derive(Debug, Clone)]
@@ -76,6 +93,9 @@ pub struct SessionCoordinator {
     
     // Two-phase termination tracking
     pub pending_cleanups: Arc<Mutex<HashMap<SessionId, CleanupTracker>>>,
+    
+    // Session readiness tracking for on_call_established
+    pub session_readiness: Arc<RwLock<HashMap<SessionId, SessionReadiness>>>,
     
     // Shutdown handles for event loops
     event_loop_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -181,6 +201,7 @@ impl SessionCoordinator {
             bridge_event_subscribers: Arc::new(RwLock::new(Vec::new())),
             negotiated_configs: Arc::new(RwLock::new(HashMap::new())),
             pending_cleanups: Arc::new(Mutex::new(HashMap::new())),
+            session_readiness: Arc::new(RwLock::new(HashMap::new())),
             event_loop_handle: Arc::new(Mutex::new(None)),
             dialog_event_loop_handle: Arc::new(Mutex::new(None)),
         });
@@ -458,7 +479,9 @@ impl SessionCoordinator {
         tracing::debug!("🎬 Creating new media session for {}", session_id);
         match self.media_coordinator.on_session_created(session_id).await {
             Ok(()) => {
-                tracing::debug!("✅ Successfully started media session for {}", session_id);
+                tracing::debug!("✅ Successfully created media session for {}", session_id);
+                // Note: MediaSessionReady event will be published after SDP negotiation
+                // when the remote endpoint is configured
                 Ok(())
             }
             Err(e) => {
@@ -499,12 +522,19 @@ impl SessionCoordinator {
         // Store negotiated config
         self.negotiated_configs.write().await.insert(session_id.clone(), negotiated.clone());
         
-        // Emit event
+        // Emit MediaNegotiated event
         let _ = self.publish_event(SessionEvent::MediaNegotiated {
             session_id: session_id.clone(),
             local_addr: negotiated.local_addr,
             remote_addr: negotiated.remote_addr,
             codec: negotiated.codec.clone(),
+        }).await;
+        
+        // Now that media is configured with remote endpoint, emit MediaSessionReady
+        let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
+        let _ = self.publish_event(SessionEvent::MediaSessionReady {
+            session_id: session_id.clone(),
+            dialog_id,
         }).await;
         
         Ok(negotiated)
@@ -516,6 +546,7 @@ impl SessionCoordinator {
         session_id: &SessionId,
         their_offer: &str,
     ) -> Result<(String, NegotiatedMediaConfig)> {
+        tracing::info!("negotiate_sdp_as_uas called for session {}", session_id);
         let (answer, negotiated) = self.sdp_negotiator.negotiate_as_uas(
             session_id,
             their_offer,
@@ -524,12 +555,19 @@ impl SessionCoordinator {
         // Store negotiated config
         self.negotiated_configs.write().await.insert(session_id.clone(), negotiated.clone());
         
-        // Emit event
+        // Emit MediaNegotiated event
         let _ = self.publish_event(SessionEvent::MediaNegotiated {
             session_id: session_id.clone(),
             local_addr: negotiated.local_addr,
             remote_addr: negotiated.remote_addr,
             codec: negotiated.codec.clone(),
+        }).await;
+        
+        // Now that media is configured with remote endpoint, emit MediaSessionReady
+        let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
+        let _ = self.publish_event(SessionEvent::MediaSessionReady {
+            session_id: session_id.clone(),
+            dialog_id,
         }).await;
         
         Ok((answer, negotiated))
