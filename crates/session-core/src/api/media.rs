@@ -505,6 +505,10 @@ pub trait MediaControl {
     /// The frame will be encoded and sent via RTP to the remote peer
     async fn send_audio_frame(&self, session_id: &SessionId, audio_frame: crate::api::types::AudioFrame) -> Result<()>;
     
+    /// Receive an audio frame from the session
+    /// Returns None if no frame is available
+    async fn receive_audio_frame(&self, session_id: &SessionId) -> Result<Option<crate::api::types::AudioFrame>>;
+    
     /// Get current audio stream configuration for a session
     /// Returns None if no audio stream is configured
     async fn get_audio_stream_config(&self, session_id: &SessionId) -> Result<Option<crate::api::types::AudioStreamConfig>>;
@@ -716,6 +720,21 @@ impl MediaControl for Arc<SessionCoordinator> {
             ).await;
         }
         Ok(())
+    }
+    
+    async fn receive_audio_frame(&self, session_id: &SessionId) -> Result<Option<crate::api::types::AudioFrame>> {
+        // Validate session exists
+        if SessionControl::get_session(self, session_id).await?.is_none() {
+            return Err(crate::errors::SessionError::SessionNotFound(session_id.to_string()));
+        }
+        
+        // Note: The current MediaManager uses a push model via callbacks
+        // To implement a pull model, we'd need to maintain a buffer per session
+        // For now, return None indicating no frame available in pull mode
+        // Real audio should be received via subscribe_to_audio_frames
+        
+        tracing::debug!("receive_audio_frame called for session {} - use subscribe_to_audio_frames for real audio", session_id);
+        Ok(None)
     }
     
     async fn get_audio_stream_config(&self, session_id: &SessionId) -> Result<Option<crate::api::types::AudioStreamConfig>> {

@@ -250,7 +250,7 @@ pub async fn coordinate_sip_session_with_media(
     sdp_offer: Option<&str>,
 ) -> std::result::Result<(SessionId, MediaSessionInfo), SessionError> {
     // Create SIP session
-    let session = session_manager.create_outgoing_call(from_uri, to_uri, sdp_offer.map(|s| s.to_string())).await?;
+    let session = session_manager.create_outgoing_call(from_uri, to_uri, sdp_offer.map(|s| s.to_string()), None).await?;
     let session_id = session.id().clone();
     
     // Create corresponding media session through MediaSessionController integration

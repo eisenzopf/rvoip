@@ -72,6 +72,7 @@ async fn test_bob_calls_charlie() {
         "sip:bob@127.0.0.1:5061",
         "sip:charlie@127.0.0.1:5062",
         None,
+        None,
     ).await.expect("Failed to create call");
     
     println!("Call created with ID: {}", call.id);

@@ -122,6 +122,7 @@ pub fn create_test_call_session(session_id: SessionId, from: &str, to: &str, sta
         to: to.to_string(),
         state,
         started_at: Some(std::time::Instant::now()),
+        sip_call_id: None,
     }
 }
 
