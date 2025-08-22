@@ -213,6 +213,7 @@ impl ApiTypesTestHelper {
                 to: format!("sip:target{}@example.com", i),
                 state: CallState::Active,
                 started_at: Some(Instant::now()),
+                sip_call_id: None,
             })
             .collect()
     }
@@ -227,6 +228,7 @@ impl ApiTypesTestHelper {
                 sdp: Some(self.create_test_sdp(&format!("session_{}", i))),
                 headers: HashMap::new(),
                 received_at: Instant::now(),
+                sip_call_id: None,
             })
             .collect()
     }

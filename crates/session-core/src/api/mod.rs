@@ -482,11 +482,16 @@ pub mod server_types;
 pub mod server;
 pub mod client;
 
+// High-level UAC and UAS APIs
+pub mod uac;
+pub mod uas;
+pub mod common;
+
 // Re-export main types
 pub use types::{
     SessionId, CallSession, CallState, IncomingCall, CallDecision, 
     SessionStats, MediaInfo, PreparedCall, CallDirection, TerminationReason,
-    SdpInfo, parse_sdp_connection,
+    SdpInfo, parse_sdp_connection, AudioFrame, AudioFrameSubscriber, AudioStreamConfig,
 };
 
 // Re-export optimized types for performance-critical code
