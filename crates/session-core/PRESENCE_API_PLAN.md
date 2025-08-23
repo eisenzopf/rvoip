@@ -75,11 +75,20 @@ if let Some(status) = watcher.recv().await {
 }
 ```
 
-#### With B2BUA Server (Transparent)
+#### With B2BUA Server (OAuth 2.0 Authentication)
 ```rust
-// Register with B2BUA (acts as presence server)
-alice.register("sip:pbx.company.com").await?;
-bob.register("sip:pbx.company.com").await?;
+// Get OAuth token first (from your OAuth provider)
+let token = oauth_client.get_token("alice", "password").await?;
+
+// Register with B2BUA using Bearer token (RFC 8898)
+alice.register("sip:pbx.company.com")
+    .auth_bearer(token)  // OAuth 2.0 Bearer token
+    .await?;
+
+// B2BUA validates token and registers user
+bob.register("sip:pbx.company.com")
+    .auth_bearer(bob_token)
+    .await?;
 
 // Same API! B2BUA handles routing
 alice.presence(PresenceStatus::Available).await?;
