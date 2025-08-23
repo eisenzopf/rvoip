@@ -143,6 +143,12 @@ pub enum HeaderName {
     MinSE,
     /// RSeq: Response sequence number for reliable provisional responses (RFC 3262)
     RSeq,
+    /// SIP-ETag: Entity tag for published event state (RFC 3903)
+    SipETag,
+    /// SIP-If-Match: Conditional request for event state (RFC 3903)
+    SipIfMatch,
+    /// Allow-Events: Supported event packages (RFC 6665)
+    AllowEvents,
 }
 
 impl HeaderName {
@@ -204,6 +210,9 @@ impl HeaderName {
             HeaderName::Other(s) => s,
             HeaderName::MinSE => "Min-SE",
             HeaderName::RSeq => "RSeq",
+            HeaderName::SipETag => "SIP-ETag",
+            HeaderName::SipIfMatch => "SIP-If-Match",
+            HeaderName::AllowEvents => "Allow-Events",
         }
     }
 }
@@ -279,6 +288,9 @@ impl FromStr for HeaderName {
             "session-expires" | "x" => Ok(HeaderName::SessionExpires),
             "min-se" => Ok(HeaderName::MinSE),
             "rseq" => Ok(HeaderName::RSeq),
+            "sip-etag" => Ok(HeaderName::SipETag),
+            "sip-if-match" => Ok(HeaderName::SipIfMatch),
+            "allow-events" => Ok(HeaderName::AllowEvents),
             _ => Ok(HeaderName::Other(s.to_string())),
         }
     }

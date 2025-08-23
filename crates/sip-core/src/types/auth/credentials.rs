@@ -16,6 +16,8 @@ pub enum Credentials {
     Digest { params: Vec<DigestParam> },
     /// Basic authentication credentials (Base64 encoded "username:password")
     Basic { token: String }, // Base64 encoded "userid:password"
+    /// Bearer token authentication (RFC 8898)
+    Bearer { token: String },
     /// Other authentication scheme credentials
     Other { scheme: String, params: Vec<AuthParam> },
 }
@@ -29,6 +31,28 @@ impl Credentials {
     pub fn is_digest(&self) -> bool {
         matches!(self, Credentials::Digest { .. })
     }
+    
+    /// Returns true if the credentials are of the Bearer type
+    ///
+    /// # Returns
+    ///
+    /// `true` if these are Bearer credentials, `false` otherwise
+    pub fn is_bearer(&self) -> bool {
+        matches!(self, Credentials::Bearer { .. })
+    }
+    
+    /// Creates new Bearer credentials with the given token
+    ///
+    /// # Parameters
+    ///
+    /// - `token`: The Bearer token string
+    ///
+    /// # Returns
+    ///
+    /// Bearer credentials with the specified token
+    pub fn bearer(token: impl Into<String>) -> Self {
+        Credentials::Bearer { token: token.into() }
+    }
 }
 
 impl fmt::Display for Credentials {
@@ -41,6 +65,9 @@ impl fmt::Display for Credentials {
             },
              Credentials::Basic { token } => {
                  write!(f, "Basic {}", token)
+            },
+            Credentials::Bearer { token } => {
+                write!(f, "Bearer {}", token)
             },
             Credentials::Other { scheme, params } => {
                 write!(f, "{} ", scheme)?;

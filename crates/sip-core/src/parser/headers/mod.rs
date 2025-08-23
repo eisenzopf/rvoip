@@ -54,6 +54,9 @@ pub mod event; // Added for Event header
 pub mod media_type;
 pub mod min_se; // Added
 pub mod rseq; // Added for RSeq header
+pub mod sip_etag; // Added for SIP-ETag header
+pub mod sip_if_match; // Added for SIP-If-Match header
+pub mod allow_events; // Added for Allow-Events header
 
 // Keep internal modules private
 mod server_val;
@@ -115,6 +118,9 @@ pub use min_expires::parse_min_expires as parse_min_expires_value;
 pub use min_se::parse_min_se_value; // Added
 pub use organization::parse_organization as parse_organization_value;
 pub use rseq::{parse_rseq, parse_rseq_header}; // Added for RSeq header parsing
+pub use sip_etag::parse_sip_etag; // Added for SIP-ETag header parsing
+pub use sip_if_match::parse_sip_if_match; // Added for SIP-If-Match header parsing
+pub use allow_events::parse_allow_events; // Added for Allow-Events header parsing
 
 // Re-export shared auth components if needed directly
 // pub use auth::common::{auth_param, realm, nonce, ...};

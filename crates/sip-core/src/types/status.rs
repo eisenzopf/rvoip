@@ -164,6 +164,8 @@ pub enum StatusCode {
     RequestTerminated = 487,
     /// 488 Not Acceptable Here
     NotAcceptableHere = 488,
+    /// 489 Bad Event (RFC 6665)
+    BadEvent = 489,
     /// 491 Request Pending
     RequestPending = 491,
     /// 493 Undecipherable
@@ -280,6 +282,7 @@ impl StatusCode {
             486 => Ok(StatusCode::BusyHere),
             487 => Ok(StatusCode::RequestTerminated),
             488 => Ok(StatusCode::NotAcceptableHere),
+            489 => Ok(StatusCode::BadEvent),
             491 => Ok(StatusCode::RequestPending),
             493 => Ok(StatusCode::Undecipherable),
 
@@ -361,6 +364,7 @@ impl StatusCode {
             StatusCode::BusyHere => 486,
             StatusCode::RequestTerminated => 487,
             StatusCode::NotAcceptableHere => 488,
+            StatusCode::BadEvent => 489,
             StatusCode::RequestPending => 491,
             StatusCode::Undecipherable => 493,
 
@@ -442,6 +446,7 @@ impl StatusCode {
             StatusCode::BusyHere => "Busy Here",
             StatusCode::RequestTerminated => "Request Terminated",
             StatusCode::NotAcceptableHere => "Not Acceptable Here",
+            StatusCode::BadEvent => "Bad Event",
             StatusCode::RequestPending => "Request Pending",
             StatusCode::Undecipherable => "Undecipherable",
 
@@ -696,6 +701,7 @@ impl StatusCode {
             Self::BusyHere => "Busy Here",
             Self::RequestTerminated => "Request Terminated",
             Self::NotAcceptableHere => "Not Acceptable Here",
+            Self::BadEvent => "Bad Event",
             Self::RequestPending => "Request Pending",
             Self::Undecipherable => "Undecipherable",
             Self::ServerInternalError => "Server Internal Error",

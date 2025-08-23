@@ -167,12 +167,7 @@ fn test_auth_headers() {
     let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Unauthorized"))
         .www_authenticate_digest(
             "sip.example.com",
-            "dcd98b7102dd2f0e8b11d0f600bfb0c093",
-            Some("5ccc069c403ebaf9f0171e9517f40e41"),
-            Some("MD5"),
-            Some(vec!["auth"]),
-            Some(false),
-            Some(vec!["sip:example.com"])
+            "dcd98b7102dd2f0e8b11d0f600bfb0c093"
         )
         .build();
     

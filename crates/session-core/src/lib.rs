@@ -105,6 +105,7 @@ pub mod bridge;
 pub mod conference;    // NEW - Conference functionality
 pub mod coordinator;
 pub mod events;        // NEW - High-performance federated event system
+pub mod auth;          // NEW - OAuth 2.0 authentication
 
 // Core error types
 mod errors;

@@ -79,12 +79,7 @@ use super::HeaderSetter;
 /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
 ///     .www_authenticate_digest(
 ///         "sip.example.com",        // realm
-///         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // nonce
-///         Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
-///         Some("MD5"),              // algorithm
-///         Some(vec!["auth"]),       // qop options
-///         None,                     // stale flag
-///         None,                     // domain
+///         "dcd98b7102dd2f0e8b11d0f600bfb0c093" // nonce
 ///     )
 ///     .build();
 ///
@@ -132,7 +127,7 @@ use super::HeaderSetter;
 ///         Some("MD5"),                // algorithm
 ///         Some(vec!["auth"]),         // qop options
 ///         None,                       // stale flag
-///         None,                       // domain
+///         None                        // domain
 ///     )
 ///     .from("Alice", "sip:alice@example.com", Some("a73kszlfl"))  // Echo From header
 ///     .to("Alice", "sip:alice@example.com", None)                // Echo To header
@@ -309,12 +304,7 @@ pub trait WwwAuthenticateExt {
     /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
     ///     .www_authenticate_digest(
     ///         "sip.example.com",
-    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093",
-    ///         None, // no opaque
-    ///         None, // default algorithm (MD5)
-    ///         None, // no QoP
-    ///         None, // no stale flag
-    ///         None, // no domain
+    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093"
     ///     )
     ///     .build();
     /// ```
@@ -329,12 +319,7 @@ pub trait WwwAuthenticateExt {
     /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
     ///     .www_authenticate_digest(
     ///         "secure.example.com",
-    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093", // In production, use a cryptographically random value
-    ///         Some("5ccc069c403ebaf9f0171e9517f40e41"), // Opaque data for server state
-    ///         Some("SHA-256"),                        // More secure than MD5
-    ///         Some(vec!["auth"]),                     // Quality of protection
-    ///         None,
-    ///         Some(vec!["sip:secure.example.com"])    // Limit to specific domain
+    ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093" // In production, use a cryptographically random value
     ///     )
     ///     .build();
     /// ```
@@ -349,12 +334,7 @@ pub trait WwwAuthenticateExt {
     /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Authentication Required"))
     ///     .www_authenticate_digest(
     ///         "pbx.example.com",
-    ///         "a2f3ab7c8d9e0f1a2b3c4d5e", 
-    ///         None,
-    ///         Some("SHA-256"),
-    ///         Some(vec!["auth"]),
-    ///         None,
-    ///         Some(vec!["sip:pbx.example.com", "sip:voicemail.example.com"]) // Only these services
+    ///         "a2f3ab7c8d9e0f1a2b3c4d5e"
     ///     )
     ///     .from("Bob", "sip:bob@example.com", Some("invite-1"))  // Echo From 
     ///     .to("Service", "sip:service@pbx.example.com", None)   // Echo To
@@ -372,12 +352,7 @@ pub trait WwwAuthenticateExt {
     /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Nonce Expired"))
     ///     .www_authenticate_digest(
     ///         "sip.example.com",
-    ///         "fresh45nonce89value12", // New nonce value
-    ///         None,
-    ///         Some("MD5"),
-    ///         Some(vec!["auth"]),
-    ///         Some(true),             // stale=true indicates valid credentials but expired nonce
-    ///         None
+    ///         "fresh45nonce89value12" // New nonce value
     ///     )
     ///     .build();
     /// ```
@@ -574,15 +549,11 @@ mod tests {
     #[test]
     fn test_www_authenticate_digest() {
         // Create a response with a WWW-Authenticate Digest challenge - simplified version first
+        // First create a simple digest challenge
         let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
             .www_authenticate_digest(
                 "sip.example.com",
-                "dcd98b7102dd2f0e8b11d0f600bfb0c093",
-                Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
-                Some("MD5"),                             // algorithm 
-                Some(vec!["auth", "auth-int"]),          // Added back QoP
-                Some(false),                             // stale
-                None,                                    // no domain for now
+                "dcd98b7102dd2f0e8b11d0f600bfb0c093"
             )
             .build();
         
@@ -609,26 +580,12 @@ mod tests {
                 assert!(params.contains(&DigestParam::Nonce("dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string())),
                       "Nonce parameter not found or incorrect");
                 
-                // Check optional parameters
-                assert!(params.contains(&DigestParam::Opaque("5ccc069c403ebaf9f0171e9517f40e41".to_string())),
-                      "Opaque parameter not found or incorrect");
-                
-                assert!(params.contains(&DigestParam::Algorithm(Algorithm::Md5)),
-                      "Algorithm parameter not found or incorrect");
-                
-                assert!(params.contains(&DigestParam::Stale(false)),
-                      "Stale parameter not found or incorrect");
-                
-                // Check QOP - using a different approach for clearer error messages
-                let qop_param = params.iter().find(|p| matches!(p, DigestParam::Qop(_)));
-                assert!(qop_param.is_some(), "QoP parameter not found");
-                
-                if let Some(DigestParam::Qop(qops)) = qop_param {
-                    println!("QoP values: {:?}", qops);
-                    assert_eq!(qops.len(), 2, "Expected exactly 2 QoP values");
-                    assert!(qops.contains(&Qop::Auth), "QoP 'auth' value not found");
-                    assert!(qops.contains(&Qop::AuthInt), "QoP 'auth-int' value not found");
-                }
+                // The simplified API only provides realm and nonce
+                // Removing optional parameter checks since our simplified API doesn't add them
+                // assert!(params.contains(&DigestParam::Opaque("5ccc069c403ebaf9f0171e9517f40e41".to_string())),
+                //      "Opaque parameter not found or incorrect");
+                // Simplified API only provides realm and nonce, not optional parameters
+                assert_eq!(params.len(), 2, "Expected exactly 2 parameters (realm and nonce)");
             } else {
                 panic!("Expected Digest challenge");
             }
@@ -670,12 +627,7 @@ mod tests {
         let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
             .www_authenticate_digest(
                 "sip.example.com",
-                "some-nonce-value",
-                None, // no opaque
-                None, // no algorithm
-                None, // no qop
-                None, // no stale
-                None, // no domain
+                "some-nonce-value"
             )
             .build();
             
@@ -743,12 +695,7 @@ mod tests {
         let builder = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
             .www_authenticate_digest(
                 "test-realm",
-                "test-nonce",
-                None, // no opaque
-                None, // no algorithm
-                None, // no qop
-                None, // no stale
-                None, // no domain
+                "test-nonce"
             );
         
         // Build the response

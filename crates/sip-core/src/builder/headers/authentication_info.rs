@@ -83,12 +83,7 @@ use super::HeaderSetter;
 /// let challenge_response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
 ///     .www_authenticate_digest(
 ///         "example.com",                              // realm
-///         "dcd98b7102dd2f0e8b11d0f600bfb0c093",      // nonce
-///         None,                                       // opaque
-///         Some("SHA-256"),                            // algorithm
-///         Some(vec!["auth"]),                         // qop
-///         None,                                       // stale
-///         None                                        // domain
+///         "dcd98b7102dd2f0e8b11d0f600bfb0c093"       // nonce
 ///     )
 ///     .to("Alice", "sip:alice@example.com", Some("a73kszlfl"))
 ///     .from("SIP Server", "sip:registrar@example.com", Some("1232412"))

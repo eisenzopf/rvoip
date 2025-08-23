@@ -121,13 +121,10 @@ mod tests {
         let (rem, creds) = parse_proxy_authorization(input).unwrap();
         assert!(rem.is_empty());
         
-        if let Credentials::Other { scheme, params } = creds {
-            assert_eq!(scheme, "Bearer");
-            assert_eq!(params.len(), 1);
-            assert_eq!(params[0].name, "token68");
-            assert_eq!(params[0].value, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
+        if let Credentials::Bearer { token } = creds {
+            assert_eq!(token, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
         } else {
-            panic!("Expected Other credentials scheme");
+            panic!("Expected Bearer credentials");
         }
     }
     

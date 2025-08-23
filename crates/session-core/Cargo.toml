@@ -28,6 +28,7 @@ rvoip-dialog-core.workspace = true
 rvoip-sip-transport.workspace = true
 rvoip-media-core.workspace = true
 infra-common.workspace = true
+rvoip-registrar-core = { path = "../registrar-core" }
 
 # External dependencies from workspace
 tokio.workspace = true
@@ -48,6 +49,11 @@ clap.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 rlimit = "0.10"
+
+# OAuth 2.0 support
+jsonwebtoken = "9.3"
+reqwest = { version = "0.12", features = ["json"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tokio.workspace = true

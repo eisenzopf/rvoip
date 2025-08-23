@@ -68,6 +68,48 @@ impl WwwAuthenticate {
             crate::types::auth::params::AuthParam { name: "realm".to_string(), value: realm.into() }
         ] }])
     }
+    
+    /// Creates a new WwwAuthenticate header with a Bearer challenge (RFC 8898).
+    ///
+    /// # Parameters
+    ///
+    /// - `realm`: The authentication realm (e.g., domain name)
+    ///
+    /// # Returns
+    ///
+    /// A new WWW-Authenticate header with a Bearer challenge
+    pub fn new_bearer(realm: impl Into<String>) -> Self {
+        Self(vec![Challenge::Bearer { 
+            realm: realm.into(),
+            scope: None,
+            error: None,
+            error_description: None,
+        }])
+    }
+    
+    /// Creates a new WwwAuthenticate header with a Bearer challenge including error.
+    ///
+    /// # Parameters
+    ///
+    /// - `realm`: The authentication realm
+    /// - `error`: The error code (e.g., "invalid_token", "expired_token")
+    /// - `error_description`: Optional human-readable error description
+    ///
+    /// # Returns
+    ///
+    /// A new WWW-Authenticate header with a Bearer challenge containing error information
+    pub fn new_bearer_error(
+        realm: impl Into<String>, 
+        error: impl Into<String>,
+        error_description: Option<String>
+    ) -> Self {
+        Self(vec![Challenge::Bearer { 
+            realm: realm.into(),
+            scope: None,
+            error: Some(error.into()),
+            error_description,
+        }])
+    }
 
     /// Adds an additional challenge to this header.
     ///
@@ -98,6 +140,16 @@ impl WwwAuthenticate {
     /// or None if no Basic challenge is present
     pub fn first_basic(&self) -> Option<&Challenge> {
         self.0.iter().find(|c| matches!(c, Challenge::Basic { .. }))
+    }
+    
+    /// Returns the first Bearer challenge, if any.
+    ///
+    /// # Returns
+    ///
+    /// An Option containing a reference to the first Bearer challenge,
+    /// or None if no Bearer challenge is present
+    pub fn first_bearer(&self) -> Option<&Challenge> {
+        self.0.iter().find(|c| matches!(c, Challenge::Bearer { .. }))
     }
 
     /// Sets the domain parameter on the first Digest challenge.

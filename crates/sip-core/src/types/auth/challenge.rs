@@ -17,6 +17,17 @@ pub enum Challenge {
     Digest { params: Vec<DigestParam> },
     /// Basic authentication challenge (typically just realm)
     Basic { params: Vec<AuthParam> }, // Typically just realm
+    /// Bearer authentication challenge (RFC 8898)
+    Bearer { 
+        /// The authentication realm
+        realm: String,
+        /// Optional scope requirement
+        scope: Option<String>,
+        /// Optional error code
+        error: Option<String>,
+        /// Optional error description
+        error_description: Option<String>,
+    },
     /// Other authentication scheme challenges
     Other { scheme: String, params: Vec<AuthParam> },
 }
@@ -33,6 +44,19 @@ impl fmt::Display for Challenge {
                  write!(f, "Basic ")?;
                  let params_str = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
                  write!(f, "{}", params_str)
+            },
+            Challenge::Bearer { realm, scope, error, error_description } => {
+                write!(f, "Bearer realm=\"{}\"", realm)?;
+                if let Some(scope) = scope {
+                    write!(f, ", scope=\"{}\"", scope)?;
+                }
+                if let Some(error) = error {
+                    write!(f, ", error=\"{}\"", error)?;
+                }
+                if let Some(error_desc) = error_description {
+                    write!(f, ", error_description=\"{}\"", error_desc)?;
+                }
+                Ok(())
             },
             Challenge::Other { scheme, params } => {
                 write!(f, "{} ", scheme)?;

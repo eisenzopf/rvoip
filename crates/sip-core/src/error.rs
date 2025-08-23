@@ -91,6 +91,10 @@ pub enum Error {
     #[error("SDP validation error: {0}")]
     SdpValidationError(String),
 
+    /// Message validation error
+    #[error("Message validation error: {0}")]
+    ValidationError(String),
+
     /// Transport-specific error
     #[error("Transport error: {0}")]
     Transport(String),

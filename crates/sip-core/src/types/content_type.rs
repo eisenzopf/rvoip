@@ -147,6 +147,127 @@ impl ContentType {
             parameters: HashMap::new(),
         })
     }
+
+    /// Creates a ContentType for application/pidf+xml
+    ///
+    /// PIDF (Presence Information Data Format) is used for presence notifications
+    /// in SIMPLE (SIP for Instant Messaging and Presence Leveraging Extensions).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let pidf = ContentType::pidf();
+    /// assert_eq!(pidf.to_string(), "application/pidf+xml");
+    /// ```
+    pub fn pidf() -> Self {
+        Self::from_type_subtype("application", "pidf+xml")
+    }
+
+    /// Creates a ContentType for application/sdp
+    ///
+    /// SDP (Session Description Protocol) is the most common content type
+    /// for SIP INVITE and response messages.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let sdp = ContentType::sdp();
+    /// assert_eq!(sdp.to_string(), "application/sdp");
+    /// ```
+    pub fn sdp() -> Self {
+        Self::from_type_subtype("application", "sdp")
+    }
+
+    /// Creates a ContentType for application/simple-message-summary
+    ///
+    /// Used for message waiting indicator notifications.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let mwi = ContentType::message_summary();
+    /// assert_eq!(mwi.to_string(), "application/simple-message-summary");
+    /// ```
+    pub fn message_summary() -> Self {
+        Self::from_type_subtype("application", "simple-message-summary")
+    }
+
+    /// Creates a ContentType for text/plain
+    ///
+    /// Used for simple text messages in MESSAGE requests.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let text = ContentType::text_plain();
+    /// assert_eq!(text.to_string(), "text/plain");
+    /// ```
+    pub fn text_plain() -> Self {
+        Self::from_type_subtype("text", "plain")
+    }
+
+    /// Checks if this ContentType is PIDF
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    /// use std::str::FromStr;
+    ///
+    /// let pidf = ContentType::pidf();
+    /// assert!(pidf.is_pidf());
+    ///
+    /// let sdp = ContentType::sdp();
+    /// assert!(!sdp.is_pidf());
+    /// ```
+    pub fn is_pidf(&self) -> bool {
+        self.0.m_type == "application" && self.0.m_subtype == "pidf+xml"
+    }
+
+    /// Checks if this ContentType is SDP
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let sdp = ContentType::sdp();
+    /// assert!(sdp.is_sdp());
+    ///
+    /// let pidf = ContentType::pidf();
+    /// assert!(!pidf.is_sdp());
+    /// ```
+    pub fn is_sdp(&self) -> bool {
+        self.0.m_type == "application" && self.0.m_subtype == "sdp"
+    }
+
+    /// Adds a parameter to the ContentType
+    ///
+    /// # Parameters
+    ///
+    /// - `name`: The parameter name
+    /// - `value`: The parameter value
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::prelude::*;
+    ///
+    /// let mut pidf = ContentType::pidf();
+    /// pidf.add_parameter("charset", "UTF-8");
+    /// assert_eq!(pidf.to_string(), "application/pidf+xml;charset=\"UTF-8\"");
+    /// ```
+    pub fn add_parameter(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.0.parameters.insert(name.into(), value.into());
+    }
 }
 
 impl fmt::Display for ContentType {
