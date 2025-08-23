@@ -306,6 +306,35 @@ Channel to PresenceWatcher
 
 ## Security & Privacy
 
+### OAuth 2.0 Bearer Token Authentication (RFC 8898)
+
+**Registration Flow with OAuth:**
+1. Client obtains access token from OAuth Authorization Server
+2. Client sends REGISTER with `Authorization: Bearer <token>` header
+3. Session-core validates token (JWT validation or introspection)
+4. If valid, user is registered in registrar-core
+5. Token scopes determine permissions (register, call, presence)
+
+**Token Validation Options:**
+- **JWT Self-Validation**: Validate signature using OAuth server's public key
+- **Token Introspection**: Call OAuth server's `/introspect` endpoint
+- **Cached Validation**: Cache validated tokens for performance
+
+**Authorization Headers:**
+```
+REGISTER sip:example.com SIP/2.0
+Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...
+```
+
+**Error Response for Invalid Token:**
+```
+SIP/2.0 401 Unauthorized
+WWW-Authenticate: Bearer realm="example.com",
+                  error="invalid_token",
+                  error_description="The access token expired"
+```
+
+### Traditional Security Features
 - Presence authorization (accept/reject watchers)
 - Filtered presence (show different status to different watchers)
 - Encryption of presence data
@@ -349,3 +378,4 @@ Channel to PresenceWatcher
 - RFC 3863 - Presence Information Data Format (PIDF)
 - RFC 3903 - SIP Extension for Event State Publication (PUBLISH)
 - RFC 6665 - SIP-Specific Event Notification (SUBSCRIBE/NOTIFY)
+- RFC 8898 - Third-Party Token-Based Authentication and Authorization for SIP
