@@ -16,6 +16,7 @@ members = [
     "crates/sip-client",
     "crates/rvoip",
     "crates/infra-common",
+    "crates/registrar-core",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,
@@ -35,6 +36,7 @@ default-members = [
     "crates/sip-client",
     "crates/rvoip",
     "crates/infra-common",
+    "crates/registrar-core",
 ]
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!

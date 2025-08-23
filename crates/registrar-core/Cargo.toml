@@ -1,0 +1,42 @@
+[package]
+name = "rvoip-registrar-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+
+# Data structures
+dashmap = "6.1"
+parking_lot = "0.12"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+quick-xml = { version = "0.36", features = ["serialize"] }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Internal dependencies
+infra-common = { path = "../infra-common" }
+rvoip-sip-core = { path = "../sip-core" }
+
+# UUID generation
+uuid = { version = "1.5", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+criterion = "0.5"
+pretty_assertions = "1.4"
+
