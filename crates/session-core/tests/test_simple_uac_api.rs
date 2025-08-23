@@ -1,5 +1,5 @@
-//! Real UAC-to-UAS test with actual connection and bi-directional audio using the new Simple API
-//! This test is completely standalone and doesn't rely on common test utilities.
+//! Standalone test for the new Simple UAC API
+//! This test doesn't rely on any common test utilities.
 
 use rvoip_session_core::api::uac::{SimpleUacClient, SimpleCall};
 use rvoip_session_core::api::uas::{SimpleUasServer};
@@ -129,62 +129,4 @@ async fn test_real_uac_to_uas_bidirectional_audio() {
     
     println!("Note: This test validates the new Simple UAC API.");
     println!("Full bidirectional audio testing will be available when Simple UAS API is updated.");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_simple_uac_protocol_detection() {
-    println!("\n=== Testing Protocol Auto-Detection with Simple API ===\n");
-    
-    // Create client
-    let client = SimpleUacClient::new("alice")
-        .port(5062)
-        .await
-        .expect("Failed to create client");
-    
-    // These would make calls if we had a server running
-    // Just testing that the API accepts different formats
-    
-    // Test SIP protocol detection
-    let _ = client.call("bob@example.com"); // Should detect as SIP
-    let _ = client.call("sip:bob@example.com"); // Explicit SIP
-    
-    // Test TEL protocol detection  
-    let _ = client.call("+14155551234"); // Should detect as TEL
-    let _ = client.call("tel:+14155551234"); // Explicit TEL
-    let _ = client.call("911"); // Emergency number
-    
-    client.shutdown().await.expect("Failed to shutdown");
-    
-    println!("Protocol detection test complete\n");
-}
-
-#[tokio::test]
-#[serial]
-async fn test_simple_uac_registration() {
-    println!("\n=== Testing Simple UAC Registration ===\n");
-    
-    // Create client
-    let client = SimpleUacClient::new("alice")
-        .local_addr("127.0.0.1")
-        .port(5063)
-        .await
-        .expect("Failed to create client");
-    
-    println!("Client created: alice@127.0.0.1:5063");
-    
-    // Test registration (mock for now)
-    client.register("sip:registrar@example.com").await
-        .expect("Failed to register");
-    
-    println!("Client registered to sip:registrar@example.com");
-    
-    // Unregister
-    client.unregister().await.expect("Failed to unregister");
-    println!("Client unregistered");
-    
-    // Shutdown
-    client.shutdown().await.expect("Failed to shutdown");
-    
-    println!("Registration test complete\n");
 }

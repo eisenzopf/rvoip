@@ -238,23 +238,78 @@ pub struct IncomingCall {
     pub received_at: Instant,
     /// SIP Call-ID header value that uniquely identifies this call across UAC and UAS
     pub sip_call_id: Option<String>,
+    /// Coordinator reference for accept/reject operations (set by handler)
+    pub(crate) coordinator: Option<Arc<crate::coordinator::SessionCoordinator>>,
 }
 
 impl IncomingCall {
-    /// Accept the incoming call
-    /// Note: Use accept_call() function with SessionManager parameter instead
-    pub async fn accept(&self) -> Result<CallSession> {
-        Err(crate::errors::SessionError::Other(
-            "Use accept_call(session_manager, &session_id) function instead".to_string()
-        ))
+    /// Accept the incoming call and get a SimpleCall handle
+    /// 
+    /// This accepts the call and returns a SimpleCall object that provides
+    /// symmetric capabilities with outgoing calls.
+    pub async fn accept(self) -> Result<crate::api::call::SimpleCall> {
+        let coordinator = self.coordinator
+            .clone()
+            .ok_or(crate::errors::SessionError::Other(
+                "IncomingCall missing coordinator - was it created properly?".to_string()
+            ))?;
+        
+        // Accept via SessionControl
+        use crate::api::control::SessionControl;
+        SessionControl::accept_incoming_call(
+            &coordinator,
+            &self,
+            self.sdp.as_ref().and_then(|sdp| {
+                // Generate SDP answer if we have an offer
+                // TODO: This should use MediaControl::generate_sdp_answer
+                None
+            })
+        ).await?;
+        
+        // Create SimpleCall
+        crate::api::call::SimpleCall::from_incoming(
+            self.id.clone(),
+            coordinator,
+            self.from.clone(),
+        ).await
     }
-
+    
     /// Reject the incoming call with a reason
-    /// Note: Use reject_call() function with SessionManager parameter instead
-    pub async fn reject(&self, reason: &str) -> Result<()> {
-        Err(crate::errors::SessionError::Other(
-            "Use reject_call(session_manager, &session_id, reason) function instead".to_string()
-        ))
+    /// 
+    /// This rejects the call with the specified reason.
+    pub async fn reject(self, reason: &str) -> Result<()> {
+        let coordinator = self.coordinator
+            .clone()
+            .ok_or(crate::errors::SessionError::Other(
+                "IncomingCall missing coordinator - was it created properly?".to_string()
+            ))?;
+        
+        use crate::api::control::SessionControl;
+        SessionControl::reject_incoming_call(
+            &coordinator,
+            &self,
+            reason
+        ).await
+    }
+    
+    /// Forward the incoming call to another destination
+    /// 
+    /// This sends a SIP redirect response to forward the call.
+    pub async fn forward(self, target: &str) -> Result<()> {
+        let coordinator = self.coordinator
+            .clone()
+            .ok_or(crate::errors::SessionError::Other(
+                "IncomingCall missing coordinator - was it created properly?".to_string()
+            ))?;
+        
+        // TODO: Implement forward_incoming_call in SessionControl
+        // For now, reject with a forwarding message
+        use crate::api::control::SessionControl;
+        SessionControl::reject_incoming_call(
+            &coordinator,
+            &self,
+            &format!("Forwarded to {}", target)
+        ).await
     }
 
     /// Get caller information

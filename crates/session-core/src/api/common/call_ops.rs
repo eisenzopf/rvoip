@@ -42,7 +42,17 @@ pub async fn transfer(
     session_id: &SessionId,
     target: &str,
 ) -> Result<()> {
-    SessionControl::transfer_session(coordinator, session_id, target).await
+    // Ensure the target is a proper SIP URI
+    let formatted_target = if target.starts_with("sip:") || target.starts_with("tel:") {
+        target.to_string()
+    } else if target.contains('@') {
+        format!("sip:{}", target)
+    } else {
+        // Assume it's a phone number or username
+        format!("sip:{}", target)
+    };
+    
+    SessionControl::transfer_session(coordinator, session_id, &formatted_target).await
 }
 
 /// Bridge two calls together (3-way conference)
