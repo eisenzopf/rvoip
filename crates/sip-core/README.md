@@ -15,6 +15,7 @@
 - **URI Processing**: Comprehensive SIP, SIPS, and TEL URI support with parameter manipulation
 - **SDP Integration**: Full Session Description Protocol support including WebRTC extensions
 - **Authentication**: Complete digest authentication with various challenge-response schemes
+- **SIMPLE Presence**: Complete RFC 3903/6665 implementation for presence services
 - **Multipart Bodies**: MIME multipart message handling for complex content scenarios
 
 ### ❌ **Delegated Responsibilities**
@@ -63,7 +64,7 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
   - ✅ SDP generation with WebRTC attribute support
   - ✅ Multipart body assembly for complex content scenarios
 
-#### **Comprehensive Header Support (60+ Headers)**
+#### **Comprehensive Header Support (65+ Headers)**
 - ✅ **Core SIP Headers (RFC 3261)**: From, To, Via, Call-ID, CSeq, Contact, Route, etc.
   - ✅ Address headers with display name and parameter parsing
   - ✅ URI headers with comprehensive scheme and parameter support
@@ -74,11 +75,35 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
   - ✅ Quality of Protection (qop) with auth and auth-int modes
   - ✅ Nonce counting and client nonce generation
   - ✅ Algorithm negotiation and stale flag handling
+  - ✅ OAuth 2.0 Bearer tokens (RFC 8898) for third-party authentication
 - ✅ **Extension Headers**: Session-Expires, Event, Refer-To, Path, Record-Route
   - ✅ RFC 3265 event notification headers (Event, Subscription-State)
   - ✅ RFC 3515 call transfer headers (Refer-To, Referred-By)
   - ✅ RFC 4028 session timer headers (Session-Expires, Min-SE)
   - ✅ RFC 3327 path extension headers (Path)
+  - ✅ RFC 3903 presence headers (SIP-ETag, SIP-If-Match)
+  - ✅ RFC 6665 enhanced event headers (Allow-Events, Min-Expires)
+
+#### **SIMPLE Presence Support (RFC 3903, RFC 6665)**
+- ✅ **PUBLISH Method (RFC 3903)**: Event state publication for presence
+  - ✅ Initial, refresh, and remove publication operations
+  - ✅ SIP-ETag and SIP-If-Match headers for conditional requests
+  - ✅ Event header with package and ID parameter support
+  - ✅ Automatic expiration handling with Expires header
+- ✅ **SUBSCRIBE/NOTIFY (RFC 6665)**: Event notification framework
+  - ✅ Event package support with "presence" as primary use case
+  - ✅ Subscription-State header for subscription lifecycle
+  - ✅ Allow-Events header for capability advertisement
+  - ✅ Min-Expires header for 423 Interval Too Brief responses
+- ✅ **PIDF Support (RFC 3863)**: Presence Information Data Format
+  - ✅ Content-Type helpers for application/pidf+xml
+  - ✅ Basic PIDF document structure and generation
+  - ✅ Integration with NOTIFY message bodies
+- ✅ **Error Response Helpers**: Presence-specific error responses
+  - ✅ 489 Bad Event for unsupported event packages
+  - ✅ 423 Interval Too Brief with Min-Expires
+  - ✅ 401 Unauthorized with Bearer challenges
+  - ✅ 403 Forbidden for subscription rejections
 
 #### **Advanced URI Processing**
 - ✅ **Multi-Scheme Support**: SIP, SIPS, TEL URIs with full parameter handling
@@ -129,19 +154,126 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
   - ✅ Builder guide with comprehensive header examples
   - ✅ SDP guide with WebRTC and traditional VoIP scenarios
 
+#### **Presence Message Builders**
+- ✅ **Convenience Methods**: Type-safe builders for presence operations
+  - ✅ `publish(uri, event)` - Create PUBLISH requests with Event header
+  - ✅ `subscribe(uri, event, expires)` - Create SUBSCRIBE with expiration
+  - ✅ `notify(uri, event, state)` - Create NOTIFY with subscription state
+  - ✅ `unauthorized()`, `forbidden()`, `interval_too_brief()`, `bad_event()` - Error responses
+- ✅ **Bearer Authentication**: Modern OAuth2 support
+  - ✅ `authorization_bearer(token)` - Add Bearer token to requests
+  - ✅ `www_authenticate_bearer(realm)` - Create Bearer challenges
+  - ✅ `www_authenticate_bearer_error(realm, error, description)` - Bearer with error details
+
 ### 🚧 Planned Features - Advanced Protocol Extensions
 
 #### **Enhanced Protocol Support**
 - 🚧 **RFC 3893 SIP Authenticated Identity Body**: Identity header and certificate handling
 - 🚧 **RFC 4538 SIP REFER Method**: Enhanced refer processing with dialog correlation
-- 🚧 **RFC 6665 Event Notification**: Enhanced event package support
 - 🚧 **RFC 7044 Augmented Backus-Naur Form (ABNF)**: Enhanced grammar validation
+
+#### **Enhanced Presence Features**
+- 🚧 **RFC 4662 Event Notification Filtering**: Resource list subscriptions
+- 🚧 **RFC 5262 Partial Presence**: Efficient presence updates
+- 🚧 **XCAP Integration**: Presence document management
 
 #### **Performance Optimizations**
 - 🚧 **Zero-Copy Parsing**: Reduce memory allocations in parsing hot paths
 - 🚧 **SIMD Header Processing**: Vectorized string processing for common headers
 - 🚧 **Parse Caching**: Cache parsed headers for repeated message processing
 - 🚧 **Streaming Parser**: Support for partial message parsing in network scenarios
+
+## Usage Examples
+
+### SIMPLE Presence Operations
+
+#### Publishing Presence State
+```rust,no_run
+use rvoip_sip_core::builder::SimpleRequestBuilder;
+use rvoip_sip_core::types::pidf::{PidfDocument, Tuple, Status};
+
+// Create a PIDF presence document
+let pidf = PidfDocument::new("pres:alice@example.com")
+    .add_tuple(
+        Tuple::new("t1", Status::open())
+            .with_contact("sip:alice@192.168.1.10")
+    )
+    .add_note("Available for calls");
+
+// Create a PUBLISH request to update presence
+let publish_request = SimpleRequestBuilder::publish("sip:alice@example.com", "presence")
+    .unwrap()
+    .from("Alice", "sip:alice@example.com", Some("tag123"))
+    .to("Alice", "sip:alice@example.com", None)
+    .call_id("publish-001")
+    .cseq(1)
+    .via("192.168.1.10:5060", "UDP", Some("branch-xyz"))
+    .expires(3600)
+    .content_type("application/pidf+xml")
+    .body(pidf.to_xml())
+    .build();
+```
+
+#### Subscribing to Presence
+```rust,no_run
+// Create a SUBSCRIBE request for presence events
+let subscribe_request = SimpleRequestBuilder::subscribe("sip:bob@example.com", "presence", 3600)
+    .unwrap()
+    .from("Alice", "sip:alice@example.com", Some("tag456"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("subscribe-001")
+    .cseq(1)
+    .via("192.168.1.10:5060", "UDP", Some("branch-abc"))
+    .contact("sip:alice@192.168.1.10:5060", None)
+    .build();
+```
+
+#### Sending Presence Notifications
+```rust,no_run
+// Create a NOTIFY with presence information
+let notify_request = SimpleRequestBuilder::notify(
+    "sip:alice@192.168.1.10:5060",
+    "presence",
+    "active;expires=3599"
+)
+.unwrap()
+.from("Bob", "sip:bob@example.com", Some("tag789"))
+.to("Alice", "sip:alice@example.com", Some("tag456"))
+.call_id("subscribe-001")
+.cseq(1)
+.via("192.168.1.20:5060", "UDP", Some("branch-def"))
+.content_type("application/pidf+xml")
+.body(presence_xml)
+.build();
+```
+
+### OAuth2 Bearer Authentication
+
+```rust,no_run
+use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use rvoip_sip_core::types::Method;
+
+// Challenge with Bearer authentication
+let challenge_response = SimpleResponseBuilder::unauthorized()
+    .from("Alice", "sip:alice@example.com", Some("tag123"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("test-001")
+    .cseq(1, Method::Register)
+    .via("192.168.1.10:5060", "UDP", Some("branch"))
+    .www_authenticate_bearer("example.com")
+    .build();
+
+// Request with Bearer token
+let authorized_request = SimpleRequestBuilder::register("sip:example.com")
+    .unwrap()
+    .from("Alice", "sip:alice@example.com", Some("tag789"))
+    .to("Alice", "sip:alice@example.com", None)
+    .call_id("register-002")
+    .cseq(1)
+    .via("192.168.1.10:5060", "UDP", Some("branch-123"))
+    .authorization_bearer("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
+    .build();
+```
 
 ## 🏗️ **Architecture**
 
@@ -882,6 +1014,26 @@ match parse_message(&data) {
 - **Validation Errors**: Type-specific validation with clear messages
 - **URI Errors**: Comprehensive URI validation and error reporting
 - **SDP Errors**: Session description validation with line numbers
+
+## RFC Compliance
+
+### Core RFCs Implemented
+- **RFC 3261**: SIP: Session Initiation Protocol - Complete implementation
+- **RFC 8866**: SDP: Session Description Protocol - Full support with WebRTC extensions
+- **RFC 3265**: SIP-Specific Event Notification - Basic framework (updated by RFC 6665)
+- **RFC 3327**: SIP Extension Header Field for Registering Non-Adjacent Contacts - Path header
+- **RFC 3515**: The Session Initiation Protocol (SIP) Refer Method - Refer-To/Referred-By headers
+- **RFC 4028**: Session Timers in the Session Initiation Protocol (SIP) - Session-Expires/Min-SE
+
+### Presence and Event RFCs
+- **RFC 3903**: SIP Extension for Event State Publication - PUBLISH method
+- **RFC 6665**: SIP-Specific Event Notification - Complete SUBSCRIBE/NOTIFY implementation
+- **RFC 3863**: Presence Information Data Format (PIDF) - Basic document support
+- **RFC 8898**: Third-Party Token-Based Authentication and Authorization for SIP - Bearer tokens
+
+### Authentication RFCs
+- **RFC 2617**: HTTP Authentication: Basic and Digest Access Authentication - Digest auth
+- **RFC 8898**: OAuth 2.0 Bearer Token Usage in SIP - Bearer authentication
 
 ## Contributing
 

@@ -83,16 +83,7 @@ pub fn credentials(input: &[u8]) -> ParseResult<Credentials> {
                         .map_err(|_| nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Char)))? // Basic error conversion
                         .to_string();
         
-        // Create a parameter with token68 value
-        let param = AuthParam {
-            name: "token68".to_string(),
-            value: token,
-        };
-        
-        return Ok((rem, Credentials::Other { 
-            scheme: "Bearer".to_string(), 
-            params: vec![param] 
-        }));
+        return Ok((rem, Credentials::Bearer { token }));
     }
     
     // If neither of the special cases, use the general approach
@@ -285,19 +276,16 @@ mod tests {
 
     #[test]
     fn test_other_credentials() {
-        // Test some other authentication scheme
+        // Test Bearer which now has its own variant
         let input = b"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
         let (rem, creds) = credentials(input).unwrap();
         assert!(rem.is_empty());
         
         match creds {
-            Credentials::Other { scheme, params } => {
-                assert_eq!(scheme, "Bearer");
-                assert_eq!(params.len(), 1);
-                assert_eq!(params[0].name, "token68");
-                assert_eq!(params[0].value, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
+            Credentials::Bearer { token } => {
+                assert_eq!(token, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
             },
-            _ => panic!("Expected Other credentials"),
+            _ => panic!("Expected Bearer credentials"),
         }
     }
 

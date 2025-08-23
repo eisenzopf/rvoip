@@ -57,6 +57,27 @@ impl Authorization {
             DigestParam::Response(response.into()),
         ] })
     }
+    
+    /// Creates a new Authorization header with Bearer token (RFC 8898).
+    ///
+    /// # Parameters
+    ///
+    /// - `token`: The Bearer token string
+    ///
+    /// # Returns
+    ///
+    /// An Authorization header with Bearer credentials
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::types::auth::Authorization;
+    /// 
+    /// let auth = Authorization::bearer("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...");
+    /// ```
+    pub fn bearer(token: impl Into<String>) -> Self {
+        Self(Credentials::bearer(token))
+    }
 
     /// Sets the algorithm parameter.
     ///

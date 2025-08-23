@@ -23,11 +23,12 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned};
 ///
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
+/// use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// use rvoip_sip_core::json::SipJsonExt;
 ///
 /// # fn example() -> Option<()> {
 /// // Create a SIP request
-/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+/// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
 ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
 ///     .to("Bob", "sip:bob@example.com", None)
 ///     .build();
@@ -70,9 +71,10 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned};
 ///
 /// ```
 /// # use rvoip_sip_core::prelude::*;
+/// # use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// # use rvoip_sip_core::json::SipJsonExt;
 /// # fn example() -> Option<()> {
-/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+/// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
 ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
 ///     .build();
 ///
@@ -87,9 +89,10 @@ use serde::{Serialize, Deserialize, de::DeserializeOwned};
 ///
 /// ```
 /// # use rvoip_sip_core::prelude::*;
+/// # use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// # use rvoip_sip_core::json::SipJsonExt;
 /// # fn example() -> Option<()> {
-/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+/// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
 ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
 ///     .build();
 ///
@@ -117,8 +120,10 @@ pub trait SipJsonExt {
     /// # use rvoip_sip_core::prelude::*;
     /// # use rvoip_sip_core::json::SipJsonExt;
     /// # use rvoip_sip_core::json::SipValue;
+    /// # use rvoip_sip_core::types::sip_request::Request;
+    /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// # fn example() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap().build();
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap().build();
     /// 
     /// // Convert to SipValue
     /// let value: SipValue = <Request as SipJsonExt>::to_sip_value(&request)?;
@@ -149,7 +154,7 @@ pub trait SipJsonExt {
     /// # use rvoip_sip_core::types::sip_request::Request;
     /// # fn example() -> std::result::Result<(), Box<dyn std::error::Error>> {
     /// // Create a request and convert to SipValue
-    /// let original = RequestBuilder::invite("sip:bob@example.com").unwrap().build();
+    /// let original = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap().build();
     /// let value = <Request as SipJsonExt>::to_sip_value(&original)?;
     /// 
     /// // Convert back to Request
@@ -173,9 +178,10 @@ pub trait SipJsonExt {
     ///
     /// ```
     /// # use rvoip_sip_core::prelude::*;
+    /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// # use rvoip_sip_core::json::SipJsonExt;
     /// # fn example() -> Option<()> {
-    /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap().build();
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap().build();
     /// let method = request.get_path("method");
     /// println!("Method: {}", method);  // Prints "Method: Invite"
     /// 
@@ -205,7 +211,7 @@ pub trait SipJsonExt {
     /// # use rvoip_sip_core::prelude::*;
     /// # use rvoip_sip_core::json::SipJsonExt;
     /// # fn example() -> Option<()> {
-    /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
     ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
     ///     .build();
     ///
@@ -239,9 +245,10 @@ pub trait SipJsonExt {
     ///
     /// ```
     /// # use rvoip_sip_core::prelude::*;
+    /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// # use rvoip_sip_core::json::SipJsonExt;
     /// # fn example() -> Option<()> {
-    /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap().build();
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap().build();
     /// 
     /// // Works with string values
     /// let method = request.path_str("method").unwrap_or_default();
@@ -273,9 +280,10 @@ pub trait SipJsonExt {
     ///
     /// ```
     /// # use rvoip_sip_core::prelude::*;
+    /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// # use rvoip_sip_core::json::SipJsonExt;
     /// # fn example() -> Option<()> {
-    /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap().build();
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap().build();
     /// 
     /// // A concise one-liner with default value
     /// let from_display = request.path_str_or("headers.From.display_name", "Anonymous");
@@ -298,9 +306,10 @@ pub trait SipJsonExt {
     ///
     /// ```
     /// # use rvoip_sip_core::prelude::*;
+    /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// # use rvoip_sip_core::json::SipJsonExt;
     /// # fn example() -> Option<()> {
-    /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap().build();
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap().build();
     /// 
     /// // Chain method calls to navigate the structure
     /// let tag = request
@@ -336,7 +345,7 @@ pub trait SipJsonExt {
     /// # use rvoip_sip_core::prelude::*;
     /// # use rvoip_sip_core::json::SipJsonExt;
     /// # fn example() -> Option<()> {
-    /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
     ///     .from("Alice", "sip:alice@example.com", Some("tag1"))
     ///     .to("Bob", "sip:bob@example.com", Some("tag2"))
     ///     .build();
@@ -369,7 +378,7 @@ pub trait SipJsonExt {
     /// # use rvoip_sip_core::prelude::*;
     /// # use rvoip_sip_core::json::{SipJsonExt, SipJsonError};
     /// # fn example() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
     ///     .from("Alice", "sip:alice@example.com", Some("tag12345"))
     ///     .build();
     ///     
@@ -392,7 +401,7 @@ pub trait SipJsonExt {
     /// # use rvoip_sip_core::prelude::*;
     /// # use rvoip_sip_core::json::{SipJsonExt, SipJsonError};
     /// # fn example() -> std::result::Result<(), Box<dyn std::error::Error>> {
-    /// let request = RequestBuilder::invite("sip:bob@example.com").unwrap().build();
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap().build();
     /// 
     /// let pretty_json = request.to_json_string_pretty().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     /// println!("Pretty JSON:\n{}", pretty_json);
@@ -1181,9 +1190,10 @@ mod tests {
 ///
 /// ```rust
 /// # use rvoip_sip_core::prelude::*;
+/// # use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// # use rvoip_sip_core::json::ext::SipMessageJson;
 /// # fn example() -> Option<()> {
-/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+/// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
 ///     .from("Alice", "sip:alice@example.com", Some("tag12345"))
 ///     .to("Bob", "sip:bob@example.com", None)
 ///     .build();
@@ -1204,9 +1214,10 @@ mod tests {
 ///
 /// ```rust
 /// # use rvoip_sip_core::prelude::*;
+/// # use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// # use rvoip_sip_core::json::ext::SipMessageJson;
 /// # fn example() -> Option<()> {
-/// let request = RequestBuilder::invite("sip:bob@example.com").unwrap()
+/// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
 ///     .from("Alice", "sip:alice@example.com", Some("tag1"))
 ///     .to("Bob", "sip:bob@example.com", Some("tag2"))
 ///     .via("proxy.example.com", "UDP", Some("z9hG4bK776asdhds"))

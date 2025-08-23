@@ -202,6 +202,7 @@ pub mod types;
 pub mod builder;
 pub mod parser;
 pub mod macros;
+pub mod validation;
 #[cfg(feature = "sdp")]
 pub mod sdp;
 /// JSON representation and access layer for SIP types

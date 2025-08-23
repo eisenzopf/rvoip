@@ -707,6 +707,143 @@ impl SimpleRequestBuilder {
     pub fn cancel(uri: &str) -> Result<Self> {
         Self::new(Method::Cancel, uri)
     }
+    
+    /// Create a PUBLISH request builder
+    ///
+    /// This is a convenience constructor for creating a PUBLISH request as specified
+    /// in [RFC 3903](https://datatracker.ietf.org/doc/html/rfc3903).
+    /// PUBLISH requests are used to publish event state to an Event State Compositor.
+    ///
+    /// # Parameters
+    /// - `uri`: The target URI of the Event State Compositor
+    /// - `event`: The event package name (e.g., "presence")
+    ///
+    /// # Returns
+    /// A Result containing the SimpleRequestBuilder or an error if the URI is invalid
+    ///
+    /// # Examples
+    ///
+    /// ## Initial PUBLISH Request
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    ///
+    /// let publish_request = SimpleRequestBuilder::publish("sip:alice@example.com", "presence").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    ///     .to("Alice", "sip:alice@example.com", None)
+    ///     .call_id("a84b4c76e66710@pc33.atlanta.com")
+    ///     .cseq(1)
+    ///     .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .max_forwards(70)
+    ///     .expires(3600)
+    ///     .content_type("application/pidf+xml")
+    ///     .body("<presence>...</presence>")
+    ///     .build();
+    /// ```
+    ///
+    /// ## Refresh PUBLISH with SIP-If-Match
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    ///
+    /// let refresh_request = SimpleRequestBuilder::publish("sip:alice@example.com", "presence").unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    ///     .to("Alice", "sip:alice@example.com", None)
+    ///     .call_id("a84b4c76e66710@pc33.atlanta.com")
+    ///     .cseq(2)
+    ///     .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .max_forwards(70)
+    ///     .sip_if_match("abc123xyz")  // Entity tag from previous response
+    ///     .expires(3600)
+    ///     .content_type("application/pidf+xml")
+    ///     .body("<presence>...</presence>")
+    ///     .build();
+    /// ```
+    pub fn publish(uri: &str, event: &str) -> Result<Self> {
+        let mut builder = Self::new(Method::Publish, uri)?;
+        builder = builder.event(event);
+        Ok(builder)
+    }
+    
+    /// Create a SUBSCRIBE request builder
+    ///
+    /// This is a convenience constructor for creating a SUBSCRIBE request as specified
+    /// in [RFC 6665](https://datatracker.ietf.org/doc/html/rfc6665).
+    /// SUBSCRIBE requests are used to subscribe to event notifications.
+    ///
+    /// # Parameters
+    /// - `uri`: The target URI to subscribe to
+    /// - `event`: The event package name (e.g., "presence", "dialog")
+    /// - `expires`: Subscription duration in seconds (0 to unsubscribe)
+    ///
+    /// # Returns
+    /// A Result containing the SimpleRequestBuilder or an error if the URI is invalid
+    ///
+    /// # Examples
+    ///
+    /// ## Initial SUBSCRIBE Request
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    ///
+    /// let subscribe_request = SimpleRequestBuilder::subscribe("sip:bob@example.com", "presence", 3600).unwrap()
+    ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    ///     .to("Bob", "sip:bob@example.com", None)  // No To tag for initial SUBSCRIBE
+    ///     .call_id("a84b4c76e66710@pc33.atlanta.com")
+    ///     .cseq(1)
+    ///     .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .max_forwards(70)
+    ///     .contact("sip:alice@192.168.1.10:5060", None)
+    ///     .build();
+    /// ```
+    pub fn subscribe(uri: &str, event: &str, expires: u32) -> Result<Self> {
+        let mut builder = Self::new(Method::Subscribe, uri)?;
+        builder = builder.event(event).expires(expires);
+        Ok(builder)
+    }
+    
+    /// Create a NOTIFY request builder
+    ///
+    /// This is a convenience constructor for creating a NOTIFY request as specified
+    /// in [RFC 6665](https://datatracker.ietf.org/doc/html/rfc6665).
+    /// NOTIFY requests are used to send event notifications to subscribers.
+    ///
+    /// # Parameters
+    /// - `uri`: The target URI of the subscriber
+    /// - `event`: The event package name
+    /// - `state`: The subscription state (e.g., "active;expires=3600", "terminated")
+    ///
+    /// # Returns
+    /// A Result containing the SimpleRequestBuilder or an error if the URI is invalid
+    ///
+    /// # Examples
+    ///
+    /// ## Active Notification with Presence Data
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    ///
+    /// let notify_request = SimpleRequestBuilder::notify(
+    ///     "sip:alice@192.168.1.10:5060",
+    ///     "presence",
+    ///     "active;expires=3599"
+    /// ).unwrap()
+    ///     .from("Bob", "sip:bob@example.com", Some("xyz987"))
+    ///     .to("Alice", "sip:alice@example.com", Some("1928301774"))  // Must have To tag
+    ///     .call_id("a84b4c76e66710@pc33.atlanta.com")
+    ///     .cseq(1)
+    ///     .via("192.168.1.20:5060", "UDP", Some("z9hG4bK776branch"))
+    ///     .max_forwards(70)
+    ///     .contact("sip:bob@192.168.1.20:5060", None)
+    ///     .content_type("application/pidf+xml")
+    ///     .body("<presence>...</presence>")
+    ///     .build();
+    /// ```
+    pub fn notify(uri: &str, event: &str, state: &str) -> Result<Self> {
+        let mut builder = Self::new(Method::Notify, uri)?;
+        builder = builder.event(event).subscription_state(state);
+        Ok(builder)
+    }
 
     /// Get the method of the request being built
     ///
@@ -930,6 +1067,112 @@ impl SimpleRequestBuilder {
         self
     }
     
+    /// Add an Event header
+    ///
+    /// Sets the Event header for SUBSCRIBE, NOTIFY, and PUBLISH requests as specified
+    /// in [RFC 6665](https://datatracker.ietf.org/doc/html/rfc6665).
+    ///
+    /// # Parameters
+    /// - `event_type`: The event package name (e.g., "presence", "dialog", "message-summary")
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::types::Method;
+    ///
+    /// let builder = SimpleRequestBuilder::new(Method::Subscribe, "sip:bob@example.com").unwrap()
+    ///     .event("presence");
+    /// ```
+    pub fn event(mut self, event_type: &str) -> Self {
+        use crate::types::event::{Event, EventType};
+        let event = Event::new(EventType::Token(event_type.to_string()));
+        self.request = self.request.with_header(TypedHeader::Event(event));
+        self
+    }
+    
+    /// Add a SIP-If-Match header
+    ///
+    /// Sets the SIP-If-Match header for conditional PUBLISH requests as specified
+    /// in [RFC 3903](https://datatracker.ietf.org/doc/html/rfc3903).
+    ///
+    /// # Parameters
+    /// - `etag`: The entity tag value to match
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::types::Method;
+    ///
+    /// let builder = SimpleRequestBuilder::new(Method::Publish, "sip:alice@example.com").unwrap()
+    ///     .event("presence")
+    ///     .sip_if_match("abc123xyz");
+    /// ```
+    pub fn sip_if_match(mut self, etag: &str) -> Self {
+        use crate::types::sip_if_match::SipIfMatch;
+        self.request = self.request.with_header(TypedHeader::SipIfMatch(SipIfMatch::new(etag)));
+        self
+    }
+    
+    /// Add a Subscription-State header
+    ///
+    /// Sets the Subscription-State header for NOTIFY requests as specified
+    /// in [RFC 6665](https://datatracker.ietf.org/doc/html/rfc6665).
+    ///
+    /// # Parameters
+    /// - `state`: The subscription state (e.g., "active;expires=3600", "terminated;reason=timeout")
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::types::Method;
+    ///
+    /// let builder = SimpleRequestBuilder::new(Method::Notify, "sip:alice@192.168.1.10").unwrap()
+    ///     .event("presence")
+    ///     .subscription_state("active;expires=3599");
+    /// ```
+    pub fn subscription_state(mut self, state: &str) -> Self {
+        self.request = self.request.with_header(TypedHeader::SubscriptionState(state.to_string()));
+        self
+    }
+    
+    /// Add an Expires header
+    ///
+    /// Sets the Expires header for REGISTER, SUBSCRIBE, and PUBLISH requests.
+    ///
+    /// # Parameters
+    /// - `seconds`: The expiration time in seconds (0 means remove/unsubscribe)
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::types::Method;
+    ///
+    /// let builder = SimpleRequestBuilder::new(Method::Subscribe, "sip:bob@example.com").unwrap()
+    ///     .event("presence")
+    ///     .expires(3600);
+    /// ```
+    pub fn expires(mut self, seconds: u32) -> Self {
+        use crate::types::expires::Expires;
+        // Use the builder's header method which properly handles single-value headers
+        self.header(TypedHeader::Expires(Expires::new(seconds)))
+    }
+    
     /// Add a generic header
     ///
     /// Allows adding any supported SIP header type using the [`TypedHeader`][`crate::types::TypedHeader`] enum.
@@ -982,7 +1225,11 @@ impl SimpleRequestBuilder {
             TypedHeader::Timestamp(_) |
             TypedHeader::Event(_) |
             TypedHeader::SubscriptionState(_) |
-            TypedHeader::MinSE(_) => {
+            TypedHeader::MinSE(_) |
+            TypedHeader::Date(_) |
+            TypedHeader::RSeq(_) |
+            TypedHeader::SipETag(_) |        // Single-value header for entity tags
+            TypedHeader::SipIfMatch(_) => {  // Single-value header for conditional requests
                  self.request.headers.retain(|h| h.name() != new_header_name);
             }
             // Appendable headers: These headers can appear multiple times.
@@ -995,6 +1242,7 @@ impl SimpleRequestBuilder {
             TypedHeader::AcceptEncoding(_) |
             TypedHeader::AcceptLanguage(_) |
             TypedHeader::Allow(_) |
+            TypedHeader::AllowEvents(_) |  // Allow-Events can appear multiple times
             TypedHeader::Supported(_) |
             TypedHeader::Unsupported(_) |
             TypedHeader::Require(_) |
@@ -1011,17 +1259,31 @@ impl SimpleRequestBuilder {
             TypedHeader::ProxyAuthenticate(_) |
             TypedHeader::ProxyAuthorization(_) |
             TypedHeader::AuthenticationInfo(_) |
-            TypedHeader::ReplyTo(_) => {
+            TypedHeader::ReplyTo(_) |
+            TypedHeader::Path(_) => {  // Path header for Path service
                 // For appendable headers, no special action is needed before pushing.
             }
             TypedHeader::Other(name, _value) => {
                 if *name == HeaderName::ReferTo { 
                     self.request.headers.retain(|h| h.name() != HeaderName::ReferTo);
                 }
-            }
-            _ => {
-                // By default, if a header type is not explicitly handled for replacement,
-                // it will be appended. No retain logic needed here.
+                // For other headers, default to single-value behavior (replace existing)
+                // unless it's a known appendable header
+                let is_known_appendable = matches!(name,
+                    HeaderName::Via | HeaderName::Route | HeaderName::RecordRoute |
+                    HeaderName::Contact | HeaderName::Warning | HeaderName::CallInfo |
+                    HeaderName::Supported | HeaderName::Unsupported | HeaderName::Require |
+                    HeaderName::ProxyRequire | HeaderName::Allow | HeaderName::AllowEvents |
+                    HeaderName::Accept | HeaderName::AcceptEncoding | HeaderName::AcceptLanguage |
+                    HeaderName::AlertInfo | HeaderName::ErrorInfo | HeaderName::ContentEncoding |
+                    HeaderName::ContentLanguage | HeaderName::ContentDisposition |
+                    HeaderName::InReplyTo | HeaderName::Path | HeaderName::Authorization |
+                    HeaderName::ProxyAuthorization | HeaderName::WwwAuthenticate | 
+                    HeaderName::ProxyAuthenticate | HeaderName::AuthenticationInfo
+                );
+                if !is_known_appendable {
+                    self.request.headers.retain(|h| h.name() != *name);
+                }
             }
         };
 

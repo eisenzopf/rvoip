@@ -76,19 +76,31 @@ mod tests {
     }
     
     #[test]
+    fn test_parse_authorization_bearer() {
+        let input = br#"Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhbGljZSIsImV4cCI6MTczNDU1NTU1NX0.signature"#;
+        let result = parse_authorization(input);
+        assert!(result.is_ok());
+        let (rem, auth) = result.unwrap();
+        assert!(rem.is_empty());
+        if let AuthorizationHeader(Credentials::Bearer { token }) = auth {
+            assert_eq!(token, "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhbGljZSIsImV4cCI6MTczNDU1NTU1NX0.signature");
+        } else {
+            panic!("Expected Bearer credentials");
+        }
+    }
+    
+    #[test]
     fn test_parse_authorization_other_scheme() {
-        let input = br#"Bearer some-token-value"#;
+        let input = br#"Custom some-param=value"#;
         let result = parse_authorization(input);
         assert!(result.is_ok());
         let (rem, creds) = result.unwrap();
         assert!(rem.is_empty());
         if let AuthorizationHeader(Credentials::Other { scheme, params }) = creds {
-            assert_eq!(scheme, "Bearer");
-            assert_eq!(params.len(), 1);
-            assert_eq!(params[0].name, "token68");
-            assert_eq!(params[0].value, "some-token-value");
+            assert_eq!(scheme, "Custom");
+            assert!(params.len() > 0);
         } else {
-            panic!("Expected Bearer credentials");
+            panic!("Expected Other credentials");
         }
     }
     

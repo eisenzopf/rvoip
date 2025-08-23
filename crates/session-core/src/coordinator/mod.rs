@@ -12,7 +12,9 @@ mod sip_client;
 mod server_manager;
 pub mod transfer;
 pub mod registry;
+pub mod registrar_integration;
 
 // Re-exports
 pub use coordinator::{SessionCoordinator, CleanupTracker, CleanupLayer};
-pub use transfer::TransferHandler; 
+pub use transfer::TransferHandler;
+pub use registrar_integration::RegistrarIntegration; 

@@ -393,6 +393,11 @@ pub mod session_expires;
 pub mod date;
 pub mod event;
 pub mod timestamp;
+pub mod subscription_state;
+pub mod sip_etag;
+pub mod sip_if_match;
+pub mod allow_events;
+pub mod pidf;
 pub use accept::Accept;
 pub use accept_language::AcceptLanguage;
 pub use address::Address;
@@ -437,7 +442,12 @@ pub use date::Date;
 pub use event::{Event, EventType};
 pub use timestamp::Timestamp;
 pub use to::To;
+pub use subscription_state::{SubscriptionState, SubState, TerminationReason};
+pub use sip_etag::SipETag;
+pub use sip_if_match::SipIfMatch;
+pub use allow_events::AllowEvents;
 pub use rseq::RSeq;
+pub use pidf::{PidfDocument, BasicStatus, Status, Tuple};
 
 // Add AsRef implementations for Message
 impl AsRef<Message> for Message {

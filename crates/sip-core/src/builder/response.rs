@@ -977,6 +977,117 @@ impl SimpleResponseBuilder {
         Self::new(StatusCode::NotFound, None)
     }
     
+    /// Create a 401 Unauthorized response
+    ///
+    /// This is a convenience constructor for creating a 401 Unauthorized response as specified
+    /// in [RFC 3261 Section 21.4.2](https://datatracker.ietf.org/doc/html/rfc3261#section-21.4.2).
+    /// 401 Unauthorized responses indicate that the request requires user authentication.
+    ///
+    /// # Returns
+    /// A SimpleResponseBuilder with a 401 Unauthorized status
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::Method;
+    ///
+    /// let response = SimpleResponseBuilder::unauthorized()
+    ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("test-call-id")
+    ///     .cseq(1, Method::Register)
+    ///     .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .www_authenticate_digest("example.com", "abc123xyz")
+    ///     .build();
+    /// ```
+    pub fn unauthorized() -> Self {
+        Self::new(StatusCode::Unauthorized, None)
+    }
+    
+    /// Create a 403 Forbidden response
+    ///
+    /// This is a convenience constructor for creating a 403 Forbidden response as specified
+    /// in [RFC 3261 Section 21.4.4](https://datatracker.ietf.org/doc/html/rfc3261#section-21.4.4).
+    /// 403 Forbidden responses indicate that the server understands the request but refuses to authorize it.
+    ///
+    /// # Returns
+    /// A SimpleResponseBuilder with a 403 Forbidden status
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::Method;
+    ///
+    /// let response = SimpleResponseBuilder::forbidden()
+    ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    ///     .to("Bob", "sip:bob@blocked.com", None)
+    ///     .call_id("test-call-id")
+    ///     .cseq(1, Method::Subscribe)
+    ///     .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .build();
+    /// ```
+    pub fn forbidden() -> Self {
+        Self::new(StatusCode::Forbidden, None)
+    }
+    
+    /// Create a 423 Interval Too Brief response
+    ///
+    /// This is a convenience constructor for creating a 423 Interval Too Brief response as specified
+    /// in [RFC 3261 Section 21.4.17](https://datatracker.ietf.org/doc/html/rfc3261#section-21.4.17).
+    /// 423 responses indicate that the expiration time in the request is too short.
+    ///
+    /// # Returns
+    /// A SimpleResponseBuilder with a 423 Interval Too Brief status
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::Method;
+    ///
+    /// let response = SimpleResponseBuilder::interval_too_brief()
+    ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    ///     .to("Alice", "sip:alice@example.com", None)
+    ///     .call_id("test-call-id")
+    ///     .cseq(1, Method::Subscribe)
+    ///     .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .min_expires(3600)
+    ///     .build();
+    /// ```
+    pub fn interval_too_brief() -> Self {
+        Self::new(StatusCode::IntervalTooBrief, None)
+    }
+    
+    /// Create a 489 Bad Event response
+    ///
+    /// This is a convenience constructor for creating a 489 Bad Event response as specified
+    /// in [RFC 6665 Section 8.3.2](https://datatracker.ietf.org/doc/html/rfc6665#section-8.3.2).
+    /// 489 Bad Event responses indicate that the server doesn't understand the event package.
+    ///
+    /// # Returns
+    /// A SimpleResponseBuilder with a 489 Bad Event status
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::Method;
+    ///
+    /// let response = SimpleResponseBuilder::bad_event()
+    ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("test-call-id")
+    ///     .cseq(1, Method::Subscribe)
+    ///     .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .allow_events(&["presence", "dialog"])
+    ///     .build();
+    /// ```
+    pub fn bad_event() -> Self {
+        Self::new(StatusCode::BadEvent, None)
+    }
+    
     /// Create a 500 Server Error response
     ///
     /// This is a convenience constructor for creating a 500 Server Internal Error response as specified
@@ -1246,6 +1357,217 @@ impl SimpleResponseBuilder {
         self
     }
     
+    /// Add a SIP-ETag header
+    ///
+    /// Sets the SIP-ETag header in PUBLISH responses as specified
+    /// in [RFC 3903](https://datatracker.ietf.org/doc/html/rfc3903).
+    ///
+    /// # Parameters
+    /// - `etag`: The entity tag value
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::StatusCode;
+    ///
+    /// let builder = SimpleResponseBuilder::new(StatusCode::Ok, None)
+    ///     .sip_etag("abc123xyz");
+    /// ```
+    pub fn sip_etag(mut self, etag: &str) -> Self {
+        use crate::types::sip_etag::SipETag;
+        self.response = self.response.with_header(TypedHeader::SipETag(SipETag::new(etag)));
+        self
+    }
+    
+    /// Add an Allow-Events header
+    ///
+    /// Sets the Allow-Events header to indicate supported event packages as specified
+    /// in [RFC 6665](https://datatracker.ietf.org/doc/html/rfc6665).
+    ///
+    /// # Parameters
+    /// - `events`: List of supported event packages
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::StatusCode;
+    ///
+    /// let builder = SimpleResponseBuilder::new(StatusCode::Ok, None)
+    ///     .allow_events(&["presence", "dialog", "message-summary"]);
+    /// ```
+    pub fn allow_events(mut self, events: &[&str]) -> Self {
+        use crate::types::allow_events::AllowEvents;
+        let events_vec: Vec<String> = events.iter().map(|e| e.to_string()).collect();
+        self.response = self.response.with_header(TypedHeader::AllowEvents(AllowEvents::new(events_vec)));
+        self
+    }
+    
+    /// Add an Expires header
+    ///
+    /// Sets the Expires header for responses to REGISTER, SUBSCRIBE, and PUBLISH requests.
+    ///
+    /// # Parameters
+    /// - `seconds`: The expiration time in seconds
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::StatusCode;
+    ///
+    /// let builder = SimpleResponseBuilder::new(StatusCode::Ok, None)
+    ///     .expires(3600);
+    /// ```
+    pub fn expires(mut self, seconds: u32) -> Self {
+        use crate::types::expires::Expires;
+        // Use the builder's header method which properly handles single-value headers
+        self.header(TypedHeader::Expires(Expires::new(seconds)))
+    }
+    
+    /// Add a Min-Expires header
+    ///
+    /// Sets the Min-Expires header in 423 Interval Too Brief responses.
+    ///
+    /// # Parameters
+    /// - `seconds`: The minimum acceptable expiration time in seconds
+    ///
+    /// # Returns
+    /// Self for method chaining
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::StatusCode;
+    ///
+    /// let builder = SimpleResponseBuilder::new(StatusCode::IntervalTooBrief, None)
+    ///     .min_expires(3600);
+    /// ```
+    pub fn min_expires(mut self, seconds: u32) -> Self {
+        use crate::types::min_expires::MinExpires;
+        self.response = self.response.with_header(TypedHeader::MinExpires(MinExpires::new(seconds)));
+        self
+    }
+    
+    /// Add WWW-Authenticate header with Digest challenge
+    ///
+    /// # Parameters
+    ///
+    /// - `realm`: The authentication realm
+    /// - `nonce`: The server-generated nonce
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::{Method, StatusCode};
+    ///
+    /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
+    ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("test-call-id")
+    ///     .cseq(1, Method::Invite)
+    ///     .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .www_authenticate_digest("example.com", "abc123xyz")
+    ///     .build();
+    /// ```
+    pub fn www_authenticate_digest(mut self, realm: &str, nonce: &str) -> Self {
+        use crate::types::auth::WwwAuthenticate;
+        let www_auth = WwwAuthenticate::new(realm, nonce);
+        self.response = self.response.with_header(TypedHeader::WwwAuthenticate(www_auth));
+        self
+    }
+    
+    /// Add WWW-Authenticate header with Bearer challenge
+    ///
+    /// # Parameters
+    ///
+    /// - `realm`: The authentication realm
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::{Method, StatusCode};
+    ///
+    /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
+    ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("test-call-id")
+    ///     .cseq(1, Method::Register)
+    ///     .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .www_authenticate_bearer("example.com")
+    ///     .build();
+    /// ```
+    pub fn www_authenticate_bearer(mut self, realm: &str) -> Self {
+        use crate::types::auth::WwwAuthenticate;
+        let www_auth = WwwAuthenticate::new_bearer(realm);
+        self.response = self.response.with_header(TypedHeader::WwwAuthenticate(www_auth));
+        self
+    }
+    
+    /// Add WWW-Authenticate header with Bearer challenge including error
+    ///
+    /// # Parameters
+    ///
+    /// - `realm`: The authentication realm
+    /// - `error`: The error code (e.g., "invalid_token", "expired_token")
+    /// - `error_description`: Optional human-readable error description
+    ///
+    /// # Returns
+    ///
+    /// The updated builder instance
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+    /// use rvoip_sip_core::types::{Method, StatusCode};
+    ///
+    /// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
+    ///     .from("Alice", "sip:alice@example.com", Some("1928301774"))
+    ///     .to("Bob", "sip:bob@example.com", None)
+    ///     .call_id("test-call-id")
+    ///     .cseq(1, Method::Register)
+    ///     .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
+    ///     .www_authenticate_bearer_error("example.com", "invalid_token", Some("The access token has expired"))
+    ///     .build();
+    /// ```
+    pub fn www_authenticate_bearer_error(
+        mut self, 
+        realm: &str, 
+        error: &str, 
+        error_description: Option<&str>
+    ) -> Self {
+        use crate::types::auth::WwwAuthenticate;
+        let www_auth = WwwAuthenticate::new_bearer_error(
+            realm, 
+            error, 
+            error_description.map(|s| s.to_string())
+        );
+        self.response = self.response.with_header(TypedHeader::WwwAuthenticate(www_auth));
+        self
+    }
+    
     /// Add a generic header
     ///
     /// Allows adding any supported SIP header type using the [`TypedHeader`][`crate::types::TypedHeader`] enum.
@@ -1300,7 +1622,9 @@ impl SimpleResponseBuilder {
             TypedHeader::MinExpires(_) |
             TypedHeader::Date(_) |
             TypedHeader::Timestamp(_) |
-            TypedHeader::RSeq(_) => {
+            TypedHeader::RSeq(_) |
+            TypedHeader::SipETag(_) |        // Single-value header for entity tags
+            TypedHeader::SipIfMatch(_) => {  // Single-value header for conditional requests
                 self.response.headers.retain(|h| h.name() != new_header_name);
             }
             
@@ -1316,6 +1640,7 @@ impl SimpleResponseBuilder {
             TypedHeader::Require(_) |
             TypedHeader::ProxyRequire(_) |  // Less common in responses
             TypedHeader::Allow(_) |
+            TypedHeader::AllowEvents(_) |  // Allow-Events can appear multiple times
             TypedHeader::Accept(_) |
             TypedHeader::AcceptEncoding(_) |
             TypedHeader::AcceptLanguage(_) |
@@ -1341,7 +1666,7 @@ impl SimpleResponseBuilder {
                     HeaderName::Via | HeaderName::Route | HeaderName::RecordRoute |
                     HeaderName::Contact | HeaderName::Warning | HeaderName::CallInfo |
                     HeaderName::Supported | HeaderName::Unsupported | HeaderName::Require |
-                    HeaderName::ProxyRequire | HeaderName::Allow | HeaderName::Accept |
+                    HeaderName::ProxyRequire | HeaderName::Allow | HeaderName::AllowEvents | HeaderName::Accept |
                     HeaderName::AcceptEncoding | HeaderName::AcceptLanguage |
                     HeaderName::AlertInfo | HeaderName::ErrorInfo | HeaderName::ContentEncoding |
                     HeaderName::ContentLanguage | HeaderName::ContentDisposition |

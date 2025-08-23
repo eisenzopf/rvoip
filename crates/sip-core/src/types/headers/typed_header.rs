@@ -166,6 +166,9 @@ pub enum TypedHeader {
     SessionExpires(SessionExpires), // Added SessionExpires variant
     MinSE(MinSE),
     RSeq(crate::types::rseq::RSeq), // Added RSeq variant
+    SipETag(crate::types::sip_etag::SipETag), // Added SIP-ETag variant
+    SipIfMatch(crate::types::sip_if_match::SipIfMatch), // Added SIP-If-Match variant
+    AllowEvents(crate::types::allow_events::AllowEvents), // Added Allow-Events variant
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -228,6 +231,9 @@ impl TypedHeader {
             TypedHeader::SessionExpires(_) => HeaderName::SessionExpires, // Added SessionExpires case
             TypedHeader::MinSE(_) => HeaderName::MinSE,
             TypedHeader::RSeq(_) => HeaderName::RSeq, // Use proper HeaderName enum variant
+            TypedHeader::SipETag(_) => HeaderName::SipETag,
+            TypedHeader::SipIfMatch(_) => HeaderName::SipIfMatch,
+            TypedHeader::AllowEvents(_) => HeaderName::AllowEvents,
             TypedHeader::Other(name, _) => name.clone(),
         }
     }
@@ -405,7 +411,7 @@ impl fmt::Display for TypedHeader {
                 write!(f, "{}", call_info)
             },
             TypedHeader::Event(event_data) => write!(f, "{}: {}", HeaderName::Event, event_data),
-            TypedHeader::SubscriptionState(_) => write!(f, "{}: SubscriptionState", HeaderName::SubscriptionState),
+            TypedHeader::SubscriptionState(state) => write!(f, "{}: {}", HeaderName::SubscriptionState, state),
             TypedHeader::Path(path) => {
                 write!(f, "{}: {}", HeaderName::Path, path)
             },
@@ -413,6 +419,9 @@ impl fmt::Display for TypedHeader {
             TypedHeader::SessionExpires(session_expires) => write!(f, "{}: {}", HeaderName::SessionExpires, session_expires),
             TypedHeader::MinSE(val) => write!(f, "{}: {}", HeaderName::MinSE, val),
             TypedHeader::RSeq(val) => write!(f, "{}: {}", HeaderName::RSeq, val),
+            TypedHeader::SipETag(val) => write!(f, "{}: {}", HeaderName::SipETag, val),
+            TypedHeader::SipIfMatch(val) => write!(f, "{}: {}", HeaderName::SipIfMatch, val),
+            TypedHeader::AllowEvents(val) => write!(f, "{}: {}", HeaderName::AllowEvents, val),
             TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
     }
@@ -1158,6 +1167,24 @@ impl TryFrom<Header> for TypedHeader {
                 let value_str = std::str::from_utf8(value_bytes)
                     .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in RSeq header value: {}", e)))?;
                 Ok(TypedHeader::RSeq(crate::types::rseq::RSeq::from_str(value_str)?))
+            },
+            HeaderName::SipETag => {
+                match all_consuming(parser::headers::parse_sip_etag)(value_bytes) {
+                    Ok((_, etag)) => Ok(TypedHeader::SipETag(etag)),
+                    Err(e) => Err(Error::from(e.to_owned())),
+                }
+            },
+            HeaderName::SipIfMatch => {
+                match all_consuming(parser::headers::parse_sip_if_match)(value_bytes) {
+                    Ok((_, if_match)) => Ok(TypedHeader::SipIfMatch(if_match)),
+                    Err(e) => Err(Error::from(e.to_owned())),
+                }
+            },
+            HeaderName::AllowEvents => {
+                match all_consuming(parser::headers::parse_allow_events)(value_bytes) {
+                    Ok((_, allow)) => Ok(TypedHeader::AllowEvents(allow)),
+                    Err(e) => Err(Error::from(e.to_owned())),
+                }
             },
             _ => Ok(TypedHeader::Other(header.name.clone(), HeaderValue::Raw(value_bytes.to_vec()))),
         };
