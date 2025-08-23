@@ -346,6 +346,7 @@ pub fn create_incoming_call(
         headers,
         received_at: std::time::Instant::now(),
         sip_call_id: None,
+        coordinator: None,
     }
 }
 

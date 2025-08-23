@@ -832,6 +832,7 @@ impl SessionCoordinator {
                 headers,
                 received_at: std::time::Instant::now(),
                 sip_call_id,
+                coordinator: None,  // Will be set by the handler if needed
             };
             
             let decision = handler.on_incoming_call(incoming_call.clone()).await;

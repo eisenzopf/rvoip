@@ -482,7 +482,12 @@ pub mod server_types;
 pub mod server;
 pub mod client;
 
-// High-level UAC and UAS APIs
+// New simplified APIs
+pub mod peer;
+pub mod b2bua;
+pub mod call;
+
+// High-level UAC and UAS APIs (legacy - will be moved)
 pub mod uac;
 pub mod uas;
 pub mod common;
@@ -513,6 +518,7 @@ pub use client::{SipClient, RegistrationHandle, SipResponse, SubscriptionHandle}
 // Re-export bridge functionality
 pub use bridge::{
     BridgeId, BridgeInfo, BridgeEvent, BridgeEventType,
+    CallBridge, BridgeType,
 };
 
 // Re-export server types
@@ -557,4 +563,30 @@ pub type Session = CallSession;
 pub type IncomingCallNotification = IncomingCallEvent;
 
 // Re-export the SessionCoordinator as the main entry point
-pub use crate::coordinator::SessionCoordinator; 
+pub use crate::coordinator::SessionCoordinator;
+
+// Re-export new simplified APIs
+pub use peer::SimplePeer;
+pub use b2bua::SimpleB2BUA;
+pub use call::SimpleCall;
+
+// Prelude for convenient imports
+pub mod prelude {
+    //! Convenient re-exports for common usage
+    //! 
+    //! # Example
+    //! ```
+    //! use rvoip_session_core::api::prelude::*;
+    //! 
+    //! async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    //!     let mut peer = SimplePeer::new("alice").await?;
+    //!     let call = peer.call("bob@example.com").await?;
+    //!     Ok(())
+    //! }
+    //! ```
+    
+    pub use super::{SimplePeer, SimpleB2BUA, SimpleCall};
+    pub use super::bridge::{CallBridge, BridgeType};
+    pub use super::types::{IncomingCall, AudioFrame, CallState};
+    pub use crate::errors::{Result, SessionError};
+} 
