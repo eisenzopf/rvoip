@@ -150,6 +150,7 @@ pub trait SipJsonExt {
     ///
     /// ```
     /// # use rvoip_sip_core::prelude::*;
+    /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// # use rvoip_sip_core::json::{SipJsonExt, SipValue, SipJsonError};
     /// # use rvoip_sip_core::types::sip_request::Request;
     /// # fn example() -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -209,6 +210,7 @@ pub trait SipJsonExt {
     ///
     /// ```
     /// # use rvoip_sip_core::prelude::*;
+    /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// # use rvoip_sip_core::json::SipJsonExt;
     /// # fn example() -> Option<()> {
     /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
@@ -343,6 +345,7 @@ pub trait SipJsonExt {
     ///
     /// ```
     /// # use rvoip_sip_core::prelude::*;
+    /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// # use rvoip_sip_core::json::SipJsonExt;
     /// # fn example() -> Option<()> {
     /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
@@ -376,6 +379,7 @@ pub trait SipJsonExt {
     ///
     /// ```
     /// # use rvoip_sip_core::prelude::*;
+    /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// # use rvoip_sip_core::json::{SipJsonExt, SipJsonError};
     /// # fn example() -> std::result::Result<(), Box<dyn std::error::Error>> {
     /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
@@ -399,6 +403,7 @@ pub trait SipJsonExt {
     ///
     /// ```
     /// # use rvoip_sip_core::prelude::*;
+    /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// # use rvoip_sip_core::json::{SipJsonExt, SipJsonError};
     /// # fn example() -> std::result::Result<(), Box<dyn std::error::Error>> {
     /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap().build();

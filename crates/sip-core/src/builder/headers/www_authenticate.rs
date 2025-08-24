@@ -105,7 +105,7 @@ use super::HeaderSetter;
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
 /// use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-/// use rvoip_sip_core::builder::headers::AuthorizationExt;
+/// use rvoip_sip_core::builder::headers::{AuthorizationExt, WwwAuthenticateExt};
 /// use std::str::FromStr;
 ///
 /// // Step 1: Client sends initial REGISTER request
@@ -119,8 +119,8 @@ use super::HeaderSetter;
 /// // Generate a nonce value (in production, this would be securely generated)
 /// let nonce = "dcd98b7102dd2f0e8b11d0f600bfb0c093";
 /// 
-/// let challenge_response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
-///     .www_authenticate_digest(
+/// let challenge_response = WwwAuthenticateExt::www_authenticate_digest(
+///     SimpleResponseBuilder::new(StatusCode::Unauthorized, None),
 ///         "sip.example.com",          // realm 
 ///         nonce,                      // nonce
 ///         None,                       // opaque
@@ -170,10 +170,11 @@ use super::HeaderSetter;
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
 /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::builder::headers::WwwAuthenticateExt;
 ///
 /// // Challenge with SHA-256 algorithm and both auth and auth-int QoP options
-/// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
-///     .www_authenticate_digest(
+/// let response = WwwAuthenticateExt::www_authenticate_digest(
+///     SimpleResponseBuilder::new(StatusCode::Unauthorized, None),
 ///         "sip.example.com",
 ///         "9FxHwSyJClx391jQKoMl3Z1",
 ///         Some("secureOpaque8734"), 
@@ -185,8 +186,8 @@ use super::HeaderSetter;
 ///     .build();
 ///
 /// // Challenge with stale=true (indicates nonce expired but credentials may be valid)
-/// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
-///     .www_authenticate_digest(
+/// let response = WwwAuthenticateExt::www_authenticate_digest(
+///     SimpleResponseBuilder::new(StatusCode::Unauthorized, None),
 ///         "sip.example.com",
 ///         "newNonce5349058kdjfd",
 ///         None,
@@ -213,8 +214,8 @@ use super::HeaderSetter;
 ///     // In production, use a cryptographically secure random generator for nonce
 ///     let nonce = "d5e5ff37c381c489bc858ac968a7c246a729ef76";
 ///     
-///     SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Authentication Required"))
-///         .www_authenticate_digest(
+///     WwwAuthenticateExt::www_authenticate_digest(
+///         SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Authentication Required")),
 ///             "registrar.example.com",         // Consistent realm for your domain
 ///             nonce,                           // Strong random nonce
 ///             Some("9e14fdca8fe47d13b5"), // Opaque server state value
@@ -245,11 +246,12 @@ use super::HeaderSetter;
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
 /// use rvoip_sip_core::builder::SimpleResponseBuilder;
+/// use rvoip_sip_core::builder::headers::WwwAuthenticateExt;
 /// use rvoip_sip_core::types::TypedHeader;
 ///
 /// // Create a response with both Digest and Basic authentication challenges
-/// let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
-///     .www_authenticate_digest(
+/// let response = WwwAuthenticateExt::www_authenticate_digest(
+///     SimpleResponseBuilder::new(StatusCode::Unauthorized, None),
 ///         "sip.example.com",
 ///         "dcd98b7102dd2f0e8b11d0f600bfb0c093",
 ///         None,
