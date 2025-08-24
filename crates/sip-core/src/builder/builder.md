@@ -389,42 +389,42 @@ use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
 use rvoip_sip_core::types::{StatusCode, Method};
 
 // Create 401 Unauthorized response with authentication challenge
-let response_401 = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
-    .from("registrar", "sip:registrar.example.com", Some("reg-tag"))
-    .to("Alice", "sip:alice@example.com", Some("tag5678"))
-    .call_id("auth-test-123")
-    .cseq(2, Method::Register)
+let response_401 = WwwAuthenticateExt::www_authenticate_digest(
+    SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
+        .from("registrar", "sip:registrar.example.com", Some("reg-tag"))
+        .to("Alice", "sip:alice@example.com", Some("tag5678"))
+        .call_id("auth-test-123")
+        .cseq(2, Method::Register),
     
     // Add WWW-Authenticate challenge
-    .www_authenticate_digest(
-        "registrar.example.com",   // realm
-        "dcd98b7102dd2f0e",        // nonce
-        None,                      // opaque
-        Some("MD5"),               // algorithm
-        Some(vec!["auth"]),        // qop options
-        Some(false),               // stale
-        None                       // domain
-    )
-    .build();
+    "registrar.example.com",   // realm
+    "dcd98b7102dd2f0e",        // nonce
+    None,                      // opaque
+    Some("MD5"),               // algorithm
+    Some(vec!["auth"]),        // qop options
+    Some(false),               // stale
+    None                       // domain
+)
+.build();
 
 // Create 407 Proxy Authentication Required response
-let response_407 = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
-    .from("proxy", "sip:proxy.example.com", Some("proxy-tag"))
-    .to("Alice", "sip:alice@example.com", Some("tag5678"))
-    .call_id("auth-test-123") 
-    .cseq(2, Method::Register)
+let response_407 = ProxyAuthenticateExt::proxy_authenticate_digest(
+    SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+        .from("proxy", "sip:proxy.example.com", Some("proxy-tag"))
+        .to("Alice", "sip:alice@example.com", Some("tag5678"))
+        .call_id("auth-test-123") 
+        .cseq(2, Method::Register),
     
     // Add Proxy-Authenticate challenge
-    .proxy_authenticate_digest(
-        "proxy.example.com",       // realm
-        "6944656576e46aa3",        // nonce
-        None,                      // opaque
-        Some("MD5"),               // algorithm
-        Some(vec!["auth"]),        // qop
-        Some(false),               // stale
-        None                       // domain
-    )
-    .build();
+    "proxy.example.com",       // realm
+    "6944656576e46aa3",        // nonce
+    None,                      // opaque
+    Some("MD5"),               // algorithm
+    Some(vec!["auth"]),        // qop
+    Some(false),               // stale
+    None                       // domain
+)
+.build();
 ```
 
 ### Routing Headers
