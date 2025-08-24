@@ -536,21 +536,198 @@ Channel to PresenceWatcher
    - Token caching for performance
    - Scope validation
 
-2. **Add Subscription-State header to sip-core**
+2. **Add Subscription-State header to sip-core** ✅ COMPLETED
+   - Already implemented in sip-core with parser and builder support
+
+### Phase 0.5: Dialog-Core Subscription Support (NEW - 3 days)
+**Priority: CRITICAL - Required for proper subscription handling**
+
+**Why This Is Needed:**
+Dialog-core currently treats SUBSCRIBE/NOTIFY as pass-through methods without proper dialog creation or subscription state management. This violates RFC 6665 and prevents proper presence implementation.
+
+#### Day 1: Core Dialog Support
+1. **Update dialog creation logic**
 ```rust
-// sip-core/src/headers/subscription_state.rs
-pub struct SubscriptionState {
-    pub state: SubState,
-    pub expires: Option<u32>,
-    pub reason: Option<String>,
-    pub retry_after: Option<u32>,
+// dialog-core/src/transaction/dialog/mod.rs
+let is_dialog_creating = match original_request.method() {
+    Method::Invite => { /* existing */ },
+    Method::Subscribe => {
+        // SUBSCRIBE creates dialog if To has no tag
+        original_request.to()
+            .map(|to| to.tag().is_none())
+            .unwrap_or(false)
+    },
+    _ => false,
+};
+```
+
+2. **Extend Dialog struct for subscriptions**
+```rust
+// dialog-core/src/dialog/dialog_impl.rs
+pub struct Dialog {
+    // ... existing fields ...
+    
+    // Subscription-specific fields
+    pub subscription_state: Option<SubscriptionState>,
+    pub subscription_expires: Option<Instant>,
+    pub event_package: Option<String>,
+    pub refresh_timer_handle: Option<JoinHandle<()>>,
+}
+```
+
+3. **Add subscription state enum**
+```rust
+// dialog-core/src/dialog/subscription_state.rs
+pub enum SubscriptionState {
+    Pending,
+    Active { expires: Duration },
+    Terminated { reason: Option<String> },
+}
+```
+
+#### Day 2: Subscription Lifecycle Management
+1. **Create SubscriptionManager**
+```rust
+// dialog-core/src/subscription/manager.rs
+pub struct SubscriptionManager {
+    dialogs: Arc<DashMap<DialogId, SubscriptionInfo>>,
+    refresh_timers: Arc<DashMap<DialogId, JoinHandle<()>>>,
+    event_packages: Arc<DashMap<String, Box<dyn EventPackage>>>,
 }
 
-pub enum SubState {
-    Active,
-    Pending,
-    Terminated,
+impl SubscriptionManager {
+    /// Handle incoming SUBSCRIBE creating new dialog
+    pub async fn handle_subscribe(&self, request: Request) -> Result<Response> {
+        // 1. Validate Event header
+        // 2. Create subscription dialog
+        // 3. Start refresh timer (expires - 30s)
+        // 4. Return 200 OK or 202 Accepted
+        // 5. Schedule initial NOTIFY
+    }
+    
+    /// Handle NOTIFY within subscription dialog
+    pub async fn handle_notify(&self, request: Request) -> Result<Response> {
+        // 1. Find subscription dialog by Call-ID + tags
+        // 2. Validate dialog exists and is active
+        // 3. Update subscription state from Subscription-State header
+        // 4. Process event data (delegate to event package)
+        // 5. Auto-send 200 OK (NOTIFY is always acknowledged)
+        // 6. Update refresh timer if needed
+    }
+    
+    /// Refresh subscription before expiry
+    async fn refresh_subscription(&self, dialog_id: DialogId) {
+        // 1. Create re-SUBSCRIBE within dialog
+        // 2. Increment CSeq
+        // 3. Send through existing dialog
+        // 4. Reschedule timer on success
+    }
+    
+    /// Terminate subscription
+    pub async fn terminate_subscription(&self, dialog_id: DialogId) {
+        // 1. Cancel refresh timer
+        // 2. Send SUBSCRIBE with Expires: 0
+        // 3. Wait for final NOTIFY with terminated state
+        // 4. Clean up dialog
+    }
 }
+```
+
+2. **Wire into DialogManager**
+```rust
+// dialog-core/src/manager/protocol_handlers.rs
+async fn handle_subscribe_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
+    // Changed from pass-through to dialog creation
+    let dialog_id = self.subscription_manager
+        .handle_subscribe(request, source)
+        .await?;
+    
+    // Store dialog in manager
+    self.store_subscription_dialog(dialog_id).await;
+    Ok(())
+}
+
+async fn handle_notify_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
+    // Changed from pass-through to dialog validation
+    self.subscription_manager
+        .handle_notify(request, source)
+        .await?;
+    Ok(())
+}
+```
+
+#### Day 3: Event Package Support & Integration
+1. **Define Event Package trait**
+```rust
+// dialog-core/src/subscription/event_package.rs
+pub trait EventPackage: Send + Sync {
+    fn name(&self) -> &str;
+    fn accept_types(&self) -> Vec<ContentType>;
+    fn validate_body(&self, body: &[u8]) -> Result<()>;
+    fn default_expires(&self) -> Duration;
+}
+
+// Built-in presence package
+pub struct PresencePackage;
+impl EventPackage for PresencePackage {
+    fn name(&self) -> &str { "presence" }
+    fn accept_types(&self) -> Vec<ContentType> {
+        vec![ContentType::from_str("application/pidf+xml").unwrap()]
+    }
+    fn default_expires(&self) -> Duration {
+        Duration::from_secs(3600)
+    }
+}
+```
+
+2. **Add subscription events to DialogEvent**
+```rust
+// dialog-core/src/events/mod.rs
+pub enum DialogEvent {
+    // ... existing events ...
+    
+    /// Subscription created
+    SubscriptionCreated {
+        dialog_id: DialogId,
+        event_package: String,
+        expires: Duration,
+    },
+    
+    /// Subscription refreshed
+    SubscriptionRefreshed {
+        dialog_id: DialogId,
+        new_expires: Duration,
+    },
+    
+    /// Subscription terminated
+    SubscriptionTerminated {
+        dialog_id: DialogId,
+        reason: Option<String>,
+    },
+    
+    /// NOTIFY received
+    NotifyReceived {
+        dialog_id: DialogId,
+        state: SubscriptionState,
+        body: Option<Vec<u8>>,
+    },
+}
+```
+
+3. **Integration tests**
+```rust
+// dialog-core/tests/subscription_tests.rs
+#[tokio::test]
+async fn test_subscribe_creates_dialog() { /* ... */ }
+
+#[tokio::test]
+async fn test_notify_within_subscription() { /* ... */ }
+
+#[tokio::test]
+async fn test_subscription_refresh() { /* ... */ }
+
+#[tokio::test]
+async fn test_subscription_termination() { /* ... */ }
 ```
 
 ### Phase 1: Registrar Integration (2-3 days)
@@ -919,31 +1096,41 @@ WWW-Authenticate: Bearer realm="example.com",
 3. Should we support presence authorization UI/UX helpers?
 4. Integration with external presence sources (calendar, etc.)?
 
-## Updated Status with registrar-core
+## Updated Status with registrar-core and sip-core
 
-With registrar-core now implemented, the completion status has improved significantly:
+With registrar-core now implemented and sip-core presence support complete, the status has improved:
 
 ### What's Complete ✅
-- **registrar-core**: 100% - Full registration, presence, and subscription management
-- **PIDF XML**: Complete in registrar-core
-- **Subscription management**: Complete in registrar-core
+- **sip-core**: 100% - All presence headers, methods, validation, and PIDF support
+- **registrar-core**: 100% - Full registration, presence, and subscription management  
+- **PIDF XML**: Complete in both registrar-core and sip-core
+- **Subscription management**: State logic in registrar-core (needs dialog-core wiring)
 - **Event system**: Ready in infra-common
-- **Basic SIP methods**: Supported in sip-core
+- **OAuth Bearer**: Support in sip-core (needs session-core implementation)
 
 ### What's Needed ❌
-- **OAuth 2.0**: Not implemented (Phase 0)
-- **Subscription-State header**: Not in sip-core
-- **Session-core integration**: Not connected to registrar-core
-- **SIP signaling routing**: Not intercepting REGISTER/PUBLISH/SUBSCRIBE
-- **API layer**: SimplePeer extensions not implemented
+- **Dialog-core subscription support**: Not implemented (Phase 0.5)
+  - SUBSCRIBE doesn't create dialogs
+  - No subscription refresh mechanism
+  - NOTIFY not validated within dialog
+- **OAuth 2.0 validation**: Not implemented in session-core (Phase 0)
+- **Session-core integration**: Not connected to registrar-core (Phase 1)
+- **SIP signaling routing**: Not intercepting REGISTER/PUBLISH/SUBSCRIBE (Phase 2)
+- **API layer**: SimplePeer extensions not implemented (Phase 3)
 
 ### Revised Effort Estimate
-**Total Estimated Effort**: 7-9 days (reduced from 8-12 days)
+**Total Estimated Effort**: 10-12 days (increased from 7-9 days due to dialog-core requirements)
 - Phase 0 (OAuth): 2 days
+- Phase 0.5 (Dialog-Core): 3 days ← NEW
 - Phase 1 (Integration): 2-3 days
 - Phase 2 (Signaling): 2 days
 - Phase 3 (API): 1-2 days
 - Phase 4 (Testing): 1-2 days
+
+**Critical Path**: Phase 0 → Phase 0.5 → Phase 1 → Phase 2 → Phase 3 → Phase 4
+- OAuth must be done first for authentication
+- Dialog-core subscription support must be done before session-core can properly handle presence
+- All other phases depend on these foundations
 
 ## References
 
