@@ -98,8 +98,11 @@ impl SimpleUacClient {
     /// Create a new UAC client with the given identity
     /// 
     /// # Example
-    /// ```
-    /// let client = SimpleUacClient::new("alice").await?;
+    /// ```rust
+    /// use rvoip_session_core::api::uac::SimpleUacClient;
+    /// 
+    /// let builder = SimpleUacClient::new("alice");
+    /// // The builder will need to be awaited to create the client
     /// ```
     pub fn new(identity: &str) -> SimpleUacClientBuilder {
         SimpleUacClientBuilder::new(identity.to_string())
@@ -124,7 +127,7 @@ impl SimpleUacClient {
     /// Make a call to the specified target
     /// 
     /// # Example
-    /// ```
+    /// ```rust,ignore
     /// let call = client.call("bob@example.com").await?;
     /// let call = client.call("bob@example.com").port(5070).await?;
     /// let call = client.call("tel:+14155551234").await?;

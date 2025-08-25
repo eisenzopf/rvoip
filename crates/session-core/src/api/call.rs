@@ -221,15 +221,16 @@ impl SimpleCall {
     /// Create a transfer builder for blind or attended transfers
     /// 
     /// # Example
-    /// ```
+    /// ```no_run
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use rvoip_session_core::api::SimplePeer;
+    /// # let peer = SimplePeer::new("alice").await?;
+    /// # let call = peer.call("bob@example.com").await?;
     /// // Blind transfer
     /// call.transfer("charlie@example.com").await?;
-    /// 
-    /// // Attended transfer
-    /// let consult_call = peer.call("charlie@example.com").await?;
-    /// call.transfer("charlie@example.com")
-    ///     .attended(consult_call)
-    ///     .await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn transfer(&self, target: &str) -> TransferBuilder {
         TransferBuilder::new(self, target)
@@ -243,10 +244,16 @@ impl SimpleCall {
     /// * `other` - The other call to bridge with
     /// 
     /// # Example
-    /// ```
+    /// ```no_run
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # use rvoip_session_core::api::SimplePeer;
+    /// # let peer = SimplePeer::new("alice").await?;
     /// let call1 = peer.call("bob@example.com").await?;
     /// let call2 = peer.call("charlie@example.com").await?;
     /// call1.bridge(call2).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn bridge(&self, other: SimpleCall) -> Result<()> {
         use crate::api::common::call_ops;

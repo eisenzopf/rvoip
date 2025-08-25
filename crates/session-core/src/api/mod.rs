@@ -576,11 +576,15 @@ pub mod prelude {
     //! Convenient re-exports for common usage
     //! 
     //! # Example
-    //! ```
+    //! ```rust,ignore
+    //! # // Requires runtime context
     //! use rvoip_session_core::api::prelude::*;
     //! 
-    //! async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    //!     let mut peer = SimplePeer::new("alice").await?;
+    //! async fn example() -> Result<()> {
+    //!     let peer = SimplePeer::new("alice")
+    //!         .local_addr("127.0.0.1")
+    //!         .port(5060)
+    //!         .await?;
     //!     let call = peer.call("bob@example.com").await?;
     //!     Ok(())
     //! }

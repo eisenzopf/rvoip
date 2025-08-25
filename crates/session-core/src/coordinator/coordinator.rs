@@ -487,8 +487,35 @@ impl SessionCoordinator {
         match self.media_coordinator.on_session_created(session_id).await {
             Ok(()) => {
                 tracing::debug!("✅ Successfully created media session for {}", session_id);
-                // Note: MediaSessionReady event will be published after SDP negotiation
-                // when the remote endpoint is configured
+                
+                // Check if SDP negotiation already happened (upfront SDP case)
+                // If we have negotiated config, publish MediaSessionReady immediately
+                if let Some(_negotiated) = self.negotiated_configs.read().await.get(session_id) {
+                    tracing::info!("SDP already negotiated for {}, publishing MediaSessionReady", session_id);
+                    let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
+                    let _ = self.publish_event(SessionEvent::MediaSessionReady {
+                        session_id: session_id.clone(),
+                        dialog_id,
+                    }).await;
+                } else {
+                    // For outbound calls with upfront SDP, negotiation happens later but we should still
+                    // mark media as ready since the media session now exists
+                    if let Ok(Some(session)) = self.registry.get_session(session_id).await {
+                        if session.local_sdp.is_some() {
+                            tracing::info!("Outbound call with upfront SDP, publishing MediaSessionReady for {}", session_id);
+                            let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
+                            let _ = self.publish_event(SessionEvent::MediaSessionReady {
+                                session_id: session_id.clone(),
+                                dialog_id,
+                            }).await;
+                        } else {
+                            tracing::debug!("No negotiated config yet for {}, MediaSessionReady will be published after SDP negotiation", session_id);
+                        }
+                    } else {
+                        tracing::debug!("No negotiated config yet for {}, MediaSessionReady will be published after SDP negotiation", session_id);
+                    }
+                }
+                
                 Ok(())
             }
             Err(e) => {
@@ -537,12 +564,19 @@ impl SessionCoordinator {
             codec: negotiated.codec.clone(),
         }).await;
         
-        // Now that media is configured with remote endpoint, emit MediaSessionReady
-        let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
-        let _ = self.publish_event(SessionEvent::MediaSessionReady {
-            session_id: session_id.clone(),
-            dialog_id,
-        }).await;
+        // Only emit MediaSessionReady if media session already exists
+        // For upfront SDP cases, the media session doesn't exist yet and MediaSessionReady
+        // will be published later when start_media_session is called
+        if let Ok(Some(_)) = self.media_manager.get_media_info(session_id).await {
+            tracing::debug!("Media session exists, publishing MediaSessionReady from SDP negotiation");
+            let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
+            let _ = self.publish_event(SessionEvent::MediaSessionReady {
+                session_id: session_id.clone(),
+                dialog_id,
+            }).await;
+        } else {
+            tracing::debug!("Media session doesn't exist yet (upfront SDP), deferring MediaSessionReady to start_media_session");
+        }
         
         Ok(negotiated)
     }
@@ -570,12 +604,19 @@ impl SessionCoordinator {
             codec: negotiated.codec.clone(),
         }).await;
         
-        // Now that media is configured with remote endpoint, emit MediaSessionReady
-        let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
-        let _ = self.publish_event(SessionEvent::MediaSessionReady {
-            session_id: session_id.clone(),
-            dialog_id,
-        }).await;
+        // Only emit MediaSessionReady if media session already exists
+        // For upfront SDP cases, the media session doesn't exist yet and MediaSessionReady
+        // will be published later when start_media_session is called
+        if let Ok(Some(_)) = self.media_manager.get_media_info(session_id).await {
+            tracing::debug!("Media session exists, publishing MediaSessionReady from SDP negotiation");
+            let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
+            let _ = self.publish_event(SessionEvent::MediaSessionReady {
+                session_id: session_id.clone(),
+                dialog_id,
+            }).await;
+        } else {
+            tracing::debug!("Media session doesn't exist yet (upfront SDP), deferring MediaSessionReady to start_media_session");
+        }
         
         Ok((answer, negotiated))
     }

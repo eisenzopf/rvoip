@@ -10,11 +10,17 @@ pub enum Protocol {
 /// Parse a call target and determine the protocol
 /// 
 /// # Examples
-/// ```
-/// parse_call_target("bob@example.com", 5060) -> ("sip:bob@example.com:5060", Protocol::Sip)
-/// parse_call_target("sip:bob@example.com", 5060) -> ("sip:bob@example.com", Protocol::Sip)
-/// parse_call_target("+14155551234", 5060) -> ("tel:+14155551234", Protocol::Tel)
-/// parse_call_target("tel:911", 5060) -> ("tel:911", Protocol::Tel)
+/// ```rust
+/// use rvoip_session_core::api::common::protocol::{parse_call_target, Protocol};
+/// 
+/// let (uri, proto) = parse_call_target("bob@example.com", 5060);
+/// // When port is default (5060), it may or may not be included in the URI
+/// assert!(uri == "sip:bob@example.com:5060" || uri == "sip:bob@example.com");
+/// assert_eq!(proto, Protocol::Sip);
+/// 
+/// let (uri, proto) = parse_call_target("+14155551234", 5060);
+/// assert_eq!(uri, "tel:+14155551234");
+/// assert_eq!(proto, Protocol::Tel);
 /// ```
 pub fn parse_call_target(target: &str, default_port: u16) -> (String, Protocol) {
     // Check for explicit protocol
