@@ -378,58 +378,80 @@ impl MethodHandler for DialogManager {
         }
     }
     
-    /// Handle SUBSCRIBE requests (simple forwarding to session layer)
+    /// Handle SUBSCRIBE requests using SubscriptionManager
     async fn handle_subscribe_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         debug!("Processing SUBSCRIBE request from {}", source);
         
-        // SUBSCRIBE can create dialog-like state for event subscriptions
-        // For now, forward to session layer for handling
-        let server_transaction = self.transaction_manager
-            .create_server_transaction(request.clone(), source)
-            .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create server transaction for SUBSCRIBE: {}", e),
-            })?;
-        
-        let transaction_id = server_transaction.id().clone();
-        
-        let event = crate::events::SessionCoordinationEvent::CapabilityQuery {
-            transaction_id,
-            request: request.clone(),
-            source,
-        };
-        
-        self.notify_session_layer(event).await?;
-        debug!("SUBSCRIBE request forwarded to session layer");
-        Ok(())
-    }
-    
-    /// Handle NOTIFY requests (simple forwarding to session layer)
-    async fn handle_notify_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
-        debug!("Processing NOTIFY request from {}", source);
-        
-        // NOTIFY is typically within an existing subscription dialog
-        if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
+        // Use SubscriptionManager if available
+        if let Some(ref subscription_manager) = self.subscription_manager {
+            // Get local address - use configured or dialog manager's local address
+            let local_addr = self.local_address;
+            
+            // Handle subscription with SubscriptionManager
+            let (response, dialog_id) = subscription_manager
+                .handle_subscribe(request.clone(), source, local_addr)
+                .await?;
+            
+            // Create server transaction for the response
             let server_transaction = self.transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
                 .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for NOTIFY: {}", e),
+                    message: format!("Failed to create server transaction for SUBSCRIBE: {}", e),
                 })?;
             
             let transaction_id = server_transaction.id().clone();
             
-            let event = crate::events::SessionCoordinationEvent::ReInvite {
-                dialog_id: dialog_id.clone(),
+            // Send the response
+            self.transaction_manager.send_response(&transaction_id, response).await
+                .map_err(|e| DialogError::TransactionError {
+                    message: format!("Failed to send SUBSCRIBE response: {}", e),
+                })?;
+            
+            // If a dialog was created, store it
+            if let Some(dialog_id) = dialog_id {
+                debug!("SUBSCRIBE created subscription dialog {}", dialog_id);
+                // Note: The actual dialog creation happens in SubscriptionManager
+                // We might want to sync this with DialogManager's dialog store later
+            }
+            
+            debug!("SUBSCRIBE request handled by SubscriptionManager");
+            Ok(())
+        } else {
+            // Fallback to forwarding to session layer
+            let server_transaction = self.transaction_manager
+                .create_server_transaction(request.clone(), source)
+                .await
+                .map_err(|e| DialogError::TransactionError {
+                    message: format!("Failed to create server transaction for SUBSCRIBE: {}", e),
+                })?;
+            
+            let transaction_id = server_transaction.id().clone();
+            
+            let event = crate::events::SessionCoordinationEvent::CapabilityQuery {
                 transaction_id,
                 request: request.clone(),
+                source,
             };
             
             self.notify_session_layer(event).await?;
-            debug!("NOTIFY request forwarded to session layer for dialog {}", dialog_id);
+            debug!("SUBSCRIBE request forwarded to session layer");
             Ok(())
-        } else {
-            // NOTIFY outside dialog - could be unsolicited, send 481
+        }
+    }
+    
+    /// Handle NOTIFY requests using SubscriptionManager
+    async fn handle_notify_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
+        debug!("Processing NOTIFY request from {}", source);
+        
+        // Use SubscriptionManager if available
+        if let Some(ref subscription_manager) = self.subscription_manager {
+            // Handle NOTIFY with SubscriptionManager
+            let response = subscription_manager
+                .handle_notify(request.clone(), source)
+                .await?;
+            
+            // Create server transaction for the response
             let server_transaction = self.transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
@@ -438,15 +460,57 @@ impl MethodHandler for DialogManager {
                 })?;
             
             let transaction_id = server_transaction.id().clone();
-            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
             
+            // Send the response (always 200 OK per RFC 6665)
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send 481 response to NOTIFY: {}", e),
+                    message: format!("Failed to send NOTIFY response: {}", e),
                 })?;
             
-            debug!("NOTIFY processed with 481 response (no dialog found)");
+            debug!("NOTIFY request handled by SubscriptionManager");
             Ok(())
+        } else {
+            // Fallback to original behavior
+            // NOTIFY is typically within an existing subscription dialog
+            if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
+                let server_transaction = self.transaction_manager
+                    .create_server_transaction(request.clone(), source)
+                    .await
+                    .map_err(|e| DialogError::TransactionError {
+                        message: format!("Failed to create server transaction for NOTIFY: {}", e),
+                    })?;
+                
+                let transaction_id = server_transaction.id().clone();
+                
+                let event = crate::events::SessionCoordinationEvent::ReInvite {
+                    dialog_id: dialog_id.clone(),
+                    transaction_id,
+                    request: request.clone(),
+                };
+                
+                self.notify_session_layer(event).await?;
+                debug!("NOTIFY request forwarded to session layer for dialog {}", dialog_id);
+                Ok(())
+            } else {
+                // NOTIFY outside dialog - could be unsolicited, send 481
+                let server_transaction = self.transaction_manager
+                    .create_server_transaction(request.clone(), source)
+                    .await
+                    .map_err(|e| DialogError::TransactionError {
+                        message: format!("Failed to create server transaction for NOTIFY: {}", e),
+                    })?;
+                
+                let transaction_id = server_transaction.id().clone();
+                let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+                
+                self.transaction_manager.send_response(&transaction_id, response).await
+                    .map_err(|e| DialogError::TransactionError {
+                        message: format!("Failed to send 481 response to NOTIFY: {}", e),
+                    })?;
+                
+                debug!("NOTIFY processed with 481 response (no dialog found)");
+                Ok(())
+            }
         }
     }
 }

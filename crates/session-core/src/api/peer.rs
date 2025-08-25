@@ -43,12 +43,12 @@ use crate::errors::{Result, SessionError};
 /// }
 /// ```
 pub struct SimplePeer {
-    identity: String,
-    coordinator: Arc<SessionCoordinator>,
+    pub(crate) identity: String,
+    pub(crate) coordinator: Arc<SessionCoordinator>,
     incoming_calls: mpsc::Receiver<IncomingCall>,
     registrar: Option<String>,
-    local_addr: String,
-    port: u16,
+    pub(crate) local_addr: String,
+    pub(crate) port: u16,
 }
 
 /// Builder for creating a SimplePeer with custom configuration
@@ -161,6 +161,12 @@ impl CallHandler for IncomingCallRouter {
 }
 
 impl SimplePeer {
+    /// Get the presence coordinator for testing
+    #[doc(hidden)]
+    pub fn presence_coordinator(&self) -> Arc<RwLock<crate::coordinator::presence::PresenceCoordinator>> {
+        self.coordinator.presence_coordinator.clone()
+    }
+    
     /// Create a new peer with builder pattern
     /// 
     /// # Example

@@ -61,12 +61,14 @@ async fn test_accept_incoming_call_with_sdp_answer() {
     let config_uac = SessionManagerConfig {
         sip_port: 15070,
         local_address: "sip:alice@127.0.0.1:15070".to_string(),
+        local_bind_addr: "127.0.0.1:15070".parse().unwrap(),
         ..Default::default()
     };
     
     let config_uas = SessionManagerConfig {
         sip_port: 15071,
         local_address: "sip:bob@127.0.0.1:15071".to_string(),
+        local_bind_addr: "127.0.0.1:15071".parse().unwrap(),
         ..Default::default()
     };
     
@@ -166,6 +168,7 @@ async fn test_accept_incoming_call_without_sdp_answer() {
     let config = SessionManagerConfig {
         sip_port: 15072,
         local_address: "sip:server@127.0.0.1:15072".to_string(),
+        local_bind_addr: "127.0.0.1:15072".parse().unwrap(),
         ..Default::default()
     };
     
@@ -175,14 +178,14 @@ async fn test_accept_incoming_call_without_sdp_answer() {
     coordinator.start().await.expect("Failed to start coordinator");
     
     // Simulate an incoming call (would normally come from network)
-    let incoming_call = IncomingCall {
-        id: rvoip_session_core::api::SessionId::new(),
-        from: "sip:caller@example.com".to_string(),
-        to: "sip:server@127.0.0.1:15072".to_string(),
-        sdp: Some("dummy SDP offer".to_string()),
-        headers: Default::default(),
-        received_at: std::time::Instant::now(),
-    };
+    let incoming_call = IncomingCall::new_test(
+        rvoip_session_core::api::SessionId::new(),
+        "sip:caller@example.com".to_string(),
+        "sip:server@127.0.0.1:15072".to_string(),
+        Some("dummy SDP offer".to_string()),
+        Default::default(),
+        None,
+    );
     
     // Store it as deferred
     handler.deferred_calls.lock().await.push(incoming_call.clone());

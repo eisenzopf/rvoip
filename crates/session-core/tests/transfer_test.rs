@@ -74,6 +74,7 @@ async fn test_blind_transfer_flow() {
         &format!("sip:alice@127.0.0.1:{}", alice_port),
         &format!("sip:bob@127.0.0.1:{}", bob_port),
         None,
+        None,
     ).await.expect("Failed to create call to Bob");
 
     println!("📞 Alice calling Bob: {}", call_to_bob.id);

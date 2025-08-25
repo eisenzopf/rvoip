@@ -128,6 +128,23 @@ impl SessionCoordinator {
                 self.handle_registration_request(transaction_id, from_uri, contact_uri, expires).await?;
             }
             
+            // Subscription/Presence events
+            SessionEvent::SubscriptionCreated { dialog_id, event_package, from_uri, to_uri, expires } => {
+                self.handle_subscription_created(dialog_id, event_package, from_uri, to_uri, expires).await?;
+            }
+            
+            SessionEvent::NotifyReceived { dialog_id, subscription_state, event_package, body } => {
+                self.handle_notify_received(dialog_id, subscription_state, event_package, body).await?;
+            }
+            
+            SessionEvent::SubscriptionTerminated { dialog_id, reason } => {
+                self.handle_subscription_terminated(dialog_id, reason).await?;
+            }
+            
+            SessionEvent::PresenceStateUpdate { user_uri, state, note } => {
+                self.handle_presence_state_update(user_uri, state, note).await?;
+            }
+            
             SessionEvent::IncomingTransferRequest { session_id, target_uri, referred_by, .. } => {
                 // Notify handler about incoming transfer request
                 if let Some(handler) = &self.handler {
@@ -1047,6 +1064,143 @@ impl SessionCoordinator {
         // Call the handler
         if let Some(handler) = &self.handler {
             handler.on_call_established(call_session, local_sdp, remote_sdp).await;
+        }
+        
+        Ok(())
+    }
+    
+    // ========== Subscription/Presence Event Handlers ==========
+    
+    /// Handle subscription created event
+    async fn handle_subscription_created(
+        &self,
+        dialog_id: rvoip_dialog_core::DialogId,
+        event_package: String,
+        from_uri: String,
+        to_uri: String,
+        expires: std::time::Duration,
+    ) -> Result<()> {
+        tracing::info!(
+            "Subscription created: package={}, from={}, to={}, expires={:?}",
+            event_package, from_uri, to_uri, expires
+        );
+        
+        // For presence subscriptions, delegate to PresenceCoordinator
+        if event_package == "presence" {
+            let presence_coordinator = self.presence_coordinator.read().await;
+            presence_coordinator.handle_subscription(
+                dialog_id.clone(),
+                from_uri.clone(),
+                to_uri.clone(),
+                event_package.clone(),
+                expires,
+            ).await?;
+            
+            // Mark the subscription as active in dialog-core
+            if let Some(subscription_manager) = self.dialog_manager.subscription_manager() {
+                let _ = subscription_manager.activate_subscription(&dialog_id).await;
+            }
+        }
+        
+        // Notify application handler if present
+        if let Some(handler) = &self.handler {
+            // TODO: Add subscription callbacks to CallHandler trait
+            tracing::debug!("Would notify handler about subscription creation");
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle NOTIFY received event
+    async fn handle_notify_received(
+        &self,
+        dialog_id: rvoip_dialog_core::DialogId,
+        subscription_state: String,
+        event_package: String,
+        body: Option<Vec<u8>>,
+    ) -> Result<()> {
+        tracing::info!(
+            "NOTIFY received: dialog={}, package={}, state={}",
+            dialog_id, event_package, subscription_state
+        );
+        
+        // Parse presence data if this is a presence NOTIFY
+        if event_package == "presence" && body.is_some() {
+            // TODO: Parse PIDF XML and extract presence state
+            // This will be handled by PresenceCoordinator
+            tracing::debug!("Received presence NOTIFY with body");
+        }
+        
+        // Check if subscription is terminated
+        if subscription_state.starts_with("terminated") {
+            tracing::info!("Subscription {} terminated via NOTIFY", dialog_id);
+        }
+        
+        // Notify application handler if present
+        if let Some(handler) = &self.handler {
+            // TODO: Add NOTIFY callbacks to CallHandler trait
+            tracing::debug!("Would notify handler about NOTIFY reception");
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle subscription terminated event
+    async fn handle_subscription_terminated(
+        &self,
+        dialog_id: rvoip_dialog_core::DialogId,
+        reason: Option<String>,
+    ) -> Result<()> {
+        tracing::info!(
+            "Subscription terminated: dialog={}, reason={:?}",
+            dialog_id, reason
+        );
+        
+        // Clean up presence subscription
+        let presence_coordinator = self.presence_coordinator.read().await;
+        presence_coordinator.terminate_subscription(dialog_id, reason.clone()).await?;
+        
+        // Notify application handler if present
+        if let Some(handler) = &self.handler {
+            // TODO: Add subscription termination callbacks to CallHandler trait
+            tracing::debug!("Would notify handler about subscription termination");
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle presence state update request
+    async fn handle_presence_state_update(
+        &self,
+        user_uri: String,
+        state: String,
+        note: Option<String>,
+    ) -> Result<()> {
+        tracing::info!(
+            "Presence state update: user={}, state={}, note={:?}",
+            user_uri, state, note
+        );
+        
+        // Parse the state string into PresenceStatus
+        use super::presence::PresenceStatus;
+        let presence_status = match state.to_lowercase().as_str() {
+            "available" | "online" => PresenceStatus::Available,
+            "busy" => PresenceStatus::Busy,
+            "away" => PresenceStatus::Away,
+            "dnd" | "do-not-disturb" => PresenceStatus::DoNotDisturb,
+            "offline" => PresenceStatus::Offline,
+            "in-call" => PresenceStatus::InCall,
+            custom => PresenceStatus::Custom(custom.to_string()),
+        };
+        
+        // Update presence state and notify watchers
+        let presence_coordinator = self.presence_coordinator.read().await;
+        presence_coordinator.update_presence(user_uri, presence_status, note).await?;
+        
+        // Notify application handler if present
+        if let Some(handler) = &self.handler {
+            // TODO: Add presence update callbacks to CallHandler trait
+            tracing::debug!("Would notify handler about presence state update");
         }
         
         Ok(())

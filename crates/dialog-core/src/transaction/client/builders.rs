@@ -26,7 +26,7 @@ use crate::transaction::utils::dialog_utils::generate_branch;
 /// 
 /// # Example
 /// ```
-/// use crate::transaction::client::builders::InviteBuilder;
+/// use rvoip_dialog_core::transaction::client::builders::InviteBuilder;
 /// use std::net::SocketAddr;
 /// 
 /// let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
@@ -101,7 +101,7 @@ impl InviteBuilder {
     /// 
     /// # Example
     /// ```rust,no_run
-    /// use crate::transaction::client::builders::InviteBuilder;
+    /// use rvoip_dialog_core::transaction::client::builders::InviteBuilder;
     /// use std::net::SocketAddr;
     /// 
     /// let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
@@ -376,7 +376,7 @@ impl Default for InviteBuilder {
 /// 
 /// # Example
 /// ```
-/// use crate::transaction::client::builders::ByeBuilder;
+/// use rvoip_dialog_core::transaction::client::builders::ByeBuilder;
 /// use std::net::SocketAddr;
 /// 
 /// let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
@@ -461,7 +461,7 @@ impl ByeBuilder {
     /// 
     /// # Example
     /// ```rust,no_run
-    /// use crate::transaction::client::builders::ByeBuilder;
+    /// use rvoip_dialog_core::transaction::client::builders::ByeBuilder;
     /// use rvoip_sip_core::Uri;
     /// use std::net::SocketAddr;
     /// 
@@ -591,7 +591,7 @@ impl Default for ByeBuilder {
 /// 
 /// # Example
 /// ```
-/// use crate::transaction::client::builders::RegisterBuilder;
+/// use rvoip_dialog_core::transaction::client::builders::RegisterBuilder;
 /// use std::net::SocketAddr;
 /// 
 /// let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
@@ -742,7 +742,7 @@ impl Default for RegisterBuilder {
 /// 
 /// # Example
 /// ```
-/// use crate::transaction::client::builders::InDialogRequestBuilder;
+/// use rvoip_dialog_core::transaction::client::builders::InDialogRequestBuilder;
 /// use rvoip_sip_core::Method;
 /// use std::net::SocketAddr;
 /// 

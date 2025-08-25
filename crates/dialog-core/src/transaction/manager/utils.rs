@@ -56,8 +56,8 @@ pub trait ResponseBuilderExt {
     /// # Example
     /// ```no_run
     /// # use rvoip_sip_core::prelude::*;
-    /// # use crate::transaction::manager::utils::ResponseBuilderExt;
-    /// # fn example(request: &Request) -> crate::transaction::error::Result<Response> {
+    /// # use rvoip_dialog_core::transaction::manager::utils::ResponseBuilderExt;
+    /// # fn example(request: &Request) -> rvoip_dialog_core::transaction::error::Result<Response> {
     /// let builder = ResponseBuilder::new(StatusCode::Ok, Some("OK"));
     /// let builder = builder.copy_essential_headers(request)?;
     /// let response = builder.build();
@@ -113,7 +113,7 @@ impl ResponseBuilderExt for ResponseBuilder {
 /// ```
 /// # use std::str::FromStr;
 /// # use rvoip_sip_core::Uri;
-/// # use crate::transaction::manager::utils::socket_addr_from_uri;
+/// # use rvoip_dialog_core::transaction::manager::utils::socket_addr_from_uri;
 /// # fn example() {
 /// let uri = Uri::from_str("sip:user@192.168.1.10:5060").unwrap();
 /// if let Some(addr) = socket_addr_from_uri(&uri) {
@@ -147,7 +147,7 @@ pub fn socket_addr_from_uri(uri: &Uri) -> Option<SocketAddr> {
 /// # Example
 /// ```no_run
 /// # use rvoip_sip_core::Message;
-/// # use crate::transaction::manager::utils::extract_cseq;
+/// # use rvoip_dialog_core::transaction::manager::utils::extract_cseq;
 /// # fn example(message: &Message) {
 /// if let Some((seq_num, method)) = extract_cseq(message) {
 ///     println!("CSeq: {} {}", seq_num, method);
@@ -182,7 +182,7 @@ pub fn extract_cseq(message: &Message) -> Option<(u32, Method)> {
 /// # Example
 /// ```no_run
 /// # use rvoip_sip_core::Response;
-/// # use crate::transaction::manager::utils::determine_ack_destination;
+/// # use rvoip_dialog_core::transaction::manager::utils::determine_ack_destination;
 /// # async fn example(response: &Response) {
 /// if let Some(dest) = determine_ack_destination(response).await {
 ///     println!("ACK destination: {}", dest);

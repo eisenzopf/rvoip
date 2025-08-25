@@ -77,7 +77,8 @@ async fn test_cancel_before_response() {
     let call = manager_a.create_outgoing_call(
         "sip:alice@127.0.0.1",
         &format!("sip:bob@{}", manager_b.get_bound_address()),
-        Some("SDP offer".to_string())
+        Some("SDP offer".to_string()),
+        None
     ).await.unwrap();
     
     let session_id = call.id().clone();
@@ -135,7 +136,8 @@ async fn test_cancel_after_provisional_response() {
     let call = manager_a.create_outgoing_call(
         "sip:alice@127.0.0.1",
         &format!("sip:bob@{}", manager_b.get_bound_address()),
-        Some("SDP offer".to_string())
+        Some("SDP offer".to_string()),
+        None
     ).await.unwrap();
     
     let session_id = call.id().clone();

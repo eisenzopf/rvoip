@@ -72,6 +72,7 @@ pub struct SessionCoordinator {
     // Subsystem coordinators
     pub dialog_coordinator: Arc<SessionDialogCoordinator>,
     pub media_coordinator: Arc<SessionMediaCoordinator>,
+    pub presence_coordinator: Arc<RwLock<super::presence::PresenceCoordinator>>,
     
     // SDP Negotiator
     pub sdp_negotiator: Arc<SdpNegotiator>,
@@ -182,6 +183,11 @@ impl SessionCoordinator {
         let media_coordinator = Arc::new(SessionMediaCoordinator::new(
             media_manager.clone()
         ));
+        
+        // Create presence coordinator
+        let mut presence_coordinator = super::presence::PresenceCoordinator::new();
+        presence_coordinator.set_dialog_manager(dialog_manager.clone());
+        let presence_coordinator = Arc::new(RwLock::new(presence_coordinator));
 
         // Create conference manager with configured local IP
         let conference_manager = Arc::new(ConferenceManager::new(config.local_bind_addr.ip()));
@@ -195,6 +201,7 @@ impl SessionCoordinator {
             conference_manager,
             dialog_coordinator,
             media_coordinator,
+            presence_coordinator,
             sdp_negotiator,
             handler,
             config,

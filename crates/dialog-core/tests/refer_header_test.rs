@@ -39,7 +39,7 @@ async fn test_refer_has_header_not_body() {
     
     // Instead of trying to send a real REFER through a non-established dialog,
     // let's just test that the REFER request builder creates the correct structure
-    use rvoip_transaction_core::dialog::quick::refer_for_dialog;
+    use rvoip_dialog_core::transaction::dialog::quick::refer_for_dialog;
     
     let local_addr: SocketAddr = "127.0.0.1:45001".parse().unwrap();
     let refer_request = refer_for_dialog(
@@ -124,7 +124,7 @@ async fn test_incoming_refer_with_proper_header() {
 async fn test_refer_request_structure() {
     println!("🧪 Testing REFER request structure with transaction-core");
     
-    use rvoip_transaction_core::dialog::quick::refer_for_dialog;
+    use rvoip_dialog_core::transaction::dialog::quick::refer_for_dialog;
     
     let local_addr: SocketAddr = "127.0.0.1:45020".parse().unwrap();
     

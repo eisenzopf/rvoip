@@ -325,6 +325,11 @@ impl UnifiedDialogApi {
         &self.manager
     }
     
+    /// Get reference to the subscription manager if configured
+    pub fn subscription_manager(&self) -> Option<&Arc<crate::subscription::SubscriptionManager>> {
+        self.manager.subscription_manager()
+    }
+    
     // ========================================
     // LIFECYCLE MANAGEMENT
     // ========================================

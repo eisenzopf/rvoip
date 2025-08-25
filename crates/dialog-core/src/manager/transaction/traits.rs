@@ -5,7 +5,7 @@
 //! for request sending, response handling, and transaction management.
 
 use rvoip_sip_core::{Request, Response, Method};
-use rvoip_transaction_core::TransactionKey;
+use rvoip_dialog_core::TransactionKey;
 use crate::errors::DialogResult;
 use crate::dialog::DialogId;
 

@@ -447,3 +447,6 @@ mod tests {
         assert!(xml.contains("&amp;"));
     }
 }
+
+/// Type alias for convenience and compatibility
+pub type Presence = PidfDocument;

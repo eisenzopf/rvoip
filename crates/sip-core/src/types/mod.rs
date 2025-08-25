@@ -447,7 +447,7 @@ pub use sip_etag::SipETag;
 pub use sip_if_match::SipIfMatch;
 pub use allow_events::AllowEvents;
 pub use rseq::RSeq;
-pub use pidf::{PidfDocument, BasicStatus, Status, Tuple};
+pub use pidf::{PidfDocument, BasicStatus, Status, Tuple, Presence};
 
 // Add AsRef implementations for Message
 impl AsRef<Message> for Message {

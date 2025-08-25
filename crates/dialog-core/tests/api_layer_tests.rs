@@ -8,11 +8,11 @@ use tokio::time::{timeout, Duration};
 
 use rvoip_dialog_core::api::{DialogClient, DialogServer, DialogApi};
 use rvoip_dialog_core::DialogId;
-use rvoip_transaction_core::builders::{client_quick}; // Use the new builders
+use rvoip_dialog_core::transaction::builders::{client_quick}; // Use the new builders
 use rvoip_sip_core::{Request, Method, StatusCode, Uri, TypedHeader, ContentLength};
 use rvoip_sip_core::builder::SimpleRequestBuilder;
-use rvoip_transaction_core::{TransactionManager, TransportManager};
-use rvoip_transaction_core::transport::TransportManagerConfig;
+use rvoip_dialog_core::transaction::TransactionManager;
+use rvoip_dialog_core::transaction::transport::{TransportManager, TransportManagerConfig};
 use uuid::Uuid;
 
 /// Test environment for dialog-core API testing using **REAL TRANSPORT**

@@ -243,6 +243,28 @@ pub struct IncomingCall {
 }
 
 impl IncomingCall {
+    /// Create a test incoming call (only for tests)
+    #[doc(hidden)]
+    pub fn new_test(
+        id: SessionId,
+        from: String,
+        to: String,
+        sdp: Option<String>,
+        headers: std::collections::HashMap<String, String>,
+        sip_call_id: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            from,
+            to,
+            sdp,
+            headers,
+            received_at: Instant::now(),
+            sip_call_id,
+            coordinator: None,
+        }
+    }
+    
     /// Accept the incoming call and get a SimpleCall handle
     /// 
     /// This accepts the call and returns a SimpleCall object that provides

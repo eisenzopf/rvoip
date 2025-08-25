@@ -91,8 +91,8 @@ use crate::transaction::error::{Error, Result};
 /// # use std::str::FromStr;
 /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// # use rvoip_sip_core::prelude::*;
-/// # use crate::transaction::method::update::create_update_request;
-/// # use crate::transaction::error::Result;
+/// # use rvoip_dialog_core::transaction::method::update::create_update_request;
+/// # use rvoip_dialog_core::transaction::error::Result;
 /// #
 /// # // Create a simple INVITE request with To tag (simulating an in-dialog request)
 /// # let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
@@ -217,7 +217,7 @@ pub fn create_update_request(
 /// ```
 /// # use std::str::FromStr;
 /// # use rvoip_sip_core::prelude::*;
-/// # use crate::transaction::method::update::validate_update_request;
+/// # use rvoip_dialog_core::transaction::method::update::validate_update_request;
 /// #
 /// # // Create a minimal valid UPDATE request
 /// # let mut request = Request::new(Method::Update, Uri::from_str("sip:bob@example.com").unwrap());

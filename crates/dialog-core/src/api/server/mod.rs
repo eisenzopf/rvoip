@@ -50,7 +50,7 @@
 //! ```rust,no_run
 //! use rvoip_dialog_core::api::{DialogServer, DialogApi, ServerConfig};
 //! use rvoip_dialog_core::events::SessionCoordinationEvent;
-//! use crate::transaction::TransactionManager;
+//! use rvoip_dialog_core::transaction::TransactionManager;
 //! use tokio::sync::mpsc;
 //! use std::sync::Arc;
 //!
@@ -139,7 +139,7 @@
 //! });
 //! # Ok(())
 //! # }
-//! # async fn setup_dependencies() -> Result<(std::sync::Arc<crate::transaction::TransactionManager>, rvoip_dialog_core::api::ServerConfig), std::io::Error> { unimplemented!() }
+//! # async fn setup_dependencies() -> Result<(std::sync::Arc<rvoip_dialog_core::transaction::TransactionManager>, rvoip_dialog_core::api::ServerConfig), std::io::Error> { unimplemented!() }
 //! ```
 //!
 //! ### Pattern 2: Advanced Call Processing
@@ -391,7 +391,7 @@
 //! # fn extract_sdp_from_request(request: &Request) -> Option<String> { Some("SDP".to_string()) }
 //! # async fn setup_media_session(offer: String) -> Result<String, Box<dyn std::error::Error + Send + Sync>> { Ok("answer".to_string()) }
 //! # async fn cleanup_media_session(dialog_id: &rvoip_dialog_core::dialog::DialogId) -> Result<(), Box<dyn std::error::Error + Send + Sync>> { Ok(()) }
-//! # async fn setup_dependencies() -> Result<(std::sync::Arc<crate::transaction::TransactionManager>, rvoip_dialog_core::api::ServerConfig), std::io::Error> { unimplemented!() }
+//! # async fn setup_dependencies() -> Result<(std::sync::Arc<rvoip_dialog_core::transaction::TransactionManager>, rvoip_dialog_core::api::ServerConfig), std::io::Error> { unimplemented!() }
 //! ```
 //!
 //! ### Load Balancer Integration
@@ -439,7 +439,7 @@
 //! });
 //! # Ok(())
 //! # }
-//! # async fn setup_dependencies() -> Result<(std::sync::Arc<crate::transaction::TransactionManager>, rvoip_dialog_core::api::ServerConfig), std::io::Error> { unimplemented!() }
+//! # async fn setup_dependencies() -> Result<(std::sync::Arc<rvoip_dialog_core::transaction::TransactionManager>, rvoip_dialog_core::api::ServerConfig), std::io::Error> { unimplemented!() }
 //! ```
 //!
 //! ## Monitoring & Statistics

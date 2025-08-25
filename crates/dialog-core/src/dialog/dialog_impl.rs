@@ -4,6 +4,7 @@
 //! handling dialog creation, state management, and request/response processing.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 use serde::{Serialize, Deserialize};
 use tracing::debug;
 
@@ -17,7 +18,9 @@ use crate::transaction::utils::DialogRequestTemplate;
 use super::dialog_state::DialogState;
 use super::dialog_id::DialogId;
 use super::dialog_utils::extract_uri_from_contact;
+use super::subscription_state::SubscriptionState;
 use crate::errors::{DialogError, DialogResult};
+use tokio::task::JoinHandle;
 
 /// A SIP dialog as defined in RFC 3261
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +78,23 @@ pub struct Dialog {
     
     /// Time when recovery was started
     pub recovery_start_time: Option<std::time::SystemTime>,
+    
+    // Subscription-specific fields (RFC 6665)
+    
+    /// Subscription state for event subscriptions
+    pub subscription_state: Option<SubscriptionState>,
+    
+    /// Event package being subscribed to (e.g., "presence", "dialog", "message-summary")
+    pub event_package: Option<String>,
+    
+    /// Event ID for this subscription (if any)
+    pub event_id: Option<String>,
+    
+    /// Number of failed refresh attempts
+    pub refresh_failures: u32,
+    
+    /// Maximum refresh failures before termination
+    pub max_refresh_failures: u32,
 }
 
 impl Dialog {
@@ -106,6 +126,11 @@ impl Dialog {
             recovery_reason: None,
             recovered_at: None,
             recovery_start_time: None,
+            subscription_state: None,
+            event_package: None,
+            event_id: None,
+            refresh_failures: 0,
+            max_refresh_failures: 3,
         }
     }
     
@@ -270,6 +295,11 @@ impl Dialog {
             recovery_reason: None,
             recovered_at: None,
             recovery_start_time: None,
+            subscription_state: None,
+            event_package: None,
+            event_id: None,
+            refresh_failures: 0,
+            max_refresh_failures: 3,
         })
     }
     
@@ -358,7 +388,100 @@ impl Dialog {
             recovery_reason: None,
             recovered_at: None,
             recovery_start_time: None,
+            subscription_state: None,
+            event_package: None,
+            event_id: None,
+            refresh_failures: 0,
+            max_refresh_failures: 3,
         })
+    }
+    
+    // ===== Subscription-specific methods (RFC 6665) =====
+    
+    /// Initialize dialog for subscription with event package
+    pub fn init_subscription(&mut self, event_package: String, event_id: Option<String>, expires: u32) {
+        use std::time::{Duration, Instant};
+        
+        self.event_package = Some(event_package);
+        self.event_id = event_id;
+        
+        if expires > 0 {
+            self.subscription_state = Some(SubscriptionState::Active {
+                remaining_duration: Duration::from_secs(expires as u64),
+                original_duration: Duration::from_secs(expires as u64),
+            });
+        } else {
+            // Expires: 0 means immediate termination
+            self.subscription_state = Some(SubscriptionState::Terminated {
+                reason: Some(crate::dialog::SubscriptionTerminationReason::ClientRequested),
+            });
+        }
+    }
+    
+    /// Update subscription state from received NOTIFY
+    pub fn update_subscription_from_notify(&mut self, subscription_state_header: &str) {
+        self.subscription_state = Some(SubscriptionState::from_header_value(subscription_state_header));
+    }
+    
+    /// Check if subscription needs refresh
+    pub fn subscription_needs_refresh(&self) -> bool {
+        use std::time::Duration;
+        
+        if let Some(ref state) = self.subscription_state {
+            // Refresh 30 seconds before expiry
+            state.needs_refresh(Duration::from_secs(30))
+        } else {
+            false
+        }
+    }
+    
+    /// Mark subscription as refreshing
+    pub fn start_subscription_refresh(&mut self, new_expires: u32) {
+        use std::time::{Duration, Instant};
+        
+        if let Some(SubscriptionState::Active { remaining_duration, .. }) = self.subscription_state {
+            self.subscription_state = Some(SubscriptionState::Refreshing {
+                current_remaining: remaining_duration,
+                requested_duration: Duration::from_secs(new_expires as u64),
+            });
+        }
+    }
+    
+    /// Complete subscription refresh
+    pub fn complete_subscription_refresh(&mut self, new_expires: u32) {
+        self.subscription_state = Some(SubscriptionState::Active {
+            remaining_duration: Duration::from_secs(new_expires as u64),
+            original_duration: Duration::from_secs(new_expires as u64),
+        });
+        self.refresh_failures = 0; // Reset failure counter on success
+    }
+    
+    /// Record subscription refresh failure
+    pub fn record_refresh_failure(&mut self) {
+        self.refresh_failures += 1;
+        
+        if self.refresh_failures >= self.max_refresh_failures {
+            self.subscription_state = Some(SubscriptionState::Terminated {
+                reason: Some(crate::dialog::SubscriptionTerminationReason::RefreshFailed),
+            });
+        }
+    }
+    
+    /// Terminate subscription
+    pub fn terminate_subscription(&mut self, reason: Option<crate::dialog::SubscriptionTerminationReason>) {
+        self.subscription_state = Some(SubscriptionState::Terminated { reason });
+        
+        // Refresh timer will be handled by SubscriptionManager
+    }
+    
+    /// Check if this is a subscription dialog
+    pub fn is_subscription(&self) -> bool {
+        self.event_package.is_some()
+    }
+    
+    /// Get subscription expiry time
+    pub fn subscription_expiry(&self) -> Option<std::time::Duration> {
+        self.subscription_state.as_ref()?.time_until_expiry()
     }
     
     /// Create a new request within this dialog

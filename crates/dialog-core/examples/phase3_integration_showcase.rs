@@ -23,7 +23,7 @@ use rvoip_dialog_core::{
     DialogId, DialogState
 };
 use uuid;
-use rvoip_transaction_core::builders::client_quick;
+use rvoip_dialog_core::transaction::builders::client_quick;
 
 /// Full lifecycle integration test environment using unified API with global events
 struct LifecycleTest {

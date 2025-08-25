@@ -236,6 +236,38 @@ pub enum SessionEvent {
         expires: u32,
     },
     
+    // ========== Subscription/Presence Events ==========
+    
+    /// Subscription created (incoming SUBSCRIBE)
+    SubscriptionCreated {
+        dialog_id: rvoip_dialog_core::DialogId,
+        event_package: String,
+        from_uri: String,
+        to_uri: String,
+        expires: std::time::Duration,
+    },
+    
+    /// NOTIFY received for a subscription
+    NotifyReceived {
+        dialog_id: rvoip_dialog_core::DialogId,
+        subscription_state: String,
+        event_package: String,
+        body: Option<Vec<u8>>,
+    },
+    
+    /// Subscription terminated
+    SubscriptionTerminated {
+        dialog_id: rvoip_dialog_core::DialogId,
+        reason: Option<String>,
+    },
+    
+    /// Presence state update needed (trigger NOTIFY)
+    PresenceStateUpdate {
+        user_uri: String,
+        state: String, // "online", "offline", "busy", etc.
+        note: Option<String>,
+    },
+    
     // ========== RTP Processing Events ==========
     
     /// RTP packet processed with zero-copy optimization

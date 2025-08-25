@@ -88,8 +88,8 @@ use crate::transaction::TransactionKey;
 /// # use std::str::FromStr;
 /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// # use rvoip_sip_core::prelude::*;
-/// # use crate::transaction::method::cancel::create_cancel_request;
-/// # use crate::transaction::error::Result;
+/// # use rvoip_dialog_core::transaction::method::cancel::create_cancel_request;
+/// # use rvoip_dialog_core::transaction::error::Result;
 /// #
 /// # // Create a simple INVITE request
 /// # let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
@@ -273,8 +273,8 @@ fn via_header_with_branch(local_addr: &SocketAddr, branch: &str) -> Result<Typed
 /// # use std::str::FromStr;
 /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// # use rvoip_sip_core::prelude::*;
-/// # use crate::transaction::method::cancel::{create_cancel_request, find_invite_transaction_for_cancel};
-/// # use crate::transaction::transaction::TransactionKey;
+/// # use rvoip_dialog_core::transaction::method::cancel::{create_cancel_request, find_invite_transaction_for_cancel};
+/// # use rvoip_dialog_core::transaction::TransactionKey;
 /// #
 /// # // Create a simple INVITE request
 /// # let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
@@ -350,8 +350,8 @@ where
 /// # use std::str::FromStr;
 /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// # use rvoip_sip_core::prelude::*;
-/// # use crate::transaction::method::cancel::{create_cancel_request, find_matching_invite_transaction};
-/// # use crate::transaction::transaction::TransactionKey;
+/// # use rvoip_dialog_core::transaction::method::cancel::{create_cancel_request, find_matching_invite_transaction};
+/// # use rvoip_dialog_core::transaction::TransactionKey;
 /// #
 /// # // Create a simple INVITE request with a specific branch
 /// # let branch = "z9hG4bK.test-branch-123";
@@ -434,7 +434,7 @@ pub fn find_matching_invite_transaction(
 /// # use std::str::FromStr;
 /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// # use rvoip_sip_core::prelude::*;
-/// # use crate::transaction::method::cancel::{create_cancel_request, validate_cancel_request};
+/// # use rvoip_dialog_core::transaction::method::cancel::{create_cancel_request, validate_cancel_request};
 /// #
 /// # // Create a simple INVITE request
 /// # let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
@@ -530,7 +530,7 @@ pub fn validate_cancel_request(request: &Request) -> Result<()> {
 /// # use std::str::FromStr;
 /// # use rvoip_sip_core::builder::SimpleRequestBuilder;
 /// # use rvoip_sip_core::prelude::*;
-/// # use crate::transaction::method::cancel::{create_cancel_request, is_cancel_for_invite};
+/// # use rvoip_dialog_core::transaction::method::cancel::{create_cancel_request, is_cancel_for_invite};
 /// #
 /// # // Create a simple INVITE request
 /// # let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()

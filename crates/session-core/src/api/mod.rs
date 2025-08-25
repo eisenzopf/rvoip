@@ -486,6 +486,7 @@ pub mod client;
 pub mod peer;
 pub mod b2bua;
 pub mod call;
+pub mod presence;
 
 // High-level UAC and UAS APIs (legacy - will be moved)
 pub mod uac;
