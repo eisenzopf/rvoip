@@ -47,9 +47,13 @@ pub async fn transfer(
         target.to_string()
     } else if target.contains('@') {
         format!("sip:{}", target)
+    } else if target.starts_with('+') {
+        // Phone number with + needs to be escaped or use tel: URI
+        format!("tel:{}", target)
     } else {
-        // Assume it's a phone number or username
-        format!("sip:{}", target)
+        // Assume it's a phone number or username - need a host
+        // For bare numbers/usernames, we need to add a default domain
+        format!("sip:{}@localhost", target)
     };
     
     SessionControl::transfer_session(coordinator, session_id, &formatted_target).await

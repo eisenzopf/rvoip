@@ -69,26 +69,8 @@ impl CallHandler for AutoAcceptHandler {
         let mut events = self.events.lock().await;
         events.push(format!("incoming_call: {} -> {}", call.from, call.to));
         
-        // Auto-accept with SDP answer
-        if let Some(offer_sdp) = call.sdp {
-            // Simple SDP answer generation
-            let answer_sdp = format!(
-                "v=0\r\n\
-                o=- {} {} IN IP4 127.0.0.1\r\n\
-                s=-\r\n\
-                c=IN IP4 127.0.0.1\r\n\
-                t=0 0\r\n\
-                m=audio {} RTP/AVP 0\r\n\
-                a=rtpmap:0 PCMU/8000\r\n\
-                a=sendrecv",
-                chrono::Utc::now().timestamp(),
-                chrono::Utc::now().timestamp(),
-                30000 + (rand::random::<u16>() % 1000)
-            );
-            CallDecision::Accept(Some(answer_sdp))
-        } else {
-            CallDecision::Accept(None)
-        }
+        // Auto-accept and let the library handle SDP negotiation
+        CallDecision::Accept(None)
     }
     
     async fn on_call_established(&self, call: CallSession, _local_sdp: Option<String>, _remote_sdp: Option<String>) {
