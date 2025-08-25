@@ -399,25 +399,11 @@ impl TransferHandler {
                     let current_state = session.state().clone();
                     println!("📊 TRANSFER MONITOR: Session {} state: {:?} (attempt {})", new_session_id, current_state, attempt_count);
                     
-                    // Only send NOTIFY if state changed
-                    if current_state != last_state {
-                        match current_state {
-                            CallState::Ringing => {
-                                // Send 180 Ringing NOTIFY
-                                let _ = handler.send_transfer_notify(
-                                    &dialog_id,
-                                    &event_id,
-                                    "SIP/2.0 180 Ringing\r\n",
-                                    false,
-                                ).await;
-                                
-                                // Emit transfer progress - Ringing
-                                let _ = handler.event_processor.publish_event(SessionEvent::TransferProgress {
-                                    session_id: original_session_id.clone(),
-                                    status: SessionTransferStatus::Ringing,
-                                }).await;
-                            }
-                            CallState::Active => {
+                    // Check if transfer is complete (regardless of whether state changed)
+                    match current_state {
+                        CallState::Active => {
+                            // Only send NOTIFY if this is a state change
+                            if current_state != last_state {
                                 println!("🎉 TRANSFER MONITOR: Transfer call {} is now ACTIVE! Transfer successful!", new_session_id);
                                 // Transfer succeeded - send 200 OK NOTIFY
                                 let _ = handler.send_transfer_notify(
@@ -453,9 +439,13 @@ impl TransferHandler {
                                 
                                 // Clean up subscription
                                 handler.remove_subscription(&event_id).await;
-                                break;
                             }
-                            CallState::Failed(reason) => {
+                            // Always exit when transfer is active
+                            break;
+                        }
+                        CallState::Failed(ref reason) => {
+                            // Only send NOTIFY if this is a state change
+                            if current_state != last_state {
                                 // Transfer failed - send error NOTIFY
                                 let _ = handler.send_transfer_notify(
                                     &dialog_id,
@@ -467,9 +457,13 @@ impl TransferHandler {
                                 
                                 // Clean up subscription
                                 handler.remove_subscription(&event_id).await;
-                                break;
                             }
-                            CallState::Terminated => {
+                            // Always exit when transfer failed
+                            break;
+                        }
+                        CallState::Terminated => {
+                            // Only send NOTIFY if this is a state change
+                            if current_state != last_state {
                                 // Call ended before connecting
                                 let _ = handler.send_transfer_notify(
                                     &dialog_id,
@@ -480,14 +474,35 @@ impl TransferHandler {
                                 
                                 // Clean up subscription
                                 handler.remove_subscription(&event_id).await;
-                                break;
                             }
-                            _ => {
-                                // Still in progress
+                            // Always exit when transfer terminated
+                            break;
+                        }
+                        CallState::Ringing => {
+                            // Send notifications only if state changed
+                            if current_state != last_state {
+                                // Send 180 Ringing NOTIFY
+                                let _ = handler.send_transfer_notify(
+                                    &dialog_id,
+                                    &event_id,
+                                    "SIP/2.0 180 Ringing\r\n",
+                                    false,
+                                ).await;
+                                
+                                // Emit transfer progress - Ringing
+                                let _ = handler.event_processor.publish_event(SessionEvent::TransferProgress {
+                                    session_id: original_session_id.clone(),
+                                    status: SessionTransferStatus::Ringing,
+                                }).await;
                             }
                         }
-                        last_state = current_state;
+                        _ => {
+                            // Other states - just continue monitoring
+                        }
                     }
+                    
+                    // Update last state for change detection
+                    last_state = current_state;
                 }
                 
                 if attempt_count >= max_attempts {

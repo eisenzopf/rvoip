@@ -585,8 +585,33 @@ async fn test_call_state_transitions() {
         Some(sdp.to_string()),
     ).await.expect("Failed to create call");
 
-    // Wait for call to establish
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Wait for call to be fully established with Active state
+    // Note: on_call_established is currently only called for incoming calls (UAS),
+    // not for outgoing calls (UAC), so we check state instead
+    let mut retries = 0;
+    loop {
+        if let Ok(Some(session)) = alice.get_session(&call.id).await {
+            if session.state() == &CallState::Active {
+                println!("✅ Call is now Active after {} retries", retries);
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        retries += 1;
+        if retries > 50 {  // 5 second timeout
+            panic!("Call never became active after 5 seconds");
+        }
+    }
+    
+    // Wait for media session creation to complete
+    // Media sessions are created asynchronously after state change
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    
+    // Verify Bob also received and established the call
+    let bob_events = bob_handler.get_events().await;
+    println!("Bob's events: {:?}", bob_events);
+    assert!(bob_events.iter().any(|e| e.contains("call_established")), 
+            "Bob should have established the call");
 
     // Now test hold/resume on an established call
     alice.hold_session(&call.id)
