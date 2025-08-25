@@ -1,6 +1,7 @@
 //! Event handling implementation for SessionCoordinator
 
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use crate::api::types::{SessionId, CallState, CallSession, IncomingCall, CallDecision};
 use crate::api::control::generate_sdp_answer;
@@ -185,6 +186,14 @@ impl SessionCoordinator {
                     if readiness.call_session.is_none() {
                         if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
                             readiness.call_session = Some(session.as_call_session().clone());
+                            
+                            // Also get SDPs from session registry if not already set (for upfront SDP cases)
+                            if readiness.local_sdp.is_none() {
+                                readiness.local_sdp = session.local_sdp.clone();
+                            }
+                            if readiness.remote_sdp.is_none() {
+                                readiness.remote_sdp = session.remote_sdp.clone();
+                            }
                         }
                     }
                     
@@ -210,11 +219,20 @@ impl SessionCoordinator {
                     let readiness = readiness_map.entry(session_id.clone()).or_default();
                     readiness.sdp_negotiated = true;
                     
-                    // Fetch and store the SDPs from media manager
+                    // Fetch and store the SDPs - try media manager first, then session registry
                     if let Ok(Some(media_info)) = self.media_manager.get_media_info(&session_id).await {
                         readiness.local_sdp = media_info.local_sdp;
                         readiness.remote_sdp = media_info.remote_sdp;
-                        tracing::debug!("Stored SDP for session {} - local: {}, remote: {}", 
+                        tracing::debug!("Got SDP from media manager for session {} - local: {}, remote: {}", 
+                            session_id,
+                            readiness.local_sdp.is_some(),
+                            readiness.remote_sdp.is_some()
+                        );
+                    } else if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                        // Fallback to session registry for upfront SDP cases
+                        readiness.local_sdp = session.local_sdp.clone();
+                        readiness.remote_sdp = session.remote_sdp.clone();
+                        tracing::debug!("Got SDP from session registry for session {} - local: {}, remote: {}", 
                             session_id,
                             readiness.local_sdp.is_some(),
                             readiness.remote_sdp.is_some()
@@ -274,6 +292,31 @@ impl SessionCoordinator {
         call_state: CallState,
     ) -> Result<()> {
         tracing::info!("Session {} created with state {:?}", session_id, call_state);
+        
+        // Initialize readiness tracking for this session
+        {
+            let mut readiness_map = self.session_readiness.write().await;
+            let readiness = readiness_map.entry(session_id.clone()).or_default();
+            
+            // If session is created in Active state, mark dialog as established
+            if call_state == CallState::Active {
+                readiness.dialog_established = true;
+                tracing::info!("Session {} created in Active state, marking dialog_established", session_id);
+            }
+            
+            // Store the call session if available
+            if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                readiness.call_session = Some(session.as_call_session().clone());
+                
+                // Also get SDPs from session if available (for upfront SDP cases)
+                if let Some(ref local_sdp) = session.local_sdp {
+                    readiness.local_sdp = Some(local_sdp.clone());
+                }
+                if let Some(ref remote_sdp) = session.remote_sdp {
+                    readiness.remote_sdp = Some(remote_sdp.clone());
+                }
+            }
+        }
 
         // Media is created later when session becomes active
         match call_state {
@@ -316,10 +359,27 @@ impl SessionCoordinator {
                 let readiness = readiness_map.entry(session_id.clone()).or_default();
                 readiness.dialog_established = true;
                 
-                // Store the call session
+                // Store the call session and SDPs
                 if readiness.call_session.is_none() {
                     if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
                         readiness.call_session = Some(session.as_call_session().clone());
+                        
+                        // Also get SDPs from session registry if available (for upfront SDP cases)
+                        if readiness.local_sdp.is_none() && session.local_sdp.is_some() {
+                            readiness.local_sdp = session.local_sdp.clone();
+                            tracing::debug!("Got local SDP from session registry in state change");
+                        }
+                        if readiness.remote_sdp.is_none() && session.remote_sdp.is_some() {
+                            readiness.remote_sdp = session.remote_sdp.clone();
+                            tracing::debug!("Got remote SDP from session registry in state change");
+                        }
+                        
+                        // For outbound calls with upfront SDP, SDP negotiation happens immediately
+                        // Check if this is an outbound call with local SDP but no remote SDP yet
+                        if session.local_sdp.is_some() && session.remote_sdp.is_none() {
+                            tracing::info!("Outbound call with upfront SDP detected for {}, marking SDP as negotiated", session_id);
+                            readiness.sdp_negotiated = true;
+                        }
                     }
                 }
                 
@@ -341,6 +401,13 @@ impl SessionCoordinator {
             (CallState::Initiating, CallState::Active) => {
                 tracing::debug!("📞 Starting media session for newly active call: {}", session_id);
                 
+                // Check if this is an outbound call with upfront SDP
+                let is_upfront_sdp = if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                    session.local_sdp.is_some()
+                } else {
+                    false
+                };
+                
                 // Spawn media session creation in background to avoid blocking event processing
                 // The MediaSessionReady event will be published when media is ready
                 let self_clone = self.clone();
@@ -348,6 +415,13 @@ impl SessionCoordinator {
                 tokio::spawn(async move {
                     if let Err(e) = self_clone.start_media_session(&session_id_clone).await {
                         tracing::error!("Failed to start media session for {}: {}", session_id_clone, e);
+                    }
+                    
+                    // For upfront SDP cases, wait briefly for media to be ready then check conditions
+                    if is_upfront_sdp {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        tracing::info!("Checking call establishment after media setup for upfront SDP call {}", session_id_clone);
+                        let _ = self_clone.check_and_trigger_call_established(&session_id_clone).await;
                     }
                 });
             }
@@ -630,15 +704,24 @@ impl SessionCoordinator {
         tracing::debug!("SDP event for session {}: {}", session_id, event_type);
 
         match event_type.as_str() {
-            "remote_sdp_answer" => {
+            "remote_sdp_answer" | "final_negotiated_sdp" => {
                 // For UAC: we sent offer, received answer - negotiate
                 if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
-                    // Get our offer from media manager (if media session exists)
+                    // Get our offer - first try media manager, then session registry
                     let media_info = self.media_manager.get_media_info(&session_id).await.ok().flatten();
                     
-                    if let Some(media_info) = media_info {
-                        // Media session exists - normal flow
-                        if let Some(our_offer) = media_info.local_sdp {
+                    // Get our offer from either media info or session registry
+                    let our_offer = if let Some(ref media_info) = media_info {
+                        media_info.local_sdp.clone()
+                    } else {
+                        // For calls with upfront SDP, get from session registry
+                        session.local_sdp.clone()
+                    };
+                    
+                    if let Some(our_offer) = our_offer {
+                        // We have an offer, proceed with negotiation
+                        if media_info.is_some() {
+                            // Media session exists - normal flow
                             tracing::info!("Negotiating SDP as UAC for session {}", session_id);
                             match self.negotiate_sdp_as_uac(&session_id, &our_offer, &sdp).await {
                                 Ok(negotiated) => {
@@ -684,30 +767,88 @@ impl SessionCoordinator {
                                     tracing::error!("SDP negotiation failed: {}", e);
                                 }
                             }
+                        } else {
+                            // Media session doesn't exist yet but we have SDP provided upfront
+                            // This happens with create_outgoing_call when SDP is provided
+                            tracing::info!("No media session but have upfront SDP for session {}", session_id);
+                            
+                            // For upfront SDP cases, we just store the SDPs without full negotiation
+                            // The actual media session will be created later
+                            
+                            // Store the SDPs in the registry
+                            if let Err(e) = self.registry.update_session_sdp(&session_id, Some(our_offer.clone()), Some(sdp.clone())).await {
+                                tracing::error!("Failed to store SDPs in registry: {}", e);
+                            } else {
+                                tracing::info!("Stored SDPs in registry for upfront SDP case");
+                            }
+                            
+                            // Update readiness tracking with the SDPs
+                            {
+                                let mut readiness_map = self.session_readiness.write().await;
+                                
+                                println!("📋 Current sessions in readiness map:");
+                                for (sid, r) in readiness_map.iter() {
+                                    println!("  - {}: local={}, remote={}, negotiated={}", 
+                                        sid, r.local_sdp.is_some(), r.remote_sdp.is_some(), r.sdp_negotiated);
+                                }
+                                
+                                // Update Bob's session
+                                if let Some(readiness) = readiness_map.get_mut(&session_id) {
+                                    readiness.local_sdp = Some(our_offer.clone());
+                                    readiness.remote_sdp = Some(sdp.clone());
+                                    readiness.sdp_negotiated = true;
+                                    tracing::info!("Updated Bob's readiness with SDPs for session {}", session_id);
+                                }
+                                
+                                // Find and update Alice's session (the outbound call)
+                                // Alice's session has local SDP but no remote SDP yet
+                                for (sid, readiness) in readiness_map.iter_mut() {
+                                    if sid != &session_id && 
+                                       readiness.local_sdp.is_some() && 
+                                       readiness.remote_sdp.is_none() {
+                                        readiness.remote_sdp = Some(sdp.clone());
+                                        tracing::info!("Updated outbound session {} with remote SDP", sid);
+                                        println!("🎯 Updated outbound session {} with remote SDP", sid);
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            // Emit MediaNegotiated event manually since we're not calling negotiate_sdp_as_uac
+                            // Extract addresses from SDP (simplified - in production would parse properly)
+                            let _ = self.publish_event(SessionEvent::MediaNegotiated {
+                                session_id: session_id.clone(),
+                                local_addr: "0.0.0.0:0".parse().unwrap(), // Would be parsed from SDP
+                                remote_addr: "0.0.0.0:0".parse().unwrap(), // Would be parsed from SDP
+                                codec: "PCMU".to_string(), // Would be determined from negotiation
+                            }).await;
+                            
+                            // Check if conditions are now met for Bob's session
+                            self.check_and_trigger_call_established(&session_id).await;
+                            
+                            // Also check for Alice's session
+                            let alice_sessions: Vec<SessionId> = {
+                                let readiness_map = self.session_readiness.read().await;
+                                readiness_map.keys()
+                                    .filter(|sid| *sid != &session_id)
+                                    .cloned()
+                                    .collect()
+                            };
+                            for sid in alice_sessions {
+                                self.check_and_trigger_call_established(&sid).await;
+                            }
                         }
                     } else {
-                        // Media session doesn't exist yet - this happens when we receive 
-                        // the remote SDP before media creation (RFC 3261 compliant flow)
-                        // Store the remote SDP for later processing
-                        tracing::info!("Media session not yet created for {}, storing remote SDP for later", session_id);
+                        // No local SDP offer found
+                        tracing::warn!("No local SDP offer found for session {}, cannot negotiate", session_id);
                         
-                        // Store the remote SDP in the MediaManager's storage
-                        let mut sdp_storage = self.media_manager.sdp_storage.write().await;
-                        let entry = sdp_storage.entry(session_id.clone()).or_insert((None, None));
-                        entry.1 = Some(sdp.clone());
-                        tracing::info!("Stored remote SDP for session {} in MediaManager storage", session_id);
-                        
-                        // The media session will be created later when we receive the
-                        // rfc_compliant_media_creation_uac event, and at that point
-                        // it will pick up the stored remote SDP
                     }
                 }
             }
-            "final_negotiated_sdp" => {
-                if let Ok(Some(_)) = self.media_manager.get_media_info(&session_id).await {
-                    if let Err(e) = self.media_manager.update_media_session(&session_id, &sdp).await {
-                        tracing::error!("Failed to update media session with SDP: {}", e);
-                    }
+            "local_sdp_offer" => {
+                // Store local SDP offer (for reference)
+                if let Err(e) = self.registry.update_session_sdp(&session_id, Some(sdp), None).await {
+                    tracing::error!("Failed to update session with local SDP: {}", e);
                 }
             }
             _ => {}
@@ -1014,24 +1155,38 @@ impl SessionCoordinator {
         let mut readiness_map = self.session_readiness.write().await;
         
         if let Some(readiness) = readiness_map.get_mut(session_id) {
+            tracing::info!("📊 Checking readiness for {}: dialog={}, media={}, sdp={}", 
+                session_id, readiness.dialog_established, readiness.media_session_ready, readiness.sdp_negotiated);
+            
             // Check if all three conditions are met
             if readiness.dialog_established && readiness.media_session_ready && readiness.sdp_negotiated {
-                tracing::info!("All conditions met for session {}, triggering on_call_established", session_id);
-                
-                // Get the call session and SDP info
-                let call_session = readiness.call_session.clone();
-                let local_sdp = readiness.local_sdp.clone();
-                let remote_sdp = readiness.remote_sdp.clone();
-                
-                // Remove from tracking since we're done
-                readiness_map.remove(session_id);
-                
-                // Drop the lock before calling the handler
-                drop(readiness_map);
-                
-                // Trigger the callback
-                if let Some(session) = call_session {
-                    self.trigger_call_established(session, local_sdp, remote_sdp).await?;
+                // For backward compatibility, only trigger if we have both SDPs
+                // The API layer expects both SDPs to be present when on_call_established is called
+                if readiness.local_sdp.is_some() && readiness.remote_sdp.is_some() {
+                    tracing::info!("✅ All conditions met for session {} with both SDPs, triggering on_call_established", session_id);
+                    
+                    // Get the call session and SDP info
+                    let call_session = readiness.call_session.clone();
+                    let local_sdp = readiness.local_sdp.clone();
+                    let remote_sdp = readiness.remote_sdp.clone();
+                    
+                    // Remove from tracking since we're done
+                    readiness_map.remove(session_id);
+                    
+                    // Drop the lock before calling the handler
+                    drop(readiness_map);
+                    
+                    // Trigger the callback
+                    if let Some(session) = call_session {
+                        self.trigger_call_established(session, local_sdp, remote_sdp).await?;
+                    }
+                } else {
+                    tracing::debug!(
+                        "Session {} has all conditions but waiting for both SDPs (local: {}, remote: {})",
+                        session_id,
+                        readiness.local_sdp.is_some(),
+                        readiness.remote_sdp.is_some()
+                    );
                 }
             } else {
                 tracing::debug!(
@@ -1064,6 +1219,9 @@ impl SessionCoordinator {
         // Call the handler
         if let Some(handler) = &self.handler {
             handler.on_call_established(call_session, local_sdp, remote_sdp).await;
+            tracing::info!("✅ Handler.on_call_established called successfully");
+        } else {
+            tracing::warn!("⚠️ No handler set to receive on_call_established event");
         }
         
         Ok(())

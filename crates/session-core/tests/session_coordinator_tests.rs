@@ -585,27 +585,32 @@ async fn test_call_state_transitions() {
         Some(sdp.to_string()),
     ).await.expect("Failed to create call");
 
-    // Wait for call to be fully established with Active state
-    // Note: on_call_established is currently only called for incoming calls (UAS),
-    // not for outgoing calls (UAC), so we check state instead
+    // Wait for call to be fully established
+    // With our fix, on_call_established should now be called for outgoing calls too
     let mut retries = 0;
     loop {
+        let alice_events = alice_handler.get_events().await;
+        if alice_events.iter().any(|e| e.contains(&format!("call_established:{}", call.id))) {
+            println!("✅ Alice's call fully established (with event) after {} retries", retries);
+            break;
+        }
+        
+        // Fallback: check state if events aren't working yet
         if let Ok(Some(session)) = alice.get_session(&call.id).await {
-            if session.state() == &CallState::Active {
-                println!("✅ Call is now Active after {} retries", retries);
-                break;
+            if session.state() == &CallState::Active && retries > 20 {
+                // This shouldn't happen anymore with our fix
+                panic!("Call is Active but no call_established event after {} retries", retries);
             }
         }
+        
         tokio::time::sleep(Duration::from_millis(100)).await;
         retries += 1;
         if retries > 50 {  // 5 second timeout
-            panic!("Call never became active after 5 seconds");
+            let alice_events = alice_handler.get_events().await;
+            println!("Alice's events after timeout: {:?}", alice_events);
+            panic!("Call never fully established after 5 seconds");
         }
     }
-    
-    // Wait for media session creation to complete
-    // Media sessions are created asynchronously after state change
-    tokio::time::sleep(Duration::from_secs(2)).await;
     
     // Verify Bob also received and established the call
     let bob_events = bob_handler.get_events().await;

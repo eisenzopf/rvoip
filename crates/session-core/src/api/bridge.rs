@@ -169,8 +169,10 @@ use tokio::sync::RwLock;
 /// supporting various topologies (full mesh, linear chain, custom).
 /// 
 /// # Example
-/// ```rust
+/// ```no_run
 /// use rvoip_session_core::api::bridge::{CallBridge, BridgeType};
+/// use rvoip_session_core::api::call::SimpleCall;
+/// use rvoip_session_core::api::Result;
 /// 
 /// async fn create_conference(calls: Vec<SimpleCall>) -> Result<()> {
 ///     let bridge = CallBridge::new();

@@ -14,7 +14,7 @@
 //! # Call Lifecycle Example
 //! 
 //! ```rust
-//! use rvoip_session_core::api::*;
+//! use rvoip_session_core::api::types::{IncomingCall, SessionId, CallDecision};
 //! use std::time::Instant;
 //! use std::collections::HashMap;
 //! 
@@ -30,6 +30,8 @@
 //!     sdp: Some(sdp_offer.to_string()),
 //!     headers: headers,
 //!     received_at: Instant::now(),
+//!     sip_call_id: None,
+//!     coordinator: None,
 //! };
 //! 
 //! // 2. Handler makes a decision

@@ -17,30 +17,34 @@ use crate::errors::{Result, SessionError};
 /// 
 /// # Example
 /// ```
-/// use rvoip_session_core::api::peer::SimplePeer;
+/// # use rvoip_session_core::api::SimplePeer;
+/// # use rvoip_session_core::errors::Result;
+/// # 
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
+/// # // Use a random port to avoid conflicts when tests run in parallel
+/// # let port = 6000 + (std::process::id() % 1000) as u16;
+/// // Create a peer with builder pattern
+/// let mut alice = SimplePeer::new("alice")
+///     .local_addr("127.0.0.1")  // Optional, defaults to 0.0.0.0
+///     .port(port)               // Optional, defaults to 5060
+///     .await?;
 /// 
-/// #[tokio::main]
-/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
-///     // Create a peer with builder pattern
-///     let mut alice = SimplePeer::new("alice")
-///         .local_addr("192.168.1.100")  // Optional, defaults to 0.0.0.0
-///         .port(5061)                    // Optional, defaults to 5060
-///         .await?;
-///     
-///     // Register with SIP server (for receiving calls)
-///     alice.register("sip:registrar@example.com").await?;
-///     
-///     // Make call - auto-detects protocol, defaults to port 5060
-///     let call = alice.call("bob@127.0.0.1").await?;
-///     
-///     // Check for incoming calls
-///     if let Some(incoming) = alice.try_incoming() {
-///         let call = incoming.accept().await?;
-///         // Handle the call...
-///     }
-///     
-///     Ok(())
+/// // Register with SIP server (for receiving calls)
+/// alice.register("sip:registrar@example.com").await?;
+/// 
+/// // Make call - auto-detects protocol, defaults to port 5060
+/// // let call = alice.call("bob@127.0.0.1").await?;
+/// 
+/// // Check for incoming calls
+/// if let Some(incoming) = alice.try_incoming() {
+///     // let call = incoming.accept().await?;
+///     // Handle the call...
 /// }
+/// 
+/// # alice.shutdown().await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct SimplePeer {
     pub(crate) identity: String,
@@ -171,10 +175,20 @@ impl SimplePeer {
     /// 
     /// # Example
     /// ```
+    /// # use rvoip_session_core::api::SimplePeer;
+    /// # use rvoip_session_core::errors::Result;
+    /// # 
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<()> {
+    /// # // Use a random port to avoid conflicts when tests run in parallel
+    /// # let port = 7000 + (std::process::id() % 1000) as u16;
     /// let peer = SimplePeer::new("alice")
-    ///     .local_addr("192.168.1.100")
-    ///     .port(5061)
+    ///     .local_addr("127.0.0.1")
+    ///     .port(port)
     ///     .await?;
+    /// # peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(identity: &str) -> PeerBuilder {
         PeerBuilder {
@@ -258,14 +272,25 @@ impl SimplePeer {
     /// 
     /// # Example
     /// ```
-    /// // Simple call with default port
-    /// let call = peer.call("bob@example.com").await?;
+    /// # use rvoip_session_core::api::SimplePeer;
+    /// # use rvoip_session_core::errors::Result;
+    /// # 
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<()> {
+    /// # // Use a random port to avoid conflicts when tests run in parallel
+    /// # let port = 8000 + (std::process::id() % 1000) as u16;
+    /// # let mut peer = SimplePeer::new("alice").port(port).await?;
+    /// // Simple call with default port (would connect in real scenario)
+    /// // let call = peer.call("bob@example.com").await?;
     /// 
-    /// // Call with custom port
-    /// let call = peer.call("bob@example.com")
-    ///     .port(5070)
-    ///     .call_id("my-call-123")
-    ///     .await?;
+    /// // Call with custom port (would connect in real scenario)
+    /// // let call2 = peer.call("charlie@example.com")
+    /// //     .port(5070)
+    /// //     .call_id("my-call-123")
+    /// //     .await?;
+    /// # peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn call(&self, target: &str) -> CallBuilder {
         CallBuilder::new(self, target)

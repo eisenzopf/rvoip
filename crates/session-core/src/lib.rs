@@ -108,7 +108,7 @@ pub mod events;        // NEW - High-performance federated event system
 pub mod auth;          // NEW - OAuth 2.0 authentication
 
 // Core error types
-mod errors;
+pub mod errors;
 pub use errors::{SessionError, Result};
 
 // Re-export the main API for convenience
