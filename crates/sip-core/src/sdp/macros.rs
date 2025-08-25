@@ -53,7 +53,7 @@
 //!
 //! match result {
 //!     Ok(session) => println!("Valid SDP: {}", session),
-//!     Err(e) => eprintln!("Invalid SDP: {}", e),
+//!     Err(e) => tracing::error!("Invalid SDP: {}", e),
 //! }
 //! ```
 //!

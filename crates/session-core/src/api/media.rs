@@ -477,10 +477,10 @@
 //!     match MediaControl::establish_media_flow(&coordinator, &session_id, addr).await {
 //!         Ok(_) => println!("Media established"),
 //!         Err(SessionError::MediaIntegration { message }) => {
-//!             eprintln!("Media error: {}", message);
+//!             tracing::error!("Media error: {}", message);
 //!             // Try fallback or notify user
 //!         }
-//!         Err(e) => eprintln!("Unexpected error: {}", e),
+//!         Err(e) => tracing::error!("Unexpected error: {}", e),
 //!     }
 //! }
 //! ```

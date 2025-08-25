@@ -115,7 +115,7 @@ impl SecurityContextManager {
                         },
                         Err(e) => {
                             // Log warning but continue with other methods
-                            eprintln!("Warning: Failed to initialize {} context: {}", 
+                            tracing::error!("Warning: Failed to initialize {} context: {}", 
                                 self.method_name(*method), e);
                         }
                     }

@@ -30,15 +30,15 @@
 //!         println!("Call started: {}", call_id);
 //!     }
 //!     Err(ClientError::NetworkError { reason }) => {
-//!         eprintln!("Network problem: {}", reason);
+//!         tracing::error!("Network problem: {}", reason);
 //!         // Retry after checking network connectivity
 //!     }
 //!     Err(ClientError::InvalidConfiguration { field, reason }) => {
-//!         eprintln!("Config error in {}: {}", field, reason);
+//!         tracing::error!("Config error in {}: {}", field, reason);
 //!         // Fix configuration before retrying
 //!     }
 //!     Err(e) => {
-//!         eprintln!("Unexpected error: {}", e);
+//!         tracing::error!("Unexpected error: {}", e);
 //!         // Log and notify user
 //!     }
 //! }
@@ -122,7 +122,7 @@
 //!             println!("Registration forbidden, contact support");
 //!         }
 //!     }
-//!     Err(e) => eprintln!("Registration error: {}", e),
+//!     Err(e) => tracing::error!("Registration error: {}", e),
 //! }
 //! # Ok(())
 //! # }
@@ -186,7 +186,7 @@
 //!             println!("No available media ports");
 //!         }
 //!     }
-//!     Err(e) => eprintln!("Media setup failed: {}", e),
+//!     Err(e) => tracing::error!("Media setup failed: {}", e),
 //! }
 //! # Ok(())
 //! # }

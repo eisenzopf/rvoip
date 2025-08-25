@@ -427,7 +427,7 @@ impl CallCenterError {
 /// 
 /// match register_agent("") {
 ///     Ok(session_id) => println!("Agent registered: {}", session_id),
-///     Err(e) => eprintln!("Registration failed: {}", e),
+///     Err(e) => tracing::error!("Registration failed: {}", e),
 /// }
 /// ```
 pub type Result<T> = std::result::Result<T, CallCenterError>; 

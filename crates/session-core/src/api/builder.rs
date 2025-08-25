@@ -150,10 +150,10 @@
 //!             println!("Coordinator created successfully");
 //!         }
 //!         Err(e) => {
-//!             eprintln!("Failed to create coordinator: {}", e);
+//!             tracing::error!("Failed to create coordinator: {}", e);
 //!             // Handle specific error types
 //!             if e.to_string().contains("Address already in use") {
-//!                 eprintln!("Port 5060 is already taken, try another port");
+//!                 tracing::error!("Port 5060 is already taken, try another port");
 //!             }
 //!         }
 //!     }

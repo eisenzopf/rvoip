@@ -217,7 +217,7 @@
 //!             engine.update_agent_status(&agent_id, AgentStatus::Available).await?;
 //!         }
 //!         Err(e) => {
-//!             eprintln!("❌ Failed to register {}: {}", agent.id, e);
+//!             tracing::error!("❌ Failed to register {}: {}", agent.id, e);
 //!         }
 //!     }
 //! }
@@ -450,7 +450,7 @@
 //!         println!("✅ Agent registered successfully: {}", session_id);
 //!     }
 //!     Err(e) => {
-//!         eprintln!("❌ Registration failed: {}", e);
+//!         tracing::error!("❌ Registration failed: {}", e);
 //!         // Handle specific error types:
 //!         // - Network connectivity issues
 //!         // - Database constraints
@@ -466,7 +466,7 @@
 //!         println!("✅ Status updated successfully");
 //!     }
 //!     Err(e) => {
-//!         eprintln!("⚠️ Status update failed: {}", e);
+//!         tracing::error!("⚠️ Status update failed: {}", e);
 //!         // System continues operating with last known state
 //!     }
 //! }

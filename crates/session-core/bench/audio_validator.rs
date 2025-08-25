@@ -190,7 +190,7 @@ impl AudioValidator {
     pub async fn validate_all(&self) -> Vec<ValidationResult> {
         // First save all WAV files
         if let Err(e) = self.save_wav_files().await {
-            eprintln!("Failed to save WAV files: {}", e);
+            tracing::error!("Failed to save WAV files: {}", e);
             return Vec::new();
         }
         
@@ -221,7 +221,7 @@ impl AudioValidator {
                     results.push(result);
                 }
                 Err(e) => {
-                    eprintln!("Failed to analyze WAV file {}: {}", wav_path.display(), e);
+                    tracing::error!("Failed to analyze WAV file {}: {}", wav_path.display(), e);
                 }
             }
         }

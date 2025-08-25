@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::thread::spawn(|| {
         // Total maximum runtime including any cleanup
         std::thread::sleep(Duration::from_secs(MAX_RUNTIME_SECONDS + 10));
-        eprintln!("Emergency timeout triggered after {} seconds - terminating process", MAX_RUNTIME_SECONDS + 10);
+        tracing::error!("Emergency timeout triggered after {} seconds - terminating process", MAX_RUNTIME_SECONDS + 10);
         process::exit(0);
     });
     

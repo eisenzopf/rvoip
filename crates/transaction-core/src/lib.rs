@@ -387,21 +387,21 @@ pub mod builders {
 ///                     assert_eq!(response.status_code(), StatusCode::Trying.as_u16());
 ///                 },
 ///                 TransactionEvent::TransportError { transaction_id, .. } if transaction_id == tx_id => {
-///                     eprintln!("Transport error for transaction {}", transaction_id);
+///                     tracing::error!("Transport error for transaction {}", transaction_id);
 ///                     return Err("Transport error".into());
 ///                 },
 ///                 TransactionEvent::TransactionTimeout { transaction_id, .. } if transaction_id == tx_id => {
-///                     eprintln!("Transaction {} timed out", transaction_id);
+///                     tracing::error!("Transaction {} timed out", transaction_id);
 ///                     return Err("Transaction timeout".into());
 ///                 },
 ///                 other_event => {
-///                     eprintln!("Received unexpected event: {:?}", other_event);
+///                     tracing::error!("Received unexpected event: {:?}", other_event);
 ///                     return Err("Unexpected event".into());
 ///                 }
 ///             }
 ///         },
 ///         _ = tokio::time::sleep(Duration::from_secs(2)) => {
-///             eprintln!("Timeout waiting for transaction event");
+///             tracing::error!("Timeout waiting for transaction event");
 ///             return Err("Timeout waiting for event".into());
 ///         }
 ///     }

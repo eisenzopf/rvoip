@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match tokio::time::timeout(Duration::from_secs(15), run_example()).await {
         Ok(result) => result,
         Err(_) => {
-            eprintln!("\n\nTest timed out after 15 seconds");
+            tracing::error!("\n\nTest timed out after 15 seconds");
             Ok(())
         }
     }

@@ -102,7 +102,7 @@ impl SimplifiedTransactionCore {
                                 
                                 // Send to the transaction layer
                                 if let Err(e) = event_tx.send(tx_event).await {
-                                    eprintln!("Error sending transaction event: {}", e);
+                                    tracing::error!("Error sending transaction event: {}", e);
                                     break;
                                 }
                             },
@@ -115,7 +115,7 @@ impl SimplifiedTransactionCore {
                                 
                                 // Send to the transaction layer
                                 if let Err(e) = event_tx.send(tx_event).await {
-                                    eprintln!("Error sending transaction event: {}", e);
+                                    tracing::error!("Error sending transaction event: {}", e);
                                     break;
                                 }
                             },
@@ -129,7 +129,7 @@ impl SimplifiedTransactionCore {
                         
                         // Send to the transaction layer
                         if let Err(e) = event_tx.send(tx_event).await {
-                            eprintln!("Error sending transaction event: {}", e);
+                            tracing::error!("Error sending transaction event: {}", e);
                             break;
                         }
                     },

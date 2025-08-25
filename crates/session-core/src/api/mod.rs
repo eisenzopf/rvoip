@@ -443,13 +443,13 @@
 //!             println!("Call created: {}", session.id());
 //!         }
 //!         Err(SessionError::InvalidUri(uri)) => {
-//!             eprintln!("Invalid SIP URI: {}", uri);
+//!             tracing::error!("Invalid SIP URI: {}", uri);
 //!         }
 //!         Err(SessionError::NetworkError(e)) => {
-//!             eprintln!("Network error: {}", e);
+//!             tracing::error!("Network error: {}", e);
 //!         }
 //!         Err(e) => {
-//!             eprintln!("Call failed: {}", e);
+//!             tracing::error!("Call failed: {}", e);
 //!         }
 //!     }
 //! }

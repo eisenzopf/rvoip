@@ -155,7 +155,7 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
         match TypedHeader::try_from(header.clone()) {
             Ok(typed) => typed_headers.push(typed),
             Err(e) => {
-                eprintln!("Warning: Header parsing error (skipping): {}", e); 
+                tracing::error!("Warning: Header parsing error (skipping): {}", e); 
                 // Add a fallback for unparseable headers
                 typed_headers.push(TypedHeader::Other(header.name, header.value));
             }
@@ -180,7 +180,7 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
         // In lenient mode, be more forgiving with incomplete bodies
         if mode == ParseMode::Lenient {
             let actual_length = rest.len();
-            eprintln!("Warning: Content-Length ({}) exceeds available body data ({}). Using available data.", 
+            tracing::error!("Warning: Content-Length ({}) exceeds available body data ({}). Using available data.", 
                     content_length, actual_length);
             let (final_rest, body_slice) = take(actual_length)(rest)?;
             let body = Bytes::copy_from_slice(body_slice);
@@ -215,7 +215,7 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
 
     // In lenient mode, if there's extra data after consuming content_length bytes, discard it with a warning
     if mode == ParseMode::Lenient && !final_rest.is_empty() {
-        eprintln!("Warning: Message has {} extra bytes after Content-Length: {}. Ignoring excess data.", 
+        tracing::error!("Warning: Message has {} extra bytes after Content-Length: {}. Ignoring excess data.", 
                   final_rest.len(), content_length);
     }
 
@@ -249,11 +249,11 @@ pub fn parse_message(input: &[u8]) -> Result<Message> {
 /// Parse a SIP message from bytes with specific parsing mode
 pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message> {
     // Add detailed debug logging to capture exact messages being parsed
-    /*eprintln!("=== PARSING SIP MESSAGE ===");
-    eprintln!("Input length: {} bytes", input.len());
-    eprintln!("Input as string: {:?}", String::from_utf8_lossy(input));
-    eprintln!("Input as hex: {:02x?}", input);
-    eprintln!("===========================");*/
+    /*tracing::error!("=== PARSING SIP MESSAGE ===");
+    tracing::error!("Input length: {} bytes", input.len());
+    tracing::error!("Input as string: {:?}", String::from_utf8_lossy(input));
+    tracing::error!("Input as hex: {:02x?}", input);
+    tracing::error!("===========================");*/
     
     // In strict mode, use all_consuming to ensure the entire input is consumed
     // In lenient mode, don't use all_consuming to allow for excess input after valid message
@@ -275,27 +275,27 @@ pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message>
 
     match parser_result {
         Ok((_, message)) => {
-            /*eprintln!("=== PARSE SUCCESS ===");
-            eprintln!("Successfully parsed message");
-            eprintln!("=====================");*/
+            /*tracing::error!("=== PARSE SUCCESS ===");
+            tracing::error!("Successfully parsed message");
+            tracing::error!("=====================");*/
             Ok(message)
         },
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
             let offset = input.len() - e.input.len();
-            eprintln!("=== PARSE ERROR ===");
-            eprintln!("Error at offset: {}", offset);
-            eprintln!("Error code: {:?}", e.code);
-            eprintln!("Remaining input: {:?}", String::from_utf8_lossy(e.input));
-            eprintln!("Remaining input as hex: {:02x?}", e.input);
-            eprintln!("==================");
+            tracing::error!("=== PARSE ERROR ===");
+            tracing::error!("Error at offset: {}", offset);
+            tracing::error!("Error code: {:?}", e.code);
+            tracing::error!("Remaining input: {:?}", String::from_utf8_lossy(e.input));
+            tracing::error!("Remaining input as hex: {:02x?}", e.input);
+            tracing::error!("==================");
             Err(Error::ParseError(
                 format!("Failed to parse message near offset {}: {:?}", offset, e.code)
             ))
         }
         Err(nom::Err::Incomplete(_)) => {
-            eprintln!("=== PARSE INCOMPLETE ===");
-            eprintln!("Incomplete message");
-            eprintln!("========================");
+            tracing::error!("=== PARSE INCOMPLETE ===");
+            tracing::error!("Incomplete message");
+            tracing::error!("========================");
             Err(Error::ParseError(
                 "Incomplete message".to_string()
             ))

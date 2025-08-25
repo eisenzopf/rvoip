@@ -1095,7 +1095,7 @@ impl ClientBuilder {
     ///         // Use client...
     ///     }
     ///     Err(error) => {
-    ///         eprintln!("Failed to initialize client: {}", error);
+    ///         tracing::error!("Failed to initialize client: {}", error);
     ///         // Handle initialization failure...
     ///     }
     /// }

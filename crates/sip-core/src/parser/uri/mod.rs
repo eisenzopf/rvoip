@@ -292,7 +292,7 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
                         params = parsed_params;
                     },
                     Err(e) => {
-                        eprintln!("Parameter parsing failed: {:?}", e);
+                        tracing::error!("Parameter parsing failed: {:?}", e);
                         // Return the error instead of silently continuing
                         return Err(e);
                     }
@@ -336,7 +336,7 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
             Ok((current_remaining, uri))
         },
         Err(e) => {
-            eprintln!("Hostport parsing failed: {:?}", e);
+            tracing::error!("Hostport parsing failed: {:?}", e);
             // Just propagate the error
             Err(e)
         }
@@ -500,7 +500,7 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
             Ok((current_remaining, uri))
         },
         Err(e) => {
-            eprintln!("Hostport parsing failed: {:?}", e);
+            tracing::error!("Hostport parsing failed: {:?}", e);
             // Just propagate the error
             Err(e)
         }

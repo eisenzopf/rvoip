@@ -223,23 +223,23 @@
 //!         println!("Call successful: {}", call.call_id());
 //!     },
 //!     Err(ApiError::Configuration { message }) => {
-//!         eprintln!("Configuration issue: {}", message);
+//!         tracing::error!("Configuration issue: {}", message);
 //!         // Fix configuration and retry
 //!     },
 //!     Err(ApiError::Network { message }) => {
-//!         eprintln!("Network problem: {}", message);
+//!         tracing::error!("Network problem: {}", message);
 //!         // Check connectivity, retry with backoff
 //!     },
 //!     Err(ApiError::Protocol { message }) => {
-//!         eprintln!("SIP protocol error: {}", message);
+//!         tracing::error!("SIP protocol error: {}", message);
 //!         // Log for debugging, potentially report upstream
 //!     },
 //!     Err(ApiError::Dialog { message }) => {
-//!         eprintln!("Dialog state error: {}", message);
+//!         tracing::error!("Dialog state error: {}", message);
 //!         // Handle dialog lifecycle issues
 //!     },
 //!     Err(ApiError::Internal { message }) => {
-//!         eprintln!("Internal error: {}", message);
+//!         tracing::error!("Internal error: {}", message);
 //!         // Log for debugging, potentially restart client
 //!     },
 //! }
@@ -604,17 +604,17 @@ use super::{
 ///             continue;
 ///         },
 ///         Err(ApiError::Configuration { message }) => {
-///             eprintln!("Configuration error: {}", message);
+///             tracing::error!("Configuration error: {}", message);
 ///             // Fix configuration and restart
 ///             break;
 ///         },
 ///         Err(ApiError::Protocol { message }) => {
-///             eprintln!("SIP protocol error: {}", message);
+///             tracing::error!("SIP protocol error: {}", message);
 ///             // Log for debugging, continue with other operations
 ///             break;
 ///         },
 ///         Err(e) => {
-///             eprintln!("Unrecoverable error: {}", e);
+///             tracing::error!("Unrecoverable error: {}", e);
 ///             break;
 ///         }
 ///     }
@@ -1034,19 +1034,19 @@ impl DialogClient {
     ///         });
     ///     },
     ///     Ok(Err(ApiError::Configuration { message })) => {
-    ///         eprintln!("Configuration error: {}", message);
+    ///         tracing::error!("Configuration error: {}", message);
     ///         // Fix URIs and retry
     ///     },
     ///     Ok(Err(ApiError::Network { message })) => {
-    ///         eprintln!("Network error: {}", message);
+    ///         tracing::error!("Network error: {}", message);
     ///         // Check connectivity and retry
     ///     },
     ///     Err(_) => {
-    ///         eprintln!("Call setup timed out");
+    ///         tracing::error!("Call setup timed out");
     ///         // Handle timeout scenario
     ///     },
     ///     Ok(Err(e)) => {
-    ///         eprintln!("Call failed: {}", e);
+    ///         tracing::error!("Call failed: {}", e);
     ///     }
     /// }
     /// # Ok(())

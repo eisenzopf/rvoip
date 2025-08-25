@@ -322,15 +322,15 @@
 //!             // Handle successful dialog case
 //!         },
 //!         Err(ApiError::Dialog { message }) => {
-//!             eprintln!("Dialog error for {}: {}", dialog_id, message);
+//!             tracing::error!("Dialog error for {}: {}", dialog_id, message);
 //!             // Dialog not found - would send 481 Call/Transaction Does Not Exist in real scenario
 //!         },
 //!         Err(ApiError::Protocol { message }) => {
-//!             eprintln!("Protocol error for {}: {}", dialog_id, message);
+//!             tracing::error!("Protocol error for {}: {}", dialog_id, message);
 //!             // Protocol error - would send 400 Bad Request in real scenario
 //!         },
 //!         Err(e) => {
-//!             eprintln!("Internal error for {}: {}", dialog_id, e);
+//!             tracing::error!("Internal error for {}: {}", dialog_id, e);
 //!             // Internal error - would send 500 Server Internal Error in real scenario
 //!         }
 //!     }
@@ -370,7 +370,7 @@
 //!                             }
 //!                         },
 //!                         Err(e) => {
-//!                             eprintln!("❌ Media setup failed: {}", e);
+//!                             tracing::error!("❌ Media setup failed: {}", e);
 //!                             // Would reject call in real scenario with proper transaction handling
 //!                         }
 //!                     }

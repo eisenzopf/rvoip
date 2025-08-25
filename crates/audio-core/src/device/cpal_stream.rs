@@ -78,7 +78,7 @@ fn find_best_config(
         desired_format.frame_size_ms,
     );
     
-    eprintln!(
+    tracing::error!(
         "🎵 Hardware format: {}Hz {} ch (requested: {}Hz {} ch)",
         hardware_rate, hardware_channels,
         desired_rate, desired_channels
@@ -101,14 +101,14 @@ pub fn create_capture_stream(
     let converter = if hardware_format.is_compatible_with(&desired_format) {
         None
     } else {
-        eprintln!("📐 Creating format converter for capture: {} -> {}", 
+        tracing::error!("📐 Creating format converter for capture: {} -> {}", 
             hardware_format.description(), 
             desired_format.description()
         );
         Some(Arc::new(Mutex::new(FormatConverter::new(hardware_format.clone(), desired_format.clone())?)))
     };
     
-    let err_fn = |err| eprintln!("Audio capture stream error: {}", err);
+    let err_fn = |err| tracing::error!("Audio capture stream error: {}", err);
     
     // Calculate samples per frame for the hardware format
     let hw_samples_per_frame = hardware_format.samples_per_frame();
@@ -134,7 +134,7 @@ pub fn create_capture_stream(
                         match converter.lock().unwrap().convert_frame(&hw_frame) {
                             Ok(converted) => converted,
                             Err(e) => {
-                                eprintln!("Format conversion error: {}", e);
+                                tracing::error!("Format conversion error: {}", e);
                                 return;
                             }
                         }
@@ -181,14 +181,14 @@ pub fn create_playback_stream(
     let converter = if desired_format.is_compatible_with(&hardware_format) {
         None
     } else {
-        eprintln!("📐 Creating format converter for playback: {} -> {}", 
+        tracing::error!("📐 Creating format converter for playback: {} -> {}", 
             desired_format.description(), 
             hardware_format.description()
         );
         Some(Arc::new(Mutex::new(FormatConverter::new(desired_format.clone(), hardware_format.clone())?)))
     };
     
-    let err_fn = |err| eprintln!("Audio playback stream error: {}", err);
+    let err_fn = |err| tracing::error!("Audio playback stream error: {}", err);
     
     // Playback buffer to smooth out timing
     let mut playback_buffer = Vec::new();
@@ -208,7 +208,7 @@ pub fn create_playback_stream(
                             match converter.lock().unwrap().convert_frame(&input_frame) {
                                 Ok(converted) => converted,
                                 Err(e) => {
-                                    eprintln!("Format conversion error: {}", e);
+                                    tracing::error!("Format conversion error: {}", e);
                                     // Use silence on conversion error
                                     playback_buffer.extend_from_slice(&silence_frame);
                                     continue;

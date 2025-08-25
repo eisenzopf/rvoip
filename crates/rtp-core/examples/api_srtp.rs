@@ -89,7 +89,7 @@ async fn main() -> Result<(), ExampleError> {
         std::thread::sleep(Duration::from_secs(FORCE_KILL_AFTER_SECONDS));
         
         // Force exit if still running
-        eprintln!("Graceful shutdown timed out - terminating process");
+        tracing::error!("Graceful shutdown timed out - terminating process");
         process::exit(1);
     });
     

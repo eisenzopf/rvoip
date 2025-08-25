@@ -107,7 +107,7 @@ pub async fn example_conference() -> Result<()> {
                 calls.push(call);
             }
             Err(e) => {
-                eprintln!("Failed to add participant {}: {}", participant, e);
+                tracing::error!("Failed to add participant {}: {}", participant, e);
             }
         }
     }

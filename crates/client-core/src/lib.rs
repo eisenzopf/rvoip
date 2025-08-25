@@ -182,15 +182,15 @@
 //!             println!("Call started: {}", call_id);
 //!         }
 //!         Err(ClientError::NetworkError { reason }) => {
-//!             eprintln!("Network problem: {}", reason);
+//!             tracing::error!("Network problem: {}", reason);
 //!             // Could retry with exponential backoff
 //!         }
 //!         Err(ClientError::InvalidConfiguration { field, reason }) => {
-//!             eprintln!("Configuration error in {}: {}", field, reason);
+//!             tracing::error!("Configuration error in {}: {}", field, reason);
 //!             // Fix configuration and retry
 //!         }
 //!         Err(e) => {
-//!             eprintln!("Call failed: {}", e);
+//!             tracing::error!("Call failed: {}", e);
 //!             // Handle other error types
 //!         }
 //!     }

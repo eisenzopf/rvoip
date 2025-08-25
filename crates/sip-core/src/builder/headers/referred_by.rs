@@ -198,7 +198,7 @@ pub trait ReferredByExt {
     ///         let request = builder.build();
     ///         // Process request
     ///     }
-    ///     Err(e) => eprintln!("Failed to parse Referred-By header: {}", e),
+    ///     Err(e) => tracing::error!("Failed to parse Referred-By header: {}", e),
     /// }
     /// ```
     fn referred_by_str(self, value: &str) -> Result<Self> where Self: Sized;

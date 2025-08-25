@@ -401,15 +401,15 @@ where
         };
         
         // Debug print
-        eprintln!("Setting ContentDisposition header: {:?}", header_value);
+        tracing::error!("Setting ContentDisposition header: {:?}", header_value);
         
         // Try to convert it to a header and back to see if conversion is working
         let header = header_value.to_header();
-        eprintln!("Created header: {:?}", header);
+        tracing::error!("Created header: {:?}", header);
         
         match ContentDisposition::from_header(&header) {
-            Ok(cd) => eprintln!("Converted back to ContentDisposition: {:?}", cd),
-            Err(e) => eprintln!("Failed to convert back: {:?}", e),
+            Ok(cd) => tracing::error!("Converted back to ContentDisposition: {:?}", cd),
+            Err(e) => tracing::error!("Failed to convert back: {:?}", e),
         }
         
         self.set_header(header_value)
@@ -486,7 +486,7 @@ mod tests {
             
         // Check if Content-Disposition header exists with the correct value
         let header = request.header(&HeaderName::ContentDisposition);
-        eprintln!("DEBUG: Header type: {:?}", header.map(|h| h.name()));
+        tracing::error!("DEBUG: Header type: {:?}", header.map(|h| h.name()));
         assert!(header.is_some(), "Content-Disposition header not found");
         
         // Try with typed_header instead

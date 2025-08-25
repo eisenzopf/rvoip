@@ -279,7 +279,7 @@ async fn test_agent_scaling_diagnostic() {
                     // Start server task
                     let server_task = tokio::spawn(async move {
                         if let Err(e) = server.run().await {
-                            eprintln!("❌ SERVER: Runtime error: {}", e);
+                            tracing::error!("❌ SERVER: Runtime error: {}", e);
                         }
                     });
                     

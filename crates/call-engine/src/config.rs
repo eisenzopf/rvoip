@@ -57,7 +57,7 @@ use serde::{Deserialize, Serialize};
 /// let config = CallCenterConfig::default();
 /// match config.validate() {
 ///     Ok(()) => println!("Configuration is valid"),
-///     Err(e) => eprintln!("Configuration error: {}", e),
+///     Err(e) => tracing::error!("Configuration error: {}", e),
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]

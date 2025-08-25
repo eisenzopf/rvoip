@@ -556,7 +556,7 @@ impl super::manager::ClientManager {
     ///             println!("Call was already terminated or doesn't exist");
     ///         }
     ///         Err(e) => {
-    ///             eprintln!("Failed to hangup call: {}", e);
+    ///             tracing::error!("Failed to hangup call: {}", e);
     ///             return Err(e.into());
     ///         }
     ///     }

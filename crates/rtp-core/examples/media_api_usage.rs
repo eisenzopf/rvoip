@@ -260,7 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         },
         Err(e) => {
-            eprintln!("Error running example: {}", e);
+            tracing::error!("Error running example: {}", e);
             Err(e)
         }
     }

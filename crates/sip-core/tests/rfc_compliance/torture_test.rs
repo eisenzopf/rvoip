@@ -39,23 +39,23 @@ impl TestResults {
 
         let action = if expected_to_fail { "succeed" } else { "fail" };
         
-        eprintln!("\n{} files unexpectedly {}ed parsing:", 
+        tracing::error!("\n{} files unexpectedly {}ed parsing:", 
                  self.failures.len(), action);
         
         for (i, (file, error, content)) in self.failures.iter().enumerate() {
-            eprintln!("\n{}. File '{}' - {}", i + 1, file, if expected_to_fail { 
+            tracing::error!("\n{}. File '{}' - {}", i + 1, file, if expected_to_fail { 
                 "parsed successfully (expected to fail)" 
             } else { 
                 "failed to parse" 
             });
             
             if !expected_to_fail {
-                eprintln!("   Error: {}", error);
+                tracing::error!("   Error: {}", error);
             }
             
-            eprintln!("   --- Message Content ---");
-            eprintln!("   {}", content);
-            eprintln!("   --- End Content ---");
+            tracing::error!("   --- Message Content ---");
+            tracing::error!("   {}", content);
+            tracing::error!("   --- End Content ---");
         }
     }
 

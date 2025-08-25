@@ -23,19 +23,19 @@
 //!     match result {
 //!         Ok(value) => println!("Success: {}", value),
 //!         Err(ApiError::Configuration { message }) => {
-//!             eprintln!("Please check your configuration: {}", message);
+//!             tracing::error!("Please check your configuration: {}", message);
 //!         },
 //!         Err(ApiError::Network { message }) => {
-//!             eprintln!("Network problem (check connectivity): {}", message);
+//!             tracing::error!("Network problem (check connectivity): {}", message);
 //!         },
 //!         Err(ApiError::Protocol { message }) => {
-//!             eprintln!("SIP protocol issue: {}", message);
+//!             tracing::error!("SIP protocol issue: {}", message);
 //!         },
 //!         Err(ApiError::Dialog { message }) => {
-//!             eprintln!("Dialog state problem: {}", message);
+//!             tracing::error!("Dialog state problem: {}", message);
 //!         },
 //!         Err(ApiError::Internal { message }) => {
-//!             eprintln!("Internal error (please report): {}", message);
+//!             tracing::error!("Internal error (please report): {}", message);
 //!         },
 //!     }
 //! }
@@ -79,9 +79,9 @@ use crate::errors::DialogError;
 /// match example_function().await {
 ///     Ok(result) => println!("Got: {}", result),
 ///     Err(ApiError::Configuration { message }) => {
-///         eprintln!("Config error: {}", message);
+///         tracing::error!("Config error: {}", message);
 ///     },
-///     Err(e) => eprintln!("Other error: {}", e),
+///     Err(e) => tracing::error!("Other error: {}", e),
 /// }
 /// # }
 /// ```

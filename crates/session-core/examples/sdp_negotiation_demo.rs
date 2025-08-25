@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
                             Some(our_answer)
                         ).await {
                             Ok(_) => println!("Call accepted successfully"),
-                            Err(e) => eprintln!("Failed to accept call: {}", e),
+                            Err(e) => tracing::error!("Failed to accept call: {}", e),
                         }
                         
                         // After negotiation, check what was actually negotiated
@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to generate SDP answer: {}", e);
+                        tracing::error!("Failed to generate SDP answer: {}", e);
                         let _ = SessionControl::reject_incoming_call(
                             &coordinator_clone,
                             &call,

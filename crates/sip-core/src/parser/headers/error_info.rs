@@ -206,7 +206,7 @@ fn create_safe_uri(uri_str: &str) -> Result<Uri, CrateError> {
         Err(e) => {
             // If nom parsing fails, create a custom URI to preserve the string
             // but log the error. This mimics the previous behavior somewhat.
-            eprintln!("Error-Info: Failed to parse URI '{}' with nom parser: {:?}. Storing as raw.", uri_str, e);
+            tracing::error!("Error-Info: Failed to parse URI '{}' with nom parser: {:?}. Storing as raw.", uri_str, e);
             Ok(Uri::custom(uri_str.to_string()))
         }
     }

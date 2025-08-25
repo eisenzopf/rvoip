@@ -219,7 +219,7 @@ impl super::manager::ClientManager {
     ///             }
     ///         }
     ///         Err(e) => {
-    ///             eprintln!("Failed to hold call: {}", e);
+    ///             tracing::error!("Failed to hold call: {}", e);
     ///         }
     ///     }
     ///     
@@ -414,7 +414,7 @@ impl super::manager::ClientManager {
     ///             }
     ///         }
     ///         Err(e) => {
-    ///             eprintln!("Failed to resume call: {}", e);
+    ///             tracing::error!("Failed to resume call: {}", e);
     ///         }
     ///     }
     ///     

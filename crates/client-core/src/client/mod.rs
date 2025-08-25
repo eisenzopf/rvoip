@@ -115,7 +115,7 @@
 //!         Ok(()) => break,
 //!         Err(e) if attempts < 3 => {
 //!             attempts += 1;
-//!             eprintln!("Registration attempt {} failed: {}", attempts, e);
+//!             tracing::error!("Registration attempt {} failed: {}", attempts, e);
 //!             tokio::time::sleep(Duration::from_secs(5)).await;
 //!         }
 //!         Err(e) => return Err(e.into()),
@@ -136,7 +136,7 @@
 //! // Mute/unmute with error handling
 //! match client.set_microphone_mute(&call_id, true).await {
 //!     Ok(_) => println!("Microphone muted"),
-//!     Err(e) => eprintln!("Failed to mute: {}", e),
+//!     Err(e) => tracing::error!("Failed to mute: {}", e),
 //! }
 //! 
 //! // Get media info before operations

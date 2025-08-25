@@ -65,7 +65,7 @@ async fn main() -> Result<(), ExampleError> {
     std::thread::spawn(|| {
         // Total maximum runtime including any cleanup
         std::thread::sleep(Duration::from_secs(MAX_RUNTIME_SECONDS + FORCE_KILL_AFTER_SECONDS));
-        eprintln!("Emergency timeout triggered - terminating process");
+        tracing::error!("Emergency timeout triggered - terminating process");
         process::exit(1);
     });
     
