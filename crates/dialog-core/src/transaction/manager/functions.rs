@@ -187,7 +187,7 @@ impl TransactionManager {
     /// # Example
     /// ```no_run
     /// # use std::time::Duration;
-    /// # use crate::transaction::{TransactionManager, TransactionState, TransactionKey};
+    /// # use rvoip_dialog_core::transaction::{TransactionManager, TransactionState, TransactionKey};
     /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) -> Result<(), Box<dyn std::error::Error>> {
     /// // Wait for the transaction to reach the Completed state
     /// let success = manager.wait_for_transaction_state(
@@ -318,7 +318,7 @@ impl TransactionManager {
     /// # Example
     /// ```no_run
     /// # use std::time::Duration;
-    /// # use crate::transaction::{TransactionManager, TransactionKey};
+    /// # use rvoip_dialog_core::transaction::{TransactionManager, TransactionKey};
     /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) -> Result<(), Box<dyn std::error::Error>> {
     /// // Wait for a final response (2xx-6xx)
     /// let response = manager.wait_for_final_response(

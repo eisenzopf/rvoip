@@ -10,9 +10,9 @@ use tokio::time::Duration;
 
 use rvoip_dialog_core::api::{DialogServer, DialogClient, DialogApi};
 use rvoip_dialog_core::DialogId;
-use rvoip_transaction_core::TransactionManager;
-use rvoip_transaction_core::transport::{TransportManager, TransportManagerConfig};
-use rvoip_transaction_core::builders::client_quick; // Phase 3 functions
+use rvoip_dialog_core::transaction::TransactionManager;
+use rvoip_dialog_core::transaction::transport::{TransportManager, TransportManagerConfig};
+use rvoip_dialog_core::transaction::builders::client_quick; // Phase 3 functions
 use rvoip_sip_core::Uri;
 use uuid;
 

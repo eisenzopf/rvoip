@@ -96,8 +96,8 @@ use crate::transaction::error::{Error, Result};
 /// # use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 /// # use rvoip_sip_core::prelude::*;
 /// # use rvoip_sip_core::types::status::StatusCode;
-/// # use crate::transaction::method::ack::create_ack_for_2xx;
-/// # use crate::transaction::error::Result;
+/// # use rvoip_dialog_core::transaction::method::ack::create_ack_for_2xx;
+/// # use rvoip_dialog_core::transaction::error::Result;
 /// #
 /// # // Create a simple INVITE request
 /// # let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
@@ -226,8 +226,8 @@ pub fn create_ack_for_2xx(
 /// # use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 /// # use rvoip_sip_core::prelude::*;
 /// # use rvoip_sip_core::types::status::StatusCode;
-/// # use crate::transaction::method::ack::create_ack_for_error_response;
-/// # use crate::transaction::error::Result;
+/// # use rvoip_dialog_core::transaction::method::ack::create_ack_for_error_response;
+/// # use rvoip_dialog_core::transaction::error::Result;
 /// #
 /// # // Create a simple INVITE request
 /// # let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()

@@ -26,8 +26,8 @@ use crate::transaction::error::{Error, Result};
 /// 
 /// # Example
 /// ```
-/// use crate::transaction::server::builders::ResponseBuilder;
-/// use crate::transaction::builders::client_quick;
+/// use rvoip_dialog_core::transaction::server::builders::ResponseBuilder;
+/// use rvoip_dialog_core::transaction::builders::client_quick;
 /// use rvoip_sip_core::StatusCode;
 /// use std::net::SocketAddr;
 /// 
@@ -102,8 +102,8 @@ impl ResponseBuilder {
     /// 
     /// # Example
     /// ```rust,no_run
-    /// use crate::transaction::server::builders::ResponseBuilder;
-    /// use crate::transaction::builders::client_quick;
+    /// use rvoip_dialog_core::transaction::server::builders::ResponseBuilder;
+    /// use rvoip_dialog_core::transaction::builders::client_quick;
     /// use rvoip_sip_core::StatusCode;
     /// use std::net::SocketAddr;
     /// 
@@ -363,8 +363,8 @@ impl ResponseBuilder {
 /// 
 /// # Example
 /// ```
-/// use crate::transaction::server::builders::InviteResponseBuilder;
-/// use crate::transaction::builders::client_quick;
+/// use rvoip_dialog_core::transaction::server::builders::InviteResponseBuilder;
+/// use rvoip_dialog_core::transaction::builders::client_quick;
 /// use rvoip_sip_core::StatusCode;
 /// use std::net::SocketAddr;
 /// 
@@ -567,8 +567,8 @@ impl InviteResponseBuilder {
 /// 
 /// # Example
 /// ```
-/// use crate::transaction::server::builders::RegisterResponseBuilder;
-/// use crate::transaction::builders::client_quick;
+/// use rvoip_dialog_core::transaction::server::builders::RegisterResponseBuilder;
+/// use rvoip_dialog_core::transaction::builders::client_quick;
 /// use rvoip_sip_core::StatusCode;
 /// use std::net::SocketAddr;
 /// 

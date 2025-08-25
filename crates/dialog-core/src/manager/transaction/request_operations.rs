@@ -6,9 +6,9 @@
 use tracing::debug;
 
 use rvoip_sip_core::{Request, Response, Method};
-use rvoip_transaction_core::TransactionKey;
-use rvoip_transaction_core::builders::{dialog_utils, dialog_quick};
-use rvoip_transaction_core::utils::DialogRequestTemplate;
+use rvoip_dialog_core::TransactionKey;
+use rvoip_dialog_core::builders::{dialog_utils, dialog_quick};
+use rvoip_dialog_core::utils::DialogRequestTemplate;
 use crate::errors::DialogResult;
 use crate::dialog::DialogId;
 use crate::manager::core::DialogManager;
@@ -206,7 +206,7 @@ impl DialogManager {
                     },
                     None => {
                         // Initial INVITE: No remote tag yet, creating new dialog
-                        use rvoip_transaction_core::client::builders::InviteBuilder;
+                        use rvoip_dialog_core::client::builders::InviteBuilder;
                         
                         let mut invite_builder = InviteBuilder::new()
                             .from_detailed(

@@ -29,9 +29,9 @@
 //! use std::sync::Arc;
 //! use std::time::Duration;
 //! use tokio::sync::mpsc;
-//! use crate::transaction::timer::TimerManager;
-//! use crate::transaction::timer::TimerType;
-//! use crate::transaction::transaction::{TransactionKey, InternalTransactionCommand};
+//! use rvoip_dialog_core::transaction::timer::TimerManager;
+//! use rvoip_dialog_core::transaction::timer::TimerType;
+//! use rvoip_dialog_core::transaction::{TransactionKey, InternalTransactionCommand};
 //! use rvoip_sip_core::Method;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {

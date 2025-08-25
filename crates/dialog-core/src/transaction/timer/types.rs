@@ -375,7 +375,7 @@ impl fmt::Display for Timer {
 ///
 /// ```rust
 /// use std::time::Duration;
-/// use crate::transaction::timer::TimerSettings;
+/// use rvoip_dialog_core::transaction::timer::TimerSettings;
 ///
 /// // Default settings (RFC 3261 recommended values)
 /// let default_settings = TimerSettings::default();

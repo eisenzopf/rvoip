@@ -122,7 +122,7 @@ impl SimpleB2BUA {
         // Try to create outbound peer on next available port
         let mut outbound_peer = None;
         for port_offset in 1..10 {
-            match SimplePeer::with_port(identity, base_port + port_offset).await {
+            match SimplePeer::new(identity).port(base_port + port_offset).await {
                 Ok(peer) => {
                     outbound_peer = Some(peer);
                     break;

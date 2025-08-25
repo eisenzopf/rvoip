@@ -118,6 +118,7 @@ use crate::dialog::{DialogId, Dialog, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::{SessionCoordinationEvent, DialogEvent};
 use crate::api::{ApiResult, ApiError, common::{DialogHandle, CallHandle}};
+use crate::subscription::SubscriptionManager;
 
 // Import the existing core DialogManager functionality
 use super::core::DialogManager;
@@ -285,6 +286,11 @@ impl UnifiedDialogManager {
     /// Useful for advanced operations that bypass the unified API.
     pub fn core(&self) -> &DialogManager {
         &self.core
+    }
+    
+    /// Get reference to the subscription manager if configured
+    pub fn subscription_manager(&self) -> Option<&Arc<SubscriptionManager>> {
+        self.core.subscription_manager()
     }
     
     /// Start the unified dialog manager

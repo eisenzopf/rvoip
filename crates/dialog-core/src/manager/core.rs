@@ -16,6 +16,7 @@ use crate::dialog::{DialogId, Dialog, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::config::DialogManagerConfig;
+use crate::subscription::SubscriptionManager;
 
 
 #[derive(Debug, Clone)]
@@ -50,6 +51,9 @@ pub struct DialogManager {
     
     /// Shutdown signal for global event processor
     pub(crate) shutdown_signal: Arc<tokio::sync::Notify>,
+    
+    /// Subscription manager for handling SUBSCRIBE/NOTIFY
+    pub(crate) subscription_manager: Option<Arc<SubscriptionManager>>,
 }
 
 impl DialogManager {
@@ -70,17 +74,32 @@ impl DialogManager {
     ) -> DialogResult<Self> {
         info!("Creating new DialogManager with local address {}", local_address);
         
+        // Create shared stores
+        let dialogs = Arc::new(DashMap::new());
+        let dialog_lookup = Arc::new(DashMap::new());
+        
+        // Create dialog event channel for subscription manager
+        let (event_tx, _) = mpsc::channel(100);
+        
+        // Create subscription manager with shared stores
+        let subscription_manager = SubscriptionManager::new(
+            dialogs.clone(),
+            dialog_lookup.clone(),
+            event_tx,
+        );
+        
         Ok(Self {
             transaction_manager,
             local_address,
             config: None,
-            dialogs: Arc::new(DashMap::new()),
-            dialog_lookup: Arc::new(DashMap::new()),
+            dialogs,
+            dialog_lookup,
             transaction_to_dialog: Arc::new(DashMap::new()),
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
+            subscription_manager: Some(Arc::new(subscription_manager)),
         })
     }
     
@@ -103,17 +122,32 @@ impl DialogManager {
     ) -> DialogResult<Self> {
         info!("Creating new DialogManager with global transaction events and local address {}", local_address);
         
+        // Create shared stores
+        let dialogs = Arc::new(DashMap::new());
+        let dialog_lookup = Arc::new(DashMap::new());
+        
+        // Create dialog event channel for subscription manager
+        let (event_tx, _) = mpsc::channel(100);
+        
+        // Create subscription manager with shared stores
+        let subscription_manager = SubscriptionManager::new(
+            dialogs.clone(),
+            dialog_lookup.clone(),
+            event_tx,
+        );
+        
         let manager = Self {
             transaction_manager,
             local_address,
             config: None,
-            dialogs: Arc::new(DashMap::new()),
-            dialog_lookup: Arc::new(DashMap::new()),
+            dialogs,
+            dialog_lookup,
             transaction_to_dialog: Arc::new(DashMap::new()),
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
+            subscription_manager: Some(Arc::new(subscription_manager)),
         };
         
         // Spawn global transaction event processor
@@ -730,6 +764,11 @@ impl DialogManager {
     
     pub async fn create_outgoing_dialog(&self, local_uri: rvoip_sip_core::Uri, remote_uri: rvoip_sip_core::Uri, call_id: Option<String>) -> DialogResult<DialogId> {
         <Self as super::dialog_operations::DialogStore>::create_outgoing_dialog(self, local_uri, remote_uri, call_id).await
+    }
+    
+    /// Get a reference to the subscription manager if configured
+    pub fn subscription_manager(&self) -> Option<&Arc<SubscriptionManager>> {
+        self.subscription_manager.as_ref()
     }
     
     // Protocol Handlers (delegated to protocol_handlers.rs)

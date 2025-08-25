@@ -75,7 +75,7 @@ pub struct DialogTransactionContext {
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::{DialogRequestTemplate, request_builder_from_dialog_template};
+/// use rvoip_dialog_core::transaction::dialog::{DialogRequestTemplate, request_builder_from_dialog_template};
 /// use rvoip_sip_core::Method;
 /// use std::net::SocketAddr;
 /// 
@@ -216,19 +216,17 @@ pub fn request_builder_from_dialog_template(
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::{DialogTransactionContext, response_builder_for_dialog_transaction};
-/// use rvoip_transaction_core::builders::client_quick;
+/// use rvoip_dialog_core::transaction::dialog::{DialogTransactionContext, response_builder_for_dialog_transaction};
+/// use rvoip_dialog_core::transaction::client::builders::InviteBuilder;
 /// use rvoip_sip_core::StatusCode;
 /// use std::net::SocketAddr;
 /// 
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-/// let original_request = client_quick::invite(
-///     "sip:alice@example.com",
-///     "sip:bob@example.com", 
-///     local_addr,
-///     None
-/// )?;
+/// let original_request = InviteBuilder::new()
+///     .from_to("sip:alice@example.com", "sip:bob@example.com")
+///     .local_address(local_addr)
+///     .build()?;
 /// 
 /// let context = DialogTransactionContext {
 ///     dialog_id: Some("dialog-123".to_string()),
@@ -312,18 +310,16 @@ pub fn response_builder_for_dialog_transaction(
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::extract_dialog_template_from_request;
-/// use rvoip_transaction_core::builders::client_quick;
+/// use rvoip_dialog_core::transaction::dialog::extract_dialog_template_from_request;
+/// use rvoip_dialog_core::transaction::client::builders::InviteBuilder;
 /// use std::net::SocketAddr;
 /// 
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-/// let invite_request = client_quick::invite(
-///     "sip:alice@example.com",
-///     "sip:bob@example.com",
-///     local_addr,
-///     None
-/// )?;
+/// let invite_request = InviteBuilder::new()
+///     .from_to("sip:alice@example.com", "sip:bob@example.com")
+///     .local_address(local_addr)
+///     .build()?;
 /// 
 /// let template = extract_dialog_template_from_request(&invite_request, local_addr, 2)?;
 /// # Ok(())
@@ -417,6 +413,12 @@ pub fn create_dialog_transaction_context(
                 .map(|to| to.tag().is_none())
                 .unwrap_or(false)
         },
+        Method::Subscribe => {
+            // SUBSCRIBE is dialog-creating if To header has no tag (RFC 6665)
+            original_request.to()
+                .map(|to| to.tag().is_none())
+                .unwrap_or(false)
+        },
         _ => false, // Other methods are typically not dialog-creating
     };
     
@@ -468,16 +470,15 @@ mod tests {
     
     #[tokio::test]
     async fn test_dialog_transaction_context() {
-        use crate::transaction::builders::client_quick;
+        use crate::transaction::client::builders::InviteBuilder;
         
         let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         
-        let original_request = client_quick::invite(
-            "sip:alice@example.com",
-            "sip:bob@example.com",
-            local_addr,
-            None
-        ).expect("Failed to create INVITE");
+        let original_request = InviteBuilder::new()
+            .from_to("sip:alice@example.com", "sip:bob@example.com")
+            .local_address(local_addr)
+            .build()
+            .expect("Failed to create INVITE");
         
         let context = create_dialog_transaction_context(
             "txn-123",

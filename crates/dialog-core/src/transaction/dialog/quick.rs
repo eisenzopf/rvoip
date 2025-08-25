@@ -35,7 +35,7 @@ use super::{DialogRequestTemplate, DialogTransactionContext, request_builder_fro
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::quick::bye_for_dialog;
+/// use rvoip_dialog_core::transaction::dialog::quick::bye_for_dialog;
 /// use std::net::SocketAddr;
 /// 
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -100,7 +100,7 @@ pub fn bye_for_dialog(
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::quick::refer_for_dialog;
+/// use rvoip_dialog_core::transaction::dialog::quick::refer_for_dialog;
 /// use std::net::SocketAddr;
 /// 
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -195,7 +195,7 @@ pub fn refer_for_dialog(
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::quick::update_for_dialog;
+/// use rvoip_dialog_core::transaction::dialog::quick::update_for_dialog;
 /// use std::net::SocketAddr;
 /// 
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -280,7 +280,7 @@ pub fn update_for_dialog(
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::quick::info_for_dialog;
+/// use rvoip_dialog_core::transaction::dialog::quick::info_for_dialog;
 /// use std::net::SocketAddr;
 /// 
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -351,7 +351,7 @@ pub fn info_for_dialog(
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::quick::notify_for_dialog;
+/// use rvoip_dialog_core::transaction::dialog::quick::notify_for_dialog;
 /// use std::net::SocketAddr;
 /// 
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -437,7 +437,7 @@ pub fn notify_for_dialog(
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::quick::message_for_dialog;
+/// use rvoip_dialog_core::transaction::dialog::quick::message_for_dialog;
 /// use std::net::SocketAddr;
 /// 
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -508,7 +508,7 @@ pub fn message_for_dialog(
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::quick::reinvite_for_dialog;
+/// use rvoip_dialog_core::transaction::dialog::quick::reinvite_for_dialog;
 /// use std::net::SocketAddr;
 /// 
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -576,19 +576,17 @@ pub fn reinvite_for_dialog(
 /// 
 /// # Example
 /// ```rust,no_run
-/// use rvoip_transaction_core::dialog::quick::response_for_dialog_transaction;
-/// use rvoip_transaction_core::builders::client_quick;
+/// use rvoip_dialog_core::transaction::dialog::quick::response_for_dialog_transaction;
+/// use rvoip_dialog_core::transaction::client::builders::InviteBuilder;
 /// use rvoip_sip_core::StatusCode;
 /// use std::net::SocketAddr;
 /// 
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-/// let original_request = client_quick::invite(
-///     "sip:alice@example.com",
-///     "sip:bob@example.com",
-///     local_addr,
-///     None
-/// )?;
+/// let original_request = InviteBuilder::new()
+///     .from_to("sip:alice@example.com", "sip:bob@example.com")
+///     .local_address(local_addr)
+///     .build()?;
 /// 
 /// let response = response_for_dialog_transaction(
 ///     "txn-123",

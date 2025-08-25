@@ -13,6 +13,9 @@ mod server_manager;
 pub mod transfer;
 pub mod registry;
 pub mod registrar_integration;
+pub mod presence;
+pub mod p2p_heartbeat;
+pub mod presence_aggregation;
 
 // Re-exports
 pub use coordinator::{SessionCoordinator, CleanupTracker, CleanupLayer};

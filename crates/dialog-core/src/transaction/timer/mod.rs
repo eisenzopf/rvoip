@@ -53,8 +53,8 @@
 //! ```rust,no_run
 //! use std::sync::Arc;
 //! use std::time::Duration;
-//! use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings};
-//! use crate::transaction::transaction::TransactionKey;
+//! use rvoip_dialog_core::transaction::timer::{TimerFactory, TimerManager, TimerSettings};
+//! use rvoip_dialog_core::transaction::TransactionKey;
 //! use rvoip_sip_core::Method;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {

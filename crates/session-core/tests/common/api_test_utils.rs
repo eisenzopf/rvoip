@@ -221,15 +221,14 @@ impl ApiTypesTestHelper {
     /// Create test incoming calls
     pub fn create_test_incoming_calls(&self, count: usize) -> Vec<IncomingCall> {
         (0..count)
-            .map(|i| IncomingCall {
-                id: SessionId(format!("incoming_{}", i)),
-                from: format!("sip:caller{}@example.com", i),
-                to: format!("sip:callee{}@example.com", i),
-                sdp: Some(self.create_test_sdp(&format!("session_{}", i))),
-                headers: HashMap::new(),
-                received_at: Instant::now(),
-                sip_call_id: None,
-            })
+            .map(|i| IncomingCall::new_test(
+                SessionId(format!("incoming_{}", i)),
+                format!("sip:caller{}@example.com", i),
+                format!("sip:callee{}@example.com", i),
+                Some(self.create_test_sdp(&format!("session_{}", i))),
+                HashMap::new(),
+                None,
+            ))
             .collect()
     }
 

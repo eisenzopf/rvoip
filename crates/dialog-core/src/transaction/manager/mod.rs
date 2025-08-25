@@ -298,7 +298,7 @@ impl TransactionManager {
     /// # use std::sync::Arc;
     /// # use tokio::sync::mpsc;
     /// # use rvoip_sip_transport::{Transport, TransportEvent};
-    /// # use crate::transaction::TransactionManager;
+    /// # use rvoip_dialog_core::transaction::TransactionManager;
     /// # async fn example(transport: Arc<dyn Transport>) -> Result<(), Box<dyn std::error::Error>> {
     /// // Create a transport event channel
     /// let (transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(100);
@@ -398,7 +398,7 @@ impl TransactionManager {
     /// # use std::time::Duration;
     /// # use tokio::sync::mpsc;
     /// # use rvoip_sip_transport::{Transport, TransportEvent};
-    /// # use crate::transaction::{TransactionManager, timer::TimerSettings};
+    /// # use rvoip_dialog_core::transaction::{TransactionManager, timer::TimerSettings};
     /// # async fn example(transport: Arc<dyn Transport>) -> Result<(), Box<dyn std::error::Error>> {
     /// // Create custom timer settings for high-latency networks
     /// let mut timer_settings = TimerSettings::default();
@@ -486,7 +486,7 @@ impl TransactionManager {
     /// ```no_run
     /// # use std::sync::Arc;
     /// # use rvoip_sip_transport::Transport;
-    /// # use crate::transaction::TransactionManager;
+    /// # use rvoip_dialog_core::transaction::TransactionManager;
     /// # fn example(transport: Arc<dyn Transport>) {
     /// // Create a transaction manager without async
     /// let manager = TransactionManager::new_sync(transport);
@@ -517,7 +517,7 @@ impl TransactionManager {
     /// # use std::sync::Arc;
     /// # use std::net::SocketAddr;
     /// # use tokio::sync::mpsc;
-    /// # use crate::transaction::{TransactionManager, transport::TransportManager, transport::TransportManagerConfig};
+    /// # use rvoip_dialog_core::transaction::{TransactionManager, transport::TransportManager, transport::TransportManagerConfig};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// // Create a transport manager configuration
     /// let config = TransportManagerConfig {
@@ -621,7 +621,7 @@ impl TransactionManager {
     /// # use std::sync::Arc;
     /// # use std::time::Duration;
     /// # use rvoip_sip_transport::Transport;
-    /// # use crate::transaction::{TransactionManager, timer::TimerSettings};
+    /// # use rvoip_dialog_core::transaction::{TransactionManager, timer::TimerSettings};
     /// # fn example(transport: Arc<dyn Transport>) {
     /// // Create custom timer settings
     /// let mut timer_settings = TimerSettings::default();
@@ -759,8 +759,8 @@ impl TransactionManager {
     /// # use std::net::SocketAddr;
     /// # use std::str::FromStr;
     /// # use rvoip_sip_core::Request;
-    /// # use crate::transaction::TransactionManager;
-    /// # use crate::transaction::transaction::TransactionKey;
+    /// # use rvoip_dialog_core::transaction::TransactionManager;
+    /// # use rvoip_dialog_core::transaction::TransactionKey;
     /// # async fn example(manager: &TransactionManager, request: Request) -> Result<(), Box<dyn std::error::Error>> {
     /// let destination = SocketAddr::from_str("192.168.1.100:5060")?;
     ///
@@ -947,8 +947,8 @@ impl TransactionManager {
     /// ```no_run
     /// # use rvoip_sip_core::{Response, StatusCode};
     /// # use rvoip_sip_core::builder::SimpleResponseBuilder;
-    /// # use crate::transaction::TransactionManager;
-    /// # use crate::transaction::transaction::TransactionKey;
+    /// # use rvoip_dialog_core::transaction::TransactionManager;
+    /// # use rvoip_dialog_core::transaction::TransactionKey;
     /// # async fn example(
     /// #    manager: &TransactionManager,
     /// #    tx_id: &TransactionKey,
@@ -1002,8 +1002,8 @@ impl TransactionManager {
     ///
     /// # Example
     /// ```no_run
-    /// # use crate::transaction::TransactionManager;
-    /// # use crate::transaction::transaction::TransactionKey;
+    /// # use rvoip_dialog_core::transaction::TransactionManager;
+    /// # use rvoip_dialog_core::transaction::TransactionKey;
     /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) {
     /// if manager.transaction_exists(tx_id).await {
     ///     println!("Transaction {} exists", tx_id);
@@ -1060,8 +1060,8 @@ impl TransactionManager {
     ///
     /// # Example
     /// ```no_run
-    /// # use crate::transaction::TransactionManager;
-    /// # use crate::transaction::transaction::{TransactionKey, TransactionState};
+    /// # use rvoip_dialog_core::transaction::TransactionManager;
+    /// # use rvoip_dialog_core::transaction::{TransactionKey, TransactionState};
     /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) -> Result<(), Box<dyn std::error::Error>> {
     /// let state = manager.transaction_state(tx_id).await?;
     /// 
@@ -1119,8 +1119,8 @@ impl TransactionManager {
     ///
     /// # Example
     /// ```no_run
-    /// # use crate::transaction::TransactionManager;
-    /// # use crate::transaction::transaction::{TransactionKey, TransactionKind};
+    /// # use rvoip_dialog_core::transaction::TransactionManager;
+    /// # use rvoip_dialog_core::transaction::{TransactionKey, TransactionKind};
     /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) -> Result<(), Box<dyn std::error::Error>> {
     /// let kind = manager.transaction_kind(tx_id).await?;
     /// 
@@ -1157,7 +1157,7 @@ impl TransactionManager {
     ///
     /// # Example
     /// ```no_run
-    /// # use crate::transaction::TransactionManager;
+    /// # use rvoip_dialog_core::transaction::TransactionManager;
     /// # async fn example(manager: &TransactionManager) {
     /// let (client_txs, server_txs) = manager.active_transactions().await;
     /// 

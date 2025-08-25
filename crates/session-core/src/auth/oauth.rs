@@ -224,60 +224,35 @@ impl OAuth2Validator {
     
     /// Validate JWT token using JWKS
     async fn validate_jwt(&self, token: &str) -> AuthResult<TokenInfo> {
-        // This is a simplified JWT validation
-        // In production, use jsonwebtoken crate with proper validation
-        
-        // Parse JWT header and claims
-        let parts: Vec<&str> = token.split('.').collect();
-        if parts.len() != 3 {
-            return Err(AuthError::JwtValidationError("Invalid JWT format".to_string()));
-        }
-        
-        // Decode claims (simplified - real implementation needs signature verification)
-        use base64::{Engine as _, engine::general_purpose};
-        let claims = general_purpose::URL_SAFE_NO_PAD.decode(parts[1])
-            .map_err(|e| AuthError::JwtValidationError(e.to_string()))?;
-        
-        let claims: serde_json::Value = serde_json::from_slice(&claims)
-            .map_err(|e| AuthError::JwtValidationError(e.to_string()))?;
-        
-        // Extract token info from claims
-        let subject = claims["sub"].as_str()
-            .ok_or_else(|| AuthError::JwtValidationError("Missing subject".to_string()))?
-            .to_string();
-        
-        let exp = claims["exp"].as_i64()
-            .ok_or_else(|| AuthError::JwtValidationError("Missing expiration".to_string()))?;
-        
-        let expires_at = chrono::DateTime::from_timestamp(exp, 0)
-            .ok_or_else(|| AuthError::JwtValidationError("Invalid expiration".to_string()))?;
-        
-        if expires_at < chrono::Utc::now() {
-            return Err(AuthError::TokenExpired);
-        }
-        
-        let scopes = if let Some(scope) = claims["scope"].as_str() {
-            scope.split_whitespace().map(String::from).collect()
-        } else if let Some(scopes) = claims["scopes"].as_array() {
-            scopes.iter()
-                .filter_map(|s| s.as_str().map(String::from))
-                .collect()
-        } else {
-            Vec::new()
+        // Get cached JWKS or fetch if needed
+        let jwks = {
+            let cache = self.jwks_cache.read().await;
+            if let Some((jwks, cached_at)) = cache.as_ref() {
+                // Use cached JWKS if it's less than 1 hour old
+                if cached_at.elapsed() < Duration::from_secs(3600) {
+                    jwks.clone()
+                } else {
+                    drop(cache);
+                    self.fetch_jwks().await?
+                }
+            } else {
+                drop(cache);
+                self.fetch_jwks().await?
+            }
         };
         
-        let client_id = claims["client_id"].as_str()
-            .unwrap_or("unknown")
-            .to_string();
+        // Use the proper JWT validator
+        let mut token_info = super::jwt::validate_jwt_with_jwks(
+            token,
+            &jwks,
+            None, // TODO: Configure expected issuer
+            None, // TODO: Configure expected audience
+        ).await?;
         
-        Ok(TokenInfo {
-            subject,
-            scopes,
-            expires_at,
-            client_id,
-            realm: self.config.realm.clone().into(),
-            extra_claims: std::collections::HashMap::new(),
-        })
+        // Add realm to token info
+        token_info.realm = Some(self.config.realm.clone());
+        
+        Ok(token_info)
     }
     
     /// Introspect token using OAuth introspection endpoint

@@ -128,6 +128,8 @@ pub mod routing;
 pub mod sdp;
 pub mod recovery;
 pub mod events;
+pub mod subscription;
+pub mod presence;
 
 // Transaction layer (merged from transaction-core)
 pub mod transaction;

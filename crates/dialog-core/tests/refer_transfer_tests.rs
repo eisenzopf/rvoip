@@ -2,7 +2,7 @@
 
 use rvoip_dialog_core::events::SessionCoordinationEvent;
 use rvoip_dialog_core::dialog::DialogId;
-use rvoip_transaction_core::TransactionKey;
+use rvoip_dialog_core::transaction::TransactionKey;
 use rvoip_sip_core::types::refer_to::ReferTo;
 use rvoip_sip_core::{Request, Method, StatusCode};
 use std::str::FromStr;

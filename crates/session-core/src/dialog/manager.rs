@@ -60,6 +60,30 @@ impl DialogManager {
         Ok(())
     }
     
+    /// Get reference to the subscription manager if configured
+    pub fn subscription_manager(&self) -> Option<&Arc<rvoip_dialog_core::subscription::SubscriptionManager>> {
+        self.dialog_api.subscription_manager()
+    }
+    
+    /// Send NOTIFY request in a subscription dialog
+    pub async fn send_notify(
+        &self,
+        dialog_id: &DialogId,
+        event: String,
+        subscription_state: String,
+        body: Option<String>,
+    ) -> DialogResult<()> {
+        // Send NOTIFY through dialog-core
+        self.dialog_api
+            .send_notify(dialog_id, event, body)
+            .await
+            .map_err(|e| DialogError::DialogCore {
+                source: Box::new(e),
+            })?;
+        
+        Ok(())
+    }
+    
     /// Create an outgoing call session
     pub async fn create_outgoing_call(
         &self,

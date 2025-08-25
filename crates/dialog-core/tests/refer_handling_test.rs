@@ -19,7 +19,7 @@ use rvoip_sip_core::{
         header::{HeaderName, TypedHeader},
     },
 };
-use rvoip_transaction_core::TransactionManager;
+use rvoip_dialog_core::transaction::TransactionManager;
 
 /// Helper to create a test dialog API
 async fn create_test_dialog_api(port: u16) -> Arc<UnifiedDialogApi> {
