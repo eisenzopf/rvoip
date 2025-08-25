@@ -8,7 +8,6 @@ use serial_test::serial;
 
 #[tokio::test]
 #[serial]
-#[ignore = "Bridge operation not yet implemented"]
 async fn test_basic_bridge() {
     println!("\n=== Testing Basic Call Bridging ===\n");
     
@@ -49,7 +48,6 @@ async fn test_basic_bridge() {
         .expect("Failed to bridge calls");
     
     println!("✓ Successfully bridged Bob and Charlie through Alice");
-    println!("  Note: Bridge operation is placeholder - full implementation pending");
     
     // The bridge consumes call_to_charlie, call_to_bob continues
     call_to_bob.hangup().await.expect("Failed to hang up");
@@ -61,7 +59,6 @@ async fn test_basic_bridge() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "Bridge operation not yet implemented"]
 async fn test_bridge_with_audio() {
     println!("\n=== Testing Bridge with Audio Flow ===\n");
     
@@ -134,7 +131,6 @@ async fn test_bridge_with_audio() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "Bridge operation not yet implemented"]
 async fn test_bridge_with_hold() {
     println!("\n=== Testing Bridge with One Call on Hold ===\n");
     
@@ -189,7 +185,6 @@ async fn test_bridge_with_hold() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "Bridge operation not yet implemented"]
 async fn test_multiple_bridges() {
     println!("\n=== Testing Multiple Bridge Operations ===\n");
     
@@ -262,7 +257,6 @@ async fn test_multiple_bridges() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "Bridge operation not yet implemented"]
 async fn test_bridge_timing() {
     println!("\n=== Testing Bridge Timing and Duration ===\n");
     

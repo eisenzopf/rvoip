@@ -61,10 +61,10 @@ pub async fn bridge(
     session1: &SessionId,
     session2: &SessionId,
 ) -> Result<()> {
-    // TODO: Implement when bridge API is available
-    // For now, this is a placeholder
-    tracing::warn!("Bridge operation not yet implemented for sessions {} and {}", session1, session2);
-    Err(crate::errors::SessionError::NotImplemented { feature: "Bridge operation".to_string() })
+    // Use the existing bridge functionality
+    let _bridge_id = super::create_bridge(coordinator, session1, session2).await?;
+    tracing::info!("Successfully bridged sessions {} and {}", session1, session2);
+    Ok(())
 }
 
 /// Terminate a call
