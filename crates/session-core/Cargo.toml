@@ -89,6 +89,14 @@ path = "examples/api_best_practices/uac_client_clean.rs"
 name = "uas_server_clean"
 path = "examples/api_best_practices/uas_server_clean.rs"
 
+[[example]]
+name = "api_peer_audio_peer1"
+path = "examples/api_peer_audio/peer1.rs"
+
+[[example]]
+name = "api_peer_audio_peer2"
+path = "examples/api_peer_audio/peer2.rs"
+
 [[bench]]
 name = "concurrent_calls_with_tones"
 path = "bench/concurrent_calls_with_tones.rs"
