@@ -1,0 +1,26 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running `target/debug/peer_b`
+[2m2025-08-27T19:57:16.586530Z[0m [32m INFO[0m [2mpeer_b[0m[2m:[0m 🎵 Peer B (UAS) starting on port 5061...
+[2m2025-08-27T19:57:16.589912Z[0m [32m INFO[0m [2mpeer_b[0m[2m:[0m 💾 Saved 880Hz input tone
+[2m2025-08-27T19:57:16.590474Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Creating UnifiedDialogApi with automatic transport setup in "Hybrid" mode
+[2m2025-08-27T19:57:16.590936Z[0m [32m INFO[0m [2mrvoip_sip_transport::transport::udp[0m[2m:[0m SIP UDP transport bound to 127.0.0.1:5061
+[2m2025-08-27T19:57:16.591623Z[0m [32m INFO[0m [2mrvoip_dialog_core::transaction::transport[0m[2m:[0m Added UDP transport bound to 127.0.0.1:5061
+[2m2025-08-27T19:57:16.592026Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Creating UnifiedDialogApi with global events in "Hybrid" mode
+[2m2025-08-27T19:57:16.592054Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Creating UnifiedDialogManager with global events in "Hybrid" mode at 127.0.0.1:5061
+[2m2025-08-27T19:57:16.592088Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m Creating new DialogManager with global transaction events and local address 127.0.0.1:5061
+[2m2025-08-27T19:57:16.592466Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m 🔄 Starting global transaction event processor for dialog-core
+[2m2025-08-27T19:57:16.592859Z[0m [32m INFO[0m [2mrvoip_media_core::relay::controller[0m[2m:[0m Created MediaSessionController with custom port range 42000-43000
+[2m2025-08-27T19:57:16.593064Z[0m [32m INFO[0m [2mrvoip_session_core::manager::events[0m[2m:[0m Session event processor started
+[2m2025-08-27T19:57:16.593100Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m SessionCoordinator initialized on port 5061
+[2m2025-08-27T19:57:16.593120Z[0m [32m INFO[0m [2mrvoip_dialog_core::api::unified[0m[2m:[0m Starting UnifiedDialogApi
+[2m2025-08-27T19:57:16.593129Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Starting UnifiedDialogManager in "Hybrid" mode
+[2m2025-08-27T19:57:16.593141Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager starting
+[2m2025-08-27T19:57:16.593151Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::core[0m[2m:[0m DialogManager started successfully
+[2m2025-08-27T19:57:16.593157Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m Hybrid mode active - from_uri: Some("sip:peer_b@127.0.0.1:5061"), domain: None, auto_auth: false, auto_options: false
+[2m2025-08-27T19:57:16.593196Z[0m [32m INFO[0m [2mrvoip_dialog_core::manager::unified[0m[2m:[0m UnifiedDialogManager started successfully
+[2m2025-08-27T19:57:16.593179Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::event_handler[0m[2m:[0m Starting main coordinator event loop (unified broadcast)
+[2m2025-08-27T19:57:16.593219Z[0m [32m INFO[0m [2mrvoip_session_core::manager::cleanup[0m[2m:[0m Cleanup manager started
+[2m2025-08-27T19:57:16.593238Z[0m [32m INFO[0m [2mrvoip_session_core::coordinator::coordinator[0m[2m:[0m SessionCoordinator started
+[2m2025-08-27T19:57:16.593255Z[0m [32m INFO[0m [2mpeer_b[0m[2m:[0m ✅ Peer B coordinator started
+[2m2025-08-27T19:57:16.593264Z[0m [32m INFO[0m [2mpeer_b[0m[2m:[0m ⏳ Waiting for incoming call...
+Error: Elapsed(())
