@@ -29,8 +29,8 @@ impl SessionCoordinator {
             sip_call_id: sip_call_id.clone(),
         };
 
-        // Create internal session from call session
-        let mut session = Session::from_call_session(call.clone());
+        // Create internal session from call session with UAC role (we're initiating the call)
+        let mut session = Session::from_call_session_with_role(call.clone(), crate::api::types::SessionRole::UAC);
         if let Some(ref sdp_str) = sdp {
             session.local_sdp = Some(sdp_str.clone());
         }
