@@ -14,36 +14,27 @@
 //! # Call Lifecycle Example
 //! 
 //! ```rust
-//! use rvoip_session_core::api::types::{IncomingCall, SessionId, CallDecision};
+//! use rvoip_session_core::api::types::{SessionId, CallDecision, CallSession, CallState};
 //! use std::time::Instant;
-//! use std::collections::HashMap;
 //! 
-//! // 1. Incoming call arrives
-//! let sdp_offer = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5004 RTP/AVP 0\r\n";
+//! // In real usage, IncomingCall would be provided by the framework
+//! // For this example, we'll work with the CallSession directly
+//! 
+//! // 1. Create a call session
+//! let session_id = SessionId::new();
 //! let sdp_answer = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5006 RTP/AVP 0\r\n";
-//! let headers = HashMap::new();
-//! 
-//! let incoming_call = IncomingCall {
-//!     id: SessionId::new(),
-//!     from: "sip:alice@example.com".to_string(),
-//!     to: "sip:bob@ourserver.com".to_string(),
-//!     sdp: Some(sdp_offer.to_string()),
-//!     headers: headers,
-//!     received_at: Instant::now(),
-//!     sip_call_id: None,
-//!     coordinator: None,
-//! };
 //! 
 //! // 2. Handler makes a decision
 //! let decision = CallDecision::Accept(Some(sdp_answer.to_string()));
 //! 
 //! // 3. Call becomes active
 //! let session = CallSession {
-//!     id: incoming_call.id.clone(),
-//!     from: incoming_call.from,
-//!     to: incoming_call.to,
+//!     id: session_id,
+//!     from: "sip:alice@example.com".to_string(),
+//!     to: "sip:bob@ourserver.com".to_string(),
 //!     state: CallState::Active,
 //!     started_at: Some(Instant::now()),
+//!     sip_call_id: Some("call-123".to_string()),
 //! };
 //! 
 //! // 4. Monitor call state
@@ -278,16 +269,24 @@ impl IncomingCall {
                 "IncomingCall missing coordinator - was it created properly?".to_string()
             ))?;
         
+        // Generate SDP answer if we have an offer
+        let sdp_answer = if let Some(offer) = &self.sdp {
+            use crate::api::media::MediaControl;
+            Some(MediaControl::generate_sdp_answer(
+                &coordinator,
+                &self.id,
+                offer
+            ).await?)
+        } else {
+            None
+        };
+        
         // Accept via SessionControl
         use crate::api::control::SessionControl;
         SessionControl::accept_incoming_call(
             &coordinator,
             &self,
-            self.sdp.as_ref().and_then(|sdp| {
-                // Generate SDP answer if we have an offer
-                // TODO: This should use MediaControl::generate_sdp_answer
-                None
-            })
+            sdp_answer
         ).await?;
         
         // Create SimpleCall
