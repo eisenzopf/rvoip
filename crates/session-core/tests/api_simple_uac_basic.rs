@@ -73,7 +73,7 @@ async fn test_basic_call_lifecycle() {
     println!("✓ Remote URI correct: {}", call.remote_uri());
     
     // Get audio channels (consumes them)
-    let (_tx, _rx) = call.audio_channels();
+    let (_tx, _rx) = call.audio_channels().await;
     println!("✓ Audio channels obtained");
     
     // Hang up

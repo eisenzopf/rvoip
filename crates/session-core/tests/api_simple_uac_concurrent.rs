@@ -124,8 +124,8 @@ async fn test_concurrent_audio_streams() {
     println!("✓ Created two concurrent calls");
     
     // Get audio channels for both
-    let (tx1, _rx1) = call1.audio_channels();
-    let (tx2, _rx2) = call2.audio_channels();
+    let (tx1, _rx1) = call1.audio_channels().await;
+    let (tx2, _rx2) = call2.audio_channels().await;
     
     // Send audio to both calls concurrently
     let audio_task1 = tokio::spawn(async move {

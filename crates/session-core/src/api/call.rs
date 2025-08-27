@@ -100,17 +100,14 @@ impl SimpleCall {
         session: CallSession,
         coordinator: Arc<SessionCoordinator>,
     ) -> Result<Self> {
-        // Set up audio channels
-        let (audio_tx, audio_rx) = setup_audio_channels(
-            &coordinator,
-            &session.id,
-        ).await?;
+        // Don't set up audio channels here - wait until they're requested
+        // This avoids the race condition where channels are set up before media session exists
         
         Ok(Self {
             session_id: session.id.clone(),
             coordinator,
-            audio_tx: Some(audio_tx),
-            audio_rx: Some(audio_rx),
+            audio_tx: None,
+            audio_rx: None,
             remote_uri: session.to.clone(),
             start_time: Instant::now(),
             state: Arc::new(RwLock::new(session.state)),
@@ -123,17 +120,14 @@ impl SimpleCall {
         coordinator: Arc<SessionCoordinator>,
         remote_uri: String,
     ) -> Result<Self> {
-        // Set up audio channels
-        let (audio_tx, audio_rx) = setup_audio_channels(
-            &coordinator,
-            &session_id,
-        ).await?;
+        // Don't set up audio channels here - wait until they're requested
+        // This ensures consistent behavior between UAC and UAS
         
         Ok(Self {
             session_id,
             coordinator,
-            audio_tx: Some(audio_tx),
-            audio_rx: Some(audio_rx),
+            audio_tx: None,
+            audio_rx: None,
             remote_uri,
             start_time: Instant::now(),
             state: Arc::new(RwLock::new(CallState::Active)),
@@ -142,18 +136,85 @@ impl SimpleCall {
     
     /// Get the audio channels (consumes them - can only be called once)
     /// 
+    /// This method now waits for the media session to be ready before setting up channels.
+    /// 
     /// Returns (tx, rx) where:
     /// - `tx`: Send audio frames to the remote party
     /// - `rx`: Receive audio frames from the remote party
     /// 
     /// # Errors
-    /// Returns an error if the channels have already been taken.
-    pub fn audio_channels(&mut self) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
+    /// Returns an error if the channels have already been taken or if media session setup fails.
+    pub async fn audio_channels(&mut self) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
+        // Store initial state to detect if channels were previously set up
+        let initially_had_channels = self.has_audio_channels_internal();
+        
+        // If channels don't exist yet, set them up (lazy initialization)
+        if self.audio_tx.is_none() || self.audio_rx.is_none() {
+            // If we initially had channels and now they're None, they were already taken
+            if initially_had_channels {
+                return Err(SessionError::MediaError("Audio channels already taken".to_string()));
+            }
+            
+            // Wait for media session to be ready (with timeout)
+            let timeout_duration = Duration::from_secs(5);
+            let start = Instant::now();
+            
+            loop {
+                // Check if session is Active AND media session exists
+                let session_active = if let Ok(Some(session)) = self.coordinator.registry.get_session(&self.session_id).await {
+                    matches!(session.state(), CallState::Active)
+                } else {
+                    false
+                };
+                
+                if session_active {
+                    if let Ok(Some(media_info)) = self.coordinator.media_manager.get_media_info(&self.session_id).await {
+                        // Check if we have remote SDP (which means media flow has been established)
+                        // For UAC, we need to wait until we get the remote SDP answer
+                        if media_info.remote_sdp.is_some() {
+                            // All conditions met: session is Active, media session exists, and remote SDP is known
+                            // Wait for RTP receivers to initialize (matching integration test)
+                            tracing::debug!("Session active, media ready, and remote SDP known, waiting for RTP receivers to initialize...");
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            
+                            // Now set up channels
+                            let (audio_tx, audio_rx) = setup_audio_channels(
+                                &self.coordinator,
+                                &self.session_id,
+                            ).await?;
+                            
+                            self.audio_tx = Some(audio_tx);
+                            self.audio_rx = Some(audio_rx);
+                            break;
+                        } else {
+                            tracing::debug!("Media session exists but no remote SDP yet for session {}", self.session_id);
+                        }
+                    }
+                }
+                
+                // Check timeout
+                if start.elapsed() > timeout_duration {
+                    return Err(SessionError::MediaError(
+                        "Timeout waiting for media session to be ready".to_string()
+                    ));
+                }
+                
+                // Wait a bit before checking again
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        
+        // Now take and return the channels
         let tx = self.audio_tx.take()
-            .ok_or(SessionError::MediaError("Audio channels already taken".to_string()))?;
+            .ok_or(SessionError::MediaError("Audio channels unavailable".to_string()))?;
         let rx = self.audio_rx.take()
-            .ok_or(SessionError::MediaError("Audio channels already taken".to_string()))?;
+            .ok_or(SessionError::MediaError("Audio channels unavailable".to_string()))?;
         Ok((tx, rx))
+    }
+    
+    /// Internal check if channels exist (not yet taken)
+    fn has_audio_channels_internal(&self) -> bool {
+        self.audio_tx.is_some() || self.audio_rx.is_some()
     }
     
     /// Check if audio channels are still available

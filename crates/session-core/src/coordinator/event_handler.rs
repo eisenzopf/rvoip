@@ -909,6 +909,26 @@ impl SessionCoordinator {
                                 } else {
                                     tracing::info!("Stored negotiated SDP in registry for session {}", session_id);
                                 }
+                                
+                                // CRITICAL: Establish media flow to the remote endpoint for UAS
+                                // This allows the UAS to send audio back to the UAC
+                                let remote_addr_str = negotiated.remote_addr.to_string();
+                                
+                                // Get dialog ID for this session
+                                let dialog_id = {
+                                    let mapping = self.media_manager.session_mapping.read().await;
+                                    mapping.get(&session_id).cloned()
+                                };
+                                
+                                if let Some(dialog_id) = dialog_id {
+                                    if let Err(e) = self.media_manager.controller.establish_media_flow(&dialog_id, negotiated.remote_addr).await {
+                                        tracing::error!("Failed to establish media flow from UAS to UAC: {}", e);
+                                    } else {
+                                        tracing::info!("✅ Established media flow from UAS to UAC at {} for session {}", remote_addr_str, session_id);
+                                    }
+                                } else {
+                                    tracing::warn!("No dialog ID found for session {} - cannot establish UAS->UAC media flow", session_id);
+                                }
                             }
                             
                             // Send event with the generated answer
