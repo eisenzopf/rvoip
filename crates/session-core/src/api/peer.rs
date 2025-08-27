@@ -143,19 +143,24 @@ impl<'a> std::future::IntoFuture for CallBuilder<'a> {
 #[derive(Debug)]
 struct IncomingCallRouter {
     tx: mpsc::Sender<IncomingCall>,
-    coordinator: Arc<SessionCoordinator>,
+    coordinator: Arc<RwLock<Option<Arc<SessionCoordinator>>>>,
 }
 
 #[async_trait::async_trait]
 impl CallHandler for IncomingCallRouter {
     async fn on_incoming_call(&self, mut call: IncomingCall) -> CallDecision {
-        // Add coordinator to the call so it can accept/reject
-        call.coordinator = Some(self.coordinator.clone());
-        
-        if self.tx.send(call).await.is_ok() {
-            CallDecision::Defer  // We'll handle it via the channel
+        // Get coordinator reference
+        if let Some(coordinator) = self.coordinator.read().await.as_ref() {
+            // Add coordinator to the call so it can accept/reject
+            call.coordinator = Some(coordinator.clone());
+            
+            if self.tx.send(call).await.is_ok() {
+                CallDecision::Defer  // We'll handle it via the channel
+            } else {
+                CallDecision::Reject("Service unavailable".to_string())
+            }
         } else {
-            CallDecision::Reject("Service unavailable".to_string())
+            CallDecision::Reject("Not ready".to_string())
         }
     }
     
@@ -200,36 +205,33 @@ impl SimplePeer {
     
     /// Internal method to create a peer with specific configuration
     async fn create(identity: &str, local_addr: &str, port: u16) -> Result<Self> {
-        let bind_addr = format!("{}:{}", local_addr, port);
-        let local_bind_addr = bind_addr.parse()
-            .map_err(|_| SessionError::ConfigError("Invalid address".to_string()))?;
+        use crate::api::builder::SessionManagerBuilder;
         
         // Create channel for incoming calls
         let (tx, rx) = mpsc::channel(100);
         
-        // Create config
-        let config = SessionManagerConfig {
-            sip_port: port,
-            local_address: format!("sip:{}@{}:{}", identity, local_addr, port),
-            local_bind_addr,
-            media_port_start: 10000,
-            media_port_end: 20000,
-            enable_stun: false,
-            stun_server: None,
-            enable_sip_client: true,  // Can act as client
-            media_config: Default::default(),
-        };
-        
-        // Create coordinator with router handler
-        let coordinator = SessionCoordinator::new(config, None).await?;
-        let handler = IncomingCallRouter { 
+        // Create handler with a deferred coordinator reference
+        let handler = Arc::new(IncomingCallRouter { 
             tx,
-            coordinator: coordinator.clone(),
-        };
+            coordinator: Arc::new(RwLock::new(None)),
+        });
         
-        // TODO: Need to set the handler - for now pass it in constructor
-        // coordinator.set_handler(Some(Arc::new(handler))).await;
-        coordinator.start().await?;
+        // Parse the bind address
+        let bind_addr = format!("{}:{}", local_addr, port);
+        let local_bind_addr = bind_addr.parse()
+            .map_err(|_| SessionError::ConfigError("Invalid address".to_string()))?;
+        
+        // Use SessionManagerBuilder to properly create the coordinator with handler
+        let coordinator = SessionManagerBuilder::new()
+            .with_sip_port(port)
+            .with_local_address(&format!("sip:{}@{}:{}", identity, local_addr, port))
+            .with_local_bind_addr(local_bind_addr)
+            .with_handler(handler.clone())
+            .build()
+            .await?;
+        
+        // Now set the coordinator reference in the handler
+        *handler.coordinator.write().await = Some(coordinator.clone());
         
         Ok(Self {
             identity: identity.to_string(),

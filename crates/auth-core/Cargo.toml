@@ -1,0 +1,53 @@
+[package]
+name = "rvoip-auth-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["RVoIP Contributors"]
+description = "OAuth2 and token-based authentication for RVoIP services"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+
+# HTTP client for OAuth2 flows
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# JWT handling
+jsonwebtoken = "9.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# OAuth2 client library
+oauth2 = "4.4"
+
+# URL handling
+url = "2.5"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Caching
+moka = { version = "0.12", features = ["future"] }
+
+# Cryptography
+ring = "0.17"
+base64 = "0.22"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+
+# Internal dependencies
+infra-common = { path = "../infra-common", version = "0.1.0" }
+
+[dev-dependencies]
+mockito = "1.4"
+wiremock = "0.6"
+tokio-test = "0.4"

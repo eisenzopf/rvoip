@@ -277,7 +277,13 @@ impl SimpleCall {
     
     /// Get current state
     pub async fn state(&self) -> CallState {
-        self.state.read().await.clone()
+        // Get the current state from the coordinator's registry
+        if let Ok(Some(session)) = self.coordinator.registry.get_session(&self.session_id).await {
+            session.state().clone()
+        } else {
+            // Fallback to cached state if session not found
+            self.state.read().await.clone()
+        }
     }
     
     /// Check if the call is active
