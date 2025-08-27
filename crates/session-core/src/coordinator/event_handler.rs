@@ -680,6 +680,40 @@ impl SessionCoordinator {
                                 tracing::error!("Failed to start media session for {}: {}", session_id, e);
                             }
                             
+                            // For UAS: Also establish media flow when becoming Active
+                            // Check if this is a UAS session and if we have negotiated config
+                            if let Ok(Some(session)) = self.registry.get_session(&session_id).await {
+                                if session.role == crate::api::types::SessionRole::UAS {
+                                    tracing::info!("UAS session {} becoming Active, checking for media flow establishment", session_id);
+                                    
+                                    // Get negotiated config to find remote address
+                                    if let Some(negotiated) = self.negotiated_configs.read().await.get(&session_id) {
+                                        let remote_addr = negotiated.remote_addr;
+                                        tracing::info!("UAS {} has negotiated config, establishing media flow to {}", session_id, remote_addr);
+                                        
+                                        // Get the media session's dialog ID
+                                        let dialog_id = {
+                                            let mapping = self.media_manager.session_mapping.read().await;
+                                            mapping.get(&session_id).cloned()
+                                        };
+                                        
+                                        if let Some(dialog_id) = dialog_id {
+                                            tracing::info!("🔄 UAS {} establishing media flow on Active state to {} (media dialog: {})", 
+                                                session_id, remote_addr, dialog_id);
+                                            if let Err(e) = self.media_manager.controller.establish_media_flow(&dialog_id, remote_addr).await {
+                                                tracing::error!("Failed to establish UAS media flow on Active: {}", e);
+                                            } else {
+                                                tracing::info!("✅ UAS {} established media flow on Active state", session_id);
+                                            }
+                                        } else {
+                                            tracing::debug!("Media session not ready yet for UAS {}, flow will be established later", session_id);
+                                        }
+                                    } else {
+                                        tracing::debug!("No negotiated config yet for UAS {}, flow will be established after negotiation", session_id);
+                                    }
+                                }
+                            }
+                            
                             // NOTE: on_call_established is now called from MediaSessionReady handler
                             // to ensure both dialog and media are ready before notifying the handler
                         }
@@ -746,20 +780,33 @@ impl SessionCoordinator {
                                         // The establish_media_flow will also start audio transmission
                                         let remote_addr_str = negotiated.remote_addr.to_string();
                                         
-                                        // Get dialog ID for this session
+                                        // Ensure media session exists before trying to establish flow
+                                        // For UAC, the media session should already exist, but double-check
+                                        if !self.media_manager.has_session_mapping(&session_id).await {
+                                            tracing::info!("Media session not yet created for UAC {}, creating it now", session_id);
+                                            if let Err(e) = self.start_media_session(&session_id).await {
+                                                tracing::error!("Failed to create media session for UAC {}: {}", session_id, e);
+                                            }
+                                        }
+                                        
+                                        // Get the media session's dialog ID (not the SIP dialog ID)
+                                        // The media manager uses its own internal dialog IDs for RTP sessions
                                         let dialog_id = {
                                             let mapping = self.media_manager.session_mapping.read().await;
                                             mapping.get(&session_id).cloned()
                                         };
                                         
                                         if let Some(dialog_id) = dialog_id {
+                                            tracing::info!("🔄 UAC establishing media flow to UAS at {} for session {} (media dialog: {})", 
+                                                remote_addr_str, session_id, dialog_id);
                                             if let Err(e) = self.media_manager.controller.establish_media_flow(&dialog_id, negotiated.remote_addr).await {
-                                                tracing::error!("Failed to establish media flow: {}", e);
+                                                tracing::error!("Failed to establish media flow from UAC to UAS: {}", e);
                                             } else {
-                                                tracing::info!("✅ Established media flow to {} for session {}", remote_addr_str, session_id);
+                                                tracing::info!("✅ UAC successfully established media flow to UAS at {} for session {}", 
+                                                    remote_addr_str, session_id);
                                             }
                                         } else {
-                                            tracing::warn!("No dialog ID found for session {} - cannot establish media flow", session_id);
+                                            tracing::warn!("No media dialog ID found for session {} - cannot establish UAC->UAS media flow", session_id);
                                         }
                                     }
                                 }
@@ -914,20 +961,33 @@ impl SessionCoordinator {
                                 // This allows the UAS to send audio back to the UAC
                                 let remote_addr_str = negotiated.remote_addr.to_string();
                                 
-                                // Get dialog ID for this session
+                                // Ensure media session exists before trying to establish flow
+                                // For UAS, the media session might not be created yet at this point
+                                if !self.media_manager.has_session_mapping(&session_id).await {
+                                    tracing::info!("Media session not yet created for UAS {}, creating it now", session_id);
+                                    if let Err(e) = self.start_media_session(&session_id).await {
+                                        tracing::error!("Failed to create media session for UAS {}: {}", session_id, e);
+                                    }
+                                }
+                                
+                                // Get the media session's dialog ID (not the SIP dialog ID)
+                                // The media manager uses its own internal dialog IDs for RTP sessions
                                 let dialog_id = {
                                     let mapping = self.media_manager.session_mapping.read().await;
                                     mapping.get(&session_id).cloned()
                                 };
                                 
                                 if let Some(dialog_id) = dialog_id {
+                                    tracing::info!("🔄 UAS establishing media flow to UAC at {} for session {} (media dialog: {})", 
+                                        remote_addr_str, session_id, dialog_id);
                                     if let Err(e) = self.media_manager.controller.establish_media_flow(&dialog_id, negotiated.remote_addr).await {
                                         tracing::error!("Failed to establish media flow from UAS to UAC: {}", e);
                                     } else {
-                                        tracing::info!("✅ Established media flow from UAS to UAC at {} for session {}", remote_addr_str, session_id);
+                                        tracing::info!("✅ UAS successfully established media flow to UAC at {} for session {}", 
+                                            remote_addr_str, session_id);
                                     }
                                 } else {
-                                    tracing::warn!("No dialog ID found for session {} - cannot establish UAS->UAC media flow", session_id);
+                                    tracing::warn!("No media dialog ID found for session {} - cannot establish UAS->UAC media flow", session_id);
                                 }
                             }
                             
@@ -978,8 +1038,8 @@ impl SessionCoordinator {
     ) -> Result<()> {
         tracing::info!("🎯 COORDINATOR: Handling IncomingCall for session {} from dialog {}", session_id, dialog_id);
         
-        // Create the session
-        let mut session = Session::new(session_id.clone());
+        // Create the session as UAS (receiving the call)
+        let mut session = Session::new_with_role(session_id.clone(), crate::api::types::SessionRole::UAS);
         session.call_session.from = from.clone();
         session.call_session.to = to.clone();
         session.call_session.state = CallState::Initiating;

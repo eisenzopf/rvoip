@@ -2,7 +2,7 @@
 //!
 //! Core session handling logic with consolidated ID mappings.
 
-use crate::api::types::{SessionId, CallState, CallSession};
+use crate::api::types::{SessionId, CallState, CallSession, SessionRole};
 use crate::errors::Result;
 
 /// Internal session implementation that consolidates all related IDs and state
@@ -11,6 +11,9 @@ use crate::errors::Result;
 pub struct Session {
     /// Unique session identifier (primary key)
     pub session_id: SessionId,
+    
+    /// Role of this session (UAC or UAS)
+    pub role: SessionRole,
     
     /// Associated SIP dialog ID (if any)
     pub dialog_id: Option<rvoip_dialog_core::DialogId>,
@@ -35,11 +38,12 @@ pub struct Session {
 }
 
 impl Session {
-    /// Create a new session from a CallSession
-    pub fn from_call_session(call_session: CallSession) -> Self {
+    /// Create a new session from a CallSession with a specific role
+    pub fn from_call_session_with_role(call_session: CallSession, role: SessionRole) -> Self {
         let now = std::time::Instant::now();
         Self {
             session_id: call_session.id.clone(),
+            role,
             dialog_id: None,
             media_session_id: None,
             call_session,
@@ -50,8 +54,13 @@ impl Session {
         }
     }
     
-    /// Create a new session with just a session ID (for internal use)
-    pub fn new(session_id: SessionId) -> Self {
+    /// Create a new session from a CallSession (defaults to UAC for compatibility)
+    pub fn from_call_session(call_session: CallSession) -> Self {
+        Self::from_call_session_with_role(call_session, SessionRole::UAC)
+    }
+    
+    /// Create a new session with just a session ID and role
+    pub fn new_with_role(session_id: SessionId, role: SessionRole) -> Self {
         let call_session = CallSession {
             id: session_id.clone(),
             from: String::new(),
@@ -60,7 +69,12 @@ impl Session {
             started_at: Some(std::time::Instant::now()),
             sip_call_id: None,
         };
-        Self::from_call_session(call_session)
+        Self::from_call_session_with_role(call_session, role)
+    }
+    
+    /// Create a new session with just a session ID (defaults to UAC for compatibility)
+    pub fn new(session_id: SessionId) -> Self {
+        Self::new_with_role(session_id, SessionRole::UAC)
     }
     
     /// Associate a dialog ID with this session

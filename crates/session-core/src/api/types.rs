@@ -127,6 +127,15 @@ impl Default for SessionId {
     }
 }
 
+/// Role of a session in a SIP dialog
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionRole {
+    /// User Agent Client - the party that initiates the call (caller)
+    UAC,
+    /// User Agent Server - the party that receives the call (callee)
+    UAS,
+}
+
 /// Alias for CallSession for compatibility
 pub type Session = CallSession;
 
