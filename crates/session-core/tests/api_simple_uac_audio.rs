@@ -27,7 +27,7 @@ async fn test_audio_channel_setup() {
     println!("✓ Call initiated: {}", call.id());
     
     // Get audio channels
-    let (tx, mut rx) = call.audio_channels();
+    let (tx, mut rx) = call.audio_channels().await;
     println!("✓ Audio channels obtained");
     
     // Test sending audio
@@ -37,7 +37,7 @@ async fn test_audio_channel_setup() {
     println!("✓ Audio frame sent successfully");
     
     // Test that we can't get channels again (they're consumed)
-    // This would panic: let (_tx2, _rx2) = call.audio_channels();
+    // This would panic: let (_tx2, _rx2) = call.audio_channels().await;
     
     call.hangup().await.expect("Failed to hang up");
     client.shutdown().await.expect("Failed to shutdown client");
@@ -62,7 +62,7 @@ async fn test_audio_sending() {
         .await
         .expect("Failed to initiate call");
     
-    let (tx, _rx) = call.audio_channels();
+    let (tx, _rx) = call.audio_channels().await;
     
     // Send multiple audio frames
     println!("Sending audio frames...");
@@ -102,7 +102,7 @@ async fn test_audio_with_different_frame_sizes() {
         .await
         .expect("Failed to initiate call");
     
-    let (tx, _rx) = call.audio_channels();
+    let (tx, _rx) = call.audio_channels().await;
     
     // Test different frame sizes (typical for different codecs)
     let frame_sizes = vec![
@@ -144,7 +144,7 @@ async fn test_audio_channel_cleanup() {
         .await
         .expect("Failed to initiate call");
     
-    let (tx, mut rx) = call.audio_channels();
+    let (tx, mut rx) = call.audio_channels().await;
     
     // Clone tx for the hangup test
     let tx_clone = tx.clone();
@@ -219,7 +219,7 @@ async fn test_audio_timestamps() {
         .await
         .expect("Failed to initiate call");
     
-    let (tx, _rx) = call.audio_channels();
+    let (tx, _rx) = call.audio_channels().await;
     
     // Send frames with proper RTP timestamps
     let sample_rate = 8000;
@@ -262,7 +262,7 @@ async fn test_rapid_audio_sending() {
         .await
         .expect("Failed to initiate call");
     
-    let (tx, _rx) = call.audio_channels();
+    let (tx, _rx) = call.audio_channels().await;
     
     // Send frames as fast as possible
     let start = std::time::Instant::now();

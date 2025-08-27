@@ -33,8 +33,8 @@ async fn main() -> Result<()> {
     
     println!("✅ Call connected!");
     
-    // Get audio channels
-    let (tx, rx) = call.audio_channels()?;
+    // Get audio channels (now async - waits for media session readiness)
+    let (tx, rx) = call.audio_channels().await?;
     
     // Exchange audio (440Hz tone for Alice)
     audio_utils::exchange_audio(tx, rx, 440.0, "alice").await?;

@@ -82,7 +82,7 @@ async fn test_bridge_with_audio() {
     println!("✓ Alice called Bob: {}", call_to_bob.id());
     
     // Get audio channels for Bob's call
-    let (bob_tx, _bob_rx) = call_to_bob.audio_channels();
+    let (bob_tx, _bob_rx) = call_to_bob.audio_channels().await;
     
     // Send some audio to Bob
     for i in 0..5 {
@@ -100,7 +100,7 @@ async fn test_bridge_with_audio() {
     println!("✓ Alice called Charlie: {}", call_to_charlie.id());
     
     // Get audio channels for Charlie's call
-    let (charlie_tx, _charlie_rx) = call_to_charlie.audio_channels();
+    let (charlie_tx, _charlie_rx) = call_to_charlie.audio_channels().await;
     
     // Send some audio to Charlie
     for i in 0..5 {

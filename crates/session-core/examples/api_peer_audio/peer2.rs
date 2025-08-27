@@ -29,8 +29,8 @@ async fn main() -> Result<()> {
     
     println!("✅ Call accepted!");
     
-    // Get audio channels
-    let (tx, rx) = call.audio_channels()?;
+    // Get audio channels (now async - waits for media session readiness)
+    let (tx, rx) = call.audio_channels().await?;
     
     // Exchange audio (880Hz tone for Bob)
     audio_utils::exchange_audio(tx, rx, 880.0, "bob").await?;

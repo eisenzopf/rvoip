@@ -42,7 +42,7 @@ async fn test_real_uac_to_uas_bidirectional_audio() {
     
     // Step 4: Get audio channels from UAC
     println!("\n=== Setting up audio channels ===");
-    let (uac_audio_tx, mut uac_audio_rx) = uac_call.audio_channels();
+    let (uac_audio_tx, mut uac_audio_rx) = uac_call.audio_channels().await;
     println!("UAC: Got audio channels (tx for sending, rx for receiving)");
     
     // For now, we'll just test the UAC side since UAS simple server doesn't have get_call yet
