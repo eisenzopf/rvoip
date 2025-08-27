@@ -231,24 +231,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("Session A RTP port: {:?}", media_a.local_rtp_port);
         tracing::info!("Session B RTP port: {:?}", media_b.local_rtp_port);
         
-        // Establish bidirectional media flow
-        if let Some(port_b) = media_b.local_rtp_port {
-            let remote_addr_b = format!("127.0.0.1:{}", port_b);
-            tracing::info!("Establishing media flow from A to B: {}", remote_addr_b);
-            match coordinator_a.establish_media_flow(&session_id_a, &remote_addr_b).await {
-                Ok(_) => tracing::info!("✅ Established media flow from session A to session B"),
-                Err(e) => tracing::error!("Failed to establish media flow from A to B: {}", e),
-            }
-        }
-        
-        if let Some(port_a) = media_a.local_rtp_port {
-            let remote_addr_a = format!("127.0.0.1:{}", port_a);
-            tracing::info!("Establishing media flow from B to A: {}", remote_addr_a);
-            match coordinator_b.establish_media_flow(&session_id_b, &remote_addr_a).await {
-                Ok(_) => tracing::info!("✅ Established media flow from session B to session A"),
-                Err(e) => tracing::error!("Failed to establish media flow from B to A: {}", e),
-            }
-        }
+        // The automatic establish_media_flow in event_handler.rs handles this
+        // No need for explicit calls - they were redundant
+        tracing::info!("Media flow is established automatically by the event handler");
     } else {
         tracing::error!("Could not get media info for sessions");
     }
