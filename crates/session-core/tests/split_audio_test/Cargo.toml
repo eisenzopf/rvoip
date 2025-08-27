@@ -1,0 +1,23 @@
+[package]
+name = "split-audio-test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "peer_a"
+path = "peer_a.rs"
+
+[[bin]]
+name = "peer_b"
+path = "peer_b.rs"
+
+[workspace]
+
+[dependencies]
+rvoip-session-core = { path = "../.." }
+tokio = { version = "1", features = ["full"] }
+hound = "3.5"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+futures = "0.3"

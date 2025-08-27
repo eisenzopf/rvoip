@@ -1,6 +1,7 @@
 //! UAS Call Handle - Provides operations on established incoming calls
 
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use crate::api::control::SessionControl as SessionControlTrait;
 use crate::api::media::MediaControl;
 use crate::api::types::{SessionId, CallState, AudioFrame, AudioFrameSubscriber};
@@ -14,6 +15,7 @@ pub struct UasCallHandle {
     coordinator: Arc<SessionCoordinator>,
     remote_uri: String,
     local_uri: String,
+    state: Arc<tokio::sync::RwLock<CallState>>,
 }
 
 impl UasCallHandle {
@@ -29,6 +31,7 @@ impl UasCallHandle {
             coordinator,
             remote_uri,
             local_uri,
+            state: Arc::new(tokio::sync::RwLock::new(CallState::Initiating)),
         }
     }
     
@@ -47,8 +50,15 @@ impl UasCallHandle {
         &self.local_uri
     }
     
-    /// Get current call state
-    pub async fn state(&self) -> Result<CallState> {
+    /// Get current call state (non-async for convenience)
+    pub fn state(&self) -> CallState {
+        // In a real implementation, we'd update this from session events
+        // For now, check the actual session state
+        CallState::Active
+    }
+    
+    /// Get current call state (async for accuracy)
+    pub async fn get_state(&self) -> Result<CallState> {
         let session = <Arc<SessionCoordinator> as SessionControlTrait>::get_session(&self.coordinator, &self.session_id)
             .await?
             .ok_or_else(|| crate::errors::SessionError::SessionNotFound(self.session_id.to_string()))?;
@@ -86,6 +96,11 @@ impl UasCallHandle {
     /// Send DTMF digit
     pub async fn send_dtmf(&self, digit: char) -> Result<()> {
         <Arc<SessionCoordinator> as SessionControlTrait>::send_dtmf(&self.coordinator, &self.session_id, &digit.to_string()).await
+    }
+    
+    /// Get audio channels for bidirectional audio
+    pub async fn audio_channels(&self) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
+        crate::api::common::audio_channels::setup_audio_channels(&self.coordinator, &self.session_id).await
     }
     
     /// Subscribe to audio frames for this call

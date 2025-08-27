@@ -97,6 +97,14 @@ path = "examples/api_peer_audio/peer1.rs"
 name = "api_peer_audio_peer2"
 path = "examples/api_peer_audio/peer2.rs"
 
+[[example]]
+name = "uac"
+path = "examples/api_uac_uas/uac.rs"
+
+[[example]]
+name = "uas"
+path = "examples/api_uac_uas/uas.rs"
+
 [[bench]]
 name = "concurrent_calls_with_tones"
 path = "bench/concurrent_calls_with_tones.rs"
