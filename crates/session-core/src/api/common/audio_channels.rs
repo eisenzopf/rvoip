@@ -16,23 +16,52 @@ pub async fn setup_audio_channels(
     coordinator: &Arc<SessionCoordinator>,
     session_id: &SessionId,
 ) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
-    // Create channels for bidirectional audio
-    let (tx_to_remote, mut rx_from_app) = mpsc::channel::<AudioFrame>(100);
-    let (tx_to_app, rx_from_remote) = mpsc::channel::<AudioFrame>(100);
+    // Wait for media session to be fully ready
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    
+    // Create channels for bidirectional audio with larger buffers
+    let (tx_to_remote, mut rx_from_app) = mpsc::channel::<AudioFrame>(1000);
+    let (tx_to_app, rx_from_remote) = mpsc::channel::<AudioFrame>(1000);
     
     // Subscribe to incoming audio from remote
     let mut audio_subscriber = MediaControl::subscribe_to_audio_frames(coordinator, session_id).await?;
     
-    // Task to forward incoming audio to the application
+    // Task to forward incoming audio to the application - made resilient
     let session_id_clone = session_id.clone();
     tokio::spawn(async move {
-        tracing::debug!("Audio receiver task started for session {}", session_id_clone);
-        while let Some(frame) = audio_subscriber.recv().await {
-            if tx_to_app.send(frame).await.is_err() {
-                tracing::debug!("Audio receiver task ended for session {} - channel closed", session_id_clone);
-                break;
+        tracing::info!("Audio receiver task started for session {}", session_id_clone);
+        let mut frame_count = 0;
+        let mut consecutive_failures = 0;
+        
+        loop {
+            match tokio::time::timeout(tokio::time::Duration::from_secs(1), audio_subscriber.recv()).await {
+                Ok(Some(frame)) => {
+                    frame_count += 1;
+                    consecutive_failures = 0;
+                    if frame_count <= 5 || frame_count % 50 == 0 {
+                        tracing::debug!("Received frame #{} for session {}", frame_count, session_id_clone);
+                    }
+                    if tx_to_app.send(frame).await.is_err() {
+                        tracing::info!("Audio receiver ended - app closed channel after {} frames", frame_count);
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    tracing::warn!("Audio subscriber closed after {} frames for session {}", frame_count, session_id_clone);
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - normal during silence or setup
+                    consecutive_failures += 1;
+                    if consecutive_failures > 30 {  // 30 seconds of no audio
+                        tracing::info!("Audio receiver timeout after {} frames for session {}", frame_count, session_id_clone);
+                        break;
+                    }
+                    // Continue waiting for frames
+                }
             }
         }
+        tracing::info!("Audio receiver task completed for session {} - total frames: {}", session_id_clone, frame_count);
     });
     
     // Task to forward outgoing audio from the application
