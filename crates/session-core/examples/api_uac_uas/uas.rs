@@ -165,13 +165,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     tracing::info!("🎵 Sending {} frames of 880Hz tone", total_frames);
     
-    // Spawn receiver task
+    // Spawn receiver task - made resilient to timeouts
     let capture_clone = capture.clone();
     let receiver = tokio::spawn(async move {
         let mut count = 0;
-        while let Ok(Some(frame)) = timeout(Duration::from_millis(100), audio_rx.recv()).await {
-            capture_clone.lock().await.add_frame(&frame);
-            count += 1;
+        let mut consecutive_timeouts = 0;
+        
+        loop {
+            match timeout(Duration::from_millis(100), audio_rx.recv()).await {
+                Ok(Some(frame)) => {
+                    capture_clone.lock().await.add_frame(&frame);
+                    count += 1;
+                    consecutive_timeouts = 0;
+                }
+                Ok(None) => {
+                    // Channel closed
+                    tracing::info!("UAS receiver channel closed after {} frames", count);
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - keep trying during call setup
+                    consecutive_timeouts += 1;
+                    if consecutive_timeouts > 60 {  // 6 seconds of no audio
+                        tracing::info!("UAS receiver timeout after {} frames", count);
+                        break;
+                    }
+                }
+            }
         }
         tracing::info!("UAS received {} frames", count);
     });
