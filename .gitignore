@@ -36,6 +36,7 @@ Cargo.backup
 *.wav
 # Test output directories
 crates/sip-client/tests/full_roundtrip/
+*.log
 
 ## Tool
 .valgrindrc

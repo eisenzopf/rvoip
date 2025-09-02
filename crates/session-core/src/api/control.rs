@@ -180,6 +180,33 @@ use crate::manager::events::SessionEvent;
 use crate::session::Session;
 use std::sync::Arc;
 
+/// Parse IP and port from SDP
+fn parse_sdp_address(sdp: &str) -> Option<String> {
+    let mut ip = None;
+    let mut port = None;
+    
+    for line in sdp.lines() {
+        if line.starts_with("c=") && ip.is_none() {
+            // Parse connection line: c=IN IP4 192.168.1.1
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 4 {
+                ip = Some(parts[3].to_string());
+            }
+        } else if line.starts_with("m=audio ") && port.is_none() {
+            // Parse media line: m=audio 5004 RTP/AVP 0
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                port = parts[1].parse::<u16>().ok();
+            }
+        }
+    }
+    
+    match (ip, port) {
+        (Some(ip), Some(port)) => Some(format!("{}:{}", ip, port)),
+        _ => None,
+    }
+}
+
 /// Main session control trait for managing SIP sessions
 /// 
 /// This trait provides the primary interface for call control operations.
@@ -918,7 +945,7 @@ impl SessionControl for Arc<SessionCoordinator> {
         let final_sdp_answer = if call.sdp.is_some() && sdp_answer.is_none() {
             tracing::info!("Generating SDP answer for call {} because no answer was provided", call.id);
             // Use the public generate_sdp_answer function which calls negotiate_sdp_as_uas
-            // This ensures the MediaNegotiated event is published
+            // This ensures the MediaNegotiated event is published and negotiated config is stored
             match generate_sdp_answer(self, &call.id, call.sdp.as_ref().unwrap()).await {
                 Ok(answer) => {
                     tracing::info!("Generated SDP answer for call {}", call.id);
@@ -940,6 +967,16 @@ impl SessionControl for Arc<SessionCoordinator> {
         
         // Update session state to Active
         self.registry.update_session_state(&call.id, CallState::Active).await?;
+        
+        // CRITICAL: Start media session for UAS if not already started
+        // This ensures the media channels are available
+        tracing::info!("🎬 Starting media session for UAS {}", call.id);
+        if let Err(e) = self.start_media_session(&call.id).await {
+            tracing::warn!("Failed to start media session for UAS {}: {}", call.id, e);
+        }
+        
+        // NOTE: MediaFlowEstablished will be published when rfc_compliant_media_creation_uas
+        // event is handled, ensuring it happens after the SimpleCall subscribes to events
         
         // Emit state change event
         let _ = self.publish_event(SessionEvent::StateChanged {

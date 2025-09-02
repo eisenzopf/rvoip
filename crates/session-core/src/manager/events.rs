@@ -132,6 +132,28 @@ pub enum SessionEvent {
         codec: String,
     },
     
+    /// Bidirectional media flow is confirmed established
+    MediaFlowEstablished {
+        session_id: SessionId,
+        local_addr: String,
+        remote_addr: String,
+        direction: MediaFlowDirection,
+    },
+    
+    /// First audio frame received from remote
+    FirstAudioFrameReceived {
+        session_id: SessionId,
+        timestamp: chrono::DateTime<chrono::Utc>,
+        ssrc: u32,
+    },
+    
+    /// Audio channels are ready for use
+    AudioChannelsReady {
+        session_id: SessionId,
+        can_send: bool,
+        can_receive: bool,
+    },
+    
     /// DTMF digits received
     DtmfReceived {
         session_id: SessionId,

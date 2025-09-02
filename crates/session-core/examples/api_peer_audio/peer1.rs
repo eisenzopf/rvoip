@@ -8,6 +8,12 @@ mod audio_utils;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive(tracing::Level::INFO.into()))
+        .init();
+    
     println!("📞 Alice starting on port 5060...");
     
     // Create peer
@@ -26,12 +32,8 @@ async fn main() -> Result<()> {
         .port(5061)
         .await?;
     
-    // Wait for call to be active
-    while !call.is_active().await {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
-    
-    println!("✅ Call connected!");
+    // The call will automatically wait for Active state when getting audio channels
+    println!("⏳ Waiting for call to connect...");
     
     // Get audio channels (now async - waits for media session readiness)
     let (tx, rx) = call.audio_channels().await?;

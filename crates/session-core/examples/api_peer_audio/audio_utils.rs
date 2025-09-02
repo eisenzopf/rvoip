@@ -125,13 +125,32 @@ async fn receive_audio(
     expected: usize,
 ) {
     let mut received = 0;
+    let mut consecutive_timeouts = 0;
+    let max_timeouts = 30; // Allow 3 seconds of no data before giving up
     
-    while let Ok(Some(frame)) = timeout(Duration::from_millis(100), rx.recv()).await {
-        recording.lock().await.extend_from_slice(&frame.samples);
-        received += frame.samples.len();
-        
-        if received >= expected {
-            break;
+    loop {
+        match timeout(Duration::from_millis(100), rx.recv()).await {
+            Ok(Some(frame)) => {
+                recording.lock().await.extend_from_slice(&frame.samples);
+                received += frame.samples.len();
+                consecutive_timeouts = 0; // Reset timeout counter on successful receive
+                
+                if received >= expected {
+                    break;
+                }
+            }
+            Ok(None) => {
+                // Channel closed
+                break;
+            }
+            Err(_) => {
+                // Timeout - but keep trying for a while
+                consecutive_timeouts += 1;
+                if consecutive_timeouts >= max_timeouts {
+                    println!("⏱️ Receive timeout after {} consecutive timeouts", consecutive_timeouts);
+                    break;
+                }
+            }
         }
     }
     

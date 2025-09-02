@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn, error};
 use bytes::Bytes;
 
 use crate::error::{Error, Result, CodecError};
@@ -314,19 +314,23 @@ impl MediaSessionController {
     /// # }
     /// ```
     pub async fn encode_and_send_audio_frame(&self, dialog_id: &DialogId, pcm_samples: Vec<i16>, timestamp: u32) -> Result<()> {
+        info!("🎯 encode_and_send_audio_frame called for dialog: {} with {} samples", dialog_id, pcm_samples.len());
+        
         // Check if transmission is enabled and if audio is muted
         let (is_muted, is_enabled) = {
             let rtp_sessions = self.rtp_sessions.read().await;
             if let Some(wrapper) = rtp_sessions.get(dialog_id) {
+                info!("✅ Found RTP session for dialog: {}, muted={}, enabled={}", dialog_id, wrapper.is_muted, wrapper.transmission_enabled);
                 (wrapper.is_muted, wrapper.transmission_enabled)
             } else {
+                warn!("⚠️ No RTP session found for dialog: {} - using defaults", dialog_id);
                 (false, true)
             }
         };
         
         if !is_enabled {
             // Transmission is disabled, don't send anything
-            debug!("🔇 Audio transmission disabled for dialog: {}, dropping frame", dialog_id);
+            info!("🔇 Audio transmission disabled for dialog: {}, dropping frame", dialog_id);
             return Ok(());
         }
         
@@ -341,14 +345,21 @@ impl MediaSessionController {
         // Get session info to determine codec
         let codec_payload_type = {
             let sessions = self.sessions.read().await;
+            info!("🔍 Looking for session for dialog: {}", dialog_id);
             let session = sessions.get(dialog_id)
-                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+                .ok_or_else(|| {
+                    error!("❌ Session not found for dialog: {}", dialog_id);
+                    Error::session_not_found(dialog_id.as_str())
+                })?;
+            info!("✅ Found session for dialog: {}", dialog_id);
             
             // Determine payload type from configured codec
-            session.config.preferred_codec
+            let pt = session.config.preferred_codec
                 .as_ref()
                 .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
-                .unwrap_or(0) // Default to PCMU
+                .unwrap_or(0); // Default to PCMU
+            info!("📝 Using payload type {} for dialog: {}", pt, dialog_id);
+            pt
         };
         
         // Create AudioFrame for codec interface
@@ -380,9 +391,10 @@ impl MediaSessionController {
         };
         
         // Send the encoded packet via RTP
+        info!("📡 About to send RTP packet for dialog: {} with {} bytes payload", dialog_id, encoded_payload.len());
         self.send_rtp_packet(dialog_id, encoded_payload, timestamp).await?;
         
-        debug!("✅ Encoded and sent audio frame for dialog: {} (codec PT: {}, timestamp: {})", 
+        info!("✅ Encoded and sent audio frame for dialog: {} (codec PT: {}, timestamp: {})", 
                dialog_id, codec_payload_type, timestamp);
         Ok(())
     }
