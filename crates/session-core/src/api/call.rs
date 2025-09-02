@@ -12,6 +12,7 @@ use crate::api::media::MediaControl;
 use crate::api::common::setup_audio_channels;
 use crate::coordinator::SessionCoordinator;
 use crate::errors::{Result, SessionError};
+use crate::manager::events::{SessionEvent, MediaFlowDirection};
 
 /// A simple call handle with all operations
 /// 
@@ -145,6 +146,7 @@ impl SimpleCall {
     /// # Errors
     /// Returns an error if the channels have already been taken or if media session setup fails.
     pub async fn audio_channels(&mut self) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
+        tracing::info!("audio_channels() called for session {}", self.session_id);
         // Store initial state to detect if channels were previously set up
         let initially_had_channels = self.has_audio_channels_internal();
         
@@ -154,6 +156,15 @@ impl SimpleCall {
             if initially_had_channels {
                 return Err(SessionError::MediaError("Audio channels already taken".to_string()));
             }
+            
+            // Subscribe to events FIRST, before checking anything else
+            // This ensures we don't miss the MediaFlowEstablished event
+            let mut event_rx = self.coordinator.event_processor.subscribe()
+                .await
+                .map_err(|e| SessionError::Other(format!("Failed to subscribe to events: {}", e)))?;
+            
+            tracing::info!("🎯 SimpleCall subscribed to events for session {}", 
+                self.session_id);
             
             // Wait for media session to be ready (with timeout)
             let timeout_duration = Duration::from_secs(5);
@@ -168,14 +179,52 @@ impl SimpleCall {
                 };
                 
                 if session_active {
+                    tracing::info!("Session {} is active, checking media info", self.session_id);
                     if let Ok(Some(media_info)) = self.coordinator.media_manager.get_media_info(&self.session_id).await {
                         // Check if we have remote SDP (which means media flow has been established)
                         // For UAC, we need to wait until we get the remote SDP answer
                         if media_info.remote_sdp.is_some() {
                             // All conditions met: session is Active, media session exists, and remote SDP is known
-                            // Wait for RTP receivers to initialize (matching integration test)
-                            tracing::debug!("Session active, media ready, and remote SDP known, waiting for RTP receivers to initialize...");
-                            tokio::time::sleep(Duration::from_secs(2)).await;
+                            // Wait for MediaFlowEstablished event
+                            tracing::info!("Session {} active, media ready, and remote SDP known, waiting for media flow event...", self.session_id);
+                            
+                            // Wait for MediaFlowEstablished event with short timeout
+                            let event_timeout = Duration::from_secs(3);
+                            let event_start = Instant::now();
+                            let mut media_flow_established = false;
+                            
+                            while event_start.elapsed() < event_timeout {
+                                let result = tokio::time::timeout(Duration::from_millis(100), event_rx.receive()).await;
+                                
+                                match result {
+                                    Ok(Ok(event)) => {
+                                        tracing::info!("🔍 SimpleCall {} received event: {:?}", self.session_id, event);
+                                        if let SessionEvent::MediaFlowEstablished { session_id, direction, .. } = event {
+                                            tracing::info!("🎯 MediaFlowEstablished event: session_id={}, my_session={}, direction={:?}", 
+                                                session_id, self.session_id, direction);
+                                            if session_id == self.session_id && direction == MediaFlowDirection::Both {
+                                                tracing::info!("✅ Received MediaFlowEstablished event for {}", self.session_id);
+                                                media_flow_established = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Ok(Err(e)) => {
+                                        tracing::debug!("Event receive error: {:?}", e);
+                                        continue;
+                                    }
+                                    Err(_) => {
+                                        // Timeout waiting for event
+                                        continue;
+                                    }
+                                }
+                            }
+                            
+                            if !media_flow_established {
+                                tracing::error!("MediaFlowEstablished event not received after {}ms timeout - this means bidirectional flow is NOT confirmed!", event_timeout.as_millis());
+                                // DO NOT fall back to timer - the event system must work
+                                return Err(SessionError::MediaError("Media flow not established - bidirectional audio not confirmed".to_string()));
+                            }
                             
                             // Now set up channels
                             let (audio_tx, audio_rx) = setup_audio_channels(
@@ -363,6 +412,97 @@ impl SimpleCall {
     pub async fn packet_loss_rate(&self) -> Result<f32> {
         use crate::api::common::call_ops;
         call_ops::get_packet_loss_rate(&self.coordinator, &self.session_id).await
+    }
+    
+    /// Wait for media to be ready without timers
+    /// 
+    /// This method waits for the MediaFlowEstablished event to be published,
+    /// indicating that bidirectional media flow has been confirmed.
+    pub async fn wait_for_media(&mut self) -> Result<()> {
+        // Subscribe to events for this session
+        let mut event_rx = self.coordinator.event_processor.subscribe()
+            .await
+            .map_err(|e| SessionError::Other(format!("Failed to subscribe to events: {}", e)))?;
+        
+        // Wait for MediaFlowEstablished event
+        let timeout_duration = Duration::from_secs(10);
+        let start = Instant::now();
+        
+        while start.elapsed() < timeout_duration {
+            match tokio::time::timeout(Duration::from_millis(100), event_rx.receive()).await {
+                Ok(Ok(event)) => {
+                    match event {
+                        SessionEvent::MediaFlowEstablished { session_id, direction, .. } => {
+                            if session_id == self.session_id && direction == MediaFlowDirection::Both {
+                                tracing::debug!("Media flow established for {}", self.session_id);
+                                return Ok(());
+                            }
+                        }
+                        SessionEvent::StateChanged { session_id, new_state: CallState::Failed(reason), .. } => {
+                            if session_id == self.session_id {
+                                return Err(SessionError::Other(reason));
+                            }
+                        }
+                        _ => continue,
+                    }
+                }
+                _ => continue,
+            }
+        }
+        
+        Err(SessionError::Timeout("Media setup timeout".into()))
+    }
+    
+    /// Get audio channels when ready (event-based)
+    /// 
+    /// This method waits for media to be ready before returning the audio channels,
+    /// ensuring that the channels are fully established before use.
+    pub async fn audio_channels_when_ready(&mut self) 
+        -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> 
+    {
+        // Wait for media to be ready
+        self.wait_for_media().await?;
+        
+        // Now safe to get channels
+        self.audio_channels().await
+    }
+    
+    /// Wait for a specific call state
+    /// 
+    /// This method waits for the call to reach a specific state.
+    pub async fn wait_for_state(&mut self, target_state: CallState) -> Result<()> {
+        // Subscribe to events
+        let mut event_rx = self.coordinator.event_processor.subscribe()
+            .await
+            .map_err(|e| SessionError::Other(format!("Failed to subscribe to events: {}", e)))?;
+        
+        // Check if already in target state
+        if self.state().await == target_state {
+            return Ok(());
+        }
+        
+        // Wait for state change event
+        let timeout_duration = Duration::from_secs(30);
+        let start = Instant::now();
+        
+        while start.elapsed() < timeout_duration {
+            match tokio::time::timeout(Duration::from_millis(100), event_rx.receive()).await {
+                Ok(Ok(event)) => {
+                    if let SessionEvent::StateChanged { session_id, new_state, .. } = event {
+                        if session_id == self.session_id {
+                            if new_state == target_state {
+                                return Ok(());
+                            } else if matches!(new_state, CallState::Failed(_) | CallState::Terminated) {
+                                return Err(SessionError::Other(format!("Call ended with state: {:?}", new_state)));
+                            }
+                        }
+                    }
+                }
+                _ => continue,
+            }
+        }
+        
+        Err(SessionError::Timeout(format!("Timeout waiting for state: {:?}", target_state)))
     }
     
     /// Get call quality score (MOS - Mean Opinion Score)

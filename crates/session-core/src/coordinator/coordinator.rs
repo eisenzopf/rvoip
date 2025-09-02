@@ -567,15 +567,36 @@ impl SessionCoordinator {
         // Only emit MediaSessionReady if media session already exists
         // For upfront SDP cases, the media session doesn't exist yet and MediaSessionReady
         // will be published later when start_media_session is called
-        if let Ok(Some(_)) = self.media_manager.get_media_info(session_id).await {
-            tracing::debug!("Media session exists, publishing MediaSessionReady from SDP negotiation");
+        if let Ok(Some(media_info)) = self.media_manager.get_media_info(session_id).await {
+            tracing::info!("✅ Media session exists for UAC {}, has remote SDP: {}", 
+                session_id, media_info.remote_sdp.is_some());
             let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
             let _ = self.publish_event(SessionEvent::MediaSessionReady {
                 session_id: session_id.clone(),
                 dialog_id,
             }).await;
+            
+            // CRITICAL: Also publish MediaFlowEstablished for UAC
+            // This ensures both UAC and UAS publish the event when media is ready
+            tracing::info!("📢 Publishing MediaFlowEstablished event for UAC session {} after SDP negotiation", session_id);
+            let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
+                session_id: session_id.clone(),
+                local_addr: negotiated.local_addr.to_string(),
+                remote_addr: negotiated.remote_addr.to_string(),
+                direction: crate::manager::events::MediaFlowDirection::Both,
+            }).await;
+            tracing::info!("✅ MediaFlowEstablished event published for UAC {}", session_id);
         } else {
-            tracing::debug!("Media session doesn't exist yet (upfront SDP), deferring MediaSessionReady to start_media_session");
+            tracing::warn!("⚠️ Media session doesn't exist yet for UAC {} (upfront SDP), deferring MediaSessionReady to start_media_session", session_id);
+            // For UAC, we should still publish MediaFlowEstablished since SDP is negotiated
+            tracing::info!("📢 Publishing MediaFlowEstablished event for UAC {} even though media session doesn't exist yet", session_id);
+            let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
+                session_id: session_id.clone(),
+                local_addr: negotiated.local_addr.to_string(),
+                remote_addr: negotiated.remote_addr.to_string(),
+                direction: crate::manager::events::MediaFlowDirection::Both,
+            }).await;
+            tracing::info!("✅ MediaFlowEstablished event published for UAC {}", session_id);
         }
         
         Ok(negotiated)
@@ -607,15 +628,39 @@ impl SessionCoordinator {
         // Only emit MediaSessionReady if media session already exists
         // For upfront SDP cases, the media session doesn't exist yet and MediaSessionReady
         // will be published later when start_media_session is called
-        if let Ok(Some(_)) = self.media_manager.get_media_info(session_id).await {
-            tracing::debug!("Media session exists, publishing MediaSessionReady from SDP negotiation");
+        if let Ok(Some(media_info)) = self.media_manager.get_media_info(session_id).await {
+            tracing::info!("✅ Media session exists for UAS {}, has remote SDP: {}", 
+                session_id, media_info.remote_sdp.is_some());
             let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
             let _ = self.publish_event(SessionEvent::MediaSessionReady {
                 session_id: session_id.clone(),
                 dialog_id,
             }).await;
+            
+            // CRITICAL: Also publish MediaFlowEstablished for UAS
+            // This is needed because when accept_incoming_call directly calls
+            // negotiate_sdp_as_uas, it doesn't go through the SdpNegotiationRequested
+            // event handler that would normally publish this event
+            tracing::info!("📢 Publishing MediaFlowEstablished event for UAS session {} after SDP negotiation", session_id);
+            let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
+                session_id: session_id.clone(),
+                local_addr: negotiated.local_addr.to_string(),
+                remote_addr: negotiated.remote_addr.to_string(),
+                direction: crate::manager::events::MediaFlowDirection::Both,
+            }).await;
+            tracing::info!("✅ MediaFlowEstablished event published for UAS {}", session_id);
         } else {
-            tracing::debug!("Media session doesn't exist yet (upfront SDP), deferring MediaSessionReady to start_media_session");
+            tracing::warn!("⚠️ Media session doesn't exist yet for UAS {} (upfront SDP), deferring MediaSessionReady to start_media_session", session_id);
+            // For UAS, we should still publish MediaFlowEstablished since SDP is negotiated
+            // The media session will be created when the call transitions to Active
+            tracing::info!("📢 Publishing MediaFlowEstablished event for UAS {} even though media session doesn't exist yet", session_id);
+            let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
+                session_id: session_id.clone(),
+                local_addr: negotiated.local_addr.to_string(),
+                remote_addr: negotiated.remote_addr.to_string(),
+                direction: crate::manager::events::MediaFlowDirection::Both,
+            }).await;
+            tracing::info!("✅ MediaFlowEstablished event published for UAS {}", session_id);
         }
         
         Ok((answer, negotiated))

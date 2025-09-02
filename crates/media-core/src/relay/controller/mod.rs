@@ -397,7 +397,7 @@ impl MediaSessionController {
             remote_addr: config.remote_addr,
             created_at: std::time::Instant::now(),
             audio_transmitter: None,
-            transmission_enabled: false,
+            transmission_enabled: true,  // Enable transmission by default
             is_muted: false,
         };
         
@@ -659,7 +659,7 @@ impl MediaSessionController {
     pub async fn set_audio_frame_callback(&self, dialog_id: DialogId, sender: mpsc::Sender<AudioFrame>) -> Result<()> {
         let mut callbacks = self.audio_frame_callbacks.write().await;
         callbacks.insert(dialog_id.clone(), sender);
-        debug!("🔊 Set audio frame callback for dialog: {}", dialog_id);
+        info!("🔊 Set audio frame callback for dialog: {}", dialog_id);
         Ok(())
     }
     
@@ -783,7 +783,15 @@ impl MediaSessionController {
                                         }
                                     }
                                 } else {
-                                    debug!("No audio frame callback registered yet for dialog {}", dialog_id);
+                                    // Log only once per dialog to avoid spam
+                                    static LOGGED_MISSING: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashSet<String>>> = 
+                                        once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+                                    
+                                    let mut logged = LOGGED_MISSING.lock().unwrap();
+                                    if !logged.contains(dialog_id.as_str()) {
+                                        info!("⚠️ No audio frame callback registered yet for dialog {}", dialog_id);
+                                        logged.insert(dialog_id.to_string());
+                                    }
                                 }
                             }
                             rtp_core::session::RtpSessionEvent::NewStreamDetected { ssrc, .. } => {

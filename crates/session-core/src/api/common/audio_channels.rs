@@ -16,8 +16,7 @@ pub async fn setup_audio_channels(
     coordinator: &Arc<SessionCoordinator>,
     session_id: &SessionId,
 ) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
-    // Wait for media session to be fully ready
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Media session should already be ready when this is called
     
     // Create channels for bidirectional audio with larger buffers
     let (tx_to_remote, mut rx_from_app) = mpsc::channel::<AudioFrame>(1000);

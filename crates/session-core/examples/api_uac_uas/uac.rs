@@ -102,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     tracing::info!("✅ UAC client created");
     
-    // Give UAS time to start
+    // Give UAS time to start (this is fine - waiting for another process)
     sleep(Duration::from_secs(2)).await;
     
     // Make the call
@@ -111,19 +111,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     tracing::info!("✅ Call initiated: {}", call.id());
     
-    // Wait for call to be active
-    loop {
-        if call.state().await == CallState::Active {
-            tracing::info!("✅ Call is active");
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
+    // The call will automatically wait for Active state and media when getting audio channels
+    tracing::info!("⏳ Waiting for call to be active and media to be ready...");
     
-    // Wait for media to be ready
-    sleep(Duration::from_secs(2)).await;
-    
-    // Set up audio channels
+    // Set up audio channels (waits for call to be active and media ready)
     tracing::info!("📻 Setting up audio channels");
     let (audio_tx, mut audio_rx) = call.audio_channels();
     
