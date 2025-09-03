@@ -1,9 +1,11 @@
 pub mod types;
 pub mod builder;
 pub mod tables;
+pub mod yaml_loader;
 
 pub use types::*;
 pub use builder::StateTableBuilder;
+pub use yaml_loader::YamlTableLoader;
 
 use lazy_static::lazy_static;
 use std::sync::Arc;
@@ -15,6 +17,17 @@ lazy_static! {
 
 /// Build the complete master state table
 fn build_master_table() -> MasterStateTable {
+    // Try to load from YAML first
+    if let Ok(table) = YamlTableLoader::load_default() {
+        // Validate the table
+        if let Err(errors) = table.validate() {
+            panic!("Invalid YAML state table: {:?}", errors);
+        }
+        return table;
+    }
+    
+    // Fallback to hardcoded transitions if YAML fails
+    tracing::warn!("Failed to load YAML state table, using hardcoded transitions");
     let mut builder = StateTableBuilder::new();
     
     // Add UAC transitions

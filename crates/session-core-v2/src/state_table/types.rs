@@ -46,8 +46,9 @@ pub struct StateKey {
 /// Role in the call (caller or receiver)
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Role {
-    UAC, // User Agent Client (caller)
-    UAS, // User Agent Server (receiver)
+    UAC,  // User Agent Client (caller)
+    UAS,  // User Agent Server (receiver)
+    Both, // Applies to both roles
 }
 
 /// Call states
@@ -56,8 +57,10 @@ pub enum CallState {
     Idle,
     Initiating,
     Ringing,
+    EarlyMedia,
     Active,
     OnHold,
+    Resuming,
     Bridged,
     Transferring,
     Terminating,
@@ -73,6 +76,7 @@ pub enum FailureReason {
     NetworkError,
     MediaError,
     ProtocolError,
+    Other,
 }
 
 /// Event types that trigger transitions
@@ -88,7 +92,6 @@ pub enum EventType {
     ResumeCall,
     BlindTransfer { target: String },
     AttendedTransfer { target: String },
-    BridgeSessions { other_session: SessionId },
     
     // Media control events
     PlayAudio { file: String },
@@ -99,10 +102,19 @@ pub enum EventType {
     // Dialog events (from dialog-core)
     DialogInvite,
     Dialog180Ringing,
+    Dialog183SessionProgress,
     Dialog200OK,
     DialogACK,
     DialogBYE,
     DialogCANCEL,
+    DialogREFER,
+    DialogReINVITE,
+    Dialog4xxFailure(u16),
+    Dialog5xxFailure(u16),
+    Dialog6xxFailure(u16),
+    Dialog487RequestTerminated,
+    DialogTimeout,
+    DialogTerminated,
     DialogError(String),
     
     // Media events (from media-core)
@@ -118,6 +130,24 @@ pub enum EventType {
     InternalACKSent,
     InternalUASMedia,
     InternalCleanupComplete,
+    CheckConditions,
+    PublishCallEstablished,
+    
+    // Bridge/Transfer events
+    BridgeSessions { other_session: SessionId },
+    UnbridgeSessions,
+    InitiateTransfer { target: String },
+    TransferAccepted,
+    TransferProgress,
+    TransferComplete,
+    TransferFailed,
+    
+    // Session modification
+    ModifySession,
+    
+    // Cleanup events
+    CleanupComplete,
+    Reset,
 }
 
 /// Transition definition - what happens when an event occurs in a state
@@ -149,6 +179,8 @@ pub enum Guard {
     DialogEstablished,
     MediaReady,
     SDPNegotiated,
+    IsIdle,
+    InActiveCall,
     Custom(String),
 }
 
@@ -247,6 +279,7 @@ pub enum EventTemplate {
     IncomingCall,
     CallEstablished,
     CallTerminated,
+    CallFailed,
     MediaFlowEstablished,
     MediaNegotiated,
     MediaSessionReady,
@@ -257,6 +290,9 @@ pub enum EventTemplate {
 pub struct MasterStateTable {
     transitions: HashMap<StateKey, Transition>,
 }
+
+/// Type alias for external use
+pub type StateTable = MasterStateTable;
 
 impl MasterStateTable {
     pub fn new() -> Self {
@@ -273,16 +309,26 @@ impl MasterStateTable {
         self.transitions.get(key)
     }
     
+    pub fn get_transition(&self, key: &StateKey) -> Option<&Transition> {
+        self.transitions.get(key)
+    }
+    
+    pub fn has_transition(&self, key: &StateKey) -> bool {
+        self.transitions.contains_key(key)
+    }
+    
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         
-        // Check for orphan states
+        // Check for orphan states (updated with new states)
         for state in [
             CallState::Idle,
             CallState::Initiating,
             CallState::Ringing,
+            CallState::EarlyMedia,
             CallState::Active,
             CallState::OnHold,
+            CallState::Resuming,
             CallState::Bridged,
             CallState::Transferring,
             CallState::Terminating,

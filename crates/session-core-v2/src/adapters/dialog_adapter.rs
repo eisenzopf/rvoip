@@ -44,6 +44,21 @@ pub struct DialogAdapter {
 }
 
 impl DialogAdapter {
+    /// Create a mock dialog adapter for testing
+    pub fn new_mock() -> Self {
+        let (event_tx, _) = mpsc::channel(100);
+        Self {
+            dialog_api: Arc::new(UnifiedDialogApi::new()),
+            event_tx,
+            store: Arc::new(SessionStore::new()),
+            session_to_dialog: Arc::new(DashMap::new()),
+            dialog_to_session: Arc::new(DashMap::new()),
+            callid_to_session: Arc::new(DashMap::new()),
+            incoming_requests: Arc::new(DashMap::new()),
+            outgoing_invite_tx: Arc::new(DashMap::new()),
+        }
+    }
+    
     pub fn new(
         dialog_api: Arc<UnifiedDialogApi>,
         event_tx: mpsc::Sender<(SessionId, EventType)>,
