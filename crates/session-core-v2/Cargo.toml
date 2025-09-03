@@ -1,0 +1,68 @@
+[package]
+name = "rvoip-session-core-v2"
+version = "0.1.0"
+edition = "2021"
+authors = ["RVoIP Contributors"]
+description = "State table-based session coordination layer for RVoIP"
+license = "MIT OR Apache-2.0"
+
+[[example]]
+name = "peer_to_peer"
+path = "examples/peer_to_peer.rs"
+
+[[example]]
+name = "b2bua"
+path = "examples/b2bua.rs"
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+tracing = "0.1"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# RVoIP crates - using actual package names
+infra-common = { path = "../infra-common" }
+rvoip-dialog-core = { path = "../dialog-core" }
+rvoip-media-core = { path = "../media-core" }
+rvoip-sip-core = { path = "../sip-core" }
+rvoip-rtp-core = { path = "../rtp-core" }
+
+# State management
+lazy_static = "1.4"
+once_cell = "1.19"
+arc-swap = "1.7"
+
+# Collections
+indexmap = "2.2"
+dashmap = "5.5"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Audio handling (for API compatibility)
+hound = "3.5"
+bytes = "1.5"
+
+# Utility
+uuid = { version = "1.4", features = ["v4"] }
+rand = "0.8"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+test-log = "0.2"
+env_logger = "0.11"
+tracing-subscriber = "0.3"
+
+[features]
+default = []
+event-history = []
+persistence = ["sqlx"]
+
+[dependencies.sqlx]
+version = "0.7"
+optional = true
+features = ["sqlite", "runtime-tokio"]
