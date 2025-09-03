@@ -1,10 +1,10 @@
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use crate::state_table::{SessionId, DialogId, MediaSessionId, CallId};
 
 use crate::state_table::{Role, CallState, ConditionUpdates};
-use super::history::SessionHistory;
+use super::history::{SessionHistory, HistoryConfig, TransitionRecord};
 
 /// Negotiated media configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,20 +91,42 @@ impl SessionState {
     }
     
     /// Create with history tracking enabled
-    pub fn with_history(session_id: SessionId, role: Role) -> Self {
+    pub fn with_history(session_id: SessionId, role: Role, config: HistoryConfig) -> Self {
         let mut state = Self::new(session_id, role);
-        state.history = Some(SessionHistory::new(100));
+        state.history = Some(SessionHistory::new(config));
         state
+    }
+    
+    /// Record a transition in history
+    pub fn record_transition(&mut self, record: TransitionRecord) {
+        if let Some(ref mut history) = self.history {
+            history.record_transition(record);
+        }
     }
     
     /// Transition to a new state
     pub fn transition_to(&mut self, new_state: CallState) {
         if let Some(ref mut history) = self.history {
-            history.record_transition(
-                self.call_state,
-                new_state,
-                Instant::now(),
-            );
+            use crate::session_store::TransitionRecord;
+            use crate::state_table::EventType;
+            let now = Instant::now();
+            let record = TransitionRecord {
+                timestamp: now,
+                timestamp_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                sequence: 0, // Will be set by history
+                from_state: self.call_state,
+                event: EventType::MediaEvent("transition_to".to_string()),
+                to_state: Some(new_state),
+                guards_evaluated: vec![],
+                actions_executed: vec![],
+                duration_ms: 0,
+                errors: vec![],
+                events_published: vec![],
+            };
+            history.record_transition(record);
         }
         self.call_state = new_state;
         self.entered_state_at = Instant::now();

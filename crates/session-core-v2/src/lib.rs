@@ -9,13 +9,26 @@ pub mod errors;
 // Re-export main types from API
 pub use api::{
     UnifiedSession, UnifiedCoordinator, SessionEvent, SessionBuilder,
-    SessionId, CallState, Role, EventType,
-    Result, SessionError,
 };
 
+// Re-export from state_table for correct types
+pub use state_table::types::{
+    SessionId, CallState, Role, EventType,
+};
+
+// Re-export error types
+pub use errors::{Result, SessionError};
+
 // Re-export internal types for advanced usage
-pub use session_store::{SessionStore, SessionState};
+pub use session_store::{
+    SessionStore, SessionState, NegotiatedConfig,
+    SessionHistory, HistoryConfig, TransitionRecord, GuardResult, ActionRecord,
+    SessionInspection, PossibleTransition, SessionHealth, ResourceUsage,
+    CleanupConfig, CleanupStats, ResourceLimits,
+};
 pub use state_machine::StateMachine;
+pub use state_table::{Guard, Action};
+pub use adapters::{DialogAdapter, MediaAdapter};
 
 /// Session-core v2 with state table architecture
 /// 

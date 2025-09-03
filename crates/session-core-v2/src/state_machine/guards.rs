@@ -5,6 +5,8 @@ use crate::{
 
 /// Check if a guard condition is satisfied
 pub async fn check_guard(guard: &Guard, session: &SessionState) -> bool {
+    use crate::state_table::CallState;
+    
     match guard {
         Guard::HasLocalSDP => session.local_sdp.is_some(),
         Guard::HasRemoteSDP => session.remote_sdp.is_some(),
@@ -13,6 +15,8 @@ pub async fn check_guard(guard: &Guard, session: &SessionState) -> bool {
         Guard::DialogEstablished => session.dialog_established,
         Guard::MediaReady => session.media_session_ready,
         Guard::SDPNegotiated => session.sdp_negotiated,
+        Guard::IsIdle => matches!(session.call_state, CallState::Idle),
+        Guard::InActiveCall => matches!(session.call_state, CallState::Active),
         Guard::Custom(name) => {
             // Custom guards can be implemented here
             tracing::warn!("Custom guard '{}' not implemented", name);
