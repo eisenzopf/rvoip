@@ -273,34 +273,27 @@ mod tests {
     fn test_bridge_transitions() {
         let table = load_bridge_transitions();
         
-        // Test UAC can bridge when active
-        let key = StateKey {
-            role: Role::UAC,
-            state: CallState::Active,
-            event: EventType::BridgeSessions { 
-                other_session: SessionId::new() 
-            },
-        };
-        assert!(table.contains_key(&key));
+        // Test that we have bridge transitions for both roles in Active state
+        let has_uac_bridge = table.keys().any(|k| {
+            k.role == Role::UAC && 
+            k.state == CallState::Active &&
+            matches!(k.event, EventType::BridgeSessions { .. })
+        });
+        assert!(has_uac_bridge, "UAC should have bridge transition from Active");
         
-        // Test UAS can bridge when active
-        let key = StateKey {
-            role: Role::UAS,
-            state: CallState::Active,
-            event: EventType::BridgeSessions { 
-                other_session: SessionId::new() 
-            },
-        };
-        assert!(table.contains_key(&key));
+        let has_uas_bridge = table.keys().any(|k| {
+            k.role == Role::UAS && 
+            k.state == CallState::Active &&
+            matches!(k.event, EventType::BridgeSessions { .. })
+        });
+        assert!(has_uas_bridge, "UAS should have bridge transition from Active");
         
         // Test blind transfer
-        let key = StateKey {
-            role: Role::UAC,
-            state: CallState::Active,
-            event: EventType::BlindTransfer { 
-                target: "sip:dest@example.com".to_string() 
-            },
-        };
-        assert!(table.contains_key(&key));
+        let has_blind_transfer = table.keys().any(|k| {
+            k.role == Role::UAC && 
+            k.state == CallState::Active &&
+            matches!(k.event, EventType::BlindTransfer { .. })
+        });
+        assert!(has_blind_transfer, "Should have blind transfer transition from Active");
     }
 }

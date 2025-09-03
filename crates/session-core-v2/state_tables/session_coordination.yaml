@@ -1,700 +1,264 @@
 # Session Coordination State Table
-# This table defines the coordination logic between dialog-core and media-core
-# It does NOT duplicate the state machines in those layers
+# Defines transitions for coordinating between dialog-core and media-core
 
 version: "1.0"
 
 metadata:
-  description: "Session-level coordination between dialog and media layers"
-  author: "RVoIP Contributors"
-  date: "2024-01-01"
+  description: "Session coordination state machine for UAC, UAS, and B2BUA roles"
+  author: "RVoIP Team"
+  date: "2025-09-03"
 
-# Define coordination-only states
+# Define valid states
 states:
-  - name: Idle
-    description: "No active session"
-  - name: Initiating  
-    description: "Session setup in progress"
-  - name: Ringing
-    description: "Remote party alerted (180 received/sent)"
-  - name: EarlyMedia
-    description: "Media before answer (183 Session Progress)"
-  - name: Active
-    description: "Both dialog confirmed and media flowing"
-  - name: OnHold
-    description: "Call on hold (media suspended)"
-  - name: Resuming
-    description: "Transitioning from hold to active"
-  - name: Bridged
-    description: "Connected to another session"
-  - name: Transferring
-    description: "REFER transfer in progress"
-  - name: Terminating
-    description: "Cleanup phase initiated"
-  - name: Terminated
-    description: "Session fully cleaned up"
-  - name: Failed
-    description: "Session failed to establish or maintain"
+  - name: "Idle"
+    description: "No active call"
+  - name: "Calling"
+    description: "UAC initiating outbound call"
+  - name: "Ringing"
+    description: "UAS received incoming call"
+  - name: "Answering"
+    description: "UAS accepting call"
+  - name: "Active"
+    description: "Call established with media flowing"
+  - name: "OnHold"
+    description: "Call on hold"
+  - name: "Terminating"
+    description: "Call being terminated"
+  - name: "Terminated"
+    description: "Call ended"
+  - name: "Failed"
+    description: "Call failed"
 
-# Define coordination conditions we track
+# Define coordination conditions
 conditions:
-  - name: dialog_established
-    description: "Dialog layer has confirmed the dialog"
+  - name: "MediaReady"
+    description: "Media resources are ready"
     default: false
-  - name: media_session_ready
-    description: "Media layer has RTP session ready"
-    default: false
-  - name: sdp_negotiated
-    description: "SDP offer/answer exchange complete"
+  - name: "DialogEstablished"
+    description: "SIP dialog is established"
     default: false
 
-# Core coordination transitions
+# Define state transitions
 transitions:
-  # ============================================
-  # UAC (Outgoing Call) Coordination
-  # ============================================
-  
-  # Start an outgoing call
-  - role: UAC
-    state: Idle
-    event: 
-      type: MakeCall
-      target: "placeholder"
-    guards: []
-    actions:
-      - SendINVITE           # Delegate to dialog-core
-      - StartMediaSession    # Prepare media-core
-    next_state: Initiating
-    publish:
-      - SessionCreated
-    description: "UAC initiates outgoing call"
-  
-  # Handle 180 Ringing
-  - role: UAC
-    state: Initiating
-    event: Dialog180Ringing
-    next_state: Ringing
-    publish:
-      - CallRinging
-    description: "Remote party is ringing"
-  
-  # Handle 183 Session Progress (Early Media)
-  - role: UAC
-    state: Initiating
-    event: Dialog183SessionProgress
-    guards:
-      - HasRemoteSDP
-    actions:
-      - StoreRemoteSDP
-      - NegotiateSDPAsUAC
-    next_state: EarlyMedia
-    conditions:
-      sdp_negotiated: true
-    publish:
-      - StateChanged
-    description: "Early media session established"
-  
-  # Handle 200 OK from Ringing state
-  - role: UAC
-    state: Ringing
-    event: Dialog200OK
-    guards:
-      - HasRemoteSDP
-    actions:
-      - SendACK
-      - StoreRemoteSDP
-      - NegotiateSDPAsUAC
-      - SetCondition(dialog_established, true)
-    next_state: Active
-    conditions:
-      dialog_established: true
-      sdp_negotiated: true
-    publish:
-      - StateChanged
-    description: "Call answered from ringing"
-  
-  # Handle 200 OK from Early Media state
-  - role: UAC
-    state: EarlyMedia
-    event: Dialog200OK
-    actions:
-      - SendACK
-      - SetCondition(dialog_established, true)
-    next_state: Active
-    conditions:
-      dialog_established: true
-    publish:
-      - StateChanged
-    description: "Call answered from early media"
-  
-  # Handle 200 OK directly from Initiating (fast answer)
-  - role: UAC
-    state: Initiating
-    event: Dialog200OK
-    guards:
-      - HasRemoteSDP
-    actions:
-      - SendACK
-      - StoreRemoteSDP
-      - NegotiateSDPAsUAC
-      - SetCondition(dialog_established, true)
-    next_state: Active
-    conditions:
-      dialog_established: true
-      sdp_negotiated: true
-    publish:
-      - StateChanged
-    description: "Call answered immediately"
-  
-  # ============================================
-  # UAS (Incoming Call) Coordination
-  # ============================================
-  
-  # Receive incoming call
-  - role: UAS
-    state: Idle
+  # UAC: Make outbound call
+  - role: "UAC"
+    state: "Idle"
     event:
-      type: IncomingCall
-      from: "placeholder"
-    guards: []
+      type: "MakeCall"
+    next_state: "Calling"
     actions:
-      - SendSIPResponse(100, "Trying")
-      - SendSIPResponse(180, "Ringing")
-      - StartMediaSession
-      - StoreRemoteSDP
-    next_state: Ringing
-    publish:
-      - IncomingCallReceived
+      - type: "CreateDialog"
+      - type: "SetupLocalMedia"
+    description: "UAC initiates outbound call"
+
+  # UAC: Call answered
+  - role: "UAC"
+    state: "Calling"
+    event:
+      type: "CallAnswered"
+    next_state: "Active"
+    actions:
+      - type: "ProcessAnswer"
+      - type: "EstablishMedia"
+    conditions:
+      set:
+        - "MediaReady"
+        - "DialogEstablished"
+    description: "UAC receives answer"
+
+  # UAC: Call rejected
+  - role: "UAC"
+    state: "Calling"
+    event:
+      type: "CallRejected"
+    next_state: "Failed"
+    actions:
+      - type: "ProcessRejection"
+    description: "UAC call rejected"
+
+  # UAC: Timeout
+  - role: "UAC"
+    state: "Calling"
+    event:
+      type: "Timeout"
+    next_state: "Terminated"
+    actions:
+      - type: "CancelCall"
+    description: "UAC call timeout"
+
+  # UAC: Hangup active call
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "InitiateTermination"
+    description: "UAC hangs up"
+
+  # UAC: Hold call
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "HoldCall"
+    next_state: "OnHold"
+    actions:
+      - type: "SendReinviteHold"
+    description: "UAC puts call on hold"
+
+  # UAC: Resume call
+  - role: "UAC"
+    state: "OnHold"
+    event:
+      type: "ResumeCall"
+    next_state: "Active"
+    actions:
+      - type: "SendReinviteResume"
+    description: "UAC resumes call"
+
+  # UAC: Termination complete
+  - role: "UAC"
+    state: "Terminating"
+    event:
+      type: "TerminationComplete"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupResources"
+    description: "UAC termination complete"
+
+  # UAC: Hangup from Idle (no-op case)
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "HangupCall"
+    next_state: "Idle"
+    actions: []
+    description: "UAC hangup when idle (no-op)"
+
+  # UAS: Incoming call
+  - role: "UAS"
+    state: "Idle"
+    event:
+      type: "IncomingCall"
+    next_state: "Ringing"
+    actions:
+      - type: "CreateDialog"
+      - type: "ProcessInvite"
     description: "UAS receives incoming call"
-  
-  # Accept incoming call
-  - role: UAS
-    state: Ringing
-    event: AcceptCall
-    guards: []
+
+  # UAS: Accept call
+  - role: "UAS"
+    state: "Ringing"
+    event:
+      type: "AcceptCall"
+    next_state: "Answering"
     actions:
-      - NegotiateSDPAsUAS
-      - StoreLocalSDP
-      - SendSIPResponse(200, "OK")
-    next_state: Active
+      - type: "SetupLocalMedia"
+      - type: "PrepareAnswer"
+    description: "UAS accepts call"
+
+  # UAS: Media ready
+  - role: "UAS"
+    state: "Answering"
+    event:
+      type: "MediaReady"
+    next_state: "Active"
+    actions:
+      - type: "Send200OK"
+      - type: "EstablishMedia"
     conditions:
-      sdp_negotiated: true
-    publish:
-      - CallAccepted
-    description: "UAS accepts the call"
-  
-  # Receive ACK after accepting
-  - role: UAS
-    state: Active
-    event: DialogACK
-    actions:
-      - SetCondition(dialog_established, true)
-    conditions:
-      dialog_established: true
-    description: "ACK confirms dialog establishment"
-  
-  # Reject incoming call
-  - role: UAS
-    state: Ringing
-    event: RejectCall
-    actions:
-      - SendSIPResponse(486, "Busy Here")
-      - StartDialogCleanup
-      - StartMediaCleanup
-    next_state: Terminating
-    publish:
-      - CallRejected
-    description: "UAS rejects the call"
-  
-  # ============================================
-  # Readiness Coordination (Both Roles)
-  # ============================================
-  
-  # Media becomes ready
-  - role: Both
-    state: Active
-    event: 
-      type: MediaEvent
-      name: "media_session_created"
-    actions:
-      - SetCondition(media_session_ready, true)
-      - CheckReadiness
-    conditions:
-      media_session_ready: true
-    description: "Media session is ready"
-  
-  # Media flow established
-  - role: Both
-    state: Active
+      set:
+        - "MediaReady"
+        - "DialogEstablished"
+    description: "UAS media ready"
+
+  # UAS: Reject call
+  - role: "UAS"
+    state: "Ringing"
     event:
-      type: MediaEvent
-      name: "rfc_compliant_media_creation_uac"
-    guards:
-      - AllConditionsMet
+      type: "RejectCall"
+    next_state: "Terminated"
     actions:
-      - TriggerCallEstablished
-    publish:
-      - CallEstablished
-      - MediaFlowEstablished
-    description: "UAC media flow confirmed"
-  
-  - role: Both
-    state: Active
+      - type: "SendRejectResponse"
+    description: "UAS rejects call"
+
+  # UAS: Hangup active call
+  - role: "UAS"
+    state: "Active"
     event:
-      type: MediaEvent
-      name: "rfc_compliant_media_creation_uas"
-    guards:
-      - AllConditionsMet
+      type: "HangupCall"
+    next_state: "Terminating"
     actions:
-      - TriggerCallEstablished
-    publish:
-      - CallEstablished
-      - MediaFlowEstablished
-    description: "UAS media flow confirmed"
-  
-  # Check if all conditions are met
-  - role: Both
-    state: Active
-    event: CheckConditions
-    guards:
-      - AllConditionsMet
-    actions:
-      - TriggerCallEstablished
-    publish:
-      - CallEstablished
-    description: "All conditions met, call established"
-  
-  # ============================================
-  # Call Termination (Both Roles)
-  # ============================================
-  
-  # Hangup from Active state
-  - role: Both
-    state: Active
-    event: HangupCall
-    actions:
-      - SendBYE
-      - StopMediaSession
-    next_state: Terminating
-    publish:
-      - CallTerminating
-    description: "User hangs up active call"
-  
-  # Hangup from Ringing state (UAC)
-  - role: UAC
-    state: Ringing
-    event: HangupCall
-    actions:
-      - SendCANCEL
-      - StopMediaSession
-    next_state: Terminating
-    publish:
-      - CallCancelled
-    description: "UAC cancels ringing call"
-  
-  # Hangup from Initiating state (UAC)
-  - role: UAC
-    state: Initiating
-    event: HangupCall
-    actions:
-      - SendCANCEL
-      - StopMediaSession
-    next_state: Terminating
-    publish:
-      - CallCancelled
-    description: "UAC cancels initiating call"
-  
-  # Receive BYE
-  - role: Both
-    state: Active
-    event: DialogBYE
-    actions:
-      - SendSIPResponse(200, "OK")
-      - StopMediaSession
-    next_state: Terminating
-    publish:
-      - RemoteHangup
-    description: "Remote party hangs up"
-  
-  # Receive CANCEL (UAS)
-  - role: UAS
-    state: Ringing
-    event: DialogCANCEL
-    actions:
-      - SendSIPResponse(200, "OK")        # 200 OK to CANCEL
-      - SendSIPResponse(487, "Request Terminated")  # 487 to INVITE
-      - StopMediaSession
-    next_state: Terminating
-    publish:
-      - CallCancelled
-    description: "Remote party cancels call"
-  
-  # Dialog terminated confirmation
-  - role: Both
-    state: Terminating
-    event: DialogTerminated
-    actions:
-      - StartDialogCleanup
-      - StartMediaCleanup
-    next_state: Terminated
-    publish:
-      - CallTerminated
-    description: "Dialog layer confirms termination"
-  
-  # ============================================
-  # Error Handling (Both Roles)
-  # ============================================
-  
-  # 4xx errors during setup
-  - role: UAC
-    state: Initiating
-    event: 
-      type: Dialog4xxFailure
-      code: 486
-    actions:
-      - SendACK
-      - StartDialogCleanup
-      - StartMediaCleanup
-    next_state: Failed
-    publish:
-      - CallFailed
-    description: "Call rejected with 4xx error"
-  
-  - role: UAC
-    state: Ringing
+      - type: "InitiateTermination"
+    description: "UAS hangs up"
+
+  # UAS: Remote hangup
+  - role: "UAS"
+    state: "Active"
     event:
-      type: Dialog4xxFailure
-      code: 486
+      type: "RemoteHangup"
+    next_state: "Terminating"
     actions:
-      - SendACK
-      - StartDialogCleanup
-      - StartMediaCleanup
-    next_state: Failed
-    publish:
-      - CallFailed
-    description: "Call rejected while ringing"
-  
-  # 5xx errors during setup
-  - role: UAC
-    state: Initiating
+      - type: "ProcessBye"
+      - type: "Send200OK"
+    description: "UAS receives remote hangup"
+
+  # UAS: Hold call
+  - role: "UAS"
+    state: "Active"
     event:
-      type: Dialog5xxFailure
-      code: 503
+      type: "HoldCall"
+    next_state: "OnHold"
     actions:
-      - SendACK
-      - StartDialogCleanup
-      - StartMediaCleanup
-    next_state: Failed
-    publish:
-      - CallFailed
-    description: "Server error during call setup"
-  
-  # 6xx global failures
-  - role: UAC
-    state: Initiating
+      - type: "SendReinviteHold"
+    description: "UAS puts call on hold"
+
+  # UAS: Resume call
+  - role: "UAS"
+    state: "OnHold"
     event:
-      type: Dialog6xxFailure
-      code: 603
+      type: "ResumeCall"
+    next_state: "Active"
     actions:
-      - SendACK
-      - StartDialogCleanup
-      - StartMediaCleanup
-    next_state: Failed
-    publish:
-      - CallFailed
-    description: "Call globally declined"
-  
-  # Timeout scenarios
-  - role: UAC
-    state: Initiating
-    event: DialogTimeout
-    actions:
-      - SendCANCEL
-      - StartDialogCleanup
-      - StartMediaCleanup
-    next_state: Failed
-    publish:
-      - CallTimeout
-    description: "Call setup timed out"
-  
-  - role: UAC
-    state: Ringing
-    event: DialogTimeout
-    actions:
-      - SendCANCEL
-      - StartDialogCleanup
-      - StartMediaCleanup
-    next_state: Failed
-    publish:
-      - CallTimeout
-    description: "No answer timeout"
-  
-  # Media failures
-  - role: Both
-    state: Active
+      - type: "SendReinviteResume"
+    description: "UAS resumes call"
+
+  # UAS: Termination complete
+  - role: "UAS"
+    state: "Terminating"
     event:
-      type: MediaEvent
-      name: "media_failed"
+      type: "TerminationComplete"
+    next_state: "Terminated"
     actions:
-      - SendBYE
-      - StartDialogCleanup
-      - StartMediaCleanup
-    next_state: Terminating
-    publish:
-      - MediaFailed
-    description: "Media layer failure during call"
-  
-  # ============================================
-  # Hold/Resume Coordination (Both Roles)
-  # ============================================
-  
-  # Put call on hold
-  - role: Both
-    state: Active
-    event: HoldCall
-    actions:
-      - SendReINVITE      # With sendonly SDP
-      - Custom(SuspendMedia)
-    next_state: OnHold
-    publish:
-      - CallOnHold
-    description: "Place call on hold"
-  
-  # Resume from hold
-  - role: Both
-    state: OnHold
-    event: ResumeCall
-    actions:
-      - SendReINVITE      # With sendrecv SDP
-      - Custom(ResumeMedia)
-    next_state: Resuming
-    publish:
-      - CallResuming
-    description: "Resume call from hold"
-  
-  # Confirm resume with 200 OK
-  - role: Both
-    state: Resuming
-    event: Dialog200OK
-    actions:
-      - SendACK
-    next_state: Active
-    publish:
-      - CallResumed
-    description: "Call successfully resumed"
-  
-  # Remote puts us on hold (re-INVITE with sendonly)
-  - role: Both
-    state: Active
-    event: DialogReINVITE
-    guards:
-      - Custom(HasSendonlyAttribute)
-    actions:
-      - NegotiateSDPAsUAS
-      - SendSIPResponse(200, "OK")
-      - Custom(SuspendMedia)
-    next_state: OnHold
-    publish:
-      - RemoteHold
-    description: "Remote party puts us on hold"
-  
-  # Remote resumes (re-INVITE with sendrecv)
-  - role: Both
-    state: OnHold
-    event: DialogReINVITE
-    guards:
-      - Custom(HasSendrecvAttribute)
-    actions:
-      - NegotiateSDPAsUAS
-      - SendSIPResponse(200, "OK")
-      - Custom(ResumeMedia)
-    next_state: Active
-    publish:
-      - RemoteResume
-    description: "Remote party resumes call"
-  
-  # Hangup from hold
-  - role: Both
-    state: OnHold
-    event: HangupCall
-    actions:
-      - SendBYE
-      - StopMediaSession
-    next_state: Terminating
-    publish:
-      - CallTerminating
-    description: "Hangup while on hold"
-  
-  # ============================================
-  # Bridge Operations (Both Roles)
-  # ============================================
-  
-  # Bridge two active sessions
-  - role: Both
-    state: Active
-    event: BridgeSessions
-    guards:
-      - Custom(OtherSessionActive)
-    actions:
-      - CreateBridge(target_session)
-      - Custom(LinkSessions)
-    next_state: Bridged
-    publish:
-      - SessionsBridged
-    description: "Bridge two active sessions"
-  
-  # Unbridge sessions
-  - role: Both
-    state: Bridged
-    event: UnbridgeSessions
-    actions:
-      - DestroyBridge
-      - Custom(UnlinkSessions)
-    next_state: Active
-    publish:
-      - SessionsUnbridged
-    description: "Unbridge sessions"
-  
-  # Hangup from bridged state
-  - role: Both
-    state: Bridged
-    event: HangupCall
-    actions:
-      - DestroyBridge
-      - SendBYE
-      - StopMediaSession
-    next_state: Terminating
-    publish:
-      - BridgeTerminating
-    description: "Hangup bridged call"
-  
-  # ============================================
-  # Transfer Operations (Both Roles)
-  # ============================================
-  
-  # Initiate blind transfer
-  - role: Both
-    state: Active
+      - type: "CleanupResources"
+    description: "UAS termination complete"
+
+  # Common: Error handling
+  - role: "Both"
+    state: "*"
     event:
-      type: InitiateTransfer
-      target: "placeholder"
+      type: "Error"
+    next_state: "Failed"
     actions:
-      - InitiateBlindTransfer(target)
-    next_state: Transferring
-    publish:
-      - TransferInitiated
-    description: "Start blind transfer"
-  
-  # Transfer accepted (202 Accepted to REFER)
-  - role: Both
-    state: Transferring
-    event: TransferAccepted
-    publish:
-      - TransferAccepted
-    description: "Transfer request accepted"
-  
-  # Transfer progress (NOTIFY updates)
-  - role: Both
-    state: Transferring
-    event: TransferProgress
-    publish:
-      - TransferProgress
-    description: "Transfer in progress"
-  
-  # Transfer completed successfully
-  - role: Both
-    state: Transferring
-    event: TransferComplete
+      - type: "HandleError"
+    description: "Handle error condition"
+
+  # Common: Reset from failed
+  - role: "Both"
+    state: "Failed"
+    event:
+      type: "Reset"
+    next_state: "Idle"
     actions:
-      - SendBYE
-      - StopMediaSession
-    next_state: Terminating
-    publish:
-      - TransferSucceeded
-    description: "Transfer completed successfully"
-  
-  # Transfer failed
-  - role: Both
-    state: Transferring
-    event: TransferFailed
-    next_state: Active
-    publish:
-      - TransferFailed
-    description: "Transfer failed, call continues"
-  
-  # Receive REFER (being transferred)
-  - role: Both
-    state: Active
-    event: DialogREFER
+      - type: "ResetSession"
+    description: "Reset from failed state"
+
+  # Common: Reset from terminated
+  - role: "Both"
+    state: "Terminated"
+    event:
+      type: "Reset"
+    next_state: "Idle"
     actions:
-      - SendSIPResponse(202, "Accepted")
-      - Custom(ProcessTransferRequest)
-    publish:
-      - IncomingTransfer
-    description: "Received transfer request"
-  
-  # ============================================
-  # Cleanup Transitions (Both Roles)
-  # ============================================
-  
-  # Failed state cleanup
-  - role: Both
-    state: Failed
-    event: CleanupComplete
-    next_state: Terminated
-    publish:
-      - SessionCleanedUp
-    description: "Cleanup after failure"
-  
-  # Return to idle from terminated
-  - role: Both
-    state: Terminated
-    event: Reset
-    next_state: Idle
-    description: "Reset to idle for reuse"
-  
-  # ============================================
-  # Re-INVITE for Session Modification
-  # ============================================
-  
-  # Handle re-INVITE in active call (codec change, etc)
-  - role: Both
-    state: Active
-    event: DialogReINVITE
-    guards:
-      - Custom(NotHoldRequest)
-    actions:
-      - NegotiateSDPAsUAS
-      - SendSIPResponse(200, "OK")
-    conditions:
-      sdp_negotiated: true
-    publish:
-      - SessionModified
-    description: "Session parameters modified"
-  
-  # Send re-INVITE for modification
-  - role: Both
-    state: Active
-    event: ModifySession
-    actions:
-      - SendReINVITE
-    publish:
-      - ModifyingSession
-    description: "Initiate session modification"
-  
-  # ============================================
-  # 487 Request Terminated (after CANCEL)
-  # ============================================
-  
-  # UAC receives 487 after sending CANCEL
-  - role: UAC
-    state: Terminating
-    event: Dialog487RequestTerminated
-    actions:
-      - SendACK
-      - StartDialogCleanup
-      - StartMediaCleanup
-    next_state: Terminated
-    publish:
-      - CallTerminated
-    description: "CANCEL confirmed with 487"
+      - type: "ResetSession"
+    description: "Reset from terminated state"

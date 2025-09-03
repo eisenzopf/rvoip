@@ -270,6 +270,7 @@ impl YamlTableLoader {
             ))?;
         
         if let Some(ref mut yaml_data) = self.yaml_data {
+            let num_transitions = merge_data.transitions.len();
             // Merge transitions
             yaml_data.transitions.extend(merge_data.transitions);
             
@@ -287,8 +288,7 @@ impl YamlTableLoader {
                 }
             }
             
-            info!("Merged {} transitions into state table", 
-                  merge_data.transitions.len());
+            info!("Merged {} transitions into state table", num_transitions);
         } else {
             self.yaml_data = Some(merge_data);
         }
@@ -432,7 +432,7 @@ impl YamlTableLoader {
             // Application events
             "MakeCall" => Ok(EventType::MakeCall { target: String::new() }),
             "AcceptCall" => Ok(EventType::AcceptCall),
-            "RejectCall" => Ok(EventType::RejectCall),
+            "RejectCall" => Ok(EventType::RejectCall { reason: String::new() }),
             "HangupCall" => Ok(EventType::HangupCall),
             "HoldCall" => Ok(EventType::HoldCall),
             "ResumeCall" => Ok(EventType::ResumeCall),

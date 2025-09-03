@@ -227,7 +227,7 @@ impl UnifiedCoordinator {
         ));
         
         // Create state machine executor with all required dependencies
-        let state_machine = Arc::new(StateMachineExecutor::new(
+        let state_machine = Arc::new(StateMachineExecutor::new_with_adapters(
             store.clone(),
             dialog_adapter.clone(),
             media_adapter.clone(),
@@ -412,6 +412,8 @@ pub struct Config {
     pub media_port_end: u16,
     pub local_ip: IpAddr,
     pub bind_addr: SocketAddr,
+    /// Optional path to custom state table YAML file
+    pub state_table_path: Option<String>,
 }
 
 impl Default for Config {
@@ -422,6 +424,7 @@ impl Default for Config {
             media_port_end: 20000,
             local_ip: "127.0.0.1".parse().unwrap(),
             bind_addr: "127.0.0.1:5060".parse().unwrap(),
+            state_table_path: None,
         }
     }
 }

@@ -12,6 +12,8 @@ pub fn add_common_transitions(builder: &mut StateTableBuilder) {
             CallState::Initiating,
             CallState::Ringing,
             CallState::Active,
+            CallState::EarlyMedia,
+            CallState::Resuming,
         ] {
             builder.add_transition(
                 role,
@@ -73,6 +75,69 @@ pub fn add_common_transitions(builder: &mut StateTableBuilder) {
                     Action::SendReINVITE,
                 ],
                 next_state: Some(CallState::Active),
+                condition_updates: ConditionUpdates::none(),
+                publish_events: vec![EventTemplate::StateChanged],
+            },
+        );
+        
+        // EarlyMedia -> Active: Early media to active call
+        builder.add_transition(
+            role,
+            CallState::EarlyMedia,
+            EventType::Dialog200OK,
+            Transition {
+                guards: vec![],
+                actions: vec![
+                    Action::StoreRemoteSDP,
+                    Action::StartMediaSession,
+                ],
+                next_state: Some(CallState::Active),
+                condition_updates: ConditionUpdates::none(),
+                publish_events: vec![EventTemplate::StateChanged],
+            },
+        );
+        
+        // EarlyMedia -> Terminated: Cancel early media
+        builder.add_transition(
+            role,
+            CallState::EarlyMedia,
+            EventType::HangupCall,
+            Transition {
+                guards: vec![],
+                actions: vec![
+                    Action::SendBYE,
+                ],
+                next_state: Some(CallState::Terminating),
+                condition_updates: ConditionUpdates::none(),
+                publish_events: vec![EventTemplate::StateChanged],
+            },
+        );
+        
+        // Resuming -> Active: Resume completed (when re-INVITE OK received)
+        builder.add_transition(
+            role,
+            CallState::Resuming,
+            EventType::Dialog200OK,
+            Transition {
+                guards: vec![],
+                actions: vec![
+                    Action::StartMediaSession,
+                ],
+                next_state: Some(CallState::Active),
+                condition_updates: ConditionUpdates::none(),
+                publish_events: vec![EventTemplate::StateChanged],
+            },
+        );
+        
+        // Resuming -> OnHold: Resume failed
+        builder.add_transition(
+            role,
+            CallState::Resuming,
+            EventType::DialogError("resume_failed".to_string()),
+            Transition {
+                guards: vec![],
+                actions: vec![],
+                next_state: Some(CallState::OnHold),
                 condition_updates: ConditionUpdates::none(),
                 publish_events: vec![EventTemplate::StateChanged],
             },

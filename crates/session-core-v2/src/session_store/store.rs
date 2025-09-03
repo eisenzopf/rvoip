@@ -11,16 +11,16 @@ use crate::state_table::{CallState, Role};
 /// Session storage with indexes for fast lookup
 pub struct SessionStore {
     /// Primary storage - all active sessions
-    sessions: Arc<RwLock<HashMap<SessionId, SessionState>>>,
+    pub(crate) sessions: Arc<RwLock<HashMap<SessionId, SessionState>>>,
     
     /// Index by dialog ID
-    by_dialog: Arc<RwLock<HashMap<DialogId, SessionId>>>,
+    pub(crate) by_dialog: Arc<RwLock<HashMap<DialogId, SessionId>>>,
     
     /// Index by call ID
-    by_call_id: Arc<RwLock<HashMap<CallId, SessionId>>>,
+    pub(crate) by_call_id: Arc<RwLock<HashMap<CallId, SessionId>>>,
     
     /// Index by media session ID
-    by_media_id: Arc<RwLock<HashMap<MediaSessionId, SessionId>>>,
+    pub(crate) by_media_id: Arc<RwLock<HashMap<MediaSessionId, SessionId>>>,
 }
 
 impl SessionStore {
@@ -42,7 +42,8 @@ impl SessionStore {
         with_history: bool,
     ) -> Result<SessionState, Box<dyn std::error::Error + Send + Sync>> {
         let session = if with_history {
-            SessionState::with_history(session_id.clone(), role)
+            use crate::session_store::HistoryConfig;
+            SessionState::with_history(session_id.clone(), role, HistoryConfig::default())
         } else {
             SessionState::new(session_id.clone(), role)
         };
@@ -186,8 +187,9 @@ impl SessionStore {
         sessions.values().cloned().collect()
     }
     
+    /* Old cleanup - replaced by cleanup.rs
     /// Clean up stale sessions
-    pub async fn cleanup_stale_sessions(&self, max_age: Duration) {
+    pub async fn cleanup_stale_sessions_old(&self, max_age: Duration) {
         let mut sessions = self.sessions.write().await;
         let now = Instant::now();
         let mut to_remove = Vec::new();
@@ -226,6 +228,7 @@ impl SessionStore {
             }
         }
     }
+    */
     
     /// Get session statistics
     pub async fn get_stats(&self) -> SessionStats {
@@ -238,8 +241,10 @@ impl SessionStore {
                 CallState::Idle => stats.idle += 1,
                 CallState::Initiating => stats.initiating += 1,
                 CallState::Ringing => stats.ringing += 1,
+                CallState::EarlyMedia => stats.active += 1,  // Count early media as active
                 CallState::Active => stats.active += 1,
                 CallState::OnHold => stats.on_hold += 1,
+                CallState::Resuming => stats.active += 1,  // Count resuming as active
                 CallState::Bridged => stats.active += 1,  // Count bridged as active
                 CallState::Transferring => stats.active += 1,  // Count transferring as active
                 CallState::Terminating => stats.terminating += 1,

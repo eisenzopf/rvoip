@@ -112,11 +112,20 @@ impl StateMachine {
         session_id: &SessionId,
         event: EventType,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        use std::time::Instant;
+        use crate::session_store::{TransitionRecord, GuardResult, ActionRecord};
+        
         debug!("Processing event {:?} for session {}", event, session_id);
+        let transition_start = Instant::now();
         
         // 1. Get current session state
         let mut session = self.store.get_session(session_id).await?;
         let old_state = session.call_state;
+        
+        // Initialize tracking for history
+        let mut guards_evaluated = Vec::new();
+        let mut actions_executed_history = Vec::new();
+        let mut errors = Vec::new();
         
         // 1a. Store event-specific data in session state
         match &event {
@@ -148,22 +157,84 @@ impl StateMachine {
             Some(t) => t,
             None => {
                 warn!("No transition defined for {:?}", key);
+                
+                // Record failed transition attempt in history
+                if session.history.is_some() {
+                    let now = Instant::now();
+                    let record = TransitionRecord {
+                        sequence: 0, // Will be set by history
+                        timestamp: now,
+                        timestamp_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                        from_state: old_state,
+                        event: event.clone(),
+                        to_state: Some(old_state),
+                        guards_evaluated: vec![],
+                        actions_executed: vec![],
+                        duration_ms: transition_start.elapsed().as_millis() as u64,
+                        errors: vec![format!("No transition defined for {:?}", key)],
+                        events_published: vec![],
+                    };
+                    session.record_transition(record);
+                    self.store.update_session(session).await?;
+                }
+                
                 return Ok(ProcessEventResult {
                     old_state,
+                    next_state: None,
                     transition: None,
                     actions_executed: vec![],
+                    events_published: vec![],
                 });
             }
         };
         
         // 4. Check guards
         for guard in &transition.guards {
-            if !guards::check_guard(guard, &session).await {
+            let guard_start = Instant::now();
+            let satisfied = guards::check_guard(guard, &session).await;
+            let guard_duration = guard_start.elapsed().as_millis() as u64;
+            
+            guards_evaluated.push(GuardResult {
+                guard: guard.clone(),
+                passed: satisfied,
+                evaluation_time_us: guard_duration * 1000,
+            });
+            
+            if !satisfied {
                 debug!("Guard {:?} not satisfied, skipping transition", guard);
+                
+                // Record guard failure in history
+                if session.history.is_some() {
+                    let now = Instant::now();
+                    let record = TransitionRecord {
+                        sequence: 0,
+                        timestamp: now,
+                        timestamp_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                        from_state: old_state,
+                        event: event.clone(),
+                        to_state: Some(old_state),
+                        guards_evaluated,
+                        actions_executed: vec![],
+                        duration_ms: transition_start.elapsed().as_millis() as u64,
+                        errors: vec![format!("Guard {:?} not satisfied", guard)],
+                        events_published: vec![],
+                    };
+                    session.record_transition(record);
+                    self.store.update_session(session).await?;
+                }
+                
                 return Ok(ProcessEventResult {
                     old_state,
+                    next_state: None,
                     transition: None,
                     actions_executed: vec![],
+                    events_published: vec![],
                 });
             }
         }
@@ -173,22 +244,95 @@ impl StateMachine {
         // 5. Execute actions
         let mut actions_executed = Vec::new();
         for action in &transition.actions {
-            if let Err(e) = actions::execute_action(
+            let action_start = Instant::now();
+            let result = actions::execute_action(
                 action,
                 &mut session,
                 &self.dialog_adapter,
                 &self.media_adapter,
-            ).await {
-                error!("Failed to execute action {:?}: {}", action, e);
-                return Err(e);
+            ).await;
+            let action_duration = action_start.elapsed().as_millis() as u64;
+            
+            let (success, error_opt, exec_error) = match result {
+                Ok(_) => {
+                    actions_executed.push(action.clone());
+                    (true, None, None)
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to execute action {:?}: {}", action, e);
+                    error!("{}", error_msg);
+                    errors.push(error_msg.clone());
+                    (false, Some(error_msg), Some(e))
+                }
+            };
+            
+            actions_executed_history.push(ActionRecord {
+                action: action.clone(),
+                success,
+                execution_time_us: action_duration * 1000,
+                error: error_opt,
+            });
+            
+            if !success {
+                // Record failed action in history
+                if session.history.is_some() {
+                    let now = Instant::now();
+                    let record = TransitionRecord {
+                        sequence: 0,
+                        timestamp: now,
+                        timestamp_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                        from_state: old_state,
+                        event: event.clone(),
+                        to_state: Some(old_state),
+                        guards_evaluated,
+                        actions_executed: actions_executed_history,
+                        duration_ms: transition_start.elapsed().as_millis() as u64,
+                        errors,
+                        events_published: vec![],
+                    };
+                    session.record_transition(record);
+                    self.store.update_session(session).await?;
+                }
+                
+                return Err(exec_error.unwrap());
             }
-            actions_executed.push(action.clone());
         }
         
         // 6. Update state if specified
-        if let Some(next_state) = transition.next_state {
-            session.transition_to(next_state);
-            info!("State transition: {:?} -> {:?}", old_state, next_state);
+        let next_state = transition.next_state;
+        if let Some(new_state) = next_state {
+            info!("State transition: {:?} -> {:?}", old_state, new_state);
+        }
+        
+        // Record successful transition in history
+        if session.history.is_some() {
+            let now = Instant::now();
+            let record = TransitionRecord {
+                sequence: 0,
+                timestamp: now,
+                timestamp_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                from_state: old_state,
+                event: event.clone(),
+                to_state: next_state,
+                guards_evaluated,
+                actions_executed: actions_executed_history,
+                duration_ms: transition_start.elapsed().as_millis() as u64,
+                errors,
+                events_published: transition.publish_events.clone(),
+            };
+            session.record_transition(record);
+        }
+        
+        // Apply state change after recording history
+        if let Some(new_state) = transition.next_state {
+            session.call_state = new_state;
+            session.entered_state_at = Instant::now();
         }
         
         // 7. Apply condition updates
