@@ -16,10 +16,14 @@ use super::{actions, guards, effects};
 pub struct ProcessEventResult {
     /// The old state before processing
     pub old_state: CallState,
+    /// The new state after processing
+    pub next_state: Option<CallState>,
     /// The transition that was executed (if any)
     pub transition: Option<Transition>,
     /// Actions that were executed
     pub actions_executed: Vec<Action>,
+    /// Events that were published
+    pub events_published: Vec<EventTemplate>,
 }
 
 /// The state machine executor that processes events through the state table
@@ -68,6 +72,21 @@ pub enum SessionEvent {
 
 impl StateMachine {
     pub fn new(
+        table: Arc<crate::state_table::MasterStateTable>,
+        store: Arc<SessionStore>,
+    ) -> Self {
+        // Create dummy adapters for now (will be provided separately)
+        let (event_tx, _) = tokio::sync::mpsc::channel(100);
+        Self {
+            table,
+            store,
+            dialog_adapter: Arc::new(DialogAdapter::new_mock()),
+            media_adapter: Arc::new(MediaAdapter::new_mock()),
+            event_tx,
+        }
+    }
+    
+    pub fn new_with_adapters(
         store: Arc<SessionStore>,
         dialog_adapter: Arc<DialogAdapter>,
         media_adapter: Arc<MediaAdapter>,
@@ -80,6 +99,11 @@ impl StateMachine {
             media_adapter,
             event_tx,
         }
+    }
+    
+    /// Check if a transition exists for the given state key
+    pub fn has_transition(&self, key: &StateKey) -> bool {
+        self.table.has_transition(key)
     }
     
     /// Process an event for a session
@@ -189,8 +213,10 @@ impl StateMachine {
         
         Ok(ProcessEventResult {
             old_state,
+            next_state: transition.next_state,
             transition: Some(transition.clone()),
             actions_executed,
+            events_published: transition.publish_events.clone(),
         })
     }
     

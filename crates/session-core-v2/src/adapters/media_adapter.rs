@@ -51,6 +51,23 @@ pub struct MediaAdapter {
 }
 
 impl MediaAdapter {
+    /// Create a mock media adapter for testing
+    pub fn new_mock() -> Self {
+        use std::str::FromStr;
+        let (event_tx, _) = mpsc::channel(100);
+        Self {
+            controller: Arc::new(MediaSessionController::new()),
+            event_tx,
+            store: Arc::new(SessionStore::new()),
+            session_to_dialog: Arc::new(DashMap::new()),
+            dialog_to_session: Arc::new(DashMap::new()),
+            media_sessions: Arc::new(DashMap::new()),
+            local_ip: IpAddr::from_str("127.0.0.1").unwrap(),
+            port_start: 10000,
+            port_end: 20000,
+        }
+    }
+    
     pub fn new(
         controller: Arc<MediaSessionController>,
         event_tx: mpsc::Sender<(SessionId, EventType)>,

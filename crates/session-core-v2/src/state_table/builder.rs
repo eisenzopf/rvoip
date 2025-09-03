@@ -12,6 +12,18 @@ impl StateTableBuilder {
         }
     }
     
+    /// Create a builder with YAML-loaded table
+    pub fn from_yaml() -> crate::errors::Result<Self> {
+        let table = super::yaml_loader::YamlTableLoader::load_default()?;
+        Ok(Self { table })
+    }
+    
+    /// Load state table from a YAML file
+    pub fn from_yaml_file(path: &str) -> crate::errors::Result<Self> {
+        let table = super::yaml_loader::YamlTableLoader::load_from_file(path)?;
+        Ok(Self { table })
+    }
+    
     /// Add a transition to the table
     pub fn add_transition(
         &mut self,
@@ -23,6 +35,11 @@ impl StateTableBuilder {
         let key = StateKey { role, state, event };
         self.table.insert(key, transition);
         self
+    }
+    
+    /// Add a raw transition with StateKey (used by YAML loader)
+    pub fn add_raw_transition(&mut self, key: StateKey, transition: Transition) {
+        self.table.insert(key, transition);
     }
     
     /// Add a simple state change transition
