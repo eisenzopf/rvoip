@@ -150,6 +150,32 @@ pub enum EventType {
     Reset,
 }
 
+impl EventType {
+    /// Normalize the event for state table lookups by removing runtime-specific field values.
+    /// This allows the state table to match on event type rather than exact field values.
+    pub fn normalize(&self) -> Self {
+        match self {
+            // User events - normalize to empty/default values
+            EventType::MakeCall { .. } => EventType::MakeCall { target: String::new() },
+            EventType::IncomingCall { .. } => EventType::IncomingCall { from: String::new(), sdp: None },
+            EventType::RejectCall { .. } => EventType::RejectCall { reason: String::new() },
+            EventType::BlindTransfer { .. } => EventType::BlindTransfer { target: String::new() },
+            EventType::AttendedTransfer { .. } => EventType::AttendedTransfer { target: String::new() },
+            
+            // Media events - normalize
+            EventType::PlayAudio { .. } => EventType::PlayAudio { file: String::new() },
+            EventType::SendDTMF { .. } => EventType::SendDTMF { digits: String::new() },
+            
+            // Bridge events - normalize session ID
+            EventType::BridgeSessions { .. } => EventType::BridgeSessions { other_session: SessionId::new() },
+            EventType::InitiateTransfer { .. } => EventType::InitiateTransfer { target: String::new() },
+            
+            // Events without fields pass through unchanged
+            _ => self.clone(),
+        }
+    }
+}
+
 /// Transition definition - what happens when an event occurs in a state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transition {
@@ -302,19 +328,37 @@ impl MasterStateTable {
     }
     
     pub fn insert(&mut self, key: StateKey, transition: Transition) {
-        self.transitions.insert(key, transition);
+        // Always normalize the event when inserting
+        let normalized_key = StateKey {
+            role: key.role,
+            state: key.state,
+            event: key.event.normalize(),
+        };
+        self.transitions.insert(normalized_key, transition);
     }
     
     pub fn get(&self, key: &StateKey) -> Option<&Transition> {
-        self.transitions.get(key)
+        // Normalize the event for lookup
+        let normalized_key = StateKey {
+            role: key.role,
+            state: key.state,
+            event: key.event.normalize(),
+        };
+        self.transitions.get(&normalized_key)
     }
     
     pub fn get_transition(&self, key: &StateKey) -> Option<&Transition> {
-        self.transitions.get(key)
+        self.get(key)
     }
     
     pub fn has_transition(&self, key: &StateKey) -> bool {
-        self.transitions.contains_key(key)
+        // Normalize the event for lookup
+        let normalized_key = StateKey {
+            role: key.role,
+            state: key.state,
+            event: key.event.normalize(),
+        };
+        self.transitions.contains_key(&normalized_key)
     }
     
     pub fn validate(&self) -> Result<(), Vec<String>> {

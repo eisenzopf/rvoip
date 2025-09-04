@@ -17,14 +17,19 @@ use rvoip_sip_core::{Request, Response, StatusCode};
 use crate::state_table::types::{SessionId, EventType};
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
+use infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
+use infra_common::events::cross_crate::{
+    RvoipCrossCrateEvent, DialogToSessionEvent, SessionToDialogEvent,
+    CrossCrateEvent,
+};
 
 /// Minimal dialog adapter - just translates between dialog-core and state machine
 pub struct DialogAdapter {
     /// Dialog-core unified API
     dialog_api: Arc<UnifiedDialogApi>,
     
-    /// Channel to send events to state machine
-    event_tx: mpsc::Sender<(SessionId, EventType)>,
+    /// Global event coordinator for cross-crate communication
+    global_coordinator: Arc<GlobalEventCoordinator>,
     
     /// Session store for updating IDs
     store: Arc<SessionStore>,
@@ -51,14 +56,14 @@ impl DialogAdapter {
         unimplemented!("Mock dialog adapter not yet implemented")
     }
     
-    pub fn new(
+    pub fn new_with_coordinator(
         dialog_api: Arc<UnifiedDialogApi>,
-        event_tx: mpsc::Sender<(SessionId, EventType)>,
+        global_coordinator: Arc<GlobalEventCoordinator>,
         store: Arc<SessionStore>,
     ) -> Self {
         Self {
             dialog_api,
-            event_tx,
+            global_coordinator,
             store,
             session_to_dialog: Arc::new(DashMap::new()),
             dialog_to_session: Arc::new(DashMap::new()),
@@ -304,7 +309,7 @@ impl DialogAdapter {
                 // Store mappings
                 self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
                 self.session_to_dialog.insert(session_id.clone(), dialog_id);
-                self.callid_to_session.insert(call_id, session_id.clone());
+                self.callid_to_session.insert(call_id.clone(), session_id.clone());
                 
                 // Store request data for UAS responses
                 self.incoming_requests.insert(session_id.clone(), (request.clone(), transaction_id, source));
@@ -316,16 +321,24 @@ impl DialogAdapter {
                     None
                 };
                 
-                // Send IncomingCall event to state machine
-                self.event_tx.send((
-                    session_id,
-                    EventType::IncomingCall {
+                // Publish IncomingCall event through GlobalEventCoordinator
+                let cross_crate_event = infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
+                    DialogToSessionEvent::IncomingCall {
+                        session_id: session_id.0.clone(),
+                        call_id: call_id.clone(),
                         from: request.from()
                             .map(|f| f.to_string())
                             .unwrap_or_else(|| "anonymous".to_string()),
-                        sdp,
+                        to: request.to()
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        sdp_offer: sdp,
+                        headers: std::collections::HashMap::new(),
                     }
-                )).await.map_err(|e| SessionError::InternalError(format!("Failed to send event: {}", e)))?;
+                );
+                if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
+                    tracing::error!("Failed to publish IncomingCall event: {}", e);
+                }
             }
             
             SessionCoordinationEvent::ResponseReceived { dialog_id, response, .. } => {
@@ -361,18 +374,47 @@ impl DialogAdapter {
                         _ => return Ok(()), // Ignore other responses
                     };
                     
-                    self.event_tx.send((session_id.clone(), event))
-                        .await
-                        .map_err(|e| SessionError::InternalError(format!("Failed to send event: {}", e)))?;
+                    // Publish dialog response event through GlobalEventCoordinator
+                    use infra_common::events::cross_crate::CallState as CrossCrateCallState;
+                    let cross_crate_event = match event {
+                        EventType::Dialog180Ringing => {
+                            infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
+                                DialogToSessionEvent::CallStateChanged {
+                                    session_id: session_id.0.clone(),
+                                    new_state: CrossCrateCallState::Ringing,
+                                    reason: None,
+                                }
+                            )
+                        }
+                        EventType::Dialog200OK => {
+                            infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
+                                DialogToSessionEvent::CallEstablished {
+                                    session_id: session_id.0.clone(),
+                                    sdp_answer: None, // Extract from response if needed
+                                }
+                            )
+                        }
+                        _ => return Ok(()), // Skip other events
+                    };
+                    if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
+                        tracing::error!("Failed to publish dialog event: {}", e);
+                    }
                 }
             }
             
             SessionCoordinationEvent::CallTerminating { dialog_id, reason } => {
                 if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
-                    self.event_tx.send((
-                        session_id.clone(),
-                        EventType::DialogBYE
-                    )).await.map_err(|e| SessionError::InternalError(format!("Failed to send event: {}", e)))?;
+                    // Publish call termination through GlobalEventCoordinator
+                    use infra_common::events::cross_crate::TerminationReason;
+                    let cross_crate_event = infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::CallTerminated {
+                            session_id: session_id.0.clone(),
+                            reason: TerminationReason::RemoteHangup,
+                        }
+                    );
+                    if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
+                        tracing::error!("Failed to publish call termination: {}", e);
+                    }
                 }
             }
             
@@ -416,7 +458,7 @@ impl Clone for DialogAdapter {
     fn clone(&self) -> Self {
         Self {
             dialog_api: self.dialog_api.clone(),
-            event_tx: self.event_tx.clone(),
+            global_coordinator: self.global_coordinator.clone(),
             store: self.store.clone(),
             session_to_dialog: self.session_to_dialog.clone(),
             dialog_to_session: self.dialog_to_session.clone(),
