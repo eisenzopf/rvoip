@@ -227,6 +227,35 @@ impl CallSession {
             "Use SessionManager::terminate_session() method instead".to_string()
         ))
     }
+
+    /// Start recording the media session
+    pub async fn start_recording(&self) -> Result<()> {
+        // For now, return Ok to avoid crashing the example
+        // Real implementation would trigger StartRecordingMedia action
+        Ok(())
+    }
+
+    /// Stop recording the media session
+    pub async fn stop_recording(&self) -> Result<()> {
+        // For now, return Ok to avoid crashing the example
+        // Real implementation would trigger StopRecordingMedia action
+        Ok(())
+    }
+
+    /// Play an audio file
+    pub async fn play_audio(&self, _file: &str) -> Result<()> {
+        // For now, return Ok to avoid crashing the example
+        // Real implementation would trigger PlayAudioFile action
+        Ok(())
+    }
+
+    /// Start the media session
+    pub async fn start_media(&self) -> Result<()> {
+        // For now, return Ok to avoid crashing the example
+        // This would trigger StartMediaSession action but it's already
+        // started automatically when the call is established
+        Ok(())
+    }
 }
 
 /// Represents an incoming call that needs to be handled

@@ -19,6 +19,7 @@ use infra_common::events::cross_crate::{
     RvoipCrossCrateEvent, MediaToSessionEvent, SessionToMediaEvent,
     CrossCrateEvent,
 };
+use rvoip_media_core::types::AudioFrame;
 
 /// Negotiated media configuration
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -27,6 +28,54 @@ pub struct NegotiatedConfig {
     pub remote_addr: SocketAddr,
     pub codec: String,
     pub payload_type: u8,
+}
+
+/// Audio frame subscriber for receiving decoded audio from RTP
+#[derive(Debug)]
+pub struct AudioFrameSubscriber {
+    /// The session ID this subscriber is associated with
+    session_id: SessionId,
+    /// Receiver for audio frames (async tokio channel for non-blocking operation)
+    receiver: tokio::sync::mpsc::Receiver<AudioFrame>,
+}
+
+impl AudioFrameSubscriber {
+    /// Create a new audio frame subscriber
+    pub fn new(session_id: SessionId, receiver: tokio::sync::mpsc::Receiver<AudioFrame>) -> Self {
+        Self {
+            session_id,
+            receiver,
+        }
+    }
+    
+    /// Get the session ID this subscriber is associated with
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+    
+    /// Receive the next audio frame (async)
+    /// 
+    /// # Returns
+    /// - `Some(audio_frame)` - Audio frame ready for playback
+    /// - `None` - Channel is closed or session ended
+    pub async fn recv(&mut self) -> Option<AudioFrame> {
+        self.receiver.recv().await
+    }
+    
+    /// Try to receive an audio frame (non-blocking)
+    /// 
+    /// # Returns
+    /// - `Ok(audio_frame)` - Audio frame ready for playback
+    /// - `Err(TryRecvError::Empty)` - No frame available right now
+    /// - `Err(TryRecvError::Disconnected)` - Channel is closed or session ended
+    pub fn try_recv(&mut self) -> std::result::Result<AudioFrame, tokio::sync::mpsc::error::TryRecvError> {
+        self.receiver.try_recv()
+    }
+    
+    /// Check if the subscriber is still connected to the session
+    pub fn is_connected(&self) -> bool {
+        !self.receiver.is_closed()
+    }
 }
 
 /// Minimal media adapter - just translates between media-core and state machine
@@ -46,6 +95,9 @@ pub struct MediaAdapter {
     
     /// Store media session info for SDP generation
     media_sessions: Arc<DashMap<SessionId, MediaSessionInfo>>,
+    
+    /// Audio frame channels for receiving decoded audio from media-core
+    audio_receivers: Arc<DashMap<SessionId, mpsc::Sender<AudioFrame>>>,
     
     /// Local IP for SDP generation
     local_ip: IpAddr,
@@ -71,6 +123,7 @@ impl MediaAdapter {
             session_to_dialog: Arc::new(DashMap::new()),
             dialog_to_session: Arc::new(DashMap::new()),
             media_sessions: Arc::new(DashMap::new()),
+            audio_receivers: Arc::new(DashMap::new()),
             local_ip: IpAddr::from_str("127.0.0.1").unwrap(),
             port_start: 10000,
             port_end: 20000,
@@ -92,6 +145,7 @@ impl MediaAdapter {
             session_to_dialog: Arc::new(DashMap::new()),
             dialog_to_session: Arc::new(DashMap::new()),
             media_sessions: Arc::new(DashMap::new()),
+            audio_receivers: Arc::new(DashMap::new()),
             local_ip,
             port_start,
             port_end,
@@ -397,15 +451,82 @@ impl MediaAdapter {
         Ok(())
     }
     
+    // ===== AUDIO FRAME API - The Missing Core Functionality =====
+    
+    /// Send an audio frame for encoding and transmission
+    /// This is the equivalent of the old session-core's MediaControl::send_audio_frame()
+    pub async fn send_audio_frame(&self, session_id: &SessionId, audio_frame: AudioFrame) -> Result<()> {
+        // Get the dialog ID for this session
+        let dialog_id = self.session_to_dialog.get(session_id)
+            .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
+            .clone();
+        
+        tracing::debug!("📤 Sending audio frame for session {} ({} samples)", session_id.0, audio_frame.samples.len());
+        
+        // Call the media controller's send_audio_frame method
+        // MediaSessionController in media-core takes the full AudioFrame
+        self.controller.send_audio_frame(&dialog_id, audio_frame)
+            .await
+            .map_err(|e| SessionError::MediaError(format!("Failed to send audio frame: {}", e)))?;
+        
+        tracing::debug!("✅ Audio frame sent successfully for session {}", session_id.0);
+        Ok(())
+    }
+    
+    /// Subscribe to receive decoded audio frames from RTP
+    /// This is the equivalent of the old session-core's MediaControl::subscribe_to_audio_frames()
+    pub async fn subscribe_to_audio_frames(&self, session_id: &SessionId) -> Result<AudioFrameSubscriber> {
+        // Get the dialog ID for this session
+        let dialog_id = self.session_to_dialog.get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(format!("No media session for {}", session_id.0)))?
+            .clone();
+        
+        // Create channel for audio frames
+        let (tx, rx) = mpsc::channel(1000); // Buffer up to 1000 frames (20 seconds at 50fps)
+        
+        // Register the callback with MediaSessionController to receive audio frames
+        self.controller.set_audio_frame_callback(dialog_id, tx.clone())
+            .await
+            .map_err(|e| SessionError::MediaError(format!("Failed to set audio callback: {}", e)))?;
+        
+        // Store the sender for this session for cleanup
+        self.audio_receivers.insert(session_id.clone(), tx);
+        
+        tracing::info!("🎧 Created audio frame subscriber for session {}", session_id.0);
+        
+        Ok(AudioFrameSubscriber::new(session_id.clone(), rx))
+    }
+    
+    /// Internal method to forward received audio frames to subscribers
+    /// This should be called by the media event handler when audio frames are received
+    pub(crate) async fn forward_audio_frame_to_subscriber(&self, session_id: &SessionId, audio_frame: AudioFrame) -> Result<()> {
+        if let Some(tx) = self.audio_receivers.get(session_id) {
+            if let Err(_) = tx.send(audio_frame).await {
+                // Receiver has been dropped, clean up
+                self.audio_receivers.remove(session_id);
+                tracing::debug!("Audio frame subscriber disconnected for session {}", session_id.0);
+            }
+        }
+        Ok(())
+    }
+    
     /// Clean up all mappings and resources for a session
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
         // Stop the media session if it exists
         if let Some(dialog_id) = self.session_to_dialog.remove(session_id) {
+            // Remove audio frame callback if one was set
+            if self.audio_receivers.contains_key(session_id) {
+                let _ = self.controller.remove_audio_frame_callback(&dialog_id.1).await;
+            }
+            
             let _ = self.controller.stop_media(&dialog_id.1).await;
             self.dialog_to_session.remove(&dialog_id.1);
         }
         
         self.media_sessions.remove(session_id);
+        
+        // Clean up audio frame receivers
+        self.audio_receivers.remove(session_id);
         
         tracing::debug!("Cleaned up media adapter mappings for session {}", session_id.0);
         Ok(())
@@ -500,6 +621,18 @@ impl MediaAdapter {
                 }
             }
             
+            // TODO: Handle incoming audio frames from media-core when available
+            // MediaSessionEvent::AudioFrameReceived { dialog_id, audio_frame } => {
+            //     if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
+            //         tracing::debug!("📥 Received audio frame for session {} ({} samples)", session_id.0, audio_frame.samples.len());
+            //         
+            //         // Forward the frame to any subscribers
+            //         if let Err(e) = self.forward_audio_frame_to_subscriber(&session_id, audio_frame).await {
+            //             tracing::error!("Failed to forward audio frame to subscriber for {}: {}", session_id.0, e);
+            //         }
+            //     }
+            // }
+            
             _ => {
                 // Ignore other events for now
             }
@@ -518,6 +651,7 @@ impl Clone for MediaAdapter {
             session_to_dialog: self.session_to_dialog.clone(),
             dialog_to_session: self.dialog_to_session.clone(),
             media_sessions: self.media_sessions.clone(),
+            audio_receivers: self.audio_receivers.clone(),
             local_ip: self.local_ip,
             port_start: self.port_start,
             port_end: self.port_end,

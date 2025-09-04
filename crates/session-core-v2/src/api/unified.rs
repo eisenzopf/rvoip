@@ -8,7 +8,9 @@ use crate::session_store::SessionStore;
 use crate::state_machine::{StateMachine as StateMachineExecutor, ProcessEventResult};
 use crate::state_machine::executor::SessionEvent as StateMachineEvent;
 use crate::adapters::{EventRouter, DialogAdapter, MediaAdapter};
+use crate::adapters::media_adapter::AudioFrameSubscriber;
 use crate::errors::{Result, SessionError};
+use rvoip_media_core::types::AudioFrame;
 use std::sync::Arc;
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::{mpsc, RwLock};
@@ -141,6 +143,22 @@ impl UnifiedSession {
         }).await
     }
     
+    // ===== REAL AUDIO FRAME API - The Missing Core Functionality =====
+    
+    /// Send an audio frame for encoding and transmission
+    /// This is the real audio transmission API that was missing!
+    pub async fn send_audio_frame(&self, audio_frame: AudioFrame) -> Result<()> {
+        // Access the media adapter directly from the coordinator
+        self.coordinator.media_adapter.send_audio_frame(&self.id, audio_frame).await
+    }
+    
+    /// Subscribe to receive decoded audio frames from RTP
+    /// This is the real audio reception API that was missing!
+    pub async fn subscribe_to_audio_frames(&self) -> Result<AudioFrameSubscriber> {
+        // Access the media adapter directly from the coordinator
+        self.coordinator.media_adapter.subscribe_to_audio_frames(&self.id).await
+    }
+    
     /// Get current state
     pub async fn state(&self) -> Result<CallState> {
         self.coordinator.get_session_state(&self.id).await
@@ -195,7 +213,10 @@ pub struct UnifiedCoordinator {
     state_machine: Arc<StateMachineExecutor>,
     
     /// Event router (handles adapters)
-    event_router: Arc<EventRouter>,
+    pub event_router: Arc<EventRouter>,
+    
+    /// Media adapter for audio operations
+    pub media_adapter: Arc<MediaAdapter>,
     
     /// Event subscribers
     subscribers: Arc<RwLock<HashMap<SessionId, Vec<Arc<dyn Fn(SessionEvent) + Send + Sync>>>>>,
@@ -290,6 +311,7 @@ impl UnifiedCoordinator {
             store,
             state_machine,
             event_router,
+            media_adapter: media_adapter.clone(),
             subscribers: subscribers.clone(),
             config,
             global_coordinator,
@@ -352,13 +374,11 @@ impl UnifiedCoordinator {
     
     /// Process an event for a session
     pub async fn process_event(&self, session_id: &SessionId, event: EventType) -> Result<()> {
-        // Process through state machine
+        // Process through state machine (which executes actions internally)
         let result = self.state_machine.process_event(session_id, event.clone()).await?;
         
-        // Execute actions through event router
-        for action in &result.actions_executed {
-            self.event_router.execute_action(session_id, action).await?;
-        }
+        // NOTE: Actions are already executed by the state machine, no need to execute them again
+        // The event router should only route events, not execute actions
         
         // Publish state change events to subscribers
         if let Some(transition) = result.transition {
