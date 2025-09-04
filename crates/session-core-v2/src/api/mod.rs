@@ -470,6 +470,7 @@
 pub mod types;      // Core types
 pub mod unified;    // Unified API
 pub mod builder;    // Session builder
+pub mod simple;     // Simple peer API (the good one)
 
 // Re-export the main types
 pub use types::{
@@ -481,6 +482,9 @@ pub use types::{
 pub use unified::{
     UnifiedSession, UnifiedCoordinator, SessionEvent, Config,
 };
+
+// Re-export the simple API (the one people should actually use)
+pub use simple::{SimplePeer, Call, IncomingCall as SimpleIncomingCall, AudioStream};
 
 // Re-export builder
 pub use builder::SessionBuilder;

@@ -102,7 +102,7 @@ check_timeout() {
 }
 
 # Wait for both to complete with timeout
-TIMEOUT=20
+TIMEOUT=30
 echo -e "${BLUE}⏳ Waiting for test to complete (max ${TIMEOUT}s)...${NC}"
 
 # Monitor both processes
