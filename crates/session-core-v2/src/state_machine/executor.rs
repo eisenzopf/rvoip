@@ -101,6 +101,22 @@ impl StateMachine {
         }
     }
     
+    pub fn new_with_custom_table(
+        table: Arc<crate::state_table::MasterStateTable>,
+        store: Arc<SessionStore>,
+        dialog_adapter: Arc<DialogAdapter>,
+        media_adapter: Arc<MediaAdapter>,
+        event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> Self {
+        Self {
+            table,
+            store,
+            dialog_adapter,
+            media_adapter,
+            event_tx,
+        }
+    }
+    
     /// Check if a transition exists for the given state key
     pub fn has_transition(&self, key: &StateKey) -> bool {
         self.table.has_transition(key)

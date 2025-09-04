@@ -14,6 +14,11 @@ use rvoip_media_core::{
 use crate::state_table::types::{SessionId, EventType};
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
+use infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
+use infra_common::events::cross_crate::{
+    RvoipCrossCrateEvent, MediaToSessionEvent, SessionToMediaEvent,
+    CrossCrateEvent,
+};
 
 /// Negotiated media configuration
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -29,8 +34,8 @@ pub struct MediaAdapter {
     /// Media-core controller
     controller: Arc<MediaSessionController>,
     
-    /// Channel to send events to state machine
-    event_tx: mpsc::Sender<(SessionId, EventType)>,
+    /// Global event coordinator for cross-crate communication
+    global_coordinator: Arc<GlobalEventCoordinator>,
     
     /// Session store for updating IDs
     store: Arc<SessionStore>,
@@ -54,10 +59,14 @@ impl MediaAdapter {
     /// Create a mock media adapter for testing
     pub fn new_mock() -> Self {
         use std::str::FromStr;
-        let (event_tx, _) = mpsc::channel(100);
+        let global_coordinator = Arc::new(
+            tokio::runtime::Handle::current().block_on(
+                GlobalEventCoordinator::monolithic()
+            ).expect("Failed to create mock coordinator")
+        );
         Self {
             controller: Arc::new(MediaSessionController::new()),
-            event_tx,
+            global_coordinator,
             store: Arc::new(SessionStore::new()),
             session_to_dialog: Arc::new(DashMap::new()),
             dialog_to_session: Arc::new(DashMap::new()),
@@ -68,9 +77,9 @@ impl MediaAdapter {
         }
     }
     
-    pub fn new(
+    pub fn new_with_coordinator(
         controller: Arc<MediaSessionController>,
-        event_tx: mpsc::Sender<(SessionId, EventType)>,
+        global_coordinator: Arc<GlobalEventCoordinator>,
         store: Arc<SessionStore>,
         local_ip: IpAddr,
         port_start: u16,
@@ -78,7 +87,7 @@ impl MediaAdapter {
     ) -> Self {
         Self {
             controller,
-            event_tx,
+            global_coordinator,
             store,
             session_to_dialog: Arc::new(DashMap::new()),
             dialog_to_session: Arc::new(DashMap::new()),
@@ -123,11 +132,17 @@ impl MediaAdapter {
                 let _ = self.store.update_session(session).await;
             }
             
-            // Send MediaSessionReady event
-            self.event_tx.send((
-                session_id.clone(),
-                EventType::MediaSessionReady
-            )).await.map_err(|e| SessionError::InternalError(format!("Failed to send event: {}", e)))?;
+            // Send MediaStreamStarted event through GlobalEventCoordinator
+            let cross_crate_event = infra_common::events::cross_crate::RvoipCrossCrateEvent::MediaToSession(
+                MediaToSessionEvent::MediaStreamStarted {
+                    session_id: session_id.0.clone(),
+                    local_port: info.rtp_port.unwrap_or(0),
+                    codec: "PCMU".to_string(),
+                }
+            );
+            if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
+                tracing::error!("Failed to publish MediaSessionReady: {}", e);
+            }
         }
         
         Ok(())
@@ -195,17 +210,18 @@ impl MediaAdapter {
             payload_type: 0,
         };
         
-        // Send negotiation complete event
-        self.event_tx.send((
-            session_id.clone(),
-            EventType::MediaNegotiated
-        )).await.map_err(|e| SessionError::InternalError(format!("Failed to send event: {}", e)))?;
-        
-        // Simulate media flow established after negotiation
-        self.event_tx.send((
-            session_id.clone(),
-            EventType::MediaFlowEstablished
-        )).await.map_err(|e| SessionError::InternalError(format!("Failed to send event: {}", e)))?;
+        // Send MediaStreamStarted event through GlobalEventCoordinator
+        // (Media negotiation and flow establishment are represented by MediaStreamStarted)
+        let media_event = infra_common::events::cross_crate::RvoipCrossCrateEvent::MediaToSession(
+            MediaToSessionEvent::MediaStreamStarted {
+                session_id: session_id.0.clone(),
+                local_port: config.local_addr.port(),
+                codec: config.codec.clone(),
+            }
+        );
+        if let Err(e) = self.global_coordinator.publish(Arc::new(media_event)).await {
+            tracing::error!("Failed to publish MediaStreamStarted: {}", e);
+        }
         
         Ok(config)
     }
@@ -244,17 +260,19 @@ impl MediaAdapter {
             payload_type: 0,
         };
         
-        // Send negotiation complete event
-        self.event_tx.send((
-            session_id.clone(),
-            EventType::MediaNegotiated
-        )).await.map_err(|e| SessionError::InternalError(format!("Failed to send event: {}", e)))?;
+        // Send MediaStreamStarted event through GlobalEventCoordinator
+        let cross_crate_event = infra_common::events::cross_crate::RvoipCrossCrateEvent::MediaToSession(
+            MediaToSessionEvent::MediaStreamStarted {
+                session_id: session_id.0.clone(),
+                local_port: config.local_addr.port(),
+                codec: config.codec.clone(),
+            }
+        );
+        if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
+            tracing::error!("Failed to publish MediaNegotiated: {}", e);
+        }
         
-        // Simulate media flow established
-        self.event_tx.send((
-            session_id.clone(),
-            EventType::MediaFlowEstablished
-        )).await.map_err(|e| SessionError::InternalError(format!("Failed to send event: {}", e)))?;
+        // Media flow is already represented by MediaStreamStarted above
         
         Ok((sdp_answer, config))
     }
@@ -462,10 +480,17 @@ impl MediaAdapter {
             
             MediaSessionEvent::SessionFailed { dialog_id, error } => {
                 if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
-                    self.event_tx.send((
-                        session_id.clone(),
-                        EventType::MediaError(error)
-                    )).await.map_err(|e| SessionError::InternalError(format!("Failed to send event: {}", e)))?;
+                    // Send MediaError event through GlobalEventCoordinator
+                    let cross_crate_event = infra_common::events::cross_crate::RvoipCrossCrateEvent::MediaToSession(
+                        MediaToSessionEvent::MediaError {
+                            session_id: session_id.0.clone(),
+                            error: error.clone(),
+                            error_code: None,
+                        }
+                    );
+                    if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
+                        tracing::error!("Failed to publish MediaError: {}", e);
+                    }
                 }
             }
             
@@ -488,7 +513,7 @@ impl Clone for MediaAdapter {
     fn clone(&self) -> Self {
         Self {
             controller: self.controller.clone(),
-            event_tx: self.event_tx.clone(),
+            global_coordinator: self.global_coordinator.clone(),
             store: self.store.clone(),
             session_to_dialog: self.session_to_dialog.clone(),
             dialog_to_session: self.dialog_to_session.clone(),

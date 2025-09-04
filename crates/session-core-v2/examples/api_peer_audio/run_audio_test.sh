@@ -44,53 +44,35 @@ for arg in "$@"; do
     esac
 done
 
-# Create log directory
-LOG_DIR="logs"
+# Create log directory (in the examples/api_peer_audio directory)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_DIR="$SCRIPT_DIR/logs"
 mkdir -p $LOG_DIR
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 ALICE_LOG="$LOG_DIR/alice_${TIMESTAMP}.log"
 BOB_LOG="$LOG_DIR/bob_${TIMESTAMP}.log"
 
-# Build the examples first
-echo -e "${BLUE}🔨 Building examples...${NC}"
-cargo build --example api_peer_audio_peer1 --example api_peer_audio_peer2 -p rvoip-session-core-v2 2>&1 | grep -E "(Compiling|Finished)" || {
-    echo -e "${RED}❌ Build failed${NC}"
-    exit 1
-}
-
 # Clean up any previous output
-if [ -d "output" ]; then
-    rm -rf output
+OUTPUT_DIR="$SCRIPT_DIR/output"
+if [ -d "$OUTPUT_DIR" ]; then
+    rm -rf "$OUTPUT_DIR"
 fi
-mkdir -p output
+mkdir -p "$OUTPUT_DIR"
 
-# Get the binary path
-# We're in crates/session-core-v2/examples/api_peer_audio, need to go up to project root
-PROJECT_ROOT="$(cd ../../../.. && pwd)"
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}"
-PEER1_BIN="$CARGO_TARGET_DIR/debug/examples/api_peer_audio_peer1"
-PEER2_BIN="$CARGO_TARGET_DIR/debug/examples/api_peer_audio_peer2"
-
-# Check if binaries exist
-if [ ! -f "$PEER1_BIN" ] || [ ! -f "$PEER2_BIN" ]; then
-    echo -e "${RED}❌ Example binaries not found. Build may have failed.${NC}"
-    echo "Looking for:"
-    echo "  - $PEER1_BIN"
-    echo "  - $PEER2_BIN"
-    exit 1
-fi
+# Navigate to the session-core-v2 directory to run cargo commands
+cd ../..
 
 # Start Bob (peer2) in the background
 echo -e "${GREEN}▶️  Starting Bob (peer2) on port 5061...${NC}"
-$PEER2_BIN > >(tee "$BOB_LOG" | sed 's/^/[BOB] /') 2>&1 &
+cargo run --example api_peer_audio_peer2 -p rvoip-session-core-v2 > >(tee "$BOB_LOG" | sed 's/^/[BOB] /') 2>&1 &
 BOB_PID=$!
 
 # Give Bob time to start listening
-sleep 2
+sleep 3
 
 # Start Alice (peer1)
 echo -e "${GREEN}▶️  Starting Alice (peer1) on port 5060...${NC}"
-$PEER1_BIN > >(tee "$ALICE_LOG" | sed 's/^/[ALICE] /') 2>&1 &
+cargo run --example api_peer_audio_peer1 -p rvoip-session-core-v2 > >(tee "$ALICE_LOG" | sed 's/^/[ALICE] /') 2>&1 &
 ALICE_PID=$!
 
 # Function to check if process is still running
@@ -168,8 +150,8 @@ if [ $ALICE_EXIT -eq 0 ] && [ $BOB_EXIT -eq 0 ]; then
     
     if [ $RECORD_MODE -eq 1 ]; then
         echo ""
-        echo "📁 Audio files saved to: output/"
-        ls -la output/*.raw 2>/dev/null || echo "   (No audio files found - audio exchange may not be implemented yet)"
+        echo "📁 Audio files saved to: $OUTPUT_DIR/"
+        ls -la "$OUTPUT_DIR"/*.raw 2>/dev/null || echo "   (No audio files found - audio exchange may not be implemented yet)"
     fi
 else
     echo -e "${RED}❌ Test failed or timed out${NC}"

@@ -63,24 +63,14 @@ impl EventRouter {
     }
     
     /// Start the event router
-    pub async fn start(mut self) -> Result<()> {
+    pub async fn start(&self) -> Result<()> {
         // Start adapters
         self.dialog_adapter.start_event_loop().await?;
         self.media_adapter.start_event_loop().await?;
         
-        // Take the receiver
-        let mut event_rx = self.event_rx.take()
-            .ok_or_else(|| SessionError::InternalError("Event router already started".into()))?;
-        
-        // Spawn event processing loop
-        let router = Arc::new(self);
-        tokio::spawn(async move {
-            while let Some((session_id, event)) = event_rx.recv().await {
-                if let Err(e) = router.route_event(session_id, event).await {
-                    tracing::error!("Error routing event: {}", e);
-                }
-            }
-        });
+        // Note: Event processing would normally happen here, but since we're
+        // using a different architecture with adapters publishing events directly
+        // through GlobalEventCoordinator, we don't need the event loop here.
         
         Ok(())
     }

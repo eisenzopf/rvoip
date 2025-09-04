@@ -159,10 +159,22 @@ impl GlobalEventCoordinator {
         
         debug!("Publishing event type: {}", event_type);
         
+        // Call registered handlers for this event type
+        if let Some(handlers) = self.handlers.get(event_type) {
+            debug!("Found {} handlers for event type: {}", handlers.len(), event_type);
+            for handler in handlers.iter() {
+                if let Err(e) = handler.handle(event.clone()).await {
+                    warn!("Handler failed for event type {}: {}", event_type, e);
+                }
+            }
+        } else {
+            debug!("No handlers registered for event type: {}", event_type);
+        }
+        
         // TODO: Add plane-aware routing for cross-crate events
         debug!("Routing cross-crate event through planes");
         
-        // Publish through event bus
+        // Publish through event bus (for subscribers)
         self.event_bus.publish(event).await?;
         
         Ok(())

@@ -6,12 +6,19 @@
 use crate::state_table::types::{Role, EventType, CallState, SessionId};
 use crate::session_store::SessionStore;
 use crate::state_machine::{StateMachine as StateMachineExecutor, ProcessEventResult};
+use crate::state_machine::executor::SessionEvent as StateMachineEvent;
 use crate::adapters::{EventRouter, DialogAdapter, MediaAdapter};
 use crate::errors::{Result, SessionError};
 use std::sync::Arc;
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::{mpsc, RwLock};
 use std::collections::HashMap;
+use infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
+use infra_common::events::cross_crate::{
+    RvoipCrossCrateEvent, DialogToSessionEvent, SessionToDialogEvent,
+    MediaToSessionEvent, SessionToMediaEvent, CrossCrateEvent,
+};
+use infra_common::planes::LayerTaskManager;
 
 /// Unified session that works for any role (UAC, UAS, B2BUA, etc.)
 pub struct UnifiedSession {
@@ -195,6 +202,12 @@ pub struct UnifiedCoordinator {
     
     /// Configuration
     config: Config,
+    
+    /// Global event coordinator for cross-crate communication
+    global_coordinator: Arc<GlobalEventCoordinator>,
+    
+    /// Task manager for background tasks
+    task_manager: Arc<LayerTaskManager>,
 }
 
 impl UnifiedCoordinator {
@@ -203,23 +216,32 @@ impl UnifiedCoordinator {
         // Create session store
         let store = Arc::new(SessionStore::new());
         
+        // Create global event coordinator
+        let global_coordinator = Arc::new(
+            GlobalEventCoordinator::monolithic()
+                .await
+                .map_err(|e| SessionError::InternalError(format!("Failed to create global coordinator: {}", e)))?
+        );
+        
+        // Create task manager
+        let task_manager = Arc::new(LayerTaskManager::new("session-core-v2"));
+        
         // Create event channel for state machine
         let (state_event_tx, mut state_event_rx) = mpsc::channel(1000);
         
-        // Create dialog adapter
+        // Create dialog adapter with global coordinator
         let dialog_api = Self::create_dialog_api(&config).await?;
-        let (event_tx, event_rx) = mpsc::channel(1000);
-        let dialog_adapter = Arc::new(DialogAdapter::new(
+        let dialog_adapter = Arc::new(DialogAdapter::new_with_coordinator(
             dialog_api,
-            event_tx.clone(),
+            global_coordinator.clone(),
             store.clone(),
         ));
         
-        // Create media adapter
+        // Create media adapter with global coordinator
         let media_controller = Self::create_media_controller(&config).await?;
-        let media_adapter = Arc::new(MediaAdapter::new(
+        let media_adapter = Arc::new(MediaAdapter::new_with_coordinator(
             media_controller,
-            event_tx.clone(),
+            global_coordinator.clone(),
             store.clone(),
             config.local_ip,
             config.media_port_start,
@@ -227,12 +249,31 @@ impl UnifiedCoordinator {
         ));
         
         // Create state machine executor with all required dependencies
-        let state_machine = Arc::new(StateMachineExecutor::new_with_adapters(
-            store.clone(),
-            dialog_adapter.clone(),
-            media_adapter.clone(),
-            state_event_tx,
-        ));
+        let state_machine = if let Some(ref yaml_path) = config.state_table_path {
+            // Load custom state table from YAML file
+            let custom_table = crate::state_table::yaml_loader::YamlTableLoader::load_from_file(yaml_path)
+                .map_err(|e| SessionError::InternalError(format!("Failed to load custom state table: {}", e)))?;
+            
+            // Validate the custom table
+            if let Err(errors) = custom_table.validate() {
+                return Err(SessionError::InternalError(format!("Invalid custom state table: {:?}", errors)));
+            }
+            
+            Arc::new(StateMachineExecutor::new_with_custom_table(
+                Arc::new(custom_table),
+                store.clone(),
+                dialog_adapter.clone(),
+                media_adapter.clone(),
+                state_event_tx,
+            ))
+        } else {
+            Arc::new(StateMachineExecutor::new_with_adapters(
+                store.clone(),
+                dialog_adapter.clone(),
+                media_adapter.clone(),
+                state_event_tx,
+            ))
+        };
         
         // Create event router
         let event_router = Arc::new(EventRouter::new(
@@ -242,16 +283,69 @@ impl UnifiedCoordinator {
             media_adapter.clone(),
         ));
         
+        // Create subscribers map
+        let subscribers = Arc::new(RwLock::new(HashMap::new()));
+        
         let coordinator = Arc::new(Self {
             store,
             state_machine,
             event_router,
-            subscribers: Arc::new(RwLock::new(HashMap::new())),
+            subscribers: subscribers.clone(),
             config,
+            global_coordinator,
+            task_manager,
         });
         
-        // Start the event router
-        // Note: In real implementation, would need to properly wire this up
+        // Start the adapters
+        coordinator.start_adapters().await?;
+        
+        // Spawn task to process state machine events and notify subscribers
+        let subscribers_clone = subscribers.clone();
+        tokio::spawn(async move {
+            while let Some(event) = state_event_rx.recv().await {
+                // Extract session_id from the event (if available)
+                let session_id = match &event {
+                    StateMachineEvent::StateChanged { session_id, .. } |
+                    StateMachineEvent::MediaFlowEstablished { session_id, .. } |
+                    StateMachineEvent::CallEstablished { session_id, .. } |
+                    StateMachineEvent::CallTerminated { session_id, .. } |
+                    StateMachineEvent::Custom { session_id, .. } => session_id.clone(),
+                };
+                
+                // Convert to public SessionEvent and notify subscribers
+                // For now, just log since we'd need to convert types
+                tracing::debug!("State machine event for session {}: {:?}", session_id.0, event);
+                
+                // Notify subscribers
+                let subs = subscribers_clone.read().await;
+                if let Some(callbacks) = subs.get(&session_id) {
+                    // Convert StateMachineEvent to local SessionEvent
+                    let local_event = match event {
+                        StateMachineEvent::StateChanged { session_id: _, old_state, new_state } => {
+                            SessionEvent::StateChanged { from: old_state, to: new_state }
+                        }
+                        StateMachineEvent::MediaFlowEstablished { session_id: _, local_addr, remote_addr, direction: _ } => {
+                            SessionEvent::MediaFlowEstablished { local_addr, remote_addr }
+                        }
+                        StateMachineEvent::CallEstablished { session_id: _, .. } => {
+                            SessionEvent::CallEstablished
+                        }
+                        StateMachineEvent::CallTerminated { session_id: _ } => {
+                            SessionEvent::CallTerminated { reason: "Normal termination".to_string() }
+                        }
+                        StateMachineEvent::Custom { session_id: _, event } => {
+                            // Map custom events to appropriate local events if possible
+                            tracing::debug!("Custom event: {}", event);
+                            continue; // Skip custom events for now
+                        }
+                    };
+                    
+                    for callback in callbacks {
+                        callback(local_event.clone());
+                    }
+                }
+            }
+        });
         
         Ok(coordinator)
     }
@@ -373,21 +467,22 @@ impl UnifiedCoordinator {
             .map_err(|e| SessionError::DialogError(format!("Failed to initialize transport: {}", e)))?;
         
         // Create transaction manager
-        let (transaction_manager, _global_rx) = TransactionManager::with_transport_manager(
+        let (transaction_manager, global_rx) = TransactionManager::with_transport_manager(
             transport_manager,
             transport_rx,
             Some(100)
         ).await
         .map_err(|e| SessionError::DialogError(format!("Failed to create transaction manager: {}", e)))?;
         
-        // Create dialog manager config
-        let dialog_config = DialogManagerConfig::server(config.bind_addr)
+        // Create dialog manager config - use hybrid mode to support both UAC and UAS
+        let dialog_config = DialogManagerConfig::hybrid(config.bind_addr)
             .with_domain("session-core.local")
             .build();
         
-        // Create the dialog API
-        let dialog_api = rvoip_dialog_core::api::unified::UnifiedDialogApi::new(
+        // Create the dialog API with global events to consume transaction events
+        let dialog_api = rvoip_dialog_core::api::unified::UnifiedDialogApi::with_global_events(
             Arc::new(transaction_manager),
+            global_rx,
             dialog_config,
         ).await
         .map_err(|e| SessionError::DialogError(format!("Failed to create dialog API: {}", e)))?;
@@ -401,6 +496,30 @@ impl UnifiedCoordinator {
         let media_controller = rvoip_media_core::MediaSessionController::new();
         
         Ok(Arc::new(media_controller))
+    }
+    
+    /// Start the event adapters
+    async fn start_adapters(&self) -> Result<()> {
+        // Start the event router to enable dialog and media event loops
+        self.event_router.start().await?;
+        
+        // Register handler for cross-crate events
+        use crate::adapters::SessionCrossCrateEventHandler;
+        
+        let handler = SessionCrossCrateEventHandler::new(self.state_machine.clone());
+        
+        // Subscribe to dialog and media events
+        self.global_coordinator.register_handler(
+            "dialog_to_session",
+            handler.clone()
+        ).await.map_err(|e| SessionError::InternalError(format!("Failed to register dialog handler: {}", e)))?;
+        
+        self.global_coordinator.register_handler(
+            "media_to_session",
+            handler
+        ).await.map_err(|e| SessionError::InternalError(format!("Failed to register media handler: {}", e)))?;
+        
+        Ok(())
     }
 }
 

@@ -23,13 +23,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[ALICE] 📞 Starting on port 5060...");
     
     // Create coordinator with configuration for Alice
+    // Load the custom state table from this example's YAML file
+    let state_table_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/api_peer_audio/peer_audio_states.yaml");
+    
     let config = Config {
         sip_port: 5060,
         media_port_start: 10000,
         media_port_end: 10100,
         local_ip: "127.0.0.1".parse()?,
         bind_addr: "127.0.0.1:5060".parse()?,
-        state_table_path: None, // Use default state table
+        state_table_path: Some(state_table_path.to_string_lossy().to_string()),
     };
     let coordinator = UnifiedCoordinator::new(config).await?;
     
