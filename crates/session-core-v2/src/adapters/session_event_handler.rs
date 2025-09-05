@@ -6,12 +6,10 @@
 use std::sync::Arc;
 use anyhow::Result;
 use infra_common::events::coordinator::CrossCrateEventHandler;
-use infra_common::events::cross_crate::{
-    CrossCrateEvent, DialogToSessionEvent, MediaToSessionEvent, RvoipCrossCrateEvent,
-};
+use infra_common::events::cross_crate::CrossCrateEvent;
 use crate::state_table::types::{SessionId, EventType};
 use crate::state_machine::StateMachine as StateMachineExecutor;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info, error};
 
 /// Handler for processing cross-crate events in session-core-v2
 #[derive(Clone)]

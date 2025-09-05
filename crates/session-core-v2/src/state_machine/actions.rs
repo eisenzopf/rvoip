@@ -22,14 +22,7 @@ pub async fn execute_action(
             dialog_adapter.send_response(&session.session_id, *code, session.local_sdp.clone()).await?;
         }
         Action::SendINVITE => {
-            let from = session.local_uri.as_deref().unwrap_or("sip:user@localhost");
-            let to = session.remote_uri.as_deref().unwrap_or("sip:target@localhost");
-            dialog_adapter.send_invite(
-                &session.session_id,
-                from,
-                to, 
-                session.local_sdp.clone()
-            ).await?;
+            // Get session details for send_invite_with_details\n            let from = session.local_uri.clone().unwrap_or_else(|| \"sip:user@localhost\".to_string());\n            let to = session.remote_uri.clone().unwrap_or_else(|| \"sip:remote@localhost\".to_string());\n            dialog_adapter.send_invite_with_details(&session.session_id, &from, &to, session.local_sdp.clone()).await?;
         }
         Action::SendACK => {
             // Use the stored 200 OK response if available
@@ -45,10 +38,45 @@ pub async fn execute_action(
             dialog_adapter.send_ack(&session.session_id, &response).await?;
         }
         Action::SendBYE => {
-            dialog_adapter.send_bye(&session.session_id).await?;
+            dialog_adapter.send_bye_session(&session.session_id).await?;
         }
         Action::SendCANCEL => {
             dialog_adapter.send_cancel(&session.session_id).await?;
+        }
+        
+        // Call control actions
+        Action::HoldCall => {
+            // Send re-INVITE with sendonly SDP
+            if let Some(hold_sdp) = media_adapter.create_hold_sdp().await.ok() {
+                session.local_sdp = Some(hold_sdp.clone());
+                dialog_adapter.send_reinvite_session(&session.session_id, hold_sdp).await?;
+            }
+        }
+        Action::ResumeCall => {
+            // Send re-INVITE with sendrecv SDP
+            if let Some(active_sdp) = media_adapter.create_active_sdp().await.ok() {
+                session.local_sdp = Some(active_sdp.clone());
+                dialog_adapter.send_reinvite_session(&session.session_id, active_sdp).await?;
+            }
+        }
+        Action::TransferCall(target) => {
+            // Send REFER for blind transfer
+            dialog_adapter.send_refer_session(&session.session_id, target).await?;
+        }
+        Action::SendDTMF(digit) => {
+            // Send DTMF through media session
+            {
+                let media_id = crate::types::MediaSessionId::new();
+                media_adapter.send_dtmf(media_id, *digit).await?;
+            }
+        }
+        Action::StartRecording => {
+            // Start recording the media session
+            media_adapter.start_recording(&session.session_id).await?;
+        }
+        Action::StopRecording => {
+            // Stop recording the media session
+            media_adapter.stop_recording(&session.session_id).await?;
         }
         
         // Media actions
@@ -162,7 +190,7 @@ pub async fn execute_action(
             };
             
             if let Some(sdp_data) = sdp {
-                dialog_adapter.send_reinvite(&session.session_id, sdp_data).await?;
+                dialog_adapter.send_reinvite_session(&session.session_id, sdp_data).await?;
             }
         }
         
@@ -197,7 +225,7 @@ pub async fn execute_action(
         
         Action::InitiateBlindTransfer(target) => {
             debug!("Blind transfer from {} to {}", session.session_id, target);
-            dialog_adapter.send_refer(&session.session_id, target).await?;
+            dialog_adapter.send_refer_session(&session.session_id, target).await?;
         }
         
         Action::InitiateAttendedTransfer(target) => {
@@ -205,7 +233,7 @@ pub async fn execute_action(
             // For attended transfer, we first establish a consultation call
             // then send REFER with Replaces header
             // For now, just do a blind transfer as a fallback
-            dialog_adapter.send_refer(&session.session_id, target).await?;
+            dialog_adapter.send_refer_session(&session.session_id, target).await?;
             info!("Attended transfer initiated (using blind transfer for now)");
         }
         

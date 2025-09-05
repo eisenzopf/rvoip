@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::fs;
 use serde::{Deserialize, Serialize};
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
 use super::{
     StateTable, StateTableBuilder, StateKey, Transition, 

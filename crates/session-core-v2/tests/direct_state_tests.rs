@@ -2,6 +2,7 @@ use std::sync::Arc;
 use rvoip_session_core_v2::{
     SessionStore, SessionState, SessionId, Role, CallState, EventType,
     HistoryConfig, TransitionRecord,
+    types::{DialogId, MediaSessionId},
 };
 use futures::future;
 
@@ -246,16 +247,18 @@ async fn test_related_ids() {
         .expect("Failed to create session");
     
     // Add related IDs
-    session.dialog_id = Some("dialog-12345".to_string());
-    session.media_session_id = Some("media-67890".to_string());
+    let dialog_id = DialogId::new();
+    let media_id = MediaSessionId::new();
+    session.dialog_id = Some(dialog_id.clone());
+    session.media_session_id = Some(media_id.clone());
     session.call_id = Some("call-abcdef".to_string());
     
     store.update_session(session).await.unwrap();
     
     // Verify storage
     let retrieved = store.get_session(&session_id).await.unwrap();
-    assert_eq!(retrieved.dialog_id, Some("dialog-12345".to_string()));
-    assert_eq!(retrieved.media_session_id, Some("media-67890".to_string()));
+    assert_eq!(retrieved.dialog_id, Some(dialog_id));
+    assert_eq!(retrieved.media_session_id, Some(media_id));
     assert_eq!(retrieved.call_id, Some("call-abcdef".to_string()));
 }
 

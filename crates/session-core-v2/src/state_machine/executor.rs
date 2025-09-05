@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{info, warn, error, debug};
 use crate::state_table::SessionId;
 
@@ -9,7 +8,7 @@ use crate::{
     adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
 };
 
-use super::{actions, guards, effects};
+use super::{actions, guards};
 
 /// Result of processing an event through the state machine
 #[derive(Debug, Clone)]
@@ -74,14 +73,16 @@ impl StateMachine {
     pub fn new(
         table: Arc<crate::state_table::MasterStateTable>,
         store: Arc<SessionStore>,
+        dialog_adapter: Arc<DialogAdapter>,
+        media_adapter: Arc<MediaAdapter>,
     ) -> Self {
-        // Create dummy adapters for now (will be provided separately)
+        // Create event channel
         let (event_tx, _) = tokio::sync::mpsc::channel(100);
         Self {
             table,
             store,
-            dialog_adapter: Arc::new(DialogAdapter::new_mock()),
-            media_adapter: Arc::new(MediaAdapter::new_mock()),
+            dialog_adapter,
+            media_adapter,
             event_tx,
         }
     }
