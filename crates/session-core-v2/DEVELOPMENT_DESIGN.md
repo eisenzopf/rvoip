@@ -6,16 +6,37 @@ This document details the specific code changes needed to implement the architec
 ## File Organization
 
 ### New Files to Create
-- `src/adapters/signaling_interceptor.rs` - SIP signaling event interceptor
-- `src/session_registry.rs` - Central ID mapping registry
+
+#### Phase 1: Core Architecture Implementation
+- `src/session_registry.rs` - Central ID mapping registry (~200 lines)
+- `src/adapters/signaling_interceptor.rs` - SIP signaling event interceptor (~300 lines)
+- `src/api/session_manager.rs` - Session lifecycle management (~300 lines)
+- `src/api/call_controller.rs` - Call control operations (~400 lines)
+- `src/api/conference_manager.rs` - Conference bridge management (~200 lines)
+
+#### Phase 2: External Service Integration
+- `src/api/registry_service.rs` - Registration/presence integration (~300 lines)
+- `src/adapters/auth_adapter.rs` - Auth-core integration (~150 lines)
+- `src/adapters/registrar_adapter.rs` - Registrar-core integration (~200 lines)
+
+#### Phase 3: Plugin System (Can be implemented later)
+- `src/adapters/registry.rs` - Adapter plugin registry (~250 lines)
+- `src/api/adapter_manager.rs` - Adapter lifecycle management (~250 lines)
 
 ### Files to Modify
-- `src/api/simple.rs` - Complete the SimplePeer, Call, IncomingCall implementation
-- `src/api/types.rs` - Add CallId, CallDirection, CallState types
-- `src/api/unified.rs` - Add factory methods and incoming call support
+
+#### Major Refactoring
+- `src/api/unified.rs` - Refactor from 580 lines to ~200 lines (thin orchestration layer)
+- `src/api/simple.rs` - Complete the SimplePeer, Call, IncomingCall implementation (~400 lines)
+
+#### Minor Updates
+- `src/api/types.rs` - Add new types (CallDirection, TransferStatus, MediaDirection, etc.)
 - `src/adapters/dialog_adapter.rs` - Add interceptor hook
 - `src/adapters/session_event_handler.rs` - Modify to skip new calls
-- `src/api/mod.rs` - Export SimplePeer and related types
+- `src/adapters/media_adapter.rs` - Add conference mixing support
+- `src/state_machine/actions.rs` - Add new actions for hold/transfer/DTMF
+- `src/state_table/state_table.yaml` - Add new states and transitions
+- `src/api/mod.rs` - Export new modules and types
 - `src/lib.rs` - Public API exports
 
 ## Complete SimplePeer API
@@ -635,7 +656,11 @@ while let Ok(incoming) = peer.wait_for_incoming().await {
 
 ## Implementation Steps
 
-### File: `src/api/mod.rs` (modifications)
+### Phase 1: Core Architecture Implementation
+
+Create the modular architecture directly - no need to build in unified.rs first and then refactor.
+
+#### Step 1: Create Core Infrastructure
 ```rust
 //! Session Core V2 API modules
 
@@ -664,9 +689,9 @@ pub use api::types::{CallId, CallDirection, CallState};
 pub use api::unified::{UnifiedCoordinator, UnifiedSession};
 ```
 
-### Phase 1: Signaling Interception (CRITICAL)
+#### Step 2: Create SignalingInterceptor
 
-#### File: `src/adapters/signaling_interceptor.rs` (NEW)
+##### File: `src/adapters/signaling_interceptor.rs` (NEW)
 ```rust
 /// Extensible handler for signaling decisions
 #[async_trait]
@@ -775,47 +800,471 @@ impl DialogAdapter {
 }
 ```
 
-### Phase 2: Session Factory
+#### Step 3: Create Modular Architecture
 
-#### File: `src/api/unified.rs` (add factory methods)
+Instead of building everything in unified.rs and then refactoring, create the proper modular structure from the start.
+
+##### File Structure
+
+```
+src/api/
+├── mod.rs                    # Module exports
+├── unified.rs                # Thin orchestration layer (~200 lines)
+├── session_manager.rs        # Session lifecycle management (~300 lines)
+├── call_controller.rs        # Call control operations (~400 lines)
+├── registry_service.rs       # Registration/presence (~300 lines)
+├── conference_manager.rs     # Conference operations (~200 lines)
+├── adapter_manager.rs        # Adapter loading/management (~250 lines)
+└── simple.rs                 # SimplePeer API (unchanged)
+```
+
+#### File: `src/api/unified.rs` (refactored to be thin orchestration layer)
 ```rust
+use crate::api::{
+    SessionManager, CallController, RegistryService, 
+    ConferenceManager, AdapterManager
+};
+
+/// Unified coordinator - thin facade over specialized managers
+pub struct UnifiedCoordinator {
+    config: Config,
+    session_manager: Arc<SessionManager>,
+    call_controller: Arc<CallController>,
+    registry_service: Option<Arc<RegistryService>>, // Optional
+    conference_manager: Arc<ConferenceManager>,
+    adapter_manager: Option<Arc<AdapterManager>>,    // Optional for Phase 2
+}
+
 impl UnifiedCoordinator {
-    /// Create session for incoming call
-    async fn create_uas_session(
-        &self, 
-        from: String,
-        dialog_id: DialogId,
-        sdp: Option<String>
-    ) -> Result<Arc<UnifiedSession>> {
-        let session_id = SessionId::new();
+    pub async fn new(config: Config) -> Result<Self> {
+        // Initialize core components
+        let session_registry = Arc::new(SessionRegistry::new());
+        let session_store = Arc::new(SessionStore::new());
+        let state_machine = Arc::new(StateMachine::new(&config.state_table_path)?);
         
-        // Create session in store
-        self.store.create_session(session_id.clone(), Role::UAS, false).await?;
+        // Create specialized managers
+        let session_manager = Arc::new(SessionManager::new(
+            session_store.clone(),
+            session_registry.clone(),
+            state_machine.clone(),
+        ));
         
-        // Map dialog to session
-        self.dialog_to_session.insert(dialog_id, session_id.clone());
+        let call_controller = Arc::new(CallController::new(
+            config.clone(),
+            session_registry.clone(),
+        ).await?);
         
-        // Create session object
-        let session = UnifiedSession::new_internal(self.clone(), Role::UAS, session_id).await?;
+        let conference_manager = Arc::new(ConferenceManager::new(
+            call_controller.media_adapter.clone(),
+        ));
         
-        // Store remote SDP if provided
-        if let Some(sdp_data) = sdp {
-            session.set_remote_sdp(sdp_data).await?;
-        }
-        
-        Ok(Arc::new(session))
+        Ok(Self {
+            config,
+            session_manager,
+            call_controller,
+            registry_service: None,
+            conference_manager,
+            adapter_manager: None,
+        })
     }
     
-    /// Create session for outgoing call
-    pub async fn create_outgoing_call(&self, target: &str) -> Result<Arc<UnifiedSession>> {
-        let session = UnifiedSession::new(self.clone(), Role::UAC).await?;
-        session.make_call(target).await?;
-        Ok(Arc::new(session))
+    pub async fn new_with_services(
+        config: Config,
+        auth_service: Option<Arc<dyn AuthClient>>,
+        registrar_service: Option<Arc<RegistrarService>>,
+    ) -> Result<Self> {
+        let mut coordinator = Self::new(config).await?;
+        
+        // Add optional registry service
+        if let (Some(auth), Some(registrar)) = (auth_service, registrar_service) {
+            coordinator.registry_service = Some(Arc::new(
+                RegistryService::new(auth, registrar).await?
+            ));
+        }
+        
+        Ok(coordinator)
+    }
+    
+    // === Delegation Methods ===
+    
+    // Session operations delegate to SessionManager
+    pub async fn create_session(&self, role: Role) -> Result<SessionId> {
+        self.session_manager.create_session(role).await
+    }
+    
+    pub async fn get_session(&self, id: &SessionId) -> Result<SessionState> {
+        self.session_manager.get_session(id).await
+    }
+    
+    // Call operations delegate to CallController
+    pub async fn make_call(&self, session_id: &SessionId, target: &str) -> Result<()> {
+        self.call_controller.make_call(session_id, target).await
+    }
+    
+    pub async fn handle_incoming_invite(&self, invite: InviteDetails) -> Result<SessionId> {
+        self.call_controller.handle_incoming_invite(invite).await
+    }
+    
+    // Registration delegates to RegistryService
+    pub async fn register(&self, registrar: &str, credentials: Credentials) -> Result<()> {
+        self.registry_service
+            .as_ref()
+            .ok_or(SessionError::ServiceNotAvailable("registry"))?
+            .register(registrar, credentials)
+            .await
+    }
+    
+    // Conference delegates to ConferenceManager
+    pub async fn create_conference(&self) -> Result<Conference> {
+        self.conference_manager.create().await
     }
 }
 ```
 
-### Phase 3: Complete the Examples
+#### File: `src/api/session_manager.rs` (NEW - manages session lifecycle)
+```rust
+/// Manages session lifecycle and state
+pub struct SessionManager {
+    store: Arc<SessionStore>,
+    registry: Arc<SessionRegistry>,
+    state_machine: Arc<StateMachine>,
+    sessions: Arc<DashMap<SessionId, Arc<Mutex<SessionState>>>>,
+}
+
+impl SessionManager {
+    pub fn new(
+        store: Arc<SessionStore>,
+        registry: Arc<SessionRegistry>,
+        state_machine: Arc<StateMachine>,
+    ) -> Self {
+        Self {
+            store,
+            registry,
+            state_machine,
+            sessions: Arc::new(DashMap::new()),
+        }
+    }
+    
+    pub async fn create_session(&self, role: Role) -> Result<SessionId> {
+        let session_id = SessionId::new();
+        
+        // Create session state
+        let session = SessionState {
+            session_id: session_id.clone(),
+            role,
+            state: CallState::Idle,
+            created_at: Instant::now(),
+            ..Default::default()
+        };
+        
+        // Store in multiple places
+        self.store.create_session(session_id.clone(), role, false).await?;
+        self.sessions.insert(session_id.clone(), Arc::new(Mutex::new(session)));
+        
+        Ok(session_id)
+    }
+    
+    pub async fn get_session(&self, id: &SessionId) -> Result<SessionState> {
+        self.store.get_session(id).await
+    }
+    
+    pub async fn update_session_state(&self, id: &SessionId, state: CallState) -> Result<()> {
+        if let Some(session) = self.sessions.get(id) {
+            let mut session = session.lock().await;
+            let old_state = session.state;
+            session.state = state;
+            
+            // Trigger state change events
+            self.notify_state_change(id, old_state, state).await?;
+        }
+        Ok(())
+    }
+    
+    pub async fn terminate_session(&self, id: &SessionId) -> Result<()> {
+        // Clean up from all stores
+        self.sessions.remove(id);
+        self.store.delete_session(id).await?;
+        self.registry.remove_session(id);
+        Ok(())
+    }
+    
+    pub async fn process_event(&self, session_id: &SessionId, event: EventType) -> Result<()> {
+        self.state_machine.process_event(session_id, event).await
+    }
+}
+```
+
+#### File: `src/api/call_controller.rs` (NEW - handles call control)
+```rust
+/// Handles call control operations
+pub struct CallController {
+    pub dialog_adapter: Arc<DialogAdapter>,
+    pub media_adapter: Arc<MediaAdapter>,
+    signaling_interceptor: Arc<SignalingInterceptor>,
+    session_registry: Arc<SessionRegistry>,
+    incoming_tx: mpsc::Sender<IncomingCall>,
+    incoming_rx: Arc<Mutex<mpsc::Receiver<IncomingCall>>>,
+}
+
+impl CallController {
+    pub async fn new(
+        config: Config,
+        session_registry: Arc<SessionRegistry>,
+    ) -> Result<Self> {
+        // Initialize adapters
+        let dialog_adapter = Arc::new(DialogAdapter::new(config.clone()).await?);
+        let media_adapter = Arc::new(MediaAdapter::new(config.clone()).await?);
+        
+        // Create incoming call channel
+        let (incoming_tx, incoming_rx) = mpsc::channel(100);
+        
+        // Create signaling interceptor
+        let signaling_interceptor = Arc::new(SignalingInterceptor::new(
+            incoming_tx.clone(),
+            session_registry.clone(),
+        ));
+        
+        // Wire up interceptor
+        dialog_adapter.set_interceptor(signaling_interceptor.clone());
+        
+        Ok(Self {
+            dialog_adapter,
+            media_adapter,
+            signaling_interceptor,
+            session_registry,
+            incoming_tx,
+            incoming_rx: Arc::new(Mutex::new(incoming_rx)),
+        })
+    }
+    
+    pub async fn make_call(&self, session_id: &SessionId, target: &str) -> Result<()> {
+        // Send INVITE via dialog adapter
+        let dialog_id = self.dialog_adapter.send_invite(session_id, target).await?;
+        
+        // Register mapping
+        self.session_registry.map_dialog(session_id.clone(), dialog_id);
+        
+        Ok(())
+    }
+    
+    pub async fn handle_incoming_invite(&self, invite: InviteDetails) -> Result<SessionId> {
+        // This is called by SignalingInterceptor
+        let session_id = SessionId::new();
+        
+        // Map dialog to session
+        self.session_registry.map_dialog(session_id.clone(), invite.dialog_id);
+        
+        // Send to incoming channel
+        self.incoming_tx.send(IncomingCall {
+            session_id: session_id.clone(),
+            from: invite.from,
+            sdp: invite.sdp,
+        }).await?;
+        
+        Ok(session_id)
+    }
+    
+    pub async fn accept_call(&self, session_id: &SessionId) -> Result<()> {
+        self.dialog_adapter.send_response(session_id, 200, "OK").await?;
+        self.media_adapter.start_media(session_id).await?;
+        Ok(())
+    }
+    
+    pub async fn reject_call(&self, session_id: &SessionId, reason: &str) -> Result<()> {
+        self.dialog_adapter.send_response(session_id, 486, reason).await
+    }
+    
+    pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
+        self.dialog_adapter.send_bye(session_id).await?;
+        self.media_adapter.stop_media(session_id).await?;
+        Ok(())
+    }
+    
+    pub async fn hold(&self, session_id: &SessionId) -> Result<()> {
+        // Send re-INVITE with sendonly
+        let sdp = self.media_adapter.create_hold_sdp(session_id).await?;
+        self.dialog_adapter.send_reinvite(session_id, sdp).await
+    }
+    
+    pub async fn get_incoming_call(&self) -> Option<IncomingCall> {
+        self.incoming_rx.lock().await.recv().await
+    }
+}
+```
+
+#### File: `src/api/registry_service.rs` (NEW - registration/presence)
+```rust
+/// Handles registration and presence
+pub struct RegistryService {
+    auth_adapter: Arc<AuthAdapter>,
+    registrar_adapter: Arc<RegistrarAdapter>,
+    presence_subscriptions: Arc<DashMap<SessionId, Vec<Subscription>>>,
+}
+
+impl RegistryService {
+    pub async fn new(
+        auth_client: Arc<dyn AuthClient>,
+        registrar_service: Arc<RegistrarService>,
+    ) -> Result<Self> {
+        let auth_adapter = Arc::new(AuthAdapter::new(auth_client));
+        let registrar_adapter = Arc::new(RegistrarAdapter::new(registrar_service));
+        
+        Ok(Self {
+            auth_adapter,
+            registrar_adapter,
+            presence_subscriptions: Arc::new(DashMap::new()),
+        })
+    }
+    
+    pub async fn register(&self, registrar: &str, credentials: Credentials) -> Result<()> {
+        // Validate credentials
+        self.auth_adapter.validate_credentials(&credentials).await?;
+        
+        // Register with registrar
+        self.registrar_adapter.register(
+            &credentials.username,
+            registrar,
+            3600, // 1 hour
+        ).await
+    }
+    
+    pub async fn unregister(&self) -> Result<()> {
+        self.registrar_adapter.unregister().await
+    }
+    
+    pub async fn subscribe_presence(&self, session_id: &SessionId, target: &str) -> Result<()> {
+        let subscription = self.registrar_adapter
+            .subscribe_presence(target)
+            .await?;
+        
+        self.presence_subscriptions
+            .entry(session_id.clone())
+            .or_default()
+            .push(subscription);
+        
+        Ok(())
+    }
+    
+    pub async fn publish_presence(&self, uri: &str, status: PresenceStatus) -> Result<()> {
+        self.registrar_adapter.publish_presence(uri, status).await
+    }
+    
+    pub async fn park_call(&self, session_id: &SessionId) -> Result<String> {
+        let park_slot = format!("park-{}", uuid::Uuid::new_v4());
+        
+        self.registrar_adapter.register_park_slot(
+            &park_slot,
+            session_id,
+            300, // 5 min timeout
+        ).await?;
+        
+        Ok(park_slot)
+    }
+    
+    pub async fn retrieve_parked_call(&self, park_slot: &str) -> Result<SessionId> {
+        self.registrar_adapter.retrieve_park_slot(park_slot).await
+    }
+}
+```
+
+#### File: `src/api/conference_manager.rs` (NEW - conference operations)
+```rust
+/// Manages conference bridges
+pub struct ConferenceManager {
+    conferences: Arc<DashMap<ConferenceId, ConferenceState>>,
+    media_adapter: Arc<MediaAdapter>,
+}
+
+impl ConferenceManager {
+    pub fn new(media_adapter: Arc<MediaAdapter>) -> Self {
+        Self {
+            conferences: Arc::new(DashMap::new()),
+            media_adapter,
+        }
+    }
+    
+    pub async fn create(&self) -> Result<Conference> {
+        let conf_id = ConferenceId::new();
+        
+        // Create audio mixer in media adapter
+        let mixer = self.media_adapter.create_audio_mixer(&conf_id).await?;
+        
+        // Store conference state
+        let state = ConferenceState {
+            id: conf_id.clone(),
+            created_at: Instant::now(),
+            participants: Vec::new(),
+            mixer_id: mixer.id(),
+        };
+        
+        self.conferences.insert(conf_id.clone(), state);
+        
+        Ok(Conference {
+            id: conf_id,
+            manager: Arc::new(self.clone()),
+        })
+    }
+    
+    pub async fn add_participant(&self, conf_id: &ConferenceId, session_id: SessionId) -> Result<()> {
+        // Get conference
+        let mut conf = self.conferences.get_mut(conf_id)
+            .ok_or(SessionError::ConferenceNotFound)?;
+        
+        // Redirect media to mixer
+        self.media_adapter.redirect_to_mixer(&session_id, conf_id).await?;
+        
+        // Add to participants
+        conf.participants.push(session_id);
+        
+        Ok(())
+    }
+    
+    pub async fn remove_participant(&self, conf_id: &ConferenceId, session_id: &SessionId) -> Result<()> {
+        // Get conference
+        let mut conf = self.conferences.get_mut(conf_id)
+            .ok_or(SessionError::ConferenceNotFound)?;
+        
+        // Remove from mixer
+        self.media_adapter.remove_from_mixer(session_id, conf_id).await?;
+        
+        // Remove from participants
+        conf.participants.retain(|id| id != session_id);
+        
+        // If empty, destroy conference
+        if conf.participants.is_empty() {
+            drop(conf); // Release lock
+            self.destroy(conf_id).await?;
+        }
+        
+        Ok(())
+    }
+    
+    async fn destroy(&self, conf_id: &ConferenceId) -> Result<()> {
+        self.conferences.remove(conf_id);
+        self.media_adapter.destroy_mixer(conf_id).await
+    }
+}
+```
+
+### Phase 2: External Service Integration
+
+After Phase 1 is working, add auth-core and registrar-core integration.
+
+### Phase 3: Plugin System (Optional)
+
+Can be added later without disrupting the core architecture.
+
+## Benefits of This Architecture
+
+1. **Manageable File Sizes**: Each file stays under 400 lines
+2. **Single Responsibility**: Each module has one clear purpose
+3. **Parallel Development**: Teams can work on different modules
+4. **Easier Testing**: Each component can be tested in isolation
+5. **Clear Dependencies**: UnifiedCoordinator just orchestrates
+
+The UnifiedCoordinator becomes a thin facade that delegates to specialized managers, preventing the file from becoming a monolithic mess.
+
+## Complete the Examples
 
 #### File: `crates/session-core-v2/examples/api_peer_audio/peer1.rs`
 ```rust
