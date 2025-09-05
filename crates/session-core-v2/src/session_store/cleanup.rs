@@ -4,9 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::interval;
 use serde::{Serialize, Deserialize};
-use tracing::{info, debug, error};
-use crate::state_table::{SessionId, CallState};
-use crate::errors::{Result, SessionError};
+use tracing::{info, debug};
+use crate::state_table::CallState;
 use super::{SessionStore, SessionState};
 
 /// Configuration for automatic cleanup

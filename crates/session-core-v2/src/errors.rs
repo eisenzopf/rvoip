@@ -27,6 +27,12 @@ pub enum SessionError {
     #[error("Configuration error: {0}")]
     ConfigurationError(String),
     
+    #[error("Config error: {0}")]
+    ConfigError(String),
+    
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+    
     #[error("Timeout: {0}")]
     Timeout(String),
     

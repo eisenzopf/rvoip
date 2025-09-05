@@ -22,6 +22,8 @@ states:
     description: "Call established with media flowing"
   - name: "OnHold"
     description: "Call on hold"
+  - name: "Transferring"
+    description: "Call being transferred"
   - name: "Terminating"
     description: "Call being terminated"
   - name: "Terminated"
@@ -115,6 +117,26 @@ transitions:
     actions:
       - type: "SendReinviteResume"
     description: "UAC resumes call"
+
+  # UAC: Blind Transfer
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "BlindTransfer"
+    next_state: "Transferring"
+    actions:
+      - type: "SendREFER"
+    description: "UAC initiates blind transfer"
+
+  # UAC: Transfer complete
+  - role: "UAC"
+    state: "Transferring"
+    event:
+      type: "TransferComplete"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupResources"
+    description: "UAC transfer completed"
 
   # UAC: Termination complete
   - role: "UAC"

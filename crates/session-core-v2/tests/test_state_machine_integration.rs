@@ -1,7 +1,8 @@
 /// Integration test for the state machine
 use rvoip_session_core_v2::{
     state_table::{Role, CallState, EventType, SessionId},
-    session_store::{SessionStore, SessionState},
+    session_store::{SessionStore, SessionState, HistoryConfig},
+    types::DialogId,
 };
 
 #[tokio::test]
@@ -97,18 +98,20 @@ async fn test_session_store_indexes() {
     let mut session2 = store.create_session(session2_id.clone(), Role::UAS, false).await.unwrap();
     
     // Set dialog IDs
-    session1.dialog_id = Some("dialog-1".to_string());
-    session2.dialog_id = Some("dialog-2".to_string());
+    let dialog1 = DialogId::new();
+    let dialog2 = DialogId::new();
+    session1.dialog_id = Some(dialog1.clone());
+    session2.dialog_id = Some(dialog2.clone());
     
     store.update_session(session1).await.unwrap();
     store.update_session(session2).await.unwrap();
     
     // Find by dialog ID
-    let found = store.find_by_dialog(&"dialog-1".to_string()).await;
+    let found = store.find_by_dialog(&dialog1).await;
     assert!(found.is_some());
     assert_eq!(found.unwrap().session_id, session1_id);
     
-    let found = store.find_by_dialog(&"dialog-2".to_string()).await;
+    let found = store.find_by_dialog(&dialog2).await;
     assert!(found.is_some());
     assert_eq!(found.unwrap().session_id, session2_id);
     
@@ -128,7 +131,7 @@ async fn test_session_with_history() {
     let session_id = SessionId::new();
     
     // Create session with history tracking
-    let mut session = SessionState::with_history(session_id.clone(), Role::UAC);
+    let mut session = SessionState::with_history(session_id.clone(), Role::UAC, HistoryConfig::default());
     
     // Make some transitions
     session.transition_to(CallState::Initiating);
@@ -137,18 +140,18 @@ async fn test_session_with_history() {
     
     // Check history
     if let Some(history) = &session.history {
-        let records = history.get_history();
+        let records = history.get_recent(100);
         assert_eq!(records.len(), 3);
         
         // Verify transitions
         assert_eq!(records[0].from_state, CallState::Idle);
-        assert_eq!(records[0].to_state, CallState::Initiating);
+        assert_eq!(records[0].to_state, Some(CallState::Initiating));
         
         assert_eq!(records[1].from_state, CallState::Initiating);
-        assert_eq!(records[1].to_state, CallState::Ringing);
+        assert_eq!(records[1].to_state, Some(CallState::Ringing));
         
         assert_eq!(records[2].from_state, CallState::Ringing);
-        assert_eq!(records[2].to_state, CallState::Active);
+        assert_eq!(records[2].to_state, Some(CallState::Active));
     } else {
         panic!("History should be present");
     }

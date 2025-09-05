@@ -9,7 +9,7 @@ use crate::{
     state_table::types::{SessionId, EventType, Action},
     state_machine::executor::StateMachine as StateMachineExecutor,
     session_store::SessionStore,
-    errors::{Result, SessionError},
+    errors::Result,
 };
 use super::{
     dialog_adapter::DialogAdapter,
@@ -25,7 +25,7 @@ pub struct EventRouter {
     store: Arc<SessionStore>,
     
     /// Dialog adapter
-    dialog_adapter: Arc<DialogAdapter>,
+    pub dialog_adapter: Arc<DialogAdapter>,
     
     /// Media adapter
     media_adapter: Arc<MediaAdapter>,
@@ -97,16 +97,11 @@ impl EventRouter {
         match action {
             // Dialog actions
             Action::SendINVITE => {
-                // Get session state for SDP and URIs
-                let state = self.store.get_session(session_id).await?;
-                let from = state.local_uri.as_deref().unwrap_or("sip:user@localhost");
-                let to = state.remote_uri.as_deref().unwrap_or("sip:target@localhost");
-                self.dialog_adapter.send_invite(
-                    session_id,
-                    from,
-                    to,
-                    state.local_sdp.clone(),
-                ).await?;
+                // Get session to get from/to/sdp
+                let session = self.store.get_session(session_id).await?;
+                let from = session.local_uri.unwrap_or_else(|| "sip:user@localhost".to_string());
+                let to = session.remote_uri.unwrap_or_else(|| "sip:remote@localhost".to_string());
+                self.dialog_adapter.send_invite_with_details(session_id, &from, &to, session.local_sdp).await?;
             }
             
             Action::SendSIPResponse(code, _reason) => {
@@ -133,7 +128,11 @@ impl EventRouter {
             }
             
             Action::SendBYE => {
-                self.dialog_adapter.send_bye(session_id).await?;
+                // Send BYE using the dialog_id from session
+                let session = self.store.get_session(session_id).await?;
+                if let Some(dialog_id) = session.dialog_id {
+                    self.dialog_adapter.send_bye(dialog_id).await?;
+                }
             }
             
             Action::SendCANCEL => {
@@ -143,7 +142,8 @@ impl EventRouter {
             Action::SendReINVITE => {
                 let state = self.store.get_session(session_id).await?;
                 if let Some(sdp) = state.local_sdp {
-                    self.dialog_adapter.send_reinvite(session_id, sdp).await?;
+                    // Send re-INVITE using session_id
+                    self.dialog_adapter.send_reinvite_session(session_id, sdp).await?;
                 }
             }
             
@@ -241,7 +241,7 @@ impl EventRouter {
             
             Action::InitiateBlindTransfer(target) => {
                 tracing::info!("Blind transfer from {} to {}", session_id, target);
-                self.dialog_adapter.send_refer(session_id, target).await?;
+                self.dialog_adapter.send_refer_session(session_id, target).await?;
             }
             
             Action::InitiateAttendedTransfer(target) => {
@@ -249,7 +249,7 @@ impl EventRouter {
                 // For attended transfer, we first establish a consultation call
                 // then send REFER with Replaces header
                 // For now, just do a blind transfer as a fallback
-                self.dialog_adapter.send_refer(session_id, target).await?;
+                self.dialog_adapter.send_refer_session(session_id, target).await?;
                 tracing::info!("Attended transfer initiated (using blind transfer for now)");
             }
             
@@ -277,6 +277,37 @@ impl EventRouter {
             Action::Custom(name) => {
                 tracing::debug!("Custom action '{}' for session {}", name, session_id);
                 // Application-specific custom actions
+            }
+            
+            // Call control actions
+            Action::HoldCall => {
+                tracing::info!("Putting call on hold for session {}", session_id);
+                // TODO: Implement hold
+            }
+            
+            Action::ResumeCall => {
+                tracing::info!("Resuming call for session {}", session_id);
+                // TODO: Implement resume
+            }
+            
+            Action::TransferCall(target) => {
+                tracing::info!("Transferring call to {} for session {}", target, session_id);
+                // TODO: Implement transfer
+            }
+            
+            Action::SendDTMF(digit) => {
+                tracing::info!("Sending DTMF {} for session {}", digit, session_id);
+                // TODO: Implement DTMF sending
+            }
+            
+            Action::StartRecording => {
+                tracing::info!("Starting recording for session {}", session_id);
+                let _ = self.media_adapter.start_recording(session_id).await?;
+            }
+            
+            Action::StopRecording => {
+                tracing::info!("Stopping recording for session {}", session_id);
+                self.media_adapter.stop_recording(session_id).await?;
             }
         }
         

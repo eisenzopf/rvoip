@@ -1,18 +1,22 @@
 //! Integration tests for the unified API
 
-use rvoip_session_core_v2::api::unified::{UnifiedSession, SessionCoordinator, Config, SessionEvent};
+use rvoip_session_core_v2::api::unified::{UnifiedSession, UnifiedCoordinator, Config};
+use rvoip_session_core_v2::api::SessionEvent;
 use rvoip_session_core_v2::state_table::types::{Role, CallState};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
 /// Test helper to create a coordinator with default config
-async fn create_test_coordinator() -> Arc<SessionCoordinator> {
+async fn create_test_coordinator() -> Arc<UnifiedCoordinator> {
     let config = Config {
-        sip_port: 0, // Use random port for tests
-        media_ports: (10000, 20000),
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        sip_port: 15200,
+        media_port_start: 40000,
+        media_port_end: 41000,
+        local_ip: "127.0.0.1".parse().unwrap(),
+        bind_addr: "127.0.0.1:15200".parse().unwrap(),
+        state_table_path: None,
     };
-    SessionCoordinator::new(config).await.unwrap()
+    UnifiedCoordinator::new(config).await.unwrap()
 }
 
 #[tokio::test]

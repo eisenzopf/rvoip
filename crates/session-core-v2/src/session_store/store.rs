@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 use crate::state_table::{SessionId, DialogId, MediaSessionId, CallId};
 
 use super::state::SessionState;
@@ -249,6 +248,7 @@ impl SessionStore {
                 CallState::Transferring => stats.active += 1,  // Count transferring as active
                 CallState::Terminating => stats.terminating += 1,
                 CallState::Terminated => stats.terminated += 1,
+                CallState::Cancelled => stats.terminated += 1,  // Count cancelled as terminated
                 CallState::Failed(_) => stats.failed += 1,
             }
         }

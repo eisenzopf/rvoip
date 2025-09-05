@@ -9,16 +9,13 @@ use tokio::sync::mpsc;
 use dashmap::DashMap;
 use rvoip_media_core::{
     relay::controller::{MediaSessionController, MediaConfig, MediaSessionInfo, MediaSessionEvent},
-    DialogId, MediaSessionId,
+    DialogId,
 };
-use crate::state_table::types::{SessionId, EventType};
+use crate::state_table::types::SessionId;
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
-use infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
-use infra_common::events::cross_crate::{
-    RvoipCrossCrateEvent, MediaToSessionEvent, SessionToMediaEvent,
-    CrossCrateEvent,
-};
+use infra_common::events::coordinator::GlobalEventCoordinator;
+use infra_common::events::cross_crate::MediaToSessionEvent;
 use rvoip_media_core::types::AudioFrame;
 
 /// Negotiated media configuration
@@ -105,32 +102,14 @@ pub struct MediaAdapter {
     /// Port range for media
     port_start: u16,
     port_end: u16,
+    
+    /// Audio mixers for conferences
+    audio_mixers: Arc<DashMap<crate::types::MediaSessionId, Vec<crate::types::MediaSessionId>>>,
 }
 
 impl MediaAdapter {
-    /// Create a mock media adapter for testing
-    pub fn new_mock() -> Self {
-        use std::str::FromStr;
-        let global_coordinator = Arc::new(
-            tokio::runtime::Handle::current().block_on(
-                GlobalEventCoordinator::monolithic()
-            ).expect("Failed to create mock coordinator")
-        );
-        Self {
-            controller: Arc::new(MediaSessionController::new()),
-            global_coordinator,
-            store: Arc::new(SessionStore::new()),
-            session_to_dialog: Arc::new(DashMap::new()),
-            dialog_to_session: Arc::new(DashMap::new()),
-            media_sessions: Arc::new(DashMap::new()),
-            audio_receivers: Arc::new(DashMap::new()),
-            local_ip: IpAddr::from_str("127.0.0.1").unwrap(),
-            port_start: 10000,
-            port_end: 20000,
-        }
-    }
-    
-    pub fn new_with_coordinator(
+    /// Create a new media adapter
+    pub fn new(
         controller: Arc<MediaSessionController>,
         global_coordinator: Arc<GlobalEventCoordinator>,
         store: Arc<SessionStore>,
@@ -149,6 +128,7 @@ impl MediaAdapter {
             local_ip,
             port_start,
             port_end,
+            audio_mixers: Arc::new(DashMap::new()),
         }
     }
     
@@ -181,8 +161,8 @@ impl MediaAdapter {
             self.media_sessions.insert(session_id.clone(), info.clone());
             
             // Update session store with media session ID (using dialog_id as media session id)
-            if let Ok(mut session) = self.store.get_session(session_id).await {
-                session.media_session_id = Some(info.dialog_id.to_string());
+            if let Ok(session) = self.store.get_session(session_id).await {
+                // Store the media session ID\n                session.media_session_id = Some(crate::types::MediaSessionId(info.dialog_id.to_string()));
                 let _ = self.store.update_session(session).await;
             }
             
@@ -368,7 +348,7 @@ impl MediaAdapter {
         tracing::debug!("Recording started at: {}", recording_path);
         
         // Store recording path in session if needed
-        if let Ok(mut session) = self.store.get_session(session_id).await {
+        if let Ok(session) = self.store.get_session(session_id).await {
             // Could add a recording_path field to SessionState if needed
             let _ = self.store.update_session(session).await;
         }
@@ -507,6 +487,123 @@ impl MediaAdapter {
                 tracing::debug!("Audio frame subscriber disconnected for session {}", session_id.0);
             }
         }
+        Ok(())
+    }
+    
+    // ===== New Methods for CallController and ConferenceManager =====
+    
+    /// Create a media session
+    pub async fn create_media_session(&self) -> Result<crate::types::MediaSessionId> {
+        let media_id = crate::types::MediaSessionId::new();
+        Ok(media_id)
+    }
+    
+    /// Stop a media session
+    pub async fn stop_media_session(&self, media_id: crate::types::MediaSessionId) -> Result<()> {
+        // For now, just return Ok
+        Ok(())
+    }
+    
+    /// Set media direction (for hold/resume)
+    pub async fn set_media_direction(&self, media_id: crate::types::MediaSessionId, direction: crate::types::MediaDirection) -> Result<()> {
+        // TODO: Implement actual media direction control
+        Ok(())
+    }
+    
+    /// Create hold SDP
+    pub async fn create_hold_sdp(&self) -> Result<String> {
+        // Create SDP with sendonly attribute
+        let sdp = format!(
+            "v=0\r\n\
+            o=- 0 0 IN IP4 {}\r\n\
+            s=-\r\n\
+            c=IN IP4 {}\r\n\
+            t=0 0\r\n\
+            m=audio 0 RTP/AVP 0\r\n\
+            a=sendonly\r\n",
+            self.local_ip, self.local_ip
+        );
+        Ok(sdp)
+    }
+    
+    /// Create active SDP
+    pub async fn create_active_sdp(&self) -> Result<String> {
+        // Create SDP with sendrecv attribute
+        let port = self.port_start; // TODO: Allocate actual port
+        let sdp = format!(
+            "v=0\r\n\
+            o=- 0 0 IN IP4 {}\r\n\
+            s=-\r\n\
+            c=IN IP4 {}\r\n\
+            t=0 0\r\n\
+            m=audio {} RTP/AVP 0\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=sendrecv\r\n",
+            self.local_ip, self.local_ip, port
+        );
+        Ok(sdp)
+    }
+    
+    /// Send DTMF digit
+    pub async fn send_dtmf(&self, media_id: crate::types::MediaSessionId, digit: char) -> Result<()> {
+        // TODO: Implement DTMF sending
+        tracing::debug!("Sending DTMF digit {} for media session {:?}", digit, media_id);
+        Ok(())
+    }
+    
+    /// Set mute state
+    pub async fn set_mute(&self, media_id: crate::types::MediaSessionId, muted: bool) -> Result<()> {
+        // TODO: Implement mute control
+        tracing::debug!("Setting mute state to {} for media session {:?}", muted, media_id);
+        Ok(())
+    }
+    
+    /// Start recording for media session
+    pub async fn start_recording_media(&self, media_id: crate::types::MediaSessionId) -> Result<()> {
+        // TODO: Implement recording
+        tracing::info!("Starting recording for media session {:?}", media_id);
+        Ok(())
+    }
+    
+    /// Stop recording for media session
+    pub async fn stop_recording_media(&self, media_id: crate::types::MediaSessionId) -> Result<()> {
+        // TODO: Implement recording stop
+        tracing::info!("Stopping recording for media session {:?}", media_id);
+        Ok(())
+    }
+    
+    // ===== Conference Methods =====
+    
+    /// Create an audio mixer for a conference
+    pub async fn create_audio_mixer(&self) -> Result<crate::types::MediaSessionId> {
+        let mixer_id = crate::types::MediaSessionId::new();
+        self.audio_mixers.insert(mixer_id.clone(), Vec::new());
+        tracing::info!("Created audio mixer {:?}", mixer_id);
+        Ok(mixer_id)
+    }
+    
+    /// Redirect audio to a mixer
+    pub async fn redirect_to_mixer(&self, media_id: crate::types::MediaSessionId, mixer_id: crate::types::MediaSessionId) -> Result<()> {
+        if let Some(mut mixer) = self.audio_mixers.get_mut(&mixer_id) {
+            mixer.push(media_id.clone());
+        }
+        tracing::debug!("Redirected media {:?} to mixer {:?}", media_id, mixer_id);
+        Ok(())
+    }
+    
+    /// Remove audio from a mixer
+    pub async fn remove_from_mixer(&self, media_id: crate::types::MediaSessionId, mixer_id: crate::types::MediaSessionId) -> Result<()> {
+        if let Some(mut mixer) = self.audio_mixers.get_mut(&mixer_id) {
+            mixer.retain(|id| id != &media_id);
+        }
+        tracing::debug!("Removed media {:?} from mixer {:?}", media_id, mixer_id);
+        Ok(())
+    }
+    
+    /// Destroy an audio mixer
+    pub async fn destroy_mixer(&self, mixer_id: crate::types::MediaSessionId) -> Result<()> {
+        self.audio_mixers.remove(&mixer_id);
+        tracing::info!("Destroyed audio mixer {:?}", mixer_id);
         Ok(())
     }
     
@@ -652,6 +749,7 @@ impl Clone for MediaAdapter {
             dialog_to_session: self.dialog_to_session.clone(),
             media_sessions: self.media_sessions.clone(),
             audio_receivers: self.audio_receivers.clone(),
+            audio_mixers: self.audio_mixers.clone(),
             local_ip: self.local_ip,
             port_start: self.port_start,
             port_end: self.port_end,

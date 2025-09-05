@@ -82,8 +82,7 @@
 //! }
 //! ```
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use crate::errors::Result;

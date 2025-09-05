@@ -6,9 +6,16 @@ pub mod session_store;
 pub mod adapters;
 pub mod errors;
 
+// New core infrastructure
+pub mod session_registry;
+pub mod types;
+
+
 // Re-export main types from API
 pub use api::{
     UnifiedSession, UnifiedCoordinator, SessionEvent, SessionBuilder,
+    SessionManager, CallController, ConferenceManager,
+    SimplePeer, Call, AudioStream,
 };
 
 // Re-export from state_table for correct types

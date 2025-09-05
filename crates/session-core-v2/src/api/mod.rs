@@ -472,6 +472,11 @@ pub mod unified;    // Unified API
 pub mod builder;    // Session builder
 pub mod simple;     // Simple peer API (the good one)
 
+// New modular components
+pub mod session_manager;     // Session lifecycle management
+pub mod call_controller;      // Call control operations
+pub mod conference_manager;   // Multi-party conference management
+
 // Re-export the main types
 pub use types::{
     SessionId, CallSession, CallState, IncomingCall, CallDecision,
@@ -488,6 +493,11 @@ pub use simple::{SimplePeer, Call, IncomingCall as SimpleIncomingCall, AudioStre
 
 // Re-export builder
 pub use builder::SessionBuilder;
+
+// Re-export new modular components
+pub use session_manager::{SessionManager, SessionMetadata, SessionLifecycleEvent};
+pub use call_controller::{CallController, ActiveCall};
+pub use conference_manager::{ConferenceManager, ConferenceState, Participant};
 
 // Re-export from state table for consistency
 pub use crate::state_table::types::{Role, EventType};

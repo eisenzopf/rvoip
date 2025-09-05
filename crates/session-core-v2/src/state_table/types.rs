@@ -26,11 +26,68 @@ pub enum MediaFlowDirection {
     None,
 }
 
-/// Dialog ID type
-pub type DialogId = String;
+/// Dialog ID type - wraps UUID for compatibility with rvoip_dialog_core
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DialogId(pub uuid::Uuid);
+
+impl DialogId {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+    
+    /// Create from a UUID
+    pub fn from_uuid(uuid: uuid::Uuid) -> Self {
+        Self(uuid)
+    }
+    
+    /// Get the inner UUID
+    pub fn as_uuid(&self) -> &uuid::Uuid {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for DialogId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+// Conversion from rvoip_dialog_core::DialogId to our DialogId
+impl From<rvoip_dialog_core::DialogId> for DialogId {
+    fn from(dialog_id: rvoip_dialog_core::DialogId) -> Self {
+        Self(dialog_id.0)
+    }
+}
+
+// Conversion from our DialogId to rvoip_dialog_core::DialogId  
+impl From<DialogId> for rvoip_dialog_core::DialogId {
+    fn from(dialog_id: DialogId) -> Self {
+        rvoip_dialog_core::DialogId(dialog_id.0)
+    }
+}
+
+// Allow conversion from &DialogId to rvoip_dialog_core::DialogId
+impl From<&DialogId> for rvoip_dialog_core::DialogId {
+    fn from(dialog_id: &DialogId) -> Self {
+        rvoip_dialog_core::DialogId(dialog_id.0)
+    }
+}
 
 /// Media session ID type  
-pub type MediaSessionId = String;
+#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MediaSessionId(pub String);
+
+impl MediaSessionId {
+    pub fn new() -> Self {
+        Self(format!("media-{}", uuid::Uuid::new_v4()))
+    }
+}
+
+impl std::fmt::Display for MediaSessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// Call ID type
 pub type CallId = String;
@@ -65,6 +122,7 @@ pub enum CallState {
     Transferring,
     Terminating,
     Terminated,
+    Cancelled,
     Failed(FailureReason),
 }
 
@@ -220,6 +278,14 @@ pub enum Action {
     SendBYE,
     SendCANCEL,
     SendReINVITE,
+    
+    // Call control actions
+    HoldCall,
+    ResumeCall,
+    TransferCall(String),
+    SendDTMF(char),
+    StartRecording,
+    StopRecording,
     
     // Media actions
     StartMediaSession,

@@ -196,9 +196,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Create coordinator
     let config = Config {
-        sip_port: 5060,
-        media_ports: (10000, 20000),
-        bind_addr: "127.0.0.1:5060".parse()?,
+        media_port_start: 10000,
+        media_port_end: 20000,
+        local_ip: "127.0.0.1".parse()?,
+        state_table_path: None,
     };
     let coordinator = SessionCoordinator::new(config).await?;
     

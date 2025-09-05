@@ -12,7 +12,7 @@ async fn test_uac_normal_flow() {
     let key = StateKey {
         role: Role::UAC,
         state: CallState::Idle,
-        event: EventType::MakeCall,
+        event: EventType::MakeCall { target: "sip:bob@example.com".to_string() },
     };
     
     let transition = table.get(&key).expect("Should have MakeCall transition");
@@ -169,7 +169,7 @@ async fn test_cancel_flow() {
 
 #[tokio::test]
 async fn test_session_state_conditions() {
-    let session_id = rvoip_session_core_v2::api::types::SessionId::new();
+    let session_id = rvoip_session_core_v2::SessionId::new();
     let mut session = SessionState::new(session_id, Role::UAC);
     
     // Initially no conditions are met

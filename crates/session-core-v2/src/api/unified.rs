@@ -5,7 +5,7 @@
 
 use crate::state_table::types::{Role, EventType, CallState, SessionId};
 use crate::session_store::SessionStore;
-use crate::state_machine::{StateMachine as StateMachineExecutor, ProcessEventResult};
+use crate::state_machine::StateMachine as StateMachineExecutor;
 use crate::state_machine::executor::SessionEvent as StateMachineEvent;
 use crate::adapters::{EventRouter, DialogAdapter, MediaAdapter};
 use crate::adapters::media_adapter::AudioFrameSubscriber;
@@ -15,11 +15,7 @@ use std::sync::Arc;
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::{mpsc, RwLock};
 use std::collections::HashMap;
-use infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
-use infra_common::events::cross_crate::{
-    RvoipCrossCrateEvent, DialogToSessionEvent, SessionToDialogEvent,
-    MediaToSessionEvent, SessionToMediaEvent, CrossCrateEvent,
-};
+use infra_common::events::coordinator::GlobalEventCoordinator;
 use infra_common::planes::LayerTaskManager;
 
 /// Unified session that works for any role (UAC, UAS, B2BUA, etc.)
@@ -218,6 +214,15 @@ pub struct UnifiedCoordinator {
     /// Media adapter for audio operations
     pub media_adapter: Arc<MediaAdapter>,
     
+    /// Dialog adapter for SIP operations
+    dialog_adapter: Arc<DialogAdapter>,
+    
+    /// Session registry
+    session_registry: Arc<crate::session_registry::SessionRegistry>,
+    
+    /// Session manager
+    session_manager: Option<Arc<crate::api::session_manager::SessionManager>>,
+    
     /// Event subscribers
     subscribers: Arc<RwLock<HashMap<SessionId, Vec<Arc<dyn Fn(SessionEvent) + Send + Sync>>>>>,
     
@@ -252,7 +257,7 @@ impl UnifiedCoordinator {
         
         // Create dialog adapter with global coordinator
         let dialog_api = Self::create_dialog_api(&config).await?;
-        let dialog_adapter = Arc::new(DialogAdapter::new_with_coordinator(
+        let dialog_adapter = Arc::new(DialogAdapter::new(
             dialog_api,
             global_coordinator.clone(),
             store.clone(),
@@ -260,7 +265,7 @@ impl UnifiedCoordinator {
         
         // Create media adapter with global coordinator
         let media_controller = Self::create_media_controller(&config).await?;
-        let media_adapter = Arc::new(MediaAdapter::new_with_coordinator(
+        let media_adapter = Arc::new(MediaAdapter::new(
             media_controller,
             global_coordinator.clone(),
             store.clone(),
@@ -304,6 +309,9 @@ impl UnifiedCoordinator {
             media_adapter.clone(),
         ));
         
+        // Create session registry
+        let session_registry = Arc::new(crate::session_registry::SessionRegistry::new());
+        
         // Create subscribers map
         let subscribers = Arc::new(RwLock::new(HashMap::new()));
         
@@ -312,6 +320,9 @@ impl UnifiedCoordinator {
             state_machine,
             event_router,
             media_adapter: media_adapter.clone(),
+            dialog_adapter: dialog_adapter.clone(),
+            session_registry,
+            session_manager: None, // Will be set later if needed
             subscribers: subscribers.clone(),
             config,
             global_coordinator,
@@ -449,6 +460,63 @@ impl UnifiedCoordinator {
             .or_insert_with(Vec::new)
             .push(Arc::new(callback));
         Ok(())
+    }
+    
+    // ===== Accessor methods for modular architecture =====
+    
+    /// Get reference to the session store
+    pub fn session_store(&self) -> Arc<SessionStore> {
+        self.store.clone()
+    }
+    
+    /// Get reference to the session registry
+    pub fn session_registry(&self) -> Arc<crate::session_registry::SessionRegistry> {
+        self.session_registry.clone()
+    }
+    
+    /// Get or create session manager
+    pub async fn session_manager(&self) -> Result<Arc<crate::api::session_manager::SessionManager>> {
+        // Create session manager if not already created
+        if self.session_manager.is_none() {
+            let (event_tx, _) = mpsc::channel(100);
+            let (notif_tx, _) = mpsc::channel(100);
+            
+            let session_manager = Arc::new(crate::api::session_manager::SessionManager::new(
+                self.session_registry.clone(),
+                self.state_machine.clone(),
+                event_tx,
+                notif_tx,
+            ));
+            
+            // We can't mutate self here since we don't have &mut self
+            // For now, just return a new instance each time
+            return Ok(session_manager);
+        }
+        
+        Ok(self.session_manager.as_ref().unwrap().clone())
+    }
+    
+    /// Get reference to the state machine
+    pub fn state_machine(&self) -> Arc<StateMachineExecutor> {
+        self.state_machine.clone()
+    }
+    
+    /// Get the event sender for the state machine
+    pub fn event_sender(&self) -> mpsc::Sender<(SessionId, StateMachineEvent)> {
+        // Note: This needs to be stored as a field in UnifiedCoordinator
+        // For now, create a new channel (this will be updated when we integrate properly)
+        let (tx, _rx) = mpsc::channel(100);
+        tx
+    }
+    
+    /// Get reference to the dialog adapter
+    pub fn dialog_adapter(&self) -> Arc<DialogAdapter> {
+        self.dialog_adapter.clone()
+    }
+    
+    /// Get reference to the media adapter
+    pub fn media_adapter(&self) -> Arc<MediaAdapter> {
+        self.media_adapter.clone()
     }
     
     /// Publish an event to subscribers
