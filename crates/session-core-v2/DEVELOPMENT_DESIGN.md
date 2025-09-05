@@ -939,6 +939,1154 @@ impl SessionCrossCrateEventHandler {
 }
 ```
 
+## Call Control Functions for SIP-Client Support
+
+The SimplePeer API needs comprehensive call control functions to support the sip-client crate. These functions should be added to the Call and SimplePeer structs to provide a complete telephony API.
+
+### File: `src/api/simple.rs` (additional methods for Call struct)
+```rust
+impl Call {
+    // === Hold/Resume ===
+    /// Put the call on hold
+    pub async fn hold(&self) -> Result<()> {
+        self.session.send_reinvite_with_direction(MediaDirection::SendOnly).await
+    }
+    
+    /// Resume a held call
+    pub async fn resume(&self) -> Result<()> {
+        self.session.send_reinvite_with_direction(MediaDirection::SendRecv).await
+    }
+    
+    /// Check if call is on hold
+    pub fn is_on_hold(&self) -> bool {
+        self.session.media_direction() == MediaDirection::SendOnly
+    }
+    
+    // === Transfer ===
+    /// Blind transfer to another party
+    pub async fn blind_transfer(&self, target: &str) -> Result<()> {
+        self.session.send_refer(target).await
+    }
+    
+    /// Attended transfer after consultation
+    pub async fn attended_transfer(&self, other_call: &Call) -> Result<()> {
+        self.session.send_refer_with_replaces(other_call.session.dialog_id()).await
+    }
+    
+    /// Get transfer status
+    pub async fn transfer_status(&self) -> TransferStatus {
+        self.session.transfer_status().await
+    }
+    
+    // === DTMF ===
+    /// Send DTMF digit (0-9, *, #, A-D)
+    pub async fn send_dtmf(&self, digit: char) -> Result<()> {
+        self.session.send_dtmf(digit).await
+    }
+    
+    /// Set callback for received DTMF
+    pub fn on_dtmf_received<F>(&self, callback: F) 
+    where 
+        F: Fn(char) + Send + Sync + 'static 
+    {
+        self.session.set_dtmf_callback(callback);
+    }
+    
+    // === Call Information ===
+    /// Get remote party URI
+    pub fn remote_uri(&self) -> &str {
+        &self.session.remote_uri()
+    }
+    
+    /// Get local URI  
+    pub fn local_uri(&self) -> &str {
+        &self.session.local_uri()
+    }
+    
+    /// Get SIP Call-ID header
+    pub fn call_id(&self) -> &str {
+        &self.session.call_id()
+    }
+    
+    /// Get call duration
+    pub fn duration(&self) -> Duration {
+        self.session.duration()
+    }
+    
+    /// Get call direction
+    pub fn direction(&self) -> CallDirection {
+        self.direction
+    }
+    
+    // === Media Control ===
+    /// Mute microphone
+    pub async fn mute_audio(&self) -> Result<()> {
+        self.session.set_audio_mute(true).await
+    }
+    
+    /// Unmute microphone
+    pub async fn unmute_audio(&self) -> Result<()> {
+        self.session.set_audio_mute(false).await
+    }
+    
+    /// Check if muted
+    pub fn is_muted(&self) -> bool {
+        self.session.is_audio_muted()
+    }
+    
+    /// Change audio device mid-call
+    pub async fn set_audio_device(&self, device: AudioDevice) -> Result<()> {
+        self.session.set_audio_device(device).await
+    }
+    
+    // === Advanced Call States ===
+    /// Wait for call to be answered (for outgoing calls)
+    pub async fn wait_for_answer(&self) -> Result<()> {
+        self.session.wait_for_state(CallState::Active).await
+    }
+    
+    /// Check if call is ringing
+    pub fn is_ringing(&self) -> bool {
+        self.session.state() == CallState::Ringing
+    }
+    
+    /// Check if call is answered
+    pub fn is_answered(&self) -> bool {
+        self.session.state() == CallState::Active
+    }
+    
+    /// Cancel outgoing call before answer
+    pub async fn cancel(&self) -> Result<()> {
+        if self.direction == CallDirection::Outgoing && !self.is_answered() {
+            self.session.send_cancel().await
+        } else {
+            Err(SessionError::InvalidState("Can only cancel unanswered outgoing calls"))
+        }
+    }
+    
+    // === Recording ===
+    /// Start recording the call
+    pub async fn start_recording(&self, path: &Path) -> Result<()> {
+        self.session.start_recording(path).await
+    }
+    
+    /// Stop recording
+    pub async fn stop_recording(&self) -> Result<()> {
+        self.session.stop_recording().await
+    }
+    
+    /// Check if recording
+    pub fn is_recording(&self) -> bool {
+        self.session.is_recording()
+    }
+    
+    // === Early Media ===
+    /// Send early media (before answer)
+    pub async fn send_early_media(&self, frame: AudioFrame) -> Result<()> {
+        self.session.send_early_media(frame).await
+    }
+    
+    /// Receive early media stream
+    pub async fn recv_early_media(&self) -> Result<AudioStream> {
+        let subscriber = self.session.subscribe_to_early_media().await?;
+        Ok(AudioStream { subscriber })
+    }
+    
+    // === Re-negotiation ===
+    /// Renegotiate media parameters
+    pub async fn renegotiate_media(&self, new_codecs: Vec<CodecInfo>) -> Result<()> {
+        self.session.send_reinvite_with_codecs(new_codecs).await
+    }
+}
+```
+
+### File: `src/api/simple.rs` (additional methods for SimplePeer struct)
+```rust
+impl SimplePeer {
+    // === Registration ===
+    /// Register with SIP server
+    pub async fn register(&self, registrar: &str, credentials: Credentials) -> Result<()> {
+        self.coordinator.register(registrar, credentials).await
+    }
+    
+    /// Unregister from SIP server
+    pub async fn unregister(&self) -> Result<()> {
+        self.coordinator.unregister().await
+    }
+    
+    /// Check registration status
+    pub fn is_registered(&self) -> bool {
+        self.coordinator.is_registered()
+    }
+    
+    // === Multiple Call Management ===
+    /// Get list of active calls
+    pub async fn active_calls(&self) -> Vec<Arc<Call>> {
+        self.active_sessions.lock().await
+            .iter()
+            .filter_map(|session| {
+                if session.is_active() {
+                    Some(Arc::new(Call {
+                        session: session.clone(),
+                        direction: session.direction(),
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+    
+    /// Find call by Call-ID
+    pub async fn find_call(&self, call_id: &str) -> Option<Arc<Call>> {
+        self.active_sessions.lock().await
+            .iter()
+            .find(|s| s.call_id() == call_id)
+            .map(|session| Arc::new(Call {
+                session: session.clone(),
+                direction: session.direction(),
+            }))
+    }
+    
+    /// Hangup all active calls
+    pub async fn hangup_all(&self) -> Result<()> {
+        let sessions = self.active_sessions.lock().await.clone();
+        for session in sessions {
+            session.hangup().await?;
+        }
+        Ok(())
+    }
+    
+    // === Conference Support ===
+    /// Create a local conference bridge
+    pub async fn create_conference(&self) -> Result<Conference> {
+        self.coordinator.create_conference().await
+    }
+    
+    // === Event Callbacks ===
+    /// Set callback for call state changes
+    pub fn on_call_state_changed<F>(&self, callback: F)
+    where
+        F: Fn(CallId, CallState) + Send + Sync + 'static
+    {
+        self.coordinator.set_call_state_callback(callback);
+    }
+    
+    /// Set callback for registration changes
+    pub fn on_registration_changed<F>(&self, callback: F)
+    where
+        F: Fn(RegistrationState) + Send + Sync + 'static
+    {
+        self.coordinator.set_registration_callback(callback);
+    }
+}
+
+/// Conference bridge for multi-party calls
+pub struct Conference {
+    id: ConferenceId,
+    coordinator: Arc<UnifiedCoordinator>,
+    participants: Arc<Mutex<Vec<Arc<Call>>>>,
+}
+
+impl Conference {
+    /// Add a call to the conference
+    pub async fn add_call(&self, call: Arc<Call>) -> Result<()> {
+        self.coordinator.add_to_conference(self.id, call.session.clone()).await?;
+        self.participants.lock().await.push(call);
+        Ok(())
+    }
+    
+    /// Remove a call from conference
+    pub async fn remove_call(&self, call: &Call) -> Result<()> {
+        self.coordinator.remove_from_conference(self.id, &call.session).await?;
+        let mut participants = self.participants.lock().await;
+        participants.retain(|c| c.call_id() != call.call_id());
+        Ok(())
+    }
+    
+    /// Get participant count
+    pub async fn participant_count(&self) -> usize {
+        self.participants.lock().await.len()
+    }
+}
+```
+
+### File: `src/api/types.rs` (additional types)
+```rust
+/// Transfer status
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransferStatus {
+    NotStarted,
+    InProgress,
+    Completed,
+    Failed(String),
+}
+
+/// Media direction for hold/resume
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MediaDirection {
+    SendRecv,   // Normal bidirectional
+    SendOnly,   // On hold (we send hold music)
+    RecvOnly,   // Reverse hold
+    Inactive,   // No media
+}
+
+/// Registration state
+#[derive(Debug, Clone, PartialEq)]
+pub enum RegistrationState {
+    NotRegistered,
+    Registering,
+    Registered,
+    Failed(String),
+}
+
+/// SIP credentials
+pub struct Credentials {
+    pub username: String,
+    pub password: String,
+    pub realm: Option<String>,
+}
+
+/// Audio device info
+pub struct AudioDevice {
+    pub id: String,
+    pub name: String,
+    pub device_type: AudioDeviceType,
+}
+
+/// Conference ID
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConferenceId(String);
+
+/// Make CallDirection public
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CallDirection {
+    Incoming,
+    Outgoing,
+}
+```
+
+### Implementation Architecture for Call Control Functions
+
+The call control functions are distributed across multiple layers of the architecture. SimplePeer provides the clean API, but the actual implementation is spread across UnifiedSession, UnifiedCoordinator, state machine actions, and the adapters.
+
+#### Layer 1: SimplePeer (API Surface Only)
+```rust
+// src/api/simple.rs - Just delegates to underlying layers
+impl Call {
+    pub async fn hold(&self) -> Result<()> {
+        self.session.hold().await  // Delegates to UnifiedSession
+    }
+}
+```
+
+#### Layer 2: UnifiedSession (Session-Level Operations)
+```rust
+// src/api/unified.rs - Manages session-specific operations
+impl UnifiedSession {
+    // Hold/Resume - sends events to state machine
+    pub async fn hold(&self) -> Result<()> {
+        self.send_event(EventType::HoldCall).await
+    }
+    
+    pub async fn resume(&self) -> Result<()> {
+        self.send_event(EventType::ResumeCall).await
+    }
+    
+    // DTMF - direct media adapter interaction
+    pub async fn send_dtmf(&self, digit: char) -> Result<()> {
+        self.coordinator.media_adapter.send_dtmf(&self.id, digit).await
+    }
+    
+    // Transfer - initiates REFER through state machine
+    pub async fn send_refer(&self, target: &str) -> Result<()> {
+        self.send_event(EventType::TransferCall { target: target.to_string() }).await
+    }
+    
+    // Recording - media adapter control
+    pub async fn start_recording(&self, path: &Path) -> Result<()> {
+        self.coordinator.media_adapter.start_recording(&self.id, path).await
+    }
+    
+    // Information getters - query session store
+    pub fn remote_uri(&self) -> String {
+        let session = self.coordinator.store.get_session(&self.id).await?;
+        session.remote_uri.unwrap_or_default()
+    }
+    
+    pub fn call_id(&self) -> String {
+        let session = self.coordinator.store.get_session(&self.id).await?;
+        session.dialog_id.as_ref().map(|d| d.call_id()).unwrap_or_default()
+    }
+}
+```
+
+#### Layer 3: UnifiedCoordinator (Multi-Session Operations)
+```rust
+// src/api/unified.rs - Manages cross-session and system-wide operations
+impl UnifiedCoordinator {
+    // Registration - system-wide, not session specific
+    pub async fn register(&self, registrar: &str, credentials: Credentials) -> Result<()> {
+        self.dialog_adapter.send_register(registrar, credentials).await
+    }
+    
+    // Conference - manages multiple sessions
+    pub async fn create_conference(&self) -> Result<Conference> {
+        let conf_id = ConferenceId::new();
+        let mixer = self.media_adapter.create_audio_mixer(conf_id.clone()).await?;
+        Ok(Conference {
+            id: conf_id,
+            coordinator: Arc::new(self),
+            mixer,
+            participants: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+    
+    pub async fn add_to_conference(&self, conf_id: ConferenceId, session: Arc<UnifiedSession>) -> Result<()> {
+        // Redirect session's audio to conference mixer
+        self.media_adapter.redirect_to_mixer(&session.id, &conf_id).await
+    }
+}
+```
+
+#### Layer 4: State Machine Actions (Protocol Coordination)
+```rust
+// src/state_machine/actions.rs - New actions for call control
+pub enum Action {
+    // Existing actions...
+    
+    // Hold/Resume actions
+    SendReInviteWithDirection { direction: MediaDirection },
+    UpdateMediaDirection { direction: MediaDirection },
+    
+    // Transfer actions
+    SendRefer { target: String },
+    SendReferWithReplaces { target: String, replaces: String },
+    MonitorTransferProgress,
+    
+    // DTMF actions
+    SendDtmfInfo { digit: char },
+    SendDtmfRfc2833 { digit: char },
+    
+    // Registration actions
+    SendRegister { registrar: String, credentials: Credentials },
+    SendUnregister,
+}
+
+// State table additions for new transitions
+// src/state_table/state_table.yaml
+states:
+  Active:
+    transitions:
+      - event: HoldCall
+        next_state: OnHold
+        actions:
+          - SendReInviteWithDirection: { direction: SendOnly }
+          - UpdateMediaDirection: { direction: SendOnly }
+      
+      - event: TransferCall
+        next_state: Transferring
+        actions:
+          - SendRefer: { target: "${event.target}" }
+          - MonitorTransferProgress
+  
+  OnHold:
+    transitions:
+      - event: ResumeCall
+        next_state: Active
+        actions:
+          - SendReInviteWithDirection: { direction: SendRecv }
+          - UpdateMediaDirection: { direction: SendRecv }
+```
+
+#### Layer 5: Adapter Implementations (Protocol/Media Details)
+```rust
+// src/adapters/dialog_adapter.rs - SIP protocol implementation
+impl DialogAdapter {
+    pub async fn send_reinvite_with_sdp(&self, session_id: &SessionId, sdp: String) -> Result<()> {
+        // Get dialog from session
+        let dialog_id = self.get_dialog_id(session_id)?;
+        
+        // Create re-INVITE with new SDP
+        self.dialog_core.send_reinvite(dialog_id, sdp).await
+    }
+    
+    pub async fn send_refer(&self, session_id: &SessionId, target: &str) -> Result<()> {
+        let dialog_id = self.get_dialog_id(session_id)?;
+        self.dialog_core.send_refer(dialog_id, target).await
+    }
+    
+    pub async fn send_register(&self, registrar: &str, credentials: Credentials) -> Result<()> {
+        // Registration is not session-specific
+        self.dialog_core.register(registrar, credentials).await
+    }
+}
+
+// src/adapters/media_adapter.rs - Media/RTP implementation
+impl MediaAdapter {
+    pub async fn send_dtmf(&self, session_id: &SessionId, digit: char) -> Result<()> {
+        let media_session = self.get_media_session(session_id)?;
+        media_session.send_dtmf_rfc2833(digit).await
+    }
+    
+    pub async fn start_recording(&self, session_id: &SessionId, path: &Path) -> Result<()> {
+        let media_session = self.get_media_session(session_id)?;
+        media_session.start_recording(path).await
+    }
+    
+    pub async fn create_audio_mixer(&self, conf_id: ConferenceId) -> Result<AudioMixer> {
+        // Create N-way audio mixer for conference
+        AudioMixer::new(conf_id)
+    }
+    
+    pub async fn redirect_to_mixer(&self, session_id: &SessionId, conf_id: &ConferenceId) -> Result<()> {
+        let media_session = self.get_media_session(session_id)?;
+        let mixer = self.get_mixer(conf_id)?;
+        
+        // Redirect audio streams to/from mixer
+        media_session.set_audio_sink(mixer.get_input_for(session_id));
+        media_session.set_audio_source(mixer.get_output_for(session_id));
+    }
+}
+```
+
+### Data Flow Example: Hold Operation
+
+```
+User calls: call.hold()
+    ↓
+SimplePeer Call::hold()
+    ↓
+UnifiedSession::hold()
+    ↓ (sends EventType::HoldCall)
+StateMachine processes event
+    ↓ (executes actions from state table)
+Action: SendReInviteWithDirection(SendOnly)
+    ↓
+DialogAdapter::send_reinvite_with_sdp()
+    ↓ (constructs SDP with a=sendonly)
+dialog-core sends re-INVITE
+    ↓
+Action: UpdateMediaDirection(SendOnly)  
+    ↓
+MediaAdapter::set_direction(SendOnly)
+    ↓
+media-core stops receiving audio
+```
+
+### Implementation Priority for sip-client
+
+**Phase 1 (Must Have):**
+- Hold/Resume (state machine + dialog adapter)
+- DTMF send/receive (media adapter)
+- Mute/Unmute (media adapter only, no signaling)
+- Call information getters (session store queries)
+- Registration support (dialog adapter)
+
+**Phase 2 (Should Have):**
+- Blind transfer (state machine + dialog adapter)
+- Call recording (media adapter)
+- Multiple call management (coordinator level)
+- Event callbacks (coordinator event bus)
+
+**Phase 3 (Nice to Have):**
+- Attended transfer (complex state machine)
+- Conference support (media mixer + coordinator)
+- Early media (state machine + media adapter)
+- Media renegotiation (dialog + media coordination)
+
+These additions ensure session-core-v2 provides all the call control functions needed by sip-client for a complete telephony solution, with clear separation of concerns across the architecture layers.
+
+## Integration with Auth-Core and Registrar-Core
+
+Session-core-v2 must integrate with existing auth-core and registrar-core libraries to provide complete SIP functionality including registration, presence, and authentication.
+
+### Auth-Core Integration
+
+#### File: `src/adapters/auth_adapter.rs` (NEW)
+```rust
+use rvoip_auth_core::{AuthError, types::{Token, Credentials as AuthCredentials}};
+use rvoip_sip_core::auth::{DigestAuth, Challenge};
+
+pub struct AuthAdapter {
+    auth_client: Arc<dyn AuthClient>,
+}
+
+impl AuthAdapter {
+    /// Validate incoming request authentication
+    pub async fn validate_request(&self, auth_header: &str) -> Result<Token> {
+        self.auth_client.validate_sip_auth(auth_header).await
+    }
+    
+    /// Generate response to 401/407 challenge
+    pub async fn respond_to_challenge(&self, challenge: Challenge, credentials: &Credentials) -> Result<String> {
+        let auth_creds = AuthCredentials {
+            username: credentials.username.clone(),
+            password: credentials.password.clone(),
+            realm: challenge.realm.clone(),
+        };
+        
+        DigestAuth::compute_response(&challenge, &auth_creds)
+    }
+    
+    /// Add authentication to outgoing request
+    pub async fn add_auth_header(&self, request: &mut SipRequest, credentials: &Credentials) -> Result<()> {
+        if let Some(auth_header) = self.generate_auth_header(credentials).await? {
+            request.add_header("Authorization", auth_header);
+        }
+        Ok(())
+    }
+}
+```
+
+### Registrar-Core Integration
+
+#### File: `src/adapters/registrar_adapter.rs` (NEW)
+```rust
+use rvoip_registrar_core::{
+    RegistrarService, UserRegistration, ContactInfo,
+    PresenceState, PresenceStatus, Subscription,
+    events::{RegistrarEvent, PresenceEvent},
+};
+
+pub struct RegistrarAdapter {
+    registrar_service: Arc<RegistrarService>,
+    presence_subscriptions: Arc<DashMap<SessionId, Vec<Subscription>>>,
+}
+
+impl RegistrarAdapter {
+    /// Handle REGISTER request
+    pub async fn register(&self, uri: &str, contact: &str, expires: u32) -> Result<()> {
+        let registration = UserRegistration {
+            aor: uri.to_string(),
+            contact: ContactInfo::from_str(contact)?,
+            expires,
+            q_value: 1.0,
+        };
+        
+        self.registrar_service.register(registration).await
+    }
+    
+    /// Handle SUBSCRIBE for presence
+    pub async fn subscribe_presence(&self, session_id: &SessionId, target: &str) -> Result<()> {
+        let subscription = self.registrar_service
+            .subscribe_presence(target)
+            .await?;
+        
+        self.presence_subscriptions
+            .entry(session_id.clone())
+            .or_default()
+            .push(subscription);
+        
+        Ok(())
+    }
+    
+    /// Handle PUBLISH for presence
+    pub async fn publish_presence(&self, uri: &str, status: PresenceStatus) -> Result<()> {
+        let state = PresenceState {
+            basic: status.into(),
+            note: None,
+            activities: vec![],
+        };
+        
+        self.registrar_service.publish_presence(uri, state).await
+    }
+    
+    /// Handle presence NOTIFY events
+    pub async fn on_presence_update(&self, event: PresenceEvent) -> Result<()> {
+        // Route to appropriate session
+        match event {
+            PresenceEvent::StatusChanged { uri, status } => {
+                // Find sessions subscribed to this URI
+                for entry in self.presence_subscriptions.iter() {
+                    let session_id = entry.key();
+                    let subscriptions = entry.value();
+                    
+                    if subscriptions.iter().any(|s| s.target == uri) {
+                        self.notify_session_presence(session_id, &uri, &status).await?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+```
+
+### Extended SimplePeer API for Registration/Presence
+
+#### File: `src/api/simple.rs` (additional methods)
+```rust
+impl SimplePeer {
+    // === Registration with Registrar ===
+    /// Register with SIP registrar (with authentication)
+    pub async fn register(&self, registrar: &str, credentials: Credentials) -> Result<()> {
+        // Authenticate first
+        self.coordinator.auth_adapter.validate_credentials(&credentials).await?;
+        
+        // Then register
+        self.coordinator.registrar_adapter.register(
+            &self.uri(),
+            &self.contact_address(),
+            3600, // 1 hour default
+        ).await?;
+        
+        // Store registration state
+        self.coordinator.set_registration_state(RegistrationState::Registered).await;
+        Ok(())
+    }
+    
+    // === Presence ===
+    /// Subscribe to presence updates for a contact
+    pub async fn subscribe_presence(&self, contact: &str) -> Result<()> {
+        self.coordinator.registrar_adapter.subscribe_presence(
+            &self.current_session_id(),
+            contact
+        ).await
+    }
+    
+    /// Publish presence status
+    pub async fn set_presence(&self, status: PresenceStatus) -> Result<()> {
+        self.coordinator.registrar_adapter.publish_presence(
+            &self.uri(),
+            status
+        ).await
+    }
+    
+    /// Set callback for presence updates
+    pub fn on_presence_update<F>(&self, callback: F)
+    where
+        F: Fn(&str, PresenceStatus) + Send + Sync + 'static
+    {
+        self.coordinator.set_presence_callback(callback);
+    }
+    
+    // === Call Parking (via Registrar) ===
+    /// Park a call
+    pub async fn park_call(&self, call: &Call) -> Result<String> {
+        // Register call with special parking AOR
+        let park_slot = format!("park-{}", uuid::Uuid::new_v4());
+        self.coordinator.registrar_adapter.register(
+            &park_slot,
+            &call.session.dialog_id()?,
+            300, // 5 min timeout
+        ).await?;
+        
+        // Put call on hold
+        call.hold().await?;
+        
+        Ok(park_slot)
+    }
+    
+    /// Retrieve parked call
+    pub async fn retrieve_parked_call(&self, park_slot: &str) -> Result<Call> {
+        // Lookup parked call from registrar
+        let contact = self.coordinator.registrar_adapter
+            .lookup(park_slot)
+            .await?;
+        
+        // Create new session to retrieve
+        let session = UnifiedSession::new(self.coordinator.clone(), Role::UAC).await?;
+        session.retrieve_parked(contact).await?;
+        
+        Ok(Call {
+            session: Arc::new(session),
+            direction: CallDirection::Outgoing,
+        })
+    }
+}
+```
+
+### State Machine Integration for Auth/Registration
+
+#### File: `src/state_machine/actions.rs` (additional actions)
+```rust
+pub enum Action {
+    // Existing actions...
+    
+    // Authentication actions
+    RespondToAuthChallenge { credentials: Credentials },
+    ValidateIncomingAuth,
+    
+    // Registration actions  
+    SendRegisterWithAuth { registrar: String, credentials: Credentials },
+    HandleRegisterResponse { status: u16 },
+    RefreshRegistration,
+    
+    // Presence actions
+    SendPresenceSubscribe { target: String },
+    SendPresenceNotify { uri: String, status: PresenceStatus },
+    PublishPresence { status: PresenceStatus },
+}
+```
+
+### State Table Updates for Registration/Presence
+
+```yaml
+# src/state_table/state_table.yaml additions
+states:
+  Idle:
+    transitions:
+      - event: Register
+        next_state: Registering
+        actions:
+          - SendRegisterWithAuth: { registrar: "${event.registrar}", credentials: "${event.credentials}" }
+  
+  Registering:
+    transitions:
+      - event: AuthChallenge
+        next_state: Authenticating
+        actions:
+          - RespondToAuthChallenge: { credentials: "${session.credentials}" }
+      
+      - event: RegisterSuccess
+        next_state: Registered
+        actions:
+          - HandleRegisterResponse: { status: 200 }
+          - PublishPresence: { status: Available }
+  
+  Registered:
+    transitions:
+      - event: SubscribePresence
+        next_state: Registered
+        actions:
+          - SendPresenceSubscribe: { target: "${event.target}" }
+      
+      - event: PresenceNotify
+        next_state: Registered
+        actions:
+          - SendPresenceNotify: { uri: "${event.uri}", status: "${event.status}" }
+```
+
+### UnifiedCoordinator Updates
+
+#### File: `src/api/unified.rs` (modifications)
+```rust
+impl UnifiedCoordinator {
+    pub auth_adapter: Arc<AuthAdapter>,
+    pub registrar_adapter: Arc<RegistrarAdapter>,
+    
+    pub async fn new_with_services(
+        config: Config,
+        auth_service: Arc<dyn AuthClient>,
+        registrar_service: Arc<RegistrarService>,
+    ) -> Result<Self> {
+        // ... existing initialization ...
+        
+        let auth_adapter = Arc::new(AuthAdapter::new(auth_service));
+        let registrar_adapter = Arc::new(RegistrarAdapter::new(registrar_service));
+        
+        // Setup event handlers for presence
+        registrar_service.on_presence_event({
+            let adapter = registrar_adapter.clone();
+            move |event| {
+                let adapter = adapter.clone();
+                tokio::spawn(async move {
+                    adapter.on_presence_update(event).await;
+                });
+            }
+        });
+        
+        Ok(Self {
+            // ... existing fields ...
+            auth_adapter,
+            registrar_adapter,
+        })
+    }
+}
+```
+
+### Complete Feature Support
+
+With auth-core and registrar-core integration, session-core-v2 now supports:
+
+**Authentication:**
+- Digest authentication for REGISTER/INVITE
+- Token-based authentication
+- Challenge/response handling
+
+**Registration:**
+- REGISTER with authentication
+- Contact binding management
+- Registration refresh
+
+**Presence:**
+- SUBSCRIBE/NOTIFY for presence
+- PUBLISH presence state
+- Buddy list management
+
+**Call Parking:**
+- Park calls using registrar
+- Retrieve parked calls
+- Parking timeout management
+
+**MESSAGE Support:**
+- Send/receive SIP MESSAGE
+- Instant messaging between registered users
+
+These additions ensure session-core-v2 provides all the call control functions needed by sip-client for a complete telephony solution, with clear separation of concerns across the architecture layers.
+
+## Adapter Plugin System (Phase 2 - Can Be Added Later)
+
+The adapter system provides extensibility without modifying core code. This can be implemented after Phase 1 is complete.
+
+### File: `src/adapters/registry.rs` (NEW - Phase 2)
+```rust
+use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use async_trait::async_trait;
+use libloading::Library;
+
+/// Base trait for all session-core adapters
+#[async_trait]
+pub trait SessionAdapter: Send + Sync {
+    fn name(&self) -> &str;
+    fn version(&self) -> &str;
+    async fn initialize(&mut self) -> Result<()>;
+}
+
+/// Adapter for call lifecycle events
+#[async_trait]
+pub trait CallEventAdapter: SessionAdapter {
+    async fn on_call_state_change(&self,
+        session_id: &SessionId,
+        old_state: CallState,
+        new_state: CallState
+    ) -> Result<()>;
+    
+    async fn on_dtmf(&self, session_id: &SessionId, digit: char) -> Result<()>;
+    
+    async fn on_call_end(&self, session_id: &SessionId, cdr: CallDetail) -> Result<()>;
+}
+
+/// Adapter for custom state machine actions
+#[async_trait]
+pub trait StateActionAdapter: SessionAdapter {
+    fn can_handle(&self, action: &str) -> bool;
+    
+    async fn execute(&self,
+        action: &str,
+        session: &SessionState,
+        params: serde_json::Value
+    ) -> Result<()>;
+}
+
+/// Registry that loads and manages adapters
+pub struct AdapterRegistry {
+    call_event_adapters: Vec<Arc<dyn CallEventAdapter>>,
+    state_action_adapters: Vec<Arc<dyn StateActionAdapter>>,
+    loaded_libraries: Vec<Library>,
+}
+
+impl AdapterRegistry {
+    pub async fn load_from_directory(&mut self, dir: &Path) -> Result<()> {
+        if !dir.exists() {
+            return Ok(());
+        }
+        
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            
+            match path.extension().and_then(|s| s.to_str()) {
+                Some("so") | Some("dylib") | Some("dll") => {
+                    self.load_native_adapter(&path).await?;
+                }
+                Some("toml") => {
+                    self.load_from_manifest(&path).await?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+    
+    unsafe fn load_native_adapter(&mut self, path: &Path) -> Result<()> {
+        let lib = Library::new(path)?;
+        
+        // Try to load as CallEventAdapter
+        if let Ok(create_fn) = lib.get::<fn() -> Box<dyn CallEventAdapter>>(b"create_call_event_adapter") {
+            let adapter = Arc::from(create_fn());
+            self.call_event_adapters.push(adapter);
+        }
+        
+        // Try to load as StateActionAdapter
+        if let Ok(create_fn) = lib.get::<fn() -> Box<dyn StateActionAdapter>>(b"create_state_action_adapter") {
+            let adapter = Arc::from(create_fn());
+            self.state_action_adapters.push(adapter);
+        }
+        
+        self.loaded_libraries.push(lib);
+        Ok(())
+    }
+}
+```
+
+### Example Adapter Implementation
+
+#### File: `adapters/billing/src/lib.rs` (External crate)
+```rust
+use rvoip_session_core::adapters::{CallEventAdapter, SessionAdapter};
+use async_trait::async_trait;
+
+pub struct BillingAdapter {
+    api_endpoint: String,
+    api_key: String,
+}
+
+#[async_trait]
+impl SessionAdapter for BillingAdapter {
+    fn name(&self) -> &str { "billing" }
+    fn version(&self) -> &str { "1.0.0" }
+    
+    async fn initialize(&mut self) -> Result<()> {
+        // Connect to billing service
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl CallEventAdapter for BillingAdapter {
+    async fn on_call_state_change(&self,
+        session_id: &SessionId,
+        old_state: CallState,
+        new_state: CallState
+    ) -> Result<()> {
+        match new_state {
+            CallState::Active => {
+                // Start billing meter
+                self.start_billing(session_id).await?;
+            }
+            CallState::Terminated => {
+                // Stop billing and generate invoice
+                self.stop_billing(session_id).await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    
+    async fn on_call_end(&self, session_id: &SessionId, cdr: CallDetail) -> Result<()> {
+        // Send CDR to billing system
+        self.send_cdr(cdr).await
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn create_call_event_adapter() -> Box<dyn CallEventAdapter> {
+    Box::new(BillingAdapter::default())
+}
+```
+
+### Integration with UnifiedCoordinator
+
+#### File: `src/api/unified.rs` (modifications for Phase 2)
+```rust
+impl UnifiedCoordinator {
+    pub async fn new_with_adapters(config: Config) -> Result<Self> {
+        let mut coordinator = Self::new(config).await?;
+        
+        // Load adapters if enabled
+        if config.enable_adapters {
+            let mut registry = AdapterRegistry::new();
+            
+            // Load from standard directories
+            for dir in &[
+                PathBuf::from("./adapters"),
+                PathBuf::from("/usr/local/lib/rvoip/adapters"),
+                dirs::config_dir().map(|d| d.join("rvoip/adapters")),
+            ] {
+                if let Some(dir) = dir {
+                    registry.load_from_directory(&dir).await?;
+                }
+            }
+            
+            coordinator.adapter_registry = Some(Arc::new(registry));
+        }
+        
+        Ok(coordinator)
+    }
+    
+    /// Notify all call event adapters
+    async fn notify_call_adapters(&self, event: CallEvent) -> Result<()> {
+        if let Some(registry) = &self.adapter_registry {
+            for adapter in registry.get_call_event_adapters() {
+                // Run adapter in background, don't block call
+                let adapter = adapter.clone();
+                let event = event.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = adapter.handle_event(event).await {
+                        warn!("Adapter {} failed: {}", adapter.name(), e);
+                    }
+                });
+            }
+        }
+        Ok(())
+    }
+}
+```
+
+### State Machine Integration for Custom Actions
+
+#### File: `src/state_machine/executor.rs` (modifications for Phase 2)
+```rust
+impl StateMachineExecutor {
+    async fn execute_action(&self, action: &Action, session: &mut SessionState) -> Result<()> {
+        // Try built-in actions first
+        if let Some(result) = self.execute_builtin_action(action, session).await? {
+            return result;
+        }
+        
+        // Try adapter actions
+        if let Some(registry) = &self.adapter_registry {
+            for adapter in registry.get_state_action_adapters() {
+                if adapter.can_handle(&action.name) {
+                    return adapter.execute(&action.name, session, action.params.clone()).await;
+                }
+            }
+        }
+        
+        Err(SessionError::UnknownAction(action.name.clone()))
+    }
+}
+```
+
+### Configuration for Adapters
+
+```toml
+# ~/.config/rvoip/config.toml
+[adapters]
+enabled = true
+directories = [
+    "./adapters",
+    "/usr/local/lib/rvoip/adapters"
+]
+
+# Adapter-specific config
+[adapters.billing]
+api_endpoint = "https://billing.example.com"
+api_key = "secret-key"
+
+[adapters.transcription]
+provider = "whisper"
+language = "en-US"
+```
+
+### Why This Can Be Added Later
+
+1. **Core Functionality First**: The adapter system is not required for basic operation
+2. **Clean Interfaces**: Adapter traits can be added without breaking existing code
+3. **Optional Loading**: Adapters are loaded conditionally based on configuration
+4. **Background Processing**: Adapters run async without blocking calls
+
+This design ensures:
+- Session-core stays focused on call control
+- Media processing stays in media-core
+- Third-party extensions don't compromise stability
+- Can be implemented incrementally after Phase 1
+
+These additions ensure session-core-v2 provides all the call control functions needed by sip-client for a complete telephony solution, with clear separation of concerns across the architecture layers.
+
 ## Testing Strategy
 
 ### File: `crates/session-core-v2/tests/simple_api_test.rs` (NEW)

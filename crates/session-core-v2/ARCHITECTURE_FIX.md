@@ -560,6 +560,321 @@ Transfer, conference, etc. can come after basics work.
    - State machine only handles existing sessions
    - Coordinator manages session lifecycle
 
+## Implementation Layers for Call Control
+
+The architecture supports comprehensive call control through clear separation of concerns:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│           Call Control Implementation Layers              │
+└──────────────────────────────────────────────────────────┘
+
+Layer 1: SimplePeer (API Surface)
+├─ call.hold() / call.resume()
+├─ call.send_dtmf()
+├─ call.transfer()
+└─ Just delegates to UnifiedSession
+
+Layer 2: UnifiedSession (Session Operations)
+├─ Sends events to state machine (hold, transfer)
+├─ Direct adapter calls (DTMF, recording)
+├─ Queries session store (getters)
+└─ Per-session operations only
+
+Layer 3: UnifiedCoordinator (System Operations)  
+├─ Registration (system-wide)
+├─ Conference management (multi-session)
+├─ Session lifecycle (create/destroy)
+└─ Cross-session coordination
+
+Layer 4: State Machine (Business Logic)
+├─ State transitions (Active -> OnHold)
+├─ Action sequencing (re-INVITE then update media)
+├─ Protocol coordination (SIP + RTP)
+└─ Driven by state table
+
+Layer 5: Adapters (Protocol Implementation)
+├─ DialogAdapter: SIP signaling (INVITE, REFER, REGISTER)
+├─ MediaAdapter: RTP/audio (DTMF, recording, mixing)
+├─ Execute actions from state machine
+└─ Generate events for state machine
+```
+
+### Example: Conference Call Implementation
+
+```
+User Level:
+    conference = peer.create_conference()
+    conference.add_call(call1)
+    conference.add_call(call2)
+
+Implementation:
+    SimplePeer::create_conference()
+        ↓
+    UnifiedCoordinator::create_conference()
+        ├─ Creates ConferenceId
+        ├─ MediaAdapter::create_audio_mixer()
+        └─ Returns Conference handle
+    
+    Conference::add_call(call)
+        ↓
+    UnifiedCoordinator::add_to_conference(conf_id, session)
+        ├─ MediaAdapter::redirect_to_mixer(session_id, conf_id)
+        │   ├─ Get media session for call
+        │   ├─ Get mixer for conference  
+        │   ├─ Connect audio sink to mixer input
+        │   └─ Connect audio source from mixer output
+        └─ Update conference participant list
+
+Audio Flow:
+    Call1 RTP ──► MediaSession1 ──► Mixer ──► Mixed Audio ──► All Participants
+    Call2 RTP ──► MediaSession2 ──┘
+```
+
+This layered architecture ensures:
+- Simple API remains simple (SimplePeer/Call)
+- Complex operations are properly decomposed
+- State machine handles protocol coordination
+- Adapters handle protocol details
+- Clear separation between session and system operations
+
+## Integration with Core Services
+
+Session-core-v2 integrates with existing RVoIP core services for complete functionality:
+
+```
+┌──────────────────────────────────────────────────────────┐
+│              Core Service Integration                      │
+└──────────────────────────────────────────────────────────┘
+
+                    SimplePeer
+                        │
+                        ▼
+                UnifiedCoordinator
+                   /    │    \
+                  /     │     \
+                 ▼      ▼      ▼
+          AuthAdapter  RegistrarAdapter  DialogAdapter
+                │            │                │
+                ▼            ▼                ▼
+          auth-core    registrar-core    dialog-core
+                             │
+                             ├─ Registration (REGISTER)
+                             ├─ Presence (SUBSCRIBE/NOTIFY)  
+                             ├─ Location Service
+                             └─ Call Parking
+```
+
+### Auth-Core Integration
+- Digest authentication for SIP requests
+- Token validation
+- Challenge/response handling
+- Credential management
+
+### Registrar-Core Integration
+- User registration with authentication
+- Contact binding management
+- Presence state (PUBLISH/SUBSCRIBE/NOTIFY)
+- Buddy list management
+- Call parking via special AORs
+
+### Complete SIP Feature Set
+With these integrations, session-core-v2 supports:
+- **Basic Calls**: INVITE, BYE, CANCEL
+- **Call Control**: Hold, Transfer, DTMF
+- **Registration**: REGISTER with auth
+- **Presence**: Full presence model
+- **Messaging**: SIP MESSAGE
+- **Parking**: Park/retrieve calls
+- **Conference**: Local mixing
+
+This makes session-core-v2 feature-complete for sip-client requirements.
+
+## Adapter Plugin System
+
+Session-core-v2 provides an extensible adapter system similar to FreeSWITCH/Asterisk modules, allowing developers to extend functionality without modifying core code.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                Adapter Plugin Architecture                │
+└──────────────────────────────────────────────────────────┘
+
+Session-Core Adapter Types:              Media-Core Adapter Types:
+├─ Call Event Adapters                   ├─ Codec Adapters (G.711, Opus)
+├─ State Action Adapters                  ├─ DSP Adapters (Echo cancel)
+├─ Analytics Adapters                     └─ Format Adapters (WAV, MP3)
+├─ Storage Adapters                       
+└─ Integration Adapters                   
+
+            SimplePeer/Call
+                  │
+                  ▼
+          UnifiedCoordinator
+                  │
+         ┌────────┴────────┐
+         │                 │
+    AdapterRegistry   MediaAdapter ──► media-core
+         │                              │
+         ▼                              ▼
+    Session Adapters              Media Adapters
+    - Transcription               - Custom Codecs
+    - CDR/Billing                 - Audio Effects  
+    - CRM Integration             - Noise Reduction
+    - Analytics                  - Format Conversion
+```
+
+### Adapter Surfaces at Session-Core Level
+
+```rust
+// Session-level adapters (NOT media processing)
+pub trait CallEventAdapter: Send + Sync {
+    /// Called when call state changes
+    async fn on_call_state_change(&self, 
+        session_id: &SessionId, 
+        old_state: CallState, 
+        new_state: CallState
+    ) -> Result<()>;
+    
+    /// Called when DTMF received
+    async fn on_dtmf(&self, session_id: &SessionId, digit: char) -> Result<()>;
+    
+    /// Called when call ends with CDR
+    async fn on_call_end(&self, session_id: &SessionId, cdr: CallDetail) -> Result<()>;
+}
+
+pub trait StateActionAdapter: Send + Sync {
+    /// Check if this adapter handles the action
+    fn can_handle(&self, action: &str) -> bool;
+    
+    /// Execute custom state machine action
+    async fn execute(&self, 
+        action: &str, 
+        session: &SessionState, 
+        params: serde_json::Value
+    ) -> Result<()>;
+}
+
+pub trait StorageAdapter: Send + Sync {
+    /// Store call recording metadata (NOT the audio)
+    async fn store_recording_metadata(&self, 
+        session_id: &SessionId, 
+        path: &str, 
+        duration: Duration
+    ) -> Result<String>;
+    
+    /// Store CDR
+    async fn store_cdr(&self, cdr: CallDetail) -> Result<()>;
+}
+```
+
+### How Codec Adapter Would Actually Work
+
+Since codecs are media-core's responsibility, session-core would coordinate but not process:
+
+```rust
+// WRONG: Session-core doesn't handle codecs directly
+// pub trait CodecAdapter { 
+//     fn encode(&self, pcm: &[i16]) -> Vec<u8>; 
+// }
+
+// CORRECT: Session-core coordinates codec negotiation
+pub trait CodecNegotiationAdapter: Send + Sync {
+    /// Influence SDP codec priorities during negotiation
+    async fn adjust_codec_priorities(&self, 
+        offered: Vec<CodecInfo>
+    ) -> Vec<CodecInfo>;
+    
+    /// Notify media-core to load custom codec
+    async fn on_codec_selected(&self, 
+        session_id: &SessionId, 
+        codec: &CodecInfo
+    ) -> Result<()> {
+        // Tell media-core to load the codec module
+        self.notify_media_core(codec).await
+    }
+}
+```
+
+### Real Example: Transcription Adapter
+
+```rust
+// adapters/transcription/src/lib.rs
+pub struct TranscriptionAdapter {
+    api_endpoint: String,
+    sessions: Arc<DashMap<SessionId, TranscriptionSession>>,
+}
+
+#[async_trait]
+impl CallEventAdapter for TranscriptionAdapter {
+    async fn on_call_state_change(&self, 
+        session_id: &SessionId, 
+        old: CallState, 
+        new: CallState
+    ) -> Result<()> {
+        match new {
+            CallState::Active => {
+                // Start transcription session
+                let session = TranscriptionSession::new();
+                self.sessions.insert(session_id.clone(), session);
+                
+                // Register with media-core to receive audio
+                media_core::register_tap(session_id, "transcription").await?;
+            }
+            CallState::Terminated => {
+                // Finalize and store transcription
+                if let Some(session) = self.sessions.remove(session_id) {
+                    let transcript = session.finalize().await?;
+                    self.store_transcript(session_id, transcript).await?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+```
+
+### Adapter Loading Strategy
+
+```rust
+impl UnifiedCoordinator {
+    pub async fn new_with_adapters(config: Config) -> Result<Self> {
+        let mut registry = AdapterRegistry::new()?;
+        
+        // Load from directories
+        registry.scan_directories(&[
+            "./adapters",
+            "/usr/lib/rvoip/adapters",
+        ]).await?;
+        
+        // Register adapters by type
+        for adapter in registry.get_call_event_adapters() {
+            self.event_bus.register_adapter(adapter);
+        }
+        
+        for adapter in registry.get_state_action_adapters() {
+            self.state_machine.register_adapter(adapter);
+        }
+        
+        Ok(self)
+    }
+}
+```
+
+### Implementation Timeline
+
+**Phase 1 (Core)**: Build without adapters
+**Phase 2 (Extensibility)**: Add adapter system
+- Can be added after core is working
+- Won't break existing API
+- Allows third-party extensions
+
+This design ensures:
+- Session-core handles call logic, not media processing
+- Media-core handles codecs, DSP, formats
+- Clear boundaries between layers
+- Extensible without core modifications
+
 ## Conclusion
 
-The state table design is good. The state machine is good. But we put it in the wrong place architecturally. By adding a transport interception layer at the coordinator level, we can fix the incoming call problem while keeping all the benefits of the state-driven design.
+The state table design is good. The state machine is good. But we put it in the wrong place architecturally. By adding a transport interception layer at the coordinator level and properly layering the implementation of call control functions, we can fix the incoming call problem while keeping all the benefits of the state-driven design and providing a complete telephony API.
