@@ -33,7 +33,7 @@ async fn test_uac_call_flow() {
         .expect("Failed to create session");
     store.update_session(session).await.unwrap();
     
-    // The YAML uses different state names - let's make a call and see what happens
+    // Test Idle -> Initiating on MakeCall
     let result = state_machine.process_event(
         &session_id,
         EventType::MakeCall { target: "sip:bob@example.com".to_string() },
@@ -41,28 +41,39 @@ async fn test_uac_call_flow() {
     assert!(result.is_ok(), "Should process MakeCall event");
     
     let session = store.get_session(&session_id).await.unwrap();
-    // The YAML might use different state names
-    assert_ne!(session.call_state, CallState::Idle, "Should no longer be Idle");
-    let first_state = session.call_state.clone();
+    assert_eq!(session.call_state, CallState::Initiating, "Should transition to Initiating");
     
-    // Since we don't know what events the YAML expects, let's try the ones it defines
-    // The YAML has CallAnswered, not Dialog200OK
+    // Test Initiating -> Ringing on 180 response
+    let result = state_machine.process_event(
+        &session_id,
+        EventType::Dialog180Ringing,
+    ).await;
+    assert!(result.is_ok(), "Should process 180 Ringing");
+    
+    let session = store.get_session(&session_id).await.unwrap();
+    assert_eq!(session.call_state, CallState::Ringing, "Should transition to Ringing");
+    
+    // Mark conditions as met to allow transition to Active
     let mut session = store.get_session(&session_id).await.unwrap();
     session.dialog_established = true;
     session.sdp_negotiated = true;
     session.media_session_ready = true;
+    session.remote_sdp = Some("fake SDP".to_string());  // HasRemoteSDP guard needs this
     store.update_session(session).await.unwrap();
     
+    // Verify session still exists after update
+    let check = store.get_session(&session_id).await;
+    assert!(check.is_ok(), "Session should exist before 200 OK: {:?}", check);
+    
+    // Test Ringing -> Active on 200 OK
     let result = state_machine.process_event(
         &session_id,
-        EventType::CallAnswered,
+        EventType::Dialog200OK,
     ).await;
+    assert!(result.is_ok(), "Should process 200 OK: {:?}", result);
     
-    if result.is_ok() {
-        let session = store.get_session(&session_id).await.unwrap();
-        // Just verify state changed
-        assert_ne!(session.call_state, first_state, "State should have changed");
-    }
+    let session = store.get_session(&session_id).await.unwrap();
+    assert_eq!(session.call_state, CallState::Active, "Should transition to Active");
     
     // Test Active -> Terminating on HangupCall
     let result = state_machine.process_event(
@@ -131,6 +142,7 @@ async fn test_uas_call_flow() {
     session.dialog_established = true;
     session.sdp_negotiated = true;
     session.media_session_ready = true;
+    session.remote_sdp = Some("fake SDP".to_string());  // HasRemoteSDP guard needs this
     store.update_session(session).await.unwrap();
     
     // Test Ringing -> Active on AcceptCall
@@ -221,6 +233,7 @@ async fn test_hold_resume() {
     session.call_state = CallState::Active;
     session.dialog_established = true;
     session.media_session_ready = true;
+    session.remote_sdp = Some("fake SDP".to_string());  // HasRemoteSDP guard needs this
     store.update_session(session).await.unwrap();
     
     // Test Active -> OnHold

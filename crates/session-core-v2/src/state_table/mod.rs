@@ -1,6 +1,5 @@
 pub mod types;
 pub mod builder;
-pub mod tables;
 pub mod yaml_loader;
 
 pub use types::*;
@@ -17,37 +16,30 @@ lazy_static! {
 
 /// Build the complete master state table
 fn build_master_table() -> MasterStateTable {
-    // Try to load from YAML first
-    if let Ok(table) = YamlTableLoader::load_default() {
-        // Validate the table
-        if let Err(errors) = table.validate() {
-            panic!("Invalid YAML state table: {:?}", errors);
+    // 1. Try custom YAML from environment variable
+    if let Ok(custom_path) = std::env::var("RVOIP_STATE_TABLE") {
+        tracing::info!("Loading custom state table from: {}", custom_path);
+        if let Ok(table) = YamlTableLoader::load_from_file(&custom_path) {
+            if let Err(errors) = table.validate() {
+                tracing::error!("Custom state table validation failed: {:?}", errors);
+            } else {
+                tracing::info!("Successfully loaded custom state table");
+                return table;
+            }
+        } else {
+            tracing::warn!("Failed to load custom state table from {}, falling back to default", custom_path);
         }
-        return table;
     }
     
-    // Fallback to hardcoded transitions if YAML fails
-    tracing::warn!("Failed to load YAML state table, using hardcoded transitions");
-    let mut builder = StateTableBuilder::new();
-    
-    // Add UAC transitions
-    tables::uac::add_uac_transitions(&mut builder);
-    
-    // Add UAS transitions
-    tables::uas::add_uas_transitions(&mut builder);
-    
-    // Add common transitions
-    tables::common::add_common_transitions(&mut builder);
-    
-    // Add bridge and transfer transitions
-    tables::bridge::add_bridge_transitions(&mut builder);
-    
-    let table = builder.build();
+    // 2. Load embedded default YAML (this should always succeed)
+    let table = YamlTableLoader::load_embedded_default()
+        .expect("Embedded default state table must be valid");
     
     // Validate the table
     if let Err(errors) = table.validate() {
-        panic!("Invalid state table: {:?}", errors);
+        panic!("Invalid default state table: {:?}", errors);
     }
     
+    tracing::debug!("Using embedded default state table");
     table
 }

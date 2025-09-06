@@ -190,7 +190,7 @@ impl YamlConditionUpdates {
 }
 
 /// Default state table embedded in the binary
-const DEFAULT_STATE_TABLE_YAML: &str = include_str!("../../state_tables/session_coordination.yaml");
+const DEFAULT_STATE_TABLE_YAML: &str = include_str!("../../state_tables/default_state_table.yaml");
 
 /// YAML table loader
 pub struct YamlTableLoader {
@@ -212,8 +212,14 @@ impl YamlTableLoader {
     
     /// Load the default embedded state table
     pub fn load_default() -> Result<StateTable> {
+        Self::load_embedded_default()
+    }
+    
+    /// Load the embedded default state table (always succeeds)
+    pub fn load_embedded_default() -> Result<StateTable> {
         let mut loader = Self::new();
-        loader.load_from_string(DEFAULT_STATE_TABLE_YAML)?;
+        loader.load_from_string(DEFAULT_STATE_TABLE_YAML)
+            .expect("Embedded default state table must be valid");
         loader.build()
     }
     

@@ -1,0 +1,448 @@
+# Default State Table for RVoIP Session Core
+# This is the single source of truth for all state transitions
+# Combines UAC, UAS, and common transitions with SIP-specific events
+
+version: "1.0"
+
+metadata:
+  description: "Complete SIP protocol state machine"
+  author: "RVoIP Team"
+  date: "2025-01-05"
+
+# Define valid states
+states:
+  - name: "Idle"
+    description: "No active call"
+  - name: "Initiating"
+    description: "Starting outbound call"
+  - name: "Ringing"
+    description: "Remote party is ringing"
+  - name: "EarlyMedia"
+    description: "Early media received"
+  - name: "Active"
+    description: "Call established with media flowing"
+  - name: "OnHold"
+    description: "Call on hold"
+  - name: "Resuming"
+    description: "Resuming from hold"
+  - name: "Bridged"
+    description: "Bridged to another call"
+  - name: "Transferring"
+    description: "Call being transferred"
+  - name: "Terminating"
+    description: "Call being terminated"
+  - name: "Terminated"
+    description: "Call ended"
+  - name: "Cancelled"
+    description: "Call was cancelled"
+  - name: "Failed"
+    description: "Call failed"
+
+# Define conditions that can be checked
+conditions:
+  - name: "DialogEstablished"
+    description: "SIP dialog is established"
+    default: false
+  - name: "MediaSessionReady"
+    description: "Media session is ready"
+    default: false
+  - name: "SDPNegotiated"
+    description: "SDP has been negotiated"
+    default: false
+  - name: "HasRemoteSDP"
+    description: "Remote SDP is available"
+    default: false
+  - name: "AllConditionsMet"
+    description: "All required conditions are met"
+    default: false
+
+# Define state transitions
+transitions:
+  # ================== UAC Transitions ==================
+  
+  # UAC: Idle -> Initiating (Make Call)
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "MakeCall"
+    guards: []
+    actions:
+      - type: "SendINVITE"
+      - type: "StartMediaSession"
+    next_state: "Initiating"
+    publish_events:
+      - type: "SessionCreated"
+
+  # UAC: Initiating -> Ringing (180 Ringing)
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "Dialog180Ringing"
+    next_state: "Ringing"
+    publish_events:
+      - type: "StateChanged"
+
+  # UAC: Ringing -> Active (200 OK)
+  - role: "UAC"
+    state: "Ringing"
+    event:
+      type: "Dialog200OK"
+    guards:
+      - type: "HasRemoteSDP"
+    actions:
+      - type: "SendACK"
+      - type: "NegotiateSDPAsUAC"
+      - type: "StoreRemoteSDP"
+    next_state: "Active"
+    condition_updates:
+      DialogEstablished: true
+    publish_events:
+      - type: "StateChanged"
+
+  # UAC: Active - ACK Sent (internal)
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "InternalACKSent"
+    publish_events:
+      - type: "Custom"
+        data: "rfc_compliant_media_creation_uac"
+
+  # UAC: Active - Media Negotiated
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "MediaNegotiated"
+    condition_updates:
+      SDPNegotiated: true
+
+  # UAC: Active - Media Session Ready
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "MediaSessionReady"
+    condition_updates:
+      MediaSessionReady: true
+
+  # UAC: Active - Check if ready
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "InternalCheckReady"
+    guards:
+      - type: "AllConditionsMet"
+    actions:
+      - type: "TriggerCallEstablished"
+    publish_events:
+      - type: "CallEstablished"
+
+  # UAC: Active -> Terminating (Hangup)
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "HangupCall"
+    actions:
+      - type: "SendBYE"
+      - type: "StartMediaCleanup"
+    next_state: "Terminating"
+    publish_events:
+      - type: "StateChanged"
+
+  # UAC: Active -> Terminating (Remote BYE)
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "DialogBYE"
+    actions:
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+      - type: "StartMediaCleanup"
+      - type: "StartDialogCleanup"
+    next_state: "Terminating"
+    publish_events:
+      - type: "StateChanged"
+
+  # UAC: Terminating -> Terminated
+  - role: "UAC"
+    state: "Terminating"
+    event:
+      type: "InternalCleanupComplete"
+    actions:
+      - type: "TriggerCallTerminated"
+    next_state: "Terminated"
+    publish_events:
+      - type: "CallTerminated"
+
+  # UAC: Initiating -> Terminating (Cancel)
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "HangupCall"
+    actions:
+      - type: "SendCANCEL"
+      - type: "StartMediaCleanup"
+      - type: "StartDialogCleanup"
+    next_state: "Terminating"
+    publish_events:
+      - type: "StateChanged"
+
+  # UAC: Ringing -> Terminating (Cancel)
+  - role: "UAC"
+    state: "Ringing"
+    event:
+      type: "HangupCall"
+    actions:
+      - type: "SendCANCEL"
+      - type: "StartMediaCleanup"
+      - type: "StartDialogCleanup"
+    next_state: "Terminating"
+    publish_events:
+      - type: "StateChanged"
+
+  # ================== UAS Transitions ==================
+  
+  # UAS: Idle -> Ringing (Incoming Call)
+  - role: "UAS"
+    state: "Idle"
+    event:
+      type: "IncomingCall"
+    guards: []
+    actions:
+      - type: "CreateMediaSession"
+      - type: "SendSIPResponse"
+        code: 180
+        reason: "Ringing"
+    next_state: "Ringing"
+    publish_events:
+      - type: "IncomingCallReceived"
+
+  # UAS: Ringing -> Active (Accept Call)
+  - role: "UAS"
+    state: "Ringing"
+    event:
+      type: "AcceptCall"
+    guards:
+      - type: "HasMediaSession"
+    actions:
+      - type: "NegotiateSDPAsUAS"
+      - type: "GenerateLocalSDP"
+      - type: "Send200OK"
+    next_state: "Active"
+    condition_updates:
+      SDPNegotiated: true
+    publish_events:
+      - type: "StateChanged"
+
+  # UAS: Ringing -> Failed (Reject Call)
+  - role: "UAS"
+    state: "Ringing"
+    event:
+      type: "RejectCall"
+    actions:
+      - type: "SendSIPResponse"
+        code: 486
+        reason: "Busy Here"
+      - type: "StartMediaCleanup"
+      - type: "StartDialogCleanup"
+    next_state: "Failed"
+    publish_events:
+      - type: "CallRejected"
+
+  # UAS: Active - ACK Received
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "DialogACK"
+    actions:
+      - type: "CreateOrUpdateMediaFlow"
+    condition_updates:
+      DialogEstablished: true
+    publish_events:
+      - type: "Custom"
+        data: "rfc_compliant_media_creation_uas"
+
+  # UAS: Active -> Terminating (Hangup)
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "HangupCall"
+    actions:
+      - type: "SendBYE"
+      - type: "StartMediaCleanup"
+    next_state: "Terminating"
+    publish_events:
+      - type: "StateChanged"
+
+  # UAS: Active -> Terminating (Remote BYE)
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "DialogBYE"
+    actions:
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+      - type: "StartMediaCleanup"
+      - type: "StartDialogCleanup"
+    next_state: "Terminating"
+    publish_events:
+      - type: "StateChanged"
+
+  # UAS: Terminating -> Terminated
+  - role: "UAS"
+    state: "Terminating"
+    event:
+      type: "InternalCleanupComplete"
+    actions:
+      - type: "TriggerCallTerminated"
+    next_state: "Terminated"
+    publish_events:
+      - type: "CallTerminated"
+
+  # ================== Common Transitions ==================
+  
+  # Hold Call
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "HoldCall"
+    actions:
+      - type: "UpdateMediaDirection"
+        direction: "sendonly"
+      - type: "SendReINVITE"
+    next_state: "OnHold"
+    publish_events:
+      - type: "CallOnHold"
+
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "HoldCall"
+    actions:
+      - type: "UpdateMediaDirection"
+        direction: "sendonly"
+      - type: "SendReINVITE"
+    next_state: "OnHold"
+    publish_events:
+      - type: "CallOnHold"
+
+  # Resume Call
+  - role: "UAC"
+    state: "OnHold"
+    event:
+      type: "ResumeCall"
+    actions:
+      - type: "UpdateMediaDirection"
+        direction: "sendrecv"
+      - type: "SendReINVITE"
+    next_state: "Resuming"
+    publish_events:
+      - type: "StateChanged"
+
+  - role: "UAS"
+    state: "OnHold"
+    event:
+      type: "ResumeCall"
+    actions:
+      - type: "UpdateMediaDirection"
+        direction: "sendrecv"
+      - type: "SendReINVITE"
+    next_state: "Resuming"
+    publish_events:
+      - type: "StateChanged"
+
+  # Resuming -> Active (200 OK)
+  - role: "UAC"
+    state: "Resuming"
+    event:
+      type: "Dialog200OK"
+    actions:
+      - type: "SendACK"
+      - type: "UpdateMediaFlow"
+    next_state: "Active"
+    publish_events:
+      - type: "CallResumed"
+
+  - role: "UAS"
+    state: "Resuming"
+    event:
+      type: "Dialog200OK"
+    actions:
+      - type: "SendACK"
+      - type: "UpdateMediaFlow"
+    next_state: "Active"
+    publish_events:
+      - type: "CallResumed"
+
+  # EarlyMedia -> Active (when call is answered)
+  - role: "UAC"
+    state: "EarlyMedia"
+    event:
+      type: "Dialog200OK"
+    actions:
+      - type: "SendACK"
+    next_state: "Active"
+    publish_events:
+      - type: "StateChanged"
+
+  # Bridged -> Terminating (when bridge ends)
+  - role: "UAC"
+    state: "Bridged"
+    event:
+      type: "HangupCall"
+    actions:
+      - type: "SendBYE"
+    next_state: "Terminating"
+    publish_events:
+      - type: "StateChanged"
+
+  - role: "UAS"
+    state: "Bridged"
+    event:
+      type: "HangupCall"
+    actions:
+      - type: "SendBYE"
+    next_state: "Terminating"
+    publish_events:
+      - type: "StateChanged"
+
+  # Transferring -> Terminated (when transfer completes)
+  - role: "UAC"
+    state: "Transferring"
+    event:
+      type: "DialogTerminated"
+    next_state: "Terminated"
+    publish_events:
+      - type: "TransferComplete"
+
+  - role: "UAS"
+    state: "Transferring"
+    event:
+      type: "DialogTerminated"
+    next_state: "Terminated"
+    publish_events:
+      - type: "TransferComplete"
+
+  # Handle Dialog Terminated from Active state
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "DialogTerminated"
+    actions:
+      - type: "StartMediaCleanup"
+      - type: "StartDialogCleanup"
+    next_state: "Terminating"
+    publish_events:
+      - type: "StateChanged"
+
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "DialogTerminated"
+    actions:
+      - type: "StartMediaCleanup"
+      - type: "StartDialogCleanup"
+    next_state: "Terminating"
+    publish_events:
+      - type: "StateChanged"
