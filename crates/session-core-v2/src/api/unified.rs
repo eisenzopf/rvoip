@@ -1,247 +1,72 @@
-//! Unified Session API - Clean Implementation
+//! Simplified Unified Session API
 //!
-//! This is the simplified API that works through the state table.
-//! No business logic here - just event sending and state queries.
+//! This is a thin wrapper over the state machine helpers.
+//! All business logic is in the state table.
 
-use crate::state_table::types::{Role, EventType, CallState, SessionId};
-use crate::session_store::SessionStore;
-use crate::state_machine::StateMachine as StateMachineExecutor;
-use crate::state_machine::executor::SessionEvent as StateMachineEvent;
-use crate::adapters::{EventRouter, DialogAdapter, MediaAdapter};
-use crate::adapters::media_adapter::AudioFrameSubscriber;
+use crate::state_table::types::{EventType, CallState, SessionId};
+use crate::state_machine::{StateMachine, StateMachineHelpers};
+use crate::adapters::{DialogAdapter, MediaAdapter};
 use crate::errors::{Result, SessionError};
+use crate::types::{SessionInfo, IncomingCallInfo};
+use crate::session_store::SessionStore;
+use crate::session_registry::SessionRegistry;
 use rvoip_media_core::types::AudioFrame;
 use std::sync::Arc;
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::{mpsc, RwLock};
-use std::collections::HashMap;
 use infra_common::events::coordinator::GlobalEventCoordinator;
-use infra_common::planes::LayerTaskManager;
 
-/// Unified session that works for any role (UAC, UAS, B2BUA, etc.)
-pub struct UnifiedSession {
-    /// Unique session identifier
-    pub id: SessionId,
-    
-    /// Reference to the coordinator
-    coordinator: Arc<UnifiedCoordinator>,
-    
-    /// Role of this session
-    role: Role,
-}
-
-impl UnifiedSession {
-    /// Create a new session with the specified role
-    pub async fn new(coordinator: Arc<UnifiedCoordinator>, role: Role) -> Result<Self> {
-        let id = SessionId::new();
-        
-        // Create initial session state in the store
-        coordinator.store.create_session(id.clone(), role, false).await
-            .map_err(|e| SessionError::InternalError(format!("Failed to create session: {}", e)))?;
-        
-        Ok(Self {
-            id: id.clone(),
-            coordinator,
-            role,
-        })
-    }
-    
-    // ===== Core Operations =====
-    
-    /// Make an outbound call (UAC role required)
-    pub async fn make_call(&self, target: &str) -> Result<()> {
-        // Pass target directly through the event
-        self.send_event(EventType::MakeCall { 
-            target: target.to_string() 
-        }).await
-    }
-    
-    /// Handle incoming call (UAS role required)
-    pub async fn on_incoming_call(&self, from: &str, sdp: Option<String>) -> Result<()> {
-        // Store SDP if provided
-        if let Some(sdp_data) = &sdp {
-            let mut session = self.coordinator.store.get_session(&self.id)
-                .await
-                .map_err(|e| SessionError::SessionNotFound(format!("Session {} not found: {}", self.id.0, e)))?;
-            session.remote_sdp = Some(sdp_data.clone());
-            self.coordinator.store.update_session(session)
-                .await
-                .map_err(|e| SessionError::InternalError(format!("Failed to update session: {}", e)))?;
-        }
-        
-        self.send_event(EventType::IncomingCall { 
-            from: from.to_string(),
-            sdp,
-        }).await
-    }
-    
-    /// Accept the call
-    pub async fn accept(&self) -> Result<()> {
-        self.send_event(EventType::AcceptCall).await
-    }
-    
-    /// Reject the call
-    pub async fn reject(&self, reason: &str) -> Result<()> {
-        self.send_event(EventType::RejectCall { 
-            reason: reason.to_string() 
-        }).await
-    }
-    
-    /// Hangup the call
-    pub async fn hangup(&self) -> Result<()> {
-        self.send_event(EventType::HangupCall).await
-    }
-    
-    /// Put call on hold
-    pub async fn hold(&self) -> Result<()> {
-        self.send_event(EventType::HoldCall).await
-    }
-    
-    /// Resume from hold
-    pub async fn resume(&self) -> Result<()> {
-        self.send_event(EventType::ResumeCall).await
-    }
-    
-    /// Transfer call
-    pub async fn transfer(&self, target: &str, attended: bool) -> Result<()> {
-        if attended {
-            self.send_event(EventType::AttendedTransfer { 
-                target: target.to_string() 
-            }).await
-        } else {
-            self.send_event(EventType::BlindTransfer { 
-                target: target.to_string() 
-            }).await
-        }
-    }
-    
-    /// Play audio file
-    pub async fn play_audio(&self, file: &str) -> Result<()> {
-        self.send_event(EventType::PlayAudio { 
-            file: file.to_string() 
-        }).await
-    }
-    
-    /// Start recording
-    pub async fn start_recording(&self) -> Result<()> {
-        self.send_event(EventType::StartRecording).await
-    }
-    
-    /// Stop recording
-    pub async fn stop_recording(&self) -> Result<()> {
-        self.send_event(EventType::StopRecording).await
-    }
-    
-    /// Send DTMF digits
-    pub async fn send_dtmf(&self, digits: &str) -> Result<()> {
-        self.send_event(EventType::SendDTMF { 
-            digits: digits.to_string() 
-        }).await
-    }
-    
-    // ===== REAL AUDIO FRAME API - The Missing Core Functionality =====
-    
-    /// Send an audio frame for encoding and transmission
-    /// This is the real audio transmission API that was missing!
-    pub async fn send_audio_frame(&self, audio_frame: AudioFrame) -> Result<()> {
-        // Access the media adapter directly from the coordinator
-        self.coordinator.media_adapter.send_audio_frame(&self.id, audio_frame).await
-    }
-    
-    /// Subscribe to receive decoded audio frames from RTP
-    /// This is the real audio reception API that was missing!
-    pub async fn subscribe_to_audio_frames(&self) -> Result<AudioFrameSubscriber> {
-        // Access the media adapter directly from the coordinator
-        self.coordinator.media_adapter.subscribe_to_audio_frames(&self.id).await
-    }
-    
-    /// Get current state
-    pub async fn state(&self) -> Result<CallState> {
-        self.coordinator.get_session_state(&self.id).await
-    }
-    
-    /// Get session role
-    pub fn role(&self) -> Role {
-        self.role
-    }
-    
-    /// Subscribe to events for this session
-    pub async fn on_event<F>(&self, callback: F) -> Result<()> 
-    where
-        F: Fn(SessionEvent) + Send + Sync + 'static
-    {
-        self.coordinator.subscribe_to_session(self.id.clone(), callback).await
-    }
-    
-    // ===== Internal =====
-    
-    /// Send an event to the state machine
-    async fn send_event(&self, event: EventType) -> Result<()> {
-        self.coordinator.process_event(&self.id, event).await
-    }
-}
-
-/// Session event for callbacks
+/// Configuration for the unified coordinator
 #[derive(Debug, Clone)]
-pub enum SessionEvent {
-    StateChanged { from: CallState, to: CallState },
-    CallEstablished,
-    CallTerminated { reason: String },
-    MediaFlowEstablished { local_addr: String, remote_addr: String },
-    MediaQualityAlert { level: String, metrics: String },
-    DtmfReceived { digit: char },
-    RecordingStarted,
-    RecordingStopped,
-    TransferInitiated { target: String },
-    TransferCompleted,
-    HoldStarted,
-    HoldReleased,
-    BridgeCreated { other_session: SessionId },
-    BridgeDestroyed,
+pub struct Config {
+    /// Local IP address for media
+    pub local_ip: IpAddr,
+    /// SIP port
+    pub sip_port: u16,
+    /// Starting port for media
+    pub media_port_start: u16,
+    /// Ending port for media
+    pub media_port_end: u16,
+    /// Bind address for SIP
+    pub bind_addr: SocketAddr,
+    /// Optional path to custom state table YAML
+    pub state_table_path: Option<String>,
 }
 
-/// The main coordinator - replaces the old SessionCoordinator
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            local_ip: "127.0.0.1".parse().unwrap(),
+            sip_port: 5060,
+            media_port_start: 16000,
+            media_port_end: 17000,
+            bind_addr: "127.0.0.1:5060".parse().unwrap(),
+            state_table_path: None,
+        }
+    }
+}
+
+/// Simplified coordinator that uses state machine helpers
 pub struct UnifiedCoordinator {
-    /// Session state storage
-    pub(crate) store: Arc<SessionStore>,
-    
-    /// State machine executor
-    state_machine: Arc<StateMachineExecutor>,
-    
-    /// Event router (handles adapters)
-    pub event_router: Arc<EventRouter>,
+    /// State machine helpers
+    helpers: Arc<StateMachineHelpers>,
     
     /// Media adapter for audio operations
-    pub media_adapter: Arc<MediaAdapter>,
+    media_adapter: Arc<MediaAdapter>,
     
     /// Dialog adapter for SIP operations
     dialog_adapter: Arc<DialogAdapter>,
     
-    /// Session registry
-    session_registry: Arc<crate::session_registry::SessionRegistry>,
-    
-    /// Session manager
-    session_manager: Option<Arc<crate::api::session_manager::SessionManager>>,
-    
-    /// Event subscribers
-    subscribers: Arc<RwLock<HashMap<SessionId, Vec<Arc<dyn Fn(SessionEvent) + Send + Sync>>>>>,
+    /// Incoming call receiver
+    incoming_rx: Arc<RwLock<mpsc::Receiver<IncomingCallInfo>>>,
     
     /// Configuration
     config: Config,
-    
-    /// Global event coordinator for cross-crate communication
-    global_coordinator: Arc<GlobalEventCoordinator>,
-    
-    /// Task manager for background tasks
-    task_manager: Arc<LayerTaskManager>,
 }
 
 impl UnifiedCoordinator {
-    /// Create a new coordinator with the given configuration
+    /// Create a new coordinator
     pub async fn new(config: Config) -> Result<Arc<Self>> {
-        // Create session store
-        let store = Arc::new(SessionStore::new());
-        
         // Create global event coordinator
         let global_coordinator = Arc::new(
             GlobalEventCoordinator::monolithic()
@@ -249,293 +74,259 @@ impl UnifiedCoordinator {
                 .map_err(|e| SessionError::InternalError(format!("Failed to create global coordinator: {}", e)))?
         );
         
-        // Create task manager
-        let task_manager = Arc::new(LayerTaskManager::new("session-core-v2"));
+        // Create core components
+        let store = Arc::new(SessionStore::new());
+        let registry = Arc::new(SessionRegistry::new());
         
-        // Create event channel for state machine
-        let (state_event_tx, mut state_event_rx) = mpsc::channel(1000);
-        
-        // Create dialog adapter with global coordinator
+        // Create adapters
         let dialog_api = Self::create_dialog_api(&config).await?;
         let dialog_adapter = Arc::new(DialogAdapter::new(
             dialog_api,
-            global_coordinator.clone(),
             store.clone(),
         ));
         
-        // Create media adapter with global coordinator
         let media_controller = Self::create_media_controller(&config).await?;
         let media_adapter = Arc::new(MediaAdapter::new(
             media_controller,
-            global_coordinator.clone(),
             store.clone(),
             config.local_ip,
             config.media_port_start,
             config.media_port_end,
         ));
         
-        // Create state machine executor with all required dependencies
-        let state_machine = if let Some(ref yaml_path) = config.state_table_path {
-            // Load custom state table from YAML file
-            let custom_table = crate::state_table::yaml_loader::YamlTableLoader::load_from_file(yaml_path)
-                .map_err(|e| SessionError::InternalError(format!("Failed to load custom state table: {}", e)))?;
-            
-            // Validate the custom table
-            if let Err(errors) = custom_table.validate() {
-                return Err(SessionError::InternalError(format!("Invalid custom state table: {:?}", errors)));
-            }
-            
-            Arc::new(StateMachineExecutor::new_with_custom_table(
-                Arc::new(custom_table),
-                store.clone(),
-                dialog_adapter.clone(),
-                media_adapter.clone(),
-                state_event_tx,
-            ))
-        } else {
-            Arc::new(StateMachineExecutor::new_with_adapters(
-                store.clone(),
-                dialog_adapter.clone(),
-                media_adapter.clone(),
-                state_event_tx,
-            ))
-        };
-        
-        // Create event router
-        let event_router = Arc::new(EventRouter::new(
-            state_machine.clone(),
+        // Create state machine
+        let (event_tx, _event_rx) = mpsc::channel(1000);
+        let state_machine = Arc::new(StateMachine::new_with_adapters(
             store.clone(),
             dialog_adapter.clone(),
             media_adapter.clone(),
+            event_tx,
         ));
         
-        // Create session registry
-        let session_registry = Arc::new(crate::session_registry::SessionRegistry::new());
+        // Create helpers
+        let helpers = Arc::new(StateMachineHelpers::new(state_machine.clone()));
         
-        // Create subscribers map
-        let subscribers = Arc::new(RwLock::new(HashMap::new()));
+        // Create incoming call channel
+        let (_incoming_tx, incoming_rx) = mpsc::channel(100);
         
         let coordinator = Arc::new(Self {
-            store,
-            state_machine,
-            event_router,
+            helpers,
             media_adapter: media_adapter.clone(),
             dialog_adapter: dialog_adapter.clone(),
-            session_registry,
-            session_manager: None, // Will be set later if needed
-            subscribers: subscribers.clone(),
+            incoming_rx: Arc::new(RwLock::new(incoming_rx)),
             config,
-            global_coordinator,
-            task_manager,
         });
         
-        // Start the adapters
-        coordinator.start_adapters().await?;
+        // Start the dialog adapter
+        dialog_adapter.start().await?;
         
-        // Spawn task to process state machine events and notify subscribers
-        let subscribers_clone = subscribers.clone();
-        tokio::spawn(async move {
-            while let Some(event) = state_event_rx.recv().await {
-                // Extract session_id from the event (if available)
-                let session_id = match &event {
-                    StateMachineEvent::StateChanged { session_id, .. } |
-                    StateMachineEvent::MediaFlowEstablished { session_id, .. } |
-                    StateMachineEvent::CallEstablished { session_id, .. } |
-                    StateMachineEvent::CallTerminated { session_id, .. } |
-                    StateMachineEvent::Custom { session_id, .. } => session_id.clone(),
-                };
-                
-                // Convert to public SessionEvent and notify subscribers
-                // For now, just log since we'd need to convert types
-                tracing::debug!("State machine event for session {}: {:?}", session_id.0, event);
-                
-                // Notify subscribers
-                let subs = subscribers_clone.read().await;
-                if let Some(callbacks) = subs.get(&session_id) {
-                    // Convert StateMachineEvent to local SessionEvent
-                    let local_event = match event {
-                        StateMachineEvent::StateChanged { session_id: _, old_state, new_state } => {
-                            SessionEvent::StateChanged { from: old_state, to: new_state }
-                        }
-                        StateMachineEvent::MediaFlowEstablished { session_id: _, local_addr, remote_addr, direction: _ } => {
-                            SessionEvent::MediaFlowEstablished { local_addr, remote_addr }
-                        }
-                        StateMachineEvent::CallEstablished { session_id: _, .. } => {
-                            SessionEvent::CallEstablished
-                        }
-                        StateMachineEvent::CallTerminated { session_id: _ } => {
-                            SessionEvent::CallTerminated { reason: "Normal termination".to_string() }
-                        }
-                        StateMachineEvent::Custom { session_id: _, event } => {
-                            // Map custom events to appropriate local events if possible
-                            tracing::debug!("Custom event: {}", event);
-                            continue; // Skip custom events for now
-                        }
-                    };
-                    
-                    for callback in callbacks {
-                        callback(local_event.clone());
-                    }
-                }
-            }
-        });
+        // Create and start the centralized event handler
+        let event_handler = crate::adapters::SessionCrossCrateEventHandler::new(
+            state_machine.clone(),
+            global_coordinator.clone(),
+            dialog_adapter.clone(),
+            media_adapter.clone(),
+            registry.clone(),
+        );
+        
+        // Start the event handler (sets up channels and subscriptions)
+        event_handler.start().await?;
         
         Ok(coordinator)
     }
     
-    /// Process an event for a session
-    pub async fn process_event(&self, session_id: &SessionId, event: EventType) -> Result<()> {
-        // Process through state machine (which executes actions internally)
-        let result = self.state_machine.process_event(session_id, event.clone()).await?;
-        
-        // NOTE: Actions are already executed by the state machine, no need to execute them again
-        // The event router should only route events, not execute actions
-        
-        // Publish state change events to subscribers
-        if let Some(transition) = result.transition {
-            if let Some(new_state) = transition.next_state {
-                self.publish_event(session_id, SessionEvent::StateChanged {
-                    from: result.old_state,
-                    to: new_state,
-                }).await;
-                
-                // Special events for specific states
-                match new_state {
-                    CallState::Active => {
-                        self.publish_event(session_id, SessionEvent::CallEstablished).await;
-                    }
-                    CallState::Terminated => {
-                        self.publish_event(session_id, SessionEvent::CallTerminated {
-                            reason: "Normal".to_string(),
-                        }).await;
-                    }
-                    CallState::OnHold => {
-                        self.publish_event(session_id, SessionEvent::HoldStarted).await;
-                    }
-                    CallState::Bridged => {
-                        // Extract other session from event
-                        if let EventType::BridgeSessions { other_session } = event {
-                            self.publish_event(session_id, SessionEvent::BridgeCreated {
-                                other_session,
-                            }).await;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        
+    // ===== Simple Call Operations =====
+    
+    /// Make an outgoing call
+    pub async fn make_call(&self, from: &str, to: &str) -> Result<SessionId> {
+        self.helpers.make_call(from, to).await
+    }
+    
+    /// Accept an incoming call
+    pub async fn accept_call(&self, session_id: &SessionId) -> Result<()> {
+        self.helpers.accept_call(session_id).await
+    }
+    
+    /// Reject an incoming call
+    pub async fn reject_call(&self, session_id: &SessionId, reason: &str) -> Result<()> {
+        self.helpers.reject_call(session_id, reason).await
+    }
+    
+    /// Hangup a call
+    pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
+        self.helpers.hangup(session_id).await
+    }
+    
+    /// Put a call on hold
+    pub async fn hold(&self, session_id: &SessionId) -> Result<()> {
+        self.helpers.state_machine.process_event(
+            session_id,
+            EventType::HoldCall,
+        ).await?;
         Ok(())
     }
     
-    /// Get the current state of a session
-    pub async fn get_session_state(&self, session_id: &SessionId) -> Result<CallState> {
-        let session = self.store.get_session(session_id)
-            .await
-            .map_err(|e| SessionError::SessionNotFound(format!("Session {} not found: {}", session_id.0, e)))?;
-        Ok(session.call_state)
-    }
-    
-    /// Bridge two sessions together
-    pub async fn bridge_sessions(&self, session1: &SessionId, session2: &SessionId) -> Result<()> {
-        // Send bridge event to both sessions
-        self.process_event(session1, EventType::BridgeSessions {
-            other_session: session2.clone(),
-        }).await?;
-        
-        self.process_event(session2, EventType::BridgeSessions {
-            other_session: session1.clone(),
-        }).await?;
-        
+    /// Resume a call from hold
+    pub async fn resume(&self, session_id: &SessionId) -> Result<()> {
+        self.helpers.state_machine.process_event(
+            session_id,
+            EventType::ResumeCall,
+        ).await?;
         Ok(())
     }
     
-    /// Subscribe to events for a specific session
-    pub async fn subscribe_to_session<F>(&self, session_id: SessionId, callback: F) -> Result<()>
+    // ===== Conference Operations =====
+    
+    /// Create a conference from an active call
+    pub async fn create_conference(&self, session_id: &SessionId, name: &str) -> Result<()> {
+        self.helpers.create_conference(session_id, name).await
+    }
+    
+    /// Add a participant to a conference
+    pub async fn add_to_conference(
+        &self,
+        host_session_id: &SessionId,
+        participant_session_id: &SessionId,
+    ) -> Result<()> {
+        self.helpers.add_to_conference(host_session_id, participant_session_id).await
+    }
+    
+    /// Join an existing conference
+    pub async fn join_conference(&self, session_id: &SessionId, conference_id: &str) -> Result<()> {
+        self.helpers.state_machine.process_event(
+            session_id,
+            EventType::JoinConference { conference_id: conference_id.to_string() },
+        ).await?;
+        Ok(())
+    }
+    
+    // ===== Transfer Operations =====
+    
+    /// Blind transfer
+    pub async fn blind_transfer(&self, session_id: &SessionId, target: &str) -> Result<()> {
+        self.helpers.state_machine.process_event(
+            session_id,
+            EventType::BlindTransfer { target: target.to_string() },
+        ).await?;
+        Ok(())
+    }
+    
+    /// Start attended transfer
+    pub async fn start_attended_transfer(&self, session_id: &SessionId, target: &str) -> Result<()> {
+        self.helpers.state_machine.process_event(
+            session_id,
+            EventType::StartAttendedTransfer { target: target.to_string() },
+        ).await?;
+        Ok(())
+    }
+    
+    /// Complete attended transfer
+    pub async fn complete_attended_transfer(&self, session_id: &SessionId) -> Result<()> {
+        self.helpers.state_machine.process_event(
+            session_id,
+            EventType::CompleteAttendedTransfer,
+        ).await?;
+        Ok(())
+    }
+    
+    // ===== DTMF Operations =====
+    
+    /// Send DTMF digit
+    pub async fn send_dtmf(&self, session_id: &SessionId, digit: char) -> Result<()> {
+        self.helpers.state_machine.process_event(
+            session_id,
+            EventType::SendDTMF { digits: digit.to_string() },
+        ).await?;
+        Ok(())
+    }
+    
+    // ===== Recording Operations =====
+    
+    /// Start recording a call
+    pub async fn start_recording(&self, session_id: &SessionId) -> Result<()> {
+        self.helpers.state_machine.process_event(
+            session_id,
+            EventType::StartRecording,
+        ).await?;
+        Ok(())
+    }
+    
+    /// Stop recording a call
+    pub async fn stop_recording(&self, session_id: &SessionId) -> Result<()> {
+        self.helpers.state_machine.process_event(
+            session_id,
+            EventType::StopRecording,
+        ).await?;
+        Ok(())
+    }
+    
+    // ===== Query Operations =====
+    
+    /// Get session information
+    pub async fn get_session_info(&self, session_id: &SessionId) -> Result<SessionInfo> {
+        self.helpers.get_session_info(session_id).await
+    }
+    
+    /// List all active sessions
+    pub async fn list_sessions(&self) -> Vec<SessionInfo> {
+        self.helpers.list_sessions().await
+    }
+    
+    /// Get current state of a session
+    pub async fn get_state(&self, session_id: &SessionId) -> Result<CallState> {
+        self.helpers.get_state(session_id).await
+    }
+    
+    /// Check if session is in conference
+    pub async fn is_in_conference(&self, session_id: &SessionId) -> Result<bool> {
+        self.helpers.is_in_conference(session_id).await
+    }
+    
+    // ===== Audio Operations =====
+    
+    /// Subscribe to audio frames for a session
+    pub async fn subscribe_to_audio(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::types::AudioFrameSubscriber> {
+        self.media_adapter.subscribe_to_audio_frames(session_id).await
+    }
+    
+    /// Send audio frame to a session
+    pub async fn send_audio(&self, session_id: &SessionId, frame: AudioFrame) -> Result<()> {
+        self.media_adapter.send_audio_frame(session_id, frame).await
+    }
+    
+    // ===== Event Subscriptions =====
+    
+    /// Subscribe to session events
+    pub async fn subscribe<F>(&self, session_id: SessionId, callback: F)
     where
-        F: Fn(SessionEvent) + Send + Sync + 'static
+        F: Fn(crate::state_machine::helpers::SessionEvent) + Send + Sync + 'static,
     {
-        let mut subscribers = self.subscribers.write().await;
-        subscribers.entry(session_id)
-            .or_insert_with(Vec::new)
-            .push(Arc::new(callback));
-        Ok(())
+        self.helpers.subscribe(session_id, callback).await
     }
     
-    // ===== Accessor methods for modular architecture =====
-    
-    /// Get reference to the session store
-    pub fn session_store(&self) -> Arc<SessionStore> {
-        self.store.clone()
+    /// Unsubscribe from session events
+    pub async fn unsubscribe(&self, session_id: &SessionId) {
+        self.helpers.unsubscribe(session_id).await
     }
     
-    /// Get reference to the session registry
-    pub fn session_registry(&self) -> Arc<crate::session_registry::SessionRegistry> {
-        self.session_registry.clone()
+    // ===== Incoming Call Handling =====
+    
+    /// Get the next incoming call
+    pub async fn get_incoming_call(&self) -> Option<IncomingCallInfo> {
+        self.incoming_rx.write().await.recv().await
     }
     
-    /// Get or create session manager
-    pub async fn session_manager(&self) -> Result<Arc<crate::api::session_manager::SessionManager>> {
-        // Create session manager if not already created
-        if self.session_manager.is_none() {
-            let (event_tx, _) = mpsc::channel(100);
-            let (notif_tx, _) = mpsc::channel(100);
-            
-            let session_manager = Arc::new(crate::api::session_manager::SessionManager::new(
-                self.session_registry.clone(),
-                self.state_machine.clone(),
-                event_tx,
-                notif_tx,
-            ));
-            
-            // We can't mutate self here since we don't have &mut self
-            // For now, just return a new instance each time
-            return Ok(session_manager);
-        }
-        
-        Ok(self.session_manager.as_ref().unwrap().clone())
-    }
+    // ===== Internal Helpers =====
     
-    /// Get reference to the state machine
-    pub fn state_machine(&self) -> Arc<StateMachineExecutor> {
-        self.state_machine.clone()
-    }
-    
-    /// Get the event sender for the state machine
-    pub fn event_sender(&self) -> mpsc::Sender<(SessionId, StateMachineEvent)> {
-        // Note: This needs to be stored as a field in UnifiedCoordinator
-        // For now, create a new channel (this will be updated when we integrate properly)
-        let (tx, _rx) = mpsc::channel(100);
-        tx
-    }
-    
-    /// Get reference to the dialog adapter
-    pub fn dialog_adapter(&self) -> Arc<DialogAdapter> {
-        self.dialog_adapter.clone()
-    }
-    
-    /// Get reference to the media adapter
-    pub fn media_adapter(&self) -> Arc<MediaAdapter> {
-        self.media_adapter.clone()
-    }
-    
-    /// Publish an event to subscribers
-    async fn publish_event(&self, session_id: &SessionId, event: SessionEvent) {
-        let subscribers = self.subscribers.read().await;
-        if let Some(callbacks) = subscribers.get(session_id) {
-            for callback in callbacks {
-                callback(event.clone());
-            }
-        }
-    }
-    
-    /// Create dialog API (stub - would connect to real dialog-core)
     async fn create_dialog_api(config: &Config) -> Result<Arc<rvoip_dialog_core::api::unified::UnifiedDialogApi>> {
-        use rvoip_dialog_core::transaction::transport::{TransportManager, TransportManagerConfig};
-        use rvoip_dialog_core::transaction::TransactionManager;
         use rvoip_dialog_core::config::DialogManagerConfig;
+        use rvoip_dialog_core::api::unified::UnifiedDialogApi;
+        use rvoip_dialog_core::transaction::{TransactionManager, transport::{TransportManager, TransportManagerConfig}};
         
-        // Create transport layer
+        // Create transport manager first (dialog-core's own transport manager)
         let transport_config = TransportManagerConfig {
             enable_udp: true,
             enable_tcp: false,
@@ -545,104 +336,64 @@ impl UnifiedCoordinator {
             ..Default::default()
         };
         
-        let (mut transport_manager, transport_rx) = TransportManager::new(transport_config)
+        let (mut transport_manager, transport_event_rx) = TransportManager::new(transport_config)
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to create transport manager: {}", e)))?;
+            .map_err(|e| SessionError::InternalError(format!("Failed to create transport manager: {}", e)))?;
         
         // Initialize the transport manager
         transport_manager.initialize()
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to initialize transport: {}", e)))?;
+            .map_err(|e| SessionError::InternalError(format!("Failed to initialize transport: {}", e)))?;
         
-        // Create transaction manager
-        let (transaction_manager, global_rx) = TransactionManager::with_transport_manager(
+        // Create transaction manager using transport manager
+        let (transaction_manager, _event_rx) = TransactionManager::with_transport_manager(
             transport_manager,
-            transport_rx,
-            Some(100)
-        ).await
-        .map_err(|e| SessionError::DialogError(format!("Failed to create transaction manager: {}", e)))?;
+            transport_event_rx,
+            None, // No max transactions limit
+        )
+        .await
+        .map_err(|e| SessionError::InternalError(format!("Failed to create transaction manager: {}", e)))?;
         
-        // Create dialog manager config - use hybrid mode to support both UAC and UAS
-        let dialog_config = DialogManagerConfig::hybrid(config.bind_addr)
-            .with_domain("session-core.local")
+        let transaction_manager = Arc::new(transaction_manager);
+        
+        // Create dialog config
+        let dialog_config = DialogManagerConfig::client(config.bind_addr)
+            .with_from_uri(&format!("sip:user@{}", config.local_ip))
             .build();
         
-        // Create the dialog API with global events to consume transaction events
-        let dialog_api = rvoip_dialog_core::api::unified::UnifiedDialogApi::with_global_events(
-            Arc::new(transaction_manager),
-            global_rx,
-            dialog_config,
-        ).await
-        .map_err(|e| SessionError::DialogError(format!("Failed to create dialog API: {}", e)))?;
+        // Create dialog API
+        let dialog_api = Arc::new(
+            UnifiedDialogApi::new(transaction_manager, dialog_config)
+                .await
+                .map_err(|e| SessionError::InternalError(format!("Failed to create dialog API: {}", e)))?
+        );
         
-        Ok(Arc::new(dialog_api))
+        dialog_api.start().await
+            .map_err(|e| SessionError::InternalError(format!("Failed to start dialog API: {}", e)))?;
+        
+        Ok(dialog_api)
     }
     
-    /// Create media controller (stub - would connect to real media-core)
-    async fn create_media_controller(config: &Config) -> Result<Arc<rvoip_media_core::MediaSessionController>> {
-        // Create the media controller with the given configuration
-        let media_controller = rvoip_media_core::MediaSessionController::new();
-        
-        Ok(Arc::new(media_controller))
-    }
     
-    /// Start the event adapters
-    async fn start_adapters(&self) -> Result<()> {
-        // Start the event router to enable dialog and media event loops
-        self.event_router.start().await?;
+    async fn create_media_controller(config: &Config) -> Result<Arc<rvoip_media_core::relay::controller::MediaSessionController>> {
+        use rvoip_media_core::relay::controller::MediaSessionController;
         
-        // Register handler for cross-crate events
-        use crate::adapters::SessionCrossCrateEventHandler;
+        // Create media controller with port range
+        let controller = Arc::new(
+            MediaSessionController::with_port_range(
+                config.media_port_start,
+                config.media_port_end
+            )
+        );
         
-        let handler = SessionCrossCrateEventHandler::new(self.state_machine.clone());
-        
-        // Subscribe to dialog and media events
-        self.global_coordinator.register_handler(
-            "dialog_to_session",
-            handler.clone()
-        ).await.map_err(|e| SessionError::InternalError(format!("Failed to register dialog handler: {}", e)))?;
-        
-        self.global_coordinator.register_handler(
-            "media_to_session",
-            handler
-        ).await.map_err(|e| SessionError::InternalError(format!("Failed to register media handler: {}", e)))?;
-        
-        Ok(())
+        Ok(controller)
     }
 }
 
-/// Configuration for the coordinator
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub sip_port: u16,
-    pub media_port_start: u16,
-    pub media_port_end: u16,
-    pub local_ip: IpAddr,
-    pub bind_addr: SocketAddr,
-    /// Optional path to custom state table YAML file
-    pub state_table_path: Option<String>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            sip_port: 5060,
-            media_port_start: 10000,
-            media_port_end: 20000,
-            local_ip: "127.0.0.1".parse().unwrap(),
-            bind_addr: "127.0.0.1:5060".parse().unwrap(),
-            state_table_path: None,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[tokio::test]
-    async fn test_unified_session_creation() {
-        // Would need mock adapters for proper testing
-        // For now, just ensure the types compile correctly
+/// Simple helper to create a session and make a call
+impl UnifiedCoordinator {
+    /// Quick method to create a UAC session and make a call
+    pub async fn quick_call(&self, from: &str, to: &str) -> Result<SessionId> {
+        self.make_call(from, to).await
     }
 }

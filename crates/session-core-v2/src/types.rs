@@ -10,7 +10,6 @@ use uuid::Uuid;
 // Re-export types from api::types for backwards compatibility
 pub use crate::api::types::{
     AudioFrame,
-    AudioFrameSubscriber,
     AudioStreamConfig,
     CallDecision,
     CallDirection,
@@ -28,6 +27,59 @@ pub use crate::api::types::{
 
 // Re-export the ID types from state_table::types for convenience
 pub use crate::state_table::types::{SessionId, DialogId, MediaSessionId};
+
+/// Call information for active calls
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallInfo {
+    pub session_id: SessionId,
+    pub from: String,
+    pub to: String,
+    pub state: crate::state_table::types::CallState,
+    pub start_time: std::time::SystemTime,
+    pub media_active: bool,
+}
+
+/// Session information for queries
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub session_id: SessionId,
+    pub from: String,
+    pub to: String,
+    pub state: crate::state_table::types::CallState,
+    pub start_time: std::time::SystemTime,
+    pub media_active: bool,
+}
+
+/// Audio frame subscriber for receiving decoded audio frames
+pub struct AudioFrameSubscriber {
+    /// Session ID this subscriber is associated with
+    pub session_id: SessionId,
+    /// Receiver for audio frames
+    pub receiver: tokio::sync::mpsc::Receiver<rvoip_media_core::types::AudioFrame>,
+}
+
+impl AudioFrameSubscriber {
+    /// Create a new audio frame subscriber
+    pub fn new(
+        session_id: SessionId,
+        receiver: tokio::sync::mpsc::Receiver<rvoip_media_core::types::AudioFrame>,
+    ) -> Self {
+        Self {
+            session_id,
+            receiver,
+        }
+    }
+    
+    /// Receive the next audio frame (async)
+    pub async fn recv(&mut self) -> Option<rvoip_media_core::types::AudioFrame> {
+        self.receiver.recv().await
+    }
+    
+    /// Try to receive an audio frame (non-blocking)
+    pub fn try_recv(&mut self) -> Result<rvoip_media_core::types::AudioFrame, tokio::sync::mpsc::error::TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
 
 /// Session events that flow through the system
 #[derive(Debug, Clone, Serialize, Deserialize)]

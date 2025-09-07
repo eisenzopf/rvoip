@@ -1,216 +1,179 @@
-//! Simple peer API - The API that session-core-v2 should have had from the start
+//! Truly Simple API - Minimal wrapper over state machine
 //!
-//! This provides a clean, simple interface like the original session-core,
-//! hiding the complexity of coordinators, sessions, and roles.
+//! This is the simplest possible API - just thin wrappers over the helpers.
 
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock};
-use crate::api::{
-    unified::{UnifiedCoordinator, UnifiedSession, Config},
-    session_manager::{SessionManager, SessionLifecycleEvent},
-    call_controller::CallController,
-};
-use crate::state_table::types::{Role, SessionId, CallState};
-use crate::errors::{Result, SessionError};
+use tokio::sync::mpsc;
+use crate::api::unified::{UnifiedCoordinator, Config};
+use crate::state_table::types::SessionId;
+use crate::types::IncomingCallInfo;
+use crate::errors::Result;
 use rvoip_media_core::types::AudioFrame;
 
 /// A simple SIP peer that can make and receive calls
-/// 
-/// This is the high-level API that users actually want.
 pub struct SimplePeer {
-    name: String,
+    /// The coordinator that does all the work
     coordinator: Arc<UnifiedCoordinator>,
-    session_manager: Arc<SessionManager>,
-    call_controller: Arc<CallController>,
-    active_sessions: Arc<RwLock<Vec<Arc<UnifiedSession>>>>,
-    incoming_calls: Arc<Mutex<Vec<IncomingCall>>>,
-    event_rx: Arc<Mutex<mpsc::Receiver<SessionLifecycleEvent>>>,
+    
+    /// Incoming call receiver
+    incoming_rx: mpsc::Receiver<IncomingCallInfo>,
 }
 
 impl SimplePeer {
-    /// Create a new peer with sensible defaults
+    /// Create a new peer with default configuration
     pub async fn new(name: &str) -> Result<Self> {
-        Self::with_port(name, 5060).await
+        Self::with_config(name, Config {
+            sip_port: 5060,
+            media_port_start: 6000,
+            media_port_end: 7000,
+            local_ip: "127.0.0.1".parse().unwrap(),
+            bind_addr: "127.0.0.1:5060".parse().unwrap(),
+            state_table_path: None,
+        }).await
     }
     
-    /// Create a new peer with a specific port
-    pub async fn with_port(name: &str, port: u16) -> Result<Self> {
-        let config = Config {
-            sip_port: port,
-            media_port_start: port + 1000,
-            media_port_end: port + 2000,
-            local_ip: "127.0.0.1".parse().unwrap(),
-            bind_addr: format!("127.0.0.1:{}", port).parse()
-                .map_err(|_| SessionError::ConfigError("Invalid address".to_string()))?,
-            state_table_path: None, // Use default state table
-        };
-        
+    /// Create a new peer with custom configuration
+    pub async fn with_config(name: &str, config: Config) -> Result<Self> {
         let coordinator = UnifiedCoordinator::new(config).await?;
-        
-        // Create session manager with event channel
-        let (event_tx, event_rx) = mpsc::channel(100);
-        let (state_event_tx, _state_event_rx) = mpsc::channel(100);
-        let session_manager = Arc::new(SessionManager::new(
-            coordinator.session_registry(),
-            coordinator.state_machine(),
-            state_event_tx,
-            event_tx,
-        ));
-        
-        // Create call controller
-        let (call_controller, incoming_call_tx) = CallController::new(
-            session_manager.clone(),
-            coordinator.session_registry(),
-            coordinator.dialog_adapter(),
-            coordinator.media_adapter(),
-        );
-        let call_controller = Arc::new(call_controller);
-        
-        // Start background task to handle incoming calls
-        let incoming_calls = Arc::new(Mutex::new(Vec::new()));
-        let incoming_calls_clone = incoming_calls.clone();
-        let session_manager_clone = session_manager.clone();
-        
-        tokio::spawn(async move {
-            // This task will monitor for incoming calls via SignalingInterceptor events
-            // For now, this is a placeholder - actual implementation needs SignalingInterceptor integration
-        });
+        let (_tx, incoming_rx) = mpsc::channel(100);
         
         Ok(Self {
-            name: name.to_string(),
             coordinator,
-            session_manager,
-            call_controller,
-            active_sessions: Arc::new(RwLock::new(Vec::new())),
-            incoming_calls,
-            event_rx: Arc::new(Mutex::new(event_rx)),
+            incoming_rx,
         })
     }
+    
+    // ===== Core Operations =====
     
     /// Make an outgoing call
-    pub async fn call(&self, target: &str) -> Result<Call> {
-        // Use CallController to make the call
-        let from = format!("sip:{}@localhost", self.name);
-        let session_id = self.call_controller.make_call(from, target.to_string()).await?;
-        
-        // Create a UAC session wrapper for the call
-        let session = UnifiedSession::new(self.coordinator.clone(), Role::UAC).await?;
-        let session = Arc::new(session);
-        
-        // Store the session
-        self.active_sessions.write().await.push(session.clone());
-        
-        Ok(Call {
-            session: session.clone(),
-            direction: CallDirection::Outgoing,
-        })
+    pub async fn call(&self, to: &str) -> Result<CallId> {
+        let from = "sip:user@localhost"; // Simple default
+        self.coordinator.make_call(from, to).await
     }
     
-    /// Check for incoming calls (non-blocking)
-    pub async fn incoming_call(&self) -> Option<IncomingCall> {
-        // Check if there are any queued incoming calls
-        let mut calls = self.incoming_calls.lock().await;
-        calls.pop()
+    /// Accept an incoming call
+    pub async fn accept(&self, call_id: &CallId) -> Result<()> {
+        self.coordinator.accept_call(call_id).await
     }
     
-    /// Wait for an incoming call (blocking)
-    pub async fn wait_for_call(&self) -> Result<IncomingCall> {
-        loop {
-            // Check for queued incoming calls
-            if let Some(call) = self.incoming_call().await {
-                return Ok(call);
-            }
-            
-            // Wait for lifecycle events
-            let mut rx = self.event_rx.lock().await;
-            while let Some(event) = rx.recv().await {
-                if let SessionLifecycleEvent::IncomingCall { session_id, from } = event {
-                    // Create a UAS session for the incoming call
-                    let session = UnifiedSession::new(self.coordinator.clone(), Role::UAS).await?;
-                    let session = Arc::new(session);
-                    
-                    // Store the session
-                    self.active_sessions.write().await.push(session.clone());
-                    
-                    return Ok(IncomingCall {
-                        from,
-                        session: session.clone(),
-                        session_id,
-                    });
-                }
-            }
+    /// Reject an incoming call
+    pub async fn reject(&self, call_id: &CallId) -> Result<()> {
+        self.coordinator.reject_call(call_id, "Busy").await
+    }
+    
+    /// Hangup a call
+    pub async fn hangup(&self, call_id: &CallId) -> Result<()> {
+        self.coordinator.hangup(call_id).await
+    }
+    
+    /// Put call on hold
+    pub async fn hold(&self, call_id: &CallId) -> Result<()> {
+        self.coordinator.hold(call_id).await
+    }
+    
+    /// Resume from hold
+    pub async fn resume(&self, call_id: &CallId) -> Result<()> {
+        self.coordinator.resume(call_id).await
+    }
+    
+    // ===== Incoming Calls =====
+    
+    /// Check for incoming call (non-blocking)
+    pub async fn incoming_call(&mut self) -> Option<IncomingCall> {
+        match self.incoming_rx.try_recv() {
+            Ok(info) => Some(IncomingCall {
+                id: info.session_id,
+                from: info.from,
+                to: info.to,
+            }),
+            Err(_) => None,
         }
+    }
+    
+    /// Wait for incoming call (blocking)
+    pub async fn wait_for_call(&mut self) -> Result<IncomingCall> {
+        match self.incoming_rx.recv().await {
+            Some(info) => Ok(IncomingCall {
+                id: info.session_id,
+                from: info.from,
+                to: info.to,
+            }),
+            None => Err(crate::errors::SessionError::Other("Channel closed".to_string())),
+        }
+    }
+    
+    // ===== Audio =====
+    
+    /// Send audio to a call
+    pub async fn send_audio(&self, call_id: &CallId, frame: AudioFrame) -> Result<()> {
+        self.coordinator.send_audio(call_id, frame).await
+    }
+    
+    /// Subscribe to receive audio from a call
+    pub async fn subscribe_audio(
+        &self,
+        call_id: &CallId,
+    ) -> Result<crate::types::AudioFrameSubscriber> {
+        self.coordinator.subscribe_to_audio(call_id).await
+    }
+    
+    // ===== Advanced Features =====
+    
+    /// Send DTMF digit
+    pub async fn send_dtmf(&self, call_id: &CallId, digit: char) -> Result<()> {
+        self.coordinator.send_dtmf(call_id, digit).await
+    }
+    
+    /// Blind transfer
+    pub async fn transfer(&self, call_id: &CallId, target: &str) -> Result<()> {
+        self.coordinator.blind_transfer(call_id, target).await
+    }
+    
+    /// Start recording
+    pub async fn start_recording(&self, call_id: &CallId) -> Result<()> {
+        self.coordinator.start_recording(call_id).await
+    }
+    
+    /// Stop recording
+    pub async fn stop_recording(&self, call_id: &CallId) -> Result<()> {
+        self.coordinator.stop_recording(call_id).await
+    }
+    
+    // ===== Conference =====
+    
+    /// Create conference from existing call
+    pub async fn create_conference(&self, call_id: &CallId, name: &str) -> Result<()> {
+        self.coordinator.create_conference(call_id, name).await
+    }
+    
+    /// Add participant to conference
+    pub async fn add_to_conference(&self, host_id: &CallId, participant_id: &CallId) -> Result<()> {
+        self.coordinator.add_to_conference(host_id, participant_id).await
     }
 }
 
-/// Represents an incoming call that can be accepted or rejected
+/// Represents a call ID (just a SessionId)
+pub type CallId = SessionId;
+
+/// Represents an incoming call
+#[derive(Debug, Clone)]
 pub struct IncomingCall {
-    from: String,
-    session: Arc<UnifiedSession>,
-    session_id: SessionId,
+    /// The call ID to use for operations
+    pub id: CallId,
+    /// Who is calling
+    pub from: String,
+    /// Who they're calling
+    pub to: String,
 }
 
 impl IncomingCall {
-    /// Accept the incoming call
-    pub async fn accept(self) -> Result<Call> {
-        self.session.accept().await?;
-        
-        Ok(Call {
-            session: self.session,
-            direction: CallDirection::Incoming,
-        })
+    /// Accept this call
+    pub async fn accept(&self, peer: &SimplePeer) -> Result<()> {
+        peer.accept(&self.id).await
     }
     
-    /// Reject the incoming call
-    pub async fn reject(self) -> Result<()> {
-        self.session.reject("Busy").await
-    }
-}
-
-/// Direction of the call
-#[derive(Debug, Clone, Copy)]
-enum CallDirection {
-    Incoming,
-    Outgoing,
-}
-
-/// Represents an active call with simple audio I/O
-pub struct Call {
-    session: Arc<UnifiedSession>,
-    direction: CallDirection,
-}
-
-impl Call {
-    /// Send an audio frame
-    pub async fn send_audio(&self, frame: AudioFrame) -> Result<()> {
-        self.session.send_audio_frame(frame).await
-    }
-    
-    /// Receive audio frames
-    pub async fn audio_stream(&self) -> Result<AudioStream> {
-        let subscriber = self.session.subscribe_to_audio_frames().await?;
-        Ok(AudioStream { subscriber })
-    }
-    
-    /// Check if call is active
-    pub async fn is_active(&self) -> Result<bool> {
-        Ok(self.session.state().await? == CallState::Active)
-    }
-    
-    /// Hang up the call
-    pub async fn hangup(self) -> Result<()> {
-        self.session.hangup().await
-    }
-}
-
-/// Stream of audio frames from the remote peer
-pub struct AudioStream {
-    subscriber: crate::adapters::media_adapter::AudioFrameSubscriber,
-}
-
-impl AudioStream {
-    /// Receive the next audio frame
-    pub async fn recv(&mut self) -> Option<AudioFrame> {
-        self.subscriber.recv().await
+    /// Reject this call
+    pub async fn reject(&self, peer: &SimplePeer) -> Result<()> {
+        peer.reject(&self.id).await
     }
 }

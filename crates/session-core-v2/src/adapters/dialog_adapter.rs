@@ -17,44 +17,37 @@ use rvoip_sip_core::{Request, Response, StatusCode};
 use crate::state_table::types::{SessionId, DialogId, EventType};
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
-use infra_common::events::coordinator::GlobalEventCoordinator;
-use infra_common::events::cross_crate::DialogToSessionEvent;
 
 /// Minimal dialog adapter - just translates between dialog-core and state machine
 pub struct DialogAdapter {
     /// Dialog-core unified API
-    dialog_api: Arc<UnifiedDialogApi>,
-    
-    /// Global event coordinator for cross-crate communication
-    global_coordinator: Arc<GlobalEventCoordinator>,
+    pub(crate) dialog_api: Arc<UnifiedDialogApi>,
     
     /// Session store for updating IDs
-    store: Arc<SessionStore>,
+    pub(crate) store: Arc<SessionStore>,
     
     /// Simple mapping of session IDs to dialog IDs
-    session_to_dialog: Arc<DashMap<SessionId, RvoipDialogId>>,
-    dialog_to_session: Arc<DashMap<RvoipDialogId, SessionId>>,
+    pub(crate) session_to_dialog: Arc<DashMap<SessionId, RvoipDialogId>>,
+    pub(crate) dialog_to_session: Arc<DashMap<RvoipDialogId, SessionId>>,
     
     /// Store Call-ID to session mapping for correlation
-    callid_to_session: Arc<DashMap<String, SessionId>>,
+    pub(crate) callid_to_session: Arc<DashMap<String, SessionId>>,
     
     /// Store incoming request data for UAS responses
-    incoming_requests: Arc<DashMap<SessionId, (Request, TransactionKey, SocketAddr)>>,
+    pub(crate) incoming_requests: Arc<DashMap<SessionId, (Request, TransactionKey, SocketAddr)>>,
     
     /// Store outgoing INVITE transaction IDs for UAC ACK sending
-    outgoing_invite_tx: Arc<DashMap<SessionId, TransactionKey>>,
+    pub(crate) outgoing_invite_tx: Arc<DashMap<SessionId, TransactionKey>>,
 }
 
 impl DialogAdapter {
-    /// Create a new dialog adapter with coordinator
+    /// Create a new dialog adapter
     pub fn new(
         dialog_api: Arc<UnifiedDialogApi>,
-        global_coordinator: Arc<GlobalEventCoordinator>,
         store: Arc<SessionStore>,
     ) -> Self {
         Self {
             dialog_api,
-            global_coordinator,
             store,
             session_to_dialog: Arc::new(DashMap::new()),
             dialog_to_session: Arc::new(DashMap::new()),
@@ -67,9 +60,13 @@ impl DialogAdapter {
     // ===== New Methods for CallController =====
     
     /// Create a new dialog (for CallController)
-    pub async fn create_dialog(&self, from: &str, to: &str) -> Result<RvoipDialogId> {
-        // Generate a unique dialog ID
-        let dialog_id = RvoipDialogId::new();
+    pub async fn create_dialog(&self, from: &str, to: &str) -> Result<crate::types::DialogId> {
+        // Create a new internal dialog ID
+        let dialog_id = crate::types::DialogId::new();
+        
+        // Store the from/to for later use when we actually send the INVITE
+        // The actual dialog in dialog-core will be created when we send the INVITE
+        
         Ok(dialog_id)
     }
     
@@ -323,6 +320,23 @@ impl DialogAdapter {
         Ok(())
     }
     
+    /// Send REFER with Replaces for attended transfer (for state machine)
+    pub async fn send_refer_with_replaces(&self, session_id: &SessionId, refer_to: &str) -> Result<()> {
+        let dialog_id = self.session_to_dialog.get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        
+        // Send REFER with Replaces header through dialog API
+        // The Some() indicates this is an attended transfer
+        self.dialog_api
+            .send_refer(&dialog_id, refer_to.to_string(), Some("attended".to_string()))
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send REFER with Replaces: {}", e)))?;
+        
+        tracing::info!("Sent REFER with Replaces to {} for session {}", refer_to, session_id.0);
+        Ok(())
+    }
+    
     /// Send re-INVITE (for hold/resume) (for state machine)
     pub async fn send_reinvite_session(&self, session_id: &SessionId, sdp: String) -> Result<()> {
         let dialog_id = self.session_to_dialog.get(session_id)
@@ -361,205 +375,13 @@ impl DialogAdapter {
     
     // ===== Inbound Events (from dialog-core) =====
     
-    /// Start listening for dialog events
-    pub async fn start_event_loop(&self) -> Result<()> {
-        // Set up channels for session coordination events
-        let (session_tx, mut session_rx) = mpsc::channel(1000);
-        self.dialog_api
-            .set_session_coordinator(session_tx)
-            .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to set session coordinator: {}", e)))?;
-        
-        // Set up channels for dialog events
-        let (dialog_tx, mut dialog_rx) = mpsc::channel(1000);
-        self.dialog_api
-            .set_dialog_event_sender(dialog_tx)
-            .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to set dialog event sender: {}", e)))?;
-        
+    /// Start the dialog API (no event handling here)
+    pub async fn start(&self) -> Result<()> {
         // Start the dialog API
         self.dialog_api
             .start()
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to start dialog API: {}", e)))?;
-        
-        let adapter = self.clone();
-        let adapter2 = self.clone();
-        
-        // Spawn task to handle session coordination events
-        tokio::spawn(async move {
-            while let Some(event) = session_rx.recv().await {
-                if let Err(e) = adapter.handle_session_event(event).await {
-                    tracing::error!("Error handling session event: {}", e);
-                }
-            }
-        });
-        
-        // Spawn task to handle dialog events
-        tokio::spawn(async move {
-            while let Some(event) = dialog_rx.recv().await {
-                if let Err(e) = adapter2.handle_dialog_event(event).await {
-                    tracing::error!("Error handling dialog event: {}", e);
-                }
-            }
-        });
-        
-        Ok(())
-    }
-    
-    /// Handle session coordination events from dialog-core
-    async fn handle_session_event(&self, event: SessionCoordinationEvent) -> Result<()> {
-        match event {
-            SessionCoordinationEvent::IncomingCall { dialog_id, transaction_id, request, source } => {
-                // Extract Call-ID for correlation
-                let call_id = request.call_id()
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| format!("unknown-{}", uuid::Uuid::new_v4()));
-                let session_id = SessionId::new();
-                
-                // Store mappings
-                self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
-                self.session_to_dialog.insert(session_id.clone(), dialog_id);
-                self.callid_to_session.insert(call_id.clone(), session_id.clone());
-                
-                // Store request data for UAS responses
-                self.incoming_requests.insert(session_id.clone(), (request.clone(), transaction_id, source));
-                
-                // Extract SDP if present
-                let sdp = if !request.body().is_empty() {
-                    String::from_utf8(request.body().to_vec()).ok()
-                } else {
-                    None
-                };
-                
-                // Publish IncomingCall event through GlobalEventCoordinator
-                let cross_crate_event = infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
-                    DialogToSessionEvent::IncomingCall {
-                        session_id: session_id.0.clone(),
-                        call_id: call_id.clone(),
-                        from: request.from()
-                            .map(|f| f.to_string())
-                            .unwrap_or_else(|| "anonymous".to_string()),
-                        to: request.to()
-                            .map(|t| t.to_string())
-                            .unwrap_or_else(|| "unknown".to_string()),
-                        sdp_offer: sdp,
-                        headers: std::collections::HashMap::new(),
-                    }
-                );
-                if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
-                    tracing::error!("Failed to publish IncomingCall event: {}", e);
-                }
-            }
-            
-            SessionCoordinationEvent::ResponseReceived { dialog_id, response, .. } => {
-                if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
-                    // Translate response code to event
-                    let status_code = response.status_code();
-                    let event = match status_code {
-                        100 => return Ok(()), // Ignore 100 Trying
-                        180 => EventType::Dialog180Ringing,
-                        200 => {
-                            // Store the 200 OK response for ACK
-                            if let Ok(mut session) = self.store.get_session(&session_id).await {
-                                // Serialize the response for storage
-                                if let Ok(serialized) = bincode::serialize(&response) {
-                                    session.last_200_ok = Some(serialized);
-                                    
-                                    // Also extract and store SDP if present
-                                    if !response.body().is_empty() {
-                                        if let Some(sdp) = String::from_utf8(response.body().to_vec()).ok() {
-                                            session.remote_sdp = Some(sdp);
-                                            tracing::debug!("Stored 200 OK with SDP for session {}", session_id.0);
-                                        }
-                                    }
-                                    
-                                    let _ = self.store.update_session(session).await;
-                                }
-                            }
-                            EventType::Dialog200OK
-                        }
-                        code if code >= 400 => {
-                            EventType::DialogError(format!("Call failed: {}", code))
-                        }
-                        _ => return Ok(()), // Ignore other responses
-                    };
-                    
-                    // Publish dialog response event through GlobalEventCoordinator
-                    use infra_common::events::cross_crate::CallState as CrossCrateCallState;
-                    let cross_crate_event = match event {
-                        EventType::Dialog180Ringing => {
-                            infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
-                                DialogToSessionEvent::CallStateChanged {
-                                    session_id: session_id.0.clone(),
-                                    new_state: CrossCrateCallState::Ringing,
-                                    reason: None,
-                                }
-                            )
-                        }
-                        EventType::Dialog200OK => {
-                            infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
-                                DialogToSessionEvent::CallEstablished {
-                                    session_id: session_id.0.clone(),
-                                    sdp_answer: None, // Extract from response if needed
-                                }
-                            )
-                        }
-                        _ => return Ok(()), // Skip other events
-                    };
-                    if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
-                        tracing::error!("Failed to publish dialog event: {}", e);
-                    }
-                }
-            }
-            
-            SessionCoordinationEvent::CallTerminating { dialog_id, reason } => {
-                if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
-                    // Publish call termination through GlobalEventCoordinator
-                    use infra_common::events::cross_crate::TerminationReason;
-                    let cross_crate_event = infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
-                        DialogToSessionEvent::CallTerminated {
-                            session_id: session_id.0.clone(),
-                            reason: TerminationReason::RemoteHangup,
-                        }
-                    );
-                    if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
-                        tracing::error!("Failed to publish call termination: {}", e);
-                    }
-                }
-            }
-            
-            _ => {
-                // Ignore other events for now
-            }
-        }
-        
-        Ok(())
-    }
-    
-    /// Handle dialog events from dialog-core
-    async fn handle_dialog_event(&self, event: DialogEvent) -> Result<()> {
-        match event {
-            DialogEvent::Created { dialog_id } => {
-                tracing::debug!("Dialog created: {:?}", dialog_id);
-            }
-            
-            DialogEvent::StateChanged { dialog_id, old_state, new_state } => {
-                tracing::debug!("Dialog state changed: {:?} from {:?} to {:?}", dialog_id, old_state, new_state);
-                // Note: ACK received will be handled through SessionCoordinationEvent
-            }
-            
-            DialogEvent::Terminated { dialog_id, reason } => {
-                if let Some(session_id) = self.dialog_to_session.get(&dialog_id) {
-                    tracing::debug!("Dialog terminated: {:?}, reason: {}", dialog_id, reason);
-                    // BYE will be handled through SessionCoordinationEvent::CallTerminating
-                }
-            }
-            
-            _ => {
-                // Ignore other events for now
-            }
-        }
         
         Ok(())
     }
@@ -569,7 +391,6 @@ impl Clone for DialogAdapter {
     fn clone(&self) -> Self {
         Self {
             dialog_api: self.dialog_api.clone(),
-            global_coordinator: self.global_coordinator.clone(),
             store: self.store.clone(),
             session_to_dialog: self.session_to_dialog.clone(),
             dialog_to_session: self.dialog_to_session.clone(),

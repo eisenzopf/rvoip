@@ -13,9 +13,8 @@ pub mod types;
 
 // Re-export main types from API
 pub use api::{
-    UnifiedSession, UnifiedCoordinator, SessionEvent, SessionBuilder,
-    SessionManager, CallController, ConferenceManager,
-    SimplePeer, Call, AudioStream,
+    UnifiedCoordinator, SessionBuilder,
+    SimplePeer, CallId,
 };
 
 // Re-export from state_table for correct types

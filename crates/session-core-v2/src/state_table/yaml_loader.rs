@@ -392,6 +392,11 @@ impl YamlTableLoader {
             "Transferring" => Ok(CallState::Transferring),
             "Terminating" => Ok(CallState::Terminating),
             "Terminated" => Ok(CallState::Terminated),
+            "Muted" => Ok(CallState::Muted),
+            "ConferenceHost" => Ok(CallState::ConferenceHost),
+            "InConference" => Ok(CallState::InConference),
+            "ConferenceOnHold" => Ok(CallState::ConferenceOnHold),
+            "ConsultationCall" => Ok(CallState::ConsultationCall),
             _ if state.starts_with("Failed") => {
                 // Parse Failed(reason) states
                 Ok(CallState::Failed(crate::state_table::FailureReason::Other))
@@ -553,6 +558,8 @@ impl YamlTableLoader {
     fn parse_action_by_name(&self, name: &str) -> Result<Action> {
         match name {
             // Dialog actions
+            "CreateDialog" => Ok(Action::CreateDialog),
+            "GenerateLocalSDP" => Ok(Action::GenerateLocalSDP),
             "SendINVITE" | "TriggerDialogINVITE" => Ok(Action::SendINVITE),
             "SendACK" => Ok(Action::SendACK),
             "SendBYE" => Ok(Action::SendBYE),
@@ -560,7 +567,8 @@ impl YamlTableLoader {
             "SendReINVITE" => Ok(Action::SendReINVITE),
             
             // Media actions
-            "StartMediaSession" | "CreateMediaSession" => Ok(Action::StartMediaSession),
+            "CreateMediaSession" => Ok(Action::CreateMediaSession),
+            "StartMediaSession" => Ok(Action::StartMediaSession),
             "StopMediaSession" | "StopMedia" => Ok(Action::StopMediaSession),
             "NegotiateSDPAsUAC" => Ok(Action::NegotiateSDPAsUAC),
             "NegotiateSDPAsUAS" => Ok(Action::NegotiateSDPAsUAS),

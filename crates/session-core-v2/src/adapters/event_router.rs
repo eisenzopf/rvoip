@@ -1,15 +1,22 @@
-//! Event Router - Connects adapters to state machine
+//! Event Router - Central hub for all event handling in session-core-v2
 //!
-//! Routes events from dialog/media adapters to the state machine,
-//! and routes actions from the state machine to the appropriate adapter.
+//! This is the ONLY place where cross-crate events are handled.
+//! All events flow through the global event bus and are processed here.
+//! No scattered event handling, no channels, just the global event bus.
 
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use infra_common::events::coordinator::GlobalEventCoordinator;
+use infra_common::events::cross_crate::{
+    CrossCrateEvent, RvoipCrossCrateEvent,
+    DialogToSessionEvent, MediaToSessionEvent,
+    SessionToDialogEvent, SessionToMediaEvent,
+};
 use crate::{
     state_table::types::{SessionId, EventType, Action},
     state_machine::executor::StateMachine as StateMachineExecutor,
     session_store::SessionStore,
-    errors::Result,
+    session_registry::SessionRegistry,
+    errors::{Result, SessionError},
 };
 use super::{
     dialog_adapter::DialogAdapter,
@@ -29,12 +36,6 @@ pub struct EventRouter {
     
     /// Media adapter
     media_adapter: Arc<MediaAdapter>,
-    
-    /// Event receiver from adapters
-    event_rx: Option<mpsc::Receiver<(SessionId, EventType)>>,
-    
-    /// Event sender for adapters
-    event_tx: mpsc::Sender<(SessionId, EventType)>,
 }
 
 impl EventRouter {
@@ -45,32 +46,20 @@ impl EventRouter {
         dialog_adapter: Arc<DialogAdapter>,
         media_adapter: Arc<MediaAdapter>,
     ) -> Self {
-        let (event_tx, event_rx) = mpsc::channel(1000);
-        
         Self {
             state_machine,
             store,
             dialog_adapter,
             media_adapter,
-            event_rx: Some(event_rx),
-            event_tx,
         }
     }
     
-    /// Get the event sender for adapters to use
-    pub fn event_sender(&self) -> mpsc::Sender<(SessionId, EventType)> {
-        self.event_tx.clone()
-    }
-    
-    /// Start the event router
+    /// Start the adapters (no event handling - that's centralized)
     pub async fn start(&self) -> Result<()> {
-        // Start adapters
-        self.dialog_adapter.start_event_loop().await?;
-        self.media_adapter.start_event_loop().await?;
+        // Start dialog adapter
+        self.dialog_adapter.start().await?;
         
-        // Note: Event processing would normally happen here, but since we're
-        // using a different architecture with adapters publishing events directly
-        // through GlobalEventCoordinator, we don't need the event loop here.
+        // Media adapter doesn't need explicit start
         
         Ok(())
     }
@@ -308,6 +297,38 @@ impl EventRouter {
             Action::StopRecording => {
                 tracing::info!("Stopping recording for session {}", session_id);
                 self.media_adapter.stop_recording(session_id).await?;
+            }
+            
+            // New actions handled by state machine
+            Action::CreateDialog |
+            Action::CreateMediaSession |
+            Action::GenerateLocalSDP |
+            Action::CreateAudioMixer |
+            Action::RedirectToMixer |
+            Action::ConnectToMixer |
+            Action::DisconnectFromMixer |
+            Action::MuteToMixer |
+            Action::UnmuteToMixer |
+            Action::DestroyMixer |
+            Action::BridgeToMixer |
+            Action::RestoreDirectMedia |
+            Action::StartRecordingMixer |
+            Action::StopRecordingMixer |
+            Action::UpdateMediaDirection { .. } |
+            Action::SendREFER |
+            Action::SendREFERWithReplaces |
+            Action::HoldCurrentCall |
+            Action::CreateConsultationCall |
+            Action::TerminateConsultationCall |
+            Action::MuteLocalAudio |
+            Action::UnmuteLocalAudio |
+            Action::SendDTMFTone |
+            Action::RestoreMediaFlow |
+            Action::ReleaseAllResources |
+            Action::StartEmergencyCleanup |
+            Action::AttemptMediaRecovery |
+            Action::CleanupResources => {
+                tracing::debug!("Advanced action {:?} for session {} - handled by state machine", action, session_id);
             }
         }
         

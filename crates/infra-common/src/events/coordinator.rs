@@ -60,14 +60,38 @@ pub trait EventBusAdapter: Send + Sync {
 pub struct MonolithicEventBus {
     event_bus: Arc<EventSystem>,
     task_manager: Arc<LayerTaskManager>,
+    /// Subscribers by event type
+    subscribers: Arc<DashMap<EventTypeId, Vec<mpsc::Sender<Arc<dyn CrossCrateEvent>>>>>,
 }
 
 #[async_trait]
 impl EventBusAdapter for MonolithicEventBus {
     async fn publish(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
-        // For now, we'll use a simplified approach with the existing EventSystem
-        // TODO: Implement proper cross-crate event publishing
-        debug!("Publishing cross-crate event: {}", event.event_type());
+        let event_type = event.event_type();
+        debug!("Publishing cross-crate event: {}", event_type);
+        
+        // Forward to all subscribers of this event type
+        if let Some(subscribers) = self.subscribers.get(event_type) {
+            let mut to_remove = Vec::new();
+            
+            for (idx, sender) in subscribers.iter().enumerate() {
+                if sender.try_send(event.clone()).is_err() {
+                    // Channel is full or disconnected
+                    to_remove.push(idx);
+                }
+            }
+            
+            // Clean up dead subscribers
+            if !to_remove.is_empty() {
+                drop(subscribers);
+                if let Some(mut subscribers) = self.subscribers.get_mut(event_type) {
+                    for idx in to_remove.into_iter().rev() {
+                        subscribers.remove(idx);
+                    }
+                }
+            }
+        }
+        
         Ok(())
     }
     
@@ -75,8 +99,13 @@ impl EventBusAdapter for MonolithicEventBus {
         // Create channel for forwarding events
         let (tx, rx) = mpsc::channel(1000);
         
-        // TODO: Implement proper cross-crate event subscription
-        debug!("Subscribing to cross-crate event type: {}", event_type);
+        // Add to subscribers
+        self.subscribers
+            .entry(event_type)
+            .or_insert_with(Vec::new)
+            .push(tx);
+        
+        debug!("Subscribed to cross-crate event type: {}", event_type);
         
         Ok(rx)
     }
@@ -119,6 +148,7 @@ impl GlobalEventCoordinator {
         let monolithic_adapter = Arc::new(MonolithicEventBus {
             event_bus,
             task_manager: task_manager.clone(),
+            subscribers: Arc::new(DashMap::new()),
         });
         
         Ok(Self {

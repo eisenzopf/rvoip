@@ -1,5 +1,6 @@
 use std::sync::Arc;
-use tracing::{info, debug};
+use tracing::{info, debug, warn, error};
+use crate::state_table::types::SessionId;
 
 use crate::{
     state_table::{Action, Condition},
@@ -18,6 +19,23 @@ pub async fn execute_action(
     
     match action {
         // Dialog actions
+        Action::CreateDialog => {
+            debug!("Creating dialog for session {}", session.session_id);
+            let from = session.local_uri.as_deref().unwrap_or("sip:user@localhost");
+            let to = session.remote_uri.as_deref().unwrap_or("sip:remote@localhost");
+            let dialog_id = dialog_adapter.create_dialog(from, to).await?;
+            session.dialog_id = Some(dialog_id);
+        }
+        Action::CreateMediaSession => {
+            debug!("Creating media session for session {}", session.session_id);
+            let media_id = media_adapter.create_session(&session.session_id).await?;
+            session.media_session_id = Some(media_id);
+        }
+        Action::GenerateLocalSDP => {
+            debug!("Generating local SDP for session {}", session.session_id);
+            let sdp = media_adapter.generate_local_sdp(&session.session_id).await?;
+            session.local_sdp = Some(sdp);
+        }
         Action::SendSIPResponse(code, _reason) => {
             dialog_adapter.send_response(&session.session_id, *code, session.local_sdp.clone()).await?;
         }
@@ -237,9 +255,202 @@ pub async fn execute_action(
             info!("Attended transfer initiated (using blind transfer for now)");
         }
         
+        // Conference actions
+        Action::CreateAudioMixer => {
+            debug!("Creating audio mixer for conference");
+            let mixer_id = media_adapter.create_audio_mixer().await?;
+            session.conference_mixer_id = Some(mixer_id);
+        }
+        
+        Action::RedirectToMixer => {
+            debug!("Redirecting session {} to mixer", session.session_id);
+            if let Some(mixer_id) = &session.conference_mixer_id {
+                if let Some(media_id) = &session.media_session_id {
+                    media_adapter.redirect_to_mixer(media_id.clone(), mixer_id.clone()).await?;
+                }
+            }
+        }
+        
+        Action::ConnectToMixer => {
+            debug!("Connecting session {} to conference mixer", session.session_id);
+            // This would connect to an existing conference mixer
+            // Implementation depends on media adapter capabilities
+        }
+        
+        Action::DisconnectFromMixer => {
+            debug!("Disconnecting session {} from mixer", session.session_id);
+            if let Some(media_id) = &session.media_session_id {
+                // TODO: Implement restore_direct_media
+                warn!("restore_direct_media not implemented yet");
+            }
+        }
+        
+        Action::MuteToMixer => {
+            debug!("Muting session {} to mixer", session.session_id);
+            if let Some(media_id) = &session.media_session_id {
+                media_adapter.set_mute(media_id.clone(), true).await?;
+            }
+        }
+        
+        Action::UnmuteToMixer => {
+            debug!("Unmuting session {} to mixer", session.session_id);
+            if let Some(media_id) = &session.media_session_id {
+                media_adapter.set_mute(media_id.clone(), false).await?;
+            }
+        }
+        
+        Action::DestroyMixer => {
+            debug!("Destroying conference mixer");
+            if let Some(mixer_id) = &session.conference_mixer_id {
+                media_adapter.destroy_mixer(mixer_id.clone()).await?;
+                session.conference_mixer_id = None;
+            }
+        }
+        
+        // Media direction actions
+        Action::UpdateMediaDirection { direction } => {
+            debug!("Updating media direction to {:?}", direction);
+            if let Some(media_id) = &session.media_session_id {
+                // Convert from state_table::types::MediaDirection to crate::types::MediaDirection
+                let media_direction = match direction {
+                    crate::state_table::types::MediaDirection::SendRecv => crate::types::MediaDirection::SendRecv,
+                    crate::state_table::types::MediaDirection::SendOnly => crate::types::MediaDirection::SendOnly,
+                    crate::state_table::types::MediaDirection::RecvOnly => crate::types::MediaDirection::RecvOnly,
+                    crate::state_table::types::MediaDirection::Inactive => crate::types::MediaDirection::Inactive,
+                };
+                media_adapter.set_media_direction(media_id.clone(), media_direction).await?;
+            }
+        }
+        
+        // Additional call control
+        Action::SendREFER => {
+            debug!("Sending REFER for transfer");
+            // The target would be in session data
+            if let Some(target) = &session.transfer_target {
+                dialog_adapter.send_refer_session(&session.session_id, target).await?;
+            }
+        }
+        
+        Action::SendREFERWithReplaces => {
+            debug!("Sending REFER with Replaces for attended transfer");
+            if let Some(target) = &session.transfer_target {
+                dialog_adapter.send_refer_with_replaces(&session.session_id, target).await?;
+            }
+        }
+        
+        Action::MuteLocalAudio => {
+            debug!("Muting local audio");
+            if let Some(media_id) = &session.media_session_id {
+                media_adapter.set_mute(media_id.clone(), true).await?;
+            }
+        }
+        
+        Action::UnmuteLocalAudio => {
+            debug!("Unmuting local audio");
+            if let Some(media_id) = &session.media_session_id {
+                media_adapter.set_mute(media_id.clone(), false).await?;
+            }
+        }
+        
+        Action::CreateConsultationCall => {
+            debug!("Creating consultation call for attended transfer");
+            // This would create a new session for consultation
+            // Handled by state machine creating a new session
+        }
+        
+        Action::TerminateConsultationCall => {
+            debug!("Terminating consultation call");
+            // Clean up the consultation session
+        }
+        
+        Action::SendDTMFTone => {
+            debug!("Sending DTMF tone");
+            if let Some(digits) = &session.dtmf_digits {
+                if let Some(media_id) = &session.media_session_id {
+                    for digit in digits.chars() {
+                        media_adapter.send_dtmf(media_id.clone(), digit).await?;
+                    }
+                }
+            }
+        }
+        
+        Action::StartRecordingMixer => {
+            debug!("Starting recording of conference mixer");
+            if let Some(mixer_id) = &session.conference_mixer_id {
+                let mixer_session_id = SessionId(format!("mixer-{}", mixer_id.0));
+                media_adapter.start_recording(&mixer_session_id).await?;
+            }
+        }
+        
+        Action::StopRecordingMixer => {
+            debug!("Stopping recording of conference mixer");
+            if let Some(mixer_id) = &session.conference_mixer_id {
+                let mixer_session_id = SessionId(format!("mixer-{}", mixer_id.0));
+                media_adapter.stop_recording(&mixer_session_id).await?;
+            }
+        }
+        
+        Action::RestoreMediaFlow => {
+            debug!("Restoring media flow after hold/resume");
+            if let Some(media_id) = &session.media_session_id {
+                // TODO: Implement restore_media_flow
+                warn!("restore_media_flow not implemented yet");
+            }
+        }
+        
+        Action::ReleaseAllResources => {
+            debug!("Releasing all resources for session {}", session.session_id);
+            // Final cleanup - both dialog and media
+            dialog_adapter.cleanup_session(&session.session_id).await?;
+            media_adapter.cleanup_session(&session.session_id).await?;
+        }
+        
+        Action::StartEmergencyCleanup => {
+            error!("Starting emergency cleanup for session {}", session.session_id);
+            // Best-effort cleanup on error
+            let _ = dialog_adapter.cleanup_session(&session.session_id).await;
+            let _ = media_adapter.cleanup_session(&session.session_id).await;
+        }
+        
+        Action::AttemptMediaRecovery => {
+            warn!("Attempting media recovery for session {}", session.session_id);
+            // Try to recover from media errors
+            if let Some(media_id) = &session.media_session_id {
+                // TODO: Implement attempt_recovery
+                warn!("attempt_recovery not implemented yet");
+            }
+        }
+        
         Action::Custom(action_name) => {
             debug!("Custom action '{}' for session {}", action_name, session.session_id);
             // Custom actions are application-specific
+        }
+        
+        // Missing actions that need implementation
+        Action::BridgeToMixer => {
+            debug!("Bridging session {} to mixer", session.session_id);
+            // TODO: Implement bridge to mixer functionality
+            warn!("BridgeToMixer not implemented yet");
+        }
+        
+        Action::RestoreDirectMedia => {
+            debug!("Restoring direct media for session {}", session.session_id);
+            if let Some(media_id) = &session.media_session_id {
+                // TODO: Implement restore_direct_media in MediaAdapter
+                warn!("RestoreDirectMedia not implemented yet");
+            }
+        }
+        
+        Action::HoldCurrentCall => {
+            debug!("Holding current call for session {}", session.session_id);
+            // TODO: Implement hold current call
+            warn!("HoldCurrentCall not implemented yet");
+        }
+        
+        Action::CleanupResources => {
+            debug!("Cleaning up resources for session {}", session.session_id);
+            // TODO: Implement resource cleanup
+            warn!("CleanupResources not implemented yet");
         }
     }
     

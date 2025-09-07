@@ -26,6 +26,15 @@ pub enum MediaFlowDirection {
     None,
 }
 
+/// Media direction for hold/resume
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
+pub enum MediaDirection {
+    SendRecv,
+    SendOnly,
+    RecvOnly,
+    Inactive,
+}
+
 /// Dialog ID type - wraps UUID for compatibility with rvoip_dialog_core
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DialogId(pub uuid::Uuid);
@@ -118,8 +127,13 @@ pub enum CallState {
     Active,
     OnHold,
     Resuming,
+    Muted,
+    ConferenceHost,
+    InConference,
+    ConferenceOnHold,
     Bridged,
     Transferring,
+    ConsultationCall,
     Terminating,
     Terminated,
     Cancelled,
@@ -148,6 +162,8 @@ pub enum EventType {
     HangupCall,
     HoldCall,
     ResumeCall,
+    MuteCall,
+    UnmuteCall,
     BlindTransfer { target: String },
     AttendedTransfer { target: String },
     
@@ -191,13 +207,24 @@ pub enum EventType {
     CheckConditions,
     PublishCallEstablished,
     
+    // Conference events
+    CreateConference { name: String },
+    AddParticipant { session_id: String },
+    JoinConference { conference_id: String },
+    LeaveConference,
+    MuteInConference,
+    UnmuteInConference,
+    
     // Bridge/Transfer events
     BridgeSessions { other_session: SessionId },
     UnbridgeSessions,
     InitiateTransfer { target: String },
+    StartAttendedTransfer { target: String },
+    CompleteAttendedTransfer,
     TransferAccepted,
     TransferProgress,
     TransferComplete,
+    TransferSuccess,
     TransferFailed,
     
     // Session modification
@@ -224,9 +251,15 @@ impl EventType {
             EventType::PlayAudio { .. } => EventType::PlayAudio { file: String::new() },
             EventType::SendDTMF { .. } => EventType::SendDTMF { digits: String::new() },
             
+            // Conference events - normalize
+            EventType::CreateConference { .. } => EventType::CreateConference { name: String::new() },
+            EventType::AddParticipant { .. } => EventType::AddParticipant { session_id: String::new() },
+            EventType::JoinConference { .. } => EventType::JoinConference { conference_id: String::new() },
+            
             // Bridge events - normalize session ID
             EventType::BridgeSessions { .. } => EventType::BridgeSessions { other_session: SessionId::new() },
             EventType::InitiateTransfer { .. } => EventType::InitiateTransfer { target: String::new() },
+            EventType::StartAttendedTransfer { .. } => EventType::StartAttendedTransfer { target: String::new() },
             
             // Events without fields pass through unchanged
             _ => self.clone(),
@@ -272,6 +305,9 @@ pub enum Guard {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Action {
     // Dialog actions
+    CreateDialog,
+    CreateMediaSession,
+    GenerateLocalSDP,
     SendSIPResponse(u16, String),
     SendINVITE,
     SendACK,
@@ -296,6 +332,34 @@ pub enum Action {
     StartRecordingMedia,
     StopRecordingMedia,
     
+    // Conference actions
+    CreateAudioMixer,
+    RedirectToMixer,
+    ConnectToMixer,
+    DisconnectFromMixer,
+    MuteToMixer,
+    UnmuteToMixer,
+    DestroyMixer,
+    BridgeToMixer,
+    RestoreDirectMedia,
+    StartRecordingMixer,
+    StopRecordingMixer,
+    
+    // Media direction actions
+    UpdateMediaDirection { direction: MediaDirection },
+    
+    // Transfer actions
+    SendREFER,
+    SendREFERWithReplaces,
+    HoldCurrentCall,
+    CreateConsultationCall,
+    TerminateConsultationCall,
+    
+    // Audio control
+    MuteLocalAudio,
+    UnmuteLocalAudio,
+    SendDTMFTone,
+    
     // State updates
     SetCondition(Condition, bool),
     StoreLocalSDP,
@@ -307,6 +371,13 @@ pub enum Action {
     DestroyBridge,
     InitiateBlindTransfer(String),
     InitiateAttendedTransfer(String),
+    
+    // Resource management
+    RestoreMediaFlow,
+    ReleaseAllResources,
+    StartEmergencyCleanup,
+    AttemptMediaRecovery,
+    CleanupResources,
     
     // Callbacks
     TriggerCallEstablished,
