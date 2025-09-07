@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug};
+use tracing::{info, debug, error};
 use crate::state_table::{SessionId, DialogId, MediaSessionId, CallId};
 
 use super::state::SessionState;
@@ -64,6 +64,10 @@ impl SessionStore {
         session_id: &SessionId,
     ) -> Result<SessionState, Box<dyn std::error::Error + Send + Sync>> {
         let sessions = self.sessions.read().await;
+        debug!("Looking for session {}, store has {} sessions", session_id, sessions.len());
+        for (id, _) in sessions.iter() {
+            debug!("  Store contains session: {}", id);
+        }
         sessions
             .get(session_id)
             .cloned()
@@ -250,6 +254,11 @@ impl SessionStore {
                 CallState::Terminated => stats.terminated += 1,
                 CallState::Cancelled => stats.terminated += 1,  // Count cancelled as terminated
                 CallState::Failed(_) => stats.failed += 1,
+                CallState::Muted => stats.active += 1, // Count as active
+                CallState::ConferenceHost => stats.active += 1, // Count as active
+                CallState::InConference => stats.active += 1, // Count as active
+                CallState::ConferenceOnHold => stats.on_hold += 1, // Count as on hold
+                CallState::ConsultationCall => stats.active += 1, // Count as active
             }
         }
         

@@ -2,7 +2,7 @@
 # This is the COMPLETE state machine - no external managers needed
 # All call control, conference, and advanced features are defined here
 
-version: "1.0"
+version: "2.0"
 
 metadata:
   description: "Complete SIP state machine with conference and advanced features"
@@ -455,9 +455,9 @@ transitions:
 
   # ================== Error Handling ==================
   
-  # Handle errors from Active state
+  # Handle errors from any state
   - role: "Both"
-    state: "Active"
+    state: "Any"
     event:
       type: "DialogError"
     actions:
@@ -467,7 +467,7 @@ transitions:
       - type: "CallFailed"
 
   - role: "Both"
-    state: "Active"
+    state: "Any"
     event:
       type: "MediaError"
     actions:
@@ -486,50 +486,3 @@ transitions:
     next_state: "Failed"
     publish_events:
       - type: "CallTimeout"
-      
-  # ================== EarlyMedia transitions ==================
-  
-  # EarlyMedia to Active
-  - role: "UAC"
-    state: "EarlyMedia"
-    event:
-      type: "Dialog200OK"
-    actions:
-      - type: "SendACK"
-      - type: "StoreNegotiatedConfig"
-    next_state: "Active"
-    publish_events:
-      - type: "CallActive"
-      
-  # Allow hanging up from EarlyMedia
-  - role: "Both"
-    state: "EarlyMedia"
-    event:
-      type: "HangupCall"
-    actions:
-      - type: "SendBYE"
-      - type: "StartDialogCleanup"
-      - type: "StartMediaCleanup"
-    next_state: "Terminating"
-    
-  # ================== Bridged state transitions ==================
-  
-  # Unbridging
-  - role: "Both"
-    state: "Bridged"
-    event:
-      type: "UnbridgeCall"
-    actions:
-      - type: "RestoreDirectMedia"
-    next_state: "Active"
-    
-  # Hanging up from bridged state
-  - role: "Both"
-    state: "Bridged"
-    event:
-      type: "HangupCall"
-    actions:
-      - type: "SendBYE"
-      - type: "StartDialogCleanup"
-      - type: "StartMediaCleanup"
-    next_state: "Terminating"

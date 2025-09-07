@@ -55,6 +55,11 @@ pub struct SessionState {
     // Bridging information
     pub bridged_to: Option<SessionId>, // Session this is bridged to
     
+    // Conference information
+    pub conference_mixer_id: Option<MediaSessionId>, // Mixer ID if hosting conference
+    pub transfer_target: Option<String>, // Target for transfers
+    pub dtmf_digits: Option<String>, // DTMF digits to send
+    
     // Timestamps
     pub created_at: Instant,
     
@@ -85,6 +90,9 @@ impl SessionState {
             remote_uri: None,
             last_200_ok: None,
             bridged_to: None,
+            conference_mixer_id: None,
+            transfer_target: None,
+            dtmf_digits: None,
             created_at: now,
             history: None,
         }

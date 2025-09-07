@@ -31,7 +31,7 @@ pub struct StateMachine {
     table: Arc<crate::state_table::MasterStateTable>,
     
     /// Session state storage
-    store: Arc<SessionStore>,
+    pub(crate) store: Arc<SessionStore>,
     
     /// Adapter to dialog-core
     dialog_adapter: Arc<DialogAdapter>,
@@ -136,7 +136,13 @@ impl StateMachine {
         let transition_start = Instant::now();
         
         // 1. Get current session state
-        let mut session = self.store.get_session(session_id).await?;
+        let mut session = match self.store.get_session(session_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to get session {}: {}", session_id, e);
+                return Err(crate::errors::SessionError::SessionNotFound(format!("session-{}", session_id)).into());
+            }
+        };
         let old_state = session.call_state;
         
         // Initialize tracking for history
