@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info, warn};
 use rand::Rng;
+use dashmap::DashMap;
 
 use crate::error::{Error, Result};
 use crate::types::{DialogId, MediaSessionId, AudioFrame, payload_types};
@@ -97,6 +98,12 @@ pub struct MediaSessionController {
     pub(super) event_tx: mpsc::UnboundedSender<MediaSessionEvent>,
     /// Event receiver (taken by the user)
     event_rx: RwLock<Option<mpsc::UnboundedReceiver<MediaSessionEvent>>>,
+    /// Event hub for global event coordination
+    event_hub: Arc<RwLock<Option<Arc<crate::events::MediaEventHub>>>>,
+    /// Session to media mapping
+    session_to_media: Arc<DashMap<String, MediaSessionId>>,
+    /// Media to session mapping
+    media_to_session: Arc<DashMap<MediaSessionId, String>>,
     /// Audio mixer for conference calls
     pub(super) audio_mixer: Option<Arc<AudioMixer>>,
     /// Conference mixing configuration
@@ -194,6 +201,9 @@ impl MediaSessionController {
             rtp_sessions: RwLock::new(HashMap::new()),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
+            event_hub: Arc::new(RwLock::new(None)),
+            session_to_media: Arc::new(DashMap::new()),
+            media_to_session: Arc::new(DashMap::new()),
             audio_mixer: None,
             conference_config: ConferenceMixingConfig::default(),
             conference_event_tx,
@@ -218,6 +228,42 @@ impl MediaSessionController {
     /// This allows external subscribers (like session-core) to receive RTP events
     pub async fn add_rtp_event_callback(&self, callback: RtpEventCallback) {
         self.rtp_bridge.add_rtp_event_callback(callback).await;
+    }
+    
+    // ===== Event Hub Helper Methods =====
+    
+    /// Set the event hub for global event coordination
+    pub async fn set_event_hub(&self, event_hub: Arc<crate::events::MediaEventHub>) {
+        *self.event_hub.write().await = Some(event_hub);
+    }
+    
+    /// Store session to media mapping
+    pub fn store_session_mapping(&self, session_id: String, media_id: MediaSessionId) {
+        self.session_to_media.insert(session_id.clone(), media_id.clone());
+        self.media_to_session.insert(media_id, session_id);
+    }
+    
+    /// Get media session ID from session ID
+    pub fn get_media_id(&self, session_id: &str) -> Option<MediaSessionId> {
+        self.session_to_media.get(session_id).map(|e| e.value().clone())
+    }
+    
+    /// Get session ID from media session ID
+    pub fn get_session_id(&self, media_id: &MediaSessionId) -> Option<String> {
+        self.media_to_session.get(media_id).map(|e| e.value().clone())
+    }
+    
+    /// Emit a media event through both channel and event hub
+    async fn emit_event(&self, event: MediaSessionEvent) {
+        // Send to channel (legacy)
+        let _ = self.event_tx.send(event.clone());
+        
+        // Send to event hub (new global bus)
+        if let Some(hub) = self.event_hub.read().await.as_ref() {
+            if let Err(e) = hub.publish_media_event(event).await {
+                warn!("Failed to publish media event to global bus: {}", e);
+            }
+        }
     }
 
     /// Create a new media session controller with custom port range
@@ -310,6 +356,9 @@ impl MediaSessionController {
             rtp_sessions: RwLock::new(HashMap::new()),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
+            event_hub: Arc::new(RwLock::new(None)),
+            session_to_media: Arc::new(DashMap::new()),
+            media_to_session: Arc::new(DashMap::new()),
             audio_mixer: Some(audio_mixer),
             conference_config,
             conference_event_tx,

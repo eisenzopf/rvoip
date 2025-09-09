@@ -40,6 +40,15 @@ pub struct DialogManager {
     /// Transaction to dialog mapping
     pub(crate) transaction_to_dialog: Arc<DashMap<TransactionKey, DialogId>>,
     
+    /// Session to dialog mapping for cross-crate coordination
+    pub(crate) session_to_dialog: Arc<DashMap<String, DialogId>>,
+    
+    /// Dialog to session mapping
+    pub(crate) dialog_to_session: Arc<DashMap<DialogId, String>>,
+    
+    /// Event hub for global event coordination
+    pub(crate) event_hub: Arc<tokio::sync::RwLock<Option<Arc<crate::events::DialogEventHub>>>>,
+    
     /// Channel for sending session coordination events to session-core
     pub(crate) session_coordinator: Arc<tokio::sync::RwLock<Option<mpsc::Sender<SessionCoordinationEvent>>>>,
     
@@ -95,6 +104,9 @@ impl DialogManager {
             dialogs,
             dialog_lookup,
             transaction_to_dialog: Arc::new(DashMap::new()),
+            session_to_dialog: Arc::new(DashMap::new()),
+            dialog_to_session: Arc::new(DashMap::new()),
+            event_hub: Arc::new(tokio::sync::RwLock::new(None)),
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
@@ -143,6 +155,9 @@ impl DialogManager {
             dialogs,
             dialog_lookup,
             transaction_to_dialog: Arc::new(DashMap::new()),
+            session_to_dialog: Arc::new(DashMap::new()),
+            dialog_to_session: Arc::new(DashMap::new()),
+            event_hub: Arc::new(tokio::sync::RwLock::new(None)),
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
@@ -434,6 +449,17 @@ impl DialogManager {
     /// This maintains the proper architectural separation where dialog-core handles
     /// SIP protocol details and session-core handles session logic.
     pub async fn emit_dialog_event(&self, event: DialogEvent) {
+        // Try event hub first (new global event bus)
+        if let Some(hub) = self.event_hub.read().await.as_ref() {
+            if let Err(e) = hub.publish_dialog_event(event.clone()).await {
+                warn!("Failed to publish dialog event to global bus: {}", e);
+            } else {
+                debug!("Published dialog event to global bus: {:?}", event);
+                return;
+            }
+        }
+        
+        // Fall back to channel (legacy)
         if let Some(sender) = self.dialog_event_sender.read().await.as_ref() {
             if let Err(e) = sender.send(event.clone()).await {
                 warn!("Failed to send dialog event to session-core: {}", e);
@@ -448,6 +474,17 @@ impl DialogManager {
     /// Sends session coordination events for legacy compatibility and specific
     /// session management operations.
     pub async fn emit_session_coordination_event(&self, event: SessionCoordinationEvent) {
+        // Try event hub first (new global event bus)
+        if let Some(hub) = self.event_hub.read().await.as_ref() {
+            if let Err(e) = hub.publish_session_coordination_event(event.clone()).await {
+                warn!("Failed to publish session coordination event to global bus: {}", e);
+            } else {
+                debug!("Published session coordination event to global bus: {:?}", event);
+                return;
+            }
+        }
+        
+        // Fall back to channel (legacy)
         if let Some(sender) = self.session_coordinator.read().await.as_ref() {
             if let Err(e) = sender.send(event.clone()).await {
                 warn!("Failed to send session coordination event: {}", e);
@@ -769,6 +806,33 @@ impl DialogManager {
     /// Get a reference to the subscription manager if configured
     pub fn subscription_manager(&self) -> Option<&Arc<SubscriptionManager>> {
         self.subscription_manager.as_ref()
+    }
+    
+    // ===== Event Hub Helper Methods =====
+    
+    /// Set the event hub for global event coordination
+    pub async fn set_event_hub(&self, event_hub: Arc<crate::events::DialogEventHub>) {
+        *self.event_hub.write().await = Some(event_hub);
+    }
+    
+    /// Get session ID from dialog ID
+    pub fn get_session_id(&self, dialog_id: &DialogId) -> Option<String> {
+        self.dialog_to_session.get(dialog_id).map(|e| e.value().clone())
+    }
+    
+    /// Store dialog mapping for incoming call
+    pub fn store_dialog_mapping(
+        &self,
+        session_id: &str,
+        dialog_id: DialogId,
+        transaction_id: TransactionKey,
+        request: rvoip_sip_core::Request,
+        source: SocketAddr,
+    ) {
+        self.session_to_dialog.insert(session_id.to_string(), dialog_id.clone());
+        self.dialog_to_session.insert(dialog_id.clone(), session_id.to_string());
+        self.transaction_to_dialog.insert(transaction_id, dialog_id);
+        // Store additional request data if needed
     }
     
     // Protocol Handlers (delegated to protocol_handlers.rs)

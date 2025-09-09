@@ -22,6 +22,11 @@ path = "examples/api_peer_audio/peer1.rs"
 name = "api_peer_audio_peer2"
 path = "examples/api_peer_audio/peer2.rs"
 
+[[example]]
+name = "test_simple_call"
+path = "examples/test_simple_call.rs"
+
+
 [dependencies]
 # Core dependencies
 tokio = { version = "1.40", features = ["full"] }

@@ -41,6 +41,9 @@ pub struct SessionCrossCrateEventHandler {
     
     /// Session registry for mappings
     registry: Arc<SessionRegistry>,
+    
+    /// Channel to send incoming call notifications
+    incoming_call_tx: Option<mpsc::Sender<crate::types::IncomingCallInfo>>,
 }
 
 impl SessionCrossCrateEventHandler {
@@ -57,6 +60,25 @@ impl SessionCrossCrateEventHandler {
             dialog_adapter,
             media_adapter,
             registry,
+            incoming_call_tx: None,
+        }
+    }
+    
+    pub fn with_incoming_call_channel(
+        state_machine: Arc<StateMachineExecutor>,
+        global_coordinator: Arc<GlobalEventCoordinator>,
+        dialog_adapter: Arc<DialogAdapter>,
+        media_adapter: Arc<MediaAdapter>,
+        registry: Arc<SessionRegistry>,
+        incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
+    ) -> Self {
+        Self { 
+            state_machine,
+            global_coordinator,
+            dialog_adapter,
+            media_adapter,
+            registry,
+            incoming_call_tx: Some(incoming_call_tx),
         }
     }
     
@@ -246,6 +268,24 @@ impl SessionCrossCrateEventHandler {
                     .unwrap_or_else(|| format!("unknown-{}", uuid::Uuid::new_v4()));
                 let session_id = SessionId::new();
                 
+                // Create session in the store for incoming call
+                let from_uri = request.from()
+                    .map(|f| f.to_string())
+                    .unwrap_or_else(|| "anonymous".to_string());
+                let to_uri = request.to()
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                    
+                if let Ok(mut session) = self.state_machine.store.create_session(
+                    session_id.clone(),
+                    crate::state_table::types::Role::UAS,
+                    true // with history
+                ).await {
+                    session.local_uri = Some(to_uri.clone());
+                    session.remote_uri = Some(from_uri.clone());
+                    let _ = self.state_machine.store.update_session(session).await;
+                }
+                
                 // Store mappings in adapters (they still maintain the mappings)
                 self.dialog_adapter.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
                 self.dialog_adapter.session_to_dialog.insert(session_id.clone(), dialog_id);
@@ -266,6 +306,24 @@ impl SessionCrossCrateEventHandler {
                         .unwrap_or_else(|| "anonymous".to_string()),
                     sdp: sdp.clone(),
                 };
+                
+                // Send to incoming call channel if configured
+                if let Some(ref tx) = self.incoming_call_tx {
+                    let call_info = crate::types::IncomingCallInfo {
+                        session_id: session_id.clone(),
+                        dialog_id: crate::state_table::types::DialogId::new(),
+                        from: request.from()
+                            .map(|f| f.to_string())
+                            .unwrap_or_else(|| "anonymous".to_string()),
+                        to: request.to()
+                            .map(|t| t.to_string())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        call_id: call_id.clone(),
+                    };
+                    if let Err(e) = tx.send(call_info).await {
+                        error!("Failed to send incoming call notification: {}", e);
+                    }
+                }
                 
                 // Process through state machine
                 if let Err(e) = self.state_machine.process_event(&session_id, event_type).await {

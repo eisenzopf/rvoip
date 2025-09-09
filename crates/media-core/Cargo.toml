@@ -30,6 +30,9 @@ rvoip-codec-core.workspace = true
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# State management
+dashmap = "5.5"
+
 # Async support
 async-trait = "0.1"
 tokio.workspace = true

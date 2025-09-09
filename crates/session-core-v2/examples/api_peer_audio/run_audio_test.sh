@@ -60,7 +60,7 @@ fi
 mkdir -p "$OUTPUT_DIR"
 
 # Navigate to the session-core-v2 directory to run cargo commands
-cd ../..
+cd "$(dirname "$0")/../.."
 
 # Start Bob (peer2) in the background
 echo -e "${GREEN}▶️  Starting Bob (peer2) on port 5061...${NC}"
@@ -151,7 +151,7 @@ if [ $ALICE_EXIT -eq 0 ] && [ $BOB_EXIT -eq 0 ]; then
     if [ $RECORD_MODE -eq 1 ]; then
         echo ""
         echo "📁 Audio files saved to: $OUTPUT_DIR/"
-        ls -la "$OUTPUT_DIR"/*.raw 2>/dev/null || echo "   (No audio files found - audio exchange may not be implemented yet)"
+        ls -la "$OUTPUT_DIR"/*.wav 2>/dev/null || echo "   (No audio files found - audio exchange may not be implemented yet)"
     fi
 else
     echo -e "${RED}❌ Test failed or timed out${NC}"

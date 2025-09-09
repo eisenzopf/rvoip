@@ -31,17 +31,22 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     /// Optional path to custom state table YAML
     pub state_table_path: Option<String>,
+    /// Local SIP URI (e.g., "sip:alice@127.0.0.1:5060")
+    pub local_uri: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
+        let ip = "127.0.0.1".parse::<IpAddr>().unwrap();
+        let port = 5060;
         Self {
-            local_ip: "127.0.0.1".parse().unwrap(),
-            sip_port: 5060,
+            local_ip: ip,
+            sip_port: port,
             media_port_start: 16000,
             media_port_end: 17000,
-            bind_addr: "127.0.0.1:5060".parse().unwrap(),
+            bind_addr: SocketAddr::new(ip, port),
             state_table_path: None,
+            local_uri: format!("sip:user@{}:{}", ip, port),
         }
     }
 }
@@ -79,13 +84,13 @@ impl UnifiedCoordinator {
         let registry = Arc::new(SessionRegistry::new());
         
         // Create adapters
-        let dialog_api = Self::create_dialog_api(&config).await?;
+        let dialog_api = Self::create_dialog_api(&config, global_coordinator.clone()).await?;
         let dialog_adapter = Arc::new(DialogAdapter::new(
             dialog_api,
             store.clone(),
         ));
         
-        let media_controller = Self::create_media_controller(&config).await?;
+        let media_controller = Self::create_media_controller(&config, global_coordinator.clone()).await?;
         let media_adapter = Arc::new(MediaAdapter::new(
             media_controller,
             store.clone(),
@@ -107,7 +112,7 @@ impl UnifiedCoordinator {
         let helpers = Arc::new(StateMachineHelpers::new(state_machine.clone()));
         
         // Create incoming call channel
-        let (_incoming_tx, incoming_rx) = mpsc::channel(100);
+        let (incoming_tx, incoming_rx) = mpsc::channel(100);
         
         let coordinator = Arc::new(Self {
             helpers,
@@ -120,13 +125,14 @@ impl UnifiedCoordinator {
         // Start the dialog adapter
         dialog_adapter.start().await?;
         
-        // Create and start the centralized event handler
-        let event_handler = crate::adapters::SessionCrossCrateEventHandler::new(
+        // Create and start the centralized event handler with incoming call channel
+        let event_handler = crate::adapters::SessionCrossCrateEventHandler::with_incoming_call_channel(
             state_machine.clone(),
             global_coordinator.clone(),
             dialog_adapter.clone(),
             media_adapter.clone(),
             registry.clone(),
+            incoming_tx,
         );
         
         // Start the event handler (sets up channels and subscriptions)
@@ -321,7 +327,7 @@ impl UnifiedCoordinator {
     
     // ===== Internal Helpers =====
     
-    async fn create_dialog_api(config: &Config) -> Result<Arc<rvoip_dialog_core::api::unified::UnifiedDialogApi>> {
+    async fn create_dialog_api(config: &Config, global_coordinator: Arc<GlobalEventCoordinator>) -> Result<Arc<rvoip_dialog_core::api::unified::UnifiedDialogApi>> {
         use rvoip_dialog_core::config::DialogManagerConfig;
         use rvoip_dialog_core::api::unified::UnifiedDialogApi;
         use rvoip_dialog_core::transaction::{TransactionManager, transport::{TransportManager, TransportManagerConfig}};
@@ -358,14 +364,18 @@ impl UnifiedCoordinator {
         
         // Create dialog config
         let dialog_config = DialogManagerConfig::client(config.bind_addr)
-            .with_from_uri(&format!("sip:user@{}", config.local_ip))
+            .with_from_uri(&config.local_uri)
             .build();
         
-        // Create dialog API
+        // Create dialog API with global event coordination
         let dialog_api = Arc::new(
-            UnifiedDialogApi::new(transaction_manager, dialog_config)
-                .await
-                .map_err(|e| SessionError::InternalError(format!("Failed to create dialog API: {}", e)))?
+            UnifiedDialogApi::new_with_event_coordinator(
+                transaction_manager, 
+            dialog_config,
+                global_coordinator.clone()
+            )
+            .await
+            .map_err(|e| SessionError::InternalError(format!("Failed to create dialog API: {}", e)))?
         );
         
         dialog_api.start().await
@@ -375,7 +385,10 @@ impl UnifiedCoordinator {
     }
     
     
-    async fn create_media_controller(config: &Config) -> Result<Arc<rvoip_media_core::relay::controller::MediaSessionController>> {
+    async fn create_media_controller(
+        config: &Config,
+        global_coordinator: Arc<GlobalEventCoordinator>
+    ) -> Result<Arc<rvoip_media_core::relay::controller::MediaSessionController>> {
         use rvoip_media_core::relay::controller::MediaSessionController;
         
         // Create media controller with port range
@@ -386,6 +399,16 @@ impl UnifiedCoordinator {
             )
         );
         
+        // Create and set up the event hub
+        let event_hub = rvoip_media_core::events::MediaEventHub::new(
+            global_coordinator,
+            controller.clone(),
+        ).await
+        .map_err(|e| SessionError::InternalError(format!("Failed to create media event hub: {}", e)))?;
+        
+        // Set the event hub on the media controller
+        controller.set_event_hub(event_hub).await;
+
         Ok(controller)
     }
 }

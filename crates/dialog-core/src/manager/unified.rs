@@ -196,6 +196,10 @@ pub struct ManagerStats {
 }
 
 impl UnifiedDialogManager {
+    /// Get inner dialog manager for event hub setup
+    pub fn inner_manager(&self) -> &DialogManager {
+        &self.core
+    }
     /// Create a new unified dialog manager
     ///
     /// # Arguments

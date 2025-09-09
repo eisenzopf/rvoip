@@ -81,39 +81,17 @@ impl MediaAdapter {
     
     /// Start a media session
     pub async fn start_session(&self, session_id: &SessionId) -> Result<()> {
-        // Create dialog ID for media-core (it uses DialogId, not SessionId)
+        // This method is now handled by generate_local_sdp
+        // We keep it for backward compatibility but it just creates the mapping
         let dialog_id = DialogId::new(format!("media-{}", session_id.0));
+        
+        tracing::info!("🚀 Preparing media session for session {} with dialog ID {}", session_id.0, dialog_id);
         
         // Store mapping
         self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
         self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
         
-        // Create media config with our settings
-        let media_config = MediaConfig {
-            local_addr: SocketAddr::new(self.local_ip, 0), // Let media-core allocate port
-            remote_addr: None, // Will be set when we get remote SDP
-            preferred_codec: Some("PCMU".to_string()), // G.711 µ-law as default
-            parameters: std::collections::HashMap::new(),
-        };
-        
-        // Start the media session
-        self.controller.start_media(dialog_id.clone(), media_config)
-            .await
-            .map_err(|e| SessionError::MediaError(format!("Failed to start media session: {}", e)))?;
-        
-        // Get media session info for SDP generation
-        if let Some(info) = self.controller.get_session_info(&dialog_id).await {
-            self.media_sessions.insert(session_id.clone(), info.clone());
-            
-            // Update session store with media session ID (using dialog_id as media session id)
-            if let Ok(session) = self.store.get_session(session_id).await {
-                // Store the media session ID\n                session.media_session_id = Some(crate::types::MediaSessionId(info.dialog_id.to_string()));
-                let _ = self.store.update_session(session).await;
-            }
-                
-                // Event publishing will be handled by SessionCrossCrateEventHandler
-        }
-        
+        // The actual media session start happens in generate_local_sdp
         Ok(())
     }
     
@@ -167,9 +145,19 @@ impl MediaAdapter {
         
         // Update media session with remote address
         if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
-            // Note: MediaSessionController doesn't have update_remote_address, 
-            // but in production this would update the RTP destination
-            tracing::debug!("Would update remote address to {}:{} for session {}", remote_ip, remote_port, session_id.0);
+            let remote_addr = SocketAddr::new(remote_ip, remote_port);
+            
+            // Update the RTP session with the remote address
+            self.controller.update_rtp_remote_addr(&dialog_id, remote_addr)
+                .await
+                .map_err(|e| SessionError::MediaError(format!("Failed to update RTP remote address: {}", e)))?;
+                
+            // Establish media flow (this starts audio transmission)
+            self.controller.establish_media_flow(&dialog_id, remote_addr)
+                .await
+                .map_err(|e| SessionError::MediaError(format!("Failed to establish media flow: {}", e)))?;
+                
+            tracing::info!("✅ Updated RTP remote address to {} for session {}", remote_addr, session_id.0);
         }
         
         let config = NegotiatedConfig {
@@ -191,6 +179,23 @@ impl MediaAdapter {
         
         // Get our local port
         let local_port = self.get_local_port(session_id)?;
+        
+        // Update media session with remote address
+        if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
+            let remote_addr = SocketAddr::new(remote_ip, remote_port);
+            
+            // Update the RTP session with the remote address
+            self.controller.update_rtp_remote_addr(&dialog_id, remote_addr)
+                .await
+                .map_err(|e| SessionError::MediaError(format!("Failed to update RTP remote address: {}", e)))?;
+                
+            // Establish media flow (this starts audio transmission)
+            self.controller.establish_media_flow(&dialog_id, remote_addr)
+                .await
+                .map_err(|e| SessionError::MediaError(format!("Failed to establish media flow: {}", e)))?;
+                
+            tracing::info!("✅ Updated RTP remote address to {} for session {} (UAS)", remote_addr, session_id.0);
+        }
         
         // Generate SDP answer
         let sdp_answer = format!(
@@ -355,56 +360,82 @@ impl MediaAdapter {
             .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
             .clone();
         
-        tracing::debug!("📤 Sending audio frame for session {} ({} samples)", session_id.0, audio_frame.samples.len());
+        tracing::info!("📤 Sending audio frame for session {} ({} samples) via RTP", session_id.0, audio_frame.samples.len());
         
-        // Call the media controller's send_audio_frame method
-        // MediaSessionController in media-core takes the full AudioFrame
-        self.controller.send_audio_frame(&dialog_id, audio_frame)
+        // Convert AudioFrame to PCM samples and call encode_and_send_audio_frame
+        // This will encode the audio and send it via RTP to the remote peer
+        let pcm_samples = audio_frame.samples.clone();
+        let timestamp = audio_frame.timestamp;
+        
+        self.controller.encode_and_send_audio_frame(&dialog_id, pcm_samples, timestamp)
             .await
-            .map_err(|e| SessionError::MediaError(format!("Failed to send audio frame: {}", e)))?;
+            .map_err(|e| SessionError::MediaError(format!("Failed to send audio frame via RTP: {}", e)))?;
         
-        tracing::debug!("✅ Audio frame sent successfully for session {}", session_id.0);
+        tracing::debug!("✅ Audio frame sent successfully via RTP for session {}", session_id.0);
         Ok(())
     }
     
     /// Create a new media session
     pub async fn create_session(&self, session_id: &SessionId) -> Result<crate::types::MediaSessionId> {
-        // Create a unique media session ID
-        let media_id = crate::types::MediaSessionId::new();
+        // Create dialog ID for media-core
+        let dialog_id = DialogId::new(format!("media-{}", session_id.0));
         
-        // Map session to media ID (using media session info instead)
+        // Store mappings
+        self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
+        self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
         
-        // Store a placeholder dialog ID for now
-        // The real dialog ID will be set when we send the INVITE
-        let placeholder_dialog_id = DialogId::new(format!("media-{}", session_id.0));
-        self.session_to_dialog.insert(session_id.clone(), placeholder_dialog_id.clone());
-        self.dialog_to_session.insert(placeholder_dialog_id, session_id.clone());
+        // Create a media session ID that matches the dialog ID
+        let media_id = crate::types::MediaSessionId(dialog_id.to_string());
+        
+        tracing::debug!("Created media session mapping for {} with dialog ID {}", session_id.0, dialog_id);
+        
+        // Don't actually start the media session here - that happens in generate_local_sdp
+        // This just sets up the mappings
         
         Ok(media_id)
     }
     
     /// Generate local SDP offer
     pub async fn generate_local_sdp(&self, session_id: &SessionId) -> Result<String> {
-        // Get the dialog ID for this session
+        // Get the dialog ID for this session (should have been created in create_session)
         let dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .ok_or_else(|| SessionError::SessionNotFound(format!("No dialog mapping for session {}", session_id.0)))?
             .clone();
             
-        // Create media session with config
-        let config = MediaConfig {
-            local_addr: SocketAddr::new(self.local_ip, 0), // Let media-core allocate port
-            remote_addr: None,
-            preferred_codec: Some("PCMU".to_string()),
-            parameters: std::collections::HashMap::new(),
-        };
+        tracing::debug!("Generating SDP for session {} with dialog ID {}", session_id.0, dialog_id);
+            
+        // Check if media session already exists
+        let need_to_start = self.controller.get_session_info(&dialog_id).await.is_none();
         
-        // Start the media session in media-core
-        self.controller.start_media(dialog_id.clone(), config).await
-            .map_err(|e| SessionError::MediaError(format!("Failed to start media session: {}", e)))?;
-        
-        // Get session info to build SDP
+        if need_to_start {
+            tracing::info!("Starting media session for dialog {}", dialog_id);
+            
+            // Create media config with our settings
+            let media_config = MediaConfig {
+                local_addr: SocketAddr::new(self.local_ip, 0), // Let media-core allocate port
+                remote_addr: None, // Will be set when we get remote SDP
+                preferred_codec: Some("PCMU".to_string()), // G.711 µ-law as default
+                parameters: std::collections::HashMap::new(),
+            };
+            
+            // Start the media session
+            self.controller.start_media(dialog_id.clone(), media_config)
+                .await
+                .map_err(|e| SessionError::MediaError(format!("Failed to start media session: {}", e)))?;
+                
+            tracing::info!("Media session started successfully for dialog {}", dialog_id);
+        }
+            
+        // Get session info (should exist now)
         let info = self.controller.get_session_info(&dialog_id).await
-            .ok_or_else(|| SessionError::MediaError("Failed to get session info".into()))?;
+            .ok_or_else(|| SessionError::MediaError(format!("Failed to get session info for dialog {}", dialog_id)))?;
+        
+        // Store session info
+        self.media_sessions.insert(session_id.clone(), info.clone());
+        
+        // The actual RTP port might not be in config.local_addr - it's in rtp_port
+        let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
+        tracing::debug!("Media session info - RTP port: {:?}, local_addr: {}", info.rtp_port, info.config.local_addr);
         
         // Build SDP from actual media session info
         let sdp = format!(
@@ -421,8 +452,10 @@ impl MediaAdapter {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
             info.config.local_addr.ip(),
             info.config.local_addr.ip(),
-            info.config.local_addr.port()
+            local_port
         );
+        
+        tracing::info!("✅ Generated SDP for session {} with local port {}", session_id.0, local_port);
         
         Ok(sdp)
     }
@@ -435,18 +468,20 @@ impl MediaAdapter {
             .ok_or_else(|| SessionError::SessionNotFound(format!("No media session for {}", session_id.0)))?
             .clone();
         
+        tracing::info!("🎧 Setting up audio subscription for session {} (dialog: {})", session_id.0, dialog_id);
+        
         // Create channel for audio frames
         let (tx, rx) = mpsc::channel(1000); // Buffer up to 1000 frames (20 seconds at 50fps)
         
         // Register the callback with MediaSessionController to receive audio frames
-        self.controller.set_audio_frame_callback(dialog_id, tx.clone())
+        self.controller.set_audio_frame_callback(dialog_id.clone(), tx.clone())
             .await
             .map_err(|e| SessionError::MediaError(format!("Failed to set audio callback: {}", e)))?;
         
         // Store the sender for this session for cleanup
         self.audio_receivers.insert(session_id.clone(), tx);
         
-        tracing::info!("🎧 Created audio frame subscriber for session {}", session_id.0);
+        tracing::info!("🎧 Created audio frame subscriber for session {} with dialog {}", session_id.0, dialog_id);
         
         // Return our types::AudioFrameSubscriber
         Ok(crate::types::AudioFrameSubscriber::new(session_id.clone(), rx))

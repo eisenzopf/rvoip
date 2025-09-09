@@ -154,10 +154,7 @@ impl StateMachine {
         match &event {
             EventType::MakeCall { target } => {
                 session.remote_uri = Some(target.clone());
-                // Set a default local URI if not already set
-                if session.local_uri.is_none() {
-                    session.local_uri = Some("sip:user@localhost".to_string());
-                }
+                // local_uri should be set when session is created
             }
             EventType::IncomingCall { from, sdp } => {
                 session.remote_uri = Some(from.clone());
