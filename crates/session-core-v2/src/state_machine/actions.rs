@@ -20,27 +20,41 @@ pub async fn execute_action(
     match action {
         // Dialog actions
         Action::CreateDialog => {
-            debug!("Creating dialog for session {}", session.session_id);
-            let from = session.local_uri.as_deref().unwrap_or("sip:user@localhost");
-            let to = session.remote_uri.as_deref().unwrap_or("sip:remote@localhost");
+            info!("Action::CreateDialog for session {}", session.session_id);
+            let from = session.local_uri.as_deref()
+                .ok_or_else(|| "local_uri not set for session".to_string())?;
+            let to = session.remote_uri.as_deref()
+                .ok_or_else(|| "remote_uri not set for session".to_string())?;
+            info!("Creating dialog from {} to {}", from, to);
             let dialog_id = dialog_adapter.create_dialog(from, to).await?;
             session.dialog_id = Some(dialog_id);
+            info!("Created dialog ID: {:?}", dialog_id);
         }
         Action::CreateMediaSession => {
-            debug!("Creating media session for session {}", session.session_id);
+            info!("Action::CreateMediaSession for session {}", session.session_id);
             let media_id = media_adapter.create_session(&session.session_id).await?;
-            session.media_session_id = Some(media_id);
+            session.media_session_id = Some(media_id.clone());
+            info!("Created media session ID: {:?}", media_id);
         }
         Action::GenerateLocalSDP => {
-            debug!("Generating local SDP for session {}", session.session_id);
+            info!("Action::GenerateLocalSDP for session {}", session.session_id);
             let sdp = media_adapter.generate_local_sdp(&session.session_id).await?;
-            session.local_sdp = Some(sdp);
+            session.local_sdp = Some(sdp.clone());
+            info!("Generated SDP with {} bytes", sdp.len());
         }
         Action::SendSIPResponse(code, _reason) => {
             dialog_adapter.send_response(&session.session_id, *code, session.local_sdp.clone()).await?;
         }
         Action::SendINVITE => {
-            // Get session details for send_invite_with_details\n            let from = session.local_uri.clone().unwrap_or_else(|| \"sip:user@localhost\".to_string());\n            let to = session.remote_uri.clone().unwrap_or_else(|| \"sip:remote@localhost\".to_string());\n            dialog_adapter.send_invite_with_details(&session.session_id, &from, &to, session.local_sdp.clone()).await?;
+            info!("Action::SendINVITE for session {}", session.session_id);
+            // Get session details for send_invite_with_details
+            let from = session.local_uri.clone()
+                .ok_or_else(|| "local_uri not set for session".to_string())?;
+            let to = session.remote_uri.clone()
+                .ok_or_else(|| "remote_uri not set for session".to_string())?;
+            info!("Sending INVITE from {} to {} with SDP: {}", from, to, session.local_sdp.is_some());
+            dialog_adapter.send_invite_with_details(&session.session_id, &from, &to, session.local_sdp.clone()).await?;
+            info!("INVITE sent successfully");
         }
         Action::SendACK => {
             // Use the stored 200 OK response if available

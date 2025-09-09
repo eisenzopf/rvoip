@@ -255,6 +255,35 @@ impl UnifiedDialogApi {
         })
     }
     
+    /// Create a new unified dialog API with global event coordination
+    pub async fn new_with_event_coordinator(
+        transaction_manager: Arc<TransactionManager>,
+        config: DialogManagerConfig,
+        global_coordinator: Arc<infra_common::events::coordinator::GlobalEventCoordinator>,
+    ) -> ApiResult<Self> {
+        info!("Creating UnifiedDialogApi with global event coordination in {:?} mode", Self::mode_name(&config));
+        
+        let manager = Arc::new(
+            UnifiedDialogManager::new(transaction_manager, config.clone()).await
+                .map_err(ApiError::from)?
+        );
+        
+        // Create and set up the event hub
+        let event_hub = crate::events::DialogEventHub::new(
+            global_coordinator,
+            Arc::new(manager.as_ref().inner_manager().clone()),
+        ).await
+        .map_err(|e| ApiError::internal(format!("Failed to create event hub: {}", e)))?;
+        
+        // Set the event hub on the dialog manager
+        manager.as_ref().inner_manager().set_event_hub(event_hub).await;
+        
+        Ok(Self {
+            manager,
+            config,
+        })
+    }
+    
     /// Create a new unified dialog API with global events (RECOMMENDED)
     ///
     /// # Arguments

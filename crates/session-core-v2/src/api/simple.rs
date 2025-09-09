@@ -17,29 +17,45 @@ pub struct SimplePeer {
     
     /// Incoming call receiver
     incoming_rx: mpsc::Receiver<IncomingCallInfo>,
+    
+    /// Local SIP URI
+    local_uri: String,
 }
 
 impl SimplePeer {
     /// Create a new peer with default configuration
     pub async fn new(name: &str) -> Result<Self> {
-        Self::with_config(name, Config {
-            sip_port: 5060,
-            media_port_start: 6000,
-            media_port_end: 7000,
-            local_ip: "127.0.0.1".parse().unwrap(),
-            bind_addr: "127.0.0.1:5060".parse().unwrap(),
-            state_table_path: None,
-        }).await
+        let mut config = Config::default();
+        config.local_uri = format!("sip:{}@{}:{}", name, config.local_ip, config.sip_port);
+        Self::with_config(name, config).await
     }
     
     /// Create a new peer with custom configuration
-    pub async fn with_config(name: &str, config: Config) -> Result<Self> {
+    pub async fn with_config(name: &str, mut config: Config) -> Result<Self> {
+        // Update local_uri if not explicitly set
+        if config.local_uri.starts_with("sip:user@") {
+            config.local_uri = format!("sip:{}@{}:{}", name, config.local_ip, config.sip_port);
+        }
+        let local_uri = config.local_uri.clone();
         let coordinator = UnifiedCoordinator::new(config).await?;
-        let (_tx, incoming_rx) = mpsc::channel(100);
+        
+        // Create a channel to bridge incoming calls from coordinator
+        let (tx, incoming_rx) = mpsc::channel(100);
+        
+        // Spawn a task to forward incoming calls from coordinator to our channel
+        let coord_clone = coordinator.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Some(call_info) = coord_clone.get_incoming_call().await {
+                    let _ = tx.send(call_info).await;
+                }
+            }
+        });
         
         Ok(Self {
             coordinator,
             incoming_rx,
+            local_uri,
         })
     }
     
@@ -47,8 +63,7 @@ impl SimplePeer {
     
     /// Make an outgoing call
     pub async fn call(&self, to: &str) -> Result<CallId> {
-        let from = "sip:user@localhost"; // Simple default
-        self.coordinator.make_call(from, to).await
+        self.coordinator.make_call(&self.local_uri, to).await
     }
     
     /// Accept an incoming call
