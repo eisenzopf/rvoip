@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         media_port_end: 10100,
         local_ip: "127.0.0.1".parse()?,
         bind_addr: "127.0.0.1:5060".parse()?,
-        state_table_path: None, // Use default state table
+        state_table_path: None, // Using environment variable RVOIP_STATE_TABLE
         local_uri: "sip:alice@127.0.0.1:5060".to_string(),
     };
     

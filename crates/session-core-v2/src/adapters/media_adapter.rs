@@ -10,6 +10,7 @@ use dashmap::DashMap;
 use rvoip_media_core::{
     relay::controller::{MediaSessionController, MediaConfig, MediaSessionInfo, MediaSessionEvent},
     DialogId,
+    types::MediaSessionId,
 };
 use crate::state_table::types::SessionId;
 use crate::errors::{Result, SessionError};
@@ -81,17 +82,17 @@ impl MediaAdapter {
     
     /// Start a media session
     pub async fn start_session(&self, session_id: &SessionId) -> Result<()> {
-        // This method is now handled by generate_local_sdp
-        // We keep it for backward compatibility but it just creates the mapping
-        let dialog_id = DialogId::new(format!("media-{}", session_id.0));
+        // Check if session already exists
+        if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
+            // Session already exists, check if it's started in media-core
+            if self.controller.get_session_info(&dialog_id).await.is_some() {
+                tracing::debug!("Media session already started for session {}", session_id.0);
+                return Ok(());
+            }
+        }
         
-        tracing::info!("🚀 Preparing media session for session {} with dialog ID {}", session_id.0, dialog_id);
-        
-        // Store mapping
-        self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
-        self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
-        
-        // The actual media session start happens in generate_local_sdp
+        // If not, create it - delegate to create_session
+        let _media_id = self.create_session(session_id).await?;
         Ok(())
     }
     
@@ -380,51 +381,48 @@ impl MediaAdapter {
         // Create dialog ID for media-core
         let dialog_id = DialogId::new(format!("media-{}", session_id.0));
         
+        tracing::info!("🚀 Creating media session for session {} with dialog ID {}", session_id.0, dialog_id);
+        
         // Store mappings
         self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
         self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
         
-        // Create a media session ID that matches the dialog ID
-        let media_id = crate::types::MediaSessionId(dialog_id.to_string());
+        // Create media config with our settings
+        let media_config = MediaConfig {
+            local_addr: SocketAddr::new(self.local_ip, 0), // Let media-core allocate port
+            remote_addr: None, // Will be set when we get remote SDP
+            preferred_codec: Some("PCMU".to_string()), // G.711 µ-law as default
+            parameters: std::collections::HashMap::new(),
+        };
         
-        tracing::debug!("Created media session mapping for {} with dialog ID {}", session_id.0, dialog_id);
+        // Start the media session in media-core
+        self.controller.start_media(dialog_id.clone(), media_config)
+            .await
+            .map_err(|e| SessionError::MediaError(format!("Failed to start media session: {}", e)))?;
+            
+        // Get and store session info
+        if let Some(info) = self.controller.get_session_info(&dialog_id).await {
+            self.media_sessions.insert(session_id.clone(), info.clone());
+            
+            // Store mapping with media controller
+            let media_id = crate::types::MediaSessionId(dialog_id.to_string());
+            self.controller.store_session_mapping(session_id.0.clone(), MediaSessionId::from_dialog(&dialog_id));
+            
+            tracing::info!("✅ Media session created successfully for dialog {}", dialog_id);
+            return Ok(media_id);
+        }
         
-        // Don't actually start the media session here - that happens in generate_local_sdp
-        // This just sets up the mappings
-        
-        Ok(media_id)
+        Err(SessionError::MediaError("Failed to get session info after creation".to_string()))
     }
     
     /// Generate local SDP offer
     pub async fn generate_local_sdp(&self, session_id: &SessionId) -> Result<String> {
-        // Get the dialog ID for this session (should have been created in create_session)
+        // Get the dialog ID for this session
         let dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(format!("No dialog mapping for session {}", session_id.0)))?
             .clone();
             
         tracing::debug!("Generating SDP for session {} with dialog ID {}", session_id.0, dialog_id);
-            
-        // Check if media session already exists
-        let need_to_start = self.controller.get_session_info(&dialog_id).await.is_none();
-        
-        if need_to_start {
-            tracing::info!("Starting media session for dialog {}", dialog_id);
-            
-            // Create media config with our settings
-            let media_config = MediaConfig {
-                local_addr: SocketAddr::new(self.local_ip, 0), // Let media-core allocate port
-                remote_addr: None, // Will be set when we get remote SDP
-                preferred_codec: Some("PCMU".to_string()), // G.711 µ-law as default
-                parameters: std::collections::HashMap::new(),
-            };
-            
-            // Start the media session
-            self.controller.start_media(dialog_id.clone(), media_config)
-                .await
-                .map_err(|e| SessionError::MediaError(format!("Failed to start media session: {}", e)))?;
-                
-            tracing::info!("Media session started successfully for dialog {}", dialog_id);
-        }
             
         // Get session info (should exist now)
         let info = self.controller.get_session_info(&dialog_id).await

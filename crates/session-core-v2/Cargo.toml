@@ -23,8 +23,8 @@ name = "api_peer_audio_peer2"
 path = "examples/api_peer_audio/peer2.rs"
 
 [[example]]
-name = "test_simple_call"
-path = "examples/test_simple_call.rs"
+name = "debug_media_session"
+path = "examples/debug_media_session.rs"
 
 
 [dependencies]
