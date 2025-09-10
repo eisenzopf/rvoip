@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         media_port_end: 10200,
         local_ip: "127.0.0.1".parse()?,
         bind_addr: "127.0.0.1:5061".parse()?,
-        state_table_path: None, // Use default state table
+        state_table_path: None, // Using environment variable RVOIP_STATE_TABLE
         local_uri: "sip:bob@127.0.0.1:5061".to_string(),
     };
     
@@ -44,6 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[BOB] Incoming call from: {}", call_info.from);
     
     let call_id = call_info.id;
+    
+    // Wait for state transition to Ringing to complete
+    // This is needed because the IncomingCall event processing is async
+    sleep(Duration::from_secs(1)).await;
     
     // Accept the call
     println!("[BOB] Accepting call...");

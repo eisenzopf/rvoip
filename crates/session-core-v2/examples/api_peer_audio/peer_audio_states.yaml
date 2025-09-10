@@ -55,8 +55,10 @@ transitions:
       type: "MakeCall"
     next_state: "Initiating"
     actions:
+      - type: "CreateDialog"
+      - type: "CreateMediaSession"
+      - type: "GenerateLocalSDP"
       - type: "SendINVITE"
-      - type: "StoreLocalSDP"
     description: "UAC starts outbound call"
 
   # UAC receives 200 OK (call answered)
@@ -66,9 +68,10 @@ transitions:
       type: "Dialog200OK"
     next_state: "Active"
     actions:
+      - type: "StoreRemoteSDP"
+      - type: "NegotiateSDPAsUAC"
       - type: "SendACK"
       - type: "StartMediaSession"
-      - type: "StoreRemoteSDP"
     conditions:
       set:
         - "MediaReady"
@@ -165,6 +168,7 @@ transitions:
       type: "IncomingCall"
     next_state: "Ringing"
     actions:
+      - type: "CreateMediaSession"
       - type: "ProcessInvite"
       - type: "Send180Ringing"
       - type: "StoreRemoteSDP"
@@ -179,7 +183,8 @@ transitions:
       type: "AcceptCall"
     next_state: "Active"
     actions:
-      - type: "StoreLocalSDP"
+      - type: "GenerateLocalSDP"
+      - type: "NegotiateSDPAsUAS"
       - type: "Send200OK"
       - type: "StartMediaSession"
     conditions:

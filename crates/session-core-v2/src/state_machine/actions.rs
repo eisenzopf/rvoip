@@ -26,9 +26,9 @@ pub async fn execute_action(
             let to = session.remote_uri.as_deref()
                 .ok_or_else(|| "remote_uri not set for session".to_string())?;
             info!("Creating dialog from {} to {}", from, to);
-            let dialog_id = dialog_adapter.create_dialog(from, to).await?;
-            session.dialog_id = Some(dialog_id);
-            info!("Created dialog ID: {:?}", dialog_id);
+            // Don't create dialog here - it will be created when we send INVITE
+            // Just log that we're preparing to create a dialog
+            info!("Dialog will be created when INVITE is sent");
         }
         Action::CreateMediaSession => {
             info!("Action::CreateMediaSession for session {}", session.session_id);
@@ -53,8 +53,20 @@ pub async fn execute_action(
             let to = session.remote_uri.clone()
                 .ok_or_else(|| "remote_uri not set for session".to_string())?;
             info!("Sending INVITE from {} to {} with SDP: {}", from, to, session.local_sdp.is_some());
+            
+            // This will create the real dialog in dialog-core
             dialog_adapter.send_invite_with_details(&session.session_id, &from, &to, session.local_sdp.clone()).await?;
-            info!("INVITE sent successfully");
+            
+            // Now get the real dialog ID that was created
+            if let Some(real_dialog_id) = dialog_adapter.session_to_dialog.get(&session.session_id) {
+                // Convert RvoipDialogId to our DialogId type
+                let dialog_id: crate::types::DialogId = real_dialog_id.value().clone().into();
+                session.dialog_id = Some(dialog_id.clone());
+                info!("INVITE sent successfully with dialog ID {:?}", dialog_id);
+            } else {
+                warn!("Failed to get dialog ID after sending INVITE");
+                info!("INVITE sent successfully");
+            }
         }
         Action::SendACK => {
             // Use the stored 200 OK response if available
@@ -167,7 +179,19 @@ pub async fn execute_action(
             // Already handled by negotiate actions
         }
         Action::StoreRemoteSDP => {
-            // Remote SDP is stored when event is received
+            // Remote SDP should already be stored by the event processor
+            // This action just confirms it's there and logs it
+            if let Some(remote_sdp) = &session.remote_sdp {
+                info!("Remote SDP stored for session {} ({} bytes)", session.session_id, remote_sdp.len());
+                // Parse and log the remote RTP port for debugging
+                if let Some(port_match) = remote_sdp.lines()
+                    .find(|line| line.starts_with("m=audio"))
+                    .and_then(|line| line.split_whitespace().nth(1)) {
+                    info!("Remote RTP port: {}", port_match);
+                }
+            } else {
+                warn!("StoreRemoteSDP action called but no remote SDP found for session {}", session.session_id);
+            }
         }
         Action::StoreNegotiatedConfig => {
             // Already handled by negotiate actions
@@ -437,7 +461,29 @@ pub async fn execute_action(
         
         Action::Custom(action_name) => {
             debug!("Custom action '{}' for session {}", action_name, session.session_id);
-            // Custom actions are application-specific
+            // Handle custom SIP actions
+            match action_name.as_str() {
+                "Send180Ringing" => {
+                    info!("Sending 180 Ringing for session {}", session.session_id);
+                    dialog_adapter.send_response_session(&session.session_id, 180, "Ringing").await?;
+                }
+                "Send200OK" => {
+                    info!("Sending 200 OK for session {}", session.session_id);
+                    // For UAS, include SDP in 200 OK
+                    if session.role == crate::state_table::Role::UAS {
+                        if let Some(local_sdp) = &session.local_sdp {
+                            dialog_adapter.send_response_with_sdp(&session.session_id, 200, "OK", local_sdp).await?;
+                        } else {
+                            dialog_adapter.send_response_session(&session.session_id, 200, "OK").await?;
+                        }
+                    } else {
+                        dialog_adapter.send_response_session(&session.session_id, 200, "OK").await?;
+                    }
+                }
+                _ => {
+                    // Other custom actions
+                }
+            }
         }
         
         // Missing actions that need implementation

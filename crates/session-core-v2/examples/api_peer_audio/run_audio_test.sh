@@ -64,7 +64,7 @@ cd "$(dirname "$0")/../.."
 
 # Start Bob (peer2) in the background
 echo -e "${GREEN}▶️  Starting Bob (peer2) on port 5061...${NC}"
-cargo run --example api_peer_audio_peer2 -p rvoip-session-core-v2 > >(tee "$BOB_LOG" | sed 's/^/[BOB] /') 2>&1 &
+RVOIP_STATE_TABLE="$SCRIPT_DIR/peer_audio_states.yaml" cargo run --example api_peer_audio_peer2 -p rvoip-session-core-v2 > >(tee "$BOB_LOG" | sed 's/^/[BOB] /') 2>&1 &
 BOB_PID=$!
 
 # Give Bob time to start listening
@@ -72,7 +72,7 @@ sleep 3
 
 # Start Alice (peer1)
 echo -e "${GREEN}▶️  Starting Alice (peer1) on port 5060...${NC}"
-cargo run --example api_peer_audio_peer1 -p rvoip-session-core-v2 > >(tee "$ALICE_LOG" | sed 's/^/[ALICE] /') 2>&1 &
+RVOIP_STATE_TABLE="$SCRIPT_DIR/peer_audio_states.yaml" cargo run --example api_peer_audio_peer1 -p rvoip-session-core-v2 > >(tee "$ALICE_LOG" | sed 's/^/[ALICE] /') 2>&1 &
 ALICE_PID=$!
 
 # Function to check if process is still running

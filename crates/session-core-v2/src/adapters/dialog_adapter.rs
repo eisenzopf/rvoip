@@ -195,13 +195,13 @@ impl DialogAdapter {
         self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
         self.callid_to_session.insert(call_id.clone(), session_id.clone());
         
-        // Update session store with dialog and call IDs
-        if let Ok(mut session) = self.store.get_session(session_id).await {
-            // Convert RvoipDialogId to our DialogId
-            session.dialog_id = Some(dialog_id.into());
-            session.call_id = Some(call_id);
-            let _ = self.store.update_session(session).await;
-        }
+        // Store the transaction ID for later ACK sending
+        // Note: CallHandle might not expose transaction_id directly
+        // For now, we'll rely on dialog-core to handle ACKs internally
+        tracing::debug!("Dialog {} created for session {} - ACK will be handled by dialog-core", dialog_id, session_id.0);
+        
+        // Don't update session store here - the state machine will handle updating the dialog ID
+        tracing::debug!("Dialog {} created for session {}", dialog_id, session_id.0);
         
         Ok(())
     }
@@ -209,6 +209,16 @@ impl DialogAdapter {
     /// Send 200 OK response
     pub async fn send_200_ok(&self, session_id: &SessionId, sdp: Option<String>) -> Result<()> {
         self.send_response(session_id, 200, sdp).await
+    }
+    
+    /// Send response with SDP
+    pub async fn send_response_with_sdp(&self, session_id: &SessionId, code: u16, reason: &str, sdp: &str) -> Result<()> {
+        self.send_response(session_id, code, Some(sdp.to_string())).await
+    }
+    
+    /// Send response without SDP
+    pub async fn send_response_session(&self, session_id: &SessionId, code: u16, reason: &str) -> Result<()> {
+        self.send_response(session_id, code, None).await
     }
     
     /// Send error response

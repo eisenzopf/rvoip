@@ -352,7 +352,7 @@ impl UnifiedCoordinator {
             .map_err(|e| SessionError::InternalError(format!("Failed to initialize transport: {}", e)))?;
         
         // Create transaction manager using transport manager
-        let (transaction_manager, _event_rx) = TransactionManager::with_transport_manager(
+        let (transaction_manager, event_rx) = TransactionManager::with_transport_manager(
             transport_manager,
             transport_event_rx,
             None, // No max transactions limit
@@ -367,11 +367,12 @@ impl UnifiedCoordinator {
             .with_from_uri(&config.local_uri)
             .build();
         
-        // Create dialog API with global event coordination
+        // Create dialog API with global event coordination AND transaction events
         let dialog_api = Arc::new(
-            UnifiedDialogApi::new_with_event_coordinator(
+            UnifiedDialogApi::with_global_events_and_coordinator(
                 transaction_manager, 
-            dialog_config,
+                event_rx,
+                dialog_config,
                 global_coordinator.clone()
             )
             .await
