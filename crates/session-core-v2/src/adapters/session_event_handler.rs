@@ -18,6 +18,7 @@ use infra_common::events::cross_crate::{
     SessionToDialogEvent, SessionToMediaEvent,
 };
 use crate::state_table::types::{SessionId, EventType};
+use std::str::FromStr;
 use crate::state_machine::StateMachine as StateMachineExecutor;
 use crate::errors::{SessionError, Result as SessionResult};
 use crate::adapters::{DialogAdapter, MediaAdapter};
@@ -214,6 +215,27 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                 
                 // Parse the event to extract the session ID and event type
                 if let Some(session_id) = self.extract_session_id(&event_str) {
+                    // Handle CallEstablished event specially to extract and store SDP
+                    if event_str.contains("CallEstablished") {
+                        // Extract SDP answer from the event
+                        if let Some(sdp_start) = event_str.find("sdp_answer: Some(\"") {
+                            let sdp_content_start = sdp_start + 18;
+                            if let Some(sdp_end) = event_str[sdp_content_start..].find("\")") {
+                                let sdp = event_str[sdp_content_start..sdp_content_start + sdp_end]
+                                    .replace("\\r\\n", "\r\n")
+                                    .replace("\\n", "\n");
+                                
+                                // Store the SDP in the session
+                                let session_id_obj = SessionId(session_id.clone());
+                                if let Ok(mut session) = self.state_machine.store.get_session(&session_id_obj).await {
+                                    session.remote_sdp = Some(sdp);
+                                    let _ = self.state_machine.store.update_session(session).await;
+                                    info!("Stored remote SDP from CallEstablished for session {}", session_id);
+                                }
+                            }
+                        }
+                    }
+                    
                     if let Some(event_type) = self.convert_dialog_event(&event_str) {
                         debug!("Converted dialog event to state machine event: {:?}", event_type);
                         

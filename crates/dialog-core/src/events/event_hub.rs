@@ -13,6 +13,8 @@ use infra_common::events::cross_crate::{
     CrossCrateEvent, RvoipCrossCrateEvent, DialogToSessionEvent, SessionToDialogEvent,
     DialogToTransportEvent, TransportToDialogEvent, CallState, TerminationReason
 };
+use rvoip_sip_core::{StatusCode, Request};
+use crate::transaction::TransactionKey;
 
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::dialog::{DialogId, DialogState};
@@ -202,6 +204,98 @@ impl DialogEventHub {
                     ))
                 } else {
                     None
+                }
+            }
+            
+            SessionCoordinationEvent::ResponseReceived { dialog_id, response, .. } => {
+                // Try to get session ID from stored mapping first
+                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
+                    // Handle specific response codes
+                    match response.status_code() {
+                        200 => {
+                            // 200 OK - call established
+                            let sdp_answer = if !response.body().is_empty() {
+                                String::from_utf8(response.body().to_vec()).ok()
+                            } else {
+                                None
+                            };
+                            
+                            Some(RvoipCrossCrateEvent::DialogToSession(
+                                DialogToSessionEvent::CallEstablished {
+                                    session_id,
+                                    sdp_answer,
+                                }
+                            ))
+                        }
+                        180 => {
+                            // 180 Ringing
+                            Some(RvoipCrossCrateEvent::DialogToSession(
+                                DialogToSessionEvent::CallStateChanged {
+                                    session_id,
+                                    new_state: CallState::Ringing,
+                                    reason: None,
+                                }
+                            ))
+                        }
+                        _ => None, // Other response codes not mapped for now
+                    }
+                } else {
+                    // For outgoing calls, try to extract session ID from Call-ID
+                    if let Ok(dialog) = self.dialog_manager.get_dialog(&dialog_id) {
+                        let call_id = &dialog.call_id;
+                        
+                        // Check if this is a session-core generated Call-ID
+                        if call_id.contains("@session-core") {
+                            // Extract session ID from Call-ID (format: "session-id@session-core")
+                            if let Some(session_id) = call_id.split('@').next() {
+                                // Store the mapping for future use
+                                self.dialog_manager.store_dialog_mapping(
+                                    session_id,
+                                    dialog_id.clone(),
+                                    TransactionKey::new("dummy".to_string(), rvoip_sip_core::Method::Invite, false), // Dummy transaction key
+                                    Request::new(rvoip_sip_core::Method::Invite, "sip:dummy@dummy".parse().unwrap()), // Dummy request
+                                    "0.0.0.0:0".parse().unwrap(),
+                                );
+                                
+                                // Now handle the response
+                                match response.status_code() {
+                                    200 => {
+                                        let sdp_answer = if !response.body().is_empty() {
+                                            String::from_utf8(response.body().to_vec()).ok()
+                                        } else {
+                                            None
+                                        };
+                                        
+                                        Some(RvoipCrossCrateEvent::DialogToSession(
+                                            DialogToSessionEvent::CallEstablished {
+                                                session_id: session_id.to_string(),
+                                                sdp_answer,
+                                            }
+                                        ))
+                                    }
+                                    180 => {
+                                        Some(RvoipCrossCrateEvent::DialogToSession(
+                                            DialogToSessionEvent::CallStateChanged {
+                                                session_id: session_id.to_string(),
+                                                new_state: CallState::Ringing,
+                                                reason: None,
+                                            }
+                                        ))
+                                    }
+                                    _ => None,
+                                }
+                            } else {
+                                warn!("Failed to extract session ID from Call-ID: {}", call_id);
+                                None
+                            }
+                        } else {
+                            warn!("No session ID found for dialog {:?} and Call-ID doesn't match session-core format", dialog_id);
+                            None
+                        }
+                    } else {
+                        warn!("No session ID found for dialog {:?} and couldn't retrieve dialog", dialog_id);
+                        None
+                    }
                 }
             }
             
