@@ -112,6 +112,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("[ALICE] Received {} total audio samples", received_samples.len());
     
+    // Continue receiving for 2 more seconds to catch any remaining packets
+    println!("[ALICE] Waiting for any remaining packets...");
+    let extra_receive_start = std::time::Instant::now();
+    let extra_timeout = Duration::from_secs(2);
+    
+    while extra_receive_start.elapsed() < extra_timeout {
+        match tokio::time::timeout(Duration::from_millis(100), audio_rx.recv()).await {
+            Ok(Some(frame)) => {
+                received_samples.extend_from_slice(&frame.samples);
+                if received_samples.len() % 8000 == 0 {
+                    println!("[ALICE] Received {} more samples...", received_samples.len());
+                }
+            }
+            Ok(None) => break, // Channel closed
+            Err(_) => continue, // Timeout, keep waiting
+        }
+    }
+    
+    println!("[ALICE] Final total: {} audio samples", received_samples.len());
+    
     // Save audio files if recording is enabled
     if std::env::var("RECORD_AUDIO").is_ok() {
         save_audio_files("alice", &sent_samples, &received_samples)?;

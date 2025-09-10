@@ -14,15 +14,18 @@ BLUE='\033[0;34m'
 YELLOW='\033[0;33m'
 NC='\033[0m' # No Color
 
+# Set recording as default
+export RECORD_AUDIO=1
+RECORD_MODE=1
+
 # Parse arguments
 DEBUG_MODE=0
-RECORD_MODE=0
 for arg in "$@"; do
     case $arg in
-        --record)
-            export RECORD_AUDIO=1
-            RECORD_MODE=1
-            echo -e "${BLUE}📼 Recording enabled - Audio files will be saved${NC}"
+        --no-record)
+            unset RECORD_AUDIO
+            RECORD_MODE=0
+            echo -e "${YELLOW}📼 Recording disabled${NC}"
             ;;
         --debug)
             export RUST_LOG=rvoip_session_core_v2=info
@@ -35,14 +38,19 @@ for arg in "$@"; do
             echo -e "${YELLOW}🔍 Trace logging enabled${NC}"
             ;;
         --help)
-            echo "Usage: $0 [--record] [--debug|--trace]"
-            echo "  --record  Save audio to files"
-            echo "  --debug   Enable info-level logging"
-            echo "  --trace   Enable debug-level logging"
+            echo "Usage: $0 [--no-record] [--debug|--trace]"
+            echo "  --no-record  Disable audio recording (enabled by default)"
+            echo "  --debug      Enable info-level logging"
+            echo "  --trace      Enable debug-level logging"
             exit 0
             ;;
     esac
 done
+
+# Show recording status
+if [ $RECORD_MODE -eq 1 ]; then
+    echo -e "${BLUE}📼 Recording enabled - Audio files will be saved to output/${NC}"
+fi
 
 # Create log directory (in the examples/api_peer_audio directory)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
