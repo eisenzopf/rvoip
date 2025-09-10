@@ -213,28 +213,86 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
             "dialog_to_session" => {
                 info!("Processing dialog-to-session event: {}", event_str);
                 
-                // Parse the event to extract the session ID and event type
-                if let Some(session_id) = self.extract_session_id(&event_str) {
-                    // Handle CallEstablished event specially to extract and store SDP
-                    if event_str.contains("CallEstablished") {
-                        // Extract SDP answer from the event
-                        if let Some(sdp_start) = event_str.find("sdp_answer: Some(\"") {
-                            let sdp_content_start = sdp_start + 18;
-                            if let Some(sdp_end) = event_str[sdp_content_start..].find("\")") {
-                                let sdp = event_str[sdp_content_start..sdp_content_start + sdp_end]
-                                    .replace("\\r\\n", "\r\n")
-                                    .replace("\\n", "\n");
-                                
-                                // Store the SDP in the session
-                                let session_id_obj = SessionId(session_id.clone());
-                                if let Ok(mut session) = self.state_machine.store.get_session(&session_id_obj).await {
-                                    session.remote_sdp = Some(sdp);
-                                    let _ = self.state_machine.store.update_session(session).await;
-                                    info!("Stored remote SDP from CallEstablished for session {}", session_id);
+                // Handle DialogCreated event specially
+                if event_str.contains("DialogCreated") {
+                    // Extract dialog_id and call_id
+                    if let Some(dialog_id_start) = event_str.find("dialog_id: \"") {
+                        let dialog_id_content_start = dialog_id_start + 12;
+                        if let Some(dialog_id_end) = event_str[dialog_id_content_start..].find("\"") {
+                            let dialog_id = event_str[dialog_id_content_start..dialog_id_content_start + dialog_id_end].to_string();
+                            
+                            if let Some(call_id_start) = event_str.find("call_id: \"") {
+                                let call_id_content_start = call_id_start + 10;
+                                if let Some(call_id_end) = event_str[call_id_content_start..].find("\"") {
+                                    let call_id = event_str[call_id_content_start..call_id_content_start + call_id_end].to_string();
+                                    
+                                    // Check if this is our call (session-core generated Call-ID)
+                                    if call_id.contains("@session-core") {
+                                        if let Some(session_id) = call_id.split('@').next() {
+                                            info!("Received DialogCreated for our session: {} -> dialog {}", session_id, dialog_id);
+                                            
+                                            // Store the mapping in our dialog adapter
+                                            let session_id_obj = SessionId(session_id.to_string());
+                                            if let Ok(uuid) = dialog_id.parse::<uuid::Uuid>() {
+                                                let parsed_dialog_id = rvoip_dialog_core::dialog::DialogId(uuid);
+                                                self.dialog_adapter.session_to_dialog.insert(session_id_obj.clone(), parsed_dialog_id.clone());
+                                                self.dialog_adapter.dialog_to_session.insert(parsed_dialog_id, session_id_obj);
+                                            }
+                                            
+                                            // Publish StoreDialogMapping event back to dialog-core
+                                            let mapping_event = RvoipCrossCrateEvent::SessionToDialog(
+                                                SessionToDialogEvent::StoreDialogMapping {
+                                                    session_id: session_id.to_string(),
+                                                    dialog_id: dialog_id.clone(),
+                                                }
+                                            );
+                                            if let Err(e) = self.global_coordinator.publish(Arc::new(mapping_event)).await {
+                                                error!("Failed to publish StoreDialogMapping event: {}", e);
+                                            } else {
+                                                info!("Published StoreDialogMapping event for session {}", session_id);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
+                    return Ok(()); // DialogCreated doesn't need state machine processing
+                }
+                
+                // Parse the event to extract the session ID and event type
+                if let Some(session_id) = self.extract_session_id(&event_str) {
+                // Handle CallEstablished event specially to extract and store SDP
+                if event_str.contains("CallEstablished") {
+                    // Extract SDP answer from the event
+                    if let Some(sdp_start) = event_str.find("sdp_answer: Some(\"") {
+                        let sdp_content_start = sdp_start + 18;
+                        if let Some(sdp_end) = event_str[sdp_content_start..].find("\")") {
+                            let sdp = event_str[sdp_content_start..sdp_content_start + sdp_end]
+                                .replace("\\r\\n", "\r\n")
+                                .replace("\\n", "\n");
+                            
+                            // Store the SDP in the session
+                            let session_id_obj = SessionId(session_id.clone());
+                            if let Ok(mut session) = self.state_machine.store.get_session(&session_id_obj).await {
+                                session.remote_sdp = Some(sdp);
+                                let _ = self.state_machine.store.update_session(session).await;
+                                info!("Stored remote SDP from CallEstablished for session {}", session_id);
+                                
+                                // Now trigger Dialog200OK event since we have the SDP stored
+                                if let Err(e) = self.state_machine.process_event(
+                                    &session_id_obj,
+                                    EventType::Dialog200OK
+                                ).await {
+                                    error!("Failed to process Dialog200OK after storing SDP: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Don't process CallEstablished as a regular event
+                    return Ok(());
+                }
                     
                     if let Some(event_type) = self.convert_dialog_event(&event_str) {
                         debug!("Converted dialog event to state machine event: {:?}", event_type);
@@ -543,12 +601,14 @@ impl SessionCrossCrateEventHandler {
             
             Some(EventType::IncomingCall { from, sdp: None })
         } else if event_str.contains("CallEstablished") {
-            Some(EventType::Dialog200OK)
+            // CallEstablished is handled specially above, should not reach here
+            None
         } else if event_str.contains("CallStateChanged") {
             if event_str.contains("Ringing") {
                 Some(EventType::Dialog180Ringing)
             } else if event_str.contains("Active") {
-                Some(EventType::Dialog200OK)
+                // Don't trigger Dialog200OK here - it will be triggered by CallEstablished
+                None
             } else if event_str.contains("Terminated") {
                 Some(EventType::DialogBYE)
             } else {
