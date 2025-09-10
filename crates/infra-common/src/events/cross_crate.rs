@@ -133,6 +133,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 SessionToDialogEvent::ResumeSession { session_id, .. } => Some(session_id),
                 SessionToDialogEvent::TransferCall { session_id, .. } => Some(session_id),
                 SessionToDialogEvent::SendDtmf { session_id, .. } => Some(session_id),
+                SessionToDialogEvent::StoreDialogMapping { session_id, .. } => Some(session_id),
             },
             RvoipCrossCrateEvent::DialogToSession(event) => match event {
                 DialogToSessionEvent::IncomingCall { session_id, .. } => Some(session_id),
@@ -141,6 +142,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::CallTerminated { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DtmfReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogError { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::DialogCreated { .. } => None, // No session_id in DialogCreated
             },
             RvoipCrossCrateEvent::SessionToMedia(event) => match event {
                 SessionToMediaEvent::StartMediaStream { session_id, .. } => Some(session_id),
@@ -226,6 +228,12 @@ pub enum SessionToDialogEvent {
         session_id: String,
         tones: String,
     },
+    
+    /// Store dialog mapping (response to DialogCreated)
+    StoreDialogMapping {
+        session_id: String,
+        dialog_id: String,
+    },
 }
 
 /// Events sent from dialog-core to session-core
@@ -271,6 +279,12 @@ pub enum DialogToSessionEvent {
         session_id: String,
         error: String,
         error_code: Option<u32>,
+    },
+    
+    /// Dialog created (for session-core to track)
+    DialogCreated {
+        dialog_id: String,
+        call_id: String,
     },
 }
 

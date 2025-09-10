@@ -136,7 +136,7 @@ impl DialogStore for DialogManager {
         
         // Create outgoing dialog (UAC perspective)
         let dialog = Dialog::new_early(
-            call_id,
+            call_id.clone(),  // Clone call_id for later use
             local_uri,  // local_uri (we are the UAC)
             remote_uri, // remote_uri (they are the UAS)
             None,       // local_tag (will be generated when we send request)
@@ -146,6 +146,21 @@ impl DialogStore for DialogManager {
         
         let dialog_id = dialog.id.clone();
         self.store_dialog(dialog).await?;
+        
+        // Publish DialogCreated event for session-core to track
+        if let Some(hub) = self.event_hub.read().await.as_ref() {
+            let event = infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
+                infra_common::events::cross_crate::DialogToSessionEvent::DialogCreated {
+                    dialog_id: dialog_id.to_string(),
+                    call_id: call_id.clone(),
+                }
+            );
+            if let Err(e) = hub.publish_cross_crate_event(event).await {
+                warn!("Failed to publish DialogCreated event: {}", e);
+            } else {
+                info!("Published DialogCreated event for dialog {} with call-id {}", dialog_id, call_id);
+            }
+        }
         
         debug!("Created UAC dialog {} for outgoing request", dialog_id);
         Ok(dialog_id)

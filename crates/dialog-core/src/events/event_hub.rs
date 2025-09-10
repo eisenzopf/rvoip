@@ -96,6 +96,13 @@ impl DialogEventHub {
         Ok(())
     }
     
+    /// Publish a cross-crate event directly
+    pub async fn publish_cross_crate_event(&self, event: RvoipCrossCrateEvent) -> Result<()> {
+        debug!("Publishing cross-crate event directly: {:?}", event);
+        self.global_coordinator.publish(Arc::new(event)).await?;
+        Ok(())
+    }
+    
     /// Convert DialogEvent to cross-crate event
     fn convert_dialog_to_cross_crate(&self, event: DialogEvent) -> Option<RvoipCrossCrateEvent> {
         match event {
@@ -240,62 +247,8 @@ impl DialogEventHub {
                         _ => None, // Other response codes not mapped for now
                     }
                 } else {
-                    // For outgoing calls, try to extract session ID from Call-ID
-                    if let Ok(dialog) = self.dialog_manager.get_dialog(&dialog_id) {
-                        let call_id = &dialog.call_id;
-                        
-                        // Check if this is a session-core generated Call-ID
-                        if call_id.contains("@session-core") {
-                            // Extract session ID from Call-ID (format: "session-id@session-core")
-                            if let Some(session_id) = call_id.split('@').next() {
-                                // Store the mapping for future use
-                                self.dialog_manager.store_dialog_mapping(
-                                    session_id,
-                                    dialog_id.clone(),
-                                    TransactionKey::new("dummy".to_string(), rvoip_sip_core::Method::Invite, false), // Dummy transaction key
-                                    Request::new(rvoip_sip_core::Method::Invite, "sip:dummy@dummy".parse().unwrap()), // Dummy request
-                                    "0.0.0.0:0".parse().unwrap(),
-                                );
-                                
-                                // Now handle the response
-                                match response.status_code() {
-                                    200 => {
-                                        let sdp_answer = if !response.body().is_empty() {
-                                            String::from_utf8(response.body().to_vec()).ok()
-                                        } else {
-                                            None
-                                        };
-                                        
-                                        Some(RvoipCrossCrateEvent::DialogToSession(
-                                            DialogToSessionEvent::CallEstablished {
-                                                session_id: session_id.to_string(),
-                                                sdp_answer,
-                                            }
-                                        ))
-                                    }
-                                    180 => {
-                                        Some(RvoipCrossCrateEvent::DialogToSession(
-                                            DialogToSessionEvent::CallStateChanged {
-                                                session_id: session_id.to_string(),
-                                                new_state: CallState::Ringing,
-                                                reason: None,
-                                            }
-                                        ))
-                                    }
-                                    _ => None,
-                                }
-                            } else {
-                                warn!("Failed to extract session ID from Call-ID: {}", call_id);
-                                None
-                            }
-                        } else {
-                            warn!("No session ID found for dialog {:?} and Call-ID doesn't match session-core format", dialog_id);
-                            None
-                        }
-                    } else {
-                        warn!("No session ID found for dialog {:?} and couldn't retrieve dialog", dialog_id);
-                        None
-                    }
+                    warn!("No session ID found for dialog {:?}", dialog_id);
+                    None
                 }
             }
             
@@ -312,21 +265,53 @@ impl CrossCrateEventHandler for DialogEventHub {
     async fn handle(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
         debug!("Handling cross-crate event: {}", event.event_type());
         
-        // Try to downcast to RvoipCrossCrateEvent
-        // Since we can't directly downcast Arc<dyn CrossCrateEvent>, we'll use the event_type
+        // Since we can't directly downcast Arc<dyn CrossCrateEvent>, we'll use the
+        // event_type() to determine what kind of event it is and parse accordingly.
+        // This is a workaround until we have proper downcast support.
+        
+        // Try to extract the event data from the debug representation
+        let event_str = format!("{:?}", event);
+        
         match event.event_type() {
             "session_to_dialog" => {
-                info!("Processing session-to-dialog event");
-                // Handle events from session-core
-                // This is where we would process InitiateCall, TerminateSession, etc.
-                // For now, log that we received it
-                debug!("Received session-to-dialog event");
+                info!("Processing session-to-dialog event: {}", event_str);
+                
+                // Handle StoreDialogMapping event
+                if event_str.contains("StoreDialogMapping") {
+                    // Extract session_id and dialog_id
+                    if let Some(session_id_start) = event_str.find("session_id: \"") {
+                        let session_id_content_start = session_id_start + 13;
+                        if let Some(session_id_end) = event_str[session_id_content_start..].find("\"") {
+                            let session_id = event_str[session_id_content_start..session_id_content_start + session_id_end].to_string();
+                            
+                            if let Some(dialog_id_start) = event_str.find("dialog_id: \"") {
+                                let dialog_id_content_start = dialog_id_start + 12;
+                                if let Some(dialog_id_end) = event_str[dialog_id_content_start..].find("\"") {
+                                    let dialog_id = event_str[dialog_id_content_start..dialog_id_content_start + dialog_id_end].to_string();
+                                    
+                                    info!("Storing dialog mapping: session {} -> dialog {}", session_id, dialog_id);
+                                    
+                                    // Parse dialog ID from UUID string
+                                    if let Ok(uuid) = dialog_id.parse::<uuid::Uuid>() {
+                                        let parsed_dialog_id = DialogId(uuid);
+                                        // Store the bidirectional mapping
+                                        self.dialog_manager.session_to_dialog.insert(session_id.clone(), parsed_dialog_id.clone());
+                                        self.dialog_manager.dialog_to_session.insert(parsed_dialog_id, session_id.clone());
+                                        
+                                        info!("Successfully stored dialog mapping for session {}", session_id);
+                                    } else {
+                                        warn!("Failed to parse dialog ID: {}", dialog_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             
             "transport_to_dialog" => {
                 info!("Processing transport-to-dialog event");
-                // Handle events from transport layer
-                debug!("Received transport-to-dialog event");
+                // Handle transport events if needed
             }
             
             _ => {
