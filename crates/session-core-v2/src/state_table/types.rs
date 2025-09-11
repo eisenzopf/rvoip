@@ -190,6 +190,9 @@ pub enum EventType {
     DialogTimeout,
     DialogTerminated,
     DialogError(String),
+    DialogStateChanged { old_state: String, new_state: String },
+    ReinviteReceived { sdp: Option<String> },
+    TransferRequested { refer_to: String, transfer_type: String },
     
     // Media events (from media-core)
     MediaSessionCreated,
@@ -198,6 +201,10 @@ pub enum EventType {
     MediaFlowEstablished,
     MediaError(String),
     MediaEvent(String), // Generic media events like "rfc_compliant_media_creation_uac"
+    MediaQualityDegraded { packet_loss_percent: u32, jitter_ms: u32, severity: String },
+    DtmfDetected { digit: char, duration_ms: u32 },
+    RtpTimeout { last_packet_time: String },
+    PacketLossThresholdExceeded { loss_percentage: u32 },
     
     // Internal coordination events
     InternalCheckReady,

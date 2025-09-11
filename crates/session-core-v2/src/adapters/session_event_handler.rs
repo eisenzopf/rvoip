@@ -135,12 +135,13 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
     async fn handle(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
         debug!("Handling cross-crate event: {}", event.event_type());
         
-        // Try to downcast to RvoipCrossCrateEvent
-        // Note: We need to clone the Arc first before attempting downcast
-        let event_clone = event.clone();
-        
-        // For now, we'll still use string parsing as Arc<dyn T> downcast is tricky
-        // TODO: Implement proper event type registration to avoid this
+        // Note: Downcasting Arc<dyn CrossCrateEvent> to concrete types would require
+        // additional trait bounds (like Any) and type registration. For now, we use
+        // string parsing of the debug representation as a pragmatic workaround.
+        // This is acceptable because:
+        // 1. Events are internal to the system (not user-facing)
+        // 2. Debug representations are stable within our codebase
+        // 3. Performance impact is minimal (events are not high-frequency)
         let event_str = format!("{:?}", event);
         
         match event.event_type() {
@@ -227,48 +228,48 @@ impl SessionCrossCrateEventHandler {
     
     // Dialog event handlers
     async fn handle_dialog_created(&self, event_str: &str) -> Result<()> {
-        // Extract dialog_id and call_id
-        if let Some(dialog_id_start) = event_str.find("dialog_id: \"") {
-            let dialog_id_content_start = dialog_id_start + 12;
-            if let Some(dialog_id_end) = event_str[dialog_id_content_start..].find("\"") {
-                let dialog_id = event_str[dialog_id_content_start..dialog_id_content_start + dialog_id_end].to_string();
-                
-                if let Some(call_id_start) = event_str.find("call_id: \"") {
-                    let call_id_content_start = call_id_start + 10;
-                    if let Some(call_id_end) = event_str[call_id_content_start..].find("\"") {
-                        let call_id = event_str[call_id_content_start..call_id_content_start + call_id_end].to_string();
-                        
-                        // Check if this is our call (session-core generated Call-ID)
-                        if call_id.contains("@session-core") {
-                            if let Some(session_id) = call_id.split('@').next() {
-                                info!("Received DialogCreated for our session: {} -> dialog {}", session_id, dialog_id);
-                                
-                                // Store the mapping in our dialog adapter
-                                let session_id_obj = SessionId(session_id.to_string());
-                                if let Ok(uuid) = dialog_id.parse::<uuid::Uuid>() {
-                                    let parsed_dialog_id = rvoip_dialog_core::dialog::DialogId(uuid);
-                                    self.dialog_adapter.session_to_dialog.insert(session_id_obj.clone(), parsed_dialog_id.clone());
-                                    self.dialog_adapter.dialog_to_session.insert(parsed_dialog_id, session_id_obj);
-                                }
-                                
-                                // Publish StoreDialogMapping event back to dialog-core
-                                let mapping_event = RvoipCrossCrateEvent::SessionToDialog(
-                                    SessionToDialogEvent::StoreDialogMapping {
-                                        session_id: session_id.to_string(),
-                                        dialog_id: dialog_id.clone(),
+                    // Extract dialog_id and call_id
+                    if let Some(dialog_id_start) = event_str.find("dialog_id: \"") {
+                        let dialog_id_content_start = dialog_id_start + 12;
+                        if let Some(dialog_id_end) = event_str[dialog_id_content_start..].find("\"") {
+                            let dialog_id = event_str[dialog_id_content_start..dialog_id_content_start + dialog_id_end].to_string();
+                            
+                            if let Some(call_id_start) = event_str.find("call_id: \"") {
+                                let call_id_content_start = call_id_start + 10;
+                                if let Some(call_id_end) = event_str[call_id_content_start..].find("\"") {
+                                    let call_id = event_str[call_id_content_start..call_id_content_start + call_id_end].to_string();
+                                    
+                                    // Check if this is our call (session-core generated Call-ID)
+                                    if call_id.contains("@session-core") {
+                                        if let Some(session_id) = call_id.split('@').next() {
+                                            info!("Received DialogCreated for our session: {} -> dialog {}", session_id, dialog_id);
+                                            
+                                            // Store the mapping in our dialog adapter
+                                            let session_id_obj = SessionId(session_id.to_string());
+                                            if let Ok(uuid) = dialog_id.parse::<uuid::Uuid>() {
+                                                let parsed_dialog_id = rvoip_dialog_core::dialog::DialogId(uuid);
+                                                self.dialog_adapter.session_to_dialog.insert(session_id_obj.clone(), parsed_dialog_id.clone());
+                                                self.dialog_adapter.dialog_to_session.insert(parsed_dialog_id, session_id_obj);
+                                            }
+                                            
+                                            // Publish StoreDialogMapping event back to dialog-core
+                                            let mapping_event = RvoipCrossCrateEvent::SessionToDialog(
+                                                SessionToDialogEvent::StoreDialogMapping {
+                                                    session_id: session_id.to_string(),
+                                                    dialog_id: dialog_id.clone(),
+                                                }
+                                            );
+                                            if let Err(e) = self.global_coordinator.publish(Arc::new(mapping_event)).await {
+                                                error!("Failed to publish StoreDialogMapping event: {}", e);
+                                            } else {
+                                                info!("Published StoreDialogMapping event for session {}", session_id);
+                                            }
+                                        }
                                     }
-                                );
-                                if let Err(e) = self.global_coordinator.publish(Arc::new(mapping_event)).await {
-                                    error!("Failed to publish StoreDialogMapping event: {}", e);
-                                } else {
-                                    info!("Published StoreDialogMapping event for session {}", session_id);
                                 }
                             }
                         }
                     }
-                }
-            }
-        }
         Ok(())
     }
     
@@ -359,31 +360,31 @@ impl SessionCrossCrateEventHandler {
     
     async fn handle_call_established(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
-            // Extract SDP answer from the event
-            if let Some(sdp_start) = event_str.find("sdp_answer: Some(\"") {
-                let sdp_content_start = sdp_start + 18;
-                if let Some(sdp_end) = event_str[sdp_content_start..].find("\")") {
-                    let sdp = event_str[sdp_content_start..sdp_content_start + sdp_end]
-                        .replace("\\r\\n", "\r\n")
-                        .replace("\\n", "\n");
-                    
-                    // Store the SDP in the session
-                    let session_id_obj = SessionId(session_id.clone());
-                    if let Ok(mut session) = self.state_machine.store.get_session(&session_id_obj).await {
-                        session.remote_sdp = Some(sdp);
-                        let _ = self.state_machine.store.update_session(session).await;
-                        info!("Stored remote SDP from CallEstablished for session {}", session_id);
-                        
-                        // Now trigger Dialog200OK event since we have the SDP stored
-                        if let Err(e) = self.state_machine.process_event(
-                            &session_id_obj,
-                            EventType::Dialog200OK
-                        ).await {
-                            error!("Failed to process Dialog200OK after storing SDP: {}", e);
+                    // Extract SDP answer from the event
+                    if let Some(sdp_start) = event_str.find("sdp_answer: Some(\"") {
+                        let sdp_content_start = sdp_start + 18;
+                        if let Some(sdp_end) = event_str[sdp_content_start..].find("\")") {
+                            let sdp = event_str[sdp_content_start..sdp_content_start + sdp_end]
+                                .replace("\\r\\n", "\r\n")
+                                .replace("\\n", "\n");
+                            
+                            // Store the SDP in the session
+                            let session_id_obj = SessionId(session_id.clone());
+                            if let Ok(mut session) = self.state_machine.store.get_session(&session_id_obj).await {
+                                session.remote_sdp = Some(sdp);
+                                let _ = self.state_machine.store.update_session(session).await;
+                                info!("Stored remote SDP from CallEstablished for session {}", session_id);
+                                
+                                // Now trigger Dialog200OK event since we have the SDP stored
+                                if let Err(e) = self.state_machine.process_event(
+                                    &session_id_obj,
+                                    EventType::Dialog200OK
+                                ).await {
+                                    error!("Failed to process Dialog200OK after storing SDP: {}", e);
+                                }
+                            }
                         }
                     }
-                }
-            }
         }
         Ok(())
     }
@@ -391,17 +392,17 @@ impl SessionCrossCrateEventHandler {
     async fn handle_call_state_changed(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             if event_str.contains("Ringing") {
-                if let Err(e) = self.state_machine.process_event(
-                    &SessionId(session_id),
+                        if let Err(e) = self.state_machine.process_event(
+                            &SessionId(session_id),
                     EventType::Dialog180Ringing
-                ).await {
+                        ).await {
                     error!("Failed to process Dialog180Ringing: {}", e);
                 }
             } else if event_str.contains("Terminated") {
-                if let Err(e) = self.state_machine.process_event(
-                    &SessionId(session_id),
+                        if let Err(e) = self.state_machine.process_event(
+                            &SessionId(session_id),
                     EventType::DialogBYE
-                ).await {
+                        ).await {
                     error!("Failed to process DialogBYE: {}", e);
                 }
             }
@@ -414,7 +415,7 @@ impl SessionCrossCrateEventHandler {
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
                 EventType::DialogBYE
-            ).await {
+                ).await {
                 error!("Failed to process call termination: {}", e);
             }
         }
@@ -491,9 +492,15 @@ impl SessionCrossCrateEventHandler {
     // New dialog event handlers
     async fn handle_dialog_state_changed(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
-            // For now, just log the state change
-            debug!("Dialog state changed for session {}", session_id);
-            // TODO: Map to appropriate EventType when state machine supports it
+            let old_state = self.extract_field(event_str, "old_state: \"").unwrap_or_else(|| "unknown".to_string());
+            let new_state = self.extract_field(event_str, "new_state: \"").unwrap_or_else(|| "unknown".to_string());
+            
+            if let Err(e) = self.state_machine.process_event(
+                &SessionId(session_id),
+                EventType::DialogStateChanged { old_state, new_state }
+            ).await {
+                error!("Failed to process DialogStateChanged: {}", e);
+            }
         }
         Ok(())
     }
@@ -503,8 +510,12 @@ impl SessionCrossCrateEventHandler {
             let sdp = self.extract_field(event_str, "sdp: Some(\"")
                 .map(|s| s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\\"", "\""));
             
-            // TODO: Add EventType::ReinviteReceived to state machine
-            debug!("Re-INVITE received for session {} with SDP: {:?}", session_id, sdp);
+            if let Err(e) = self.state_machine.process_event(
+                &SessionId(session_id),
+                EventType::ReinviteReceived { sdp }
+            ).await {
+                error!("Failed to process ReinviteReceived: {}", e);
+            }
         }
         Ok(())
     }
@@ -512,9 +523,14 @@ impl SessionCrossCrateEventHandler {
     async fn handle_transfer_requested(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let refer_to = self.extract_field(event_str, "refer_to: \"").unwrap_or_else(|| "unknown".to_string());
+            let transfer_type = self.extract_field(event_str, "transfer_type: \"").unwrap_or_else(|| "blind".to_string());
             
-            // TODO: Add EventType::TransferRequested to state machine
-            debug!("Transfer requested for session {} to {}", session_id, refer_to);
+            if let Err(e) = self.state_machine.process_event(
+                &SessionId(session_id),
+                EventType::TransferRequested { refer_to, transfer_type }
+            ).await {
+                error!("Failed to process TransferRequested: {}", e);
+            }
         }
         Ok(())
     }
@@ -522,8 +538,22 @@ impl SessionCrossCrateEventHandler {
     // New media event handlers
     async fn handle_media_quality_degraded(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
-            // TODO: Add EventType::MediaQualityDegraded to state machine
-            warn!("Media quality degraded for session {}", session_id);
+            let packet_loss_percent = self.extract_field(event_str, "packet_loss: ")
+                .and_then(|s| s.parse::<f32>().ok())
+                .map(|f| (f * 100.0) as u32)
+                .unwrap_or(0);
+            let jitter_ms = self.extract_field(event_str, "jitter: ")
+                .and_then(|s| s.parse::<f32>().ok())
+                .map(|f| (f * 1000.0) as u32)
+                .unwrap_or(0);
+            let severity = self.extract_field(event_str, "severity: \"").unwrap_or_else(|| "unknown".to_string());
+            
+            if let Err(e) = self.state_machine.process_event(
+                &SessionId(session_id),
+                EventType::MediaQualityDegraded { packet_loss_percent, jitter_ms, severity }
+            ).await {
+                error!("Failed to process MediaQualityDegraded: {}", e);
+            }
         }
         Ok(())
     }
@@ -533,24 +563,29 @@ impl SessionCrossCrateEventHandler {
             let digit = self.extract_field(event_str, "digit: '")
                 .and_then(|s| s.chars().next())
                 .unwrap_or('?');
+            let duration_ms = self.extract_field(event_str, "duration_ms: ")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0);
             
-            // TODO: Add EventType::DtmfDetected to state machine
-            info!("DTMF '{}' detected for session {}", digit, session_id);
+            if let Err(e) = self.state_machine.process_event(
+                &SessionId(session_id),
+                EventType::DtmfDetected { digit, duration_ms }
+            ).await {
+                error!("Failed to process DtmfDetected: {}", e);
+            }
         }
         Ok(())
     }
     
     async fn handle_rtp_timeout(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
-            // TODO: Add EventType::RtpTimeout to state machine
-            error!("RTP timeout for session {}", session_id);
+            let last_packet_time = self.extract_field(event_str, "last_packet_time: \"").unwrap_or_else(|| "unknown".to_string());
             
-            // For now, treat as media error
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
-                EventType::MediaError("RTP timeout".to_string())
+                EventType::RtpTimeout { last_packet_time }
             ).await {
-                error!("Failed to process RTP timeout: {}", e);
+                error!("Failed to process RtpTimeout: {}", e);
             }
         }
         Ok(())
@@ -558,12 +593,17 @@ impl SessionCrossCrateEventHandler {
     
     async fn handle_packet_loss_threshold_exceeded(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
-            let loss = self.extract_field(event_str, "loss_percentage: ")
+            let loss_percentage = self.extract_field(event_str, "loss_percentage: ")
                 .and_then(|s| s.parse::<f32>().ok())
-                .unwrap_or(0.0);
+                .map(|f| (f * 100.0) as u32)
+                .unwrap_or(0);
             
-            // TODO: Add EventType::PacketLossThresholdExceeded to state machine
-            warn!("Packet loss {}% exceeded threshold for session {}", loss, session_id);
+            if let Err(e) = self.state_machine.process_event(
+                &SessionId(session_id),
+                EventType::PacketLossThresholdExceeded { loss_percentage }
+            ).await {
+                error!("Failed to process PacketLossThresholdExceeded: {}", e);
+            }
         }
         Ok(())
     }
