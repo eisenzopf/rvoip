@@ -18,6 +18,9 @@ use crate::planes::{PlaneRouter, PlaneType, PlaneConfig, LayerTaskManager};
 
 use crate::events::cross_crate::{CrossCrateEvent, EventTypeId};
 
+use super::config::{EventCoordinatorConfig, DeploymentConfig};
+use super::transport::NetworkTransport;
+
 /// Global singleton instance for monolithic deployments
 static GLOBAL_COORDINATOR: OnceCell<Arc<GlobalEventCoordinator>> = OnceCell::const_new();
 
@@ -44,8 +47,12 @@ pub async fn global_coordinator() -> &'static Arc<GlobalEventCoordinator> {
     GLOBAL_COORDINATOR.get_or_init(|| async {
         info!("Initializing global event coordinator singleton for monolithic deployment");
         
+        // Try to load config from environment
+        let config = EventCoordinatorConfig::from_env()
+            .unwrap_or_else(|_| EventCoordinatorConfig::monolithic());
+        
         Arc::new(
-            GlobalEventCoordinator::monolithic()
+            GlobalEventCoordinator::new(config)
                 .await
                 .expect("Failed to initialize global event coordinator")
         )
@@ -54,11 +61,14 @@ pub async fn global_coordinator() -> &'static Arc<GlobalEventCoordinator> {
 
 /// Global event coordinator supporting both monolithic and distributed modes
 pub struct GlobalEventCoordinator {
-    /// Deployment mode
-    deployment_mode: DeploymentMode,
+    /// Configuration
+    config: EventCoordinatorConfig,
     
     /// Core event bus (StaticFastPath for monolithic, network-aware for distributed)
     event_bus: Arc<dyn EventBusAdapter>,
+    
+    /// Network transport for distributed mode (None for monolithic)
+    network_transport: Option<Arc<dyn NetworkTransport>>,
     
     /// Plane-aware event routing
     plane_router: Arc<PlaneRouter>,
@@ -174,12 +184,26 @@ impl CrossCrateEventHandler for ChannelForwarder {
 }
 
 impl GlobalEventCoordinator {
+    /// Create a new coordinator with the given configuration
+    pub async fn new(config: EventCoordinatorConfig) -> Result<Self> {
+        match &config.deployment {
+            DeploymentConfig::Monolithic => Self::new_monolithic(config).await,
+            DeploymentConfig::Distributed { .. } => Self::new_distributed(config).await,
+        }
+    }
+    
     /// Create coordinator for monolithic deployment (single process)
     /// 
     /// **Note**: For most monolithic applications, use `global_coordinator()` instead
     /// to get the singleton instance. Only create a new instance if you need
     /// isolated event handling (e.g., for testing or special use cases).
+    #[deprecated(note = "Use global_coordinator() for singleton access or GlobalEventCoordinator::new() with config")]
     pub async fn monolithic() -> Result<Self> {
+        Self::new(EventCoordinatorConfig::monolithic()).await
+    }
+    
+    /// Create a monolithic coordinator
+    async fn new_monolithic(config: EventCoordinatorConfig) -> Result<Self> {
         let event_bus = Arc::new(EventSystem::new_static_fast_path(10000));
         let task_manager = Arc::new(LayerTaskManager::new("global"));
         
@@ -190,8 +214,9 @@ impl GlobalEventCoordinator {
         });
         
         Ok(Self {
-            deployment_mode: DeploymentMode::Monolithic,
+            config,
             event_bus: monolithic_adapter,
+            network_transport: None,
             plane_router: Arc::new(PlaneRouter::new(PlaneConfig::Local)),
             task_manager,
             event_registry: Arc::new(EventTypeRegistry::new()),
@@ -200,9 +225,40 @@ impl GlobalEventCoordinator {
         })
     }
     
+    /// Create a distributed coordinator (stub)
+    async fn new_distributed(config: EventCoordinatorConfig) -> Result<Self> {
+        error!("Distributed mode not yet implemented");
+        
+        // Extract transport and discovery config
+        let (transport_config, discovery_config) = match &config.deployment {
+            DeploymentConfig::Distributed { transport, discovery } => (transport, discovery),
+            _ => unreachable!("new_distributed called with non-distributed config"),
+        };
+        
+        // Log what would be configured
+        info!(
+            "Would create distributed coordinator with transport: {:?}, discovery: {:?}",
+            transport_config, discovery_config
+        );
+        
+        // For now, return an error
+        Err(anyhow::anyhow!(
+            "Distributed mode is not yet implemented. \
+            Please use monolithic mode or wait for distributed support. \
+            Attempted config: transport={:?}, discovery={:?}",
+            transport_config,
+            discovery_config
+        ))
+    }
+    
     /// Get the deployment mode
-    pub fn deployment_mode(&self) -> &DeploymentMode {
-        &self.deployment_mode
+    pub fn deployment_mode(&self) -> &DeploymentConfig {
+        &self.config.deployment
+    }
+    
+    /// Get the service name
+    pub fn service_name(&self) -> &str {
+        &self.config.service_name
     }
     
     /// Register an event handler for a specific event type
@@ -224,6 +280,15 @@ impl GlobalEventCoordinator {
     /// Publish an event through the global coordinator
     pub async fn publish(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
         let event_type = event.event_type();
+        
+        // For distributed mode, check if we need network transport
+        if let DeploymentConfig::Distributed { .. } = &self.config.deployment {
+            if let Some(transport) = &self.network_transport {
+                // TODO: Determine target service from event metadata
+                warn!("Distributed event publishing not yet implemented for event: {}", event_type);
+                return Err(anyhow::anyhow!("Distributed event publishing not yet implemented"));
+            }
+        }
         
         debug!("Publishing event type: {}", event_type);
         
@@ -303,7 +368,8 @@ impl GlobalEventCoordinator {
         let task_stats = self.task_manager.stats().await;
         
         EventCoordinatorStats {
-            deployment_mode: self.deployment_mode.clone(),
+            deployment_config: self.config.deployment.clone(),
+            service_name: self.config.service_name.clone(),
             registered_handlers: handler_count,
             active_subscriptions: subscription_count,
             active_tasks: task_stats.active_tasks,
@@ -417,7 +483,8 @@ struct EventSubscription {
 /// Statistics about the event coordinator
 #[derive(Debug, Clone)]
 pub struct EventCoordinatorStats {
-    pub deployment_mode: DeploymentMode,
+    pub deployment_config: DeploymentConfig,
+    pub service_name: String,
     pub registered_handlers: usize,
     pub active_subscriptions: usize,
     pub active_tasks: usize,
@@ -436,7 +503,7 @@ mod tests {
     
     #[tokio::test]
     async fn test_monolithic_coordinator_creation() {
-        let coordinator = GlobalEventCoordinator::monolithic().await.unwrap();
+        let coordinator = rvoip_infra_common::events::global_coordinator().await;
         
         assert!(matches!(coordinator.deployment_mode(), DeploymentMode::Monolithic));
         

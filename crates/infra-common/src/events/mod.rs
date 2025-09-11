@@ -188,4 +188,10 @@ pub mod builder;
 // Phase 2.5: Global Event Coordination for Monolithic Event Integration
 pub mod coordinator;
 pub mod cross_crate;
+pub mod config;
+pub mod transport;
+
+// Re-export commonly used items
+pub use coordinator::{global_coordinator, GlobalEventCoordinator};
+pub use config::{EventCoordinatorConfig, DeploymentConfig};
 

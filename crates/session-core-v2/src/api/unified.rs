@@ -74,7 +74,7 @@ impl UnifiedCoordinator {
     /// Create a new coordinator
     pub async fn new(config: Config) -> Result<Arc<Self>> {
         // Get the global event coordinator singleton
-        let global_coordinator = rvoip_infra_common::events::coordinator::global_coordinator()
+        let global_coordinator = rvoip_infra_common::events::global_coordinator()
             .await
             .clone();
         

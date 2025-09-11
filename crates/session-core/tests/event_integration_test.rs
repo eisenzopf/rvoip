@@ -24,7 +24,7 @@ async fn test_monolithic_event_integration() {
     // Step 1: Create global event coordinator
     info!("Creating global event coordinator...");
     let coordinator = Arc::new(
-        GlobalEventCoordinator::monolithic()
+        rvoip_infra_common::events::global_coordinator()
             .await
             .expect("Failed to create global event coordinator")
     );
@@ -155,9 +155,9 @@ async fn test_thread_count_comparison() {
     
     // New approach: Single global coordinator manages all cross-crate events
     let coordinator = Arc::new(
-        GlobalEventCoordinator::monolithic()
+        rvoip_infra_common::events::global_coordinator()
             .await
-            .expect("Failed to create coordinator")
+            .clone()
     );
     
     // Create adapters for different crates - but they all share the same coordinator
@@ -208,9 +208,9 @@ async fn test_cross_crate_event_conversion() {
     info!("=== Cross-Crate Event Conversion Test ===");
 
     let coordinator = Arc::new(
-        GlobalEventCoordinator::monolithic()
+        rvoip_infra_common::events::global_coordinator()
             .await
-            .expect("Failed to create coordinator")
+            .clone()
     );
 
     let adapter = SessionEventAdapter::new(coordinator.clone())
@@ -246,9 +246,9 @@ async fn test_event_system_performance() {
     info!("=== Event System Performance Test ===");
 
     let coordinator = Arc::new(
-        GlobalEventCoordinator::monolithic()
+        rvoip_infra_common::events::global_coordinator()
             .await
-            .expect("Failed to create coordinator")
+            .clone()
     );
 
     let adapter = SessionEventAdapter::new(coordinator.clone())
