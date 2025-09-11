@@ -30,12 +30,6 @@ pub struct MediaEventAdapter {
     /// Task manager for event processing tasks
     task_manager: Arc<LayerTaskManager>,
     
-    /// Channel for backward compatibility with existing media event consumers
-    media_event_sender: Arc<RwLock<Option<mpsc::Sender<MediaSessionEventType>>>>,
-    
-    /// Channel for backward compatibility with integration events
-    integration_event_sender: Arc<RwLock<Option<mpsc::Sender<IntegrationEventType>>>>,
-    
     /// Running state
     is_running: Arc<RwLock<bool>>,
 }
@@ -48,8 +42,6 @@ impl MediaEventAdapter {
         Ok(Self {
             global_coordinator,
             task_manager,
-            media_event_sender: Arc::new(RwLock::new(None)),
-            integration_event_sender: Arc::new(RwLock::new(None)),
             is_running: Arc::new(RwLock::new(false)),
         })
     }
@@ -126,17 +118,8 @@ impl MediaEventAdapter {
     // BACKWARD COMPATIBILITY API - For existing media event handling
     // =============================================================================
     
-    /// Set media event sender for backward compatibility
-    pub async fn set_media_event_sender(&self, sender: mpsc::Sender<MediaSessionEventType>) {
-        *self.media_event_sender.write().await = Some(sender);
-    }
     
-    /// Set integration event sender for backward compatibility  
-    pub async fn set_integration_event_sender(&self, sender: mpsc::Sender<IntegrationEventType>) {
-        *self.integration_event_sender.write().await = Some(sender);
-    }
-    
-    /// Publish a media session event (backward compatibility + cross-crate)
+    /// Publish a media session event (cross-crate only)
     pub async fn publish_media_event(&self, event: MediaSessionEventType) -> Result<()> {
         // Convert to cross-crate event if applicable
         if let Some(cross_crate_event) = self.convert_media_to_cross_crate_event(&event) {
@@ -146,30 +129,16 @@ impl MediaEventAdapter {
             }
         }
         
-        // Publish locally for backward compatibility
-        if let Some(sender) = &*self.media_event_sender.read().await {
-            if let Err(e) = sender.try_send(event) {
-                warn!("Failed to send media event locally: {}", e);
-            }
-        }
-        
         Ok(())
     }
     
-    /// Publish an integration event (backward compatibility + cross-crate)
+    /// Publish an integration event (cross-crate only)
     pub async fn publish_integration_event(&self, event: IntegrationEventType) -> Result<()> {
         // Convert to cross-crate event if applicable
         if let Some(cross_crate_event) = self.convert_integration_to_cross_crate_event(&event) {
             // Publish cross-crate event
             if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
                 error!("Failed to publish cross-crate integration event from media-core: {}", e);
-            }
-        }
-        
-        // Publish locally for backward compatibility
-        if let Some(sender) = &*self.integration_event_sender.read().await {
-            if let Err(e) = sender.try_send(event) {
-                warn!("Failed to send integration event locally: {}", e);
             }
         }
         

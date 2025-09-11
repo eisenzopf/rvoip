@@ -362,8 +362,8 @@ impl UnifiedCoordinator {
         
         let transaction_manager = Arc::new(transaction_manager);
         
-        // Create dialog config
-        let dialog_config = DialogManagerConfig::client(config.bind_addr)
+        // Create dialog config - use hybrid mode to support both incoming and outgoing calls
+        let dialog_config = DialogManagerConfig::hybrid(config.bind_addr)
             .with_from_uri(&config.local_uri)
             .build();
         

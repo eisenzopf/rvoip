@@ -28,12 +28,6 @@ pub struct DialogEventAdapter {
     /// Task manager for event processing tasks
     task_manager: Arc<LayerTaskManager>,
     
-    /// Channel for backward compatibility with existing dialog event consumers
-    dialog_event_sender: Arc<RwLock<Option<mpsc::Sender<DialogEvent>>>>,
-    
-    /// Channel for backward compatibility with session coordination
-    session_coordination_sender: Arc<RwLock<Option<mpsc::Sender<SessionCoordinationEvent>>>>,
-    
     /// Running state
     is_running: Arc<RwLock<bool>>,
 }
@@ -46,8 +40,6 @@ impl DialogEventAdapter {
         Ok(Self {
             global_coordinator,
             task_manager,
-            dialog_event_sender: Arc::new(RwLock::new(None)),
-            session_coordination_sender: Arc::new(RwLock::new(None)),
             is_running: Arc::new(RwLock::new(false)),
         })
     }
@@ -124,17 +116,8 @@ impl DialogEventAdapter {
     // BACKWARD COMPATIBILITY API - For existing dialog event handling
     // =============================================================================
     
-    /// Set dialog event sender for backward compatibility
-    pub async fn set_dialog_event_sender(&self, sender: mpsc::Sender<DialogEvent>) {
-        *self.dialog_event_sender.write().await = Some(sender);
-    }
     
-    /// Set session coordination sender for backward compatibility  
-    pub async fn set_session_coordination_sender(&self, sender: mpsc::Sender<SessionCoordinationEvent>) {
-        *self.session_coordination_sender.write().await = Some(sender);
-    }
-    
-    /// Publish a dialog event (backward compatibility + cross-crate)
+    /// Publish a dialog event (cross-crate only)
     pub async fn publish_dialog_event(&self, event: DialogEvent) -> Result<()> {
         // Convert to cross-crate event if applicable
         if let Some(cross_crate_event) = self.convert_dialog_to_cross_crate_event(&event) {
@@ -144,30 +127,16 @@ impl DialogEventAdapter {
             }
         }
         
-        // Publish locally for backward compatibility
-        if let Some(sender) = &*self.dialog_event_sender.read().await {
-            if let Err(e) = sender.try_send(event) {
-                warn!("Failed to send dialog event locally: {}", e);
-            }
-        }
-        
         Ok(())
     }
     
-    /// Publish a session coordination event (backward compatibility + cross-crate)
+    /// Publish a session coordination event (cross-crate only)
     pub async fn publish_session_coordination_event(&self, event: SessionCoordinationEvent) -> Result<()> {
         // Convert to cross-crate event if applicable
         if let Some(cross_crate_event) = self.convert_coordination_to_cross_crate_event(&event) {
             // Publish cross-crate event
             if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
                 error!("Failed to publish cross-crate coordination event from dialog-core: {}", e);
-            }
-        }
-        
-        // Publish locally for backward compatibility
-        if let Some(sender) = &*self.session_coordination_sender.read().await {
-            if let Err(e) = sender.try_send(event) {
-                warn!("Failed to send session coordination event locally: {}", e);
             }
         }
         
@@ -244,6 +213,8 @@ impl DialogEventAdapter {
                         to,
                         sdp_offer,
                         headers: std::collections::HashMap::new(),
+                        transaction_id: "unknown".to_string(), // TODO: Extract from request
+                        source_addr: "unknown".to_string(), // TODO: Extract from source
                     }
                 ))
             }

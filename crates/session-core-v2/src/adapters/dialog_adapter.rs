@@ -2,6 +2,24 @@
 //!
 //! Thin translation layer between dialog-core and state machine.
 //! Focuses only on essential dialog operations and events.
+//!
+//! ## API Design
+//! 
+//! This adapter provides a clean interface for dialog operations:
+//! 
+//! ### Primary Methods
+//! - `send_invite_with_details()` - Creates dialog and sends INVITE in one atomic operation
+//! - `send_response()` - Sends SIP responses for incoming calls
+//! - `send_bye()` - Terminates calls
+//! - `send_ack()` - Acknowledges responses
+//! 
+//! ### Removed Methods
+//! The following methods were removed to avoid confusion:
+//! - `create_dialog()` - Did not actually create a dialog in dialog-core
+//! - `send_invite()` - Did not actually send an INVITE
+//! 
+//! All dialog creation is now done through `send_invite_with_details()` which
+//! properly creates the dialog in dialog-core and sends the INVITE.
 
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -57,25 +75,9 @@ impl DialogAdapter {
         }
     }
     
-    // ===== New Methods for CallController =====
-    
-    /// Create a new dialog (for CallController)
-    pub async fn create_dialog(&self, from: &str, to: &str) -> Result<crate::types::DialogId> {
-        // Create a new internal dialog ID
-        let dialog_id = crate::types::DialogId::new();
-        
-        // Store the from/to for later use when we actually send the INVITE
-        // The actual dialog in dialog-core will be created when we send the INVITE
-        
-        Ok(dialog_id)
-    }
-    
-    /// Send INVITE for a specific dialog
-    pub async fn send_invite(&self, dialog_id: DialogId) -> Result<()> {
-        // This is handled by send_invite with session_id
-        // For now, just return Ok
-        Ok(())
-    }
+    // ===== Direct Dialog Operations =====
+    // NOTE: Removed confusing create_dialog() and send_invite() methods
+    // Use send_invite_with_details() to create a dialog and send INVITE in one operation
     
     /// Send a response
     pub async fn send_response_by_dialog(&self, _dialog_id: DialogId, status_code: u16, _reason: &str) -> Result<()> {
@@ -172,7 +174,18 @@ impl DialogAdapter {
     
     // ===== Outbound Actions (from state machine) =====
     
-    /// Send INVITE for UAC with full details
+    /// Send INVITE for UAC - this is the primary method for initiating calls
+    /// 
+    /// This method:
+    /// 1. Creates a dialog in dialog-core
+    /// 2. Sends the INVITE request
+    /// 3. Stores the session-to-dialog mapping
+    /// 
+    /// # Arguments
+    /// * `session_id` - The session ID from the state machine
+    /// * `from` - The From URI (e.g., "sip:alice@example.com")
+    /// * `to` - The To URI (e.g., "sip:bob@example.com")
+    /// * `sdp` - Optional SDP offer
     pub async fn send_invite_with_details(
         &self,
         session_id: &SessionId,

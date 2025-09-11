@@ -698,11 +698,11 @@ impl MediaSessionController {
         sessions.values().cloned().collect()
     }
     
-    /// Get event receiver (can only be called once)
-    pub async fn take_event_receiver(&self) -> Option<mpsc::UnboundedReceiver<MediaSessionEvent>> {
-        let mut event_rx = self.event_rx.write().await;
-        event_rx.take()
-    }
+    // REMOVED: Channel-based communication - use GlobalEventCoordinator instead
+    // pub async fn take_event_receiver(&self) -> Option<mpsc::UnboundedReceiver<MediaSessionEvent>> {
+    //     let mut event_rx = self.event_rx.write().await;
+    //     event_rx.take()
+    // }
     
     /// Set audio frame callback for a dialog
     pub async fn set_audio_frame_callback(&self, dialog_id: DialogId, sender: mpsc::Sender<AudioFrame>) -> Result<()> {

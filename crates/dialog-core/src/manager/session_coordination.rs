@@ -58,13 +58,8 @@ impl SessionCoordinator for DialogManager {
     }
     
     async fn notify_session_layer(&self, event: SessionCoordinationEvent) -> DialogResult<()> {
-        if let Some(ref coordinator) = self.session_coordinator.read().await.as_ref() {
-            coordinator.send(event).await
-                .map_err(|e| crate::errors::DialogError::internal_error(
-                    &format!("Failed to send session coordination event: {}", e),
-                    None
-                ))?;
-        }
+        // Use the emit_session_coordination_event method which properly uses GlobalEventCoordinator
+        self.emit_session_coordination_event(event).await;
         Ok(())
     }
 }
