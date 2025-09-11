@@ -29,7 +29,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Internal dependencies
-infra-common = { path = "../infra-common" }
+rvoip-infra-common = { path = "../infra-common" }
 rvoip-sip-core = { path = "../sip-core" }
 
 # UUID generation

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use async_trait::async_trait;
-use infra_common::events::{
+use rvoip_infra_common::events::{
     api::{EventSystem, EventPublisher, EventSubscriber},
     builder::{EventSystemBuilder, ImplementationType},
 };
@@ -83,7 +83,7 @@ pub struct RvoipFederatedBus {
     config: FederatedBusConfig,
     
     /// Local event system (infra-common)
-    local_system: Arc<infra_common::events::system::EventSystem>,
+    local_system: Arc<rvoip_infra_common::events::system::EventSystem>,
     
     /// Local publisher
     local_publisher: Box<dyn EventPublisher<SessionEvent>>,
@@ -109,7 +109,7 @@ impl RvoipFederatedBus {
     /// Create with custom configuration
     pub fn with_config(config: FederatedBusConfig) -> Self {
         // Register SessionEvent as a StaticEvent type
-        infra_common::events::registry::register_static_event::<SessionEvent>();
+        rvoip_infra_common::events::registry::register_static_event::<SessionEvent>();
         
         let implementation = if config.use_static_fast_path {
             ImplementationType::StaticFastPath

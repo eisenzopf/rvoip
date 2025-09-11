@@ -1,5 +1,5 @@
-use infra_common::events::bus::{EventBus, EventBusConfig};
-use infra_common::events::types::{Event, EventPriority, EventHandler};
+use rvoip_infra_common::events::bus::{EventBus, EventBusConfig};
+use rvoip_infra_common::events::types::{Event, EventPriority, EventHandler};
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;

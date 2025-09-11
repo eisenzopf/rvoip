@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, OnceCell};
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use tracing::{debug, info, warn, error};
@@ -17,6 +17,40 @@ use crate::events::types::{Event, EventHandler, EventPriority};
 use crate::planes::{PlaneRouter, PlaneType, PlaneConfig, LayerTaskManager};
 
 use crate::events::cross_crate::{CrossCrateEvent, EventTypeId};
+
+/// Global singleton instance for monolithic deployments
+static GLOBAL_COORDINATOR: OnceCell<Arc<GlobalEventCoordinator>> = OnceCell::const_new();
+
+/// Get the global coordinator instance for monolithic deployments
+/// 
+/// This function returns a reference to the global singleton coordinator.
+/// On first call, it initializes the coordinator with monolithic configuration.
+/// Subsequent calls return the same instance.
+///
+/// # Panics
+/// Panics if the coordinator fails to initialize (should only happen on first call)
+///
+/// # Example
+/// ```rust
+/// use rvoip_infra_common::events::coordinator::global_coordinator;
+/// 
+/// // Get the global instance - initialized on first access
+/// let coordinator = global_coordinator().await;
+/// 
+/// // Publish an event
+/// coordinator.publish(my_event).await?;
+/// ```
+pub async fn global_coordinator() -> &'static Arc<GlobalEventCoordinator> {
+    GLOBAL_COORDINATOR.get_or_init(|| async {
+        info!("Initializing global event coordinator singleton for monolithic deployment");
+        
+        Arc::new(
+            GlobalEventCoordinator::monolithic()
+                .await
+                .expect("Failed to initialize global event coordinator")
+        )
+    }).await
+}
 
 /// Global event coordinator supporting both monolithic and distributed modes
 pub struct GlobalEventCoordinator {
@@ -141,6 +175,10 @@ impl CrossCrateEventHandler for ChannelForwarder {
 
 impl GlobalEventCoordinator {
     /// Create coordinator for monolithic deployment (single process)
+    /// 
+    /// **Note**: For most monolithic applications, use `global_coordinator()` instead
+    /// to get the singleton instance. Only create a new instance if you need
+    /// isolated event handling (e.g., for testing or special use cases).
     pub async fn monolithic() -> Result<Self> {
         let event_bus = Arc::new(EventSystem::new_static_fast_path(10000));
         let task_manager = Arc::new(LayerTaskManager::new("global"));

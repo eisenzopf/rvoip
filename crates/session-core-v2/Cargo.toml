@@ -41,7 +41,7 @@ bincode = "1.3"
 futures = "0.3"
 
 # RVoIP crates - using actual package names
-infra-common = { path = "../infra-common" }
+rvoip-infra-common = { path = "../infra-common" }
 rvoip-dialog-core = { path = "../dialog-core" }
 rvoip-media-core = { path = "../media-core" }
 rvoip-sip-core = { path = "../sip-core" }

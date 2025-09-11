@@ -20,7 +20,7 @@ description = "RTP/RTCP protocol implementation for the rvoip stack"
 workspace = true
 [dependencies]
 # Internal crates
-infra-common.workspace = true
+rvoip-infra-common.workspace = true
 
 bytes = "1.5.0"
 thiserror = "1.0.56"

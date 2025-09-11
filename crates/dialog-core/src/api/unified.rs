@@ -259,7 +259,7 @@ impl UnifiedDialogApi {
     pub async fn new_with_event_coordinator(
         transaction_manager: Arc<TransactionManager>,
         config: DialogManagerConfig,
-        global_coordinator: Arc<infra_common::events::coordinator::GlobalEventCoordinator>,
+        global_coordinator: Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
     ) -> ApiResult<Self> {
         info!("Creating UnifiedDialogApi with global event coordination in {:?} mode", Self::mode_name(&config));
         
@@ -289,7 +289,7 @@ impl UnifiedDialogApi {
         transaction_manager: Arc<TransactionManager>,
         transaction_events: mpsc::Receiver<TransactionEvent>,
         config: DialogManagerConfig,
-        global_coordinator: Arc<infra_common::events::coordinator::GlobalEventCoordinator>,
+        global_coordinator: Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
     ) -> ApiResult<Self> {
         info!("Creating UnifiedDialogApi with global events and event coordination in {:?} mode", Self::mode_name(&config));
         
@@ -454,12 +454,7 @@ impl UnifiedDialogApi {
     //     self.manager.set_dialog_event_sender(sender).await
     // }
     
-    /// Subscribe to dialog events
-    ///
-    /// Returns a receiver for monitoring dialog state changes and events.
-    pub fn subscribe_to_dialog_events(&self) -> mpsc::Receiver<DialogEvent> {
-        self.manager.subscribe_to_dialog_events()
-    }
+    // REMOVED: subscribe_to_dialog_events() - Use GlobalEventCoordinator instead
     
     // ========================================
     // CLIENT-MODE OPERATIONS

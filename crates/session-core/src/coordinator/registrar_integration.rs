@@ -22,7 +22,7 @@ use rvoip_registrar_core::{
     types::RegistrarConfig,
     events::{RegistrarEvent, PresenceEvent},
 };
-use infra_common::events::{
+use rvoip_infra_common::events::{
     system::EventSystem,
     api::EventSystem as EventSystemTrait,
 };

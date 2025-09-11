@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use async_trait::async_trait;
-use infra_common::events::{
+use rvoip_infra_common::events::{
     api::{EventSystem, EventPublisher, EventSubscriber},
     types::{Event, EventResult, EventPriority, StaticEvent},
     system::EventSystem as InfraEventSystem,
@@ -45,7 +45,7 @@ impl InfraSessionEventSystem {
     /// Create a new high-performance event system using StaticFastPath
     pub fn new() -> Self {
         // Register SessionEvent as a StaticEvent type
-        infra_common::events::registry::register_static_event::<SessionEvent>();
+        rvoip_infra_common::events::registry::register_static_event::<SessionEvent>();
         
         let inner = EventSystemBuilder::new()
             .implementation(ImplementationType::StaticFastPath)
@@ -63,7 +63,7 @@ impl InfraSessionEventSystem {
     /// Create with custom configuration
     pub fn with_config(capacity: usize) -> Self {
         // Register SessionEvent as a StaticEvent type
-        infra_common::events::registry::register_static_event::<SessionEvent>();
+        rvoip_infra_common::events::registry::register_static_event::<SessionEvent>();
         
         let inner = EventSystemBuilder::new()
             .implementation(ImplementationType::StaticFastPath)

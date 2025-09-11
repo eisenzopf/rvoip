@@ -10,13 +10,13 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tracing::{debug, info, warn, error};
 
-use infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
-use infra_common::events::cross_crate::{
+use rvoip_infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
+use rvoip_infra_common::events::cross_crate::{
     RvoipCrossCrateEvent, MediaToSessionEvent, MediaToRtpEvent,
     SessionToMediaEvent, RtpToMediaEvent, CrossCrateEvent,
     MediaQualityMetrics, MediaStreamConfig, RecordingFormat
 };
-use infra_common::planes::LayerTaskManager;
+use rvoip_infra_common::planes::LayerTaskManager;
 
 use crate::session::events::{MediaSessionEventType, QualitySeverity};
 use crate::integration::events::IntegrationEventType;
@@ -101,7 +101,7 @@ impl MediaEventAdapter {
         
         self.task_manager.spawn_tracked(
             "media-cross-crate-handler",
-            infra_common::planes::TaskPriority::High,
+            rvoip_infra_common::planes::TaskPriority::High,
             async move {
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -317,7 +317,7 @@ impl CrossCrateEventHandler for MediaCrossCrateEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use infra_common::events::coordinator::GlobalEventCoordinator;
+    use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
     
     #[tokio::test]
     async fn test_media_adapter_creation() {

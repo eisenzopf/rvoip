@@ -21,7 +21,7 @@ workspace = true
 [dependencies]
 # 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
 rvoip-rtp-core.workspace = true
-infra-common.workspace = true
+rvoip-infra-common.workspace = true
 
 # Codec support
 rvoip-codec-core.workspace = true

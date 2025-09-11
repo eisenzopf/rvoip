@@ -149,8 +149,8 @@ impl DialogStore for DialogManager {
         
         // Publish DialogCreated event for session-core to track
         if let Some(hub) = self.event_hub.read().await.as_ref() {
-            let event = infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
-                infra_common::events::cross_crate::DialogToSessionEvent::DialogCreated {
+            let event = rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
+                rvoip_infra_common::events::cross_crate::DialogToSessionEvent::DialogCreated {
                     dialog_id: dialog_id.to_string(),
                     call_id: call_id.clone(),
                 }

@@ -208,6 +208,12 @@ impl DialogAdapter {
         self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
         self.callid_to_session.insert(call_id.clone(), session_id.clone());
         
+        // Publish StoreDialogMapping event to inform dialog-core about the session-dialog mapping
+        // NOTE: Currently dialog-core doesn't have access to GlobalEventCoordinator from here
+        // This would require passing the coordinator through the adapter constructor
+        // For now, dialog-core will discover the mapping when it receives events with the session_id
+        tracing::info!("Created dialog {} for session {} - dialog-core will discover mapping via events", dialog_id, session_id.0);
+        
         // Store the transaction ID for later ACK sending
         // Note: CallHandle might not expose transaction_id directly
         // For now, we'll rely on dialog-core to handle ACKs internally

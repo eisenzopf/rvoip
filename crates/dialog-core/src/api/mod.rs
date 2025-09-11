@@ -99,11 +99,7 @@ pub trait DialogApi: Send + Sync {
     /// that aren't available through the high-level API.
     fn dialog_manager(&self) -> &Arc<DialogManager>;
     
-    /// Set session coordinator for communication with session-core
-    ///
-    /// Establishes the communication channel for session management events.
-    /// This is essential for proper integration with session-core.
-    async fn set_session_coordinator(&self, sender: mpsc::Sender<SessionCoordinationEvent>) -> ApiResult<()>;
+    // REMOVED: set_session_coordinator() - Use GlobalEventCoordinator instead
     
     /// Start the dialog API
     ///

@@ -12,8 +12,8 @@ use std::str::FromStr;
 use anyhow::Result;
 use tokio::sync::mpsc;
 use dashmap::DashMap;
-use infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
-use infra_common::events::cross_crate::{
+use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
+use rvoip_infra_common::events::cross_crate::{
     CrossCrateEvent, RvoipCrossCrateEvent,
     DialogToSessionEvent, MediaToSessionEvent,
     SessionToDialogEvent, SessionToMediaEvent,
@@ -228,54 +228,29 @@ impl SessionCrossCrateEventHandler {
     
     // Dialog event handlers
     async fn handle_dialog_created(&self, event_str: &str) -> Result<()> {
-                    // Extract dialog_id and call_id
-                    if let Some(dialog_id_start) = event_str.find("dialog_id: \"") {
-                        let dialog_id_content_start = dialog_id_start + 12;
-                        if let Some(dialog_id_end) = event_str[dialog_id_content_start..].find("\"") {
-                            let dialog_id = event_str[dialog_id_content_start..dialog_id_content_start + dialog_id_end].to_string();
-                            
-                            if let Some(call_id_start) = event_str.find("call_id: \"") {
-                                let call_id_content_start = call_id_start + 10;
-                                if let Some(call_id_end) = event_str[call_id_content_start..].find("\"") {
-                                    let call_id = event_str[call_id_content_start..call_id_content_start + call_id_end].to_string();
-                                    
-                                    // Check if this is our call (session-core generated Call-ID)
-                                    if call_id.contains("@session-core") {
-                                        if let Some(session_id) = call_id.split('@').next() {
-                                            info!("Received DialogCreated for our session: {} -> dialog {}", session_id, dialog_id);
-                                            
-                                            // Store the mapping in our dialog adapter
-                                            let session_id_obj = SessionId(session_id.to_string());
-                                            if let Ok(uuid) = dialog_id.parse::<uuid::Uuid>() {
-                                                let parsed_dialog_id = rvoip_dialog_core::dialog::DialogId(uuid);
-                                                self.dialog_adapter.session_to_dialog.insert(session_id_obj.clone(), parsed_dialog_id.clone());
-                                                self.dialog_adapter.dialog_to_session.insert(parsed_dialog_id, session_id_obj);
-                                            }
-                                            
-                                            // Publish StoreDialogMapping event back to dialog-core
-                                            let mapping_event = RvoipCrossCrateEvent::SessionToDialog(
-                                                SessionToDialogEvent::StoreDialogMapping {
-                                                    session_id: session_id.to_string(),
-                                                    dialog_id: dialog_id.clone(),
-                                                }
-                                            );
-                                            if let Err(e) = self.global_coordinator.publish(Arc::new(mapping_event)).await {
-                                                error!("Failed to publish StoreDialogMapping event: {}", e);
-                                            } else {
-                                                info!("Published StoreDialogMapping event for session {}", session_id);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+        // Extract dialog_id and call_id
+        let dialog_id = self.extract_field(event_str, "dialog_id: \"").unwrap_or_else(|| "unknown".to_string());
+        let call_id = self.extract_field(event_str, "call_id: \"").unwrap_or_else(|| "unknown".to_string());
+        
+        // Check if this is our call (session-core generated Call-ID)
+        if call_id.contains("@session-core") {
+            if let Some(session_id) = call_id.split('@').next() {
+                // Only trigger state transition - all logic should be in the state machine
+                if let Err(e) = self.state_machine.process_event(
+                    &SessionId(session_id.to_string()),
+                    EventType::DialogCreated { dialog_id, call_id }
+                ).await {
+                    error!("Failed to process DialogCreated event: {}", e);
+                }
+            }
+        }
+        
         Ok(())
     }
     
     async fn handle_incoming_call(&self, event_str: &str) -> Result<()> {
         // Extract fields from the event
-        let dialog_id = self.extract_field(event_str, "session_id: \"").unwrap_or_else(|| "unknown".to_string());
+        let dialog_id_str = self.extract_field(event_str, "session_id: \"").unwrap_or_else(|| "unknown".to_string());
         let call_id = self.extract_field(event_str, "call_id: \"").unwrap_or_else(|| "unknown".to_string());
         let from = self.extract_field(event_str, "from: \"").unwrap_or_else(|| "unknown".to_string());
         let to = self.extract_field(event_str, "to: \"").unwrap_or_else(|| "unknown".to_string());
@@ -284,40 +259,31 @@ impl SessionCrossCrateEventHandler {
         let transaction_id = self.extract_field(event_str, "transaction_id: \"").unwrap_or_else(|| "unknown".to_string());
         let source_addr = self.extract_field(event_str, "source_addr: \"").unwrap_or_else(|| "127.0.0.1:5060".to_string());
         
-        // Create a new session for the incoming call
+        // CRITICAL: IncomingCall is a special case - we must create session here
+        // because we don't have a session ID yet from dialog-core
         let session_id = SessionId::new();
         
-        // Create the session in the store
+        // Create session in store - this is the ONLY place we create sessions outside state machine
         self.state_machine.store.create_session(
             session_id.clone(),
-            Role::UAS, // User Agent Server role for incoming calls
-            true, // with history
+            Role::UAS,
+            true,
         ).await.map_err(|e| SessionError::InternalError(format!("Failed to create session: {}", e)))?;
         
-        // Map the dialog to the session
-        // Parse dialog_id string to UUID (dialog-core uses UUIDs as IDs)
-        let dialog_uuid = uuid::Uuid::parse_str(&dialog_id).unwrap_or_else(|_| uuid::Uuid::new_v4());
-        self.registry.map_dialog(session_id.clone(), DialogId(dialog_uuid));
-        
-        // Map the dialog in dialog adapter
-        self.dialog_adapter.dialog_to_session.insert(
-            rvoip_dialog_core::DialogId(dialog_uuid),
-            session_id.clone()
-        );
-        self.dialog_adapter.session_to_dialog.insert(
-            session_id.clone(),
-            rvoip_dialog_core::DialogId(dialog_uuid)
-        );
-        
-        // Store the transaction info for sending responses
-        // We need to create a dummy Request and TransactionKey for now
-        // In a real implementation, these would be passed through the event
+        // Store transaction info for response sending - required before state machine runs
+        let dialog_uuid = uuid::Uuid::parse_str(&dialog_id_str).unwrap_or_else(|_| uuid::Uuid::new_v4());
         let transaction_key = rvoip_dialog_core::transaction::TransactionKey::from_str(&transaction_id)
-            .map_err(|e| SessionError::InternalError(format!("Invalid transaction ID: {}", e)))?;
+            .unwrap_or_else(|_| {
+                // Create a minimal transaction key
+                rvoip_dialog_core::transaction::TransactionKey::new(
+                    transaction_id.clone(),
+                    rvoip_sip_core::Method::Invite,
+                    true // is_server = true for incoming calls
+                )
+            });
         let source_socket_addr = source_addr.parse::<std::net::SocketAddr>()
             .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 5061)));
         
-        // Create a dummy request - this is a workaround since we don't have the full request
         let dummy_request = rvoip_sip_core::Request::new(
             rvoip_sip_core::Method::Invite,
             rvoip_sip_core::Uri::from_str(&to).unwrap_or_else(|_| rvoip_sip_core::Uri::from_str("sip:unknown@unknown").unwrap())
@@ -328,64 +294,68 @@ impl SessionCrossCrateEventHandler {
             (dummy_request, transaction_key, source_socket_addr)
         );
         
-        // Create incoming call info and send through channel
-        if let Some(ref tx) = self.incoming_call_tx {
-            let call_info = crate::types::IncomingCallInfo {
+        // Store mapping info for state machine to use
+        self.registry.map_dialog(session_id.clone(), DialogId(dialog_uuid));
+        self.registry.store_pending_incoming_call(
+            session_id.clone(),
+            crate::types::IncomingCallInfo {
                 session_id: session_id.clone(),
                 from: from.clone(),
                 to: to.clone(),
-                call_id: call_id.clone(),
+                        call_id: call_id.clone(),
                 dialog_id: DialogId(dialog_uuid),
-            };
-            
-            if let Err(e) = tx.send(call_info).await {
-                error!("Failed to send incoming call notification: {}", e);
             }
-        }
+        );
         
-        info!("Created session {} for incoming call from {} (dialog: {}, tx: {})", session_id.0, from, dialog_id, transaction_id);
-        
-        // Now process the IncomingCall event through the state machine
-        let event_type = EventType::IncomingCall { from, sdp };
+        // Process the event - state machine will handle the rest
+        let event_type = EventType::IncomingCall { from: from.clone(), sdp };
         
         if let Err(e) = self.state_machine.process_event(
             &session_id,
             event_type
         ).await {
             error!("Failed to process incoming call event: {}", e);
+            // Clean up on failure
+            self.state_machine.store.remove_session(&session_id).await;
+            self.registry.remove_session(&session_id);
+        } else {
+            // Notify about incoming call after successful processing
+            if let Some(ref tx) = self.incoming_call_tx {
+                info!("Sending incoming call notification for session {}", session_id);
+                let call_info = crate::types::IncomingCallInfo {
+                    session_id: session_id.clone(),
+                    from,
+                    to,
+                    call_id,
+                    dialog_id: DialogId(dialog_uuid),
+                };
+                if let Err(e) = tx.send(call_info).await {
+                    error!("Failed to send incoming call notification: {}", e);
+                } else {
+                    info!("Successfully sent incoming call notification");
+                }
+            } else {
+                warn!("No incoming_call_tx channel available to send notification");
+            }
         }
         
         Ok(())
     }
     
     async fn handle_call_established(&self, event_str: &str) -> Result<()> {
-        if let Some(session_id) = self.extract_session_id(event_str) {
-                    // Extract SDP answer from the event
-                    if let Some(sdp_start) = event_str.find("sdp_answer: Some(\"") {
-                        let sdp_content_start = sdp_start + 18;
-                        if let Some(sdp_end) = event_str[sdp_content_start..].find("\")") {
-                            let sdp = event_str[sdp_content_start..sdp_content_start + sdp_end]
-                                .replace("\\r\\n", "\r\n")
-                                .replace("\\n", "\n");
-                            
-                            // Store the SDP in the session
-                            let session_id_obj = SessionId(session_id.clone());
-                            if let Ok(mut session) = self.state_machine.store.get_session(&session_id_obj).await {
-                                session.remote_sdp = Some(sdp);
-                                let _ = self.state_machine.store.update_session(session).await;
-                                info!("Stored remote SDP from CallEstablished for session {}", session_id);
-                                
-                                // Now trigger Dialog200OK event since we have the SDP stored
-                                if let Err(e) = self.state_machine.process_event(
-                                    &session_id_obj,
-                                    EventType::Dialog200OK
-                                ).await {
-                                    error!("Failed to process Dialog200OK after storing SDP: {}", e);
-                                }
-                            }
-                        }
-                    }
+        // Extract session_id and optional SDP answer
+        let session_id = self.extract_session_id(event_str).unwrap_or_else(|| "unknown".to_string());
+        let sdp_answer = self.extract_field(event_str, "sdp_answer: Some(\"")
+            .map(|s| s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\\"", "\""));
+        
+        // Only trigger state transition - all logic should be in the state machine
+        if let Err(e) = self.state_machine.process_event(
+            &SessionId(session_id.clone()),
+            EventType::CallEstablished { session_id: session_id.clone(), sdp_answer }
+        ).await {
+            error!("Failed to process CallEstablished event: {}", e);
         }
+        
         Ok(())
     }
     
@@ -416,9 +386,9 @@ impl SessionCrossCrateEventHandler {
                 &SessionId(session_id),
                 EventType::DialogBYE
                 ).await {
-                error!("Failed to process call termination: {}", e);
-            }
-        }
+                        error!("Failed to process call termination: {}", e);
+                    }
+                }
         Ok(())
     }
     

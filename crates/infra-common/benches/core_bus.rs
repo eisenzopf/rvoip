@@ -1,9 +1,9 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use infra_common::events::bus::{EventBus, EventBusConfig};
-use infra_common::events::types::{Event, EventHandler, EventPriority, StaticEvent};
-use infra_common::events::bus::Publisher;
-use infra_common::events::publisher::FastPublisher;
-use infra_common::events::registry::GlobalTypeRegistry;
+use rvoip_infra_common::events::bus::{EventBus, EventBusConfig};
+use rvoip_infra_common::events::types::{Event, EventHandler, EventPriority, StaticEvent};
+use rvoip_infra_common::events::bus::Publisher;
+use rvoip_infra_common::events::publisher::FastPublisher;
+use rvoip_infra_common::events::registry::GlobalTypeRegistry;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;

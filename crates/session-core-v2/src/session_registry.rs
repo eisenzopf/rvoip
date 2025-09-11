@@ -7,7 +7,7 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 
-use crate::types::{SessionId, DialogId, MediaSessionId};
+use crate::types::{SessionId, DialogId, MediaSessionId, IncomingCallInfo};
 
 /// Registry for mapping between different session identifiers
 #[derive(Clone)]
@@ -20,6 +20,8 @@ pub struct SessionRegistry {
     session_to_media: Arc<DashMap<SessionId, MediaSessionId>>,
     /// Map from MediaSessionId to SessionId
     media_to_session: Arc<DashMap<MediaSessionId, SessionId>>,
+    /// Temporary storage for pending incoming calls
+    pending_incoming_calls: Arc<DashMap<SessionId, IncomingCallInfo>>,
 }
 
 impl SessionRegistry {
@@ -30,6 +32,7 @@ impl SessionRegistry {
             dialog_to_session: Arc::new(DashMap::new()),
             session_to_media: Arc::new(DashMap::new()),
             media_to_session: Arc::new(DashMap::new()),
+            pending_incoming_calls: Arc::new(DashMap::new()),
         }
     }
 
@@ -95,6 +98,17 @@ impl SessionRegistry {
         self.dialog_to_session.clear();
         self.session_to_media.clear();
         self.media_to_session.clear();
+        self.pending_incoming_calls.clear();
+    }
+    
+    /// Store pending incoming call info
+    pub fn store_pending_incoming_call(&self, session_id: SessionId, info: IncomingCallInfo) {
+        self.pending_incoming_calls.insert(session_id, info);
+    }
+    
+    /// Get and remove pending incoming call info
+    pub fn take_pending_incoming_call(&self, session_id: &SessionId) -> Option<IncomingCallInfo> {
+        self.pending_incoming_calls.remove(session_id).map(|(_, info)| info)
     }
 }
 

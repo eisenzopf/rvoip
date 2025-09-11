@@ -225,7 +225,7 @@ impl EventSubscriberTrait for OldEventSubscriber {
 
 /// Wrapper for new event subscriber
 pub struct NewEventSubscriber {
-    inner: Box<dyn infra_common::events::api::EventSubscriber<SessionEvent>>,
+    inner: Box<dyn rvoip_infra_common::events::api::EventSubscriber<SessionEvent>>,
 }
 
 #[async_trait]

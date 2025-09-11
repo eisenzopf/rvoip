@@ -339,28 +339,10 @@ impl UnifiedDialogManager {
         Ok(())
     }
     
-    /// Set session coordinator
-    ///
-    /// Establishes communication with session-core for session management.
-    pub async fn set_session_coordinator(&self, sender: mpsc::Sender<SessionCoordinationEvent>) -> ApiResult<()> {
-        self.core.set_session_coordinator(sender).await;
-        Ok(())
-    }
-    
-    /// Set dialog event sender
-    ///
-    /// Establishes dialog event communication for external consumers.
-    pub async fn set_dialog_event_sender(&self, sender: mpsc::Sender<DialogEvent>) -> ApiResult<()> {
-        self.core.set_dialog_event_sender(sender).await;
-        Ok(())
-    }
-    
-    /// Subscribe to dialog events
-    ///
-    /// Returns a receiver for monitoring dialog state changes.
-    pub fn subscribe_to_dialog_events(&self) -> mpsc::Receiver<DialogEvent> {
-        self.core.subscribe_to_dialog_events()
-    }
+    // REMOVED: Channel-based methods - use GlobalEventCoordinator instead
+    // - set_session_coordinator()
+    // - set_dialog_event_sender()
+    // - subscribe_to_dialog_events()
     
     // ========================================
     // CLIENT-MODE OPERATIONS

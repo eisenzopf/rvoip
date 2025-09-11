@@ -8,8 +8,8 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{info, debug};
 
-use infra_common::events::coordinator::GlobalEventCoordinator;
-use infra_common::events::cross_crate::{RvoipCrossCrateEvent, DialogToSessionEvent, CallState};
+use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
+use rvoip_infra_common::events::cross_crate::{RvoipCrossCrateEvent, DialogToSessionEvent, CallState};
 use rvoip_session_core::events::SessionEventAdapter;
 use rvoip_session_core::api::types::SessionId;
 
