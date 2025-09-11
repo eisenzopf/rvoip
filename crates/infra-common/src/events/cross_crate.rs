@@ -143,6 +143,9 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::DtmfReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogError { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogCreated { .. } => None, // No session_id in DialogCreated
+                DialogToSessionEvent::DialogStateChanged { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::ReinviteReceived { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::TransferRequested { session_id, .. } => Some(session_id),
             },
             RvoipCrossCrateEvent::SessionToMedia(event) => match event {
                 SessionToMediaEvent::StartMediaStream { session_id, .. } => Some(session_id),
@@ -163,6 +166,11 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 MediaToSessionEvent::RecordingStopped { session_id, .. } => Some(session_id),
                 MediaToSessionEvent::AudioPlaybackFinished { session_id, .. } => Some(session_id),
                 MediaToSessionEvent::MediaError { session_id, .. } => Some(session_id),
+                MediaToSessionEvent::MediaFlowEstablished { session_id, .. } => Some(session_id),
+                MediaToSessionEvent::MediaQualityDegraded { session_id, .. } => Some(session_id),
+                MediaToSessionEvent::DtmfDetected { session_id, .. } => Some(session_id),
+                MediaToSessionEvent::RtpTimeout { session_id, .. } => Some(session_id),
+                MediaToSessionEvent::PacketLossThresholdExceeded { session_id, .. } => Some(session_id),
             },
             RvoipCrossCrateEvent::DialogToTransport(_) => None, // Transport events don't have session context
             RvoipCrossCrateEvent::TransportToDialog(_) => None,
@@ -247,6 +255,10 @@ pub enum DialogToSessionEvent {
         to: String,
         sdp_offer: Option<String>,
         headers: HashMap<String, String>,
+        /// Transaction ID for sending responses
+        transaction_id: String,
+        /// Source address for responses
+        source_addr: String,
     },
     
     /// Call state change notification
@@ -285,6 +297,26 @@ pub enum DialogToSessionEvent {
     DialogCreated {
         dialog_id: String,
         call_id: String,
+    },
+    
+    /// Dialog state changed
+    DialogStateChanged {
+        session_id: String,
+        old_state: DialogState,
+        new_state: DialogState,
+    },
+    
+    /// Re-INVITE received
+    ReinviteReceived {
+        session_id: String,
+        sdp: Option<String>,
+    },
+    
+    /// Transfer requested
+    TransferRequested {
+        session_id: String,
+        refer_to: String,
+        transfer_type: TransferType,
     },
 }
 
@@ -395,6 +427,37 @@ pub enum MediaToSessionEvent {
         session_id: String,
         error: String,
         error_code: Option<u32>,
+    },
+    
+    /// Media flow established
+    MediaFlowEstablished {
+        session_id: String,
+    },
+    
+    /// Media quality degraded
+    MediaQualityDegraded {
+        session_id: String,
+        metrics: MediaQualityMetrics,
+        severity: QualitySeverity,
+    },
+    
+    /// DTMF detected
+    DtmfDetected {
+        session_id: String,
+        digit: char,
+        duration_ms: u32,
+    },
+    
+    /// RTP timeout
+    RtpTimeout {
+        session_id: String,
+        last_packet_time: u64,
+    },
+    
+    /// Packet loss threshold exceeded
+    PacketLossThresholdExceeded {
+        session_id: String,
+        loss_percentage: f32,
     },
 }
 
@@ -571,6 +634,23 @@ pub enum TerminationReason {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum DialogState {
+    Initial,
+    Early,
+    Confirmed,
+    Recovering,
+    Terminated,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum QualitySeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum TransferType {
     Blind,
     Attended,
@@ -650,6 +730,8 @@ impl RvoipCrossCrateEvent {
             to,
             sdp_offer,
             headers: HashMap::new(),
+            transaction_id: String::new(), // Must be set by caller
+            source_addr: String::new(), // Must be set by caller
         })
     }
     

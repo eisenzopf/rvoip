@@ -174,7 +174,7 @@ impl DialogEventHub {
                 let session_id = format!("session-{}", uuid::Uuid::new_v4());
                 
                 // Store mapping
-                self.dialog_manager.store_dialog_mapping(&session_id, dialog_id, transaction_id, request, source);
+                self.dialog_manager.store_dialog_mapping(&session_id, dialog_id.clone(), transaction_id.clone(), request.clone(), source);
                 
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {
@@ -184,6 +184,8 @@ impl DialogEventHub {
                         to,
                         sdp_offer,
                         headers: std::collections::HashMap::new(),
+                        transaction_id: transaction_id.to_string(),
+                        source_addr: source.to_string(),
                     }
                 ))
             }
