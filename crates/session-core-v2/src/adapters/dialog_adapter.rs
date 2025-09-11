@@ -32,6 +32,10 @@ use rvoip_dialog_core::{
     transaction::TransactionKey,
 };
 use rvoip_sip_core::{Request, Response, StatusCode};
+use rvoip_infra_common::events::{
+    coordinator::GlobalEventCoordinator,
+    cross_crate::{RvoipCrossCrateEvent, SessionToDialogEvent},
+};
 use crate::state_table::types::{SessionId, DialogId, EventType};
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
@@ -56,6 +60,9 @@ pub struct DialogAdapter {
     
     /// Store outgoing INVITE transaction IDs for UAC ACK sending
     pub(crate) outgoing_invite_tx: Arc<DashMap<SessionId, TransactionKey>>,
+    
+    /// Global event coordinator for publishing events
+    pub(crate) global_coordinator: Arc<GlobalEventCoordinator>,
 }
 
 impl DialogAdapter {
@@ -63,6 +70,7 @@ impl DialogAdapter {
     pub fn new(
         dialog_api: Arc<UnifiedDialogApi>,
         store: Arc<SessionStore>,
+        global_coordinator: Arc<GlobalEventCoordinator>,
     ) -> Self {
         Self {
             dialog_api,
@@ -72,6 +80,7 @@ impl DialogAdapter {
             callid_to_session: Arc::new(DashMap::new()),
             incoming_requests: Arc::new(DashMap::new()),
             outgoing_invite_tx: Arc::new(DashMap::new()),
+            global_coordinator,
         }
     }
     
@@ -209,10 +218,16 @@ impl DialogAdapter {
         self.callid_to_session.insert(call_id.clone(), session_id.clone());
         
         // Publish StoreDialogMapping event to inform dialog-core about the session-dialog mapping
-        // NOTE: Currently dialog-core doesn't have access to GlobalEventCoordinator from here
-        // This would require passing the coordinator through the adapter constructor
-        // For now, dialog-core will discover the mapping when it receives events with the session_id
-        tracing::info!("Created dialog {} for session {} - dialog-core will discover mapping via events", dialog_id, session_id.0);
+        let event = SessionToDialogEvent::StoreDialogMapping {
+            session_id: session_id.0.clone(),
+            dialog_id: dialog_id.to_string(),
+        };
+        self.global_coordinator.publish(Arc::new(
+            RvoipCrossCrateEvent::SessionToDialog(event)
+        )).await
+        .map_err(|e| SessionError::InternalError(format!("Failed to publish StoreDialogMapping: {}", e)))?;
+        
+        tracing::info!("Published StoreDialogMapping for session {} -> dialog {}", session_id.0, dialog_id);
         
         // Store the transaction ID for later ACK sending
         // Note: CallHandle might not expose transaction_id directly
@@ -426,6 +441,7 @@ impl Clone for DialogAdapter {
             callid_to_session: self.callid_to_session.clone(),
             incoming_requests: self.incoming_requests.clone(),
             outgoing_invite_tx: self.outgoing_invite_tx.clone(),
+            global_coordinator: self.global_coordinator.clone(),
         }
     }
 }

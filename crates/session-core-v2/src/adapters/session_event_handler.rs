@@ -348,12 +348,22 @@ impl SessionCrossCrateEventHandler {
         let sdp_answer = self.extract_field(event_str, "sdp_answer: Some(\"")
             .map(|s| s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\\"", "\""));
         
-        // Only trigger state transition - all logic should be in the state machine
+        // Store remote SDP if present
+        if let Some(sdp) = &sdp_answer {
+            info!("Stored remote SDP from CallEstablished for session {}", session_id);
+            // Update the session with remote SDP
+            if let Ok(mut session) = self.state_machine.store.get_session(&SessionId(session_id.clone())).await {
+                session.remote_sdp = Some(sdp.clone());
+                let _ = self.state_machine.store.update_session(session).await;
+            }
+        }
+        
+        // CallEstablished maps to Dialog200OK for state machine processing
         if let Err(e) = self.state_machine.process_event(
             &SessionId(session_id.clone()),
-            EventType::CallEstablished { session_id: session_id.clone(), sdp_answer }
+            EventType::Dialog200OK
         ).await {
-            error!("Failed to process CallEstablished event: {}", e);
+            error!("Failed to process CallEstablished as Dialog200OK: {}", e);
         }
         
         Ok(())
