@@ -212,10 +212,7 @@ impl DialogApi for DialogServer {
         &self.dialog_manager
     }
     
-    async fn set_session_coordinator(&self, sender: mpsc::Sender<SessionCoordinationEvent>) -> ApiResult<()> {
-        self.dialog_manager.set_session_coordinator(sender).await;
-        Ok(())
-    }
+    // REMOVED: set_session_coordinator() - Use GlobalEventCoordinator instead
     
     async fn start(&self) -> ApiResult<()> {
         info!("Starting DialogServer on {}", self.config.dialog.local_address);

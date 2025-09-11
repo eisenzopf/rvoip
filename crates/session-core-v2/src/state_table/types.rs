@@ -174,6 +174,8 @@ pub enum EventType {
     SendDTMF { digits: String },
     
     // Dialog events (from dialog-core)
+    DialogCreated { dialog_id: String, call_id: String },
+    CallEstablished { session_id: String, sdp_answer: Option<String> },
     DialogInvite,
     Dialog180Ringing,
     Dialog183SessionProgress,

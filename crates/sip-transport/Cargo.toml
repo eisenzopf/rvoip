@@ -22,7 +22,7 @@ workspace = true
 [dependencies]
 # 🎯 INTERNAL CRATES
 rvoip-sip-core.workspace = true
-infra-common.workspace = true
+rvoip-infra-common.workspace = true
 
 # External dependencies from workspace
 tokio.workspace = true

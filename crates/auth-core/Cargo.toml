@@ -45,7 +45,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 
 # Internal dependencies
-infra-common = { path = "../infra-common", version = "0.1.0" }
+rvoip-infra-common = { path = "../infra-common", version = "0.1.0" }
 
 [dev-dependencies]
 mockito = "1.4"

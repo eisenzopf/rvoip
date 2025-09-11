@@ -9,12 +9,12 @@ use tokio::sync::{mpsc, RwLock, broadcast};
 use anyhow::Result;
 use tracing::{debug, info, warn, error};
 
-use infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
-use infra_common::events::cross_crate::{
+use rvoip_infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
+use rvoip_infra_common::events::cross_crate::{
     RvoipCrossCrateEvent, SessionToDialogEvent, SessionToMediaEvent, 
     DialogToSessionEvent, MediaToSessionEvent, CrossCrateEvent
 };
-use infra_common::planes::LayerTaskManager;
+use rvoip_infra_common::planes::LayerTaskManager;
 
 use crate::manager::events::{SessionEvent, SessionEventProcessor, SessionEventSubscriber};
 use crate::api::types::SessionId;
@@ -159,7 +159,7 @@ impl SessionEventAdapter {
         match event {
             SessionEvent::StateChanged { session_id, old_state, new_state } => {
                 use crate::api::types::CallState;
-                use infra_common::events::cross_crate::{CallState as CrossCrateCallState, DialogToSessionEvent};
+                use rvoip_infra_common::events::cross_crate::{CallState as CrossCrateCallState, DialogToSessionEvent};
                 
                 // Convert CallState
                 let cross_crate_state = match new_state {
@@ -193,7 +193,7 @@ impl SessionEventAdapter {
             }
             
             SessionEvent::SessionTerminating { session_id, .. } => {
-                use infra_common::events::cross_crate::TerminationReason;
+                use rvoip_infra_common::events::cross_crate::TerminationReason;
                 
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::CallTerminated {
@@ -226,7 +226,7 @@ impl SessionEventAdapter {
                     }
                     
                     DialogToSessionEvent::CallStateChanged { session_id, new_state, .. } => {
-                        use infra_common::events::cross_crate::CallState as CrossCrateCallState;
+                        use rvoip_infra_common::events::cross_crate::CallState as CrossCrateCallState;
                         use crate::api::types::{CallState, SessionId};
                         
                         let local_state = match new_state {
@@ -285,7 +285,7 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use infra_common::events::coordinator::GlobalEventCoordinator;
+    use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
     
     #[tokio::test]
     async fn test_adapter_creation() {

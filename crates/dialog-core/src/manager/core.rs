@@ -337,111 +337,11 @@ impl DialogManager {
         self.local_address
     }
     
-    /// Set the session coordinator for sending events to session-core
-    /// 
-    /// This establishes the communication channel between dialog-core and session-core,
-    /// maintaining the proper architectural layer separation.
-    /// 
-    /// # Arguments
-    /// * `sender` - Channel sender for session coordination events
-    pub async fn set_session_coordinator(&self, sender: mpsc::Sender<SessionCoordinationEvent>) {
-        *self.session_coordinator.write().await = Some(sender);
-        debug!("Session coordinator configured");
-    }
-    
-    /// Set the dialog event sender for external consumers (session-core)
-    /// 
-    /// This establishes the dialog event communication channel that session-core
-    /// can use to receive high-level dialog state changes and events.
-    /// 
-    /// # Arguments
-    /// * `sender` - Channel sender for dialog events
-    pub async fn set_dialog_event_sender(&self, sender: mpsc::Sender<DialogEvent>) {
-        *self.dialog_event_sender.write().await = Some(sender);
-        debug!("Dialog event sender configured for session-core");
-    }
-    
-    /// Setup bidirectional dialog event communication
-    /// 
-    /// Creates a channel that allows session-core to send shutdown events to dialog-core
-    /// and receive dialog events from dialog-core.
-    /// 
-    /// # Returns
-    /// A sender for session-core to send events to dialog-core
-    pub async fn setup_dialog_event_channel(&self) -> mpsc::Sender<DialogEvent> {
-        let (tx, rx) = mpsc::channel(100);
-        
-        // Store receiver for internal processing
-        *self.dialog_event_receiver.write().await = Some(rx);
-        
-        // Spawn dialog event processor
-        let manager = self.clone();
-        tokio::spawn(async move {
-            manager.process_dialog_events().await;
-        });
-        
-        // Return sender to session-core
-        tx
-    }
-    
-    /// Process incoming dialog events (mainly for shutdown coordination)
-    async fn process_dialog_events(&self) {
-        let mut receiver = {
-            let mut rx_guard = self.dialog_event_receiver.write().await;
-            rx_guard.take()
-        };
-        
-        if let Some(mut rx) = receiver {
-            info!("Starting dialog event processor");
-            
-            while let Some(event) = rx.recv().await {
-                match event {
-                    DialogEvent::ShutdownRequested => {
-                        info!("📥 DialogManager received ShutdownRequested event");
-                        self.handle_shutdown_requested().await;
-                    }
-                    _ => {
-                        // Other events are for outgoing to session-core
-                        debug!("Received unexpected dialog event: {:?}", event);
-                    }
-                }
-            }
-            
-            info!("Dialog event processor terminated");
-        }
-    }
-    
-    /// Handle shutdown request from session layer
-    async fn handle_shutdown_requested(&self) {
-        info!("🛑 DialogManager handling shutdown request");
-        
-        // Forward shutdown request to transaction layer
-        // Transaction manager will handle transport shutdown
-        
-        // Report readiness
-        self.emit_dialog_event(DialogEvent::ShutdownReady).await;
-    }
-    
-    /// Subscribe to dialog events
-    /// 
-    /// Returns a receiver for dialog events that session-core can use to monitor
-    /// dialog state changes and other dialog-level events.
-    /// 
-    /// # Returns
-    /// A receiver for dialog events
-    pub fn subscribe_to_dialog_events(&self) -> mpsc::Receiver<DialogEvent> {
-        let (tx, rx) = mpsc::channel(100);
-        
-        // Store the sender for future use
-        tokio::spawn({
-            let dialog_event_sender = self.dialog_event_sender.clone();
-            async move {
-                *dialog_event_sender.write().await = Some(tx);
-            }
-        });
-        
-        rx
-    }
+    // REMOVED: set_session_coordinator() - Use GlobalEventCoordinator instead
+    // REMOVED: set_dialog_event_sender() - Use GlobalEventCoordinator instead
+    // REMOVED: setup_dialog_event_channel() - Use GlobalEventCoordinator instead
+    // REMOVED: process_dialog_events() and handle_shutdown_requested() - Use GlobalEventCoordinator instead
+    // REMOVED: subscribe_to_dialog_events() - Use GlobalEventCoordinator instead
     
     /// Emit a dialog event to external consumers
     /// 

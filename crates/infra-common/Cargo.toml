@@ -1,5 +1,5 @@
 [package]
-name = "infra-common"
+name = "rvoip-infra-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

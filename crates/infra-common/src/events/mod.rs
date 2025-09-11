@@ -9,10 +9,10 @@
 //! ## Quick Start - Zero Copy Implementation
 //! 
 //! ```rust,no_run
-//! use infra_common::events::system::EventSystem;
-//! use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
-//! use infra_common::events::types::{Event, EventPriority};
-//! use infra_common::events::api::EventSystem as EventSystemTrait;
+//! use rvoip_infra_common::events::system::EventSystem;
+//! use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+//! use rvoip_infra_common::events::types::{Event, EventPriority};
+//! use rvoip_infra_common::events::api::EventSystem as EventSystemTrait;
 //! use std::any::Any;
 //! use std::time::Duration;
 //! use serde::{Serialize, Deserialize};
@@ -94,7 +94,7 @@
 //! When creating a Zero Copy event system, you can configure:
 //! 
 //! ```rust,no_run
-//! use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+//! use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};
 //! 
 //! let system = EventSystemBuilder::new()
 //!     .implementation(ImplementationType::ZeroCopy)
@@ -113,10 +113,10 @@
 //! to only receive events that meet specific criteria:
 //!
 //! ```rust,no_run
-//! use infra_common::events::system::EventSystem;
-//! use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
-//! use infra_common::events::types::{Event, EventPriority, EventFilter};
-//! use infra_common::events::api::{EventSystem as EventSystemTrait, EventSubscriber, filters};
+//! use rvoip_infra_common::events::system::EventSystem;
+//! use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+//! use rvoip_infra_common::events::types::{Event, EventPriority, EventFilter};
+//! use rvoip_infra_common::events::api::{EventSystem as EventSystemTrait, EventSubscriber, filters};
 //! use std::any::Any;
 //! use std::sync::Arc;
 //! use serde::{Serialize, Deserialize};

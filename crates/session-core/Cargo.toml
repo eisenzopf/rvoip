@@ -27,7 +27,7 @@ rvoip-sip-core.workspace = true
 rvoip-dialog-core.workspace = true
 rvoip-sip-transport.workspace = true
 rvoip-media-core.workspace = true
-infra-common.workspace = true
+rvoip-infra-common.workspace = true
 rvoip-registrar-core = { path = "../registrar-core" }
 
 # External dependencies from workspace

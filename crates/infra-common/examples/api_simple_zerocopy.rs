@@ -1,6 +1,6 @@
-use infra_common::events::api::EventSystem;
-use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
-use infra_common::events::types::{Event, EventPriority};
+use rvoip_infra_common::events::api::EventSystem;
+use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+use rvoip_infra_common::events::types::{Event, EventPriority};
 use serde::{Serialize, Deserialize};
 use std::any::Any;
 use std::time::Duration;

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use tracing::{info, debug, warn};
 #[allow(unused_imports)] // EventPublisher trait is needed for .publish() method
-use infra_common::events::api::{EventSystem as EventSystemTrait, EventPublisher as _};
+use rvoip_infra_common::events::api::{EventSystem as EventSystemTrait, EventPublisher as _};
 
 use crate::registrar::Registrar;
 use crate::presence::Presence;
@@ -26,7 +26,7 @@ pub struct RegistrarService {
     config: Arc<RegistrarConfig>,
     
     /// Event bus for publishing events
-    event_bus: Option<Arc<infra_common::events::system::EventSystem>>,
+    event_bus: Option<Arc<rvoip_infra_common::events::system::EventSystem>>,
     
     /// Service mode
     mode: ServiceMode,
@@ -76,7 +76,7 @@ impl RegistrarService {
     }
     
     /// Set the event bus for publishing events
-    pub fn set_event_bus(&mut self, event_bus: Arc<infra_common::events::system::EventSystem>) {
+    pub fn set_event_bus(&mut self, event_bus: Arc<rvoip_infra_common::events::system::EventSystem>) {
         self.event_bus = Some(event_bus);
     }
     
@@ -297,7 +297,7 @@ impl RegistrarService {
     /// Publish an event to the event bus
     async fn publish_event<E>(&self, event: E) 
     where
-        E: infra_common::events::types::Event + std::fmt::Debug + 'static,
+        E: rvoip_infra_common::events::types::Event + std::fmt::Debug + 'static,
     {
         if let Some(bus) = &self.event_bus {
             let publisher = bus.create_publisher::<E>();

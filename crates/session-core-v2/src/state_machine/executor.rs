@@ -39,8 +39,8 @@ pub struct StateMachine {
     /// Adapter to media-core
     media_adapter: Arc<MediaAdapter>,
     
-    /// Event publisher
-    event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
+    /// Event publisher (optional - for legacy compatibility)
+    event_tx: Option<tokio::sync::mpsc::Sender<SessionEvent>>,
 }
 
 /// Events that flow through the system
@@ -76,14 +76,12 @@ impl StateMachine {
         dialog_adapter: Arc<DialogAdapter>,
         media_adapter: Arc<MediaAdapter>,
     ) -> Self {
-        // Create event channel
-        let (event_tx, _) = tokio::sync::mpsc::channel(100);
         Self {
             table,
             store,
             dialog_adapter,
             media_adapter,
-            event_tx,
+            event_tx: None, // No event channel by default
         }
     }
     
@@ -98,7 +96,7 @@ impl StateMachine {
             store,
             dialog_adapter,
             media_adapter,
-            event_tx,
+            event_tx: Some(event_tx),
         }
     }
     
@@ -114,7 +112,7 @@ impl StateMachine {
             store,
             dialog_adapter,
             media_adapter,
-            event_tx,
+            event_tx: Some(event_tx),
         }
     }
     
@@ -361,11 +359,13 @@ impl StateMachine {
         // 8. Save updated session state
         self.store.update_session(session.clone()).await?;
         
-        // 9. Publish events
-        for event_template in &transition.publish_events {
-            let event = self.instantiate_event(event_template, &session, old_state).await;
-            if let Err(e) = self.event_tx.send(event).await {
-                error!("Failed to publish event: {}", e);
+        // 9. Publish events (if channel is available)
+        if let Some(ref event_tx) = self.event_tx {
+            for event_template in &transition.publish_events {
+                let event = self.instantiate_event(event_template, &session, old_state).await;
+                if let Err(e) = event_tx.send(event).await {
+                    error!("Failed to publish event: {}", e);
+                }
             }
         }
         

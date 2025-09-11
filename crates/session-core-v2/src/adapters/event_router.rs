@@ -5,8 +5,8 @@
 //! No scattered event handling, no channels, just the global event bus.
 
 use std::sync::Arc;
-use infra_common::events::coordinator::GlobalEventCoordinator;
-use infra_common::events::cross_crate::{
+use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
+use rvoip_infra_common::events::cross_crate::{
     CrossCrateEvent, RvoipCrossCrateEvent,
     DialogToSessionEvent, MediaToSessionEvent,
     SessionToDialogEvent, SessionToMediaEvent,

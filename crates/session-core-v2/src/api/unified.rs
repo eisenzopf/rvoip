@@ -4,6 +4,7 @@
 //! All business logic is in the state table.
 
 use crate::state_table::types::{EventType, CallState, SessionId};
+use crate::state_table::MASTER_TABLE;
 use crate::state_machine::{StateMachine, StateMachineHelpers};
 use crate::adapters::{DialogAdapter, MediaAdapter};
 use crate::errors::{Result, SessionError};
@@ -14,7 +15,7 @@ use rvoip_media_core::types::AudioFrame;
 use std::sync::Arc;
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::{mpsc, RwLock};
-use infra_common::events::coordinator::GlobalEventCoordinator;
+use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 
 /// Configuration for the unified coordinator
 #[derive(Debug, Clone)]
@@ -72,12 +73,10 @@ pub struct UnifiedCoordinator {
 impl UnifiedCoordinator {
     /// Create a new coordinator
     pub async fn new(config: Config) -> Result<Arc<Self>> {
-        // Create global event coordinator
-        let global_coordinator = Arc::new(
-            GlobalEventCoordinator::monolithic()
-                .await
-                .map_err(|e| SessionError::InternalError(format!("Failed to create global coordinator: {}", e)))?
-        );
+        // Get the global event coordinator singleton
+        let global_coordinator = rvoip_infra_common::events::coordinator::global_coordinator()
+            .await
+            .clone();
         
         // Create core components
         let store = Arc::new(SessionStore::new());
@@ -99,13 +98,12 @@ impl UnifiedCoordinator {
             config.media_port_end,
         ));
         
-        // Create state machine
-        let (event_tx, _event_rx) = mpsc::channel(1000);
-        let state_machine = Arc::new(StateMachine::new_with_adapters(
+        // Create state machine (without event channel - using GlobalEventCoordinator)
+        let state_machine = Arc::new(StateMachine::new(
+            MASTER_TABLE.clone(),
             store.clone(),
             dialog_adapter.clone(),
             media_adapter.clone(),
-            event_tx,
         ));
         
         // Create helpers

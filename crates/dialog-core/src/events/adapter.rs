@@ -9,12 +9,12 @@ use tokio::sync::{mpsc, RwLock};
 use anyhow::Result;
 use tracing::{debug, info, warn, error};
 
-use infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
-use infra_common::events::cross_crate::{
+use rvoip_infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
+use rvoip_infra_common::events::cross_crate::{
     RvoipCrossCrateEvent, DialogToSessionEvent, DialogToTransportEvent,
     SessionToDialogEvent, TransportToDialogEvent, CrossCrateEvent, CallState as CrossCrateCallState
 };
-use infra_common::planes::LayerTaskManager;
+use rvoip_infra_common::planes::LayerTaskManager;
 
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::dialog::{DialogId, DialogState};
@@ -99,7 +99,7 @@ impl DialogEventAdapter {
         
         self.task_manager.spawn_tracked(
             "dialog-cross-crate-handler",
-            infra_common::planes::TaskPriority::High,
+            rvoip_infra_common::planes::TaskPriority::High,
             async move {
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -174,7 +174,7 @@ impl DialogEventAdapter {
             }
             
             DialogEvent::Terminated { dialog_id, reason } => {
-                use infra_common::events::cross_crate::TerminationReason;
+                use rvoip_infra_common::events::cross_crate::TerminationReason;
                 
                 let termination_reason = if reason.contains("timeout") {
                     TerminationReason::Timeout
@@ -290,7 +290,7 @@ impl CrossCrateEventHandler for DialogCrossCrateEventHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use infra_common::events::coordinator::GlobalEventCoordinator;
+    use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
     
     #[tokio::test]
     async fn test_dialog_adapter_creation() {

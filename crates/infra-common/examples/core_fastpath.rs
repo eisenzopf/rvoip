@@ -1,7 +1,7 @@
-use infra_common::events::types::{Event, EventPriority, StaticEvent};
-use infra_common::events::bus::Publisher;
-use infra_common::events::registry::GlobalTypeRegistry;
-use infra_common::events::bus::EventBus;
+use rvoip_infra_common::events::types::{Event, EventPriority, StaticEvent};
+use rvoip_infra_common::events::bus::Publisher;
+use rvoip_infra_common::events::registry::GlobalTypeRegistry;
+use rvoip_infra_common::events::bus::EventBus;
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};

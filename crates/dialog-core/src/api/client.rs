@@ -1851,11 +1851,7 @@ impl DialogApi for DialogClient {
         &self.dialog_manager
     }
     
-    async fn set_session_coordinator(&self, sender: mpsc::Sender<SessionCoordinationEvent>) -> ApiResult<()> {
-        info!("Setting session coordinator for dialog client");
-        self.dialog_manager.set_session_coordinator(sender).await;
-        Ok(())
-    }
+    // REMOVED: set_session_coordinator() - Use GlobalEventCoordinator instead
     
     async fn start(&self) -> ApiResult<()> {
         info!("Starting dialog client");

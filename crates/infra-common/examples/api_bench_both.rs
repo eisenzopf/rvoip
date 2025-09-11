@@ -1,9 +1,9 @@
-use infra_common::events::system::EventSystem;
-use infra_common::events::types::{Event, EventPriority, EventResult, StaticEvent};
-use infra_common::events::builder::{EventSystemBuilder, ImplementationType};
-use infra_common::events::registry::GlobalTypeRegistry;
-use infra_common::events::api::EventSystem as EventSystemTrait;
-use infra_common::events::api::{EventPublisher, EventSubscriber};
+use rvoip_infra_common::events::system::EventSystem;
+use rvoip_infra_common::events::types::{Event, EventPriority, EventResult, StaticEvent};
+use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+use rvoip_infra_common::events::registry::GlobalTypeRegistry;
+use rvoip_infra_common::events::api::EventSystem as EventSystemTrait;
+use rvoip_infra_common::events::api::{EventPublisher, EventSubscriber};
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

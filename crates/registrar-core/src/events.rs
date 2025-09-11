@@ -5,7 +5,7 @@ use std::any::Any;
 use crate::types::{ContactInfo, PresenceStatus};
 
 // Import Event trait from infra-common
-use infra_common::events::types::{Event, EventPriority};
+use rvoip_infra_common::events::types::{Event, EventPriority};
 
 /// Registration-related events
 #[derive(Debug, Clone, Serialize, Deserialize)]

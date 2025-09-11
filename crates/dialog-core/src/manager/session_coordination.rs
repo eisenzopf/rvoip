@@ -51,10 +51,11 @@ pub trait EventSender {
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
 }
 
-// Stub implementations
+// Implementation using GlobalEventCoordinator
 impl SessionCoordinator for DialogManager {
-    async fn configure_session_coordination(&self, sender: mpsc::Sender<SessionCoordinationEvent>) {
-        self.set_session_coordinator(sender).await;
+    async fn configure_session_coordination(&self, _sender: mpsc::Sender<SessionCoordinationEvent>) {
+        // REMOVED: Channel-based coordination - events now flow through GlobalEventCoordinator
+        tracing::warn!("configure_session_coordination() called but channel-based coordination is removed");
     }
     
     async fn notify_session_layer(&self, event: SessionCoordinationEvent) -> DialogResult<()> {

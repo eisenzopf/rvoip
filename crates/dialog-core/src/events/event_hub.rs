@@ -8,8 +8,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tracing::{debug, info, warn, error};
 
-use infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
-use infra_common::events::cross_crate::{
+use rvoip_infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
+use rvoip_infra_common::events::cross_crate::{
     CrossCrateEvent, RvoipCrossCrateEvent, DialogToSessionEvent, SessionToDialogEvent,
     DialogToTransportEvent, TransportToDialogEvent, CallState, TerminationReason
 };
