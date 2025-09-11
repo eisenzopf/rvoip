@@ -87,6 +87,7 @@ impl UnifiedCoordinator {
         let dialog_adapter = Arc::new(DialogAdapter::new(
             dialog_api,
             store.clone(),
+            global_coordinator.clone(),
         ));
         
         let media_controller = Self::create_media_controller(&config, global_coordinator.clone()).await?;
