@@ -322,7 +322,7 @@ mod tests {
     #[tokio::test]
     async fn test_media_adapter_creation() {
         let coordinator = Arc::new(
-            GlobalEventCoordinator::monolithic()
+            rvoip_infra_common::events::global_coordinator()
                 .await
                 .expect("Failed to create coordinator")
         );
@@ -337,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn test_media_adapter_start_stop() {
         let coordinator = Arc::new(
-            GlobalEventCoordinator::monolithic()
+            rvoip_infra_common::events::global_coordinator()
                 .await
                 .expect("Failed to create coordinator")
         );

@@ -279,11 +279,9 @@ mod tests {
     
     #[tokio::test]
     async fn test_rtp_adapter_creation() {
-        let coordinator = Arc::new(
-            GlobalEventCoordinator::monolithic()
-                .await
-                .expect("Failed to create coordinator")
-        );
+        let coordinator = rvoip_infra_common::events::global_coordinator()
+            .await
+            .clone();
         
         let adapter = RtpEventAdapter::new(coordinator)
             .await
@@ -294,11 +292,9 @@ mod tests {
     
     #[tokio::test]
     async fn test_rtp_adapter_start_stop() {
-        let coordinator = Arc::new(
-            GlobalEventCoordinator::monolithic()
-                .await
-                .expect("Failed to create coordinator")
-        );
+        let coordinator = rvoip_infra_common::events::global_coordinator()
+            .await
+            .clone();
         
         let adapter = RtpEventAdapter::new(coordinator)
             .await
