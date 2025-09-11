@@ -13,7 +13,7 @@
 //! - Coordinating request sending through transaction layer
 
 use std::net::SocketAddr;
-use tracing::{debug, warn, info};
+use tracing::{debug, warn, info, error};
 use rvoip_sip_core::{Request, Response, Method};
 use crate::transaction::{TransactionKey, TransactionEvent, TransactionState};
 use crate::transaction::builders::{dialog_utils, dialog_quick};
@@ -98,6 +98,8 @@ impl TransactionIntegration for DialogManager {
                 
                 // For certain methods in confirmed dialogs, remote tag is required
                 (_, crate::dialog::DialogState::Confirmed) => {
+                    error!("Dialog {} in Confirmed state but missing remote tag for {} request. Dialog details: local_tag={:?}, remote_tag={:?}", 
+                           dialog_id, method, dialog.local_tag, dialog.remote_tag);
                     return Err(crate::errors::DialogError::protocol_error(
                         &format!("{} request in confirmed dialog missing remote tag", method)
                     ));
@@ -521,8 +523,13 @@ impl DialogManager {
             // Update dialog with response information (remote tag, etc.)
             if let Some(to_header) = response.to() {
                 if let Some(to_tag) = to_header.tag() {
+                    info!("Updating remote tag for dialog {} to: {}", dialog_id, to_tag);
                     dialog.set_remote_tag(to_tag.to_string());
+                } else {
+                    warn!("200 OK response has no To tag for dialog {}", dialog_id);
                 }
+            } else {
+                warn!("200 OK response has no To header for dialog {}", dialog_id);
             }
             
             // Update dialog state based on response status and current state

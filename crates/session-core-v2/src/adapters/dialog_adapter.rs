@@ -274,10 +274,42 @@ impl DialogAdapter {
             .clone();
         
         // Build response using transaction ID
-        let response = self.dialog_api
-            .build_response(&transaction_id, StatusCode::from_u16(code).unwrap_or(StatusCode::Ok), sdp.clone())
-            .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to build response: {}", e)))?;
+        // For 200 OK responses to INVITE, use special handling to ensure To tag is generated
+        let response = if code == 200 && request.method() == rvoip_sip_core::Method::Invite {
+            // Use dialog-core's response builder that adds To tags
+            use rvoip_dialog_core::transaction::utils::response_builders;
+            // Use the source address we stored earlier as the contact address
+            let contact_addr = source.ip().to_string();
+            let contact_port = Some(source.port());
+            let mut response = response_builders::create_ok_response_with_dialog_info(
+                &request,
+                "server",
+                &contact_addr,
+                contact_port
+            );
+            
+            // Add SDP if provided
+            if let Some(sdp_body) = sdp {
+                response = response.with_body(sdp_body.as_bytes().to_vec());
+                // Add Content-Type header for SDP
+                use rvoip_sip_core::{TypedHeader, types::content_type::ContentType};
+                use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
+                response.headers.push(TypedHeader::ContentType(ContentType::new(
+                    ContentTypeValue {
+                        m_type: "application".to_string(),
+                        m_subtype: "sdp".to_string(),
+                        parameters: std::collections::HashMap::new(),
+                    }
+                )));
+            }
+            response
+        } else {
+            // For other responses, use the generic builder
+            self.dialog_api
+                .build_response(&transaction_id, StatusCode::from_u16(code).unwrap_or(StatusCode::Ok), sdp.clone())
+                .await
+                .map_err(|e| SessionError::DialogError(format!("Failed to build response: {}", e)))?
+        };
         
         // Send the response
         self.dialog_api

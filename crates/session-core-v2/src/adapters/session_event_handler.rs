@@ -307,6 +307,24 @@ impl SessionCrossCrateEventHandler {
             }
         );
         
+        // CRITICAL: Also store the mapping in dialog adapter so it can send responses
+        // Convert our DialogId to rvoip DialogId
+        let our_dialog_id = DialogId(dialog_uuid);
+        let rvoip_dialog_id = rvoip_dialog_core::DialogId::from(our_dialog_id.clone());
+        self.dialog_adapter.session_to_dialog.insert(session_id.clone(), rvoip_dialog_id.clone());
+        self.dialog_adapter.dialog_to_session.insert(rvoip_dialog_id.clone(), session_id.clone());
+        
+        // Publish StoreDialogMapping event to inform dialog-core about the session-dialog mapping
+        use rvoip_infra_common::events::cross_crate::{RvoipCrossCrateEvent, SessionToDialogEvent};
+        let event = SessionToDialogEvent::StoreDialogMapping {
+            session_id: session_id.0.clone(),
+            dialog_id: dialog_id_str.clone(),
+        };
+        let _ = self.global_coordinator.publish(Arc::new(
+            RvoipCrossCrateEvent::SessionToDialog(event)
+        )).await;
+        info!("Published StoreDialogMapping for UAS session {} -> dialog {}", session_id.0, dialog_id_str);
+        
         // Process the event - state machine will handle the rest
         let event_type = EventType::IncomingCall { from: from.clone(), sdp };
         
