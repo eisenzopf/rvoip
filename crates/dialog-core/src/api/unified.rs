@@ -142,7 +142,7 @@
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
-use tracing::{info, debug};
+use tracing::{info, debug, warn, error};
 
 use crate::transaction::{TransactionManager, TransactionKey, TransactionEvent};
 use rvoip_sip_core::{Request, Response, Method, StatusCode};
@@ -653,6 +653,120 @@ impl UnifiedDialogApi {
         reason: Option<String>
     ) -> ApiResult<()> {
         self.manager.send_status_response(transaction_id, status_code, reason).await
+    }
+    
+    /// Send a response for a session (session-core convenience method)
+    ///
+    /// Allows session-core to send responses without knowing transaction details.
+    /// Dialog-core will look up the appropriate transaction for the session.
+    ///
+    /// # Arguments
+    /// * `session_id` - Session ID to respond for
+    /// * `status_code` - Status code to send
+    /// * `body` - Optional response body (e.g., SDP)
+    pub async fn send_response_for_session(
+        &self,
+        session_id: &str,
+        status_code: u16,
+        body: Option<String>
+    ) -> ApiResult<()> {
+        debug!("send_response_for_session called for session {} with status {}", session_id, status_code);
+        
+        // Look up the dialog ID for this session
+        let dialog_id = self.manager.core()
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                error!("No dialog found for session {}", session_id);
+                ApiError::Dialog { 
+                    message: format!("No dialog found for session {}", session_id) 
+                }
+            })?
+            .clone();
+        
+        debug!("Found dialog {} for session {}", dialog_id, session_id);
+        
+        // Find the transaction for this dialog
+        let transaction_id = self.manager.core()
+            .transaction_to_dialog
+            .iter()
+            .find(|entry| entry.value() == &dialog_id)
+            .map(|entry| entry.key().clone())
+            .ok_or_else(|| {
+                error!("No transaction found for dialog {} (session {})", dialog_id, session_id);
+                // List all transaction mappings for debugging
+                for entry in self.manager.core().transaction_to_dialog.iter() {
+                    debug!("Transaction {} -> Dialog {}", entry.key(), entry.value());
+                }
+                ApiError::Dialog { 
+                    message: format!("No transaction found for dialog {}", dialog_id) 
+                }
+            })?;
+        
+        debug!("Found transaction {} for dialog {}", transaction_id, dialog_id);
+        
+        // Build the response
+        // For 200 OK responses to INVITE, we need special handling to ensure To tag is added
+        let response = if status_code == 200 {
+            // Get original request to check if it's an INVITE
+            let original_request = self.manager.core()
+                .transaction_manager()
+                .original_request(&transaction_id)
+                .await
+                .map_err(|e| ApiError::Internal { 
+                    message: format!("Failed to get original request: {}", e) 
+                })?
+                .ok_or_else(|| ApiError::Internal { 
+                    message: "No original request found for transaction".to_string() 
+                })?;
+            
+            if original_request.method() == rvoip_sip_core::Method::Invite {
+                // Use special response builder for 200 OK to INVITE that adds To tag
+                use crate::transaction::utils::response_builders;
+                let local_addr = self.manager.core().local_address;
+                let mut response = response_builders::create_ok_response_with_dialog_info(
+                    &original_request,
+                    "server",
+                    &local_addr.ip().to_string(),
+                    Some(local_addr.port())
+                );
+                
+                // Add SDP if provided
+                if let Some(sdp_body) = body {
+                    response = response.with_body(sdp_body.as_bytes().to_vec());
+                    // Add Content-Type header for SDP
+                    use rvoip_sip_core::{TypedHeader, types::content_type::ContentType};
+                    use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
+                    response.headers.push(TypedHeader::ContentType(ContentType::new(
+                        ContentTypeValue {
+                            m_type: "application".to_string(),
+                            m_subtype: "sdp".to_string(),
+                            parameters: std::collections::HashMap::new(),
+                        }
+                    )));
+                }
+                
+                response
+            } else {
+                // Not an INVITE, use regular response building
+                self.build_response(
+                    &transaction_id,
+                    StatusCode::from_u16(status_code).unwrap_or(StatusCode::Ok),
+                    body
+                ).await?
+            }
+        } else {
+            // Not a 200 OK, use regular response building
+            self.build_response(
+                &transaction_id,
+                StatusCode::from_u16(status_code).unwrap_or(StatusCode::Ok),
+                body
+            ).await?
+        };
+        
+        info!("Sending {} response for session {} via transaction {}", status_code, session_id, transaction_id);
+        
+        self.send_response(&transaction_id, response).await
     }
     
     // ========================================

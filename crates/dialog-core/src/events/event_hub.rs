@@ -176,6 +176,10 @@ impl DialogEventHub {
                 // Store mapping
                 self.dialog_manager.store_dialog_mapping(&session_id, dialog_id.clone(), transaction_id.clone(), request.clone(), source);
                 
+                // Include dialog_id in headers since IncomingCall doesn't have a dialog_id field
+                let mut headers = std::collections::HashMap::new();
+                headers.insert("X-Dialog-Id".to_string(), dialog_id.to_string());
+                
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {
                         session_id,
@@ -183,7 +187,7 @@ impl DialogEventHub {
                         from,
                         to,
                         sdp_offer,
-                        headers: std::collections::HashMap::new(),
+                        headers,
                         transaction_id: transaction_id.to_string(),
                         source_addr: source.to_string(),
                     }
