@@ -4,11 +4,14 @@
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use crate::api::unified::{UnifiedCoordinator, Config};
+use crate::api::unified::UnifiedCoordinator;
 use crate::state_table::types::SessionId;
 use crate::types::IncomingCallInfo;
 use crate::errors::Result;
-use rvoip_media_core::types::AudioFrame;
+
+// Re-export types that users of SimplePeer will need
+pub use rvoip_media_core::types::AudioFrame;
+pub use crate::api::unified::Config;
 
 /// A simple SIP peer that can make and receive calls
 pub struct SimplePeer {

@@ -1,8 +1,6 @@
 //! Alice - Makes a call and sends audio
 
-use rvoip_session_core_v2::api::simple::SimplePeer;
-use rvoip_session_core_v2::api::unified::Config;
-use rvoip_media_core::types::AudioFrame;
+use rvoip_session_core_v2::api::simple::{SimplePeer, Config, AudioFrame};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
