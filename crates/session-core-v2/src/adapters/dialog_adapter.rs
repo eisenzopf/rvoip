@@ -55,9 +55,6 @@ pub struct DialogAdapter {
     /// Store Call-ID to session mapping for correlation
     pub(crate) callid_to_session: Arc<DashMap<String, SessionId>>,
     
-    /// Store incoming request data for UAS responses
-    pub(crate) incoming_requests: Arc<DashMap<SessionId, (Request, TransactionKey, SocketAddr)>>,
-    
     /// Store outgoing INVITE transaction IDs for UAC ACK sending
     pub(crate) outgoing_invite_tx: Arc<DashMap<SessionId, TransactionKey>>,
     
@@ -78,7 +75,6 @@ impl DialogAdapter {
             session_to_dialog: Arc::new(DashMap::new()),
             dialog_to_session: Arc::new(DashMap::new()),
             callid_to_session: Arc::new(DashMap::new()),
-            incoming_requests: Arc::new(DashMap::new()),
             outgoing_invite_tx: Arc::new(DashMap::new()),
             global_coordinator,
         }
@@ -267,62 +263,17 @@ impl DialogAdapter {
         code: u16,
         sdp: Option<String>,
     ) -> Result<()> {
-        // Get stored request data
-        let (request, transaction_id, source) = self.incoming_requests
-            .get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(format!("No incoming request for session {}", session_id.0)))?
-            .clone();
+        tracing::info!("DialogAdapter sending {} response for session {} with SDP: {}", 
+            code, session_id.0, sdp.is_some());
         
-        // Build response using transaction ID
-        // For 200 OK responses to INVITE, use special handling to ensure To tag is generated
-        let response = if code == 200 && request.method() == rvoip_sip_core::Method::Invite {
-            // Use dialog-core's response builder that adds To tags
-            use rvoip_dialog_core::transaction::utils::response_builders;
-            // Use the source address we stored earlier as the contact address
-            let contact_addr = source.ip().to_string();
-            let contact_port = Some(source.port());
-            let mut response = response_builders::create_ok_response_with_dialog_info(
-                &request,
-                "server",
-                &contact_addr,
-                contact_port
-            );
-            
-            // Add SDP if provided
-            if let Some(sdp_body) = sdp {
-                response = response.with_body(sdp_body.as_bytes().to_vec());
-                // Add Content-Type header for SDP
-                use rvoip_sip_core::{TypedHeader, types::content_type::ContentType};
-                use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
-                response.headers.push(TypedHeader::ContentType(ContentType::new(
-                    ContentTypeValue {
-                        m_type: "application".to_string(),
-                        m_subtype: "sdp".to_string(),
-                        parameters: std::collections::HashMap::new(),
-                    }
-                )));
-            }
-            response
-        } else {
-            // For other responses, use the generic builder
-            self.dialog_api
-                .build_response(&transaction_id, StatusCode::from_u16(code).unwrap_or(StatusCode::Ok), sdp.clone())
-                .await
-                .map_err(|e| SessionError::DialogError(format!("Failed to build response: {}", e)))?
-        };
-        
-        // Send the response
+        // Use dialog-core's session-based response method
         self.dialog_api
-            .send_response(&transaction_id, response)
+            .send_response_for_session(&session_id.0, code, sdp)
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send response: {}", e)))?;
-        
-        // Clean up stored request after successful response
-        if code >= 200 {
-            self.incoming_requests.remove(session_id);
-        }
-        
-        Ok(())
+            .map_err(|e| {
+                tracing::error!("Failed to send response for session {}: {}", session_id.0, e);
+                SessionError::DialogError(format!("Failed to send response: {}", e))
+            })
     }
     
     /// Send ACK (for UAC after 200 OK)
@@ -442,7 +393,6 @@ impl DialogAdapter {
             self.callid_to_session.remove(&call_id);
         }
         
-        self.incoming_requests.remove(session_id);
         self.outgoing_invite_tx.remove(session_id);
         
         tracing::debug!("Cleaned up dialog adapter mappings for session {}", session_id.0);
@@ -471,7 +421,6 @@ impl Clone for DialogAdapter {
             session_to_dialog: self.session_to_dialog.clone(),
             dialog_to_session: self.dialog_to_session.clone(),
             callid_to_session: self.callid_to_session.clone(),
-            incoming_requests: self.incoming_requests.clone(),
             outgoing_invite_tx: self.outgoing_invite_tx.clone(),
             global_coordinator: self.global_coordinator.clone(),
         }

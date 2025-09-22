@@ -250,7 +250,26 @@ impl SessionCrossCrateEventHandler {
     
     async fn handle_incoming_call(&self, event_str: &str) -> Result<()> {
         // Extract fields from the event
-        let dialog_id_str = self.extract_field(event_str, "session_id: \"").unwrap_or_else(|| "unknown".to_string());
+        // Extract session_id from the event (dialog-core provides it)
+        let session_id_str = self.extract_field(event_str, "session_id: \"").unwrap_or_else(|| format!("session-{}", uuid::Uuid::new_v4()));
+        
+        // Extract dialog_id from headers since IncomingCall doesn't have a dialog_id field directly
+        let dialog_id_str = if let Some(headers_start) = event_str.find("headers: {") {
+            // Look for X-Dialog-Id in headers
+            let headers_section = &event_str[headers_start..];
+            if let Some(dialog_id_start) = headers_section.find("\"X-Dialog-Id\": \"") {
+                let start = dialog_id_start + "\"X-Dialog-Id\": \"".len();
+                if let Some(end) = headers_section[start..].find('"') {
+                    headers_section[start..start+end].to_string()
+                } else {
+                    "unknown".to_string()
+                }
+            } else {
+                "unknown".to_string()
+            }
+        } else {
+            "unknown".to_string()
+        };
         let call_id = self.extract_field(event_str, "call_id: \"").unwrap_or_else(|| "unknown".to_string());
         let from = self.extract_field(event_str, "from: \"").unwrap_or_else(|| "unknown".to_string());
         let to = self.extract_field(event_str, "to: \"").unwrap_or_else(|| "unknown".to_string());
@@ -259,9 +278,8 @@ impl SessionCrossCrateEventHandler {
         let transaction_id = self.extract_field(event_str, "transaction_id: \"").unwrap_or_else(|| "unknown".to_string());
         let source_addr = self.extract_field(event_str, "source_addr: \"").unwrap_or_else(|| "127.0.0.1:5060".to_string());
         
-        // CRITICAL: IncomingCall is a special case - we must create session here
-        // because we don't have a session ID yet from dialog-core
-        let session_id = SessionId::new();
+        // Use the session ID provided by dialog-core
+        let session_id = SessionId(session_id_str);
         
         // Create session in store - this is the ONLY place we create sessions outside state machine
         self.state_machine.store.create_session(
@@ -270,29 +288,8 @@ impl SessionCrossCrateEventHandler {
             true,
         ).await.map_err(|e| SessionError::InternalError(format!("Failed to create session: {}", e)))?;
         
-        // Store transaction info for response sending - required before state machine runs
+        // Parse dialog UUID for registry mapping
         let dialog_uuid = uuid::Uuid::parse_str(&dialog_id_str).unwrap_or_else(|_| uuid::Uuid::new_v4());
-        let transaction_key = rvoip_dialog_core::transaction::TransactionKey::from_str(&transaction_id)
-            .unwrap_or_else(|_| {
-                // Create a minimal transaction key
-                rvoip_dialog_core::transaction::TransactionKey::new(
-                    transaction_id.clone(),
-                    rvoip_sip_core::Method::Invite,
-                    true // is_server = true for incoming calls
-                )
-            });
-        let source_socket_addr = source_addr.parse::<std::net::SocketAddr>()
-            .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 5061)));
-        
-        let dummy_request = rvoip_sip_core::Request::new(
-            rvoip_sip_core::Method::Invite,
-            rvoip_sip_core::Uri::from_str(&to).unwrap_or_else(|_| rvoip_sip_core::Uri::from_str("sip:unknown@unknown").unwrap())
-        );
-        
-        self.dialog_adapter.incoming_requests.insert(
-            session_id.clone(),
-            (dummy_request, transaction_key, source_socket_addr)
-        );
         
         // Store mapping info for state machine to use
         self.registry.map_dialog(session_id.clone(), DialogId(dialog_uuid));
@@ -307,23 +304,15 @@ impl SessionCrossCrateEventHandler {
             }
         );
         
-        // CRITICAL: Also store the mapping in dialog adapter so it can send responses
+        // Store the mapping in dialog adapter for local reference
         // Convert our DialogId to rvoip DialogId
         let our_dialog_id = DialogId(dialog_uuid);
         let rvoip_dialog_id = rvoip_dialog_core::DialogId::from(our_dialog_id.clone());
         self.dialog_adapter.session_to_dialog.insert(session_id.clone(), rvoip_dialog_id.clone());
         self.dialog_adapter.dialog_to_session.insert(rvoip_dialog_id.clone(), session_id.clone());
         
-        // Publish StoreDialogMapping event to inform dialog-core about the session-dialog mapping
-        use rvoip_infra_common::events::cross_crate::{RvoipCrossCrateEvent, SessionToDialogEvent};
-        let event = SessionToDialogEvent::StoreDialogMapping {
-            session_id: session_id.0.clone(),
-            dialog_id: dialog_id_str.clone(),
-        };
-        let _ = self.global_coordinator.publish(Arc::new(
-            RvoipCrossCrateEvent::SessionToDialog(event)
-        )).await;
-        info!("Published StoreDialogMapping for UAS session {} -> dialog {}", session_id.0, dialog_id_str);
+        // No need to publish StoreDialogMapping - dialog-core already stored the mapping
+        // when it created the IncomingCall event
         
         // Process the event - state machine will handle the rest
         let event_type = EventType::IncomingCall { from: from.clone(), sdp };
