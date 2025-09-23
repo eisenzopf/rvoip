@@ -3,9 +3,10 @@ use tracing::{info, warn, error, debug};
 use crate::state_table::SessionId;
 
 use crate::{
-    state_table::{MASTER_TABLE, StateKey, EventType, EventTemplate, Action, Transition, CallState},
+    state_table::{MASTER_TABLE, StateKey, EventType, EventTemplate, Action, Transition},
     session_store::{SessionStore, SessionState},
     adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
+    types::CallState,
 };
 
 use super::{actions, guards};
@@ -48,8 +49,8 @@ pub struct StateMachine {
 pub enum SessionEvent {
     StateChanged {
         session_id: SessionId,
-        old_state: crate::state_table::CallState,
-        new_state: crate::state_table::CallState,
+        old_state: CallState,
+        new_state: CallState,
     },
     MediaFlowEstablished {
         session_id: SessionId,
@@ -389,7 +390,7 @@ impl StateMachine {
         &self,
         template: &EventTemplate,
         session: &SessionState,
-        old_state: crate::state_table::CallState,
+        old_state: CallState,
     ) -> SessionEvent {
         match template {
             EventTemplate::StateChanged => SessionEvent::StateChanged {

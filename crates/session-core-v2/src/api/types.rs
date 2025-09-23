@@ -87,6 +87,7 @@ use serde::{Serialize, Deserialize};
 use uuid::Uuid;
 use crate::errors::Result;
 use std::fmt;
+use crate::types::CallState;
 
 // Re-export StatusCode for convenience
 pub use rvoip_sip_core::StatusCode;
@@ -336,56 +337,6 @@ impl IncomingCall {
     }
 }
 
-/// Current state of a call session
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CallState {
-    /// Call is being initiated
-    Initiating,
-    /// Call is ringing (180 Ringing received)
-    Ringing,
-    /// Call is active and media is flowing
-    Active,
-    /// Call is on hold
-    OnHold,
-    /// Call is being transferred
-    Transferring,
-    /// Call is being terminated
-    Terminating,
-    /// Call has ended
-    Terminated,
-    /// Call was cancelled (487 Request Terminated)
-    Cancelled,
-    /// Call failed or was rejected
-    Failed(String),
-}
-
-impl CallState {
-    /// Check if this is a final state (call is over)
-    pub fn is_final(&self) -> bool {
-        matches!(self, CallState::Terminated | CallState::Cancelled | CallState::Failed(_))
-    }
-
-    /// Check if the call is in progress
-    pub fn is_in_progress(&self) -> bool {
-        matches!(self, CallState::Initiating | CallState::Ringing | CallState::Active | CallState::OnHold)
-    }
-}
-
-impl fmt::Display for CallState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CallState::Initiating => write!(f, "Initiating"),
-            CallState::Ringing => write!(f, "Ringing"),
-            CallState::Active => write!(f, "Active"),
-            CallState::OnHold => write!(f, "OnHold"),
-            CallState::Transferring => write!(f, "Transferring"),
-            CallState::Terminating => write!(f, "Terminating"),
-            CallState::Terminated => write!(f, "Terminated"),
-            CallState::Cancelled => write!(f, "Cancelled"),
-            CallState::Failed(reason) => write!(f, "Failed: {}", reason),
-        }
-    }
-}
 
 /// Decision on how to handle an incoming call
 #[derive(Debug, Clone, PartialEq, Eq)]

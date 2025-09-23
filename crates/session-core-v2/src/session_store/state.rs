@@ -3,7 +3,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use crate::state_table::{SessionId, DialogId, MediaSessionId, CallId};
 
-use crate::state_table::{Role, CallState, ConditionUpdates};
+use crate::state_table::{Role, ConditionUpdates};
+use crate::types::CallState;
 use super::history::{SessionHistory, HistoryConfig, TransitionRecord};
 
 /// Negotiated media configuration

@@ -221,7 +221,7 @@ pub async fn execute_action(
             debug!("Sending re-INVITE for session {}", session.session_id);
             
             // Generate SDP based on current state
-            let sdp = if session.call_state == crate::state_table::CallState::Active {
+            let sdp = if session.call_state == crate::types::CallState::Active {
                 // Going to hold - use sendonly
                 session.local_sdp.as_ref().map(|sdp| {
                     // Modify SDP to include sendonly attribute

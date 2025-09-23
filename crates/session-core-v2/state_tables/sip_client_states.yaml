@@ -1,0 +1,458 @@
+# SIP Client State Table
+# Optimized for SIP softphones and client applications
+# Includes registration, presence, messaging, and basic call features
+
+version: "1.0"
+
+metadata:
+  description: "State table optimized for SIP client applications"
+  author: "RVoIP Team"
+  date: "2025-01-07"
+
+# Client-focused states
+states:
+  # Core states
+  - name: "Idle"
+    description: "No active call or registration"
+  - name: "Registering"
+    description: "SIP registration in progress"
+  - name: "Registered"
+    description: "Successfully registered with SIP server"
+  - name: "Unregistering"
+    description: "Unregistration in progress"
+    
+  # Call states
+  - name: "Initiating"
+    description: "Starting outbound call"
+  - name: "Ringing"
+    description: "Call is ringing"
+  - name: "EarlyMedia"
+    description: "Early media received"
+  - name: "Active"
+    description: "Call established with media flowing"
+  - name: "OnHold"
+    description: "Call on hold"
+  - name: "Muted"
+    description: "Microphone muted"
+  - name: "Transferring"
+    description: "Call being transferred"
+  - name: "Terminating"
+    description: "Call being terminated"
+  - name: "Terminated"
+    description: "Call ended"
+  - name: "Failed"
+    description: "Call or operation failed"
+    
+  # Presence states
+  - name: "Subscribing"
+    description: "Subscribing to presence"
+  - name: "Subscribed"
+    description: "Active presence subscription"
+  - name: "Publishing"
+    description: "Publishing presence state"
+    
+  # Messaging state
+  - name: "Messaging"
+    description: "Sending instant message"
+
+# Client-specific conditions
+conditions:
+  - name: "IsRegistered"
+    description: "Client is registered"
+    default: false
+  - name: "HasActiveCall"
+    description: "Has an active call"
+    default: false
+  - name: "HasPresenceSubscription"
+    description: "Has active presence subscription"
+    default: false
+  - name: "MediaReady"
+    description: "Media session is ready"
+    default: false
+
+# Client-focused transitions
+transitions:
+  # ================== Registration ==================
+  
+  - role: "Both"
+    state: "Idle"
+    event:
+      type: "Register"
+    actions:
+      - type: "SendREGISTER"
+    next_state: "Registering"
+    publish_events:
+      - type: "RegistrationStarted"
+      
+  - role: "Both"
+    state: "Registering"
+    event:
+      type: "Dialog200OK"
+    actions:
+      - type: "StoreRegistration"
+      - type: "StartRegistrationRefreshTimer"
+      - type: "UpdatePresenceState"
+    next_state: "Registered"
+    condition_updates:
+      IsRegistered: true
+    publish_events:
+      - type: "RegistrationSuccessful"
+      
+  - role: "Both"
+    state: "Registering"
+    event:
+      type: "Dialog4xxFailure"
+    actions:
+      - type: "HandleRegistrationFailure"
+      - type: "ScheduleRetry"
+    next_state: "Idle"
+    publish_events:
+      - type: "RegistrationFailed"
+      
+  - role: "Both"
+    state: "Registered"
+    event:
+      type: "RefreshRegistration"
+    actions:
+      - type: "SendREGISTER"
+    next_state: "Registering"
+      
+  - role: "Both"
+    state: "Registered"
+    event:
+      type: "Unregister"
+    actions:
+      - type: "SendUnregister"
+      - type: "StopRefreshTimer"
+    next_state: "Unregistering"
+      
+  - role: "Both"
+    state: "Unregistering"
+    event:
+      type: "Dialog200OK"
+    actions:
+      - type: "ClearRegistration"
+      - type: "ClearPresence"
+    next_state: "Idle"
+    condition_updates:
+      IsRegistered: false
+    publish_events:
+      - type: "UnregistrationComplete"
+      
+  # ================== Calling from Registered State ==================
+  
+  - role: "UAC"
+    state: "Registered"
+    event:
+      type: "MakeCall"
+    actions:
+      - type: "CreateDialog"
+      - type: "CreateMediaSession"
+      - type: "GenerateLocalSDP"
+      - type: "SendINVITE"
+      - type: "UpdatePresenceBusy"
+    next_state: "Initiating"
+    condition_updates:
+      HasActiveCall: true
+    publish_events:
+      - type: "CallInitiated"
+      
+  - role: "UAS"
+    state: "Registered"
+    event:
+      type: "IncomingCall"
+    actions:
+      - type: "CreateMediaSession"
+      - type: "StoreRemoteSDP"
+      - type: "SendSIPResponse"
+        code: 180
+        reason: "Ringing"
+      - type: "NotifyUser"
+    next_state: "Ringing"
+    publish_events:
+      - type: "IncomingCallReceived"
+      
+  # ================== Basic Call Flow ==================
+  
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "Dialog180Ringing"
+    next_state: "Ringing"
+    publish_events:
+      - type: "CallRinging"
+      
+  - role: "UAC"
+    state: "Ringing"
+    event:
+      type: "Dialog200OK"
+    actions:
+      - type: "StoreRemoteSDP"
+      - type: "NegotiateSDPAsUAC"
+      - type: "SendACK"
+      - type: "StartMediaFlow"
+    next_state: "Active"
+    condition_updates:
+      MediaReady: true
+    publish_events:
+      - type: "CallEstablished"
+      
+  - role: "UAS"
+    state: "Ringing"
+    event:
+      type: "AcceptCall"
+    actions:
+      - type: "NegotiateSDPAsUAS"
+      - type: "GenerateLocalSDP"
+      - type: "Send200OK"
+      - type: "UpdatePresenceBusy"
+    next_state: "Active"
+    condition_updates:
+      HasActiveCall: true
+      MediaReady: true
+    publish_events:
+      - type: "CallAccepted"
+      
+  - role: "UAS"
+    state: "Ringing"
+    event:
+      type: "RejectCall"
+    actions:
+      - type: "SendSIPResponse"
+        code: 486
+        reason: "Busy Here"
+      - type: "CleanupMediaSession"
+    next_state: "Registered"
+    publish_events:
+      - type: "CallRejected"
+      
+  # ================== Call Control ==================
+  
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "HoldCall"
+    actions:
+      - type: "UpdateMediaDirection"
+        direction: "sendonly"
+      - type: "SendReINVITE"
+    next_state: "OnHold"
+    publish_events:
+      - type: "CallOnHold"
+      
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "ResumeCall"
+    actions:
+      - type: "UpdateMediaDirection"
+        direction: "sendrecv"
+      - type: "SendReINVITE"
+    next_state: "Active"
+    publish_events:
+      - type: "CallResumed"
+      
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "MuteCall"
+    actions:
+      - type: "MuteLocalAudio"
+    next_state: "Muted"
+    publish_events:
+      - type: "CallMuted"
+      
+  - role: "Both"
+    state: "Muted"
+    event:
+      type: "UnmuteCall"
+    actions:
+      - type: "UnmuteLocalAudio"
+    next_state: "Active"
+    publish_events:
+      - type: "CallUnmuted"
+      
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "BlindTransfer"
+    actions:
+      - type: "SendREFER"
+    next_state: "Transferring"
+    publish_events:
+      - type: "TransferInitiated"
+      
+  # ================== Call Termination ==================
+  
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "HangupCall"
+    actions:
+      - type: "SendBYE"
+      - type: "StopMediaFlow"
+    next_state: "Terminating"
+    publish_events:
+      - type: "CallTerminating"
+      
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "DialogBYE"
+    actions:
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+      - type: "StopMediaFlow"
+    next_state: "Terminating"
+    publish_events:
+      - type: "RemoteHangup"
+      
+  - role: "Both"
+    state: "Terminating"
+    event:
+      type: "InternalCleanupComplete"
+    actions:
+      - type: "ReleaseAllResources"
+      - type: "UpdatePresenceAvailable"
+    next_state: "Registered"
+    condition_updates:
+      HasActiveCall: false
+      MediaReady: false
+    publish_events:
+      - type: "CallTerminated"
+      
+  # ================== Presence ==================
+  
+  - role: "Both"
+    state: "Registered"
+    event:
+      type: "Subscribe"
+    actions:
+      - type: "SendSUBSCRIBE"
+    next_state: "Subscribing"
+    publish_events:
+      - type: "PresenceSubscribing"
+      
+  - role: "Both"
+    state: "Subscribing"
+    event:
+      type: "Dialog200OK"
+    actions:
+      - type: "StoreSubscription"
+      - type: "StartSubscriptionRefreshTimer"
+    next_state: "Subscribed"
+    condition_updates:
+      HasPresenceSubscription: true
+    publish_events:
+      - type: "PresenceSubscribed"
+      
+  - role: "Both"
+    state: "Subscribed"
+    event:
+      type: "DialogNOTIFY"
+    actions:
+      - type: "ProcessPresenceUpdate"
+      - type: "Send200OK"
+      - type: "UpdateUI"
+    publish_events:
+      - type: "PresenceUpdated"
+      
+  - role: "Both"
+    state: "Registered"
+    event:
+      type: "PublishPresence"
+    actions:
+      - type: "SendPUBLISH"
+    next_state: "Publishing"
+      
+  - role: "Both"
+    state: "Publishing"
+    event:
+      type: "Dialog200OK"
+    actions:
+      - type: "StoreETag"
+      - type: "SchedulePresenceRefresh"
+    next_state: "Registered"
+    publish_events:
+      - type: "PresencePublished"
+      
+  # ================== Messaging ==================
+  
+  - role: "Both"
+    state: "Registered"
+    event:
+      type: "SendMessage"
+    actions:
+      - type: "SendMESSAGE"
+    next_state: "Messaging"
+    publish_events:
+      - type: "MessageSending"
+      
+  - role: "Both"
+    state: "Messaging"
+    event:
+      type: "Dialog200OK"
+    next_state: "Registered"
+    publish_events:
+      - type: "MessageSent"
+      
+  - role: "Both"
+    state: "Any"
+    event:
+      type: "DialogMESSAGE"
+    actions:
+      - type: "ProcessMessage"
+      - type: "Send200OK"
+      - type: "NotifyUI"
+    publish_events:
+      - type: "MessageReceived"
+      
+  # ================== OPTIONS (Keepalive) ==================
+  
+  - role: "Both"
+    state: "Registered"
+    event:
+      type: "SendOptions"
+    actions:
+      - type: "SendOPTIONS"
+    publish_events:
+      - type: "KeepaliveSent"
+      
+  - role: "Both"
+    state: "Any"
+    event:
+      type: "DialogOPTIONS"
+    actions:
+      - type: "GenerateCapabilities"
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+    publish_events:
+      - type: "OptionsReceived"
+      
+  # ================== Error Handling ==================
+  
+  - role: "Both"
+    state: "Any"
+    event:
+      type: "DialogError"
+    actions:
+      - type: "HandleError"
+      - type: "NotifyUser"
+    next_state: "Failed"
+    publish_events:
+      - type: "Error"
+      
+  - role: "Both"
+    state: "Failed"
+    event:
+      type: "Reset"
+    actions:
+      - type: "CleanupAll"
+    next_state: "Idle"
+    condition_updates:
+      IsRegistered: false
+      HasActiveCall: false
+      HasPresenceSubscription: false
+      MediaReady: false

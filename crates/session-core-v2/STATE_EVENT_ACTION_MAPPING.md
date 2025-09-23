@@ -166,23 +166,137 @@ Call failed. This is a final state with specific failure reasons.
 |-------|------|------------|---------|--------|----------------|
 | **Reset** | Both | Idle | None | None | None |
 
+### 19. **Registering** State
+SIP registration in progress.
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **Dialog200OK** | Both | Registered | - StoreRegistration<br>- StartRegistrationRefreshTimer | None | IsRegistered: true |
+| **Dialog4xxFailure** | Both | Idle | - HandleRegistrationFailure | None | None |
+| **Dialog5xxFailure** | Both | Idle | - HandleRegistrationFailure | None | None |
+| **DialogTimeout** | Both | Idle | - HandleRegistrationFailure | None | None |
+
+### 20. **Registered** State
+Successfully registered with SIP server.
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **MakeCall** | UAC | Initiating | - CreateDialog<br>- CreateMediaSession<br>- GenerateLocalSDP<br>- SendINVITE<br>- UpdatePresenceBusy | None | HasMediaSession: true |
+| **IncomingCall** | UAS | Ringing | - CreateMediaSession<br>- StoreRemoteSDP<br>- SendSIPResponse(180, "Ringing")<br>- NotifyUser | None | HasRemoteSDP: true<br>HasMediaSession: true |
+| **RefreshRegistration** | Both | Registering | - SendREGISTER | None | None |
+| **Unregister** | Both | Unregistering | - SendUnregister | None | None |
+| **Subscribe** | Both | Subscribing | - SendSUBSCRIBE | None | None |
+| **PublishPresence** | Both | Publishing | - SendPUBLISH | None | None |
+| **SendMessage** | Both | Registered | - SendMESSAGE | None | None |
+| **SendOptions** | Both | Registered | - SendOPTIONS | None | None |
+
+### 21. **Unregistering** State
+Unregistration in progress.
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **Dialog200OK** | Both | Idle | - ClearRegistration | None | IsRegistered: false |
+| **DialogTimeout** | Both | Idle | - ClearRegistration | None | IsRegistered: false |
+
+### 22. **Subscribing** State
+Subscription request in progress.
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **Dialog200OK** | Both | Subscribed | - StoreSubscription | None | HasActiveSubscription: true |
+| **Dialog4xxFailure** | Both | Registered | - HandleSubscriptionFailure | None | None |
+
+### 23. **Subscribed** State
+Active subscription for presence/events.
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **DialogNOTIFY** | Both | Subscribed | - ProcessNotification<br>- Send200OK | None | None |
+| **Unsubscribe** | Both | Registered | - SendUnsubscribe | None | HasActiveSubscription: false |
+| **RefreshSubscription** | Both | Subscribing | - SendSUBSCRIBE | None | None |
+
+### 24. **Publishing** State
+Publishing presence information.
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **Dialog200OK** | Both | Registered | - StoreETag | None | None |
+| **Dialog4xxFailure** | Both | Registered | - HandlePublishFailure | None | None |
+
+### 25. **Queued** State
+Call in queue waiting for agent (Call Center).
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **AssignToAgent** | Both | AgentRinging | - RouteToAgent<br>- NotifyAgent | None | None |
+| **QueueTimeout** | Both | Terminating | - RemoveFromQueue<br>- RouteToVoicemail | None | None |
+| **HangupCall** | Both | Terminating | - RemoveFromQueue<br>- SendBYE | None | None |
+
+### 26. **AgentRinging** State
+Ringing at agent endpoint (Call Center).
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **AgentAccept** | Both | Active | - BridgeToAgent<br>- StartCallRecording | None | InQueue: false |
+| **AgentNoAnswer** | Both | Queued | - ReleaseAgent<br>- FindNextAgent | None | None |
+| **HangupCall** | Both | Terminating | - SendBYE<br>- ReleaseAgent | None | None |
+
+### 27. **WrapUp** State
+Agent in post-call work (Call Center).
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **CompleteWrapUp** | Both | Idle | - SaveCallNotes<br>- UpdateAgentStats | None | AgentAvailable: true |
+| **WrapUpTimeout** | Both | Idle | - ForceCompleteWrapUp<br>- UpdateAgentStats | None | AgentAvailable: true |
+
+### 28. **BridgeInitiating** State
+Setting up B2BUA bridge (Gateway).
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **BridgeConnected** | Both | BridgeActive | - ConnectMediaStreams<br>- StartBridgeMonitoring | None | None |
+| **BridgeFailed** | Both | Failed | - CleanupBothLegs<br>- SendErrorResponses | None | None |
+
+### 29. **BridgeActive** State
+B2BUA bridge established with both legs active (Gateway).
+
+| Event | Role | Next State | Actions | Guards | Conditions Set |
+|-------|------|------------|---------|--------|----------------|
+| **InboundBYE** | Both | Terminating | - Send200OKToInbound<br>- SendBYEToOutbound | None | None |
+| **OutboundBYE** | Both | Terminating | - Send200OKToOutbound<br>- SendBYEToInbound | None | None |
+| **TranscodingRequired** | Both | BridgeActive | - SetupTranscoder<br>- UpdateMediaPath | None | TranscodingRequired: true |
+| **BridgeFailed** | Both | BridgeInitiating | - AttemptBridgeRecovery<br>- NotifyEndpoints | None | None |
+
 ## Part 2: Event-Centric View (Which states can handle each event?)
 
 ### User-Initiated Events
 
 | Event | Valid States | Purpose |
 |-------|-------------|---------|
-| **MakeCall** | Idle | Initiate outbound call |
-| **IncomingCall** | Idle | Handle incoming call |
+| **MakeCall** | Idle, Registered | Initiate outbound call |
+| **IncomingCall** | Idle, Registered | Handle incoming call |
 | **AcceptCall** | Ringing | Accept incoming call |
 | **RejectCall** | Ringing | Reject incoming call |
-| **HangupCall** | Initiating, Ringing, EarlyMedia, Active, OnHold, Muted, ConferenceHost, InConference, ConsultationCall, Bridged | End the call |
+| **HangupCall** | Initiating, Ringing, EarlyMedia, Active, OnHold, Muted, ConferenceHost, InConference, ConsultationCall, Bridged, Queued, AgentRinging | End the call |
 | **HoldCall** | Active, ConferenceHost | Put call on hold |
 | **ResumeCall** | OnHold, ConferenceOnHold | Resume from hold |
 | **MuteCall** | Active | Mute microphone |
 | **UnmuteCall** | Muted | Unmute microphone |
 | **BlindTransfer** | Active | Initiate blind transfer |
 | **StartAttendedTransfer** | Active | Start attended transfer |
+
+### Registration/Authentication Events
+
+| Event | Valid States | Purpose |
+|-------|-------------|---------|
+| **Register** | Idle | Start SIP registration |
+| **RefreshRegistration** | Registered | Refresh registration |
+| **Unregister** | Registered | Unregister from server |
+| **Subscribe** | Registered | Subscribe to events |
+| **Unsubscribe** | Subscribed | End subscription |
+| **PublishPresence** | Registered | Publish presence state |
+| **SendMessage** | Registered | Send instant message |
+| **SendOptions** | Registered | Send OPTIONS request |
 
 ### Dialog Events (from dialog-core)
 
@@ -191,13 +305,21 @@ Call failed. This is a final state with specific failure reasons.
 | **DialogInvite** | (Not used in current state table) | Incoming INVITE |
 | **Dialog180Ringing** | Initiating | Remote party is ringing |
 | **Dialog183SessionProgress** | Initiating, Ringing | Early media available |
-| **Dialog200OK** | Initiating, Ringing, EarlyMedia, Resuming | Call answered/operation succeeded |
+| **Dialog200OK** | Initiating, Ringing, EarlyMedia, Resuming, Registering, Subscribing, Publishing, Unregistering | Call answered/operation succeeded |
 | **DialogACK** | Active (for re-INVITE) | ACK received |
 | **DialogBYE** | Active, OnHold, Muted, ConferenceHost, InConference | Remote hangup |
-| **Dialog4xxFailure** | Initiating, Ringing | Client error |
-| **Dialog5xxFailure** | Initiating, Ringing | Server error |
-| **DialogTimeout** | Initiating, Ringing | No response timeout |
+| **Dialog4xxFailure** | Initiating, Ringing, Registering, Subscribing, Publishing | Client error |
+| **Dialog5xxFailure** | Initiating, Ringing, Registering | Server error |
+| **DialogTimeout** | Initiating, Ringing, Registering, Unregistering | No response timeout |
 | **DialogError** | Active | Protocol error |
+| **DialogOPTIONS** | Any | OPTIONS received (keepalive/capabilities) |
+| **DialogUPDATE** | Active | UPDATE received (mid-dialog modification) |
+| **DialogINFO** | Active | INFO received (application signaling) |
+| **DialogNOTIFY** | Subscribed | NOTIFY received (event notification) |
+| **DialogMESSAGE** | Any | MESSAGE received (instant message) |
+| **DialogREGISTER** | (Server only) | REGISTER received |
+| **DialogSUBSCRIBE** | (Server only) | SUBSCRIBE received |
+| **DialogPUBLISH** | (Server only) | PUBLISH received |
 
 ### Media Events (from media-core)
 
@@ -226,6 +348,29 @@ Call failed. This is a final state with specific failure reasons.
 | **TransferSuccess** | Transferring | Transfer succeeded |
 | **TransferFailed** | Transferring | Transfer failed |
 
+### Call Center Events
+
+| Event | Valid States | Purpose |
+|-------|-------------|---------|
+| **QueueCall** | Ringing | Add call to queue |
+| **AssignToAgent** | Queued | Assign call to available agent |
+| **AgentAccept** | AgentRinging | Agent accepts call |
+| **AgentNoAnswer** | AgentRinging | Agent didn't answer |
+| **CompleteWrapUp** | WrapUp | Complete post-call work |
+| **WrapUpTimeout** | WrapUp | Wrap-up time exceeded |
+| **QueueTimeout** | Queued | Call waited too long |
+
+### Gateway/B2BUA Events
+
+| Event | Valid States | Purpose |
+|-------|-------------|---------|
+| **InitiateBridge** | Active | Start B2BUA bridge |
+| **BridgeConnected** | BridgeInitiating | Bridge established |
+| **BridgeFailed** | BridgeInitiating, BridgeActive | Bridge failure |
+| **InboundBYE** | BridgeActive | Inbound leg hangup |
+| **OutboundBYE** | BridgeActive | Outbound leg hangup |
+| **TranscodingRequired** | BridgeActive | Need transcoding |
+
 ### Other Events
 
 | Event | Valid States | Purpose |
@@ -235,6 +380,9 @@ Call failed. This is a final state with specific failure reasons.
 | **StopRecording** | Active | Stop recording |
 | **InternalCleanupComplete** | Terminating | Cleanup finished |
 | **Reset** | Terminated, Cancelled, Failed | Reset to idle |
+| **SendUpdate** | Active | Send UPDATE request |
+| **SendInfo** | Active | Send INFO request |
+| **RefreshSubscription** | Subscribed | Refresh subscription |
 
 ## Part 3: Cross-Crate Event Mapping
 
@@ -250,6 +398,14 @@ Call failed. This is a final state with specific failure reasons.
 | CallTerminated | DialogBYE | Remote hangup |
 | CallFailed | Dialog4xxFailure/5xxFailure | Call failed |
 | DialogError | DialogError | Protocol error |
+| RegistrationSuccess | Dialog200OK | Registration succeeded |
+| RegistrationFailed | Dialog4xxFailure | Registration failed |
+| SubscriptionActive | Dialog200OK | Subscription accepted |
+| NotificationReceived | DialogNOTIFY | NOTIFY received |
+| MessageReceived | DialogMESSAGE | MESSAGE received |
+| OptionsReceived | DialogOPTIONS | OPTIONS received |
+| UpdateReceived | DialogUPDATE | UPDATE received |
+| InfoReceived | DialogINFO | INFO received |
 
 ### MediaToSessionEvent → Internal EventType  
 
@@ -275,6 +431,16 @@ Call failed. This is a final state with specific failure reasons.
 - **SendReINVITE**: Send re-INVITE (hold/resume)
 - **SendREFER**: Send REFER for transfer
 - **SendSIPResponse**: Send generic SIP response
+- **SendREGISTER**: Send REGISTER request
+- **SendUnregister**: Send REGISTER with expires=0
+- **SendSUBSCRIBE**: Send SUBSCRIBE request
+- **SendUnsubscribe**: Send SUBSCRIBE with expires=0
+- **SendNOTIFY**: Send NOTIFY
+- **SendPUBLISH**: Send PUBLISH request
+- **SendMESSAGE**: Send MESSAGE request
+- **SendOPTIONS**: Send OPTIONS request
+- **SendUPDATE**: Send UPDATE request
+- **SendINFO**: Send INFO request
 
 ### Media Actions
 - **CreateMediaSession**: Create media session
@@ -311,6 +477,41 @@ Call failed. This is a final state with specific failure reasons.
 - **StoreNegotiatedConfig**: Save negotiated params
 - **TriggerCallEstablished**: Notify call active
 - **TriggerCallTerminated**: Notify call ended
+- **StoreRegistration**: Save registration details
+- **ClearRegistration**: Remove registration
+- **StoreSubscription**: Save subscription details
+- **StoreETag**: Save entity tag for PUBLISH
+
+### Registration/Presence Actions
+- **StartRegistrationRefreshTimer**: Schedule re-registration
+- **HandleRegistrationFailure**: Process registration error
+- **UpdatePresenceBusy**: Set presence to busy
+- **UpdatePresenceAvailable**: Set presence to available
+- **ProcessNotification**: Handle NOTIFY content
+- **ProcessMessage**: Handle MESSAGE content
+- **GenerateCapabilities**: Create OPTIONS response
+
+### Call Center Actions
+- **AddToQueue**: Add call to queue
+- **RemoveFromQueue**: Remove from queue
+- **RouteToAgent**: Route call to agent
+- **ReleaseAgent**: Free agent for next call
+- **BridgeToAgent**: Connect customer to agent
+- **StartCallRecording**: Begin recording
+- **SaveCallNotes**: Save wrap-up notes
+- **UpdateAgentStats**: Update metrics
+- **PlayQueueMusic**: Play hold music
+- **NotifyAgent**: Alert agent of call
+
+### Gateway/B2BUA Actions
+- **CreateOutboundLeg**: Create second leg
+- **ConnectMediaStreams**: Bridge media
+- **SetupTranscoder**: Initialize transcoding
+- **UpdateMediaPath**: Modify media route
+- **AttemptBridgeRecovery**: Recover failed bridge
+- **Send200OKToInbound**: Respond to inbound leg
+- **SendBYEToOutbound**: Terminate outbound leg
+- **CleanupBothLegs**: Clean both legs
 
 ## Key Insights
 
@@ -331,28 +532,26 @@ This mapping is essential for:
 
 ### Missing States
 1. **Proceeding** - After receiving 100 Trying, before 180/183
-2. **Redirecting** - Handling 3xx redirect responses
-3. **Authenticating** - Handling 401/407 authentication challenges
+2. **Redirecting** - Handling 3xx redirect responses  
+3. **Authenticating** - Handling 401/407 authentication challenges (partially implemented for gateway)
 4. **Refreshing** - Session timer refresh in progress
 5. **WaitingForPRACK** - Waiting for PRACK for reliable provisional responses (RFC 3262)
 6. **Replaced** - Session being replaced (attended transfer completion)
+7. **Forking** - Handling multiple provisional responses (partially implemented for gateway)
 
 ### Missing Events
 
-#### Dialog Events (from dialog-core)
+#### Dialog Events (from dialog-core) - Still Missing
 - **Dialog100Trying** - Call is being processed
 - **Dialog3xxRedirect** - Call redirected to new destination
 - **Dialog401Unauthorized** - Authentication required
 - **Dialog407ProxyAuthRequired** - Proxy authentication required
 - **DialogPRACK** - PRACK received (RFC 3262)
-- **DialogUPDATE** - UPDATE received (RFC 3311)
-- **DialogOPTIONS** - OPTIONS received
-- **DialogINFO** - INFO received (RFC 6086)
-- **DialogNOTIFY** - NOTIFY received
-- **DialogSUBSCRIBE** - SUBSCRIBE received
 - **SessionTimerExpired** - Session timer needs refresh (RFC 4028)
 - **AuthenticationChallenge** - Need to authenticate
 - **AuthenticationSuccess** - Authentication completed
+- **Dialog202Accepted** - Asynchronous request accepted
+- **DialogForked** - Multiple provisional responses received
 
 #### Media Events (from media-core)
 - **MediaCodecChanged** - Codec renegotiation occurred
@@ -368,27 +567,24 @@ This mapping is essential for:
 - **MediaQualityRecovered** - Media quality improved
 - **RTPTimeout** - No RTP packets received
 
-#### Session Management Events
-- **RegistrationRequired** - Need to register before call
-- **RegistrationSuccess** - Registration completed
-- **RegistrationFailed** - Registration failed
+#### Session Management Events - Still Missing
 - **SessionTimerWarning** - Session about to expire
 - **ForkedResponse** - Multiple responses received (forking)
+- **RegistrationExpiring** - Registration about to expire
+- **SubscriptionExpiring** - Subscription needs refresh
+- **AuthenticationRequired** - Need to provide credentials
 
 ### Missing Actions
 
-#### Dialog Actions
+#### Dialog Actions - Still Missing
 - **SendPRACK** - Send PRACK for reliable provisional response
-- **SendUPDATE** - Send UPDATE request
-- **SendOPTIONS** - Send OPTIONS request
-- **SendINFO** - Send INFO request
-- **SendNOTIFY** - Send NOTIFY
-- **SendSUBSCRIBE** - Send SUBSCRIBE
 - **SendAuthResponse** - Send authentication response
 - **ProcessRedirect** - Handle 3xx redirect
 - **StartSessionTimer** - Initialize session timer
 - **RefreshSession** - Send session refresh
 - **CancelSessionTimer** - Stop session timer
+- **HandleForkedResponse** - Process multiple provisional responses
+- **Send100Trying** - Send 100 Trying response
 
 #### Media Actions
 - **RenegotiateCodecs** - Change audio codecs
@@ -409,25 +605,45 @@ This mapping is essential for:
 - **ProcessForkedResponses** - Handle multiple responses
 - **SelectBestResponse** - Choose from forked responses
 
+### Missing Cross-Crate Events
+
+These events should be added to DialogToSessionEvent and MediaToSessionEvent enums:
+
+#### DialogToSessionEvent (should be added)
+- **RegistrationRequired** - Dialog-core detects registration needed
+- **AuthenticationChallenge** - 401/407 received
+- **RedirectReceived** - 3xx response received
+- **PRACKRequired** - Reliable provisional response needs PRACK
+- **SessionTimerExpired** - Session needs refresh
+- **ForkingDetected** - Multiple provisional responses
+
+#### MediaToSessionEvent (should be added)  
+- **CodecNegotiationFailed** - Incompatible codecs
+- **TranscodingRequired** - Need to transcode between codecs
+- **MediaRecovered** - Media quality restored
+- **VADStateChanged** - Voice activity detection state change
+- **JitterBufferUnderrun** - Jitter buffer empty
+- **JitterBufferOverrun** - Jitter buffer overflow
+
 ### Implementation Priority
 
 1. **High Priority** (Basic SIP compliance):
-   - Authentication support (401/407)
+   - Authentication support (401/407) 
    - Session timers (RFC 4028)
    - 100 Trying handling
-   - Proper cleanup for all states
+   - Cross-crate event mappings for new features
 
 2. **Medium Priority** (Enhanced functionality):
    - Reliable provisional responses (RFC 3262)
-   - UPDATE support (RFC 3311)
-   - Media quality monitoring
-   - DTMF improvements
+   - Media quality monitoring improvements
+   - DTMF detection improvements
+   - Voice activity detection
 
 3. **Low Priority** (Advanced features):
-   - Call forking support
-   - INFO method support
-   - OPTIONS handling
-   - Event subscriptions
+   - Call forking support (partially done)
+   - Full B2BUA state management
+   - Advanced media features
+   - Performance optimizations
 
 ### Notes
 
@@ -436,3 +652,33 @@ This mapping is essential for:
 - Authentication should be coordinated with dialog-core
 - Session timers are critical for carrier compliance
 - Consider if all states need to handle "Reset" event for error recovery
+
+## Summary of Recent Additions
+
+This document has been updated to include the following new state machine features:
+
+### New States Added (11 total)
+- **Registration**: Registering, Registered, Unregistering
+- **Presence/Events**: Subscribing, Subscribed, Publishing
+- **Call Center**: Queued, AgentRinging, WrapUp
+- **Gateway/B2BUA**: BridgeInitiating, BridgeActive
+
+### New Events Supported
+- **SIP Methods**: REGISTER, OPTIONS, UPDATE, INFO, SUBSCRIBE, NOTIFY, MESSAGE, PUBLISH
+- **Registration**: Register, RefreshRegistration, Unregister
+- **Presence**: Subscribe, Unsubscribe, PublishPresence, SendMessage
+- **Call Center**: QueueCall, AssignToAgent, AgentAccept, CompleteWrapUp
+- **Gateway**: InitiateBridge, BridgeConnected, TranscodingRequired
+
+### New Actions Added
+- **Dialog**: SendREGISTER, SendSUBSCRIBE, SendNOTIFY, SendMESSAGE, SendOPTIONS, SendUPDATE, SendINFO
+- **Registration**: StoreRegistration, StartRegistrationRefreshTimer, HandleRegistrationFailure
+- **Call Center**: AddToQueue, RouteToAgent, BridgeToAgent, SaveCallNotes
+- **Gateway**: CreateOutboundLeg, SetupTranscoder, AttemptBridgeRecovery
+
+### Use Case Support
+- **SIP Clients**: Full registration, presence, and messaging support
+- **Call Centers**: Agent management, queuing, and supervisor features
+- **Gateways**: B2BUA operations, transcoding, and load balancing
+
+The state machine now provides comprehensive coverage for production SIP deployments across multiple use cases.

@@ -23,6 +23,10 @@ name = "api_peer_audio_peer2"
 path = "examples/api_peer_audio/peer2.rs"
 
 [[example]]
+name = "test_state_table_loading_simple"
+path = "examples/test_state_table_loading_simple.rs"
+
+[[example]]
 name = "debug_media_session"
 path = "examples/debug_media_session.rs"
 

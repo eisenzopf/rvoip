@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::time::interval;
 use serde::{Serialize, Deserialize};
 use tracing::{info, debug};
-use crate::state_table::CallState;
+use crate::types::CallState;
 use super::{SessionStore, SessionState};
 
 /// Configuration for automatic cleanup

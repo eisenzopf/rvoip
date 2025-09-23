@@ -14,7 +14,6 @@ pub use crate::api::types::{
     CallDecision,
     CallDirection,
     CallSession,
-    CallState,
     IncomingCall,
     MediaInfo,
     PreparedCall,
@@ -28,13 +27,141 @@ pub use crate::api::types::{
 // Re-export the ID types from state_table::types for convenience
 pub use crate::state_table::types::{SessionId, DialogId, MediaSessionId};
 
+/// Reasons for call failure
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
+pub enum FailureReason {
+    Timeout,
+    Rejected,
+    NetworkError,
+    MediaError,
+    ProtocolError,
+    Other,
+}
+
+/// Call states
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CallState {
+    Idle,
+    Initiating,
+    Ringing,
+    EarlyMedia,
+    Active,
+    OnHold,
+    Resuming,
+    Muted,
+    ConferenceHost,
+    InConference,
+    ConferenceOnHold,
+    Bridged,
+    Transferring,
+    ConsultationCall,
+    Terminating,
+    Terminated,
+    Cancelled,
+    Failed(FailureReason),
+    
+    // Registration states
+    Registering,
+    Registered,
+    Unregistering,
+    
+    // Subscription/Presence states
+    Subscribing,
+    Subscribed,
+    Publishing,
+    
+    // Call center states
+    Queued,
+    AgentRinging,
+    WrapUp,
+    
+    // Gateway/B2BUA states
+    BridgeInitiating,
+    BridgeActive,
+}
+
+impl CallState {
+    /// Check if this is a final state (call is over)
+    pub fn is_final(&self) -> bool {
+        matches!(self, CallState::Terminated | CallState::Cancelled | CallState::Failed(_))
+    }
+
+    /// Check if the call is in progress
+    pub fn is_in_progress(&self) -> bool {
+        matches!(self, 
+            CallState::Initiating | 
+            CallState::Ringing | 
+            CallState::Active | 
+            CallState::OnHold |
+            CallState::EarlyMedia |
+            CallState::Resuming |
+            CallState::Muted |
+            CallState::ConferenceHost |
+            CallState::InConference |
+            CallState::ConferenceOnHold |
+            CallState::Bridged |
+            CallState::Transferring |
+            CallState::ConsultationCall |
+            CallState::Queued |           // Call center: call in queue
+            CallState::AgentRinging |      // Call center: ringing at agent
+            CallState::WrapUp |           // Call center: post-call work
+            CallState::BridgeInitiating | // Gateway: setting up bridge
+            CallState::BridgeActive       // Gateway: bridge active
+        )
+    }
+}
+
+impl fmt::Display for CallState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CallState::Idle => write!(f, "Idle"),
+            CallState::Initiating => write!(f, "Initiating"),
+            CallState::Ringing => write!(f, "Ringing"),
+            CallState::EarlyMedia => write!(f, "EarlyMedia"),
+            CallState::Active => write!(f, "Active"),
+            CallState::OnHold => write!(f, "OnHold"),
+            CallState::Resuming => write!(f, "Resuming"),
+            CallState::Muted => write!(f, "Muted"),
+            CallState::ConferenceHost => write!(f, "ConferenceHost"),
+            CallState::InConference => write!(f, "InConference"),
+            CallState::ConferenceOnHold => write!(f, "ConferenceOnHold"),
+            CallState::Bridged => write!(f, "Bridged"),
+            CallState::Transferring => write!(f, "Transferring"),
+            CallState::ConsultationCall => write!(f, "ConsultationCall"),
+            CallState::Terminating => write!(f, "Terminating"),
+            CallState::Terminated => write!(f, "Terminated"),
+            CallState::Cancelled => write!(f, "Cancelled"),
+            CallState::Failed(reason) => write!(f, "Failed({:?})", reason),
+            
+            // Registration states
+            CallState::Registering => write!(f, "Registering"),
+            CallState::Registered => write!(f, "Registered"),
+            CallState::Unregistering => write!(f, "Unregistering"),
+            
+            // Subscription/Presence states
+            CallState::Subscribing => write!(f, "Subscribing"),
+            CallState::Subscribed => write!(f, "Subscribed"),
+            CallState::Publishing => write!(f, "Publishing"),
+            
+            // Call center states
+            CallState::Queued => write!(f, "Queued"),
+            CallState::AgentRinging => write!(f, "AgentRinging"),
+            CallState::WrapUp => write!(f, "WrapUp"),
+            
+            // Gateway/B2BUA states
+            CallState::BridgeInitiating => write!(f, "BridgeInitiating"),
+            CallState::BridgeActive => write!(f, "BridgeActive"),
+        }
+    }
+}
+
 /// Call information for active calls
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallInfo {
     pub session_id: SessionId,
     pub from: String,
     pub to: String,
-    pub state: crate::state_table::types::CallState,
+    pub state: CallState,
     pub start_time: std::time::SystemTime,
     pub media_active: bool,
 }
@@ -45,7 +172,7 @@ pub struct SessionInfo {
     pub session_id: SessionId,
     pub from: String,
     pub to: String,
-    pub state: crate::state_table::types::CallState,
+    pub state: CallState,
     pub start_time: std::time::SystemTime,
     pub media_active: bool,
 }

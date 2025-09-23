@@ -11,10 +11,11 @@ use tracing::{info, debug};
 
 use super::{
     StateTable, StateTableBuilder, StateKey, Transition, 
-    Role, CallState, EventType, Guard, Action, 
+    Role, EventType, Guard, Action, 
     ConditionUpdates, EventTemplate, Condition, SessionId
 };
 use crate::errors::{Result, SessionError};
+use crate::types::{CallState, FailureReason};
 
 /// YAML representation of the complete state table
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,7 +191,7 @@ impl YamlConditionUpdates {
 }
 
 /// Default state table embedded in the binary
-const DEFAULT_STATE_TABLE_YAML: &str = include_str!("../../state_tables/default_state_table.yaml");
+const DEFAULT_STATE_TABLE_YAML: &str = include_str!("../../state_tables/enhanced_state_table.yaml");
 
 /// YAML table loader
 pub struct YamlTableLoader {
@@ -397,9 +398,30 @@ impl YamlTableLoader {
             "InConference" => Ok(CallState::InConference),
             "ConferenceOnHold" => Ok(CallState::ConferenceOnHold),
             "ConsultationCall" => Ok(CallState::ConsultationCall),
+            "Cancelled" => Ok(CallState::Cancelled),
+            
+            // Registration states
+            "Registering" => Ok(CallState::Registering),
+            "Registered" => Ok(CallState::Registered),
+            "Unregistering" => Ok(CallState::Unregistering),
+            
+            // Subscription/Presence states
+            "Subscribing" => Ok(CallState::Subscribing),
+            "Subscribed" => Ok(CallState::Subscribed),
+            "Publishing" => Ok(CallState::Publishing),
+            
+            // Call center states
+            "Queued" => Ok(CallState::Queued),
+            "AgentRinging" => Ok(CallState::AgentRinging),
+            "WrapUp" => Ok(CallState::WrapUp),
+            
+            // Gateway/B2BUA states
+            "BridgeInitiating" => Ok(CallState::BridgeInitiating),
+            "BridgeActive" => Ok(CallState::BridgeActive),
+            
             _ if state.starts_with("Failed") => {
                 // Parse Failed(reason) states
-                Ok(CallState::Failed(crate::state_table::FailureReason::Other))
+                Ok(CallState::Failed(FailureReason::Other))
             }
             _ => Err(SessionError::InternalError(
                 format!("Invalid call state: {}", state)
