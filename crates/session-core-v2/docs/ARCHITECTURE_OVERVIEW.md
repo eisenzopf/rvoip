@@ -98,6 +98,8 @@ Manages runtime session data:
 
 ## How Components Work Together
 
+> **Note**: For detailed event flow diagrams including incoming calls, outgoing calls, and bridge scenarios, see `EVENT_FLOW_DIAGRAMS.md`.
+
 ### Event Flow Example: Making a Call
 
 1. **API Call**: Application calls `session.make_call("sip:bob@example.com")`
@@ -605,6 +607,7 @@ Session-Core-v2 provides a powerful, flexible framework for building VoIP applic
 The key to understanding session-core-v2 is recognizing that it's a **coordinator**, not an implementer. It orchestrates the dance between SIP signaling and media handling, but delegates the actual protocol work to specialized components.
 
 For more details, see:
+- `EVENT_FLOW_DIAGRAMS.md` - Detailed event flow diagrams and sequences
 - `STATE_EVENT_ACTION_MAPPING.md` - Complete event/state reference
 - `ADAPTER_ARCHITECTURE_EXPLANATION.md` - Deep dive on adapters
 - `examples/` - Working code examples
