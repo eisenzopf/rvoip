@@ -223,33 +223,7 @@ Publishing presence information.
 | **Dialog200OK** | Both | Registered | - StoreETag | None | None |
 | **Dialog4xxFailure** | Both | Registered | - HandlePublishFailure | None | None |
 
-### 25. **Queued** State
-Call in queue waiting for agent (Call Center).
-
-| Event | Role | Next State | Actions | Guards | Conditions Set |
-|-------|------|------------|---------|--------|----------------|
-| **AssignToAgent** | Both | AgentRinging | - RouteToAgent<br>- NotifyAgent | None | None |
-| **QueueTimeout** | Both | Terminating | - RemoveFromQueue<br>- RouteToVoicemail | None | None |
-| **HangupCall** | Both | Terminating | - RemoveFromQueue<br>- SendBYE | None | None |
-
-### 26. **AgentRinging** State
-Ringing at agent endpoint (Call Center).
-
-| Event | Role | Next State | Actions | Guards | Conditions Set |
-|-------|------|------------|---------|--------|----------------|
-| **AgentAccept** | Both | Active | - BridgeToAgent<br>- StartCallRecording | None | InQueue: false |
-| **AgentNoAnswer** | Both | Queued | - ReleaseAgent<br>- FindNextAgent | None | None |
-| **HangupCall** | Both | Terminating | - SendBYE<br>- ReleaseAgent | None | None |
-
-### 27. **WrapUp** State
-Agent in post-call work (Call Center).
-
-| Event | Role | Next State | Actions | Guards | Conditions Set |
-|-------|------|------------|---------|--------|----------------|
-| **CompleteWrapUp** | Both | Idle | - SaveCallNotes<br>- UpdateAgentStats | None | AgentAvailable: true |
-| **WrapUpTimeout** | Both | Idle | - ForceCompleteWrapUp<br>- UpdateAgentStats | None | AgentAvailable: true |
-
-### 28. **BridgeInitiating** State
+### 25. **BridgeInitiating** State
 Setting up B2BUA bridge (Gateway).
 
 | Event | Role | Next State | Actions | Guards | Conditions Set |
@@ -257,7 +231,7 @@ Setting up B2BUA bridge (Gateway).
 | **BridgeConnected** | Both | BridgeActive | - ConnectMediaStreams<br>- StartBridgeMonitoring | None | None |
 | **BridgeFailed** | Both | Failed | - CleanupBothLegs<br>- SendErrorResponses | None | None |
 
-### 29. **BridgeActive** State
+### 26. **BridgeActive** State
 B2BUA bridge established with both legs active (Gateway).
 
 | Event | Role | Next State | Actions | Guards | Conditions Set |
@@ -347,18 +321,6 @@ B2BUA bridge established with both legs active (Gateway).
 | **CompleteAttendedTransfer** | ConsultationCall | Complete attended transfer |
 | **TransferSuccess** | Transferring | Transfer succeeded |
 | **TransferFailed** | Transferring | Transfer failed |
-
-### Call Center Events
-
-| Event | Valid States | Purpose |
-|-------|-------------|---------|
-| **QueueCall** | Ringing | Add call to queue |
-| **AssignToAgent** | Queued | Assign call to available agent |
-| **AgentAccept** | AgentRinging | Agent accepts call |
-| **AgentNoAnswer** | AgentRinging | Agent didn't answer |
-| **CompleteWrapUp** | WrapUp | Complete post-call work |
-| **WrapUpTimeout** | WrapUp | Wrap-up time exceeded |
-| **QueueTimeout** | Queued | Call waited too long |
 
 ### Gateway/B2BUA Events
 
@@ -657,28 +619,24 @@ These events should be added to DialogToSessionEvent and MediaToSessionEvent enu
 
 This document has been updated to include the following new state machine features:
 
-### New States Added (11 total)
+### New States Added (8 total)
 - **Registration**: Registering, Registered, Unregistering
 - **Presence/Events**: Subscribing, Subscribed, Publishing
-- **Call Center**: Queued, AgentRinging, WrapUp
 - **Gateway/B2BUA**: BridgeInitiating, BridgeActive
 
 ### New Events Supported
 - **SIP Methods**: REGISTER, OPTIONS, UPDATE, INFO, SUBSCRIBE, NOTIFY, MESSAGE, PUBLISH
 - **Registration**: Register, RefreshRegistration, Unregister
 - **Presence**: Subscribe, Unsubscribe, PublishPresence, SendMessage
-- **Call Center**: QueueCall, AssignToAgent, AgentAccept, CompleteWrapUp
 - **Gateway**: InitiateBridge, BridgeConnected, TranscodingRequired
 
 ### New Actions Added
 - **Dialog**: SendREGISTER, SendSUBSCRIBE, SendNOTIFY, SendMESSAGE, SendOPTIONS, SendUPDATE, SendINFO
 - **Registration**: StoreRegistration, StartRegistrationRefreshTimer, HandleRegistrationFailure
-- **Call Center**: AddToQueue, RouteToAgent, BridgeToAgent, SaveCallNotes
 - **Gateway**: CreateOutboundLeg, SetupTranscoder, AttemptBridgeRecovery
 
 ### Use Case Support
 - **SIP Clients**: Full registration, presence, and messaging support
-- **Call Centers**: Agent management, queuing, and supervisor features
 - **Gateways**: B2BUA operations, transcoding, and load balancing
 
 The state machine now provides comprehensive coverage for production SIP deployments across multiple use cases.

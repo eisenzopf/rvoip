@@ -232,7 +232,6 @@ session-core-v2/
 │       └── unified.rs       # High-level interface
 ├── state_tables/            # YAML configurations
 │   ├── default_state_table.yaml    # Standard SIP client
-│   ├── call_center_states.yaml     # Call center features
 │   ├── gateway_states.yaml         # B2BUA/Gateway
 │   └── sip_client_states.yaml      # Simple client
 └── examples/                # Usage examples
@@ -453,30 +452,33 @@ session.on_event(|event| {
 
 **State Table**: Use `sip_client_states.yaml` for basic client features.
 
-### Call Center
-Advanced features like queuing, routing, and monitoring:
+### Call Center (via call-engine)
+Call center functionality requires multi-session coordination and agent state management, which is beyond the scope of session-core-v2. Instead, implement call centers using the `call-engine` crate:
+
+**Architecture**:
+- `call-engine` manages agents, queues, and routing logic
+- `session-core-v2` handles individual SIP sessions (customer and agent)
+- `call-engine` orchestrates multiple session-core-v2 instances
 
 ```rust
-// Incoming call arrives
-let session = coordinator.create_session_for_incoming(call_info).await?;
+// In call-engine (pseudo-code)
+// 1. Customer call arrives - create session in session-core-v2
+let customer_session = session_core.create_session(incoming_call).await?;
 
-// Route to agent
-let agent = find_available_agent().await?;
-session.bridge_to(agent.extension).await?;
+// 2. Queue management in call-engine
+queue_manager.add_call(customer_session.id, priority).await?;
 
-// Monitor call
-session.start_recording().await?;
-session.on_event(|event| {
-    match event {
-        SessionEvent::QualityDegraded { metrics } => {
-            log_quality_issue(metrics);
-        }
-        _ => {}
-    }
-}).await?;
+// 3. Find agent (call-engine logic)
+let agent = agent_manager.find_available_agent(skills).await?;
+
+// 4. Create agent session via session-core-v2
+let agent_session = session_core.make_call(agent.extension).await?;
+
+// 5. Bridge sessions when both answer
+session_core.bridge_sessions(customer_session.id, agent_session.id).await?;
 ```
 
-**State Table**: Use `call_center_states.yaml` with queue and agent states.
+**Note**: Session-core-v2 provides the SIP/media layer; call-engine adds the call center abstractions.
 
 ### SIP Gateway/B2BUA
 Bridge between different networks or protocols:
@@ -502,12 +504,12 @@ if inbound.codec() != outbound.codec() {
 
 ### Key Differences by Use Case
 
-| Feature | SIP Client | Call Center | Gateway |
-|---------|------------|-------------|---------|
-| States | Basic (Idle, Ringing, Active) | Extended (Queued, AgentReady) | Bridge states |
-| Events | User-initiated | Queue events, agent events | Protocol translation |
-| Actions | Simple call control | Recording, monitoring | Transcoding, routing |
-| Adapters | Standard | Analytics adapter | Protocol adapters |
+| Feature | SIP Client | Gateway | Call Center (call-engine) |
+|---------|------------|---------|---------------------------|
+| States | Basic (Idle, Ringing, Active) | Bridge states | Uses session-core + agent states |
+| Events | User-initiated | Protocol translation | Orchestrates session events |
+| Actions | Simple call control | Transcoding, routing | Queue/agent management |
+| Architecture | Single session | Dual sessions | Multi-session orchestration |
 
 ## Example: Call Flow Walkthrough
 

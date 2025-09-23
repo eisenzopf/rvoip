@@ -70,11 +70,6 @@ pub enum CallState {
     Subscribed,
     Publishing,
     
-    // Call center states
-    Queued,
-    AgentRinging,
-    WrapUp,
-    
     // Gateway/B2BUA states
     BridgeInitiating,
     BridgeActive,
