@@ -71,14 +71,6 @@ states:
   - name: "Publishing"
     description: "Publishing presence information"
     
-  # Call center specific states
-  - name: "Queued"
-    description: "Call in queue waiting for agent"
-  - name: "AgentRinging"
-    description: "Ringing at agent endpoint"
-  - name: "WrapUp"
-    description: "Agent in post-call work"
-    
   # Gateway/B2BUA states
   - name: "BridgeInitiating"
     description: "Setting up B2BUA bridge"
@@ -780,68 +772,6 @@ transitions:
     next_state: "Registered"
     publish_events:
       - type: "PresencePublished"
-      
-  # ================== Call Center Specific ==================
-  
-  # Queue incoming call
-  - role: "Both"
-    state: "Ringing"
-    event:
-      type: "QueueCall"
-    actions:
-      - type: "AddToQueue"
-      - type: "PlayQueueMusic"
-    next_state: "Queued"
-    publish_events:
-      - type: "CallQueued"
-      
-  # Assign call to agent
-  - role: "Both"
-    state: "Queued"
-    event:
-      type: "AssignToAgent"
-    actions:
-      - type: "RouteToAgent"
-      - type: "NotifyAgent"
-    next_state: "AgentRinging"
-    publish_events:
-      - type: "CallAssigned"
-      
-  # Agent accepts call
-  - role: "Both"
-    state: "AgentRinging"
-    event:
-      type: "AgentAccept"
-    actions:
-      - type: "BridgeToAgent"
-      - type: "StartCallRecording"
-    next_state: "Active"
-    publish_events:
-      - type: "AgentConnected"
-      
-  # Start wrap-up
-  - role: "Both"
-    state: "Terminating"
-    event:
-      type: "StartWrapUp"
-    actions:
-      - type: "LogCallDetails"
-      - type: "StartWrapUpTimer"
-    next_state: "WrapUp"
-    publish_events:
-      - type: "WrapUpStarted"
-      
-  # Complete wrap-up
-  - role: "Both"
-    state: "WrapUp"
-    event:
-      type: "CompleteWrapUp"
-    actions:
-      - type: "SaveCallNotes"
-      - type: "UpdateAgentStats"
-    next_state: "Idle"
-    publish_events:
-      - type: "WrapUpComplete"
       
   # ================== Gateway/B2BUA Specific ==================
   
