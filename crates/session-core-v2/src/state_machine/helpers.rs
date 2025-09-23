@@ -11,8 +11,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
 use crate::{
-    types::{SessionId, SessionInfo},
-    state_table::types::{Role, EventType, CallState},
+    types::{SessionId, SessionInfo, CallState},
+    state_table::types::{Role, EventType},
     errors::{Result, SessionError},
 };
 use super::StateMachine;

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::types::{CallState, FailureReason};
 
 /// Session ID type
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -117,39 +118,6 @@ pub enum Role {
     Both, // Applies to both roles
 }
 
-/// Call states
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub enum CallState {
-    Idle,
-    Initiating,
-    Ringing,
-    EarlyMedia,
-    Active,
-    OnHold,
-    Resuming,
-    Muted,
-    ConferenceHost,
-    InConference,
-    ConferenceOnHold,
-    Bridged,
-    Transferring,
-    ConsultationCall,
-    Terminating,
-    Terminated,
-    Cancelled,
-    Failed(FailureReason),
-}
-
-/// Reasons for call failure
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub enum FailureReason {
-    Timeout,
-    Rejected,
-    NetworkError,
-    MediaError,
-    ProtocolError,
-    Other,
-}
 
 /// Event types that trigger transitions
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -505,6 +473,10 @@ impl MasterStateTable {
             event: key.event.normalize(),
         };
         self.transitions.contains_key(&normalized_key)
+    }
+    
+    pub fn transition_count(&self) -> usize {
+        self.transitions.len()
     }
     
     pub fn validate(&self) -> Result<(), Vec<String>> {

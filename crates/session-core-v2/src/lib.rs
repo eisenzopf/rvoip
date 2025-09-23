@@ -19,8 +19,11 @@ pub use api::{
 
 // Re-export from state_table for correct types
 pub use state_table::types::{
-    SessionId, CallState, Role, EventType,
+    SessionId, Role, EventType,
 };
+
+// Re-export CallState from types
+pub use types::CallState;
 
 // Re-export error types
 pub use errors::{Result, SessionError};

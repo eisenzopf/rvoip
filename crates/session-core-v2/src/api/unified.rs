@@ -3,8 +3,8 @@
 //! This is a thin wrapper over the state machine helpers.
 //! All business logic is in the state table.
 
-use crate::state_table::types::{EventType, CallState, SessionId};
-use crate::state_table::MASTER_TABLE;
+use crate::state_table::types::{EventType, SessionId};
+use crate::types::CallState;
 use crate::state_machine::{StateMachine, StateMachineHelpers};
 use crate::adapters::{DialogAdapter, MediaAdapter};
 use crate::errors::{Result, SessionError};
@@ -31,6 +31,7 @@ pub struct Config {
     /// Bind address for SIP
     pub bind_addr: SocketAddr,
     /// Optional path to custom state table YAML
+    /// Priority: 1) This config path, 2) RVOIP_STATE_TABLE env var, 3) Embedded default
     pub state_table_path: Option<String>,
     /// Local SIP URI (e.g., "sip:alice@127.0.0.1:5060")
     pub local_uri: String,
@@ -99,9 +100,16 @@ impl UnifiedCoordinator {
             config.media_port_end,
         ));
         
+        // Load state table based on config
+        let state_table = Arc::new(
+            crate::state_table::load_state_table_with_config(
+                config.state_table_path.as_deref()
+            )
+        );
+        
         // Create state machine (without event channel - using GlobalEventCoordinator)
         let state_machine = Arc::new(StateMachine::new(
-            MASTER_TABLE.clone(),
+            state_table,
             store.clone(),
             dialog_adapter.clone(),
             media_adapter.clone(),

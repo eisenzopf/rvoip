@@ -3,7 +3,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde::{Serialize, Deserialize};
-use crate::state_table::{CallState, EventType, Guard, Action, EventTemplate};
+use crate::state_table::{EventType, Guard, Action, EventTemplate};
+use crate::types::CallState;
 
 /// Configuration for history tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]

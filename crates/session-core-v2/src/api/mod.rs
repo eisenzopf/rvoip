@@ -474,9 +474,10 @@ pub mod simple;     // Simple peer API
 
 // Re-export the main types
 pub use types::{
-    SessionId, CallSession, CallState, IncomingCall, CallDecision,
+    SessionId, CallSession, IncomingCall, CallDecision,
     SessionStats, MediaInfo, AudioStreamConfig,
 };
+pub use crate::types::CallState;
 
 // Re-export the unified API
 pub use unified::{UnifiedCoordinator, Config};

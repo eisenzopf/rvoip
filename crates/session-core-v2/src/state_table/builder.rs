@@ -1,4 +1,5 @@
 use super::types::*;
+use crate::types::CallState;
 
 /// Builder for constructing the state table
 pub struct StateTableBuilder {

@@ -1,0 +1,524 @@
+# Call Center State Table
+# Optimized for call center operations with agent management, queuing, and monitoring
+# Includes supervisor features, call recording, and quality management
+
+version: "1.0"
+
+metadata:
+  description: "State table optimized for call center applications"
+  author: "RVoIP Team"
+  date: "2025-01-07"
+
+# Call center specific states
+states:
+  # Agent states
+  - name: "AgentIdle"
+    description: "Agent available for calls"
+  - name: "AgentRegistering"
+    description: "Agent logging into system"
+  - name: "AgentReady"
+    description: "Agent ready to receive calls"
+  - name: "AgentBusy"
+    description: "Agent on active call"
+  - name: "AgentWrapUp"
+    description: "Agent in post-call work"
+  - name: "AgentBreak"
+    description: "Agent on break"
+  - name: "AgentOffline"
+    description: "Agent logged out"
+    
+  # Call states
+  - name: "CallQueued"
+    description: "Call waiting in queue"
+  - name: "CallDistributing"
+    description: "Finding available agent"
+  - name: "AgentRinging"
+    description: "Ringing at agent station"
+  - name: "CallActive"
+    description: "Customer connected to agent"
+  - name: "CallOnHold"
+    description: "Customer on hold"
+  - name: "CallTransferring"
+    description: "Call being transferred"
+  - name: "CallRecording"
+    description: "Call being recorded"
+  - name: "CallMonitored"
+    description: "Supervisor monitoring call"
+    
+  # Conference states
+  - name: "ConferenceActive"
+    description: "Multi-party conference"
+  - name: "ConferenceHold"
+    description: "Conference on hold"
+    
+  # Supervisor states
+  - name: "Monitoring"
+    description: "Supervisor monitoring call"
+  - name: "Whispering"
+    description: "Supervisor coaching agent"
+  - name: "BargedIn"
+    description: "Supervisor joined call"
+    
+  # System states
+  - name: "Idle"
+    description: "No active operation"
+  - name: "Failed"
+    description: "Operation failed"
+  - name: "Terminating"
+    description: "Call ending"
+  - name: "Terminated"
+    description: "Call ended"
+
+# Call center conditions
+conditions:
+  - name: "AgentAvailable"
+    description: "Agent is available for calls"
+    default: false
+  - name: "IsRegistered"
+    description: "Agent is registered"
+    default: false
+  - name: "InQueue"
+    description: "Call is in queue"
+    default: false
+  - name: "IsRecording"
+    description: "Call is being recorded"
+    default: false
+  - name: "HasSupervisor"
+    description: "Call has supervisor monitoring"
+    default: false
+  - name: "MediaReady"
+    description: "Media session established"
+    default: false
+
+# Call center transitions
+transitions:
+  # ================== Agent Management ==================
+  
+  - role: "Both"
+    state: "AgentIdle"
+    event:
+      type: "AgentLogin"
+    actions:
+      - type: "AuthenticateAgent"
+      - type: "SendREGISTER"
+    next_state: "AgentRegistering"
+    publish_events:
+      - type: "AgentLoggingIn"
+      
+  - role: "Both"
+    state: "AgentRegistering"
+    event:
+      type: "Dialog200OK"
+    actions:
+      - type: "StoreAgentSession"
+      - type: "UpdateAgentDatabase"
+      - type: "NotifyQueues"
+    next_state: "AgentReady"
+    condition_updates:
+      IsRegistered: true
+      AgentAvailable: true
+    publish_events:
+      - type: "AgentLoggedIn"
+      
+  - role: "Both"
+    state: "AgentReady"
+    event:
+      type: "SetAgentBusy"
+    actions:
+      - type: "UpdateAgentStatus"
+      - type: "NotifyQueues"
+    next_state: "AgentBusy"
+    condition_updates:
+      AgentAvailable: false
+    publish_events:
+      - type: "AgentStatusChanged"
+      
+  - role: "Both"
+    state: "AgentReady"
+    event:
+      type: "AgentBreak"
+    actions:
+      - type: "UpdateAgentStatus"
+      - type: "StartBreakTimer"
+      - type: "NotifyQueues"
+    next_state: "AgentBreak"
+    condition_updates:
+      AgentAvailable: false
+    publish_events:
+      - type: "AgentOnBreak"
+      
+  - role: "Both"
+    state: "AgentBreak"
+    event:
+      type: "EndBreak"
+    actions:
+      - type: "UpdateAgentStatus"
+      - type: "LogBreakDuration"
+      - type: "NotifyQueues"
+    next_state: "AgentReady"
+    condition_updates:
+      AgentAvailable: true
+    publish_events:
+      - type: "AgentBackFromBreak"
+      
+  - role: "Both"
+    state: "AgentReady"
+    event:
+      type: "AgentLogout"
+    actions:
+      - type: "SendUnregister"
+      - type: "UpdateAgentDatabase"
+      - type: "NotifyQueues"
+    next_state: "AgentOffline"
+    condition_updates:
+      IsRegistered: false
+      AgentAvailable: false
+    publish_events:
+      - type: "AgentLoggedOut"
+      
+  # ================== Call Queuing ==================
+  
+  - role: "UAS"
+    state: "Idle"
+    event:
+      type: "IncomingCall"
+    actions:
+      - type: "CreateCallRecord"
+      - type: "DetermineQueue"
+      - type: "AddToQueue"
+      - type: "PlayQueueAnnouncement"
+      - type: "SendSIPResponse"
+        code: 180
+        reason: "Queued"
+    next_state: "CallQueued"
+    condition_updates:
+      InQueue: true
+    publish_events:
+      - type: "CallQueued"
+      
+  - role: "Both"
+    state: "CallQueued"
+    event:
+      type: "QueueTimeout"
+    actions:
+      - type: "RemoveFromQueue"
+      - type: "RouteToVoicemail"
+      - type: "UpdateStatistics"
+    next_state: "Terminating"
+    publish_events:
+      - type: "CallAbandonedInQueue"
+      
+  - role: "Both"
+    state: "CallQueued"
+    event:
+      type: "AgentAvailable"
+    actions:
+      - type: "SelectAgent"
+      - type: "ReserveAgent"
+      - type: "RouteToAgent"
+    next_state: "CallDistributing"
+    publish_events:
+      - type: "CallDistributing"
+      
+  # ================== Call Distribution ==================
+  
+  - role: "Both"
+    state: "CallDistributing"
+    event:
+      type: "AgentSelected"
+    actions:
+      - type: "CreateAgentLeg"
+      - type: "SendINVITEToAgent"
+      - type: "NotifyAgent"
+    next_state: "AgentRinging"
+    publish_events:
+      - type: "CallingAgent"
+      
+  - role: "Both"
+    state: "AgentRinging"
+    event:
+      type: "AgentAnswered"
+    actions:
+      - type: "BridgeCustomerToAgent"
+      - type: "StartCallTimer"
+      - type: "UpdateAgentStatus"
+      - type: "Send200OKToCustomer"
+    next_state: "CallActive"
+    condition_updates:
+      InQueue: false
+      MediaReady: true
+      AgentAvailable: false
+    publish_events:
+      - type: "CallConnected"
+      
+  - role: "Both"
+    state: "AgentRinging"
+    event:
+      type: "AgentNoAnswer"
+    actions:
+      - type: "ReleaseAgent"
+      - type: "FindNextAgent"
+      - type: "UpdateAgentStats"
+    next_state: "CallDistributing"
+    publish_events:
+      - type: "AgentMissedCall"
+      
+  # ================== Active Call Management ==================
+  
+  - role: "Both"
+    state: "CallActive"
+    event:
+      type: "StartRecording"
+    actions:
+      - type: "InitializeRecording"
+      - type: "NotifyCompliance"
+      - type: "PlayRecordingBeep"
+    condition_updates:
+      IsRecording: true
+    publish_events:
+      - type: "RecordingStarted"
+      
+  - role: "Both"
+    state: "CallActive"
+    event:
+      type: "HoldCall"
+    actions:
+      - type: "PlayHoldMusic"
+      - type: "UpdateMediaDirection"
+        direction: "sendonly"
+      - type: "NotifyAgent"
+    next_state: "CallOnHold"
+    publish_events:
+      - type: "CustomerOnHold"
+      
+  - role: "Both"
+    state: "CallOnHold"
+    event:
+      type: "ResumeCall"
+    actions:
+      - type: "StopHoldMusic"
+      - type: "UpdateMediaDirection"
+        direction: "sendrecv"
+      - type: "NotifyAgent"
+    next_state: "CallActive"
+    publish_events:
+      - type: "CallResumed"
+      
+  - role: "Both"
+    state: "CallActive"
+    event:
+      type: "TransferToAgent"
+    actions:
+      - type: "FindTargetAgent"
+      - type: "InitiateTransfer"
+      - type: "NotifyAgents"
+    next_state: "CallTransferring"
+    publish_events:
+      - type: "TransferInitiated"
+      
+  - role: "Both"
+    state: "CallTransferring"
+    event:
+      type: "TransferComplete"
+    actions:
+      - type: "ReleaseOriginalAgent"
+      - type: "UpdateCallRecord"
+      - type: "NotifyNewAgent"
+    next_state: "CallActive"
+    publish_events:
+      - type: "TransferCompleted"
+      
+  # ================== Supervisor Features ==================
+  
+  - role: "Both"
+    state: "CallActive"
+    event:
+      type: "SupervisorMonitor"
+    actions:
+      - type: "CreateMonitoringLeg"
+      - type: "MuteMonitorAudio"
+      - type: "NotifySupervisor"
+    next_state: "CallMonitored"
+    condition_updates:
+      HasSupervisor: true
+    publish_events:
+      - type: "SupervisorMonitoring"
+      
+  - role: "Both"
+    state: "CallMonitored"
+    event:
+      type: "SupervisorWhisper"
+    actions:
+      - type: "EnableWhisperMode"
+      - type: "RouteAudioToAgent"
+    next_state: "Whispering"
+    publish_events:
+      - type: "SupervisorWhispering"
+      
+  - role: "Both"
+    state: "Whispering"
+    event:
+      type: "SupervisorBarge"
+    actions:
+      - type: "EnableFullAudio"
+      - type: "NotifyAllParties"
+      - type: "CreateConference"
+    next_state: "BargedIn"
+    publish_events:
+      - type: "SupervisorBargedIn"
+      
+  - role: "Both"
+    state: "CallMonitored"
+    event:
+      type: "SupervisorDisconnect"
+    actions:
+      - type: "RemoveMonitoringLeg"
+      - type: "UpdateCallRecord"
+    next_state: "CallActive"
+    condition_updates:
+      HasSupervisor: false
+    publish_events:
+      - type: "SupervisorDisconnected"
+      
+  # ================== Conference Support ==================
+  
+  - role: "Both"
+    state: "CallActive"
+    event:
+      type: "CreateConference"
+    actions:
+      - type: "InitializeConferenceBridge"
+      - type: "MovePartiesToBridge"
+      - type: "EnableConferenceFeatures"
+    next_state: "ConferenceActive"
+    publish_events:
+      - type: "ConferenceCreated"
+      
+  - role: "Both"
+    state: "ConferenceActive"
+    event:
+      type: "AddParticipant"
+    actions:
+      - type: "InviteParticipant"
+      - type: "UpdateConferenceMixer"
+      - type: "NotifyParticipants"
+    publish_events:
+      - type: "ParticipantAdded"
+      
+  - role: "Both"
+    state: "ConferenceActive"
+    event:
+      type: "RemoveParticipant"
+    actions:
+      - type: "DisconnectParticipant"
+      - type: "UpdateConferenceMixer"
+      - type: "CheckConferenceViability"
+    publish_events:
+      - type: "ParticipantRemoved"
+      
+  # ================== Call Termination ==================
+  
+  - role: "Both"
+    state: "CallActive"
+    event:
+      type: "HangupCall"
+    actions:
+      - type: "StopRecording"
+      - type: "CalculateCallMetrics"
+      - type: "SendBYE"
+    next_state: "AgentWrapUp"
+    publish_events:
+      - type: "CallEnding"
+      
+  - role: "Both"
+    state: "AgentWrapUp"
+    event:
+      type: "CompleteWrapUp"
+    actions:
+      - type: "SaveCallNotes"
+      - type: "UpdateCRM"
+      - type: "UpdateAgentStats"
+      - type: "ReleaseAgent"
+    next_state: "AgentReady"
+    condition_updates:
+      AgentAvailable: true
+    publish_events:
+      - type: "WrapUpComplete"
+      
+  - role: "Both"
+    state: "AgentWrapUp"
+    event:
+      type: "WrapUpTimeout"
+    actions:
+      - type: "ForceCompleteWrapUp"
+      - type: "LogTimeout"
+      - type: "ReleaseAgent"
+    next_state: "AgentReady"
+    condition_updates:
+      AgentAvailable: true
+    publish_events:
+      - type: "WrapUpTimedOut"
+      
+  # ================== Quality Management ==================
+  
+  - role: "Both"
+    state: "CallActive"
+    event:
+      type: "QualityAlert"
+    actions:
+      - type: "LogQualityIssue"
+      - type: "NotifySupervisor"
+      - type: "AttemptQualityRecovery"
+    publish_events:
+      - type: "QualityIssueDetected"
+      
+  - role: "Both"
+    state: "CallActive"
+    event:
+      type: "ComplianceFlag"
+    actions:
+      - type: "FlagCallForReview"
+      - type: "NotifyCompliance"
+      - type: "EnsureRecording"
+    publish_events:
+      - type: "ComplianceAlerted"
+      
+  # ================== Error Handling ==================
+  
+  - role: "Both"
+    state: "Any"
+    event:
+      type: "SystemError"
+    actions:
+      - type: "LogError"
+      - type: "AttemptRecovery"
+      - type: "NotifyAdministrator"
+    next_state: "Failed"
+    publish_events:
+      - type: "SystemErrorOccurred"
+      
+  - role: "Both"
+    state: "Any"
+    event:
+      type: "AgentDisconnected"
+    actions:
+      - type: "HandleAgentLoss"
+      - type: "FindBackupAgent"
+      - type: "MaintainCustomerConnection"
+    publish_events:
+      - type: "AgentConnectionLost"
+      
+  - role: "Both"
+    state: "Failed"
+    event:
+      type: "Reset"
+    actions:
+      - type: "CleanupResources"
+      - type: "ResetState"
+    next_state: "Idle"
+    condition_updates:
+      AgentAvailable: false
+      InQueue: false
+      IsRecording: false
+      HasSupervisor: false
+      MediaReady: false

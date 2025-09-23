@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use crate::state_table::{
-    SessionId, CallState, Role, EventType, Guard, StateKey, MASTER_TABLE
+    SessionId, Role, EventType, Guard, StateKey, MASTER_TABLE
 };
+use crate::types::{CallState, FailureReason};
 use super::{SessionStore, SessionState};
 use super::history::TransitionRecord;
 
@@ -443,7 +444,7 @@ impl SessionStore {
             CallState::Transferring,
             CallState::Terminating,
             CallState::Terminated,
-            CallState::Failed(crate::state_table::FailureReason::Other),
+            CallState::Failed(FailureReason::Other),
         ]
     }
     

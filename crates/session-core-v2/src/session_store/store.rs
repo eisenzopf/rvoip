@@ -5,7 +5,8 @@ use tracing::{info, debug, error};
 use crate::state_table::{SessionId, DialogId, MediaSessionId, CallId};
 
 use super::state::SessionState;
-use crate::state_table::{CallState, Role};
+use crate::state_table::Role;
+use crate::types::CallState;
 
 /// Session storage with indexes for fast lookup
 pub struct SessionStore {
@@ -259,6 +260,25 @@ impl SessionStore {
                 CallState::InConference => stats.active += 1, // Count as active
                 CallState::ConferenceOnHold => stats.on_hold += 1, // Count as on hold
                 CallState::ConsultationCall => stats.active += 1, // Count as active
+                
+                // Registration states
+                CallState::Registering => stats.initiating += 1, // Count as initiating
+                CallState::Registered => stats.idle += 1, // Count as idle (ready for calls)
+                CallState::Unregistering => stats.terminating += 1, // Count as terminating
+                
+                // Subscription/Presence states
+                CallState::Subscribing => stats.initiating += 1, // Count as initiating
+                CallState::Subscribed => stats.idle += 1, // Count as idle (subscription active)
+                CallState::Publishing => stats.initiating += 1, // Count as initiating
+                
+                // Call center states
+                CallState::Queued => stats.on_hold += 1, // Count as on hold
+                CallState::AgentRinging => stats.ringing += 1, // Count as ringing
+                CallState::WrapUp => stats.active += 1, // Count as active (post-call work)
+                
+                // Gateway/B2BUA states
+                CallState::BridgeInitiating => stats.initiating += 1, // Count as initiating
+                CallState::BridgeActive => stats.active += 1, // Count as active
             }
         }
         
