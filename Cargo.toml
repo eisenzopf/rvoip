@@ -17,7 +17,7 @@ members = [
     "crates/sip-client",
     "crates/rvoip",
     "crates/infra-common",
-    "crates/registrar-core",
+    "crates/registrar-core", "crates/users-core",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,

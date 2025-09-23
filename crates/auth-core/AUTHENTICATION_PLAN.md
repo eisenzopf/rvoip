@@ -2,7 +2,11 @@
 
 ## Executive Summary
 
-Auth-Core provides a unified authentication and authorization service for the RVoIP ecosystem. It handles OAuth2 flows, token validation, user context management, and integrates seamlessly with session-core, registrar-core, and other services.
+Auth-Core provides a unified token validation and external authentication service for the RVoIP ecosystem. It validates JWT tokens (including those issued by users-core), handles OAuth2 flows with external providers, manages token caching, and integrates seamlessly with session-core, registrar-core, and other services.
+
+**Key Separation of Concerns:**
+- **users-core**: Manages internal users, issues JWT tokens, handles password authentication
+- **auth-core**: Validates all tokens (JWT and OAuth2), integrates external providers, provides unified validation API
 
 ## Architecture Overview
 
@@ -25,43 +29,53 @@ Auth-Core provides a unified authentication and authorization service for the RV
                         │             │
                         │ • Validate  │
                         │ • Cache     │
-                        │ • Refresh   │
+                        │ • Unify     │
                         └──────┬──────┘
                                │
-                ┌──────────────┼──────────────┐
-                ▼              ▼              ▼
-        ┌──────────┐   ┌──────────┐   ┌──────────┐
-        │  OAuth2  │   │   JWT    │   │  Local   │
-        │ Provider │   │  Issuer  │   │   Store  │
-        └──────────┘   └──────────┘   └──────────┘
+         ┌─────────────────────┼─────────────────────┐
+         ▼                     ▼                     ▼
+  ┌──────────────┐      ┌─────────────┐      ┌──────────────┐
+  │  Users-Core  │      │   OAuth2    │      │   Other      │
+  │              │      │  Providers  │      │   JWTs       │
+  │ • Issue JWT  │      │ • Google    │      │ • Partners   │
+  │ • Local Auth │      │ • Azure AD  │      │ • Services   │
+  └──────────────┘      └─────────────┘      └──────────────┘
 ```
 
 ## Core Components
 
-### 1. Authentication Service
-The main service that orchestrates all authentication operations.
+### 1. Token Validation Service
+The main service that validates tokens from multiple sources.
 
 ```rust
-pub trait AuthenticationService {
-    /// Validate a token and return user context
+pub trait TokenValidationService {
+    /// Validate any token and return user context
     async fn validate_token(&self, token: &str) -> Result<UserContext>;
     
-    /// Refresh an expired token
-    async fn refresh_token(&self, refresh_token: &str) -> Result<TokenPair>;
+    /// Get token metadata (issuer, type, expiry)
+    async fn inspect_token(&self, token: &str) -> Result<TokenMetadata>;
     
-    /// Revoke a token
-    async fn revoke_token(&self, token: &str) -> Result<()>;
+    /// Exchange OAuth2 authorization code for tokens
+    async fn exchange_oauth_code(&self, code: &str, provider: &str) -> Result<TokenPair>;
     
-    /// Exchange authorization code for tokens (OAuth2)
-    async fn exchange_code(&self, code: &str) -> Result<TokenPair>;
+    /// Add trusted JWT issuer (e.g., users-core)
+    async fn add_trusted_issuer(&self, issuer: TrustedIssuer) -> Result<()>;
+}
+
+pub struct TrustedIssuer {
+    pub issuer: String,           // e.g., "https://users.rvoip.local"
+    pub jwks_uri: Option<String>, // JWKS endpoint
+    pub public_key: Option<Jwk>,  // Or direct public key
+    pub audiences: Vec<String>,   // Expected audiences
 }
 ```
 
 ### 2. Token Validators
-Pluggable validators for different token types:
+Pluggable validators for different token sources:
 
-- **OAuth2 Validator**: Validates against OAuth2 authorization servers
-- **JWT Validator**: Local validation of JWT tokens
+- **Users-Core JWT Validator**: Validates JWTs issued by users-core
+- **OAuth2 Validator**: Validates tokens from external OAuth2 providers (Google, Azure AD, etc.)
+- **Generic JWT Validator**: Validates JWTs from trusted third parties
 - **Opaque Token Validator**: Remote validation via introspection endpoint
 
 ### 3. Cache Layer
@@ -72,17 +86,54 @@ High-performance caching to reduce validation latency:
 - Cache invalidation on token revocation
 
 ### 4. Provider Adapters
-Support for multiple authentication providers:
+Support for multiple token sources:
 
+**Internal:**
+- Users-Core (JWT issuer)
+
+**External OAuth2:**
 - Google OAuth2
 - Microsoft Azure AD
 - Keycloak
 - Auth0
 - Custom OAuth2 providers
 
+**Other:**
+- Partner JWT issuers
+- Service-to-service tokens
+
 ## Authentication Flows
 
-### Flow 1: SIP Phone Registration
+### Flow 1: SIP Phone Registration with Users-Core Token
+
+```mermaid
+sequenceDiagram
+    participant Phone as SIP Phone
+    participant Session as Session-Core
+    participant Auth as Auth-Core
+    participant Users as Users-Core
+
+    Note over Phone: Previously authenticated with users-core
+    Phone->>Session: REGISTER sip:user@domain
+    Note right of Phone: Authorization: Bearer <JWT>
+    
+    Session->>Auth: validate_token(jwt)
+    
+    alt Token in cache
+        Auth-->>Session: UserContext (from cache)
+    else Token not cached
+        Auth->>Auth: Validate JWT signature
+        Note right of Auth: Using users-core public key
+        Auth->>Auth: Extract claims
+        Auth->>Auth: Cache result
+        Auth-->>Session: UserContext
+    end
+    
+    Session->>Session: Create SIP registration
+    Session-->>Phone: 200 OK
+```
+
+### Flow 2: SIP Phone Registration with OAuth2 Token
 
 ```mermaid
 sequenceDiagram
@@ -109,7 +160,7 @@ sequenceDiagram
     Session-->>Phone: 200 OK
 ```
 
-### Flow 2: Web Application Login
+### Flow 3: Web Application Login via OAuth2
 
 ```mermaid
 sequenceDiagram
@@ -131,7 +182,32 @@ sequenceDiagram
     WebApp->>User: Logged in!
 ```
 
-### Flow 3: Token Refresh
+### Flow 4: Mixed Authentication Environment
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Service
+    participant Auth as Auth-Core
+    participant Users as Users-Core
+    participant OAuth as OAuth Provider
+
+    alt Internal User
+        Client->>Users: POST /auth/login
+        Users-->>Client: JWT token
+        Client->>Service: Request with JWT
+        Service->>Auth: validate_token(jwt)
+        Auth->>Auth: Validate with users-core key
+        Auth-->>Service: UserContext
+    else External User
+        Client->>OAuth: OAuth2 flow
+        OAuth-->>Client: OAuth2 token
+        Client->>Service: Request with OAuth token
+        Service->>Auth: validate_token(oauth_token)
+        Auth->>OAuth: Validate token
+        Auth-->>Service: UserContext
+    end
+```
 
 ```mermaid
 sequenceDiagram
@@ -225,6 +301,25 @@ async fn validate_token(&self, token: &str) -> Result<UserContext> {
 
 ## Integration Points
 
+### Users-Core Integration
+
+```rust
+// Configure auth-core to trust users-core
+pub async fn setup_auth_core() -> Result<AuthCore> {
+    let auth_core = AuthCore::builder()
+        .add_trusted_issuer(TrustedIssuer {
+            issuer: "https://users.rvoip.local".to_string(),
+            jwks_uri: Some("http://localhost:8081/auth/jwks.json".to_string()),
+            audiences: vec!["rvoip-api".to_string(), "rvoip-sip".to_string()],
+        })
+        .add_oauth2_provider("google", google_config)
+        .build()
+        .await?;
+    
+    Ok(auth_core)
+}
+```
+
 ### Session-Core Integration
 
 ```rust
@@ -290,22 +385,24 @@ pub async fn auth_middleware(
 
 ## Token Management
 
-### Token Types
+### Token Sources
 
-1. **Access Token**
-   - Short-lived (5-60 minutes)
-   - Used for API access
+1. **Users-Core Tokens**
+   - JWT format with RS256 signature
+   - Issued for internal user authentication
+   - Contains roles and permissions
+   - Validated using users-core public key
+
+2. **OAuth2 Provider Tokens**
    - Can be JWT or opaque
+   - Issued by external providers
+   - Validated via provider APIs or JWKS
+   - May require token exchange
 
-2. **Refresh Token**
-   - Long-lived (days to months)
-   - Used to obtain new access tokens
-   - Should be securely stored
-
-3. **ID Token** (OpenID Connect)
-   - Contains user identity claims
-   - Always JWT format
-   - Not used for API access
+3. **Service Tokens**
+   - Inter-service authentication
+   - Usually JWT with specific audiences
+   - Short-lived for security
 
 ### Token Storage Strategy
 
@@ -330,23 +427,32 @@ async fn validate_token(&self, token: &str) -> Result<UserContext> {
         }
     }
     
-    // 2. Determine token type
-    let token_type = detect_token_type(token)?;
+    // 2. Determine token type and source
+    let token_info = analyze_token(token)?;
     
-    // 3. Validate based on type
-    let user_context = match token_type {
-        TokenType::JWT => self.validate_jwt(token).await?,
-        TokenType::Opaque => self.validate_opaque(token).await?,
-        TokenType::Bearer => self.validate_oauth2(token).await?,
+    // 3. Validate based on source
+    let user_context = match token_info {
+        TokenInfo::JWT { issuer, .. } => {
+            // Check if it's from users-core or another trusted issuer
+            if self.trusted_issuers.contains(&issuer) {
+                self.validate_trusted_jwt(token, &issuer).await?
+            } else {
+                return Err(Error::UntrustedIssuer(issuer));
+            }
+        },
+        TokenInfo::OpaqueOAuth2 { hint } => {
+            // Validate with OAuth2 provider
+            self.validate_oauth2_token(token, hint).await?
+        },
     };
     
-    // 4. Check permissions/scopes
-    self.check_permissions(&user_context)?;
+    // 4. Enrich context with local data if needed
+    let enriched_context = self.enrich_user_context(user_context).await?;
     
     // 5. Cache result
-    self.cache.insert(token, user_context.clone()).await;
+    self.cache.insert(token, enriched_context.clone()).await;
     
-    Ok(user_context)
+    Ok(enriched_context)
 }
 ```
 
@@ -380,6 +486,15 @@ async fn validate_token(&self, token: &str) -> Result<UserContext> {
 ### Provider Configuration
 
 ```toml
+# Users-Core JWT configuration
+[auth.trusted_issuers.users_core]
+issuer = "https://users.rvoip.local"
+jwks_uri = "http://localhost:8081/auth/jwks.json"
+audiences = ["rvoip-api", "rvoip-sip"]
+algorithms = ["RS256"]
+cache_jwks = true
+
+# External OAuth2 providers
 [auth.providers.google]
 type = "oauth2"
 client_id = "xxx.apps.googleusercontent.com"
@@ -396,14 +511,13 @@ discovery_url = "https://keycloak.example.com/realms/rvoip/.well-known/openid-co
 client_id = "rvoip-client"
 client_secret = "${KEYCLOAK_CLIENT_SECRET}"
 
+# General JWT validation settings
 [auth.jwt]
-audiences = ["rvoip-api", "rvoip-sip"]
-issuers = ["https://auth.rvoip.com", "https://keycloak.example.com/realms/rvoip"]
-algorithms = ["RS256", "ES256"]
 validation_options = {
     validate_exp = true,
     validate_nbf = true,
-    leeway = 60
+    leeway = 60,
+    required_claims = ["sub", "iss", "aud"]
 }
 ```
 
@@ -435,18 +549,20 @@ prefix = "auth:token:"
 - [ ] Error types and result handling
 - [ ] Core traits and types
 - [ ] Configuration system
+- [ ] Integration with users-core types
 
-### Phase 2: JWT Support (Days 3-4)
+### Phase 2: JWT Support with Users-Core (Days 3-4)
 - [ ] JWT validation logic
-- [ ] RSA and ECDSA signature verification
-- [ ] Claims extraction and validation
-- [ ] JWKS endpoint support
+- [ ] Users-core public key integration
+- [ ] JWKS endpoint client
+- [ ] Trusted issuer management
+- [ ] Claims mapping to UserContext
 
 ### Phase 3: OAuth2 Integration (Days 5-7)
 - [ ] OAuth2 client implementation
 - [ ] Authorization code flow
 - [ ] Token endpoint integration
-- [ ] Refresh token handling
+- [ ] Provider discovery support
 - [ ] PKCE support
 
 ### Phase 4: Caching Layer (Days 8-9)
@@ -655,4 +771,26 @@ impl RegistrarService {
 
 ---
 
-This plan provides a comprehensive authentication solution that can be integrated throughout the RVoIP ecosystem while maintaining security, performance, and flexibility.
+## Relationship with Users-Core
+
+### Division of Responsibilities
+
+| Feature | Users-Core | Auth-Core |
+|---------|------------|------------|
+| User Storage | ✓ Manages users in SQLite | ✗ No user storage |
+| Password Auth | ✓ Handles login | ✗ Only validates tokens |
+| JWT Issuance | ✓ Issues tokens | ✗ Only validates |
+| OAuth2 Login | ✗ No OAuth2 | ✓ Full OAuth2 support |
+| Token Validation | ✗ Only own tokens | ✓ Validates all tokens |
+| Token Caching | ✗ No caching | ✓ High-performance cache |
+| API Keys | ✓ Issues & stores | ✗ Only validates |
+
+### Integration Flow
+
+1. **Internal Users**: Authenticate with users-core → Get JWT → Validate with auth-core
+2. **External Users**: OAuth2 with provider → Get token → Validate with auth-core
+3. **Unified API**: All services use auth-core for validation regardless of token source
+
+---
+
+This plan provides a comprehensive token validation solution that unifies authentication across internal (users-core) and external (OAuth2) sources while maintaining security, performance, and flexibility.
