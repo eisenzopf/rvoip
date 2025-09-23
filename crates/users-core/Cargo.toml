@@ -21,6 +21,7 @@ sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "json", 
 
 # Password hashing
 argon2 = "0.5"
+password-hash = "0.5"
 
 # JWT
 jsonwebtoken = "9.3"
@@ -56,6 +57,7 @@ config = "0.14"
 rand = "0.8"
 base64 = "0.22"
 sha2 = "0.10"
+rsa = { version = "0.9", features = ["pem"] }
 
 # Validation
 validator = { version = "0.18", features = ["derive"] }
@@ -63,6 +65,30 @@ validator = { version = "0.18", features = ["derive"] }
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3.14"
+
+[[example]]
+name = "basic_usage"
+path = "examples/basic_usage.rs"
+
+[[example]]
+name = "sip_register_flow"
+path = "examples/sip_register_flow.rs"
+
+[[example]]
+name = "token_validation"
+path = "examples/token_validation.rs"
+
+[[example]]
+name = "api_key_service"
+path = "examples/api_key_service.rs"
+
+[[example]]
+name = "multi_device_presence"
+path = "examples/multi_device_presence.rs"
+
+[[example]]
+name = "session_core_v2_integration"
+path = "examples/session_core_v2_integration.rs"
 
 [lints]
 workspace = true
