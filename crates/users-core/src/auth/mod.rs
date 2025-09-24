@@ -83,6 +83,43 @@ impl AuthenticationService {
         self.pool = Some(pool);
     }
     
+    /// Validate password against configured policy
+    fn validate_password_strength(&self, password: &str) -> Result<()> {
+        let config = &self.password_config;
+        
+        if password.len() < config.min_length {
+            return Err(Error::InvalidPassword(
+                format!("Password must be at least {} characters", config.min_length)
+            ));
+        }
+        
+        if config.require_uppercase && !password.chars().any(|c| c.is_uppercase()) {
+            return Err(Error::InvalidPassword(
+                "Password must contain uppercase letter".to_string()
+            ));
+        }
+        
+        if config.require_lowercase && !password.chars().any(|c| c.is_lowercase()) {
+            return Err(Error::InvalidPassword(
+                "Password must contain lowercase letter".to_string()
+            ));
+        }
+        
+        if config.require_numbers && !password.chars().any(|c| c.is_numeric()) {
+            return Err(Error::InvalidPassword(
+                "Password must contain number".to_string()
+            ));
+        }
+        
+        if config.require_special && !password.chars().any(|c| !c.is_alphanumeric()) {
+            return Err(Error::InvalidPassword(
+                "Password must contain special character".to_string()
+            ));
+        }
+        
+        Ok(())
+    }
+    
     /// Create a new user with password hashing
     pub async fn create_user(&self, mut request: CreateUserRequest) -> Result<User> {
         // Validate password
@@ -263,32 +300,6 @@ impl AuthenticationService {
         
         // Revoke all existing tokens
         self.revoke_tokens(user_id).await?;
-        
-        Ok(())
-    }
-    
-    fn validate_password_strength(&self, password: &str) -> Result<()> {
-        if password.len() < self.password_config.min_length {
-            return Err(Error::InvalidPassword(
-                format!("Password must be at least {} characters", self.password_config.min_length)
-            ));
-        }
-        
-        if self.password_config.require_uppercase && !password.chars().any(|c| c.is_uppercase()) {
-            return Err(Error::InvalidPassword("Password must contain uppercase letter".to_string()));
-        }
-        
-        if self.password_config.require_lowercase && !password.chars().any(|c| c.is_lowercase()) {
-            return Err(Error::InvalidPassword("Password must contain lowercase letter".to_string()));
-        }
-        
-        if self.password_config.require_numbers && !password.chars().any(|c| c.is_numeric()) {
-            return Err(Error::InvalidPassword("Password must contain number".to_string()));
-        }
-        
-        if self.password_config.require_special && !password.chars().any(|c| !c.is_alphanumeric()) {
-            return Err(Error::InvalidPassword("Password must contain special character".to_string()));
-        }
         
         Ok(())
     }

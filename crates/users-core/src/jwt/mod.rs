@@ -165,14 +165,43 @@ impl JwtIssuer {
     
     /// Get the public key in JWK format (for auth-core)
     pub fn public_key_jwk(&self) -> serde_json::Value {
-        // This is a simplified version - in production, you'd extract the actual RSA components
+        use rsa::{RsaPrivateKey, RsaPublicKey};
+        use rsa::pkcs8::DecodePrivateKey;
+        use rsa::traits::PublicKeyParts;
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        
+        if self.config.algorithm == "RS256" {
+            // Extract RSA components from the private key
+            if let Ok(private_key) = RsaPrivateKey::from_pkcs8_pem(
+                self.config.signing_key.as_ref().unwrap()
+            ) {
+                let public_key = RsaPublicKey::from(&private_key);
+                
+                // Get modulus and exponent
+                let n = public_key.n();
+                let e = public_key.e();
+                
+                // Convert to base64url encoding
+                let n_bytes = n.to_bytes_be();
+                let e_bytes = e.to_bytes_be();
+                
+                return serde_json::json!({
+                    "kty": "RSA",
+                    "use": "sig",
+                    "kid": self.header.kid.as_ref().unwrap(),
+                    "alg": self.config.algorithm,
+                    "n": URL_SAFE_NO_PAD.encode(&n_bytes),
+                    "e": URL_SAFE_NO_PAD.encode(&e_bytes),
+                });
+            }
+        }
+        
+        // Fallback for non-RSA algorithms
         serde_json::json!({
-            "kty": "RSA",
+            "kty": "oct",
             "use": "sig",
             "kid": self.header.kid.as_ref().unwrap(),
             "alg": self.config.algorithm,
-            "n": "base64url_encoded_modulus",  // Would be extracted from actual key
-            "e": "AQAB"  // Standard RSA exponent
         })
     }
     

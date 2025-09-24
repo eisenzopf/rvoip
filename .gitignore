@@ -14,6 +14,7 @@ publish_order.sh
 bump_version.sh
 Cargo.toml.backup
 test_vectors/
+*.db
 
 ## Editor
 *.swp

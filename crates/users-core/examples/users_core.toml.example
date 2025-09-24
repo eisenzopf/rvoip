@@ -1,0 +1,50 @@
+# Example Users-Core Configuration File
+# Copy this to users_core.toml and adjust values as needed
+
+[users_core]
+# Database URL - supports SQLite, PostgreSQL, MySQL
+# SQLite: "sqlite://users.db?mode=rwc"
+# PostgreSQL: "postgres://user:pass@localhost/users_db"
+# MySQL: "mysql://user:pass@localhost/users_db"
+database_url = "sqlite://users.db"
+
+# REST API server binding address
+api_bind_address = "127.0.0.1:8081"
+
+[users_core.jwt]
+# JWT token configuration
+issuer = "https://users.rvoip.local"           # Your domain
+audience = ["rvoip-api", "rvoip-sip"]          # Valid audiences
+access_ttl_seconds = 900                        # 15 minutes
+refresh_ttl_seconds = 2592000                   # 30 days
+# kid = "users-core-2024"                      # Optional: Key ID for JWKS
+
+[users_core.password]
+# Password policy settings
+min_length = 8
+require_uppercase = true
+require_lowercase = true
+require_numbers = true
+require_special = false
+
+# Argon2id parameters (defaults are secure for most uses)
+argon2_memory_cost = 65536      # 64MB
+argon2_time_cost = 3           # iterations
+argon2_parallelism = 4         # threads
+
+# Optional sections (these use defaults if not specified):
+
+# [users_core.api]
+# rate_limit_requests = 100    # Per minute
+# cors_allow_origins = ["*"]   # Configure CORS
+# max_request_size_mb = 10
+
+# [users_core.security]
+# session_idle_timeout_minutes = 60
+# max_sessions_per_user = 10
+# max_failed_login_attempts = 5
+# lockout_duration_minutes = 15
+
+# [users_core.defaults]
+# default_user_roles = ["user"]
+# default_user_active = true
