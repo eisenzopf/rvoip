@@ -15,6 +15,10 @@ For example:
 cargo run --example basic_usage
 ```
 
+## Configuration
+
+Most examples use default configuration values. A sample configuration file `users_core.toml.example` is provided to show all available options. Copy it to `users_core.toml` and adjust as needed for your use case.
+
 ## Examples Overview
 
 ### 1. `basic_usage.rs` - Getting Started
@@ -76,6 +80,19 @@ Full integration example showing:
 - Error handling
 
 **Key concepts**: Full system integration, component interaction
+
+### 7. `rest_api_server.rs` - REST API Server
+Runs a complete REST API server:
+- Full HTTP server on port 8081
+- All authentication endpoints
+- User management endpoints
+- API key management
+- Health checks and metrics
+- Rate limiting
+- Request tracing
+- Example curl commands
+
+**Key concepts**: Production-ready REST API, HTTP server, OpenAPI compliance
 
 ## Integration Patterns
 

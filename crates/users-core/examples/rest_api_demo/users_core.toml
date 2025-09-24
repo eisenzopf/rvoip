@@ -1,0 +1,71 @@
+# Users-Core Demo Configuration
+# This file demonstrates all available configuration options
+
+[users_core]
+# Database location (SQLite for demo)
+database_url = "sqlite://demo.db?mode=rwc"
+
+# REST API binding address
+api_bind_address = "127.0.0.1:8082"
+
+[users_core.jwt]
+# JWT issuer (should match your domain in production)
+issuer = "https://demo.users.rvoip.local"
+
+# JWT audience (who can use these tokens)
+audience = ["rvoip-api", "rvoip-sip", "demo-app"]
+
+# Token expiration times
+access_ttl_seconds = 900        # 15 minutes
+refresh_ttl_seconds = 2592000   # 30 days
+
+# Key ID for JWKS (optional, auto-generated if not set)
+# kid = "users-core-demo-2024"
+
+[users_core.password]
+# Password complexity requirements
+min_length = 8
+require_uppercase = true
+require_lowercase = true
+require_numbers = true
+require_special = false  # Set to true for stronger passwords
+
+# Argon2id parameters (advanced - defaults are secure)
+argon2_memory_cost = 65536      # 64MB
+argon2_time_cost = 3            # iterations
+argon2_parallelism = 4          # threads
+
+[users_core.api]
+# Rate limiting (per minute)
+rate_limit_requests = 100
+
+# CORS settings
+cors_allow_origins = ["*"]  # Be more restrictive in production!
+cors_allow_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+cors_allow_headers = ["Content-Type", "Authorization", "X-API-Key"]
+
+# Request size limits
+max_request_size_mb = 10
+
+[users_core.security]
+# Session settings
+session_idle_timeout_minutes = 60
+max_sessions_per_user = 10
+
+# Audit logging
+enable_audit_log = true
+audit_log_file = "audit.log"
+
+# Failed login tracking
+max_failed_login_attempts = 5
+lockout_duration_minutes = 15
+
+[users_core.defaults]
+# Default roles for new users
+default_user_roles = ["user"]
+
+# Whether new users are active by default
+default_user_active = true
+
+# Default API key permissions
+default_api_key_permissions = ["read"]

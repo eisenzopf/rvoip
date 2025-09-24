@@ -12,6 +12,10 @@ categories.workspace = true
 keywords.workspace = true
 description = "User management and authentication service for RVoIP"
 
+[features]
+default = []
+client = ["reqwest"]
+
 [dependencies]
 # Async runtime
 tokio = { workspace = true, features = ["full"] }
@@ -42,7 +46,7 @@ thiserror = { workspace = true }
 async-trait = "0.1"
 
 # Web framework (for REST API)
-axum = { version = "0.7", features = ["http2", "json", "tokio"] }
+axum = { version = "0.7", features = ["http2", "json", "tokio", "macros"] }
 tower = { version = "0.5", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
@@ -57,6 +61,9 @@ config = "0.14"
 rand = "0.8"
 base64 = "0.22"
 sha2 = "0.10"
+
+# HTTP client (for examples)
+reqwest = { version = "0.11", features = ["json"], optional = true }
 rsa = { version = "0.9", features = ["pem"] }
 
 # Validation
@@ -89,6 +96,19 @@ path = "examples/multi_device_presence.rs"
 [[example]]
 name = "session_core_v2_integration"
 path = "examples/session_core_v2_integration.rs"
+
+[[example]]
+name = "rest_api_server"
+path = "examples/rest_api_server.rs"
+
+[[example]]
+name = "rest_api_demo_server"
+path = "examples/rest_api_demo/server.rs"
+
+[[example]]
+name = "rest_api_demo_client"
+path = "examples/rest_api_demo/client.rs"
+required-features = ["client"]
 
 [lints]
 workspace = true
