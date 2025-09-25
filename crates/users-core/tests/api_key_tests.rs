@@ -58,7 +58,7 @@ async fn test_validate_api_key() {
     let (created_key, raw_key) = store.create_api_key(CreateApiKeyRequest {
         user_id: user_id.clone(),
         name: "Validation Test".to_string(),
-        permissions: vec!["api.access".to_string()],
+        permissions: vec!["read".to_string()],
         expires_at: None,
     }).await.unwrap();
     
@@ -80,14 +80,17 @@ async fn test_validate_api_key() {
 async fn test_expired_api_key() {
     let (store, user_id, _temp_dir) = create_test_db_with_user().await;
     
-    // Create an already expired API key
-    let expires_at = Utc::now() - Duration::hours(1);
+    // Create an API key that will expire very soon (1 second)
+    let expires_at = Utc::now() + Duration::seconds(1);
     let (_api_key, raw_key) = store.create_api_key(CreateApiKeyRequest {
         user_id: user_id.clone(),
         name: "Expired Key".to_string(),
         permissions: vec!["read".to_string()],
         expires_at: Some(expires_at),
     }).await.unwrap();
+    
+    // Wait for the key to expire
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     
     // Validation should fail
     let result = store.validate_api_key(&raw_key).await;
@@ -136,7 +139,7 @@ async fn test_list_user_api_keys() {
         store.create_api_key(CreateApiKeyRequest {
             user_id: user_id.clone(),
             name: format!("Key {}", i),
-            permissions: vec![format!("permission{}", i)],
+            permissions: vec![if i == 1 { "read".to_string() } else if i == 2 { "write".to_string() } else { "admin".to_string() }],
             expires_at: if i == 2 { 
                 Some(Utc::now() + Duration::days(30)) 
             } else { 
@@ -168,7 +171,7 @@ async fn test_api_key_unique_names_per_user() {
     store.create_api_key(CreateApiKeyRequest {
         user_id: user_id.clone(),
         name: "Production Key".to_string(),
-        permissions: vec!["all".to_string()],
+        permissions: vec!["*".to_string()],
         expires_at: None,
     }).await.unwrap();
     
@@ -209,7 +212,7 @@ async fn test_api_key_permissions() {
     let (read_key, read_raw) = store.create_api_key(CreateApiKeyRequest {
         user_id: user_id.clone(),
         name: "Read Only".to_string(),
-        permissions: vec!["users.read".to_string(), "sessions.read".to_string()],
+        permissions: vec!["read".to_string()],
         expires_at: None,
     }).await.unwrap();
     
@@ -222,9 +225,8 @@ async fn test_api_key_permissions() {
     
     // Validate and check permissions
     let read_validated = store.validate_api_key(&read_raw).await.unwrap().unwrap();
-    assert_eq!(read_validated.permissions.len(), 2);
-    assert!(read_validated.permissions.contains(&"users.read".to_string()));
-    assert!(read_validated.permissions.contains(&"sessions.read".to_string()));
+    assert_eq!(read_validated.permissions.len(), 1);
+    assert!(read_validated.permissions.contains(&"read".to_string()));
     
     let admin_validated = store.validate_api_key(&admin_raw).await.unwrap().unwrap();
     assert_eq!(admin_validated.permissions, vec!["*"]);

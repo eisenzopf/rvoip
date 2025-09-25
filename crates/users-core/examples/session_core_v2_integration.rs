@@ -179,19 +179,19 @@ async fn main() -> Result<()> {
     println!("\n👥 Step 5: Create test users...");
     
     let alice = users_core.create_user(CreateUserRequest {
-        username: "alice@voip.example.com".to_string(),
-        password: "AliceSecure123".to_string(),
+        username: "alice".to_string(),
+        password: "SecureIntegration2024!".to_string(),
         email: Some("alice@example.com".to_string()),
         display_name: Some("Alice Smith".to_string()),
-        roles: vec!["user".to_string(), "sip".to_string(), "presence".to_string()],
+        roles: vec!["user".to_string()],
     }).await?;
     
     let bob = users_core.create_user(CreateUserRequest {
-        username: "bob@voip.example.com".to_string(),
-        password: "BobSecure123".to_string(),
+        username: "bob".to_string(),
+        password: "SecureIntegration2024!".to_string(),
         email: Some("bob@example.com".to_string()),
         display_name: Some("Bob Jones".to_string()),
-        roles: vec!["user".to_string(), "sip".to_string()],
+        roles: vec!["user".to_string()],
     }).await?;
     
     println!("✅ Created users: {} and {}", alice.username, bob.username);
@@ -203,7 +203,7 @@ async fn main() -> Result<()> {
     println!("\n[Alice's SIP Client]");
     println!("   1. Authenticate with users-core...");
     let alice_auth = users_core
-        .authenticate_password("alice@voip.example.com", "AliceSecure123")
+        .authenticate_password("alice", "SecureIntegration2024!")
         .await?;
     println!("   ✓ Received JWT token");
 
@@ -241,10 +241,10 @@ async fn main() -> Result<()> {
     // Bob subscribes to Alice's presence
     println!("\n[Bob's SIP Client]");
     let bob_auth = users_core
-        .authenticate_password("bob@voip.example.com", "BobSecure123")
+        .authenticate_password("bob", "SecureIntegration2024!")
         .await?;
     
-    println!("   1. Send SUBSCRIBE for alice@voip.example.com");
+    println!("   1. Send SUBSCRIBE for alice");
     println!("   2. Include Authorization: Bearer <bob's token>");
     
     println!("\n[Session-Core-V2]");
@@ -280,7 +280,7 @@ async fn main() -> Result<()> {
     
     // Invalid password
     println!("\n[Invalid Password]");
-    match users_core.authenticate_password("alice@voip.example.com", "WrongPassword").await {
+    match users_core.authenticate_password("alice", "WrongPassword").await {
         Ok(_) => println!("   ⚠️ Should have failed!"),
         Err(e) => println!("   ✓ Correctly rejected: {}", e),
     }

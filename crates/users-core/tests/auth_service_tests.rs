@@ -2,7 +2,7 @@
 //! These tests demonstrate complete authentication workflows
 
 use users_core::{init, UsersConfig, CreateUserRequest};
-use users_core::config::PasswordConfig;
+use users_core::config::{PasswordConfig, TlsSettings};
 use users_core::jwt::JwtConfig;
 use tempfile::TempDir;
 
@@ -19,7 +19,7 @@ fn create_test_config(db_url: String) -> UsersConfig {
             signing_key: None,  // Will be auto-generated
         },
         password: PasswordConfig {
-            min_length: 8,
+            min_length: 12,  // Updated to match validation.rs
             require_uppercase: true,
             require_lowercase: true,
             require_numbers: true,
@@ -29,6 +29,7 @@ fn create_test_config(db_url: String) -> UsersConfig {
             argon2_parallelism: 1,
         },
         api_bind_address: "127.0.0.1:0".to_string(),
+        tls: TlsSettings::default(),
     }
 }
 
@@ -97,10 +98,10 @@ async fn test_password_validation() {
     
     // Test various invalid passwords
     let test_cases = vec![
-        ("short1", "Password must be at least 8 characters"),
-        ("alllowercase123", "Password must contain uppercase letter"),
-        ("ALLUPPERCASE123", "Password must contain lowercase letter"),
-        ("NoNumbersHere", "Password must contain number"),
+        ("short1", "Your password needs to be at least 12 characters long. Try using a passphrase!"),
+        ("alllowercase123", "Password must contain an uppercase letter"),
+        ("ALLUPPERCASE123", "Password must contain a lowercase letter"),
+        ("NoNumbersHereAtAll", "Password must contain a number"),
     ];
     
     for (password, expected_error) in test_cases {
@@ -134,10 +135,10 @@ async fn test_api_key_authentication() {
     // Create a user
     let user = auth_service.create_user(CreateUserRequest {
         username: "apiuser".to_string(),
-        password: "ApiUserPass123".to_string(),
+        password: "SecurePass2024!".to_string(),
         email: Some("api@example.com".to_string()),
         display_name: None,
-        roles: vec!["service".to_string()],
+        roles: vec!["user".to_string()],
     }).await.unwrap();
     
     // Create an API key
@@ -145,7 +146,7 @@ async fn test_api_key_authentication() {
     let (api_key, raw_key) = api_key_store.create_api_key(users_core::api_keys::CreateApiKeyRequest {
         user_id: user.id.clone(),
         name: "Test API Key".to_string(),
-        permissions: vec!["api.read".to_string(), "api.write".to_string()],
+        permissions: vec!["read".to_string(), "write".to_string()],
         expires_at: None,
     }).await.unwrap();
     
@@ -210,7 +211,7 @@ async fn test_inactive_user_cannot_authenticate() {
     // Create a user
     let user = auth_service.create_user(CreateUserRequest {
         username: "inactiveuser".to_string(),
-        password: "Password123".to_string(),
+        password: "SecurePass2024".to_string(),
         email: None,
         display_name: None,
         roles: vec!["user".to_string()],
@@ -226,7 +227,7 @@ async fn test_inactive_user_cannot_authenticate() {
     }).await.unwrap();
     
     // Authentication should fail
-    let auth_result = auth_service.authenticate_password("inactiveuser", "Password123").await;
+    let auth_result = auth_service.authenticate_password("inactiveuser", "SecurePass2024").await;
     assert!(auth_result.is_err());
     match auth_result.unwrap_err() {
         users_core::Error::InvalidCredentials => {},
@@ -248,13 +249,13 @@ async fn test_jwt_claims_content() {
     // Create a user with specific roles
     let user = auth_service.create_user(CreateUserRequest {
         username: "claimstest".to_string(),
-        password: "Password123".to_string(),
+        password: "SecurePass2024".to_string(),
         email: Some("claims@example.com".to_string()),
         display_name: Some("Claims Test".to_string()),
         roles: vec!["user".to_string(), "admin".to_string()],
     }).await.unwrap();
     
-    let auth_result = auth_service.authenticate_password("claimstest", "Password123").await.unwrap();
+    let auth_result = auth_service.authenticate_password("claimstest", "SecurePass2024").await.unwrap();
     
     // Get public key for validation
     let public_key_pem = auth_service.jwt_issuer().public_key_pem().unwrap();

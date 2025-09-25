@@ -1,5 +1,8 @@
 //! REST API for users-core
 
+pub mod rate_limit;
+pub mod security_headers;
+
 use axum::{
     Router,
     routing::{get, post, put, delete},
@@ -19,12 +22,15 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{decode, Algorithm, Validation, DecodingKey};
+use self::rate_limit::{EnhancedRateLimiter, RateLimitConfig};
+use std::path::PathBuf;
+use std::net::SocketAddr;
 
 // API State
 #[derive(Clone)]
 pub struct ApiState {
     pub auth_service: Arc<AuthenticationService>,
-    pub rate_limiter: RateLimiter,
+    pub rate_limiter: EnhancedRateLimiter,
     pub metrics: Arc<Mutex<Metrics>>,
 }
 
@@ -169,13 +175,18 @@ impl AuthContext {
 pub fn create_router(auth_service: Arc<AuthenticationService>) -> Router {
     let state = ApiState { 
         auth_service,
-        rate_limiter: RateLimiter::new(100, Duration::from_secs(60)), // 100 requests per minute
+        rate_limiter: EnhancedRateLimiter::new(RateLimitConfig::default()),
         metrics: Arc::new(Mutex::new(Metrics {
             start_time: Instant::now(),
             ..Default::default()
         })),
     };
     
+    create_router_with_state(state)
+}
+
+/// Create the REST API router with a custom ApiState (useful for testing)
+pub fn create_router_with_state(state: ApiState) -> Router {
     Router::new()
         // Authentication endpoints
         .route("/auth/login", post(login))
@@ -201,14 +212,70 @@ pub fn create_router(auth_service: Arc<AuthenticationService>) -> Router {
         .route("/health", get(health_check))
         .route("/metrics", get(metrics))
         
-        // Apply middleware
+        // Apply middleware (order matters - security headers should be outermost)
+        .layer(middleware::from_fn(security_headers::security_headers_middleware))
         .layer(CorsLayer::permissive())
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit::rate_limit_middleware))
         .with_state(state)
+}
+
+/// TLS configuration
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    pub enabled: bool,
+}
+
+/// Create and start the API server with optional TLS
+pub async fn create_server_with_tls(
+    app: Router,
+    addr: SocketAddr,
+    tls_config: Option<TlsConfig>,
+) -> anyhow::Result<()> {
+    match tls_config {
+        Some(tls) if tls.enabled => {
+            // Use HTTPS with axum-server
+            use axum_server::tls_rustls::RustlsConfig;
+            
+            let config = RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to load TLS config: {}", e))?;
+            
+            tracing::info!("🔒 Starting HTTPS server on https://{}", addr);
+            tracing::info!("   Certificate: {}", tls.cert_path.display());
+            tracing::info!("   Private key: {}", tls.key_path.display());
+            
+            axum_server::bind_rustls(addr, config)
+                .serve(app.into_make_service())
+                .await
+                .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+        }
+        _ => {
+            // Fallback to HTTP with big warning
+            tracing::warn!("⚠️  WARNING: Starting server without TLS encryption!");
+            tracing::warn!("⚠️  This is INSECURE and should NOT be used in production!");
+            tracing::warn!("⚠️  All traffic including passwords will be sent in PLAIN TEXT!");
+            tracing::warn!("");
+            tracing::warn!("To enable HTTPS, provide TLS configuration with:");
+            tracing::warn!("  - Certificate file (cert_path)");
+            tracing::warn!("  - Private key file (key_path)");
+            tracing::warn!("  - Set enabled = true");
+            
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            tracing::info!("Starting HTTP server on http://{}", addr);
+            
+            axum::serve(listener, app)
+                .await
+                .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
+        }
+    }
+    Ok(())
 }
 
 // Authentication handlers
 
+#[axum::debug_handler]
 async fn login(
     State(state): State<ApiState>,
     Json(req): Json<LoginRequest>,
@@ -219,9 +286,31 @@ async fn login(
         metrics.authentication_attempts += 1;
     }
     
+    // Check if account is locked due to failed attempts
     let auth_result = state.auth_service
         .authenticate_password(&req.username, &req.password)
-        .await?;
+        .await;
+    
+    // Handle rate limiting for login attempts
+    use self::rate_limit::{handle_login_rate_limit, RateLimitError};
+    let rate_limit_result = handle_login_rate_limit(
+        &state.rate_limiter,
+        &req.username,
+        auth_result.as_ref().map(|_| ()).map_err(|_| ())
+    ).await;
+    
+    // Check rate limit first
+    if let Err(e) = rate_limit_result {
+        return match e {
+            RateLimitError::AccountLocked(duration) => {
+                Err(AppError::AccountLocked(duration.as_secs()))
+            }
+            _ => Err(AppError::InvalidCredentials),
+        };
+    }
+    
+    // Now handle the authentication result
+    let auth_result = auth_result?;
     
     // Track successful authentication
     {
@@ -624,26 +713,32 @@ pub enum AppError {
     NotFound,
     Forbidden,
     BadRequest(String),
+    AccountLocked(u64), // seconds until unlock
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, code, message) = match self {
+        let (status, code, message, retry_after) = match self {
             AppError::Internal(e) => {
                 tracing::error!("Internal error: {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "An internal error occurred".to_string())
+                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "An internal error occurred".to_string(), None)
             },
             AppError::InvalidCredentials => {
-                (StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS", "Invalid username or password".to_string())
+                (StatusCode::UNAUTHORIZED, "INVALID_CREDENTIALS", "Invalid username or password".to_string(), None)
             },
             AppError::NotFound => {
-                (StatusCode::NOT_FOUND, "NOT_FOUND", "Resource not found".to_string())
+                (StatusCode::NOT_FOUND, "NOT_FOUND", "Resource not found".to_string(), None)
             },
             AppError::Forbidden => {
-                (StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied".to_string())
+                (StatusCode::FORBIDDEN, "FORBIDDEN", "Access denied".to_string(), None)
             },
             AppError::BadRequest(msg) => {
-                (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg)
+                (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg, None)
+            },
+            AppError::AccountLocked(seconds) => {
+                (StatusCode::TOO_MANY_REQUESTS, "ACCOUNT_LOCKED", 
+                 format!("Account temporarily locked due to too many failed login attempts. Try again in {} seconds.", seconds),
+                 Some(seconds))
             },
         };
         
@@ -655,7 +750,17 @@ impl IntoResponse for AppError {
             },
         });
         
-        (status, body).into_response()
+        let mut response = (status, body).into_response();
+        
+        // Add Retry-After header if applicable
+        if let Some(seconds) = retry_after {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                seconds.to_string().parse().unwrap()
+            );
+        }
+        
+        response
     }
 }
 
@@ -761,65 +866,3 @@ where
     }
 }
 
-// Rate limiting (simple in-memory implementation)
-
-#[derive(Clone)]
-pub struct RateLimiter {
-    requests: Arc<Mutex<HashMap<String, Vec<Instant>>>>,
-    max_requests: usize,
-    window: Duration,
-}
-
-impl RateLimiter {
-    pub fn new(max_requests: usize, window: Duration) -> Self {
-        Self {
-            requests: Arc::new(Mutex::new(HashMap::new())),
-            max_requests,
-            window,
-        }
-    }
-    
-    pub fn check_rate_limit(&self, key: &str) -> bool {
-        let mut requests = self.requests.lock().unwrap();
-        let now = Instant::now();
-        
-        let timestamps = requests.entry(key.to_string()).or_insert_with(Vec::new);
-        
-        // Remove old timestamps
-        timestamps.retain(|&ts| now.duration_since(ts) < self.window);
-        
-        if timestamps.len() < self.max_requests {
-            timestamps.push(now);
-            true
-        } else {
-            false
-        }
-    }
-}
-
-// Rate limiting middleware
-async fn rate_limit_middleware(
-    State(state): State<ApiState>,
-    request: Request<axum::body::Body>,
-    next: Next,
-) -> Result<Response, StatusCode> {
-    // Track API request
-    {
-        let mut metrics = state.metrics.lock().unwrap();
-        metrics.api_requests += 1;
-    }
-    
-    // Get client identifier (IP address or user ID from token)
-    let client_id = request
-        .headers()
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("unknown")
-        .to_string();
-    
-    if !state.rate_limiter.check_rate_limit(&client_id) {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-    
-    Ok(next.run(request).await)
-}

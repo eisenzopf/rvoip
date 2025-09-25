@@ -42,19 +42,19 @@ async fn main() -> Result<()> {
     println!("📝 Creating SIP users...");
     
     let alice = auth_service.create_user(CreateUserRequest {
-        username: "alice@voip.example.com".to_string(),
-        password: "AlicePassword123".to_string(),
+        username: "alice".to_string(),
+        password: "SecurePass2024!".to_string(),
         email: Some("alice@example.com".to_string()),
         display_name: Some("Alice Smith".to_string()),
-        roles: vec!["user".to_string(), "sip".to_string()],
+        roles: vec!["user".to_string()],
     }).await?;
 
     let bob = auth_service.create_user(CreateUserRequest {
-        username: "bob@voip.example.com".to_string(),
-        password: "BobPassword123".to_string(),
+        username: "bob".to_string(),
+        password: "SecurePass2024!".to_string(),
         email: Some("bob@example.com".to_string()),
         display_name: Some("Bob Jones".to_string()),
-        roles: vec!["user".to_string(), "sip".to_string()],
+        roles: vec!["user".to_string()],
     }).await?;
 
     println!("✅ Created users: {} and {}", alice.username, bob.username);
@@ -63,7 +63,7 @@ async fn main() -> Result<()> {
     println!("\n🔐 SIP clients authenticate to get JWT tokens...");
     
     let alice_auth = auth_service
-        .authenticate_password("alice@voip.example.com", "AlicePassword123")
+        .authenticate_password("alice", "SecurePass2024!")
         .await?;
     
     println!("✅ Alice authenticated, got JWT token");
@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
     
     // Alice registers from mobile device
     let alice_mobile_auth = auth_service
-        .authenticate_password("alice@voip.example.com", "AlicePassword123")
+        .authenticate_password("alice", "SecurePass2024!")
         .await?;
     
     let mobile_register = SipRegister {

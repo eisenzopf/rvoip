@@ -71,11 +71,11 @@ async fn main() -> Result<()> {
     println!("📝 Creating user with presence capability...");
     
     let user = auth_service.create_user(CreateUserRequest {
-        username: "alice@company.com".to_string(),
-        password: "AliceSecure123".to_string(),
+        username: "alice".to_string(),
+        password: "SecurePresence2024!".to_string(),
         email: Some("alice@company.com".to_string()),
         display_name: Some("Alice Johnson".to_string()),
-        roles: vec!["user".to_string(), "presence".to_string()],
+        roles: vec!["user".to_string()],
     }).await?;
 
     println!("✅ Created user: {}", user.username);
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
     
     println!("\n🖥️ Device 1: Desktop Softphone");
     let desktop_auth = auth_service
-        .authenticate_password("alice@company.com", "AliceSecure123")
+        .authenticate_password("alice", "SecurePresence2024!")
         .await?;
     
     let desktop_reg = DeviceRegistration {
@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
 
     println!("\n📱 Device 2: Mobile App");
     let mobile_auth = auth_service
-        .authenticate_password("alice@company.com", "AliceSecure123")
+        .authenticate_password("alice", "SecurePresence2024!")
         .await?;
     
     let mobile_reg = DeviceRegistration {
@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
 
     println!("\n🌐 Device 3: Web Browser");
     let web_auth = auth_service
-        .authenticate_password("alice@company.com", "AliceSecure123")
+        .authenticate_password("alice", "SecurePresence2024!")
         .await?;
     
     let web_reg = DeviceRegistration {

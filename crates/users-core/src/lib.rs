@@ -22,6 +22,7 @@ pub mod api_keys;
 pub mod jwt;
 pub mod api;
 pub mod config;
+pub mod validation;
 
 pub use error::{Error, Result};
 pub use types::{User, CreateUserRequest, UpdateUserRequest, UserFilter};

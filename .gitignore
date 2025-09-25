@@ -38,6 +38,13 @@ Cargo.backup
 # Test output directories
 crates/sip-client/tests/full_roundtrip/
 *.log
+.claude/
+
+# TLS certificates (never commit these!)
+certs/
+*.crt
+*.key
+*.pem
 
 ## Tool
 .valgrindrc

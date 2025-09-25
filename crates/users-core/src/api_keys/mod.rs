@@ -36,3 +36,31 @@ pub struct CreateApiKeyRequest {
     pub permissions: Vec<String>,
     pub expires_at: Option<DateTime<Utc>>,
 }
+
+impl CreateApiKeyRequest {
+    /// Validate the request
+    pub fn validate(&self) -> crate::Result<()> {
+        use crate::validation::validate_api_key_name;
+        
+        // Validate name
+        validate_api_key_name(&self.name)
+            .map_err(|e| crate::Error::Validation(format!("Invalid API key name: {}", e)))?;
+        
+        // Validate permissions
+        const ALLOWED_PERMISSIONS: &[&str] = &["read", "write", "delete", "admin", "*"];
+        for perm in &self.permissions {
+            if !ALLOWED_PERMISSIONS.contains(&perm.as_str()) {
+                return Err(crate::Error::Validation(format!("Invalid permission: {}", perm)));
+            }
+        }
+        
+        // Validate expiry date if provided
+        if let Some(expires_at) = self.expires_at {
+            if expires_at <= Utc::now() {
+                return Err(crate::Error::Validation("Expiry date must be in the future".to_string()));
+            }
+        }
+        
+        Ok(())
+    }
+}

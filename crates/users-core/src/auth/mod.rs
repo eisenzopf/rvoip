@@ -83,47 +83,34 @@ impl AuthenticationService {
         self.pool = Some(pool);
     }
     
-    /// Validate password against configured policy
-    fn validate_password_strength(&self, password: &str) -> Result<()> {
-        let config = &self.password_config;
-        
-        if password.len() < config.min_length {
-            return Err(Error::InvalidPassword(
-                format!("Password must be at least {} characters", config.min_length)
-            ));
-        }
-        
-        if config.require_uppercase && !password.chars().any(|c| c.is_uppercase()) {
-            return Err(Error::InvalidPassword(
-                "Password must contain uppercase letter".to_string()
-            ));
-        }
-        
-        if config.require_lowercase && !password.chars().any(|c| c.is_lowercase()) {
-            return Err(Error::InvalidPassword(
-                "Password must contain lowercase letter".to_string()
-            ));
-        }
-        
-        if config.require_numbers && !password.chars().any(|c| c.is_numeric()) {
-            return Err(Error::InvalidPassword(
-                "Password must contain number".to_string()
-            ));
-        }
-        
-        if config.require_special && !password.chars().any(|c| !c.is_alphanumeric()) {
-            return Err(Error::InvalidPassword(
-                "Password must contain special character".to_string()
-            ));
-        }
-        
-        Ok(())
-    }
     
-    /// Create a new user with password hashing
+    /// Create a new user with password hashing and validation
     pub async fn create_user(&self, mut request: CreateUserRequest) -> Result<User> {
-        // Validate password
-        self.validate_password_strength(&request.password)?;
+        use crate::validation::{PasswordValidator, validate_username, validate_email, sanitize_display_name, validate_roles};
+        
+        // Validate username
+        validate_username(&request.username)
+            .map_err(|e| Error::Validation(format!("Invalid username: {}", e)))?;
+        
+        // Validate email if provided
+        if let Some(ref email) = request.email {
+            validate_email(email)
+                .map_err(|e| Error::Validation(format!("Invalid email: {}", e)))?;
+        }
+        
+        // Validate roles
+        validate_roles(&request.roles)
+            .map_err(|e| Error::Validation(format!("Invalid roles: {}", e)))?;
+        
+        // Sanitize display name if provided
+        if let Some(ref display_name) = request.display_name {
+            request.display_name = Some(sanitize_display_name(display_name));
+        }
+        
+        // Validate password with our policy
+        let password_validator = PasswordValidator::with_default_policy();
+        password_validator.validate(&request.password, &request.username)
+            .map_err(|e| Error::InvalidPassword(e.user_message()))?;
         
         // Hash the password
         let salt = SaltString::generate(&mut OsRng);
@@ -139,50 +126,84 @@ impl AuthenticationService {
         self.user_store.create_user(request).await
     }
     
-    /// Authenticate user with password
+    /// Authenticate user with password (constant-time implementation)
     pub async fn authenticate_password(
         &self,
         username: &str,
         password: &str,
     ) -> Result<AuthenticationResult> {
-        // Get user
-        let user = self.user_store
+        use rand::Rng;
+        use std::time::Duration;
+        
+        // Always fetch user (or use dummy)
+        let user_result = self.user_store
             .get_user_by_username(username)
-            .await?
-            .ok_or(Error::InvalidCredentials)?;
+            .await;
         
-        // Verify password
-        let parsed_hash = PasswordHash::new(&user.password_hash)
-            .map_err(|_| Error::Internal(anyhow::anyhow!("Invalid password hash format")))?;
+        // Create a dummy hash if user doesn't exist
+        // This is a valid Argon2 hash to ensure consistent timing
+        const DUMMY_HASH: &str = "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHQ$RdescudvJCsgt3ub+b+dWRWJTmaaJObG";
         
-        self.argon2
+        // Extract user and hash in constant time
+        let (user_opt, hash_to_verify) = match user_result {
+            Ok(Some(user)) => {
+                let hash = user.password_hash.clone();
+                (Some(user), hash)
+            },
+            Ok(None) => (None, DUMMY_HASH.to_string()),
+            Err(_) => (None, DUMMY_HASH.to_string()),
+        };
+        
+        // Parse hash - always succeeds with dummy
+        let parsed_hash = PasswordHash::new(&hash_to_verify)
+            .unwrap_or_else(|_| PasswordHash::new(DUMMY_HASH).unwrap());
+        
+        // Verify password - always runs regardless of user existence
+        let password_valid = self.argon2
             .verify_password(password.as_bytes(), &parsed_hash)
-            .map_err(|_| Error::InvalidCredentials)?;
+            .is_ok();
         
-        // Check if account is active
-        if !user.active {
-            return Err(Error::InvalidCredentials);
+        // Add small random delay to further obscure timing (100-500 microseconds)
+        let delay_us = {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            rng.gen_range(100..500)
+        };
+        tokio::time::sleep(Duration::from_micros(delay_us)).await;
+        
+        // Now check results after constant-time operations
+        match (user_opt, password_valid) {
+            (Some(user), true) => {
+                // Check if account is active
+                if !user.active {
+                    return Err(Error::InvalidCredentials);
+                }
+                
+                // Generate tokens
+                let access_token = self.jwt_issuer.create_access_token(&user)?;
+                let refresh_token = self.jwt_issuer.create_refresh_token(&user.id)?;
+                
+                // Store refresh token JTI if pool is available
+                if let Some(pool) = &self.pool {
+                    let claims = self.jwt_issuer.validate_refresh_token(&refresh_token)?;
+                    self.store_refresh_token(pool, &claims).await?;
+                }
+                
+                // Update last login
+                self.update_last_login(&user.id).await?;
+                
+                Ok(AuthenticationResult {
+                    user,
+                    access_token,
+                    refresh_token,
+                    expires_in: Duration::from_secs(self.jwt_issuer.config.access_ttl_seconds),
+                })
+            }
+            _ => {
+                // Failed login - could record for rate limiting here
+                Err(Error::InvalidCredentials)
+            }
         }
-        
-        // Generate tokens
-        let access_token = self.jwt_issuer.create_access_token(&user)?;
-        let refresh_token = self.jwt_issuer.create_refresh_token(&user.id)?;
-        
-        // Store refresh token JTI if pool is available
-        if let Some(pool) = &self.pool {
-            let claims = self.jwt_issuer.validate_refresh_token(&refresh_token)?;
-            self.store_refresh_token(pool, &claims).await?;
-        }
-        
-        // Update last login
-        self.update_last_login(&user.id).await?;
-        
-        Ok(AuthenticationResult {
-            user,
-            access_token,
-            refresh_token,
-            expires_in: std::time::Duration::from_secs(self.jwt_issuer.config.access_ttl_seconds),
-        })
     }
     
     /// Authenticate with API key
@@ -264,6 +285,8 @@ impl AuthenticationService {
     
     /// Change user password
     pub async fn change_password(&self, user_id: &str, old_password: &str, new_password: &str) -> Result<()> {
+        use crate::validation::PasswordValidator;
+        
         // Get user
         let user = self.user_store
             .get_user(user_id)
@@ -278,8 +301,10 @@ impl AuthenticationService {
             .verify_password(old_password.as_bytes(), &parsed_hash)
             .map_err(|_| Error::InvalidCredentials)?;
         
-        // Validate new password
-        self.validate_password_strength(new_password)?;
+        // Validate new password with our policy
+        let password_validator = PasswordValidator::with_default_policy();
+        password_validator.validate(new_password, &user.username)
+            .map_err(|e| Error::InvalidPassword(e.user_message()))?;
         
         // Hash new password
         let salt = SaltString::generate(&mut OsRng);

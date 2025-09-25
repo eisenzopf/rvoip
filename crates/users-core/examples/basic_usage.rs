@@ -29,11 +29,11 @@ async fn main() -> Result<()> {
     // Create a new user
     println!("\n📝 Creating a new user...");
     let user = auth_service.create_user(CreateUserRequest {
-        username: "alice@example.com".to_string(),
+        username: "alice".to_string(),
         password: "SecurePassword123!".to_string(),
         email: Some("alice@example.com".to_string()),
         display_name: Some("Alice Johnson".to_string()),
-        roles: vec!["user".to_string(), "sip".to_string()],
+        roles: vec!["user".to_string()],
     }).await?;
 
     println!("✅ User created successfully!");
@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
     // Authenticate the user
     println!("\n🔐 Authenticating user...");
     let auth_result = auth_service
-        .authenticate_password("alice@example.com", "SecurePassword123!")
+        .authenticate_password("alice", "SecurePassword123!")
         .await?;
 
     println!("✅ Authentication successful!");
@@ -75,7 +75,7 @@ async fn main() -> Result<()> {
     // Try to authenticate with new password
     println!("\n🔐 Authenticating with new password...");
     let new_auth = auth_service
-        .authenticate_password("alice@example.com", "NewSecurePassword456!")
+        .authenticate_password("alice", "NewSecurePassword456!")
         .await?;
 
     println!("✅ Authentication with new password successful!");
