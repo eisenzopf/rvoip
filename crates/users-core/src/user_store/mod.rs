@@ -164,51 +164,73 @@ impl UserStore for SqliteUserStore {
     }
     
     async fn list_users(&self, filter: UserFilter) -> Result<Vec<User>> {
-        let mut query = String::from(
+        // Base query with proper parameterization
+        let mut query_str = String::from(
             "SELECT id, username, email, display_name, password_hash, roles, active, created_at, updated_at, last_login
              FROM users WHERE 1=1"
         );
+        let mut params: Vec<String> = Vec::new();
         
-        // Build dynamic query based on filter
-        let mut bindings = vec![];
-        
+        // Build conditions safely
         if let Some(active) = filter.active {
-            query.push_str(" AND active = ?");
-            bindings.push(if active { "1" } else { "0" }.to_string());
+            query_str.push_str(" AND active = ?");
+            params.push(if active { "1" } else { "0" }.to_string());
         }
         
         if let Some(role) = filter.role {
-            query.push_str(" AND roles LIKE ?");
-            bindings.push(format!("%\"{}%", role));
+            // Sanitize role input - remove quotes and percent signs
+            let safe_role = role.replace('"', "").replace('%', "").replace('\'', "");
+            query_str.push_str(" AND roles LIKE ?");
+            params.push(format!("%\"{}%", safe_role));
         }
         
         if let Some(search) = filter.search {
-            query.push_str(" AND (username LIKE ? OR email LIKE ? OR display_name LIKE ?)");
-            let search_pattern = format!("%{}%", search);
-            bindings.push(search_pattern.clone());
-            bindings.push(search_pattern.clone());
-            bindings.push(search_pattern);
+            // Validate search length
+            if search.len() > 100 {
+                return Err(Error::Validation("Search term too long".to_string()));
+            }
+            
+            // Escape special LIKE characters for SQL
+            let safe_search = search
+                .replace('\\', "\\\\")  // Escape backslash first
+                .replace('%', "\\%")    // Escape percent
+                .replace('_', "\\_")    // Escape underscore
+                .replace('\'', "''");   // Escape single quote
+            
+            query_str.push_str(" AND (username LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')");
+            let search_pattern = format!("%{}%", safe_search);
+            params.push(search_pattern.clone());
+            params.push(search_pattern.clone());
+            params.push(search_pattern);
         }
         
-        query.push_str(" ORDER BY created_at DESC");
+        query_str.push_str(" ORDER BY created_at DESC");
         
         if let Some(limit) = filter.limit {
-            query.push_str(" LIMIT ?");
-            bindings.push(limit.to_string());
+            // Validate limit
+            if limit > 1000 {
+                return Err(Error::Validation("Limit too large".to_string()));
+            }
+            query_str.push_str(" LIMIT ?");
+            params.push(limit.to_string());
         }
         
         if let Some(offset) = filter.offset {
-            query.push_str(" OFFSET ?");
-            bindings.push(offset.to_string());
+            // Validate offset
+            if offset > 100000 {
+                return Err(Error::Validation("Offset too large".to_string()));
+            }
+            query_str.push_str(" OFFSET ?");
+            params.push(offset.to_string());
         }
         
-        // Execute query with dynamic bindings
-        let mut q = sqlx::query(&query);
-        for binding in bindings {
-            q = q.bind(binding);
+        // Execute with proper parameter binding
+        let mut query = sqlx::query(&query_str);
+        for param in params {
+            query = query.bind(param);
         }
         
-        let rows = q.fetch_all(&self.pool).await?;
+        let rows = query.fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(|row| self.row_to_user(row)).collect())
     }
 }
@@ -236,6 +258,9 @@ impl crate::ApiKeyStore for SqliteUserStore {
     async fn create_api_key(&self, request: crate::api_keys::CreateApiKeyRequest) -> Result<(crate::ApiKey, String)> {
         use rand::Rng;
         use sha2::{Sha256, Digest};
+        
+        // Validate the request first
+        request.validate()?;
         
         // Generate the actual API key
         let raw_key = format!("rvoip_ak_live_{}", 

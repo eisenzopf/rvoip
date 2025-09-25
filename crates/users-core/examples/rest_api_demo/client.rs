@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     let resp = client.post(format!("{}/auth/login", BASE_URL))
         .json(&json!({
             "username": "admin",
-            "password": "AdminPass123"
+            "password": "SecurePass123"
         }))
         .send()
         .await?;
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     println!("\n3️⃣ Creating regular user...");
     let regular_user = CreateUserRequest {
         username: "alice".to_string(),
-        password: "AlicePass123".to_string(),
+        password: "SecurePass456".to_string(),
         email: Some("alice@example.com".to_string()),
         display_name: Some("Alice Smith".to_string()),
         roles: vec!["user".to_string()],
@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
     let resp = client.post(format!("{}/auth/login", BASE_URL))
         .json(&json!({
             "username": "alice",
-            "password": "AlicePass123"
+            "password": "SecurePass456"
         }))
         .send()
         .await?;
@@ -173,8 +173,8 @@ async fn main() -> Result<()> {
     let resp = client.post(format!("{}/users/{}/password", BASE_URL, alice.id))
         .header("Authorization", format!("Bearer {}", alice_login.access_token))
         .json(&json!({
-            "old_password": "AlicePass123",
-            "new_password": "NewAlicePass123"
+            "old_password": "SecurePass456",
+            "new_password": "NewSecurePass789"
         }))
         .send()
         .await?;
@@ -185,7 +185,7 @@ async fn main() -> Result<()> {
     let resp = client.post(format!("{}/auth/login", BASE_URL))
         .json(&json!({
             "username": "alice",
-            "password": "NewAlicePass123"
+            "password": "NewSecurePass789"
         }))
         .send()
         .await?;

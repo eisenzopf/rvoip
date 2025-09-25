@@ -2,7 +2,7 @@
 //! This demonstrates the complete flow from user authentication to SIP registration
 
 use users_core::{init, UsersConfig, CreateUserRequest};
-use users_core::config::PasswordConfig;
+use users_core::config::{PasswordConfig, TlsSettings};
 use users_core::jwt::JwtConfig;
 use tempfile::TempDir;
 
@@ -25,7 +25,7 @@ async fn example_sip_register_flow() {
             signing_key: None,
         },
         password: PasswordConfig {
-            min_length: 8,
+            min_length: 12,  // Updated to match validation.rs
             require_uppercase: true,
             require_lowercase: true,
             require_numbers: true,
@@ -35,24 +35,25 @@ async fn example_sip_register_flow() {
             argon2_parallelism: 4,
         },
         api_bind_address: "127.0.0.1:8081".to_string(),
+        tls: TlsSettings::default(),
     };
     
     let auth_service = init(config).await.unwrap();
     
     // Create a SIP user
     let user = auth_service.create_user(CreateUserRequest {
-        username: "alice@example.com".to_string(),
-        password: "AliceSecure123".to_string(),
+        username: "alice".to_string(),
+        password: "SecurePass2024!".to_string(),
         email: Some("alice@example.com".to_string()),
         display_name: Some("Alice Smith".to_string()),
-        roles: vec!["user".to_string(), "sip".to_string()],
+        roles: vec!["user".to_string()],
     }).await.unwrap();
     
     println!("Created SIP user: {}", user.username);
     
     // Step 1: SIP client authenticates to get JWT
     let auth_result = auth_service
-        .authenticate_password("alice@example.com", "AliceSecure123")
+        .authenticate_password("alice", "SecurePass2024!")
         .await
         .unwrap();
     
@@ -93,7 +94,7 @@ async fn example_sip_register_flow() {
     
     // Step 5: session-core-v2 creates SIP registration
     assert!(token_data.claims.scope.contains("sip.register"));
-    assert!(token_data.claims.roles.contains(&"sip".to_string()));
+    assert!(token_data.claims.roles.contains(&"user".to_string()));
     
     println!("\n✓ User authorized for SIP registration!");
 }
@@ -110,11 +111,11 @@ async fn example_api_key_for_pbx_system() {
     
     // Create a service account for PBX system
     let pbx_user = auth_service.create_user(CreateUserRequest {
-        username: "pbx-system".to_string(),
+        username: "pbxsystem".to_string(),
         password: "NotUsedForApiKey123".to_string(),
         email: Some("pbx@example.com".to_string()),
         display_name: Some("PBX System Service".to_string()),
-        roles: vec!["service".to_string(), "pbx".to_string()],
+        roles: vec!["user".to_string()],
     }).await.unwrap();
     
     // Create an API key for the PBX
@@ -123,9 +124,8 @@ async fn example_api_key_for_pbx_system() {
             user_id: pbx_user.id.clone(),
             name: "PBX Integration Key".to_string(),
             permissions: vec![
-                "sip.register".to_string(),
-                "calls.manage".to_string(),
-                "users.read".to_string(),
+                "read".to_string(),
+                "write".to_string(),
             ],
             expires_at: None,  // No expiration
         })
@@ -145,7 +145,7 @@ async fn example_api_key_for_pbx_system() {
     println!("  Access token valid for: {} seconds", auth_result.expires_in.as_secs());
     
     // The PBX can now use this token for SIP operations
-    assert!(auth_result.user.roles.contains(&"pbx".to_string()));
+    assert!(auth_result.user.roles.contains(&"user".to_string()));
 }
 
 /// Example: Multi-device user with presence
@@ -160,22 +160,22 @@ async fn example_multi_device_presence() {
     
     // Create a user who will register from multiple devices
     let user = auth_service.create_user(CreateUserRequest {
-        username: "bob@company.com".to_string(),
-        password: "BobSecure456".to_string(),
+        username: "bob".to_string(),
+        password: "SecurePass2024!".to_string(),
         email: Some("bob@company.com".to_string()),
         display_name: Some("Bob Johnson".to_string()),
-        roles: vec!["user".to_string(), "presence".to_string()],
+        roles: vec!["user".to_string()],
     }).await.unwrap();
     
     // Device 1: Desktop softphone
     let desktop_auth = auth_service
-        .authenticate_password("bob@company.com", "BobSecure456")
+        .authenticate_password("bob", "SecurePass2024!")
         .await
         .unwrap();
     
     // Device 2: Mobile app (same user, different token)
     let mobile_auth = auth_service
-        .authenticate_password("bob@company.com", "BobSecure456")
+        .authenticate_password("bob", "SecurePass2024!")
         .await
         .unwrap();
     
@@ -192,14 +192,14 @@ async fn example_multi_device_presence() {
     assert_ne!(desktop_auth.access_token, mobile_auth.access_token);
     assert_eq!(desktop_auth.user.id, mobile_auth.user.id);
     
-    // Both tokens have presence scope
-    let desktop_has_presence = desktop_auth.user.roles.contains(&"presence".to_string());
-    let mobile_has_presence = mobile_auth.user.roles.contains(&"presence".to_string());
+    // Both tokens have user role
+    let desktop_has_user_role = desktop_auth.user.roles.contains(&"user".to_string());
+    let mobile_has_user_role = mobile_auth.user.roles.contains(&"user".to_string());
     
-    assert!(desktop_has_presence);
-    assert!(mobile_has_presence);
+    assert!(desktop_has_user_role);
+    assert!(mobile_has_user_role);
     
-    println!("\n✓ Both devices authorized for presence!");
+    println!("\n✓ Both devices authenticated successfully!");
 }
 
 /// Example: Token refresh workflow
@@ -217,14 +217,14 @@ async fn example_token_refresh_workflow() {
     // Create and authenticate user
     auth_service.create_user(CreateUserRequest {
         username: "refresh_test".to_string(),
-        password: "Password123".to_string(),
+        password: "SecurePass2024".to_string(),
         email: None,
         display_name: None,
         roles: vec!["user".to_string()],
     }).await.unwrap();
     
     let initial_auth = auth_service
-        .authenticate_password("refresh_test", "Password123")
+        .authenticate_password("refresh_test", "SecurePass2024")
         .await
         .unwrap();
     
@@ -263,7 +263,7 @@ fn create_test_config(db_url: String) -> UsersConfig {
         database_url: db_url,
         jwt: JwtConfig::default(),
         password: PasswordConfig {
-            min_length: 8,
+            min_length: 12,  // Updated to match validation.rs
             require_uppercase: true,
             require_lowercase: true,
             require_numbers: true,
@@ -273,5 +273,6 @@ fn create_test_config(db_url: String) -> UsersConfig {
             argon2_parallelism: 1,
         },
         api_bind_address: "127.0.0.1:0".to_string(),
+        tls: TlsSettings::default(),
     }
 }

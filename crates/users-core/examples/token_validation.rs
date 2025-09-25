@@ -43,15 +43,15 @@ async fn main() -> Result<()> {
     println!("📝 Setting up test user...");
     
     let user = auth_service.create_user(CreateUserRequest {
-        username: "validator@example.com".to_string(),
-        password: "ValidateMe123".to_string(),
+        username: "validator".to_string(),
+        password: "SecureValidate2024!".to_string(),
         email: Some("validator@example.com".to_string()),
         display_name: Some("Token Validator".to_string()),
         roles: vec!["user".to_string(), "admin".to_string()],
     }).await?;
 
     let auth_result = auth_service
-        .authenticate_password("validator@example.com", "ValidateMe123")
+        .authenticate_password("validator", "SecureValidate2024!")
         .await?;
 
     println!("✅ User authenticated, received JWT token");
@@ -83,7 +83,11 @@ async fn main() -> Result<()> {
     println!("   Active: {}", introspection.active);
     println!("   Scope: {}", introspection.scope);
     println!("   Username: {}", introspection.username);
-    println!("   Expires in: {} seconds", introspection.exp - current_timestamp());
+    if introspection.active && introspection.exp > 0 {
+        println!("   Expires in: {} seconds", introspection.exp - current_timestamp());
+    } else {
+        println!("   Expires in: N/A (token inactive or invalid)");
+    }
 
     // Show different token sources
     println!("\n🌐 Handling different token sources...");
@@ -187,7 +191,9 @@ struct TokenIntrospection {
 
 fn introspect_token(token: &str, public_key_pem: &str) -> Result<TokenIntrospection> {
     let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes())?;
-    let validation = Validation::new(Algorithm::RS256);
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&["https://users.rvoip.local"]);
+    validation.set_audience(&["rvoip-api", "rvoip-sip"]);
     
     match decode::<UserClaims>(token, &decoding_key, &validation) {
         Ok(token_data) => {

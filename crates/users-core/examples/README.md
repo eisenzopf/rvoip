@@ -203,3 +203,32 @@ registrar.register(user_context, contact).await?;
 - Check JWT contents at jwt.io (development only!)
 - Verify public key format is PEM
 - Test with shorter token TTLs during development
+
+## Running All Examples
+
+Two scripts are provided to run all examples:
+
+### Interactive Version
+```bash
+./examples/run_all_examples.sh
+```
+
+This script:
+- Shows detailed output from each example
+- Provides colored status indicators
+- Cleans up database files between runs
+- Shows a summary of passed/failed examples
+- Useful for development and demonstration
+
+### CI/CD Version
+```bash
+./examples/run_all_examples_ci.sh
+```
+
+This minimal script:
+- Suppresses example output
+- Shows only pass/fail status
+- Returns appropriate exit codes
+- Ideal for automated testing
+
+Both scripts will build all examples before running them and clean up any database files to ensure each example starts fresh.

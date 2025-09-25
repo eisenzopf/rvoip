@@ -1,0 +1,3 @@
+cargo:rerun-if-changed=build.rs
+cargo:rustc-check-cfg=cfg(no_diagnostic_namespace)
+cargo:rustc-check-cfg=cfg(no_serde_derive)

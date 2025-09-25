@@ -47,6 +47,7 @@ async-trait = "0.1"
 
 # Web framework (for REST API)
 axum = { version = "0.7", features = ["http2", "json", "tokio", "macros"] }
+axum-server = { version = "0.6", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
@@ -63,15 +64,20 @@ base64 = "0.22"
 sha2 = "0.10"
 
 # HTTP client (for examples)
-reqwest = { version = "0.11", features = ["json"], optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
 rsa = { version = "0.9", features = ["pem"] }
 
 # Validation
 validator = { version = "0.18", features = ["derive"] }
+regex = "1.10"
+once_cell = "1.19"
 
 [dev-dependencies]
 criterion = "0.5"
 tempfile = "3.14"
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1.0"
+futures = "0.3"
 
 [[example]]
 name = "basic_usage"
@@ -98,10 +104,6 @@ name = "session_core_v2_integration"
 path = "examples/session_core_v2_integration.rs"
 
 [[example]]
-name = "rest_api_server"
-path = "examples/rest_api_server.rs"
-
-[[example]]
 name = "rest_api_demo_server"
 path = "examples/rest_api_demo/server.rs"
 
@@ -109,6 +111,22 @@ path = "examples/rest_api_demo/server.rs"
 name = "rest_api_demo_client"
 path = "examples/rest_api_demo/client.rs"
 required-features = ["client"]
+
+[[test]]
+name = "security_sql_injection_tests"
+path = "tests/security_sql_injection_tests.rs"
+
+[[test]]
+name = "security_timing_attack_tests"
+path = "tests/security_timing_attack_tests.rs"
+
+[[test]]
+name = "security_input_validation_tests"
+path = "tests/security_input_validation_tests.rs"
+
+[[test]]
+name = "security_rate_limiting_tests"
+path = "tests/security_rate_limiting_tests.rs"
 
 [lints]
 workspace = true

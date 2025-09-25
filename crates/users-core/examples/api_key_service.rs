@@ -47,28 +47,28 @@ async fn main() -> Result<()> {
     // PBX Service Account
     let pbx_account = auth_service.create_user(CreateUserRequest {
         username: "pbx-service".to_string(),
-        password: "NotUsedWithApiKeys123".to_string(), // Required but not used for API key auth
+        password: "NotUsedWithApiKeys2024!".to_string(), // Required but not used for API key auth
         email: Some("pbx@services.example.com".to_string()),
         display_name: Some("PBX Service Account".to_string()),
-        roles: vec!["service".to_string(), "pbx".to_string()],
+        roles: vec!["user".to_string()],
     }).await?;
 
     // Monitoring Service Account
     let monitor_account = auth_service.create_user(CreateUserRequest {
         username: "monitoring-service".to_string(),
-        password: "AlsoNotUsed123".to_string(),
+        password: "AlsoNotUsed2024!".to_string(),
         email: Some("monitor@services.example.com".to_string()),
         display_name: Some("Monitoring Service".to_string()),
-        roles: vec!["service".to_string(), "monitor".to_string()],
+        roles: vec!["user".to_string()],
     }).await?;
 
     // Automation Bot Account
     let bot_account = auth_service.create_user(CreateUserRequest {
         username: "automation-bot".to_string(),
-        password: "BotPassword123".to_string(),
+        password: "BotPassword2024!".to_string(),
         email: Some("bot@services.example.com".to_string()),
         display_name: Some("Automation Bot".to_string()),
-        roles: vec!["service".to_string(), "bot".to_string()],
+        roles: vec!["user".to_string()],
     }).await?;
 
     println!("✅ Created service accounts");
@@ -83,10 +83,9 @@ async fn main() -> Result<()> {
         user_id: pbx_account.id.clone(),
         name: "PBX Master Key".to_string(),
         permissions: vec![
-            "sip.register".to_string(),
-            "sip.calls.manage".to_string(),
-            "users.read".to_string(),
-            "extensions.write".to_string(),
+            "read".to_string(),
+            "write".to_string(),
+            "admin".to_string(),
         ],
         expires_at: None, // No expiration for production service
     }).await?;
@@ -101,9 +100,7 @@ async fn main() -> Result<()> {
         user_id: monitor_account.id.clone(),
         name: "Monitoring Read-Only Key".to_string(),
         permissions: vec![
-            "sip.calls.read".to_string(),
-            "metrics.read".to_string(),
-            "logs.read".to_string(),
+            "read".to_string(),
         ],
         expires_at: Some(Utc::now() + Duration::days(90)), // Expires in 90 days
     }).await?;
@@ -119,9 +116,7 @@ async fn main() -> Result<()> {
         user_id: bot_account.id.clone(),
         name: "Bot Automation Key".to_string(),
         permissions: vec![
-            "users.create".to_string(),
-            "users.update".to_string(),
-            "notifications.send".to_string(),
+            "write".to_string(),
         ],
         expires_at: Some(Utc::now() + Duration::days(30)), // Short expiration
     }).await?;

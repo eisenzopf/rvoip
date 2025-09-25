@@ -10,6 +10,8 @@ pub struct UsersConfig {
     pub jwt: JwtConfig,
     pub password: PasswordConfig,
     pub api_bind_address: String,
+    #[serde(default)]
+    pub tls: TlsSettings,
 }
 
 /// Password configuration
@@ -23,6 +25,26 @@ pub struct PasswordConfig {
     pub argon2_memory_cost: u32,
     pub argon2_time_cost: u32,
     pub argon2_parallelism: u32,
+}
+
+/// TLS/HTTPS configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct TlsSettings {
+    pub enabled: bool,
+    pub cert_path: String,
+    pub key_path: String,
+    pub require_tls: bool,  // If true, refuse to start without TLS
+}
+
+impl Default for TlsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cert_path: "certs/server.crt".to_string(),
+            key_path: "certs/server.key".to_string(),
+            require_tls: true,  // Fail safe by default
+        }
+    }
 }
 
 impl UsersConfig {
@@ -41,6 +63,7 @@ impl Default for UsersConfig {
             jwt: crate::jwt::JwtConfig::default(),
             password: PasswordConfig::default(),
             api_bind_address: "127.0.0.1:8081".to_string(),
+            tls: TlsSettings::default(),
         }
     }
 }

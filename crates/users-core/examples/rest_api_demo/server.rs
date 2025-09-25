@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
     info!("Creating initial admin user for demo...");
     match auth_service.create_user(users_core::CreateUserRequest {
         username: "admin".to_string(),
-        password: "AdminPass123".to_string(),
+        password: "SecurePass123".to_string(),
         email: Some("admin@example.com".to_string()),
         display_name: Some("Demo Admin".to_string()),
         roles: vec!["admin".to_string()],
@@ -45,9 +45,25 @@ async fn main() -> Result<()> {
     // Create router
     let app = create_router(auth_service);
 
-    // Start server
+    // Start server with TLS support
     let addr = config.api_bind_address.parse::<std::net::SocketAddr>()?;
-    info!("REST API listening on http://{}", addr);
+    
+    // For demo, try to use HTTPS if certificates exist
+    let tls_config = if std::path::Path::new("certs/server.crt").exists() 
+        && std::path::Path::new("certs/server.key").exists() {
+        info!("Found TLS certificates, starting HTTPS server");
+        Some(users_core::api::TlsConfig {
+            cert_path: "certs/server.crt".into(),
+            key_path: "certs/server.key".into(),
+            enabled: true,
+        })
+    } else {
+        info!("No TLS certificates found. Run scripts/generate_dev_certs.sh to enable HTTPS");
+        None
+    };
+    
+    let protocol = if tls_config.is_some() { "https" } else { "http" };
+    info!("REST API listening on {}://{}", protocol, addr);
     
     // Print available endpoints
     println!("\n📋 Available endpoints:");
@@ -77,10 +93,16 @@ async fn main() -> Result<()> {
     
     println!("\n🔑 Demo credentials:");
     println!("  Username: admin");
-    println!("  Password: AdminPass123");
+    println!("  Password: SecurePass123");
     
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    if tls_config.is_none() {
+        println!("\n⚠️  WARNING: Running without HTTPS!");
+        println!("To enable HTTPS for this demo:");
+        println!("  1. Run: ./scripts/generate_dev_certs.sh");
+        println!("  2. Restart this server");
+    }
+    
+    users_core::api::create_server_with_tls(app, addr, tls_config).await?;
 
     Ok(())
 }
