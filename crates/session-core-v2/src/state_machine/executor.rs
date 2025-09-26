@@ -139,7 +139,7 @@ impl StateMachine {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to get session {}: {}", session_id, e);
-                return Err(crate::errors::SessionError::SessionNotFound(format!("session-{}", session_id)).into());
+                return Err(crate::errors::SessionError::SessionNotFound(session_id.to_string()).into());
             }
         };
         let old_state = session.call_state;
