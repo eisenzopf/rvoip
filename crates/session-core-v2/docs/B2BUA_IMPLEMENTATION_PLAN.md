@@ -1553,6 +1553,12 @@ impl FailoverManager {
 
 ## Implementation Task List
 
+### Summary
+- **Completed**: Phase 1-5, 9 (Core implementation)
+- **Partially Complete**: Phase 4-5 (Stubs waiting for dependencies)
+- **Remaining**: Phase 6-8 (Extensions, Examples, Testing)
+- **Blocked**: Media bridging and recording (waiting for media-core support)
+
 ### Phase 1: Foundation Components ✅
 - [x] **1.1 SessionState Extensions**
   - [x] Add `bridged_to: Option<SessionId>` field to `SessionState`
@@ -1659,18 +1665,57 @@ impl FailoverManager {
   - [ ] Add connection pooling (optional)
   - [ ] Implement zero-copy relay (future)
 
-### Phase 9: Final Integration
-- [ ] **9.1 Module Integration**
-  - [ ] Update `/src/api/mod.rs` to export B2BUA
-  - [ ] Update `/src/adapters/mod.rs` for routing adapter
-  - [ ] Ensure all imports are correct
-  - [ ] Run full test suite
+### Phase 9: Final Integration ✅
+- [x] **9.1 Module Integration**
+  - [x] Update `/src/api/mod.rs` to export B2BUA
+  - [x] Update `/src/adapters/mod.rs` for routing adapter
+  - [x] Ensure all imports are correct
+  - [x] Code compiles successfully
 
 - [ ] **9.2 Validation**
   - [ ] Verify SimplePeer compatibility
   - [ ] Test with real SIP endpoints
   - [ ] Load test with 100+ concurrent calls
   - [ ] Verify memory usage is reasonable
+
+## Critical TODOs and Recommendations
+
+### High Priority (Blocks B2BUA functionality)
+1. **BridgeCoordinator Bridge Info Methods**
+   - Add `get_bridge_partner(session_id)` method to return the other leg
+   - Add `list_bridge_pairs()` to return Vec<(SessionId, SessionId)>
+   - Expose bridge metadata for monitoring
+
+2. **Media Bridge Implementation**
+   - Either stub out media-core calls or implement simple packet forwarding
+   - Add actual port allocation instead of hardcoded ports
+   - Implement bridge teardown logic
+
+3. **Signaling Handler Integration**
+   - Add method to UnifiedCoordinator to set custom signaling handlers
+   - Or add to DialogAdapter's pre-session interception
+
+### Medium Priority
+1. **Registration/Unregistration**
+   - Implement actual SIP REGISTER if needed
+   - Or document that B2BUA works in proxy mode only
+
+2. **Event Subscription**
+   - Wire up actual event channels in BridgeCoordinator
+   - Implement leg event forwarding
+
+3. **Backend Health Monitoring**
+   - Add `get_backend_health()` method to RoutingAdapter
+   - Expose circuit breaker state
+
+### Low Priority
+1. **Advanced Load Balancing**
+   - Implement least-connections tracking
+   - Add weighted round-robin
+
+2. **DTMF and Mute**
+   - Implement DTMF relay between legs
+   - Add mute/unmute coordination
 
 ## Completion Criteria
 
