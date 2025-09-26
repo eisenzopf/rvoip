@@ -3,8 +3,8 @@
 //! These tests demonstrate the unified coordinator API usage
 
 use rvoip_session_core_v2::api::unified::{UnifiedCoordinator, Config};
-use rvoip_session_core_v2::state_table::types::{SessionId, CallState};
-use std::sync::Arc;
+use rvoip_session_core_v2::state_table::types::SessionId;
+use rvoip_session_core_v2::types::CallState;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -17,6 +17,7 @@ fn test_config(base_port: u16) -> Config {
         local_ip: "127.0.0.1".parse().unwrap(),
         bind_addr: format!("127.0.0.1:{}", base_port).parse().unwrap(),
         state_table_path: None,
+        local_uri: format!("sip:test@127.0.0.1:{}", base_port),
     }
 }
 
@@ -210,7 +211,7 @@ async fn test_event_subscription() {
     let _ = coordinator.hangup(&session_id).await;
     
     // Should receive event (with timeout)
-    let event = timeout(Duration::from_millis(100), rx.recv()).await;
+    let _event = timeout(Duration::from_millis(100), rx.recv()).await;
     // Event system is async, may or may not receive immediately
     
     // Unsubscribe

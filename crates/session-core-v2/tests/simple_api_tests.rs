@@ -16,6 +16,7 @@ fn test_config(base_port: u16) -> Config {
         local_ip: "127.0.0.1".parse().unwrap(),
         bind_addr: format!("127.0.0.1:{}", base_port).parse().unwrap(),
         state_table_path: None,
+        local_uri: format!("sip:test@127.0.0.1:{}", base_port),
     }
 }
 
@@ -171,7 +172,7 @@ async fn test_hangup_call() {
 async fn test_peer_to_peer_call() {
     // Create two peers
     let alice = SimplePeer::with_config("alice", test_config(15119)).await.unwrap();
-    let mut bob = SimplePeer::with_config("bob", test_config(15120)).await.unwrap();
+    let _bob = SimplePeer::with_config("bob", test_config(15120)).await.unwrap();
     
     // Alice calls Bob
     let call_id = alice.call("sip:bob@localhost:15120").await.unwrap();

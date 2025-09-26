@@ -8,16 +8,10 @@
 //! NO OTHER MODULE should interact with the GlobalEventCoordinator directly.
 
 use std::sync::Arc;
-use std::str::FromStr;
 use anyhow::Result;
 use tokio::sync::mpsc;
-use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
-use rvoip_infra_common::events::cross_crate::{
-    CrossCrateEvent, RvoipCrossCrateEvent,
-    DialogToSessionEvent, MediaToSessionEvent,
-    SessionToDialogEvent, SessionToMediaEvent,
-};
+use rvoip_infra_common::events::cross_crate::CrossCrateEvent;
 use crate::state_table::types::{SessionId, EventType, Role};
 use crate::state_machine::StateMachine as StateMachineExecutor;
 use crate::errors::{SessionError, Result as SessionResult};
@@ -28,6 +22,7 @@ use tracing::{debug, info, error, warn};
 
 /// Handler for processing cross-crate events in session-core-v2
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct SessionCrossCrateEventHandler {
     /// State machine executor
     state_machine: Arc<StateMachineExecutor>,
@@ -275,8 +270,8 @@ impl SessionCrossCrateEventHandler {
         let to = self.extract_field(event_str, "to: \"").unwrap_or_else(|| "unknown".to_string());
         let sdp = self.extract_field(event_str, "sdp_offer: Some(\"")
             .map(|s| s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\\"", "\""));
-        let transaction_id = self.extract_field(event_str, "transaction_id: \"").unwrap_or_else(|| "unknown".to_string());
-        let source_addr = self.extract_field(event_str, "source_addr: \"").unwrap_or_else(|| "127.0.0.1:5060".to_string());
+        let _transaction_id = self.extract_field(event_str, "transaction_id: \"").unwrap_or_else(|| "unknown".to_string());
+        let _source_addr = self.extract_field(event_str, "source_addr: \"").unwrap_or_else(|| "127.0.0.1:5060".to_string());
         
         // Use the session ID provided by dialog-core
         let session_id = SessionId(session_id_str);
@@ -323,7 +318,7 @@ impl SessionCrossCrateEventHandler {
         ).await {
             error!("Failed to process incoming call event: {}", e);
             // Clean up on failure
-            self.state_machine.store.remove_session(&session_id).await;
+            let _ = self.state_machine.store.remove_session(&session_id).await;
             self.registry.remove_session(&session_id);
         } else {
             // Notify about incoming call after successful processing

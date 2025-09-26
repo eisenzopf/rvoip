@@ -3,8 +3,6 @@
 //! These tests demonstrate multi-party conference functionality
 
 use rvoip_session_core_v2::api::unified::{UnifiedCoordinator, Config};
-use rvoip_session_core_v2::state_table::types::CallState;
-use std::sync::Arc;
 
 /// Create a test configuration with unique ports
 fn test_config(base_port: u16) -> Config {
@@ -15,6 +13,7 @@ fn test_config(base_port: u16) -> Config {
         local_ip: "127.0.0.1".parse().unwrap(),
         bind_addr: format!("127.0.0.1:{}", base_port).parse().unwrap(),
         state_table_path: None,
+        local_uri: format!("sip:test@127.0.0.1:{}", base_port),
     }
 }
 

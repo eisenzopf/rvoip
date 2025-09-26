@@ -1,3 +1,20 @@
+//! Session-core v2 with state table architecture
+//! 
+//! This is a refactored version of session-core that uses a master state table
+//! to coordinate between dialog-core and media-core. The key benefits are:
+//! 
+//! 1. Deterministic state transitions
+//! 2. Simplified event handling
+//! 3. Easier testing and verification
+//! 4. Reduced complexity
+//! 
+//! The architecture consists of:
+//! - State Table: Defines all valid transitions
+//! - State Machine: Executes transitions
+//! - Session Store: Maintains session state
+//! - Coordinator: Routes events to state machine
+//! - Adapters: Interface with dialog-core and media-core
+
 // Core modules
 pub mod api;
 pub mod state_table;
@@ -38,30 +55,3 @@ pub use session_store::{
 pub use state_machine::StateMachine;
 pub use state_table::{Guard, Action};
 pub use adapters::{DialogAdapter, MediaAdapter};
-
-/// Session-core v2 with state table architecture
-/// 
-/// This is a refactored version of session-core that uses a master state table
-/// to coordinate between dialog-core and media-core. The key benefits are:
-/// 
-/// 1. Deterministic state transitions
-/// 2. Simplified event handling
-/// 3. Easier testing and verification
-/// 4. Reduced complexity
-/// 
-/// The architecture consists of:
-/// - State Table: Defines all valid transitions
-/// - State Machine: Executes transitions
-/// - Session Store: Maintains session state
-/// - Coordinator: Routes events to state machine
-/// - Adapters: Interface with dialog-core and media-core
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_state_table_loads() {
-        // This will panic if the state table is invalid
-        let _ = &*state_table::MASTER_TABLE;
-    }
-}

@@ -442,7 +442,7 @@ transitions:
       - type: "Send200OKToInbound"
       - type: "SendBYEToOutbound"
       - type: "StartTeardown"
-    next_state: "TearingDown"
+    next_state: "Terminating"
     publish_events:
       - type: "InboundDisconnected"
       
@@ -454,12 +454,12 @@ transitions:
       - type: "Send200OKToOutbound"
       - type: "SendBYEToInbound"
       - type: "StartTeardown"
-    next_state: "TearingDown"
+    next_state: "Terminating"
     publish_events:
       - type: "OutboundDisconnected"
       
   - role: "B2BUA"
-    state: "TearingDown"
+    state: "Terminating"
     event:
       type: "TeardownComplete"
     actions:

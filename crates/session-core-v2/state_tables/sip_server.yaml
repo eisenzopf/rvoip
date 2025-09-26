@@ -1,0 +1,300 @@
+# SIP Server State Table
+# This state table configures session-core-v2 to act as a complete SIP server
+# with registration, authentication, and call routing capabilities
+
+version: "1.0"
+
+metadata:
+  description: "Complete SIP server with registration and authentication"
+  author: "RVoIP Team"
+  date: "2025-01-16"
+
+# Server states - represents the state of each user session
+states:
+  # Initial connection state
+  - name: "Connected"
+    description: "Transport connection established, no registration"
+    
+  # Authentication states
+  - name: "Authenticating"
+    description: "Validating user credentials"
+    
+  # Registration states  
+  - name: "Registered"
+    description: "User successfully registered and authenticated"
+  - name: "Unregistering"
+    description: "Processing de-registration"
+    
+  # Call states (when registered)
+  - name: "RegisteredIdle"
+    description: "Registered and available for calls"
+  - name: "RegisteredCalling"
+    description: "Registered and initiating a call"
+  - name: "RegisteredInCall"
+    description: "Registered with active call"
+  - name: "RegisteredBusy"
+    description: "Registered but busy"
+    
+  # Error states
+  - name: "AuthFailed"
+    description: "Authentication failed"
+  - name: "Disconnected"
+    description: "Connection closed"
+
+# Conditions that can be checked
+conditions:
+  - name: "HasValidJWT"
+    description: "Request contains valid JWT token"
+    default: false
+    
+  - name: "IsRegistered"
+    description: "User is currently registered"
+    default: false
+    
+  - name: "HasActiveCall"
+    description: "User has an active call"
+    default: false
+    
+  - name: "RegistrationExpiring"
+    description: "Registration about to expire"
+    default: false
+
+# Guards that check conditions before transitions
+guards:
+  - name: "HasAuthentication"
+    description: "Check if request has auth header"
+    conditions:
+      - HasValidJWT
+      
+  - name: "NoAuthentication"
+    description: "Check if request lacks auth"
+    conditions:
+      - "!HasValidJWT"
+      
+  - name: "CanMakeCall"
+    description: "User is registered and not busy"
+    conditions:
+      - IsRegistered
+      - "!HasActiveCall"
+
+# State transitions
+transitions:
+  # ===== REGISTRATION FLOW =====
+  
+  # Incoming REGISTER with valid JWT
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "DialogREGISTER"
+    guards:
+      - type: "HasAuthentication"
+    actions:
+      - type: "ValidateJWT"
+      - type: "RegisterUser"
+      - type: "SendSIPResponse"
+        args:
+          code: 200
+          reason: "OK"
+          headers:
+            Contact: "${contact};expires=${expires}"
+    next_state: "Registered"
+    effects:
+      - type: "StartRegistrationTimer"
+      - type: "PublishUserRegistered"
+      
+  # REGISTER without authentication
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "DialogREGISTER"
+    guards:
+      - type: "NoAuthentication"
+    actions:
+      - type: "SendSIPResponse"
+        args:
+          code: 401
+          reason: "Unauthorized"
+          headers:
+            WWW-Authenticate: 'Bearer realm="example.com"'
+    next_state: "Active"
+    
+  # REGISTER with invalid JWT
+  - role: "UAS"
+    state: "Registering"
+    event:
+      type: "AuthenticationFailed"
+    actions:
+      - type: "SendSIPResponse"
+        args:
+          code: 403
+          reason: "Forbidden"
+    next_state: "Failed"
+    
+  # Registration refresh
+  - role: "UAS"
+    state: "Registered"
+    event:
+      type: "RegistrationExpiring"
+    actions:
+      - type: "RefreshRegistration"
+    next_state: "Registered"
+    effects:
+      - type: "RestartRegistrationTimer"
+      
+  # Unregister (REGISTER with Expires: 0)
+  - role: "UAS"
+    state: "Registered"
+    event:
+      type: "DialogREGISTER"
+    guards:
+      - type: "ExpiresIsZero"
+    actions:
+      - type: "UnregisterUser"
+      - type: "SendSIPResponse"
+        args:
+          code: 200
+          reason: "OK"
+    next_state: "Unregistering"
+    effects:
+      - type: "StopRegistrationTimer"
+      - type: "PublishUserUnregistered"
+      
+  # ===== INCOMING CALL HANDLING =====
+  
+  # INVITE to registered user
+  - role: "UAS"
+    state: "Registered"
+    event:
+      type: "DialogInvite"
+    guards:
+      - type: "CanReceiveCall"
+    actions:
+      - type: "LookupCalleeLocation"
+      - type: "ForwardINVITE"
+      - type: "SendSIPResponse"
+        args:
+          code: 100
+          reason: "Trying"
+    next_state: "Active"
+    
+  # INVITE to unregistered user
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "DialogInvite"
+    actions:
+      - type: "SendSIPResponse"
+        args:
+          code: 404
+          reason: "Not Found"
+    next_state: "Active"
+    
+  # ===== PRESENCE HANDLING =====
+  
+  # SUBSCRIBE for presence
+  - role: "UAS"
+    state: "Registered"
+    event:
+      type: "DialogSUBSCRIBE"
+    guards:
+      - type: "HasAuthentication"
+    actions:
+      - type: "ProcessPresenceSubscription"
+      - type: "SendSIPResponse"
+        args:
+          code: 200
+          reason: "OK"
+      - type: "SendInitialNOTIFY"
+    next_state: "Registered"
+    
+  # PUBLISH presence update
+  - role: "UAS"
+    state: "Registered"
+    event:
+      type: "DialogPUBLISH"
+    actions:
+      - type: "UpdatePresenceState"
+      - type: "SendSIPResponse"
+        args:
+          code: 200
+          reason: "OK"
+          headers:
+            SIP-ETag: "${entity_tag}"
+      - type: "NotifyPresenceWatchers"
+    next_state: "Registered"
+    
+  # ===== MESSAGE HANDLING =====
+  
+  # MESSAGE between registered users
+  - role: "UAS"
+    state: "Registered"
+    event:
+      type: "DialogMESSAGE"
+    actions:
+      - type: "LookupMessageRecipient"
+      - type: "ForwardMESSAGE"
+      - type: "SendSIPResponse"
+        args:
+          code: 200
+          reason: "OK"
+    next_state: "Registered"
+    
+  # ===== ERROR HANDLING =====
+  
+  # Connection lost
+  - role: "UAS"
+    state: "*"  # From any state
+    event:
+      type: "TransportError"
+    actions:
+      - type: "CleanupSession"
+    next_state: "Terminated"
+    effects:
+      - type: "PublishUserOffline"
+
+# Actions that can be performed
+actions:
+  # Authentication actions
+  - name: "ValidateJWT"
+    description: "Validate JWT token with users-core"
+    
+  - name: "RegisterUser"
+    description: "Register user in registrar-core"
+    
+  - name: "UnregisterUser"
+    description: "Remove user from registrar-core"
+    
+  # Call routing actions
+  - name: "LookupCalleeLocation"
+    description: "Find where to route the call"
+    
+  - name: "ForwardINVITE"
+    description: "Route INVITE to destination"
+    
+  # Presence actions
+  - name: "ProcessPresenceSubscription"
+    description: "Handle presence subscription"
+    
+  - name: "UpdatePresenceState"
+    description: "Update user's presence"
+    
+  - name: "NotifyPresenceWatchers"
+    description: "Send NOTIFY to watchers"
+    
+  # Message routing
+  - name: "LookupMessageRecipient"
+    description: "Find message destination"
+    
+  - name: "ForwardMESSAGE"
+    description: "Route MESSAGE to recipient"
+
+# Effects that run after transitions
+effects:
+  - name: "StartRegistrationTimer"
+    description: "Start timer for registration refresh"
+    
+  - name: "PublishUserRegistered"
+    description: "Publish event that user registered"
+    
+  - name: "PublishUserOffline"
+    description: "Publish event that user went offline"

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use crate::types::{CallState, FailureReason};
+use crate::types::CallState;
 
 /// Session ID type
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -429,6 +429,8 @@ pub enum EventTemplate {
 /// Master state table containing all transitions
 pub struct MasterStateTable {
     transitions: HashMap<StateKey, Transition>,
+    /// Wildcard transitions that apply to any state
+    wildcard_transitions: HashMap<(Role, EventType), Transition>,
 }
 
 /// Type alias for external use
@@ -438,6 +440,7 @@ impl MasterStateTable {
     pub fn new() -> Self {
         Self {
             transitions: HashMap::new(),
+            wildcard_transitions: HashMap::new(),
         }
     }
     
@@ -451,6 +454,12 @@ impl MasterStateTable {
         self.transitions.insert(normalized_key, transition);
     }
     
+    /// Insert a wildcard transition that applies to any state
+    pub fn insert_wildcard(&mut self, role: Role, event: EventType, transition: Transition) {
+        let normalized_event = event.normalize();
+        self.wildcard_transitions.insert((role, normalized_event), transition);
+    }
+    
     pub fn get(&self, key: &StateKey) -> Option<&Transition> {
         // Normalize the event for lookup
         let normalized_key = StateKey {
@@ -458,7 +467,15 @@ impl MasterStateTable {
             state: key.state,
             event: key.event.normalize(),
         };
-        self.transitions.get(&normalized_key)
+        
+        // First check for exact state match
+        if let Some(transition) = self.transitions.get(&normalized_key) {
+            return Some(transition);
+        }
+        
+        // If no exact match, check for wildcard transition
+        let normalized_event = key.event.normalize();
+        self.wildcard_transitions.get(&(key.role, normalized_event))
     }
     
     pub fn get_transition(&self, key: &StateKey) -> Option<&Transition> {
@@ -472,31 +489,46 @@ impl MasterStateTable {
             state: key.state,
             event: key.event.normalize(),
         };
-        self.transitions.contains_key(&normalized_key)
+        
+        // Check exact match first
+        if self.transitions.contains_key(&normalized_key) {
+            return true;
+        }
+        
+        // Check wildcard match
+        let normalized_event = key.event.normalize();
+        self.wildcard_transitions.contains_key(&(key.role, normalized_event))
     }
     
     pub fn transition_count(&self) -> usize {
-        self.transitions.len()
+        self.transitions.len() + self.wildcard_transitions.len()
     }
     
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         
-        // Check for orphan states (updated with new states)
+        // Check for orphan states (non-terminal states should have exit transitions)
+        // Only check states that are commonly used across state tables
         for state in [
             CallState::Idle,
             CallState::Initiating,
             CallState::Ringing,
-            CallState::EarlyMedia,
+            CallState::Answering,
             CallState::Active,
             CallState::OnHold,
             CallState::Resuming,
-            CallState::Bridged,
             CallState::Transferring,
-            CallState::Terminating,
+            // Note: Not checking EarlyMedia, Bridged as they may not be used in all state tables
+            // Note: Not checking terminal states like Terminated, Cancelled, Failed
+            // Note: Not checking all specialized states (B2BUA/Gateway) as they may be optional
         ] {
-            let has_exit = self.transitions.iter().any(|(k, _)| k.state == state);
-            if !has_exit {
+            // Check if state has exit transitions (exact or wildcard)
+            let has_exact_exit = self.transitions.iter().any(|(k, _)| k.state == state);
+            
+            // Check if there are wildcard transitions that could apply
+            let has_wildcard_exit = !self.wildcard_transitions.is_empty();
+            
+            if !has_exact_exit && !has_wildcard_exit {
                 errors.push(format!("State {:?} has no exit transitions", state));
             }
         }

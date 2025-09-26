@@ -44,6 +44,7 @@ pub enum CallState {
     Idle,
     Initiating,
     Ringing,
+    Answering,        // UAS accepted call, sending 200 OK, waiting for ACK
     EarlyMedia,
     Active,
     OnHold,
@@ -73,6 +74,38 @@ pub enum CallState {
     // Gateway/B2BUA states
     BridgeInitiating,
     BridgeActive,
+    
+    // Call center states
+    Queued,
+    AgentRinging,
+    WrapUp,
+    
+    // Authentication flow
+    Authenticating,     // Processing authentication challenge
+    
+    // Gateway/B2BUA routing
+    Routing,           // Determining call routing
+    
+    // Messaging
+    Messaging,         // Handling SIP MESSAGE requests
+    
+    // B2BUA-specific states
+    InboundLegActive,      // Inbound leg connected, outbound not yet
+    OutboundLegRinging,    // Outbound leg ringing
+    BothLegsActive,        // Both legs connected and bridged
+    CreatingOutboundLeg,   // Creating outbound leg for B2BUA
+    
+    // Gateway-specific states
+    SelectingBackend,      // Choosing backend server/route
+    NormalizingHeaders,    // Normalizing SIP headers
+    MediaAnchoring,        // Anchoring media through gateway
+    MediaBypass,           // Direct media between endpoints
+    TranscodingActive,     // Active media transcoding
+    ConvertingProtocol,    // Converting between protocols (SIP/H.323)
+    ProxyingRegistration,  // Proxying registration to upstream
+    CachingRegistration,   // Caching registration locally
+    ForkingCall,           // Forking call to multiple destinations
+    Failover,              // Failing over to alternate route
 }
 
 impl CallState {
@@ -112,6 +145,7 @@ impl fmt::Display for CallState {
             CallState::Idle => write!(f, "Idle"),
             CallState::Initiating => write!(f, "Initiating"),
             CallState::Ringing => write!(f, "Ringing"),
+            CallState::Answering => write!(f, "Answering"),
             CallState::EarlyMedia => write!(f, "EarlyMedia"),
             CallState::Active => write!(f, "Active"),
             CallState::OnHold => write!(f, "OnHold"),
@@ -146,6 +180,29 @@ impl fmt::Display for CallState {
             // Gateway/B2BUA states
             CallState::BridgeInitiating => write!(f, "BridgeInitiating"),
             CallState::BridgeActive => write!(f, "BridgeActive"),
+            
+            // Authentication and routing states
+            CallState::Authenticating => write!(f, "Authenticating"),
+            CallState::Routing => write!(f, "Routing"),
+            CallState::Messaging => write!(f, "Messaging"),
+            
+            // B2BUA-specific states
+            CallState::InboundLegActive => write!(f, "InboundLegActive"),
+            CallState::OutboundLegRinging => write!(f, "OutboundLegRinging"),
+            CallState::BothLegsActive => write!(f, "BothLegsActive"),
+            CallState::CreatingOutboundLeg => write!(f, "CreatingOutboundLeg"),
+            
+            // Gateway-specific states
+            CallState::SelectingBackend => write!(f, "SelectingBackend"),
+            CallState::NormalizingHeaders => write!(f, "NormalizingHeaders"),
+            CallState::MediaAnchoring => write!(f, "MediaAnchoring"),
+            CallState::MediaBypass => write!(f, "MediaBypass"),
+            CallState::TranscodingActive => write!(f, "TranscodingActive"),
+            CallState::ConvertingProtocol => write!(f, "ConvertingProtocol"),
+            CallState::ProxyingRegistration => write!(f, "ProxyingRegistration"),
+            CallState::CachingRegistration => write!(f, "CachingRegistration"),
+            CallState::ForkingCall => write!(f, "ForkingCall"),
+            CallState::Failover => write!(f, "Failover"),
         }
     }
 }

@@ -212,7 +212,7 @@ impl CallSession {
 
     /// Transfer the call to another destination
     /// Note: Use SessionManager::transfer_session() method instead
-    pub async fn transfer(&self, target: &str) -> Result<()> {
+    pub async fn transfer(&self, _target: &str) -> Result<()> {
         // This method now requires the caller to use SessionManager directly
         Err(crate::errors::SessionError::Other(
             "Use SessionManager::transfer_session() method instead".to_string()
@@ -645,8 +645,9 @@ mod tests {
     
     #[test]
     fn test_call_state_display() {
+        use crate::types::FailureReason;
         assert_eq!(CallState::Active.to_string(), "Active");
-        assert_eq!(CallState::Failed("timeout".to_string()).to_string(), "Failed: timeout");
+        assert_eq!(CallState::Failed(FailureReason::Timeout).to_string(), "Failed(Timeout)");
     }
 }
 
