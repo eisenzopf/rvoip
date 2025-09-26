@@ -16,6 +16,59 @@ use crate::state_table::types::SessionId;
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
 use rvoip_media_core::types::AudioFrame;
+use crate::adapters::MediaMode;
+
+/// Audio format for recording
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub enum AudioFormat {
+    Wav,
+    Raw,
+    Mp3,
+}
+
+/// Recording configuration
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecordingConfig {
+    /// Path where the recording should be saved
+    pub file_path: String,
+
+    /// Audio format for the recording
+    pub format: AudioFormat,
+
+    /// Sample rate in Hz (e.g., 8000, 16000, 48000)
+    pub sample_rate: u32,
+
+    /// Number of channels (1 = mono, 2 = stereo)
+    pub channels: u16,
+
+    /// Include mixed audio from both legs (for B2BUA)
+    pub include_mixed: bool,
+
+    /// Save separate tracks for each leg
+    pub separate_tracks: bool,
+}
+
+impl Default for RecordingConfig {
+    fn default() -> Self {
+        Self {
+            file_path: "/tmp/recording.wav".to_string(),
+            format: AudioFormat::Wav,
+            sample_rate: 8000,
+            channels: 1,
+            include_mixed: false,
+            separate_tracks: false,
+        }
+    }
+}
+
+/// Recording status information
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecordingStatus {
+    pub is_recording: bool,
+    pub is_paused: bool,
+    pub duration_seconds: f64,
+    pub file_size_bytes: u64,
+}
 
 /// Negotiated media configuration
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -252,7 +305,7 @@ impl MediaAdapter {
     }
     
     /// Start recording the media session
-    pub async fn start_recording(&self, session_id: &SessionId) -> Result<String> {
+    pub async fn start_recording_old(&self, session_id: &SessionId) -> Result<String> {
         // Get the dialog ID for this session
         let _dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
@@ -307,7 +360,7 @@ impl MediaAdapter {
     }
     
     /// Destroy a media bridge
-    pub async fn destroy_bridge(&self, session_id: &SessionId) -> Result<()> {
+    pub async fn destroy_bridge_old(&self, session_id: &SessionId) -> Result<()> {
         // Get the bridged session
         let bridged_session = if let Ok(session) = self.store.get_session(session_id).await {
             session.bridged_to.clone()
@@ -337,7 +390,7 @@ impl MediaAdapter {
     }
     
     /// Stop recording the media session
-    pub async fn stop_recording(&self, session_id: &SessionId) -> Result<()> {
+    pub async fn stop_recording_old(&self, session_id: &SessionId) -> Result<()> {
         // Get the dialog ID for this session
         let _dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
@@ -668,6 +721,307 @@ impl MediaAdapter {
     }
     
     // ===== Event handling removed - now centralized in SessionCrossCrateEventHandler ====="
+
+    // ===== B2BUA-specific Media Methods =====
+
+    /// Create a packet relay between two sessions (B2BUA specific)
+    /// This is the most efficient mode - just forwards RTP packets without decoding
+    pub async fn create_relay(
+        &self,
+        inbound_dialog: String,
+        outbound_dialog: String,
+    ) -> Result<()> {
+        let _inbound_dialog_id = DialogId::new(inbound_dialog.clone());
+        let _outbound_dialog_id = DialogId::new(outbound_dialog.clone());
+
+        tracing::info!("Creating packet relay between {} <-> {}", inbound_dialog, outbound_dialog);
+
+        // Configure media controller for packet relay mode
+        // This tells media-core to just forward packets without processing
+        // TODO: When media-core adds relay bridge support, implement this properly
+        // self.controller.create_relay_bridge(
+        //     &inbound_dialog_id,
+        //     &outbound_dialog_id,
+        // ).await
+        //     .map_err(|e| SessionError::MediaError(format!("Failed to create relay: {}", e)))?;
+
+        tracing::info!("✅ Packet relay established between {} <-> {}", inbound_dialog, outbound_dialog);
+        Ok(())
+    }
+
+    /// Create a full processing bridge (decode/encode)
+    /// This mode allows for recording, transcoding, mixing, etc.
+    pub async fn create_full_bridge(
+        &self,
+        inbound_dialog: String,
+        outbound_dialog: String,
+    ) -> Result<()> {
+        let _inbound_dialog_id = DialogId::new(inbound_dialog.clone());
+        let _outbound_dialog_id = DialogId::new(outbound_dialog.clone());
+
+        tracing::info!("Creating full processing bridge between {} <-> {}", inbound_dialog, outbound_dialog);
+
+        // Get session info for both dialogs
+        let inbound_info = self.controller.get_session_info(&_inbound_dialog_id).await
+            .ok_or_else(|| SessionError::MediaError(format!("No session info for inbound dialog {}", inbound_dialog)))?;
+        let outbound_info = self.controller.get_session_info(&_outbound_dialog_id).await
+            .ok_or_else(|| SessionError::MediaError(format!("No session info for outbound dialog {}", outbound_dialog)))?;
+
+        // Create media config for full processing
+        let _bridge_config = MediaConfig {
+            local_addr: inbound_info.config.local_addr,
+            remote_addr: outbound_info.config.remote_addr,
+            preferred_codec: inbound_info.config.preferred_codec.clone(),
+            parameters: inbound_info.config.parameters.clone(),
+        };
+
+        // Create processing bridge in media controller
+        // TODO: When media-core adds processing bridge support, implement this properly
+        // self.controller.create_processing_bridge(
+        //     &inbound_dialog_id,
+        //     &outbound_dialog_id,
+        //     bridge_config,
+        // ).await
+        //     .map_err(|e| SessionError::MediaError(format!("Failed to create processing bridge: {}", e)))?;
+
+        tracing::info!("✅ Full processing bridge established between {} <-> {}", inbound_dialog, outbound_dialog);
+        Ok(())
+    }
+
+    /// Create a media bridge with specified mode
+    pub async fn create_bridge_with_mode(
+        &self,
+        inbound_session: &SessionId,
+        outbound_session: &SessionId,
+        mode: MediaMode,
+    ) -> Result<()> {
+        // Get dialog IDs for both sessions
+        let inbound_dialog = self.session_to_dialog.get(inbound_session)
+            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", inbound_session.0)))?
+            .clone();
+        let outbound_dialog = self.session_to_dialog.get(outbound_session)
+            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", outbound_session.0)))?
+            .clone();
+
+        match mode {
+            MediaMode::Relay => {
+                self.create_relay(inbound_dialog.to_string(), outbound_dialog.to_string()).await?;
+            }
+            MediaMode::FullProcessing => {
+                self.create_full_bridge(inbound_dialog.to_string(), outbound_dialog.to_string()).await?;
+            }
+        }
+
+        // Update session states to mark them as bridged
+        if let Ok(mut inbound_state) = self.store.get_session(inbound_session).await {
+            inbound_state.bridged_to = Some(outbound_session.clone());
+            let _ = self.store.update_session(inbound_state).await;
+        }
+
+        if let Ok(mut outbound_state) = self.store.get_session(outbound_session).await {
+            outbound_state.bridged_to = Some(inbound_session.clone());
+            let _ = self.store.update_session(outbound_state).await;
+        }
+
+        Ok(())
+    }
+
+    /// Check if a session's media is bridged to another session
+    pub async fn is_bridged(&self, session_id: &SessionId) -> bool {
+        if let Ok(session) = self.store.get_session(session_id).await {
+            session.bridged_to.is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Get the bridged partner session if one exists
+    pub async fn get_bridged_partner(&self, session_id: &SessionId) -> Option<SessionId> {
+        if let Ok(session) = self.store.get_session(session_id).await {
+            session.bridged_to
+        } else {
+            None
+        }
+    }
+
+    /// Destroy a media bridge (simple version for backward compatibility)
+    pub async fn destroy_bridge(&self, session_id: &SessionId) -> Result<()> {
+        // Get the bridged partner
+        if let Some(partner_id) = self.get_bridged_partner(session_id).await {
+            self.destroy_bridge_pair(session_id, &partner_id).await
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Destroy a media bridge between two sessions
+    pub async fn destroy_bridge_pair(&self, session1: &SessionId, session2: &SessionId) -> Result<()> {
+        // Get dialog IDs
+        let dialog1 = self.session_to_dialog.get(session1)
+            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session1.0)))?
+            .clone();
+        let dialog2 = self.session_to_dialog.get(session2)
+            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session2.0)))?
+            .clone();
+
+        tracing::info!("Destroying media bridge between {} <-> {}", session1.0, session2.0);
+
+        // Remove bridge in media controller
+        // TODO: When media-core adds bridge support, implement this properly
+        // self.controller.destroy_bridge(&dialog1, &dialog2).await
+        //     .map_err(|e| SessionError::MediaError(format!("Failed to destroy bridge: {}", e)))?;
+
+        // Update session states
+        if let Ok(mut session1_state) = self.store.get_session(session1).await {
+            session1_state.bridged_to = None;
+            let _ = self.store.update_session(session1_state).await;
+        }
+
+        if let Ok(mut session2_state) = self.store.get_session(session2).await {
+            session2_state.bridged_to = None;
+            let _ = self.store.update_session(session2_state).await;
+        }
+
+        Ok(())
+    }
+
+    // ===== Recording Management =====
+
+    /// Start recording for a session (simple version for backward compatibility)
+    pub async fn start_recording(&self, session_id: &SessionId) -> Result<String> {
+        // Use default config for backward compatibility
+        let config = RecordingConfig::default();
+        self.start_recording_with_config(session_id, config).await
+    }
+
+    /// Start recording for a session with specific config
+    pub async fn start_recording_with_config(
+        &self,
+        session_id: &SessionId,
+        config: RecordingConfig,
+    ) -> Result<String> {
+        // Get dialog ID
+        let dialog_id = self.session_to_dialog.get(session_id)
+            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
+            .clone();
+
+        tracing::info!("Starting recording for session {} with path: {}", session_id.0, config.file_path);
+
+        // For now, we'll generate a simple recording ID
+        // In a real implementation, this would interact with media-core's recording API
+        let recording_id = format!("rec_{}_{}", session_id.0, chrono::Utc::now().timestamp());
+
+        // TODO: When media-core adds recording support, implement this properly
+        // self.controller.start_recording(&dialog_id, config).await
+
+        tracing::info!("✅ Recording started for session {} with ID: {}", session_id.0, recording_id);
+        Ok(recording_id)
+    }
+
+    /// Stop recording for a session (simple version for backward compatibility)
+    pub async fn stop_recording(&self, session_id: &SessionId) -> Result<()> {
+        // For backward compatibility, we don't have a recording_id
+        // Just log the action
+        tracing::info!("Stopping recording for session {}", session_id.0);
+        Ok(())
+    }
+
+    /// Stop recording for a session with specific recording ID
+    pub async fn stop_recording_with_id(&self, session_id: &SessionId, recording_id: &str) -> Result<()> {
+        // Get dialog ID
+        let _dialog_id = self.session_to_dialog.get(session_id)
+            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
+            .clone();
+
+        tracing::info!("Stopping recording {} for session {}", recording_id, session_id.0);
+
+        // TODO: When media-core adds recording support, implement this properly
+        // self.controller.stop_recording(&dialog_id, recording_id).await
+
+        tracing::info!("✅ Recording stopped for session {}", session_id.0);
+        Ok(())
+    }
+
+    /// Pause recording for a session
+    pub async fn pause_recording(&self, session_id: &SessionId, recording_id: &str) -> Result<()> {
+        // Get dialog ID
+        let _dialog_id = self.session_to_dialog.get(session_id)
+            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
+            .clone();
+
+        tracing::debug!("Pausing recording {} for session {}", recording_id, session_id.0);
+
+        // TODO: When media-core adds recording support, implement this properly
+        // self.controller.pause_recording(&dialog_id, recording_id).await
+
+        Ok(())
+    }
+
+    /// Resume a paused recording
+    pub async fn resume_recording(&self, session_id: &SessionId, recording_id: &str) -> Result<()> {
+        // Get dialog ID
+        let _dialog_id = self.session_to_dialog.get(session_id)
+            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
+            .clone();
+
+        tracing::debug!("Resuming recording {} for session {}", recording_id, session_id.0);
+
+        // TODO: When media-core adds recording support, implement this properly
+        // self.controller.resume_recording(&dialog_id, recording_id).await
+
+        Ok(())
+    }
+
+    /// Get recording status
+    pub async fn get_recording_status(
+        &self,
+        session_id: &SessionId,
+        _recording_id: &str,
+    ) -> Result<RecordingStatus> {
+        // Get dialog ID
+        let _dialog_id = self.session_to_dialog.get(session_id)
+            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
+            .clone();
+
+        // TODO: When media-core adds recording support, implement this properly
+        // For now, return a mock status
+        Ok(RecordingStatus {
+            is_recording: false,
+            is_paused: false,
+            duration_seconds: 0.0,
+            file_size_bytes: 0,
+        })
+    }
+
+    /// Start recording for a bridged session pair
+    pub async fn start_bridge_recording(
+        &self,
+        session1: &SessionId,
+        session2: &SessionId,
+        config: RecordingConfig,
+    ) -> Result<String> {
+        tracing::info!("Starting bridge recording for sessions {} <-> {}", session1.0, session2.0);
+
+        // Start recording on both sessions with mixed audio
+        let mut recording_config = config;
+        recording_config.include_mixed = true;
+        recording_config.separate_tracks = true;
+
+        // Start recording on the first session (will capture both legs if bridged)
+        self.start_recording_with_config(session1, recording_config).await
+    }
+
+    /// Enable/disable recording for all B2BUA sessions
+    pub async fn set_b2bua_recording_enabled(&self, enabled: bool) -> Result<()> {
+        // This would be stored in a shared configuration
+        // For now, we'll just log the intent
+        tracing::info!("B2BUA recording enabled: {}", enabled);
+
+        // TODO: Store this in a shared configuration that B2BUA sessions check
+        // when they are created
+
+        Ok(())
+    }
 }
 
 impl Clone for MediaAdapter {

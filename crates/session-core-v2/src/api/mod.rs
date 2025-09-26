@@ -467,8 +467,10 @@
 //! - [SIP_CLIENT_DESIGN.md](https://github.com/yourusername/rvoip/blob/main/crates/session-core/SIP_CLIENT_DESIGN.md) - SipClient design
 
 // Core modules only
+pub mod bridge_coordinator; // Bridge coordination for B2BUA
+pub mod b2bua;      // B2BUA API
 pub mod types;      // Core types
-pub mod unified;    // Unified API 
+pub mod unified;    // Unified API
 pub mod builder;    // Session builder
 pub mod simple;     // Simple peer API
 
@@ -484,6 +486,15 @@ pub use unified::{UnifiedCoordinator, Config};
 
 // Re-export the simple API (the one people should actually use)
 pub use simple::{SimplePeer, CallId, IncomingCall as SimpleIncomingCall};
+
+// Re-export bridge coordinator for B2BUA
+pub use bridge_coordinator::{
+    BridgeCoordinator, BridgeState, BridgeMetadata, BridgeStats,
+    BridgeEvent, LegEvent, MediaEventType,
+};
+
+// Re-export B2BUA API
+pub use b2bua::{SimpleB2bua, B2buaConfig, B2buaBuilder};
 
 // Re-export builder
 pub use builder::SessionBuilder;
