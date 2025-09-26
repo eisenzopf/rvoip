@@ -1551,6 +1551,136 @@ impl FailoverManager {
 }
 ```
 
+## Implementation Task List
+
+### Phase 1: Foundation Components ✅
+- [x] **1.1 SessionState Extensions**
+  - [x] Add `bridged_to: Option<SessionId>` field to `SessionState`
+  - [x] Add `b2bua_role: Option<B2buaRole>` enum (InboundLeg/OutboundLeg)
+  - [x] Update SessionStore methods to handle new fields
+
+- [x] **1.2 UnifiedCoordinator Extensions**
+  - [x] Add `get_incoming_call()` public method
+  - [x] Add `get_state()` method to retrieve session state
+  - [x] Add `subscribe()` method for session events
+  - [x] Test coordinator extensions
+
+### Phase 2: Routing & Interception ✅
+- [x] **2.1 Create Routing Adapter** (`/src/adapters/routing_adapter.rs`)
+  - [x] Define `RoutingDecision` enum
+  - [x] Define `RoutingRule` struct
+  - [x] Implement `RoutingAdapter` with rule management
+  - [x] Add pattern matching for SIP URIs
+  - [x] Write unit tests for routing logic
+
+- [x] **2.2 B2BUA Signaling Handler**
+  - [x] Create `B2buaSignalingHandler` implementing `SignalingHandler`
+  - [x] Integrate with `RoutingAdapter`
+  - [x] Handle `SignalingDecision::Custom` for B2BUA routes
+  - [x] Test signaling interception
+
+### Phase 3: Bridge Coordination ✅
+- [x] **3.1 Bridge Coordinator** (`/src/api/bridge_coordinator.rs`)
+  - [x] Define `LegEvent` enum for leg coordination
+  - [x] Implement `BridgeCoordinator` with session mappings
+  - [x] Create bridge registration/unregistration logic
+  - [x] Implement `coordinate_legs()` event loop
+  - [x] Add event forwarding between legs
+  - [x] Write tests for bridge lifecycle
+
+- [x] **3.2 Global Event Integration**
+  - [x] Add B2BUA event types to cross-crate events
+  - [x] Update `SessionCrossCrateEventHandler` for B2BUA events
+  - [x] Test event propagation between legs
+
+### Phase 4: Media Handling ✅
+- [x] **4.1 Media Adapter Extensions**
+  - [x] Add `create_relay()` method for packet forwarding (stub)
+  - [x] Add `create_full_bridge()` for decode/encode processing (stub)
+  - [x] Implement `MediaMode` enum (Relay/FullProcessing)
+  - [x] Add `is_bridged()` status check
+  - [ ] ⚠️ **BLOCKED**: Actual implementation waiting for media-core support
+
+- [x] **4.2 Recording Support**
+  - [x] Create `RecordingConfig` struct
+  - [x] Add recording path configuration
+  - [x] Implement per-session recording control (stub)
+  - [x] Add audio format selection
+  - [ ] ⚠️ **BLOCKED**: Actual recording waiting for media-core support
+
+### Phase 5: B2BUA API ✅
+- [x] **5.1 Core B2BUA API** (`/src/api/b2bua.rs`)
+  - [x] Create `SimpleB2bua` struct
+  - [x] Implement with coordinator wrapping
+  - [x] Add routing rule management
+  - [x] Implement bridge creation and management
+  - [ ] ⚠️ **TODO**: Add signaling handler integration to coordinator
+  - [ ] ⚠️ **TODO**: Implement actual registration/unregistration
+  - [ ] ⚠️ **TODO**: Add bridge info retrieval methods
+
+- [x] **5.2 Advanced Features**
+  - [x] Add load balancing support (in RoutingAdapter)
+  - [x] Implement failover with circuit breaker (in RoutingAdapter)
+  - [ ] ⚠️ **TODO**: Add custom header support
+  - [ ] ⚠️ **TODO**: Implement authentication hooks
+  - [ ] ⚠️ **TODO**: Add metrics collection
+
+### Phase 6: Dialog Adapter Extensions
+- [ ] **6.1 B2BUA-specific Methods**
+  - [ ] Add `send_trying()` for 100 response
+  - [ ] Add `answer_with_sdp()` for leg coordination
+  - [ ] Update dialog mappings for B2BUA
+  - [ ] Test dialog operations
+
+### Phase 7: Examples & Tests
+- [ ] **7.1 Example Applications**
+  - [ ] Create `simple_b2bua.rs` minimal example
+  - [ ] Create `load_balancer.rs` with round-robin
+  - [ ] Create `business_router.rs` with time-based routing
+  - [ ] Add recording example
+
+- [ ] **7.2 Integration Tests**
+  - [ ] Test SimplePeer → B2BUA → SimplePeer call flow
+  - [ ] Test failover scenarios
+  - [ ] Test media bridging (both modes)
+  - [ ] Test concurrent call handling
+  - [ ] Test hold/resume coordination
+  - [ ] Test call termination propagation
+
+### Phase 8: Documentation & Polish
+- [ ] **8.1 API Documentation**
+  - [ ] Document all public APIs
+  - [ ] Add usage examples in doc comments
+  - [ ] Create README for B2BUA module
+
+- [ ] **8.2 Performance & Optimization**
+  - [ ] Profile B2BUA under load
+  - [ ] Optimize hot paths
+  - [ ] Add connection pooling (optional)
+  - [ ] Implement zero-copy relay (future)
+
+### Phase 9: Final Integration
+- [ ] **9.1 Module Integration**
+  - [ ] Update `/src/api/mod.rs` to export B2BUA
+  - [ ] Update `/src/adapters/mod.rs` for routing adapter
+  - [ ] Ensure all imports are correct
+  - [ ] Run full test suite
+
+- [ ] **9.2 Validation**
+  - [ ] Verify SimplePeer compatibility
+  - [ ] Test with real SIP endpoints
+  - [ ] Load test with 100+ concurrent calls
+  - [ ] Verify memory usage is reasonable
+
+## Completion Criteria
+
+- [ ] B2BUA can be created in <10 lines of code
+- [ ] Handles 1000+ concurrent bridges
+- [ ] Automatic failover works reliably
+- [ ] Media relay has <5ms added latency
+- [ ] All tests pass
+- [ ] Documentation is complete
+
 ## Conclusion
 
 This implementation plan delivers a **dead simple** B2BUA API that matches the elegance of SimplePeer. By wrapping and extending the existing `UnifiedCoordinator`, we leverage existing infrastructure while hiding all complexity from developers. The result is a B2BUA that can be created in 3 lines of code, yet is powerful enough for production deployments handling thousands of concurrent calls.

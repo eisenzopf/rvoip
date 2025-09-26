@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 use tracing::{info, debug};
 use crate::state_table::{SessionId, DialogId, MediaSessionId, CallId};
 
-use super::state::SessionState;
+use super::state::{SessionState, B2buaRole};
 use crate::state_table::Role;
 use crate::types::CallState;
 
@@ -189,6 +189,111 @@ impl SessionStore {
     pub async fn get_all_sessions(&self) -> Vec<SessionState> {
         let sessions = self.sessions.read().await;
         sessions.values().cloned().collect()
+    }
+
+    // ===== B2BUA-specific methods =====
+
+    /// Mark two sessions as bridged in a B2BUA configuration
+    pub async fn bridge_sessions(
+        &self,
+        inbound_id: &SessionId,
+        outbound_id: &SessionId,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut sessions = self.sessions.write().await;
+
+        // Update inbound session
+        if let Some(inbound) = sessions.get_mut(inbound_id) {
+            inbound.bridged_to = Some(outbound_id.clone());
+            inbound.b2bua_role = Some(B2buaRole::InboundLeg);
+        } else {
+            return Err(format!("Inbound session {} not found", inbound_id).into());
+        }
+
+        // Update outbound session
+        if let Some(outbound) = sessions.get_mut(outbound_id) {
+            outbound.bridged_to = Some(inbound_id.clone());
+            outbound.b2bua_role = Some(B2buaRole::OutboundLeg);
+        } else {
+            // Rollback inbound changes
+            if let Some(inbound) = sessions.get_mut(inbound_id) {
+                inbound.bridged_to = None;
+                inbound.b2bua_role = None;
+            }
+            return Err(format!("Outbound session {} not found", outbound_id).into());
+        }
+
+        info!("Bridged sessions {} <-> {}", inbound_id, outbound_id);
+        Ok(())
+    }
+
+    /// Unbridge two sessions
+    pub async fn unbridge_sessions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut sessions = self.sessions.write().await;
+
+        // Get the bridged session ID
+        let bridged_id = if let Some(session) = sessions.get(session_id) {
+            session.bridged_to.clone()
+        } else {
+            return Err(format!("Session {} not found", session_id).into());
+        };
+
+        // Clear bridge info from first session
+        if let Some(session) = sessions.get_mut(session_id) {
+            session.bridged_to = None;
+            session.b2bua_role = None;
+        }
+
+        // Clear bridge info from bridged session
+        if let Some(bridged_id) = bridged_id {
+            if let Some(bridged) = sessions.get_mut(&bridged_id) {
+                bridged.bridged_to = None;
+                bridged.b2bua_role = None;
+            }
+            info!("Unbridged sessions {} <-> {}", session_id, bridged_id);
+        }
+
+        Ok(())
+    }
+
+    /// Get the bridged partner session
+    pub async fn get_bridged_partner(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<SessionState> {
+        let sessions = self.sessions.read().await;
+        if let Some(session) = sessions.get(session_id) {
+            if let Some(bridged_id) = &session.bridged_to {
+                return sessions.get(bridged_id).cloned();
+            }
+        }
+        None
+    }
+
+    /// Get all bridged session pairs
+    pub async fn get_bridged_pairs(&self) -> Vec<(SessionId, SessionId)> {
+        let sessions = self.sessions.read().await;
+        let mut pairs = Vec::new();
+        let mut processed = std::collections::HashSet::new();
+
+        for (id, session) in sessions.iter() {
+            if !processed.contains(id) {
+                if let Some(bridged_id) = &session.bridged_to {
+                    if !processed.contains(bridged_id) {
+                        // Only add if this is an inbound leg to avoid duplicates
+                        if session.b2bua_role == Some(B2buaRole::InboundLeg) {
+                            pairs.push((id.clone(), bridged_id.clone()));
+                            processed.insert(id.clone());
+                            processed.insert(bridged_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        pairs
     }
     
     /* Old cleanup - replaced by cleanup.rs
