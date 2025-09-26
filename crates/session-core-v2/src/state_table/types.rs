@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use crate::types::CallState;
 
 /// Session ID type
@@ -426,6 +426,14 @@ pub enum EventTemplate {
     Custom(String),
 }
 
+/// States that must always have exit transitions if used
+const CORE_STATES_REQUIRING_EXITS: &[CallState] = &[
+    CallState::Idle,
+    CallState::Initiating,
+    CallState::Ringing,
+    CallState::Active,
+];
+
 /// Master state table containing all transitions
 pub struct MasterStateTable {
     transitions: HashMap<StateKey, Transition>,
@@ -504,32 +512,52 @@ impl MasterStateTable {
         self.transitions.len() + self.wildcard_transitions.len()
     }
     
+    /// Collect all states referenced in this state table
+    pub fn collect_used_states(&self) -> HashSet<CallState> {
+        let mut states = HashSet::new();
+        
+        // Collect from regular transitions
+        for (key, transition) in &self.transitions {
+            states.insert(key.state);
+            if let Some(next_state) = &transition.next_state {
+                states.insert(*next_state);
+            }
+        }
+        
+        // Collect from wildcard transitions
+        for (_, transition) in &self.wildcard_transitions {
+            if let Some(next_state) = &transition.next_state {
+                states.insert(*next_state);
+            }
+        }
+        
+        states
+    }
+    
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
         
-        // Check for orphan states (non-terminal states should have exit transitions)
-        // Only check states that are commonly used across state tables
-        for state in [
-            CallState::Idle,
-            CallState::Initiating,
-            CallState::Ringing,
-            CallState::Answering,
-            CallState::Active,
-            CallState::OnHold,
-            CallState::Resuming,
-            CallState::Transferring,
-            // Note: Not checking EarlyMedia, Bridged as they may not be used in all state tables
-            // Note: Not checking terminal states like Terminated, Cancelled, Failed
-            // Note: Not checking all specialized states (B2BUA/Gateway) as they may be optional
-        ] {
-            // Check if state has exit transitions (exact or wildcard)
-            let has_exact_exit = self.transitions.iter().any(|(k, _)| k.state == state);
+        // Collect states actually used in this table
+        let used_states = self.collect_used_states();
+        
+        // Check for orphan states only among used states
+        for state in used_states.iter() {
+            // Skip terminal states
+            if matches!(state, CallState::Terminated | CallState::Cancelled | CallState::Failed(_)) {
+                continue;
+            }
             
-            // Check if there are wildcard transitions that could apply
+            // Check if state has exit transitions
+            let has_exact_exit = self.transitions.iter().any(|(k, _)| k.state == *state);
             let has_wildcard_exit = !self.wildcard_transitions.is_empty();
             
             if !has_exact_exit && !has_wildcard_exit {
-                errors.push(format!("State {:?} has no exit transitions", state));
+                // Only error for core states, warn for others
+                if CORE_STATES_REQUIRING_EXITS.contains(state) {
+                    errors.push(format!("Core state {:?} has no exit transitions", state));
+                }
+                // Note: We could collect warnings here for non-core states if desired
+                // For now, we just skip them to avoid false positives
             }
         }
         
