@@ -22,21 +22,18 @@
 //! properly creates the dialog in dialog-core and sends the INVITE.
 
 use std::sync::Arc;
-use std::net::SocketAddr;
-use tokio::sync::mpsc;
 use dashmap::DashMap;
 use rvoip_dialog_core::{
     api::unified::UnifiedDialogApi,
-    events::{SessionCoordinationEvent, DialogEvent},
     DialogId as RvoipDialogId,
     transaction::TransactionKey,
 };
-use rvoip_sip_core::{Request, Response, StatusCode};
+use rvoip_sip_core::{Response, StatusCode};
 use rvoip_infra_common::events::{
     coordinator::GlobalEventCoordinator,
     cross_crate::{RvoipCrossCrateEvent, SessionToDialogEvent},
 };
-use crate::state_table::types::{SessionId, DialogId, EventType};
+use crate::state_table::types::{SessionId, DialogId};
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
 
@@ -172,7 +169,7 @@ impl DialogAdapter {
     }
     
     /// Get remote URI for a dialog
-    pub async fn get_remote_uri(&self, dialog_id: crate::types::DialogId) -> Result<String> {
+    pub async fn get_remote_uri(&self, _dialog_id: crate::types::DialogId) -> Result<String> {
         // For now, return a placeholder
         Ok("sip:remote@example.com".to_string())
     }
@@ -242,17 +239,17 @@ impl DialogAdapter {
     }
     
     /// Send response with SDP
-    pub async fn send_response_with_sdp(&self, session_id: &SessionId, code: u16, reason: &str, sdp: &str) -> Result<()> {
+    pub async fn send_response_with_sdp(&self, session_id: &SessionId, code: u16, _reason: &str, sdp: &str) -> Result<()> {
         self.send_response(session_id, code, Some(sdp.to_string())).await
     }
     
     /// Send response without SDP
-    pub async fn send_response_session(&self, session_id: &SessionId, code: u16, reason: &str) -> Result<()> {
+    pub async fn send_response_session(&self, session_id: &SessionId, code: u16, _reason: &str) -> Result<()> {
         self.send_response(session_id, code, None).await
     }
     
     /// Send error response
-    pub async fn send_error_response(&self, session_id: &SessionId, code: StatusCode, reason: &str) -> Result<()> {
+    pub async fn send_error_response(&self, session_id: &SessionId, code: StatusCode, _reason: &str) -> Result<()> {
         self.send_response(session_id, code.as_u16(), None).await
     }
     

@@ -106,6 +106,7 @@ pub struct ResourceUsageReport {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum RemovalReason {
     Terminated,
     Failed,
@@ -261,14 +262,14 @@ impl SessionStore {
         
         return tokio::spawn(async move {
             let mut cleanup_interval = interval(config.interval);
-            let mut consecutive_failures = 0;
+            let mut _consecutive_failures = 0;
             
             loop {
                 cleanup_interval.tick().await;
                 
                 let stats = self.cleanup_sessions(config.clone()).await;
                 
-                consecutive_failures = 0;
+                _consecutive_failures = 0;
                 
                 if stats.total_removed > 0 {
                     info!(

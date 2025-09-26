@@ -216,6 +216,7 @@ impl StateMachineHelpers {
     // ========== Internal Helpers ==========
     
     /// Notify subscribers of an event
+    #[allow(dead_code)]
     pub(crate) async fn notify_subscribers(&self, session_id: &SessionId, event: SessionEvent) {
         if let Some(callbacks) = self.subscribers.read().await.get(session_id) {
             for callback in callbacks {
@@ -225,6 +226,7 @@ impl StateMachineHelpers {
     }
     
     /// Clean up terminated session
+    #[allow(dead_code)]
     pub(crate) async fn cleanup_session(&self, session_id: &SessionId) {
         self.active_sessions.write().await.remove(session_id);
         self.subscribers.write().await.remove(session_id);

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, debug, error};
+use tracing::{info, debug};
 use crate::state_table::{SessionId, DialogId, MediaSessionId, CallId};
 
 use super::state::SessionState;
@@ -245,6 +245,7 @@ impl SessionStore {
                 CallState::Idle => stats.idle += 1,
                 CallState::Initiating => stats.initiating += 1,
                 CallState::Ringing => stats.ringing += 1,
+                CallState::Answering => stats.ringing += 1,  // Still in setup phase
                 CallState::EarlyMedia => stats.active += 1,  // Count early media as active
                 CallState::Active => stats.active += 1,
                 CallState::OnHold => stats.on_hold += 1,
@@ -279,6 +280,29 @@ impl SessionStore {
                 // Gateway/B2BUA states
                 CallState::BridgeInitiating => stats.initiating += 1, // Count as initiating
                 CallState::BridgeActive => stats.active += 1, // Count as active
+                
+                // Authentication and routing states
+                CallState::Authenticating => stats.initiating += 1, // Count as initiating
+                CallState::Routing => stats.initiating += 1, // Count as initiating
+                CallState::Messaging => stats.active += 1, // Count as active
+                
+                // B2BUA-specific states
+                CallState::InboundLegActive => stats.active += 1, // Inbound active, waiting for outbound
+                CallState::OutboundLegRinging => stats.ringing += 1, // Outbound ringing
+                CallState::BothLegsActive => stats.active += 1, // Both legs active
+                CallState::CreatingOutboundLeg => stats.initiating += 1, // Creating outbound
+                
+                // Gateway-specific states
+                CallState::SelectingBackend => stats.initiating += 1, // Selecting route
+                CallState::NormalizingHeaders => stats.initiating += 1, // Preprocessing
+                CallState::MediaAnchoring => stats.active += 1, // Media flowing through
+                CallState::MediaBypass => stats.active += 1, // Media direct between endpoints
+                CallState::TranscodingActive => stats.active += 1, // Transcoding media
+                CallState::ConvertingProtocol => stats.initiating += 1, // Protocol conversion
+                CallState::ProxyingRegistration => stats.initiating += 1, // Proxying registration
+                CallState::CachingRegistration => stats.initiating += 1, // Caching registration
+                CallState::ForkingCall => stats.initiating += 1, // Forking to multiple
+                CallState::Failover => stats.initiating += 1, // Trying alternate route
             }
         }
         

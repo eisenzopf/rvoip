@@ -317,7 +317,7 @@ pub async fn execute_action(
         
         Action::DisconnectFromMixer => {
             debug!("Disconnecting session {} from mixer", session.session_id);
-            if let Some(media_id) = &session.media_session_id {
+            if let Some(_media_id) = &session.media_session_id {
                 // TODO: Implement restore_direct_media
                 warn!("restore_direct_media not implemented yet");
             }
@@ -430,7 +430,7 @@ pub async fn execute_action(
         
         Action::RestoreMediaFlow => {
             debug!("Restoring media flow after hold/resume");
-            if let Some(media_id) = &session.media_session_id {
+            if let Some(_media_id) = &session.media_session_id {
                 // TODO: Implement restore_media_flow
                 warn!("restore_media_flow not implemented yet");
             }
@@ -453,7 +453,7 @@ pub async fn execute_action(
         Action::AttemptMediaRecovery => {
             warn!("Attempting media recovery for session {}", session.session_id);
             // Try to recover from media errors
-            if let Some(media_id) = &session.media_session_id {
+            if let Some(_media_id) = &session.media_session_id {
                 // TODO: Implement attempt_recovery
                 warn!("attempt_recovery not implemented yet");
             }
@@ -495,7 +495,7 @@ pub async fn execute_action(
         
         Action::RestoreDirectMedia => {
             debug!("Restoring direct media for session {}", session.session_id);
-            if let Some(media_id) = &session.media_session_id {
+            if let Some(_media_id) = &session.media_session_id {
                 // TODO: Implement restore_direct_media in MediaAdapter
                 warn!("RestoreDirectMedia not implemented yet");
             }

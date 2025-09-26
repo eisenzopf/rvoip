@@ -8,7 +8,7 @@ use std::net::{IpAddr, SocketAddr};
 use tokio::sync::mpsc;
 use dashmap::DashMap;
 use rvoip_media_core::{
-    relay::controller::{MediaSessionController, MediaConfig, MediaSessionInfo, MediaSessionEvent},
+    relay::controller::{MediaSessionController, MediaConfig, MediaSessionInfo},
     DialogId,
     types::MediaSessionId,
 };
@@ -234,7 +234,7 @@ impl MediaAdapter {
     /// Play an audio file to the remote party
     pub async fn play_audio_file(&self, session_id: &SessionId, file_path: &str) -> Result<()> {
         // Get the dialog ID for this session
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let _dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
             .clone();
         
@@ -254,7 +254,7 @@ impl MediaAdapter {
     /// Start recording the media session
     pub async fn start_recording(&self, session_id: &SessionId) -> Result<String> {
         // Get the dialog ID for this session
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let _dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
             .clone();
         
@@ -279,10 +279,10 @@ impl MediaAdapter {
     /// Create a media bridge between two sessions
     pub async fn create_bridge(&self, session1: &SessionId, session2: &SessionId) -> Result<()> {
         // Get dialog IDs for both sessions
-        let dialog1 = self.session_to_dialog.get(session1)
+        let _dialog1 = self.session_to_dialog.get(session1)
             .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session1.0)))?
             .clone();
-        let dialog2 = self.session_to_dialog.get(session2)
+        let _dialog2 = self.session_to_dialog.get(session2)
             .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session2.0)))?
             .clone();
         
@@ -339,7 +339,7 @@ impl MediaAdapter {
     /// Stop recording the media session
     pub async fn stop_recording(&self, session_id: &SessionId) -> Result<()> {
         // Get the dialog ID for this session
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let _dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
             .clone();
         
@@ -487,6 +487,7 @@ impl MediaAdapter {
     
     /// Internal method to forward received audio frames to subscribers
     /// This should be called by the media event handler when audio frames are received
+    #[allow(dead_code)]
     pub(crate) async fn forward_audio_frame_to_subscriber(&self, session_id: &SessionId, audio_frame: rvoip_media_core::types::AudioFrame) -> Result<()> {
         if let Some(tx) = self.audio_receivers.get(session_id) {
             if let Err(_) = tx.send(audio_frame).await {
@@ -507,13 +508,13 @@ impl MediaAdapter {
     }
     
     /// Stop a media session
-    pub async fn stop_media_session(&self, media_id: crate::types::MediaSessionId) -> Result<()> {
+    pub async fn stop_media_session(&self, _media_id: crate::types::MediaSessionId) -> Result<()> {
         // For now, just return Ok
         Ok(())
     }
     
     /// Set media direction (for hold/resume)
-    pub async fn set_media_direction(&self, media_id: crate::types::MediaSessionId, direction: crate::types::MediaDirection) -> Result<()> {
+    pub async fn set_media_direction(&self, _media_id: crate::types::MediaSessionId, _direction: crate::types::MediaDirection) -> Result<()> {
         // TODO: Implement actual media direction control
         Ok(())
     }

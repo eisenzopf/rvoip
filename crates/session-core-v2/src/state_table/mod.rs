@@ -84,6 +84,7 @@ pub fn load_state_table_with_config(config_path: Option<&str>) -> MasterStateTab
     let table = YamlTableLoader::load_embedded_default()
         .expect("Embedded default state table must be valid");
     
+    // Validate the table
     if let Err(errors) = table.validate() {
         panic!("Invalid default state table: {:?}", errors);
     }

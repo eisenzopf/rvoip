@@ -47,7 +47,7 @@ transitions:
     state: "Idle"
     event:
       type: "MakeCall"
-    next_state: "Calling"
+    next_state: "Initiating"
     actions:
       - type: "CreateDialog"
       - type: "SetupLocalMedia"
@@ -55,7 +55,7 @@ transitions:
 
   # UAC: Call answered
   - role: "UAC"
-    state: "Calling"
+    state: "Initiating"
     event:
       type: "CallAnswered"
     next_state: "Active"
@@ -70,7 +70,7 @@ transitions:
 
   # UAC: Call rejected
   - role: "UAC"
-    state: "Calling"
+    state: "Initiating"
     event:
       type: "CallRejected"
     next_state: "Failed"
@@ -80,7 +80,7 @@ transitions:
 
   # UAC: Timeout
   - role: "UAC"
-    state: "Calling"
+    state: "Initiating"
     event:
       type: "Timeout"
     next_state: "Terminated"

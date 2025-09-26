@@ -54,6 +54,7 @@ impl Default for Config {
 }
 
 /// Simplified coordinator that uses state machine helpers
+#[allow(dead_code)]
 pub struct UnifiedCoordinator {
     /// State machine helpers
     helpers: Arc<StateMachineHelpers>,

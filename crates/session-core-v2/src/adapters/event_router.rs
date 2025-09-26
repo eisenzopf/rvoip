@@ -5,18 +5,11 @@
 //! No scattered event handling, no channels, just the global event bus.
 
 use std::sync::Arc;
-use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
-use rvoip_infra_common::events::cross_crate::{
-    CrossCrateEvent, RvoipCrossCrateEvent,
-    DialogToSessionEvent, MediaToSessionEvent,
-    SessionToDialogEvent, SessionToMediaEvent,
-};
 use crate::{
     state_table::types::{SessionId, EventType, Action},
     state_machine::executor::StateMachine as StateMachineExecutor,
     session_store::SessionStore,
-    session_registry::SessionRegistry,
-    errors::{Result, SessionError},
+    errors::Result,
 };
 use super::{
     dialog_adapter::DialogAdapter,
@@ -24,6 +17,7 @@ use super::{
 };
 
 /// Routes events and actions between adapters and state machine
+#[allow(dead_code)]
 pub struct EventRouter {
     /// State machine executor
     state_machine: Arc<StateMachineExecutor>,
@@ -65,6 +59,7 @@ impl EventRouter {
     }
     
     /// Route an event to the state machine
+    #[allow(dead_code)]
     async fn route_event(&self, session_id: SessionId, event: EventType) -> Result<()> {
         tracing::debug!("Routing event {:?} for session {}", event, session_id);
         
@@ -338,8 +333,6 @@ impl EventRouter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    
     #[tokio::test]
     async fn test_event_router_creation() {
         // This would need mock adapters for proper testing

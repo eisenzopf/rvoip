@@ -43,6 +43,11 @@ impl StateTableBuilder {
         self.table.insert(key, transition);
     }
     
+    /// Add a wildcard transition that applies to any state
+    pub fn add_wildcard_transition(&mut self, role: Role, event: EventType, transition: Transition) {
+        self.table.insert_wildcard(role, event, transition);
+    }
+    
     /// Add a simple state change transition
     pub fn add_state_change(
         &mut self,

@@ -244,10 +244,10 @@ impl YamlTableLoader {
                 format!("Failed to parse YAML: {}", e)
             ))?;
         
-        // Validate version
-        if !yaml_data.version.starts_with("1.") {
+        // Validate version - accept both 1.x and 2.x versions
+        if !yaml_data.version.starts_with("1.") && !yaml_data.version.starts_with("2.") {
             return Err(SessionError::InternalError(
-                format!("Unsupported state table version: {}", yaml_data.version)
+                format!("Unsupported state table version: {} (expected 1.x or 2.x)", yaml_data.version)
             ));
         }
         
@@ -312,33 +312,65 @@ impl YamlTableLoader {
         
         // Process each transition
         for yaml_transition in yaml_data.transitions {
-            let transition = self.convert_transition(yaml_transition)?;
-            self.builder.add_raw_transition(transition.0, transition.1);
+            match self.convert_transition(yaml_transition) {
+                Ok((key, transition)) => {
+                    // Normal transition
+                    self.builder.add_raw_transition(key, transition);
+                }
+                Err(SessionError::InternalError(msg)) if msg.starts_with("WILDCARD_TRANSITION:") => {
+                    // Parse wildcard transition data
+                    let parts: Vec<&str> = msg.strip_prefix("WILDCARD_TRANSITION:").unwrap().split(':').collect();
+                    if parts.len() == 3 {
+                        // Deserialize the components
+                        if let (Ok(role), Ok(event), Ok(transition)) = (
+                            serde_json::from_str::<Role>(parts[0]),
+                            serde_json::from_str::<EventType>(parts[1]),
+                            serde_json::from_str::<Transition>(parts[2])
+                        ) {
+                            // Add wildcard transition
+                            self.builder.add_wildcard_transition(role, event, transition);
+                        } else {
+                            tracing::warn!("Failed to parse wildcard transition data");
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
         }
         
         Ok(self.builder.build())
     }
     
     /// Convert a YAML transition to internal format
+    /// Returns a special error for wildcard transitions
     fn convert_transition(&self, yaml: YamlTransition) -> Result<(StateKey, Transition)> {
         // Convert role
         let role = match yaml.role.to_lowercase().as_str() {
             "uac" => Role::UAC,
             "uas" => Role::UAS,
             "both" => Role::Both,
+            "b2bua" => Role::Both,  // Accept B2BUA as alias for Both
+            "server" => Role::UAS,  // Accept Server as alias for UAS
             _ => return Err(SessionError::InternalError(
                 format!("Invalid role: {}", yaml.role)
             )),
         };
         
-        // Convert state
-        let state = self.parse_call_state(&yaml.state)?;
+        // Check if this is a wildcard state
+        let is_wildcard = yaml.state == "Any" || yaml.state == "*";
+        
+        // Convert state (use Idle as placeholder for wildcards)
+        let state = if is_wildcard {
+            CallState::Idle // Placeholder, won't be used
+        } else {
+            self.parse_call_state(&yaml.state)?
+        };
         
         // Convert event
         let event = self.parse_event(yaml.event)?;
         
         // Create state key
-        let key = StateKey { role, state, event };
+        let key = StateKey { role, state, event: event.clone() };
         
         // Convert guards
         let guards = yaml.guards.into_iter()
@@ -376,6 +408,18 @@ impl YamlTableLoader {
             publish_events,
         };
         
+        // If this is a wildcard, return a special error that includes the transition data
+        if is_wildcard {
+            // We'll use a special error to signal wildcard transitions
+            return Err(SessionError::InternalError(
+                format!("WILDCARD_TRANSITION:{}:{}:{}", 
+                    serde_json::to_string(&role).unwrap_or_default(),
+                    serde_json::to_string(&event).unwrap_or_default(),
+                    serde_json::to_string(&transition).unwrap_or_default()
+                )
+            ));
+        }
+        
         Ok((key, transition))
     }
     
@@ -385,6 +429,7 @@ impl YamlTableLoader {
             "Idle" => Ok(CallState::Idle),
             "Initiating" => Ok(CallState::Initiating),
             "Ringing" => Ok(CallState::Ringing),
+            "Answering" => Ok(CallState::Answering),
             "EarlyMedia" => Ok(CallState::EarlyMedia),
             "Active" => Ok(CallState::Active),
             "OnHold" => Ok(CallState::OnHold),
@@ -418,6 +463,29 @@ impl YamlTableLoader {
             // Gateway/B2BUA states
             "BridgeInitiating" => Ok(CallState::BridgeInitiating),
             "BridgeActive" => Ok(CallState::BridgeActive),
+            
+            // Authentication and routing states
+            "Authenticating" => Ok(CallState::Authenticating),
+            "Routing" => Ok(CallState::Routing),
+            "Messaging" => Ok(CallState::Messaging),
+            
+            // B2BUA-specific states
+            "InboundLegActive" => Ok(CallState::InboundLegActive),
+            "OutboundLegRinging" => Ok(CallState::OutboundLegRinging),
+            "BothLegsActive" => Ok(CallState::BothLegsActive),
+            "CreatingOutboundLeg" => Ok(CallState::CreatingOutboundLeg),
+            
+            // Gateway-specific states
+            "SelectingBackend" => Ok(CallState::SelectingBackend),
+            "NormalizingHeaders" => Ok(CallState::NormalizingHeaders),
+            "MediaAnchoring" => Ok(CallState::MediaAnchoring),
+            "MediaBypass" => Ok(CallState::MediaBypass),
+            "TranscodingActive" => Ok(CallState::TranscodingActive),
+            "ConvertingProtocol" => Ok(CallState::ConvertingProtocol),
+            "ProxyingRegistration" => Ok(CallState::ProxyingRegistration),
+            "CachingRegistration" => Ok(CallState::CachingRegistration),
+            "ForkingCall" => Ok(CallState::ForkingCall),
+            "Failover" => Ok(CallState::Failover),
             
             _ if state.starts_with("Failed") => {
                 // Parse Failed(reason) states
@@ -476,6 +544,9 @@ impl YamlTableLoader {
             "DialogEstablished" | "Dialog200OK" => Ok(EventType::Dialog200OK),
             "DialogFailed" => Ok(EventType::Dialog4xxFailure(400)),
             "DialogTerminated" => Ok(EventType::DialogBYE),
+            
+            // Gateway-specific BYE events
+            "InboundBYE" | "OutboundBYE" => Ok(EventType::DialogBYE),
             "IncomingCall" => Ok(EventType::IncomingCall { 
                 from: String::new(), 
                 sdp: None 
