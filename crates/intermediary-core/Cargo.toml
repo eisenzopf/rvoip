@@ -1,0 +1,53 @@
+[package]
+name = "rvoip-intermediary-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["RVoIP Contributors"]
+description = "Core library for building SIP intermediaries (proxies, B2BUAs, SBCs, gateways)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+tracing = "0.1"
+thiserror = "1.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+futures = "0.3"
+
+# RVoIP crates
+rvoip-session-core-v2 = { path = "../session-core-v2" }
+rvoip-infra-common = { path = "../infra-common" }
+rvoip-dialog-core = { path = "../dialog-core" }
+rvoip-media-core = { path = "../media-core" }
+rvoip-sip-core = { path = "../sip-core" }
+rvoip-rtp-core = { path = "../rtp-core" }
+
+# State management
+arc-swap = "1.7"
+dashmap = "5.5"
+
+# Collections
+indexmap = "2.2"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Utility
+uuid = { version = "1.4", features = ["v4", "serde"] }
+rand = "0.8"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+test-log = "0.2"
+env_logger = "0.11"
+tracing-subscriber = "0.3"
+
+[features]
+default = []
+proxy = []
+b2bua = []
+full = ["proxy", "b2bua"]
+metrics = []
