@@ -1,8 +1,9 @@
-//! Event Router - Central hub for all event handling in session-core-v2
+//! Event Router - Action executor for state machine transitions
 //!
-//! This is the ONLY place where cross-crate events are handled.
-//! All events flow through the global event bus and are processed here.
-//! No scattered event handling, no channels, just the global event bus.
+//! This module routes actions from the state machine to the appropriate adapters.
+//! It does NOT handle cross-crate events - that's done by SessionCrossCrateEventHandler.
+//! Instead, it executes actions like SendINVITE, StartMediaSession, etc. by calling
+//! the corresponding adapter methods (DialogAdapter, MediaAdapter).
 
 use std::sync::Arc;
 use crate::{
