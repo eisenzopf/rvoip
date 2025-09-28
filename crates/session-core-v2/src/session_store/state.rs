@@ -7,15 +7,6 @@ use crate::state_table::{Role, ConditionUpdates};
 use crate::types::CallState;
 use super::history::{SessionHistory, HistoryConfig, TransitionRecord};
 
-/// B2BUA leg role
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum B2buaRole {
-    /// This session is the inbound leg (from caller)
-    InboundLeg,
-    /// This session is the outbound leg (to callee)
-    OutboundLeg,
-}
-
 /// Negotiated media configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NegotiatedConfig {
@@ -62,9 +53,8 @@ pub struct SessionState {
     // Store last 200 OK response for ACK
     pub last_200_ok: Option<Vec<u8>>, // Serialized response
     
-    // Bridging information
+    // Bridging information (for peer-to-peer conferencing)
     pub bridged_to: Option<SessionId>, // Session this is bridged to
-    pub b2bua_role: Option<B2buaRole>, // Role in B2BUA bridge
 
     // Conference information
     pub conference_mixer_id: Option<MediaSessionId>, // Mixer ID if hosting conference
@@ -101,7 +91,6 @@ impl SessionState {
             remote_uri: None,
             last_200_ok: None,
             bridged_to: None,
-            b2bua_role: None,
             conference_mixer_id: None,
             transfer_target: None,
             dtmf_digits: None,

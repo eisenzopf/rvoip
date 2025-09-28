@@ -17,6 +17,9 @@ pub async fn check_guard(guard: &Guard, session: &SessionState) -> bool {
         Guard::SDPNegotiated => session.sdp_negotiated,
         Guard::IsIdle => matches!(session.call_state, CallState::Idle),
         Guard::InActiveCall => matches!(session.call_state, CallState::Active),
+        Guard::IsRegistered => matches!(session.call_state, CallState::Registered),
+        Guard::IsSubscribed => matches!(session.call_state, CallState::Subscribed),
+        Guard::HasActiveSubscription => matches!(session.call_state, CallState::Subscribed),
         Guard::Custom(name) => {
             // Custom guards can be implemented here
             tracing::warn!("Custom guard '{}' not implemented", name);

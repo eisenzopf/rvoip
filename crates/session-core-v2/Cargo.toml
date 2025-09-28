@@ -7,28 +7,12 @@ description = "State table-based session coordination layer for RVoIP"
 license = "MIT OR Apache-2.0"
 
 [[example]]
-name = "peer_to_peer"
-path = "examples/peer_to_peer.rs"
-
-[[example]]
-name = "b2bua"
-path = "examples/b2bua.rs"
-
-[[example]]
 name = "api_peer_audio_peer1"
 path = "examples/api_peer_audio/peer1.rs"
 
 [[example]]
 name = "api_peer_audio_peer2"
 path = "examples/api_peer_audio/peer2.rs"
-
-[[example]]
-name = "test_state_table_loading_simple"
-path = "examples/test_state_table_loading_simple.rs"
-
-[[example]]
-name = "debug_media_session"
-path = "examples/debug_media_session.rs"
 
 
 [dependencies]
@@ -77,6 +61,7 @@ test-log = "0.2"
 env_logger = "0.11"
 tracing-subscriber = "0.3"
 rvoip-sip-transport = { path = "../sip-transport" }
+serial_test = { workspace = true }
 
 [features]
 default = []

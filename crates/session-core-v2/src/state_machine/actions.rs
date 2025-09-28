@@ -512,6 +512,79 @@ pub async fn execute_action(
             // TODO: Implement resource cleanup
             warn!("CleanupResources not implemented yet");
         }
+
+        // Registration actions
+        Action::SendREGISTER => {
+            info!("Action::SendREGISTER for session {}", session.session_id);
+            let from_uri = session.local_uri.as_deref()
+                .ok_or_else(|| "local_uri not set for registration".to_string())?;
+            let registrar_uri = session.remote_uri.as_deref()
+                .ok_or_else(|| "registrar_uri not set for registration".to_string())?;
+            let expires = 3600; // Default 1 hour registration
+            dialog_adapter.send_register(&session.session_id, from_uri, registrar_uri, expires).await?;
+        }
+        Action::ProcessRegistrationResponse => {
+            debug!("Processing registration response for session {}", session.session_id);
+            // Response processing is handled by events from dialog adapter
+            // This action is a placeholder for any additional processing needed
+        }
+
+        // Subscription actions
+        Action::SendSUBSCRIBE => {
+            info!("Action::SendSUBSCRIBE for session {}", session.session_id);
+            let from_uri = session.local_uri.as_deref()
+                .ok_or_else(|| "local_uri not set for subscription".to_string())?;
+            let to_uri = session.remote_uri.as_deref()
+                .ok_or_else(|| "to_uri not set for subscription".to_string())?;
+            let event_package = "presence"; // Default to presence, could be stored in session
+            let expires = 3600; // Default 1 hour subscription
+            dialog_adapter.send_subscribe(&session.session_id, from_uri, to_uri, event_package, expires).await?;
+        }
+        Action::ProcessNOTIFY => {
+            debug!("Processing NOTIFY for session {}", session.session_id);
+            // NOTIFY processing is handled by events from dialog adapter
+            // This action is a placeholder for any additional processing needed
+        }
+        Action::SendNOTIFY => {
+            info!("Action::SendNOTIFY for session {}", session.session_id);
+            // Get event package from session context (default to presence)
+            let event_package = "presence";
+            let body = session.local_sdp.clone(); // Use SDP field to store notify body temporarily
+            dialog_adapter.send_notify(&session.session_id, event_package, body).await?;
+        }
+
+        // Message actions
+        Action::SendMESSAGE => {
+            info!("Action::SendMESSAGE for session {}", session.session_id);
+            let from_uri = session.local_uri.as_deref()
+                .ok_or_else(|| "local_uri not set for message".to_string())?;
+            let to_uri = session.remote_uri.as_deref()
+                .ok_or_else(|| "to_uri not set for message".to_string())?;
+            // Get message body from session (could be stored in a specific field)
+            let body = session.local_sdp.clone()
+                .unwrap_or_else(|| "Test message".to_string());
+            let in_dialog = session.dialog_id.is_some(); // Send in-dialog if we have a dialog
+            dialog_adapter.send_message(&session.session_id, from_uri, to_uri, body, in_dialog).await?;
+        }
+        Action::ProcessMESSAGE => {
+            debug!("Processing MESSAGE for session {}", session.session_id);
+            // MESSAGE processing is handled by events from dialog adapter
+            // This action is a placeholder for any additional processing needed
+        }
+
+        // Generic cleanup actions
+        Action::CleanupDialog => {
+            debug!("Cleaning up dialog for session {}", session.session_id);
+            if session.dialog_id.is_some() {
+                dialog_adapter.cleanup_session(&session.session_id).await?;
+            }
+        }
+        Action::CleanupMedia => {
+            debug!("Cleaning up media for session {}", session.session_id);
+            if session.media_session_id.is_some() {
+                media_adapter.cleanup_session(&session.session_id).await?;
+            }
+        }
     }
     
     Ok(())

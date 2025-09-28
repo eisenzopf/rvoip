@@ -38,6 +38,19 @@ pub enum FailureReason {
     Other,
 }
 
+impl fmt::Display for FailureReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FailureReason::Timeout => write!(f, "Timeout"),
+            FailureReason::Rejected => write!(f, "Rejected"),
+            FailureReason::NetworkError => write!(f, "Network error"),
+            FailureReason::MediaError => write!(f, "Media error"),
+            FailureReason::ProtocolError => write!(f, "Protocol error"),
+            FailureReason::Other => write!(f, "Other error"),
+        }
+    }
+}
+
 /// Call states
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum CallState {
@@ -50,10 +63,7 @@ pub enum CallState {
     OnHold,
     Resuming,
     Muted,
-    ConferenceHost,
-    InConference,
-    ConferenceOnHold,
-    Bridged,
+    Bridged,           // Two endpoint calls bridged together
     Transferring,
     ConsultationCall,
     Terminating,
@@ -71,41 +81,14 @@ pub enum CallState {
     Subscribed,
     Publishing,
     
-    // Gateway/B2BUA states
-    BridgeInitiating,
-    BridgeActive,
-    
-    // Call center states
-    Queued,
-    AgentRinging,
-    WrapUp,
     
     // Authentication flow
     Authenticating,     // Processing authentication challenge
     
-    // Gateway/B2BUA routing
-    Routing,           // Determining call routing
     
     // Messaging
     Messaging,         // Handling SIP MESSAGE requests
     
-    // B2BUA-specific states
-    InboundLegActive,      // Inbound leg connected, outbound not yet
-    OutboundLegRinging,    // Outbound leg ringing
-    BothLegsActive,        // Both legs connected and bridged
-    CreatingOutboundLeg,   // Creating outbound leg for B2BUA
-    
-    // Gateway-specific states
-    SelectingBackend,      // Choosing backend server/route
-    NormalizingHeaders,    // Normalizing SIP headers
-    MediaAnchoring,        // Anchoring media through gateway
-    MediaBypass,           // Direct media between endpoints
-    TranscodingActive,     // Active media transcoding
-    ConvertingProtocol,    // Converting between protocols (SIP/H.323)
-    ProxyingRegistration,  // Proxying registration to upstream
-    CachingRegistration,   // Caching registration locally
-    ForkingCall,           // Forking call to multiple destinations
-    Failover,              // Failing over to alternate route
 }
 
 impl CallState {
@@ -124,17 +107,9 @@ impl CallState {
             CallState::EarlyMedia |
             CallState::Resuming |
             CallState::Muted |
-            CallState::ConferenceHost |
-            CallState::InConference |
-            CallState::ConferenceOnHold |
             CallState::Bridged |
             CallState::Transferring |
-            CallState::ConsultationCall |
-            CallState::Queued |           // Call center: call in queue
-            CallState::AgentRinging |      // Call center: ringing at agent
-            CallState::WrapUp |           // Call center: post-call work
-            CallState::BridgeInitiating | // Gateway: setting up bridge
-            CallState::BridgeActive       // Gateway: bridge active
+            CallState::ConsultationCall
         )
     }
 }
@@ -151,16 +126,13 @@ impl fmt::Display for CallState {
             CallState::OnHold => write!(f, "OnHold"),
             CallState::Resuming => write!(f, "Resuming"),
             CallState::Muted => write!(f, "Muted"),
-            CallState::ConferenceHost => write!(f, "ConferenceHost"),
-            CallState::InConference => write!(f, "InConference"),
-            CallState::ConferenceOnHold => write!(f, "ConferenceOnHold"),
             CallState::Bridged => write!(f, "Bridged"),
             CallState::Transferring => write!(f, "Transferring"),
             CallState::ConsultationCall => write!(f, "ConsultationCall"),
             CallState::Terminating => write!(f, "Terminating"),
             CallState::Terminated => write!(f, "Terminated"),
             CallState::Cancelled => write!(f, "Cancelled"),
-            CallState::Failed(reason) => write!(f, "Failed({:?})", reason),
+            CallState::Failed(reason) => write!(f, "Failed({})", reason),
             
             // Registration states
             CallState::Registering => write!(f, "Registering"),
@@ -172,37 +144,9 @@ impl fmt::Display for CallState {
             CallState::Subscribed => write!(f, "Subscribed"),
             CallState::Publishing => write!(f, "Publishing"),
             
-            // Call center states
-            CallState::Queued => write!(f, "Queued"),
-            CallState::AgentRinging => write!(f, "AgentRinging"),
-            CallState::WrapUp => write!(f, "WrapUp"),
-            
-            // Gateway/B2BUA states
-            CallState::BridgeInitiating => write!(f, "BridgeInitiating"),
-            CallState::BridgeActive => write!(f, "BridgeActive"),
-            
             // Authentication and routing states
             CallState::Authenticating => write!(f, "Authenticating"),
-            CallState::Routing => write!(f, "Routing"),
             CallState::Messaging => write!(f, "Messaging"),
-            
-            // B2BUA-specific states
-            CallState::InboundLegActive => write!(f, "InboundLegActive"),
-            CallState::OutboundLegRinging => write!(f, "OutboundLegRinging"),
-            CallState::BothLegsActive => write!(f, "BothLegsActive"),
-            CallState::CreatingOutboundLeg => write!(f, "CreatingOutboundLeg"),
-            
-            // Gateway-specific states
-            CallState::SelectingBackend => write!(f, "SelectingBackend"),
-            CallState::NormalizingHeaders => write!(f, "NormalizingHeaders"),
-            CallState::MediaAnchoring => write!(f, "MediaAnchoring"),
-            CallState::MediaBypass => write!(f, "MediaBypass"),
-            CallState::TranscodingActive => write!(f, "TranscodingActive"),
-            CallState::ConvertingProtocol => write!(f, "ConvertingProtocol"),
-            CallState::ProxyingRegistration => write!(f, "ProxyingRegistration"),
-            CallState::CachingRegistration => write!(f, "CachingRegistration"),
-            CallState::ForkingCall => write!(f, "ForkingCall"),
-            CallState::Failover => write!(f, "Failover"),
         }
     }
 }
@@ -315,6 +259,74 @@ pub enum SessionEvent {
         dialog_id: DialogId,
         target: String,
         attended: bool,
+    },
+    /// Registration started
+    RegistrationStarted {
+        dialog_id: DialogId,
+        uri: String,
+        expires: u32,
+    },
+    /// Registration successful
+    RegistrationSuccess {
+        dialog_id: DialogId,
+        uri: String,
+        expires: u32,
+    },
+    /// Registration failed
+    RegistrationFailed {
+        dialog_id: DialogId,
+        reason: String,
+        status_code: u16,
+    },
+    /// Unregistration complete
+    UnregistrationComplete {
+        dialog_id: DialogId,
+    },
+    /// Subscription started
+    SubscriptionStarted {
+        dialog_id: DialogId,
+        uri: String,
+        event_package: String,
+        expires: u32,
+    },
+    /// Subscription accepted
+    SubscriptionAccepted {
+        dialog_id: DialogId,
+        expires: u32,
+    },
+    /// Subscription failed
+    SubscriptionFailed {
+        dialog_id: DialogId,
+        reason: String,
+        status_code: u16,
+    },
+    /// NOTIFY received
+    NotifyReceived {
+        dialog_id: DialogId,
+        event_package: String,
+        body: Option<String>,
+    },
+    /// MESSAGE sent
+    MessageSent {
+        dialog_id: DialogId,
+        to: String,
+        body: String,
+    },
+    /// MESSAGE received
+    MessageReceived {
+        dialog_id: DialogId,
+        from: String,
+        body: String,
+    },
+    /// MESSAGE delivery confirmed
+    MessageDelivered {
+        dialog_id: DialogId,
+    },
+    /// MESSAGE delivery failed
+    MessageDeliveryFailed {
+        dialog_id: DialogId,
+        reason: String,
+        status_code: u16,
     },
 }
 

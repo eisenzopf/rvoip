@@ -25,7 +25,7 @@ states:
   - name: "Resuming"
     description: "Resuming from hold"
   - name: "Bridged"
-    description: "Call bridged to another"
+    description: "Call bridged to another endpoint call"
   - name: "Transferring"
     description: "Call being transferred"
   - name: "Terminating"
@@ -405,8 +405,8 @@ transitions:
     next_state: "OnHold"
     actions: []
     description: "Resume failed"
-    
-  # Bridged transitions
+
+  # Bridged transitions (for endpoint call bridging)
   - role: "Both"
     state: "Bridged"
     event:
@@ -416,7 +416,7 @@ transitions:
       - type: "SendBYE"
       - type: "StopMediaSession"
     description: "Hangup bridged call"
-    
+
   - role: "Both"
     state: "Bridged"
     event:
@@ -424,7 +424,7 @@ transitions:
     next_state: "Active"
     actions: []
     description: "Unbridge sessions"
-    
+
   # Transferring transitions
   - role: "Both"
     state: "Transferring"

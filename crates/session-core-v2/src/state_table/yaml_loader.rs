@@ -191,7 +191,7 @@ impl YamlConditionUpdates {
 }
 
 /// Default state table embedded in the binary
-const DEFAULT_STATE_TABLE_YAML: &str = include_str!("../../state_tables/enhanced_state_table.yaml");
+const DEFAULT_STATE_TABLE_YAML: &str = include_str!("../../state_tables/default.yaml");
 
 /// YAML table loader
 pub struct YamlTableLoader {
@@ -349,7 +349,6 @@ impl YamlTableLoader {
             "uac" => Role::UAC,
             "uas" => Role::UAS,
             "both" => Role::Both,
-            "b2bua" => Role::Both,  // Accept B2BUA as alias for Both
             "server" => Role::UAS,  // Accept Server as alias for UAS
             _ => return Err(SessionError::InternalError(
                 format!("Invalid role: {}", yaml.role)
@@ -439,9 +438,6 @@ impl YamlTableLoader {
             "Terminating" => Ok(CallState::Terminating),
             "Terminated" => Ok(CallState::Terminated),
             "Muted" => Ok(CallState::Muted),
-            "ConferenceHost" => Ok(CallState::ConferenceHost),
-            "InConference" => Ok(CallState::InConference),
-            "ConferenceOnHold" => Ok(CallState::ConferenceOnHold),
             "ConsultationCall" => Ok(CallState::ConsultationCall),
             "Cancelled" => Ok(CallState::Cancelled),
             
@@ -455,37 +451,9 @@ impl YamlTableLoader {
             "Subscribed" => Ok(CallState::Subscribed),
             "Publishing" => Ok(CallState::Publishing),
             
-            // Call center states
-            "Queued" => Ok(CallState::Queued),
-            "AgentRinging" => Ok(CallState::AgentRinging),
-            "WrapUp" => Ok(CallState::WrapUp),
-            
-            // Gateway/B2BUA states
-            "BridgeInitiating" => Ok(CallState::BridgeInitiating),
-            "BridgeActive" => Ok(CallState::BridgeActive),
-            
             // Authentication and routing states
             "Authenticating" => Ok(CallState::Authenticating),
-            "Routing" => Ok(CallState::Routing),
             "Messaging" => Ok(CallState::Messaging),
-            
-            // B2BUA-specific states
-            "InboundLegActive" => Ok(CallState::InboundLegActive),
-            "OutboundLegRinging" => Ok(CallState::OutboundLegRinging),
-            "BothLegsActive" => Ok(CallState::BothLegsActive),
-            "CreatingOutboundLeg" => Ok(CallState::CreatingOutboundLeg),
-            
-            // Gateway-specific states
-            "SelectingBackend" => Ok(CallState::SelectingBackend),
-            "NormalizingHeaders" => Ok(CallState::NormalizingHeaders),
-            "MediaAnchoring" => Ok(CallState::MediaAnchoring),
-            "MediaBypass" => Ok(CallState::MediaBypass),
-            "TranscodingActive" => Ok(CallState::TranscodingActive),
-            "ConvertingProtocol" => Ok(CallState::ConvertingProtocol),
-            "ProxyingRegistration" => Ok(CallState::ProxyingRegistration),
-            "CachingRegistration" => Ok(CallState::CachingRegistration),
-            "ForkingCall" => Ok(CallState::ForkingCall),
-            "Failover" => Ok(CallState::Failover),
             
             _ if state.starts_with("Failed") => {
                 // Parse Failed(reason) states
@@ -570,7 +538,29 @@ impl YamlTableLoader {
             // Transfer events
             "InitiateTransfer" => Ok(EventType::InitiateTransfer { target: String::new() }),
             "TransferComplete" => Ok(EventType::TransferComplete),
-            
+
+            // Registration events
+            "StartRegistration" => Ok(EventType::StartRegistration),
+            "Registration200OK" => Ok(EventType::Registration200OK),
+            "RegistrationFailed" => Ok(EventType::RegistrationFailed(0)),
+            "UnregisterRequest" => Ok(EventType::UnregisterRequest),
+            "RegistrationExpired" => Ok(EventType::RegistrationExpired),
+
+            // Subscription events
+            "StartSubscription" => Ok(EventType::StartSubscription),
+            "ReceiveNOTIFY" => Ok(EventType::ReceiveNOTIFY),
+            "SendNOTIFY" => Ok(EventType::SendNOTIFY),
+            "SubscriptionAccepted" => Ok(EventType::SubscriptionAccepted),
+            "SubscriptionFailed" => Ok(EventType::SubscriptionFailed(0)),
+            "SubscriptionExpired" => Ok(EventType::SubscriptionExpired),
+            "UnsubscribeRequest" => Ok(EventType::UnsubscribeRequest),
+
+            // Message events
+            "SendMessage" => Ok(EventType::SendMessage),
+            "ReceiveMESSAGE" => Ok(EventType::ReceiveMESSAGE),
+            "MessageDelivered" => Ok(EventType::MessageDelivered),
+            "MessageFailed" => Ok(EventType::MessageFailed(0)),
+
             // Default: treat as media event
             _ => Ok(EventType::MediaEvent(name.to_string())),
         }
@@ -597,6 +587,9 @@ impl YamlTableLoader {
             "AllConditionsMet" | "all_conditions_met" => Ok(Guard::AllConditionsMet),
             "IsIdle" => Ok(Guard::IsIdle),
             "InActiveCall" => Ok(Guard::InActiveCall),
+            "IsRegistered" => Ok(Guard::IsRegistered),
+            "IsSubscribed" => Ok(Guard::IsSubscribed),
+            "HasActiveSubscription" => Ok(Guard::HasActiveSubscription),
             "OtherSessionActive" => Ok(Guard::Custom(name.to_string())),
             _ => {
                 debug!("Unknown guard '{}', treating as custom", name);
@@ -678,17 +671,32 @@ impl YamlTableLoader {
             "TriggerCallTerminated" => Ok(Action::TriggerCallTerminated),
             
             // Cleanup
-            "StartDialogCleanup" | "CleanupDialog" => Ok(Action::StartDialogCleanup),
-            "StartMediaCleanup" | "CleanupMedia" => Ok(Action::StartMediaCleanup),
-            
+            "StartDialogCleanup" => Ok(Action::StartDialogCleanup),
+            "StartMediaCleanup" => Ok(Action::StartMediaCleanup),
+            "CleanupDialog" => Ok(Action::CleanupDialog),
+            "CleanupMedia" => Ok(Action::CleanupMedia),
+
+            // Registration actions
+            "SendREGISTER" => Ok(Action::SendREGISTER),
+            "ProcessRegistrationResponse" => Ok(Action::ProcessRegistrationResponse),
+
+            // Subscription actions
+            "SendSUBSCRIBE" => Ok(Action::SendSUBSCRIBE),
+            "ProcessNOTIFY" => Ok(Action::ProcessNOTIFY),
+            "SendNOTIFY" => Ok(Action::SendNOTIFY),
+
+            // Message actions
+            "SendMESSAGE" => Ok(Action::SendMESSAGE),
+            "ProcessMESSAGE" => Ok(Action::ProcessMESSAGE),
+
             // Bridge/Transfer
             "CreateMediaBridge" => Ok(Action::Custom("CreateMediaBridge".to_string())),
             "LinkSessions" => Ok(Action::Custom("LinkSessions".to_string())),
             "SendREFER" => Ok(Action::Custom("SendREFER".to_string())),
-            
+
             // Internal
             "CheckReadiness" => Ok(Action::Custom("CheckReadiness".to_string())),
-            
+
             // Default: treat as custom
             _ => {
                 debug!("Unknown action '{}', treating as custom", name);

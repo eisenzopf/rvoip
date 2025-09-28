@@ -146,6 +146,13 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::DialogStateChanged { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::ReinviteReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::TransferRequested { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::RegistrationSuccess { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::RegistrationFailed { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::SubscriptionAccepted { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::SubscriptionFailed { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::NotifyReceived { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::MessageDelivered { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::MessageFailed { session_id, .. } => Some(session_id),
             },
             RvoipCrossCrateEvent::SessionToMedia(event) => match event {
                 SessionToMediaEvent::StartMediaStream { session_id, .. } => Some(session_id),
@@ -317,6 +324,46 @@ pub enum DialogToSessionEvent {
         session_id: String,
         refer_to: String,
         transfer_type: TransferType,
+    },
+
+    /// Registration successful
+    RegistrationSuccess {
+        session_id: String,
+    },
+
+    /// Registration failed
+    RegistrationFailed {
+        session_id: String,
+        status_code: u16,
+    },
+
+    /// Subscription accepted
+    SubscriptionAccepted {
+        session_id: String,
+    },
+
+    /// Subscription failed
+    SubscriptionFailed {
+        session_id: String,
+        status_code: u16,
+    },
+
+    /// NOTIFY received
+    NotifyReceived {
+        session_id: String,
+        event_package: String,
+        body: Option<String>,
+    },
+
+    /// MESSAGE delivered
+    MessageDelivered {
+        session_id: String,
+    },
+
+    /// MESSAGE delivery failed
+    MessageFailed {
+        session_id: String,
+        status_code: u16,
     },
 }
 

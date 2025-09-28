@@ -323,7 +323,16 @@ impl EventRouter {
             Action::ReleaseAllResources |
             Action::StartEmergencyCleanup |
             Action::AttemptMediaRecovery |
-            Action::CleanupResources => {
+            Action::CleanupResources |
+            Action::SendREGISTER |
+            Action::ProcessRegistrationResponse |
+            Action::SendSUBSCRIBE |
+            Action::ProcessNOTIFY |
+            Action::SendNOTIFY |
+            Action::SendMESSAGE |
+            Action::ProcessMESSAGE |
+            Action::CleanupDialog |
+            Action::CleanupMedia => {
                 tracing::debug!("Advanced action {:?} for session {} - handled by state machine", action, session_id);
             }
         }
