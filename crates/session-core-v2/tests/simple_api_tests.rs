@@ -1,11 +1,12 @@
 //! Tests for the simple API
-//! 
+//!
 //! These tests demonstrate the simple peer API usage
 
 use rvoip_session_core_v2::api::simple::{SimplePeer, CallId};
 use rvoip_session_core_v2::api::unified::Config;
 use std::time::Duration;
 use tokio::time::timeout;
+use serial_test::serial;
 
 /// Create a test configuration with unique ports
 fn test_config(base_port: u16) -> Config {
@@ -21,12 +22,14 @@ fn test_config(base_port: u16) -> Config {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_create_peer() {
     let peer = SimplePeer::new("alice").await;
     assert!(peer.is_ok());
 }
 
 #[tokio::test]
+#[serial]
 async fn test_make_outgoing_call() {
     let peer = SimplePeer::with_config("alice", test_config(15100)).await.unwrap();
     
@@ -39,6 +42,7 @@ async fn test_make_outgoing_call() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_hold_resume_call() {
     let peer = SimplePeer::with_config("alice", test_config(15102)).await.unwrap();
     
@@ -55,6 +59,7 @@ async fn test_hold_resume_call() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_send_dtmf() {
     let peer = SimplePeer::with_config("alice", test_config(15104)).await.unwrap();
     
@@ -69,6 +74,7 @@ async fn test_send_dtmf() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_transfer_call() {
     let peer = SimplePeer::with_config("alice", test_config(15106)).await.unwrap();
     
@@ -81,6 +87,7 @@ async fn test_transfer_call() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_recording() {
     let peer = SimplePeer::with_config("alice", test_config(15109)).await.unwrap();
     
@@ -95,6 +102,7 @@ async fn test_recording() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_conference_creation() {
     let peer = SimplePeer::with_config("alice", test_config(15111)).await.unwrap();
     
@@ -114,6 +122,7 @@ async fn test_conference_creation() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_incoming_call_non_blocking() {
     let mut peer = SimplePeer::with_config("alice", test_config(15114)).await.unwrap();
     
@@ -123,6 +132,7 @@ async fn test_incoming_call_non_blocking() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_incoming_call_blocking() {
     let mut peer = SimplePeer::with_config("alice", test_config(15115)).await.unwrap();
     
@@ -137,6 +147,7 @@ async fn test_incoming_call_blocking() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_accept_reject_incoming() {
     let peer = SimplePeer::with_config("alice", test_config(15116)).await.unwrap();
     
@@ -156,6 +167,7 @@ async fn test_accept_reject_incoming() {
 }
 
 #[tokio::test]
+#[serial]
 async fn test_hangup_call() {
     let peer = SimplePeer::with_config("alice", test_config(15117)).await.unwrap();
     
@@ -169,6 +181,7 @@ async fn test_hangup_call() {
 
 // Integration test with two peers
 #[tokio::test]
+#[serial]
 async fn test_peer_to_peer_call() {
     // Create two peers
     let alice = SimplePeer::with_config("alice", test_config(15119)).await.unwrap();

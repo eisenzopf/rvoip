@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 use tracing::{info, debug};
 use crate::state_table::{SessionId, DialogId, MediaSessionId, CallId};
 
-use super::state::{SessionState, B2buaRole};
+use super::state::SessionState;
 use crate::state_table::Role;
 use crate::types::CallState;
 
@@ -191,9 +191,9 @@ impl SessionStore {
         sessions.values().cloned().collect()
     }
 
-    // ===== B2BUA-specific methods =====
+    // ===== Bridging methods (for peer-to-peer conferencing) =====
 
-    /// Mark two sessions as bridged in a B2BUA configuration
+    /// Mark two sessions as bridged for conferencing
     pub async fn bridge_sessions(
         &self,
         inbound_id: &SessionId,
@@ -201,25 +201,22 @@ impl SessionStore {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut sessions = self.sessions.write().await;
 
-        // Update inbound session
-        if let Some(inbound) = sessions.get_mut(inbound_id) {
-            inbound.bridged_to = Some(outbound_id.clone());
-            inbound.b2bua_role = Some(B2buaRole::InboundLeg);
+        // Update first session
+        if let Some(session1) = sessions.get_mut(inbound_id) {
+            session1.bridged_to = Some(outbound_id.clone());
         } else {
-            return Err(format!("Inbound session {} not found", inbound_id).into());
+            return Err(format!("Session {} not found", inbound_id).into());
         }
 
-        // Update outbound session
-        if let Some(outbound) = sessions.get_mut(outbound_id) {
-            outbound.bridged_to = Some(inbound_id.clone());
-            outbound.b2bua_role = Some(B2buaRole::OutboundLeg);
+        // Update second session
+        if let Some(session2) = sessions.get_mut(outbound_id) {
+            session2.bridged_to = Some(inbound_id.clone());
         } else {
-            // Rollback inbound changes
-            if let Some(inbound) = sessions.get_mut(inbound_id) {
-                inbound.bridged_to = None;
-                inbound.b2bua_role = None;
+            // Rollback first session changes
+            if let Some(session1) = sessions.get_mut(inbound_id) {
+                session1.bridged_to = None;
             }
-            return Err(format!("Outbound session {} not found", outbound_id).into());
+            return Err(format!("Session {} not found", outbound_id).into());
         }
 
         info!("Bridged sessions {} <-> {}", inbound_id, outbound_id);
@@ -243,14 +240,12 @@ impl SessionStore {
         // Clear bridge info from first session
         if let Some(session) = sessions.get_mut(session_id) {
             session.bridged_to = None;
-            session.b2bua_role = None;
         }
 
         // Clear bridge info from bridged session
         if let Some(bridged_id) = bridged_id {
             if let Some(bridged) = sessions.get_mut(&bridged_id) {
                 bridged.bridged_to = None;
-                bridged.b2bua_role = None;
             }
             info!("Unbridged sessions {} <-> {}", session_id, bridged_id);
         }
@@ -282,12 +277,10 @@ impl SessionStore {
             if !processed.contains(id) {
                 if let Some(bridged_id) = &session.bridged_to {
                     if !processed.contains(bridged_id) {
-                        // Only add if this is an inbound leg to avoid duplicates
-                        if session.b2bua_role == Some(B2buaRole::InboundLeg) {
-                            pairs.push((id.clone(), bridged_id.clone()));
-                            processed.insert(id.clone());
-                            processed.insert(bridged_id.clone());
-                        }
+                        // Add the pair (only once to avoid duplicates)
+                        pairs.push((id.clone(), bridged_id.clone()));
+                        processed.insert(id.clone());
+                        processed.insert(bridged_id.clone());
                     }
                 }
             }
@@ -362,9 +355,6 @@ impl SessionStore {
                 CallState::Cancelled => stats.terminated += 1,  // Count cancelled as terminated
                 CallState::Failed(_) => stats.failed += 1,
                 CallState::Muted => stats.active += 1, // Count as active
-                CallState::ConferenceHost => stats.active += 1, // Count as active
-                CallState::InConference => stats.active += 1, // Count as active
-                CallState::ConferenceOnHold => stats.on_hold += 1, // Count as on hold
                 CallState::ConsultationCall => stats.active += 1, // Count as active
                 
                 // Registration states
@@ -377,37 +367,9 @@ impl SessionStore {
                 CallState::Subscribed => stats.idle += 1, // Count as idle (subscription active)
                 CallState::Publishing => stats.initiating += 1, // Count as initiating
                 
-                // Call center states
-                CallState::Queued => stats.on_hold += 1, // Count as on hold
-                CallState::AgentRinging => stats.ringing += 1, // Count as ringing
-                CallState::WrapUp => stats.active += 1, // Count as active (post-call work)
-                
-                // Gateway/B2BUA states
-                CallState::BridgeInitiating => stats.initiating += 1, // Count as initiating
-                CallState::BridgeActive => stats.active += 1, // Count as active
-                
                 // Authentication and routing states
                 CallState::Authenticating => stats.initiating += 1, // Count as initiating
-                CallState::Routing => stats.initiating += 1, // Count as initiating
                 CallState::Messaging => stats.active += 1, // Count as active
-                
-                // B2BUA-specific states
-                CallState::InboundLegActive => stats.active += 1, // Inbound active, waiting for outbound
-                CallState::OutboundLegRinging => stats.ringing += 1, // Outbound ringing
-                CallState::BothLegsActive => stats.active += 1, // Both legs active
-                CallState::CreatingOutboundLeg => stats.initiating += 1, // Creating outbound
-                
-                // Gateway-specific states
-                CallState::SelectingBackend => stats.initiating += 1, // Selecting route
-                CallState::NormalizingHeaders => stats.initiating += 1, // Preprocessing
-                CallState::MediaAnchoring => stats.active += 1, // Media flowing through
-                CallState::MediaBypass => stats.active += 1, // Media direct between endpoints
-                CallState::TranscodingActive => stats.active += 1, // Transcoding media
-                CallState::ConvertingProtocol => stats.initiating += 1, // Protocol conversion
-                CallState::ProxyingRegistration => stats.initiating += 1, // Proxying registration
-                CallState::CachingRegistration => stats.initiating += 1, // Caching registration
-                CallState::ForkingCall => stats.initiating += 1, // Forking to multiple
-                CallState::Failover => stats.initiating += 1, // Trying alternate route
             }
         }
         

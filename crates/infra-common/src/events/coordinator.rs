@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use tokio::sync::{mpsc, RwLock, OnceCell};
+use tokio::sync::{mpsc, broadcast, RwLock, OnceCell};
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use tracing::{debug, info, warn, error};
@@ -100,12 +100,14 @@ pub trait EventBusAdapter: Send + Sync {
     async fn shutdown(&self) -> Result<()>;
 }
 
-/// Monolithic event bus adapter using StaticFastPath
+/// Monolithic event bus adapter using broadcast channels
 pub struct MonolithicEventBus {
     event_bus: Arc<EventSystem>,
     task_manager: Arc<LayerTaskManager>,
-    /// Subscribers by event type
-    subscribers: Arc<DashMap<EventTypeId, Vec<mpsc::Sender<Arc<dyn CrossCrateEvent>>>>>,
+    /// Broadcast channels by event type - lock-free publishing!
+    broadcasters: Arc<DashMap<EventTypeId, broadcast::Sender<Arc<dyn CrossCrateEvent>>>>,
+    /// Channel capacity for broadcast channels
+    channel_capacity: usize,
 }
 
 #[async_trait]
@@ -113,45 +115,65 @@ impl EventBusAdapter for MonolithicEventBus {
     async fn publish(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
         let event_type = event.event_type();
         debug!("Publishing cross-crate event: {}", event_type);
-        
-        // Forward to all subscribers of this event type
-        if let Some(subscribers) = self.subscribers.get(event_type) {
-            let mut to_remove = Vec::new();
-            
-            for (idx, sender) in subscribers.iter().enumerate() {
-                if sender.try_send(event.clone()).is_err() {
-                    // Channel is full or disconnected
-                    to_remove.push(idx);
-                }
+
+        // Get or create broadcast channel for this event type
+        let sender = self.broadcasters
+            .entry(event_type)
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(self.channel_capacity);
+                tx
+            })
+            .clone();
+
+        // Send to all subscribers - completely lock-free!
+        // Broadcast automatically handles disconnected receivers
+        match sender.send(event) {
+            Ok(receiver_count) => {
+                debug!("Event {} sent to {} subscribers", event_type, receiver_count);
             }
-            
-            // Clean up dead subscribers
-            if !to_remove.is_empty() {
-                drop(subscribers);
-                if let Some(mut subscribers) = self.subscribers.get_mut(event_type) {
-                    for idx in to_remove.into_iter().rev() {
-                        subscribers.remove(idx);
-                    }
-                }
+            Err(_) => {
+                // No receivers currently listening, but that's ok
+                debug!("No subscribers for event type {}", event_type);
             }
         }
-        
+
         Ok(())
     }
     
     async fn subscribe(&self, event_type: EventTypeId) -> Result<mpsc::Receiver<Arc<dyn CrossCrateEvent>>> {
-        // Create channel for forwarding events
-        let (tx, rx) = mpsc::channel(1000);
-        
-        // Add to subscribers
-        self.subscribers
+        // Get or create broadcast channel for this event type
+        let sender = self.broadcasters
             .entry(event_type)
-            .or_insert_with(Vec::new)
-            .push(tx);
-        
+            .or_insert_with(|| {
+                let (tx, _) = broadcast::channel(self.channel_capacity);
+                tx
+            })
+            .clone();
+
+        // Subscribe to the broadcast channel
+        let mut broadcast_rx = sender.subscribe();
+
+        // Create mpsc channel for API compatibility
+        let (mpsc_tx, mpsc_rx) = mpsc::channel(1000);
+
+        // Spawn a task to bridge broadcast to mpsc
+        // This maintains API compatibility while using broadcast internally
+        tokio::spawn(async move {
+            debug!("Starting broadcast->mpsc bridge for event type: {}", event_type);
+            while let Ok(event) = broadcast_rx.recv().await {
+                // Forward to mpsc channel
+                if mpsc_tx.send(event).await.is_err() {
+                    // Receiver dropped, stop bridging
+                    debug!("Stopping bridge for event type {} - receiver dropped", event_type);
+                    break;
+                }
+            }
+            debug!("Bridge task ending for event type: {}", event_type);
+        });
+
         debug!("Subscribed to cross-crate event type: {}", event_type);
-        
-        Ok(rx)
+
+        Ok(mpsc_rx)
     }
     
     async fn shutdown(&self) -> Result<()> {
@@ -206,11 +228,12 @@ impl GlobalEventCoordinator {
     async fn new_monolithic(config: EventCoordinatorConfig) -> Result<Self> {
         let event_bus = Arc::new(EventSystem::new_static_fast_path(10000));
         let task_manager = Arc::new(LayerTaskManager::new("global"));
-        
+
         let monolithic_adapter = Arc::new(MonolithicEventBus {
             event_bus,
             task_manager: task_manager.clone(),
-            subscribers: Arc::new(DashMap::new()),
+            broadcasters: Arc::new(DashMap::new()),
+            channel_capacity: 10000,
         });
         
         Ok(Self {

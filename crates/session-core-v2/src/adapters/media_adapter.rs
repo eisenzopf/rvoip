@@ -16,7 +16,6 @@ use crate::state_table::types::SessionId;
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
 use rvoip_media_core::types::AudioFrame;
-use crate::adapters::MediaMode;
 
 /// Audio format for recording
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -41,7 +40,7 @@ pub struct RecordingConfig {
     /// Number of channels (1 = mono, 2 = stereo)
     pub channels: u16,
 
-    /// Include mixed audio from both legs (for B2BUA)
+    /// Include mixed audio from both legs (for conference recording)
     pub include_mixed: bool,
 
     /// Save separate tracks for each leg
@@ -329,7 +328,7 @@ impl MediaAdapter {
         Ok(recording_path)
     }
     
-    /// Create a media bridge between two sessions
+    /// Create a media bridge between two sessions (for peer-to-peer conferencing)
     pub async fn create_bridge(&self, session1: &SessionId, session2: &SessionId) -> Result<()> {
         // Get dialog IDs for both sessions
         let _dialog1 = self.session_to_dialog.get(session1)
@@ -360,7 +359,7 @@ impl MediaAdapter {
     }
     
     /// Destroy a media bridge
-    pub async fn destroy_bridge_old(&self, session_id: &SessionId) -> Result<()> {
+    pub async fn destroy_bridge(&self, session_id: &SessionId) -> Result<()> {
         // Get the bridged session
         let bridged_session = if let Ok(session) = self.store.get_session(session_id).await {
             session.bridged_to.clone()
@@ -722,169 +721,6 @@ impl MediaAdapter {
     
     // ===== Event handling removed - now centralized in SessionCrossCrateEventHandler ====="
 
-    // ===== B2BUA-specific Media Methods =====
-
-    /// Create a packet relay between two sessions (B2BUA specific)
-    /// This is the most efficient mode - just forwards RTP packets without decoding
-    pub async fn create_relay(
-        &self,
-        inbound_dialog: String,
-        outbound_dialog: String,
-    ) -> Result<()> {
-        let _inbound_dialog_id = DialogId::new(inbound_dialog.clone());
-        let _outbound_dialog_id = DialogId::new(outbound_dialog.clone());
-
-        tracing::info!("Creating packet relay between {} <-> {}", inbound_dialog, outbound_dialog);
-
-        // Configure media controller for packet relay mode
-        // This tells media-core to just forward packets without processing
-        // TODO: When media-core adds relay bridge support, implement this properly
-        // self.controller.create_relay_bridge(
-        //     &inbound_dialog_id,
-        //     &outbound_dialog_id,
-        // ).await
-        //     .map_err(|e| SessionError::MediaError(format!("Failed to create relay: {}", e)))?;
-
-        tracing::info!("✅ Packet relay established between {} <-> {}", inbound_dialog, outbound_dialog);
-        Ok(())
-    }
-
-    /// Create a full processing bridge (decode/encode)
-    /// This mode allows for recording, transcoding, mixing, etc.
-    pub async fn create_full_bridge(
-        &self,
-        inbound_dialog: String,
-        outbound_dialog: String,
-    ) -> Result<()> {
-        let _inbound_dialog_id = DialogId::new(inbound_dialog.clone());
-        let _outbound_dialog_id = DialogId::new(outbound_dialog.clone());
-
-        tracing::info!("Creating full processing bridge between {} <-> {}", inbound_dialog, outbound_dialog);
-
-        // Get session info for both dialogs
-        let inbound_info = self.controller.get_session_info(&_inbound_dialog_id).await
-            .ok_or_else(|| SessionError::MediaError(format!("No session info for inbound dialog {}", inbound_dialog)))?;
-        let outbound_info = self.controller.get_session_info(&_outbound_dialog_id).await
-            .ok_or_else(|| SessionError::MediaError(format!("No session info for outbound dialog {}", outbound_dialog)))?;
-
-        // Create media config for full processing
-        let _bridge_config = MediaConfig {
-            local_addr: inbound_info.config.local_addr,
-            remote_addr: outbound_info.config.remote_addr,
-            preferred_codec: inbound_info.config.preferred_codec.clone(),
-            parameters: inbound_info.config.parameters.clone(),
-        };
-
-        // Create processing bridge in media controller
-        // TODO: When media-core adds processing bridge support, implement this properly
-        // self.controller.create_processing_bridge(
-        //     &inbound_dialog_id,
-        //     &outbound_dialog_id,
-        //     bridge_config,
-        // ).await
-        //     .map_err(|e| SessionError::MediaError(format!("Failed to create processing bridge: {}", e)))?;
-
-        tracing::info!("✅ Full processing bridge established between {} <-> {}", inbound_dialog, outbound_dialog);
-        Ok(())
-    }
-
-    /// Create a media bridge with specified mode
-    pub async fn create_bridge_with_mode(
-        &self,
-        inbound_session: &SessionId,
-        outbound_session: &SessionId,
-        mode: MediaMode,
-    ) -> Result<()> {
-        // Get dialog IDs for both sessions
-        let inbound_dialog = self.session_to_dialog.get(inbound_session)
-            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", inbound_session.0)))?
-            .clone();
-        let outbound_dialog = self.session_to_dialog.get(outbound_session)
-            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", outbound_session.0)))?
-            .clone();
-
-        match mode {
-            MediaMode::Relay => {
-                self.create_relay(inbound_dialog.to_string(), outbound_dialog.to_string()).await?;
-            }
-            MediaMode::FullProcessing => {
-                self.create_full_bridge(inbound_dialog.to_string(), outbound_dialog.to_string()).await?;
-            }
-        }
-
-        // Update session states to mark them as bridged
-        if let Ok(mut inbound_state) = self.store.get_session(inbound_session).await {
-            inbound_state.bridged_to = Some(outbound_session.clone());
-            let _ = self.store.update_session(inbound_state).await;
-        }
-
-        if let Ok(mut outbound_state) = self.store.get_session(outbound_session).await {
-            outbound_state.bridged_to = Some(inbound_session.clone());
-            let _ = self.store.update_session(outbound_state).await;
-        }
-
-        Ok(())
-    }
-
-    /// Check if a session's media is bridged to another session
-    pub async fn is_bridged(&self, session_id: &SessionId) -> bool {
-        if let Ok(session) = self.store.get_session(session_id).await {
-            session.bridged_to.is_some()
-        } else {
-            false
-        }
-    }
-
-    /// Get the bridged partner session if one exists
-    pub async fn get_bridged_partner(&self, session_id: &SessionId) -> Option<SessionId> {
-        if let Ok(session) = self.store.get_session(session_id).await {
-            session.bridged_to
-        } else {
-            None
-        }
-    }
-
-    /// Destroy a media bridge (simple version for backward compatibility)
-    pub async fn destroy_bridge(&self, session_id: &SessionId) -> Result<()> {
-        // Get the bridged partner
-        if let Some(partner_id) = self.get_bridged_partner(session_id).await {
-            self.destroy_bridge_pair(session_id, &partner_id).await
-        } else {
-            Ok(())
-        }
-    }
-
-    /// Destroy a media bridge between two sessions
-    pub async fn destroy_bridge_pair(&self, session1: &SessionId, session2: &SessionId) -> Result<()> {
-        // Get dialog IDs
-        let dialog1 = self.session_to_dialog.get(session1)
-            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session1.0)))?
-            .clone();
-        let dialog2 = self.session_to_dialog.get(session2)
-            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session2.0)))?
-            .clone();
-
-        tracing::info!("Destroying media bridge between {} <-> {}", session1.0, session2.0);
-
-        // Remove bridge in media controller
-        // TODO: When media-core adds bridge support, implement this properly
-        // self.controller.destroy_bridge(&dialog1, &dialog2).await
-        //     .map_err(|e| SessionError::MediaError(format!("Failed to destroy bridge: {}", e)))?;
-
-        // Update session states
-        if let Ok(mut session1_state) = self.store.get_session(session1).await {
-            session1_state.bridged_to = None;
-            let _ = self.store.update_session(session1_state).await;
-        }
-
-        if let Ok(mut session2_state) = self.store.get_session(session2).await {
-            session2_state.bridged_to = None;
-            let _ = self.store.update_session(session2_state).await;
-        }
-
-        Ok(())
-    }
-
     // ===== Recording Management =====
 
     /// Start recording for a session (simple version for backward compatibility)
@@ -901,7 +737,7 @@ impl MediaAdapter {
         config: RecordingConfig,
     ) -> Result<String> {
         // Get dialog ID
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let _dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
             .clone();
 
@@ -1011,13 +847,13 @@ impl MediaAdapter {
         self.start_recording_with_config(session1, recording_config).await
     }
 
-    /// Enable/disable recording for all B2BUA sessions
-    pub async fn set_b2bua_recording_enabled(&self, enabled: bool) -> Result<()> {
+    /// Enable/disable recording for all conference sessions
+    pub async fn set_conference_recording_enabled(&self, enabled: bool) -> Result<()> {
         // This would be stored in a shared configuration
         // For now, we'll just log the intent
-        tracing::info!("B2BUA recording enabled: {}", enabled);
+        tracing::info!("Conference recording enabled: {}", enabled);
 
-        // TODO: Store this in a shared configuration that B2BUA sessions check
+        // TODO: Store this in a shared configuration that conference sessions check
         // when they are created
 
         Ok(())

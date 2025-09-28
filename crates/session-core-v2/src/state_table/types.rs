@@ -206,7 +206,29 @@ pub enum EventType {
     
     // Session modification
     ModifySession,
-    
+
+    // Registration events
+    StartRegistration,
+    Registration200OK,
+    RegistrationFailed(u16),
+    UnregisterRequest,
+    RegistrationExpired,
+
+    // Subscription/Notify events
+    StartSubscription,
+    ReceiveNOTIFY,
+    SendNOTIFY,
+    SubscriptionAccepted,
+    SubscriptionFailed(u16),
+    SubscriptionExpired,
+    UnsubscribeRequest,
+
+    // Message events
+    SendMessage,
+    ReceiveMESSAGE,
+    MessageDelivered,
+    MessageFailed(u16),
+
     // Cleanup events
     CleanupComplete,
     Reset,
@@ -237,7 +259,16 @@ impl EventType {
             EventType::BridgeSessions { .. } => EventType::BridgeSessions { other_session: SessionId::new() },
             EventType::InitiateTransfer { .. } => EventType::InitiateTransfer { target: String::new() },
             EventType::StartAttendedTransfer { .. } => EventType::StartAttendedTransfer { target: String::new() },
-            
+
+            // Registration events - normalize status codes
+            EventType::RegistrationFailed(_) => EventType::RegistrationFailed(0),
+
+            // Subscription events - normalize status codes
+            EventType::SubscriptionFailed(_) => EventType::SubscriptionFailed(0),
+
+            // Message events - normalize status codes
+            EventType::MessageFailed(_) => EventType::MessageFailed(0),
+
             // Events without fields pass through unchanged
             _ => self.clone(),
         }
@@ -275,6 +306,9 @@ pub enum Guard {
     SDPNegotiated,
     IsIdle,
     InActiveCall,
+    IsRegistered,
+    IsSubscribed,
+    HasActiveSubscription,
     Custom(String),
 }
 
@@ -363,7 +397,24 @@ pub enum Action {
     // Cleanup
     StartDialogCleanup,
     StartMediaCleanup,
-    
+
+    // Registration actions
+    SendREGISTER,
+    ProcessRegistrationResponse,
+
+    // Subscription actions
+    SendSUBSCRIBE,
+    ProcessNOTIFY,
+    SendNOTIFY,
+
+    // Message actions
+    SendMESSAGE,
+    ProcessMESSAGE,
+
+    // Generic cleanup actions
+    CleanupDialog,
+    CleanupMedia,
+
     // Custom action for extension
     Custom(String),
 }

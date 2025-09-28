@@ -14,8 +14,7 @@
 //! # Call Lifecycle Example
 //! 
 //! ```rust
-//! use rvoip_session_core_v2::api::types::{SessionId, CallDecision, CallSession};
-//! use rvoip_session_core_v2::api::CallState;
+//! use rvoip_session_core::api::types::{SessionId, CallDecision, CallSession, CallState};
 //! use std::time::Instant;
 //! 
 //! // In real usage, IncomingCall would be provided by the framework
@@ -62,7 +61,7 @@
 //! # SDP Parsing
 //! 
 //! ```rust
-//! use rvoip_session_core_v2::api::parse_sdp_connection;
+//! use rvoip_session_core::api::parse_sdp_connection;
 //! 
 //! fn parse_example() -> Result<(), Box<dyn std::error::Error>> {
 //!     let sdp = r#"v=0
@@ -446,7 +445,7 @@ pub struct SdpInfo {
 /// 
 /// # Example
 /// ```no_run
-/// use rvoip_session_core_v2::api::parse_sdp_connection;
+/// use rvoip_session_core::api::parse_sdp_connection;
 /// 
 /// let sdp = "v=0\r\nc=IN IP4 192.168.1.100\r\nm=audio 5004 RTP/AVP 0 8\r\n";
 /// if let Ok(info) = parse_sdp_connection(sdp) {
