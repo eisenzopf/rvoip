@@ -60,12 +60,12 @@ pub enum SessionState {
     Ringing,
     Connected,
     OnHold,
+    Transferring,  // KEEP - clients do transfers!
     // REMOVE THESE:
-    Bridging,
-    Bridged,
-    Transferring,
-    Queueing,
-    InConference,
+    Bridging,       // B2BUA specific
+    Bridged,        // B2BUA specific
+    Queueing,       // B2BUA specific
+    InConference,   // B2BUA specific
 }
 
 // AFTER CLEANUP (Simple)
@@ -75,6 +75,7 @@ pub enum SessionState {
     Ringing,
     Connected,
     OnHold,
+    Transferring,   // KEEP for REFER handling
     Disconnected,
 }
 ```
@@ -106,7 +107,10 @@ impl SessionCore {
     pub async fn hangup(&self) -> Result<()>;
     pub async fn hold(&self) -> Result<()>;
     pub async fn resume(&self) -> Result<()>;
-    pub async fn transfer(&self, target: &str) -> Result<()>;
+
+    // Transfer operations (standard endpoint features - KEEP!)
+    pub async fn transfer(&self, target: &str) -> Result<()>;  // Blind transfer
+    pub async fn attended_transfer(&self, other_session: &Session) -> Result<()>;  // Attended transfer
 
     // Media operations (local processing)
     pub async fn send_dtmf(&self, digits: &str) -> Result<()>;
@@ -132,8 +136,10 @@ impl SessionCore {
 3. **Standard SIP Operations**
    - Hold/Resume
    - Blind transfer (REFER)
+   - Attended transfer (REFER with Replaces)
    - Session refresh
    - Early media
+   - Call forwarding
 
 ## Migration Steps
 
@@ -300,6 +306,17 @@ session.dial("1234").await?;
 | `bridge_to()` method | Use b2bua-core | Call b2bua.bridge_to() |
 | `BridgeDriver` trait | Use b2bua-core | Implement MediaServerController |
 | `SessionState::Bridged` | Use b2bua-core states | Use B2buaState |
+| `SessionState::Queueing` | Use b2bua-core | Use B2buaState |
+| `SessionState::InConference` | Use b2bua-core | Use B2buaState |
+
+### APIs That Remain
+
+| Kept API | Purpose | Notes |
+|----------|---------|-------|
+| `transfer()` method | Blind transfer | Standard endpoint feature |
+| `attended_transfer()` method | Attended transfer | Standard endpoint feature |
+| `SessionState::Transferring` | Transfer in progress | Standard endpoint state |
+| `hold()` / `resume()` | Hold/Resume | Standard endpoint feature |
 
 ## Benefits After Cleanup
 
