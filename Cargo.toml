@@ -214,4 +214,11 @@ opt-level = 3            # Maximum speed optimization
 lto = "thin"             # Light link-time optimization
 codegen-units = 16       # Parallel compilation
 panic = "unwind"         # Standard panic behavior
-debug = false            # No debug info 
+debug = false            # No debug info
+
+[profile.flamegraph]
+# Profile for flamegraph profiling with debug symbols
+inherits = "release"
+opt-level = 3            # Keep optimization for realistic profiling
+debug = true             # Include debug symbols for flamegraph
+strip = false            # Don't strip symbols
