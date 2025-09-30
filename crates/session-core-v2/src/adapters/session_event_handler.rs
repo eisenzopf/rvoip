@@ -226,20 +226,29 @@ impl SessionCrossCrateEventHandler {
         // Extract dialog_id and call_id
         let dialog_id = self.extract_field(event_str, "dialog_id: \"").unwrap_or_else(|| "unknown".to_string());
         let call_id = self.extract_field(event_str, "call_id: \"").unwrap_or_else(|| "unknown".to_string());
-        
+
         // Check if this is our call (session-core generated Call-ID)
         if call_id.contains("@session-core") {
-            if let Some(session_id) = call_id.split('@').next() {
+            if let Some(session_id_str) = call_id.split('@').next() {
+                let session_id = SessionId(session_id_str.to_string());
+
+                // Check if session exists before processing event
+                // DialogCreated may arrive before the MakeCall transition completes
+                if self.state_machine.store.get_session(&session_id).await.is_err() {
+                    debug!("DialogCreated event arrived before session {} was fully created, will be handled by state machine later", session_id);
+                    return Ok(());
+                }
+
                 // Only trigger state transition - all logic should be in the state machine
                 if let Err(e) = self.state_machine.process_event(
-                    &SessionId(session_id.to_string()),
+                    &session_id,
                     EventType::DialogCreated { dialog_id, call_id }
                 ).await {
                     error!("Failed to process DialogCreated event: {}", e);
                 }
             }
         }
-        
+
         Ok(())
     }
     
@@ -247,7 +256,7 @@ impl SessionCrossCrateEventHandler {
         // Extract fields from the event
         // Extract session_id from the event (dialog-core provides it)
         let session_id_str = self.extract_field(event_str, "session_id: \"").unwrap_or_else(|| format!("session-{}", uuid::Uuid::new_v4()));
-        
+
         // Extract dialog_id from headers since IncomingCall doesn't have a dialog_id field directly
         let dialog_id_str = if let Some(headers_start) = event_str.find("headers: {") {
             // Look for X-Dialog-Id in headers
@@ -265,6 +274,21 @@ impl SessionCrossCrateEventHandler {
         } else {
             "unknown".to_string()
         };
+
+        // IMPORTANT: Check if this event is for OUR dialog instance
+        // Parse dialog UUID to check against our dialog adapter
+        if let Ok(dialog_uuid) = uuid::Uuid::parse_str(&dialog_id_str) {
+            let rvoip_dialog_id = rvoip_dialog_core::DialogId(dialog_uuid);
+
+            // Check if this dialog exists in our dialog adapter's session_to_dialog map
+            // If the dialog is already mapped, it means another peer is handling it
+            if self.dialog_adapter.dialog_to_session.contains_key(&rvoip_dialog_id) {
+                // This dialog is already being handled (probably by another peer in the same process)
+                debug!("Ignoring IncomingCall for dialog {} - already handled by another peer", dialog_id_str);
+                return Ok(());
+            }
+        }
+
         let call_id = self.extract_field(event_str, "call_id: \"").unwrap_or_else(|| "unknown".to_string());
         let from = self.extract_field(event_str, "from: \"").unwrap_or_else(|| "unknown".to_string());
         let to = self.extract_field(event_str, "to: \"").unwrap_or_else(|| "unknown".to_string());
@@ -275,14 +299,23 @@ impl SessionCrossCrateEventHandler {
         
         // Use the session ID provided by dialog-core
         let session_id = SessionId(session_id_str);
-        
+
         // Create session in store - this is the ONLY place we create sessions outside state machine
         self.state_machine.store.create_session(
             session_id.clone(),
             Role::UAS,
             true,
         ).await.map_err(|e| SessionError::InternalError(format!("Failed to create session: {}", e)))?;
-        
+
+        // IMPORTANT: Populate the session with URIs before processing events
+        // The state machine's CreateDialog action requires these fields
+        let mut session = self.state_machine.store.get_session(&session_id).await
+            .map_err(|e| SessionError::InternalError(format!("Failed to get newly created session: {}", e)))?;
+        session.local_uri = Some(to.clone());    // The "To" header is us (answerer)
+        session.remote_uri = Some(from.clone()); // The "From" header is the caller
+        self.state_machine.store.update_session(session).await
+            .map_err(|e| SessionError::InternalError(format!("Failed to update session URIs: {}", e)))?;
+
         // Parse dialog UUID for registry mapping
         let dialog_uuid = uuid::Uuid::parse_str(&dialog_id_str).unwrap_or_else(|_| uuid::Uuid::new_v4());
         
@@ -305,10 +338,19 @@ impl SessionCrossCrateEventHandler {
         let rvoip_dialog_id = rvoip_dialog_core::DialogId::from(our_dialog_id.clone());
         self.dialog_adapter.session_to_dialog.insert(session_id.clone(), rvoip_dialog_id.clone());
         self.dialog_adapter.dialog_to_session.insert(rvoip_dialog_id.clone(), session_id.clone());
-        
-        // No need to publish StoreDialogMapping - dialog-core already stored the mapping
-        // when it created the IncomingCall event
-        
+
+        // IMPORTANT: Publish StoreDialogMapping so dialog-core can route session-based operations
+        // Dialog-core needs this for send_response_for_session() to work
+        let event = rvoip_infra_common::events::cross_crate::SessionToDialogEvent::StoreDialogMapping {
+            session_id: session_id.0.clone(),
+            dialog_id: dialog_uuid.to_string(),
+        };
+        if let Err(e) = self.dialog_adapter.global_coordinator.publish(Arc::new(
+            rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::SessionToDialog(event)
+        )).await {
+            error!("Failed to publish StoreDialogMapping for UAS: {}", e);
+        }
+
         // Process the event - state machine will handle the rest
         let event_type = EventType::IncomingCall { from: from.clone(), sdp };
         
@@ -345,29 +387,41 @@ impl SessionCrossCrateEventHandler {
     }
     
     async fn handle_call_established(&self, event_str: &str) -> Result<()> {
-        // Extract session_id and optional SDP answer
-        let session_id = self.extract_session_id(event_str).unwrap_or_else(|| "unknown".to_string());
+        // Extract session_id field from event
+        // Dialog-core's event_hub retrieves the actual session_id via dialog_manager.get_session_id()
+        // This is the real session ID in "session-XXX" format, not a dialog_id!
+        let session_id_str = self.extract_session_id(event_str).unwrap_or_else(|| "unknown".to_string());
+
+        if session_id_str == "unknown" {
+            error!("Cannot extract session_id from CallEstablished event");
+            return Ok(());
+        }
+
+        let session_id = SessionId(session_id_str);
+
+        debug!("CallEstablished event for session {}", session_id);
+
         let sdp_answer = self.extract_field(event_str, "sdp_answer: Some(\"")
             .map(|s| s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\\"", "\""));
-        
+
         // Store remote SDP if present
         if let Some(sdp) = &sdp_answer {
             info!("Stored remote SDP from CallEstablished for session {}", session_id);
             // Update the session with remote SDP
-            if let Ok(mut session) = self.state_machine.store.get_session(&SessionId(session_id.clone())).await {
+            if let Ok(mut session) = self.state_machine.store.get_session(&session_id).await {
                 session.remote_sdp = Some(sdp.clone());
                 let _ = self.state_machine.store.update_session(session).await;
             }
         }
-        
+
         // CallEstablished maps to Dialog200OK for state machine processing
         if let Err(e) = self.state_machine.process_event(
-            &SessionId(session_id.clone()),
+            &session_id,
             EventType::Dialog200OK
         ).await {
             error!("Failed to process CallEstablished as Dialog200OK: {}", e);
         }
-        
+
         Ok(())
     }
     
