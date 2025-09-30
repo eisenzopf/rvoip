@@ -197,18 +197,21 @@ impl DialogAdapter {
     ) -> Result<()> {
         // Use make_call_with_id to control the Call-ID
         let call_id = format!("{}@session-core", session_id.0);
-        
+
+        // Store Call-ID mapping BEFORE making the call to avoid race condition
+        // This ensures any events that come back immediately can find the session
+        self.callid_to_session.insert(call_id.clone(), session_id.clone());
+
         let call_handle = self.dialog_api
             .make_call_with_id(from, to, sdp, Some(call_id.clone()))
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to make call: {}", e)))?;
-        
+
         let dialog_id = call_handle.call_id().clone();
-        
-        // Store mappings
+
+        // Store remaining mappings
         self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
         self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
-        self.callid_to_session.insert(call_id.clone(), session_id.clone());
         
         // Publish StoreDialogMapping event to inform dialog-core about the session-dialog mapping
         let event = SessionToDialogEvent::StoreDialogMapping {

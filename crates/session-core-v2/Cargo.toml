@@ -18,6 +18,14 @@ path = "examples/api_peer_audio/peer2.rs"
 name = "thread_benchmark"
 path = "examples/thread_benchmark/main.rs"
 
+[[example]]
+name = "uas_answerer"
+path = "examples/thread_benchmark/uas_answerer.rs"
+
+[[example]]
+name = "uac_caller"
+path = "examples/thread_benchmark/uac_caller.rs"
+
 
 [dependencies]
 # Core dependencies
