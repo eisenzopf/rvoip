@@ -15,6 +15,8 @@ bump_version.sh
 Cargo.toml.backup
 test_vectors/
 *.db
+osx_trace.sh
+*.trace
 
 ## Editor
 *.swp
