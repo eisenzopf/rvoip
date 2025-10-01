@@ -435,6 +435,7 @@ impl YamlTableLoader {
             "Resuming" => Ok(CallState::Resuming),
             "Bridged" => Ok(CallState::Bridged),
             "Transferring" => Ok(CallState::Transferring),
+            "TransferringCall" => Ok(CallState::TransferringCall),
             "Terminating" => Ok(CallState::Terminating),
             "Terminated" => Ok(CallState::Terminated),
             "Muted" => Ok(CallState::Muted),
@@ -536,8 +537,17 @@ impl YamlTableLoader {
             }),
             
             // Transfer events
-            "InitiateTransfer" => Ok(EventType::InitiateTransfer { target: String::new() }),
+            "BlindTransfer" => Ok(EventType::BlindTransfer { target: String::new() }),
+            "TransferRequested" => Ok(EventType::TransferRequested {
+                refer_to: String::new(),
+                transfer_type: String::new()
+            }),
             "TransferComplete" => Ok(EventType::TransferComplete),
+
+            // Internal transfer coordination events
+            "InternalProceedWithTransfer" => Ok(EventType::InternalProceedWithTransfer),
+            "InternalMakeTransferCall" => Ok(EventType::InternalMakeTransferCall),
+            "InternalTransferCallEstablished" => Ok(EventType::InternalTransferCallEstablished),
 
             // Registration events
             "StartRegistration" => Ok(EventType::StartRegistration),
@@ -692,7 +702,19 @@ impl YamlTableLoader {
             // Bridge/Transfer
             "CreateMediaBridge" => Ok(Action::Custom("CreateMediaBridge".to_string())),
             "LinkSessions" => Ok(Action::Custom("LinkSessions".to_string())),
-            "SendREFER" => Ok(Action::Custom("SendREFER".to_string())),
+            "SendREFER" => Ok(Action::SendREFER),
+            "SendREFERWithReplaces" => Ok(Action::SendREFERWithReplaces),
+            "HoldOriginalCall" | "HoldCurrentCall" => Ok(Action::HoldCurrentCall),
+            "CreateConsultationDialog" | "CreateConsultationCall" => Ok(Action::CreateConsultationCall),
+            "TerminateConsultationCall" => Ok(Action::TerminateConsultationCall),
+            "ResumeOriginalCall" => Ok(Action::RestoreMediaFlow),
+
+            // Blind transfer recipient actions
+            "AcceptTransferREFER" => Ok(Action::AcceptTransferREFER),
+            "SendTransferNOTIFY" => Ok(Action::SendTransferNOTIFY),
+            "SendTransferNOTIFYSuccess" => Ok(Action::SendTransferNOTIFYSuccess),
+            "StoreTransferTarget" => Ok(Action::StoreTransferTarget),
+            "TerminateCurrentCall" => Ok(Action::TerminateCurrentCall),
 
             // Internal
             "CheckReadiness" => Ok(Action::Custom("CheckReadiness".to_string())),

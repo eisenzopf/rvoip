@@ -363,23 +363,33 @@ impl DialogLookup for DialogManager {
         
         // First try: Standard lookup with both tags (for confirmed dialogs)
         if let Some(to_tag) = &to_tag {
-            debug!("Looking for confirmed dialog: Call-ID={}, From-tag={}, To-tag={}", 
+            debug!("Looking for confirmed dialog: Call-ID={}, From-tag={}, To-tag={}",
                    call_id, from_tag, to_tag);
-            
+
             // Try both scenarios: UAC and UAS perspective
             let (key1, key2) = DialogUtils::create_bidirectional_keys(&call_id, &from_tag, &to_tag);
-            
+            debug!("Trying lookup key1 (UAC perspective): {}", key1);
+            debug!("Trying lookup key2 (UAS perspective): {}", key2);
+
+            // DEBUG: Show all keys in lookup table
+            debug!("Dialog lookup table has {} entries:", self.dialog_lookup.len());
+            for entry in self.dialog_lookup.iter().take(10) {
+                debug!("  Lookup key: {} -> dialog: {}", entry.key(), entry.value());
+            }
+
             // Scenario 1: Local is From, Remote is To (UAC perspective)
             if let Some(dialog_id) = self.dialog_lookup.get(&key1) {
-                debug!("Found confirmed dialog {} using UAC perspective", dialog_id.value());
+                debug!("✅ Found confirmed dialog {} using UAC perspective (key1)", dialog_id.value());
                 return Some(dialog_id.clone());
             }
-            
+
             // Scenario 2: Local is To, Remote is From (UAS perspective)
             if let Some(dialog_id) = self.dialog_lookup.get(&key2) {
-                debug!("Found confirmed dialog {} using UAS perspective", dialog_id.value());
+                debug!("✅ Found confirmed dialog {} using UAS perspective (key2)", dialog_id.value());
                 return Some(dialog_id.clone());
             }
+
+            debug!("❌ No match found for either key in lookup table");
         }
         
         // Second try: Fallback lookup for early dialogs (only have call-id and from-tag)

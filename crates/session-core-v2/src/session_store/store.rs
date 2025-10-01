@@ -350,6 +350,7 @@ impl SessionStore {
                 CallState::Resuming => stats.active += 1,  // Count resuming as active
                 CallState::Bridged => stats.active += 1,  // Count bridged as active
                 CallState::Transferring => stats.active += 1,  // Count transferring as active
+                CallState::TransferringCall => stats.active += 1,  // Count transfer recipient as active
                 CallState::Terminating => stats.terminating += 1,
                 CallState::Terminated => stats.terminated += 1,
                 CallState::Cancelled => stats.terminated += 1,  // Count cancelled as terminated

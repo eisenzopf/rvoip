@@ -425,7 +425,7 @@ impl SessionStore {
             EventType::CheckConditions,
             EventType::BridgeSessions { other_session: SessionId::new() },
             EventType::UnbridgeSessions,
-            EventType::InitiateTransfer { target: String::new() },
+            EventType::BlindTransfer { target: String::new() },
             EventType::TransferComplete,
             EventType::TransferFailed,
         ]

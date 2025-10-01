@@ -225,13 +225,19 @@ impl UnifiedCoordinator {
         Ok(())
     }
     
-    /// Start attended transfer
-    pub async fn start_attended_transfer(&self, session_id: &SessionId, target: &str) -> Result<()> {
+    /// Start attended transfer - puts current call on hold and creates consultation call
+    /// Returns the consultation session ID
+    pub async fn start_attended_transfer(&self, session_id: &SessionId, target: &str) -> Result<SessionId> {
+        // First process the event to trigger hold and state change
         self.helpers.state_machine.process_event(
             session_id,
             EventType::StartAttendedTransfer { target: target.to_string() },
         ).await?;
-        Ok(())
+
+        // Create the actual consultation call
+        let consultation_id = self.helpers.create_consultation_call(session_id, target).await?;
+
+        Ok(consultation_id)
     }
     
     /// Complete attended transfer
@@ -242,7 +248,17 @@ impl UnifiedCoordinator {
         ).await?;
         Ok(())
     }
-    
+
+    /// Cancel attended transfer and return to original call
+    pub async fn cancel_attended_transfer(&self, original_session_id: &SessionId) -> Result<()> {
+        // Terminate consultation and resume original by sending HangupCall in ConsultationCall state
+        self.helpers.state_machine.process_event(
+            original_session_id,
+            EventType::HangupCall,
+        ).await?;
+        Ok(())
+    }
+
     // ===== DTMF Operations =====
     
     /// Send DTMF digit

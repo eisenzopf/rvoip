@@ -15,16 +15,24 @@ name = "api_peer_audio_peer2"
 path = "examples/api_peer_audio/peer2.rs"
 
 [[example]]
-name = "thread_benchmark"
-path = "examples/thread_benchmark/main.rs"
-
-[[example]]
 name = "uas_answerer"
 path = "examples/thread_benchmark/uas_answerer.rs"
 
 [[example]]
 name = "uac_caller"
 path = "examples/thread_benchmark/uac_caller.rs"
+
+[[example]]
+name = "blind_transfer_peer1_caller"
+path = "examples/blind_transfer/peer1_caller.rs"
+
+[[example]]
+name = "blind_transfer_peer2_transferor"
+path = "examples/blind_transfer/peer2_transferor.rs"
+
+[[example]]
+name = "blind_transfer_peer3_target"
+path = "examples/blind_transfer/peer3_target.rs"
 
 
 [dependencies]

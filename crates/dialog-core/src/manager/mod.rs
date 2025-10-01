@@ -13,6 +13,7 @@ pub mod unified;
 pub mod dialog_operations;
 pub mod protocol_handlers;
 pub mod transaction_integration;
+pub mod response_lifecycle;
 pub mod event_processing;
 pub mod session_coordination;
 pub mod message_routing;
@@ -31,6 +32,7 @@ pub use dialog_operations::{DialogStore, DialogLookup};
 pub use protocol_handlers::{ProtocolHandlers, MethodHandler};
 pub use message_routing::{MessageRouter, DialogMatcher};
 pub use transaction_integration::{TransactionIntegration, TransactionHelpers};
+pub use response_lifecycle::ResponseLifecycle;
 pub use session_coordination::{SessionCoordinator, EventSender};
 pub use utils::{MessageExtensions, SourceExtractor};
 

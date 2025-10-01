@@ -635,17 +635,25 @@ impl CallHandle {
             }
             
             // Transition from Early to Confirmed
+            debug!("Dialog {} current state: {:?}, local_tag: {:?}, remote_tag: {:?}",
+                   self.call_id(), dialog.state, dialog.local_tag, dialog.remote_tag);
+
             if dialog.state == crate::dialog::DialogState::Early {
                 dialog.state = crate::dialog::DialogState::Confirmed;
                 info!("Dialog {} transitioned to Confirmed state", self.call_id());
-                
+
                 // CRITICAL FIX: Update dialog lookup now that we have both tags
                 if let Some(tuple) = dialog.dialog_id_tuple() {
                     use crate::manager::utils::DialogUtils;
                     let key = DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
+                    debug!("Inserting dialog lookup key: {}", key);
                     self.dialog_handle.dialog_manager.dialog_lookup.insert(key, dialog.id.clone());
                     info!("Updated dialog lookup for confirmed dialog {}", dialog.id);
+                } else {
+                    warn!("Dialog {} cannot be added to lookup table - missing local or remote tag", dialog.id);
                 }
+            } else {
+                debug!("Dialog {} not in Early state, current state: {:?}", self.call_id(), dialog.state);
             }
         }
         

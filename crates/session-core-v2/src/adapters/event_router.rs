@@ -332,7 +332,12 @@ impl EventRouter {
             Action::SendMESSAGE |
             Action::ProcessMESSAGE |
             Action::CleanupDialog |
-            Action::CleanupMedia => {
+            Action::CleanupMedia |
+            Action::AcceptTransferREFER |
+            Action::SendTransferNOTIFY |
+            Action::SendTransferNOTIFYSuccess |
+            Action::StoreTransferTarget |
+            Action::TerminateCurrentCall => {
                 tracing::debug!("Advanced action {:?} for session {} - handled by state machine", action, session_id);
             }
         }
