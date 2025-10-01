@@ -65,6 +65,7 @@ pub enum CallState {
     Muted,
     Bridged,           // Two endpoint calls bridged together
     Transferring,
+    TransferringCall,  // Transfer recipient processing transfer
     ConsultationCall,
     Terminating,
     Terminated,
@@ -109,6 +110,7 @@ impl CallState {
             CallState::Muted |
             CallState::Bridged |
             CallState::Transferring |
+            CallState::TransferringCall |
             CallState::ConsultationCall
         )
     }
@@ -128,6 +130,7 @@ impl fmt::Display for CallState {
             CallState::Muted => write!(f, "Muted"),
             CallState::Bridged => write!(f, "Bridged"),
             CallState::Transferring => write!(f, "Transferring"),
+            CallState::TransferringCall => write!(f, "TransferringCall"),
             CallState::ConsultationCall => write!(f, "ConsultationCall"),
             CallState::Terminating => write!(f, "Terminating"),
             CallState::Terminated => write!(f, "Terminated"),

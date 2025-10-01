@@ -348,19 +348,28 @@ impl DialogAdapter {
     }
     
     /// Send REFER with Replaces for attended transfer (for state machine)
-    pub async fn send_refer_with_replaces(&self, session_id: &SessionId, refer_to: &str) -> Result<()> {
+    pub async fn send_refer_with_replaces(&self, session_id: &SessionId, consultation_session_id: &SessionId) -> Result<()> {
         let dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
-        
-        // Send REFER with Replaces header through dialog API
-        // The Some() indicates this is an attended transfer
+
+        // Get consultation dialog ID to build Replaces header
+        let consultation_dialog_id = self.session_to_dialog.get(consultation_session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(consultation_session_id.0.clone()))?
+            .clone();
+
+        // For now, send REFER with the consultation session marked as "attended"
+        // The dialog-core layer should construct proper Replaces header from the dialog ID
+        // Format: Refer-To: <sip:target@domain?Replaces=call-id%3Bto-tag%3Dtag1%3Bfrom-tag%3Dtag2>
+        let refer_to = format!("dialog:{}", consultation_dialog_id.0);
+
         self.dialog_api
-            .send_refer(&dialog_id, refer_to.to_string(), Some("attended".to_string()))
+            .send_refer(&dialog_id, refer_to, Some("attended".to_string()))
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send REFER with Replaces: {}", e)))?;
-        
-        tracing::info!("Sent REFER with Replaces to {} for session {}", refer_to, session_id.0);
+
+        tracing::info!("Sent REFER with Replaces for session {} using consultation dialog {}",
+                       session_id.0, consultation_dialog_id.0);
         Ok(())
     }
     

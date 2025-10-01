@@ -765,7 +765,17 @@ impl UnifiedDialogApi {
         };
         
         info!("Sending {} response for session {} via transaction {}", status_code, session_id, transaction_id);
-        
+
+        // Call pre-send lifecycle hook for dialog state management
+        // This handles UAS dialog confirmation when sending 200 OK to INVITE
+        if let Ok(Some(original_request)) = self.manager.core().transaction_manager().original_request(&transaction_id).await {
+            use crate::manager::ResponseLifecycle;
+            if let Err(e) = self.manager.core().pre_send_response(&dialog_id, &response, &transaction_id, &original_request).await {
+                error!("Failed to execute pre_send_response hook for dialog {}: {}", dialog_id, e);
+                // Continue with sending - the error is logged but shouldn't block the response
+            }
+        }
+
         self.send_response(&transaction_id, response).await
     }
     

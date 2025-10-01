@@ -258,9 +258,34 @@ impl DialogEventHub {
                 }
             }
             
+            SessionCoordinationEvent::TransferRequest { dialog_id, refer_to, replaces, .. } => {
+                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
+                    // Convert ReferTo to string
+                    let refer_to_uri = refer_to.uri().to_string();
+
+                    // Determine transfer type based on Replaces header
+                    let transfer_type = if replaces.is_some() {
+                        rvoip_infra_common::events::cross_crate::TransferType::Attended
+                    } else {
+                        rvoip_infra_common::events::cross_crate::TransferType::Blind
+                    };
+
+                    Some(RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::TransferRequested {
+                            session_id,
+                            refer_to: refer_to_uri,
+                            transfer_type,
+                        }
+                    ))
+                } else {
+                    warn!("No session ID found for dialog {:?} in TransferRequest", dialog_id);
+                    None
+                }
+            }
+
             // DTMF events would be handled separately if implemented
             // SessionCoordinationEvent doesn't have DtmfReceived yet
-            
+
             _ => None, // Other events not yet mapped
         }
     }

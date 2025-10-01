@@ -17,6 +17,15 @@ pub struct NegotiatedConfig {
     pub channels: u8,
 }
 
+/// Transfer state tracking
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferState {
+    None,
+    ConsultationInProgress,
+    TransferInitiated,
+    TransferCompleted,
+}
+
 /// Complete state of a session
 #[derive(Debug, Clone)]
 pub struct SessionState {
@@ -60,7 +69,13 @@ pub struct SessionState {
     pub conference_mixer_id: Option<MediaSessionId>, // Mixer ID if hosting conference
     pub transfer_target: Option<String>, // Target for transfers
     pub dtmf_digits: Option<String>, // DTMF digits to send
-    
+
+    // Attended transfer tracking
+    pub consultation_session_id: Option<SessionId>, // Consultation call session for attended transfer
+    pub original_session_id: Option<SessionId>, // Original session (set in consultation call)
+    pub transfer_state: TransferState, // Current transfer state
+    pub transfer_notify_dialog: Option<DialogId>, // Dialog to send NOTIFY messages to (for blind transfer)
+
     // Timestamps
     pub created_at: Instant,
     
@@ -94,6 +109,10 @@ impl SessionState {
             conference_mixer_id: None,
             transfer_target: None,
             dtmf_digits: None,
+            consultation_session_id: None,
+            original_session_id: None,
+            transfer_state: TransferState::None,
+            transfer_notify_dialog: None,
             created_at: now,
             history: None,
         }

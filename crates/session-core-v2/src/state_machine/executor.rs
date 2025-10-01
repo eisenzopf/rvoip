@@ -161,6 +161,19 @@ impl StateMachine {
                     session.remote_sdp = Some(sdp_data.clone());
                 }
             }
+            EventType::BlindTransfer { target } => {
+                session.transfer_target = Some(target.clone());
+                debug!("Set blind transfer target to: {}", target);
+            }
+            EventType::TransferRequested { refer_to, transfer_type } => {
+                session.transfer_target = Some(refer_to.clone());
+                session.transfer_notify_dialog = session.dialog_id.clone();
+                debug!("Set transfer target from REFER: {}, type: {:?}", refer_to, transfer_type);
+            }
+            EventType::StartAttendedTransfer { target } => {
+                session.transfer_target = Some(target.clone());
+                debug!("Set attended transfer target to: {}", target);
+            }
             _ => {}
         }
         
@@ -269,6 +282,7 @@ impl StateMachine {
                 &mut session,
                 &self.dialog_adapter,
                 &self.media_adapter,
+                &self.store,
             ).await;
             let action_duration = action_start.elapsed().as_millis() as u64;
             

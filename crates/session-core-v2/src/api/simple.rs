@@ -146,7 +146,27 @@ impl SimplePeer {
     pub async fn transfer(&self, call_id: &CallId, target: &str) -> Result<()> {
         self.coordinator.blind_transfer(call_id, target).await
     }
-    
+
+    /// Start attended transfer (returns consultation call ID)
+    pub async fn start_attended_transfer(&self, call_id: &CallId, target: &str) -> Result<CallId> {
+        let session_id = SessionId(call_id.to_string());
+        let consultation_session_id = self.coordinator.start_attended_transfer(&session_id, target).await?;
+        // CallId is SessionId in this module
+        Ok(consultation_session_id)
+    }
+
+    /// Complete attended transfer
+    pub async fn complete_attended_transfer(&self, call_id: &CallId) -> Result<()> {
+        let session_id = SessionId(call_id.to_string());
+        self.coordinator.complete_attended_transfer(&session_id).await
+    }
+
+    /// Cancel attended transfer
+    pub async fn cancel_attended_transfer(&self, call_id: &CallId) -> Result<()> {
+        let session_id = SessionId(call_id.to_string());
+        self.coordinator.cancel_attended_transfer(&session_id).await
+    }
+
     /// Start recording
     pub async fn start_recording(&self, call_id: &CallId) -> Result<()> {
         self.coordinator.start_recording(call_id).await

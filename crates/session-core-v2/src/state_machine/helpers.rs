@@ -10,6 +10,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
+use tracing::info;
 use crate::{
     types::{SessionId, SessionInfo, CallState},
     state_table::types::{Role, EventType},
@@ -156,13 +157,60 @@ impl StateMachineHelpers {
     ) -> Result<()> {
         self.state_machine.process_event(
             host_session_id,
-            EventType::AddParticipant { 
-                session_id: participant_session_id.to_string() 
+            EventType::AddParticipant {
+                session_id: participant_session_id.to_string()
             },
         ).await?;
         Ok(())
     }
-    
+
+    /// Create consultation call for attended transfer
+    pub async fn create_consultation_call(
+        &self,
+        original_session_id: &SessionId,
+        target: &str,
+    ) -> Result<SessionId> {
+        use crate::session_store::TransferState;
+
+        // Get original session to link them
+        let mut original_session = self.state_machine.store.get_session(original_session_id).await?;
+
+        // Create new session for consultation call
+        let consultation_session_id = SessionId::new();
+
+        // Determine local URI from original session
+        let from = original_session.local_uri.clone()
+            .unwrap_or_else(|| "sip:anonymous@localhost".to_string());
+
+        // Create the consultation session
+        self.create_session(
+            consultation_session_id.clone(),
+            from.clone(),
+            target.to_string(),
+            Role::UAC,
+        ).await?;
+
+        // Link consultation session back to original
+        let mut consultation_session = self.state_machine.store.get_session(&consultation_session_id).await?;
+        consultation_session.original_session_id = Some(original_session_id.clone());
+        self.state_machine.store.update_session(consultation_session).await?;
+
+        // Link original session to consultation
+        original_session.consultation_session_id = Some(consultation_session_id.clone());
+        original_session.transfer_state = TransferState::ConsultationInProgress;
+        self.state_machine.store.update_session(original_session).await?;
+
+        // Start the consultation call (send INVITE)
+        self.state_machine.process_event(
+            &consultation_session_id,
+            EventType::MakeCall { target: target.to_string() },
+        ).await?;
+
+        info!("Created consultation call {} for transfer from {}", consultation_session_id, original_session_id);
+
+        Ok(consultation_session_id)
+    }
+
     // ========== Query Methods ==========
     // These need access to internal state
     
