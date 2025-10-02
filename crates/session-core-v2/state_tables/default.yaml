@@ -130,7 +130,6 @@ transitions:
       - type: "StartMediaSession"
     conditions:
       sdp_negotiated: true
-      media_session_ready: true
     description: "Early media received"
 
   # UAC receives 200 OK while still initiating (fast answer without ringing)
@@ -146,7 +145,6 @@ transitions:
       - type: "StartMediaSession"
     conditions:
       dialog_established: true
-      media_session_ready: true
       sdp_negotiated: true
     publish:
       - "CallAnswered"
@@ -165,7 +163,6 @@ transitions:
       - type: "StartMediaSession"
     conditions:
       dialog_established: true
-      media_session_ready: true
       sdp_negotiated: true
     publish:
       - "CallEstablished"
@@ -212,11 +209,35 @@ transitions:
       - type: "StartMediaSession"
     conditions:
       dialog_established: true
-      media_session_ready: true
       sdp_negotiated: true
     publish:
       - "CallEstablished"
     description: "Call established after ACK"
+
+  # UAS can hangup while waiting for ACK (before dialog is fully established)
+  - role: "UAS"
+    state: "Answering"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+      - type: "StopMediaSession"
+    description: "UAS hangs up before receiving ACK"
+
+  # UAS receives BYE before ACK (peer changed their mind)
+  - role: "UAS"
+    state: "Answering"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    description: "Remote party sent BYE before ACK"
 
   # UAS rejects call
   - role: "UAS"

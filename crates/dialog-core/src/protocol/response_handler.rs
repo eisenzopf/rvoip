@@ -281,6 +281,22 @@ impl DialogManager {
                             warn!("Failed to send automatic ACK for 200 OK to INVITE: {}", e);
                         } else {
                             info!("Successfully sent automatic ACK for 200 OK to INVITE");
+
+                            // Notify session-core that ACK was sent (for state machine transition)
+                            // Extract SDP if present for final negotiation
+                            let negotiated_sdp = if !response.body().is_empty() {
+                                Some(String::from_utf8_lossy(response.body()).to_string())
+                            } else {
+                                None
+                            };
+
+                            if let Err(e) = self.notify_session_layer(SessionCoordinationEvent::AckSent {
+                                dialog_id: dialog_id.clone(),
+                                transaction_id: transaction_id.clone(),
+                                negotiated_sdp,
+                            }).await {
+                                warn!("Failed to notify session layer of ACK sent: {}", e);
+                            }
                         }
                     }
                 }

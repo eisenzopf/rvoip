@@ -146,6 +146,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::DialogStateChanged { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::ReinviteReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::TransferRequested { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::AckReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::RegistrationSuccess { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::RegistrationFailed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::SubscriptionAccepted { session_id, .. } => Some(session_id),
@@ -324,6 +325,12 @@ pub enum DialogToSessionEvent {
         session_id: String,
         refer_to: String,
         transfer_type: TransferType,
+    },
+
+    /// ACK received (for UAS state transitions)
+    AckReceived {
+        session_id: String,
+        sdp: Option<String>,
     },
 
     /// Registration successful

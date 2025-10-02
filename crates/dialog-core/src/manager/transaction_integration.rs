@@ -587,6 +587,34 @@ impl DialogManager {
         // Handle specific successful response types
         match response.status_code() {
             200 => {
+                // Check if this is a 200 OK to INVITE - need to send ACK
+                if transaction_id.method() == &rvoip_sip_core::Method::Invite {
+                    info!("✅ Received 200 OK to INVITE, sending automatic ACK for dialog {}", dialog_id);
+
+                    // Send ACK using transaction-core's send_ack_for_2xx method
+                    match self.transaction_manager.send_ack_for_2xx(transaction_id, &response).await {
+                        Ok(_) => {
+                            info!("Successfully sent automatic ACK for 200 OK to INVITE");
+
+                            // Notify session-core that ACK was sent (for state machine transition)
+                            let negotiated_sdp = if !response.body().is_empty() {
+                                Some(String::from_utf8_lossy(response.body()).to_string())
+                            } else {
+                                None
+                            };
+
+                            self.emit_session_coordination_event(SessionCoordinationEvent::AckSent {
+                                dialog_id: dialog_id.clone(),
+                                transaction_id: transaction_id.clone(),
+                                negotiated_sdp,
+                            }).await;
+                        }
+                        Err(e) => {
+                            warn!("Failed to send automatic ACK for 200 OK to INVITE: {}", e);
+                        }
+                    }
+                }
+
                 // Successful completion - could be call answered, request completed, etc.
                 if !response.body().is_empty() {
                     let sdp = String::from_utf8_lossy(response.body()).to_string();
@@ -600,7 +628,7 @@ impl DialogManager {
                 debug!("Other successful response {} for dialog {}", response.status_code(), dialog_id);
             }
         }
-        
+
         Ok(())
     }
     
@@ -792,25 +820,27 @@ impl DialogManager {
         request: rvoip_sip_core::Request,
     ) -> DialogResult<()> {
         info!("✅ RFC 3261: ACK received for transaction {} in dialog {} - time to start media (UAS side)", transaction_id, dialog_id);
-        
+
         // Extract any SDP from the ACK (though typically ACK doesn't have SDP for 2xx responses)
         let negotiated_sdp = if !request.body().is_empty() {
             let sdp = String::from_utf8_lossy(request.body()).to_string();
-            debug!("ACK contains SDP body: {}", sdp);
+            info!("ACK contains SDP body: {}", sdp);
             Some(sdp)
         } else {
-            debug!("ACK has no SDP body (normal for 2xx ACK)");
+            info!("ACK has no SDP body (normal for 2xx ACK)");
             None
         };
-        
+
+        info!("🔔 About to emit AckReceived event for dialog {}", dialog_id);
+
         // RFC 3261 COMPLIANT: Emit ACK received event for UAS side media creation
         self.emit_session_coordination_event(SessionCoordinationEvent::AckReceived {
             dialog_id: dialog_id.clone(),
             transaction_id: transaction_id.clone(),
             negotiated_sdp,
         }).await;
-        
-        debug!("🚀 RFC 3261: Emitted AckReceived event for UAS side media creation");
+
+        info!("🚀 RFC 3261: Emitted AckReceived event for UAS side media creation");
         Ok(())
     }
 }
