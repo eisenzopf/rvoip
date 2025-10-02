@@ -1143,7 +1143,12 @@ impl SimpleRequestBuilder {
     ///     .subscription_state("active;expires=3599");
     /// ```
     pub fn subscription_state(mut self, state: &str) -> Self {
-        self.request = self.request.with_header(TypedHeader::SubscriptionState(state.to_string()));
+        use std::str::FromStr;
+        use crate::types::subscription_state::SubscriptionState as SubscriptionStateType;
+
+        if let Ok(sub_state) = SubscriptionStateType::from_str(state) {
+            self.request = self.request.with_header(TypedHeader::SubscriptionState(sub_state));
+        }
         self
     }
     
