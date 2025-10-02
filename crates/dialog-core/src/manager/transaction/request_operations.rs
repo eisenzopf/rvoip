@@ -29,18 +29,22 @@ impl TransactionIntegration for DialogManager {
         debug!("Sending {} request for dialog {} using Phase 3 dialog functions", method, dialog_id);
         
         // Get destination and dialog context
-        let (destination, request) = {
+        let (destination, request, event_package, subscription_state) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
-            
+
             let destination = dialog.get_remote_target_address().await
                 .ok_or_else(|| crate::errors::DialogError::routing_error("No remote target address available"))?;
-            
+
             // Convert body to String if provided
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
-            
+
             // Create dialog template using the proper dialog method
             let template = dialog.create_request_template(method.clone());
-            
+
+            // Extract event package and subscription state for NOTIFY requests (RFC 6665)
+            let event_package = dialog.event_package.clone();
+            let subscription_state = dialog.subscription_state.clone();
+
             // Generate local tag if missing (for outgoing requests we should always have a local tag)
             let local_tag = match &template.local_tag {
                 Some(tag) if !tag.is_empty() => tag.clone(),
@@ -50,33 +54,35 @@ impl TransactionIntegration for DialogManager {
                     new_tag
                 }
             };
-            
+
             // Handle remote tag based on dialog state and method
             let remote_tag = match (&template.remote_tag, dialog.state.clone()) {
                 // If we have a valid remote tag, use it
                 (Some(tag), _) if !tag.is_empty() => Some(tag.clone()),
-                
+
                 // For certain methods in confirmed dialogs, remote tag is required
                 (_, crate::dialog::DialogState::Confirmed) => {
                     return Err(crate::errors::DialogError::protocol_error(
                         &format!("{} request in confirmed dialog missing remote tag", method)
                     ));
                 },
-                
+
                 // For early/initial dialogs, remote tag may be None (will be set to None, not empty string)
                 _ => None
             };
-            
+
             // Build request using Phase 3 dialog quick functions (MUCH simpler!)
             let request = self.build_dialog_request(
-                &template, 
-                method.clone(), 
-                local_tag, 
-                remote_tag, 
-                body_string
+                &template,
+                method.clone(),
+                local_tag,
+                remote_tag,
+                body_string,
+                event_package.as_deref(),
+                subscription_state.as_ref()
             )?;
-            
-            (destination, request)
+
+            (destination, request, event_package, subscription_state)
         };
         
         // Use transaction-core helpers to create appropriate transaction
@@ -179,6 +185,8 @@ impl DialogManager {
         local_tag: String,
         remote_tag: Option<String>,
         body_string: Option<String>,
+        event_package: Option<&str>,
+        subscription_state: Option<&crate::dialog::subscription_state::SubscriptionState>,
     ) -> DialogResult<Request> {
         let request = match method {
             Method::Invite => {
@@ -322,8 +330,17 @@ impl DialogManager {
                 let remote_tag = remote_tag.ok_or_else(|| {
                     crate::errors::DialogError::protocol_error("NOTIFY request requires remote tag in established dialog")
                 })?;
-                
-                let event_type = "dialog"; // This should come from dialog context
+
+                // Get event type from dialog's event_package field (RFC 6665)
+                let event_type = event_package.ok_or_else(|| {
+                    crate::errors::DialogError::protocol_error(
+                        "NOTIFY request requires event_package to be set on dialog"
+                    )
+                })?;
+
+                // Get subscription state from dialog for RFC 6665 compliance
+                let sub_state_str = subscription_state.map(|s| s.to_header_value());
+
                 dialog_quick::notify_for_dialog(
                     &template.call_id,
                     &template.local_uri.to_string(),
@@ -332,6 +349,7 @@ impl DialogManager {
                     &remote_tag,
                     event_type,
                     body_string,
+                    sub_state_str,
                     template.cseq_number,
                     self.local_address,
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }

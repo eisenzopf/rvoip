@@ -770,6 +770,7 @@ pub struct InDialogRequestBuilder {
     body: Option<String>,
     content_type: Option<String>,
     event_type: Option<String>, // For NOTIFY requests
+    subscription_state: Option<String>, // For NOTIFY Subscription-State header (RFC 6665)
     custom_headers: Vec<TypedHeader>,
     max_forwards: u8,
 }
@@ -791,6 +792,7 @@ impl InDialogRequestBuilder {
             body: None,
             content_type: None,
             event_type: None,
+            subscription_state: None,
             custom_headers: Vec::new(),
             max_forwards: 70,
         }
@@ -885,7 +887,18 @@ impl InDialogRequestBuilder {
         self.event_type = Some(event.into());
         self
     }
-    
+
+    /// Set the Subscription-State for NOTIFY requests (RFC 6665)
+    ///
+    /// # Examples
+    /// - "active;expires=3600" - Active subscription
+    /// - "pending" - Pending subscription
+    /// - "terminated;reason=noresource" - Terminated subscription
+    pub fn with_subscription_state(mut self, state: impl Into<String>) -> Self {
+        self.subscription_state = Some(state.into());
+        self
+    }
+
     /// Build the in-dialog request
     pub fn build(self) -> Result<Request> {
         // Validate required fields
@@ -917,7 +930,24 @@ impl InDialogRequestBuilder {
             let event_header = Event::new(EventType::Token(event.clone()));
             builder = builder.header(TypedHeader::Event(event_header));
         }
-        
+
+        // Add Subscription-State header for NOTIFY requests (RFC 6665 compliance)
+        if let Some(sub_state) = &self.subscription_state {
+            use std::str::FromStr;
+            use rvoip_sip_core::types::subscription_state::SubscriptionState as SubStateHeader;
+            use tracing::warn;
+
+            match SubStateHeader::from_str(sub_state) {
+                Ok(state_header) => {
+                    builder = builder.header(TypedHeader::SubscriptionState(state_header));
+                }
+                Err(e) => {
+                    warn!("Failed to parse Subscription-State '{}': {}", sub_state, e);
+                    return Err(Error::Other(format!("Invalid Subscription-State: {}", e)));
+                }
+            }
+        }
+
         // Add Route headers
         for route in self.route_set {
             builder = builder.header(TypedHeader::Route(Route::with_uri(route)));

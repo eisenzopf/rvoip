@@ -787,7 +787,7 @@ pub async fn execute_action(
             // Get event package from session context (default to presence)
             let event_package = "presence";
             let body = session.local_sdp.clone(); // Use SDP field to store notify body temporarily
-            dialog_adapter.send_notify(&session.session_id, event_package, body).await?;
+            dialog_adapter.send_notify(&session.session_id, event_package, body, None).await?;
         }
 
         // Message actions

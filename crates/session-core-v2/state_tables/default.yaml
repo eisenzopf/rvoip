@@ -33,6 +33,8 @@ states:
     description: "Two endpoint calls bridged together"
   - name: "Transferring"
     description: "Call being transferred"
+  - name: "TransferringCall"
+    description: "Transferring to a new target (blind transfer recipient)"
   - name: "ConsultationCall"
     description: "In consultation for attended transfer"
   - name: "Terminating"
@@ -450,6 +452,17 @@ transitions:
     publish:
       - "TransferCallTerminated"
     description: "Current call terminated, ready for transfer"
+
+  # Handle explicit hangup while in transfer state
+  - role: "Both"
+    state: "TransferringCall"
+    event:
+      type: "HangupCall"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    description: "Cleanup transfer session when explicitly hung up"
 
   # After cleanup, make new call to transfer target
   # This is triggered by the MakeCall event with the stored transfer target

@@ -803,11 +803,22 @@ impl UnifiedDialogApi {
         &self,
         dialog_id: &DialogId,
         event: String,
-        body: Option<String>
+        body: Option<String>,
+        subscription_state: Option<String>
     ) -> ApiResult<TransactionKey> {
-        self.manager.send_notify(dialog_id, event, body).await
+        self.manager.send_notify(dialog_id, event, body, subscription_state).await
     }
-    
+
+    /// Send NOTIFY for REFER implicit subscription (RFC 3515)
+    pub async fn send_refer_notify(
+        &self,
+        dialog_id: &DialogId,
+        status_code: u16,
+        reason: &str
+    ) -> ApiResult<TransactionKey> {
+        self.manager.send_refer_notify(dialog_id, status_code, reason).await
+    }
+
     /// Send UPDATE request for media modifications
     pub async fn send_update(
         &self,

@@ -264,16 +264,24 @@ impl TransactionIntegration for DialogManager {
                     let remote_tag = remote_tag.ok_or_else(|| {
                         crate::errors::DialogError::protocol_error("NOTIFY request requires remote tag in established dialog")
                     })?;
-                    
-                    let event_type = "dialog"; // This should come from dialog context
+
+                    // Get event type and subscription state from dialog (RFC 6665 compliance)
+                    let (event_type, subscription_state) = {
+                        let dialog_ref = self.get_dialog(&dialog_id)?;
+                        let event = dialog_ref.event_package.clone().unwrap_or_else(|| "dialog".to_string());
+                        let sub_state = dialog_ref.subscription_state.as_ref().map(|s| s.to_header_value());
+                        (event, sub_state)
+                    };
+
                     dialog_quick::notify_for_dialog(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
                         &template.remote_uri.to_string(),
                         &remote_tag,
-                        event_type,
+                        &event_type,
                         body_string,
+                        subscription_state,
                         template.cseq_number,
                         self.local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }

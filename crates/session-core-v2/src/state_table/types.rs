@@ -543,12 +543,24 @@ impl MasterStateTable {
             state: key.state,
             event: key.event.normalize(),
         };
-        
-        // First check for exact state match
+
+        // First check for exact role match
         if let Some(transition) = self.transitions.get(&normalized_key) {
             return Some(transition);
         }
-        
+
+        // If UAC or UAS, also check for Role::Both transitions
+        if key.role == Role::UAC || key.role == Role::UAS {
+            let both_key = StateKey {
+                role: Role::Both,
+                state: key.state,
+                event: key.event.normalize(),
+            };
+            if let Some(transition) = self.transitions.get(&both_key) {
+                return Some(transition);
+            }
+        }
+
         // If no exact match, check for wildcard transition
         let normalized_event = key.event.normalize();
         self.wildcard_transitions.get(&(key.role, normalized_event))
@@ -565,12 +577,24 @@ impl MasterStateTable {
             state: key.state,
             event: key.event.normalize(),
         };
-        
-        // Check exact match first
+
+        // Check exact role match first
         if self.transitions.contains_key(&normalized_key) {
             return true;
         }
-        
+
+        // If UAC or UAS, also check for Role::Both transitions
+        if key.role == Role::UAC || key.role == Role::UAS {
+            let both_key = StateKey {
+                role: Role::Both,
+                state: key.state,
+                event: key.event.normalize(),
+            };
+            if self.transitions.contains_key(&both_key) {
+                return true;
+            }
+        }
+
         // Check wildcard match
         let normalized_event = key.event.normalize();
         self.wildcard_transitions.contains_key(&(key.role, normalized_event))
