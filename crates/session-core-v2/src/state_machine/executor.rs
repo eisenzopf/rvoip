@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tracing::{info, warn, error, debug};
+use tracing::{info, error, debug};
 use crate::state_table::SessionId;
 
 use crate::{
@@ -188,7 +188,7 @@ impl StateMachine {
         let transition = match self.table.get(&key) {
             Some(t) => t,
             None => {
-                warn!("No transition defined for {:?}", key);
+                debug!("No transition defined for {:?}", key);
                 
                 // Record failed transition attempt in history
                 if session.history.is_some() {

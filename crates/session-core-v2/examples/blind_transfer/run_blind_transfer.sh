@@ -10,6 +10,9 @@ echo "🔄 Session-Core-V2 Blind Transfer Test"
 echo "======================================"
 echo ""
 
+# Force use of default state table (unset any custom table)
+unset RVOIP_STATE_TABLE
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -107,7 +110,7 @@ check_timeout() {
 }
 
 # Wait for all to complete with timeout
-TIMEOUT=40
+TIMEOUT=30
 echo -e "${BLUE}⏳ Waiting for test to complete (max ${TIMEOUT}s)...${NC}"
 echo ""
 

@@ -78,7 +78,7 @@ pub async fn execute_action(
                     .unwrap_or_else(|_| rvoip_sip_core::Response::new(rvoip_sip_core::StatusCode::Ok))
             } else {
                 // Fallback to a dummy response if none stored
-                tracing::warn!("No 200 OK response stored for ACK, using dummy response");
+                tracing::debug!("No 200 OK response stored for ACK, using dummy response");
                 rvoip_sip_core::Response::new(rvoip_sip_core::StatusCode::Ok)
             };
             dialog_adapter.send_ack(&session.session_id, &response).await?;
@@ -647,7 +647,7 @@ pub async fn execute_action(
 
             // Get the transfer target that was stored
             let transfer_target = session.transfer_target.clone();
-            let session_id = session.session_id.clone();
+            let _session_id = session.session_id.clone();
             let current_dialog_id = session.dialog_id.clone();
 
             if let Some(target) = transfer_target {
@@ -655,7 +655,7 @@ pub async fn execute_action(
 
                 // Spawn background task to coordinate the transfer
                 let dialog_adapter_clone = dialog_adapter.clone();
-                let session_store_clone = session_store.clone();
+                let _session_store_clone = session_store.clone();
 
                 tokio::spawn(async move {
                     // Small delay to let current action complete
