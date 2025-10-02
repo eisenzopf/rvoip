@@ -557,12 +557,27 @@ impl SessionCrossCrateEventHandler {
     }
     
     async fn handle_transfer_requested(&self, event_str: &str) -> Result<()> {
-        if let Some(session_id) = self.extract_session_id(event_str) {
+        if let Some(session_id_str) = self.extract_session_id(event_str) {
             let refer_to = self.extract_field(event_str, "refer_to: \"").unwrap_or_else(|| "unknown".to_string());
             let transfer_type = self.extract_field(event_str, "transfer_type: \"").unwrap_or_else(|| "blind".to_string());
-            
+
+            let session_id = SessionId(session_id_str.clone());
+
+            // RFC 3515 Compliance: Store transferor session ID for NOTIFY messages
+            // The transferor_session_id is Alice's own session ID because:
+            // - Bob sends REFER to Alice within their shared dialog
+            // - Alice must send NOTIFY back through the SAME dialog
+            // - DialogAdapter.send_notify() uses Alice's session to find the dialog
+            // - Therefore, transferor_session_id = Alice's session ID (the transferee)
+            if let Ok(mut session) = self.state_machine.store.get_session(&session_id).await {
+                session.transferor_session_id = Some(session_id.clone());
+                if let Err(e) = self.state_machine.store.update_session(session).await {
+                    error!("Failed to store transferor session ID: {}", e);
+                }
+            }
+
             if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
+                &session_id,
                 EventType::TransferRequested { refer_to, transfer_type }
             ).await {
                 error!("Failed to process TransferRequested: {}", e);

@@ -377,7 +377,9 @@ pub enum Action {
     // Blind transfer recipient actions
     AcceptTransferREFER,
     SendTransferNOTIFY,
+    SendTransferNOTIFYRinging,
     SendTransferNOTIFYSuccess,
+    SendTransferNOTIFYFailure,
     StoreTransferTarget,
     TerminateCurrentCall,
 

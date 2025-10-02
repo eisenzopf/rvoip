@@ -528,15 +528,111 @@ pub async fn execute_action(
         }
 
         Action::SendTransferNOTIFY => {
-            debug!("Sending NOTIFY for transfer progress");
-            // TODO: Send NOTIFY with sipfrag body: "SIP/2.0 100 Trying"
-            warn!("SendTransferNOTIFY not fully implemented yet");
+            debug!("Sending NOTIFY for transfer progress (100 Trying)");
+
+            // Get transferor session ID (who we need to notify)
+            let transferor_session_id = match &session.transferor_session_id {
+                Some(id) => id,
+                None => {
+                    warn!("No transferor session ID stored, cannot send NOTIFY");
+                    return Ok(());
+                }
+            };
+
+            // Create NOTIFY handler
+            let notify_handler = crate::transfer::notify::TransferNotifyHandler::new(
+                dialog_adapter.clone()
+            );
+
+            // Send "100 Trying" NOTIFY
+            if let Err(e) = notify_handler.notify_trying(transferor_session_id).await {
+                error!("Failed to send NOTIFY (100 Trying): {}", e);
+            } else {
+                info!("✅ Sent NOTIFY (100 Trying) to transferor session {}", transferor_session_id);
+            }
         }
 
         Action::SendTransferNOTIFYSuccess => {
-            debug!("Sending NOTIFY for transfer success");
-            // TODO: Send NOTIFY with sipfrag body: "SIP/2.0 200 OK"
-            warn!("SendTransferNOTIFYSuccess not fully implemented yet");
+            debug!("Sending NOTIFY for transfer success (200 OK)");
+
+            // Get transferor session ID (who we need to notify)
+            let transferor_session_id = match &session.transferor_session_id {
+                Some(id) => id,
+                None => {
+                    warn!("No transferor session ID stored, cannot send NOTIFY");
+                    return Ok(());
+                }
+            };
+
+            // Create NOTIFY handler
+            let notify_handler = crate::transfer::notify::TransferNotifyHandler::new(
+                dialog_adapter.clone()
+            );
+
+            // Send "200 OK" NOTIFY (transfer succeeded)
+            if let Err(e) = notify_handler.notify_success(transferor_session_id).await {
+                error!("Failed to send NOTIFY (200 OK): {}", e);
+            } else {
+                info!("✅ Sent NOTIFY (200 OK) to transferor session {} - transfer complete!", transferor_session_id);
+            }
+        }
+
+        Action::SendTransferNOTIFYRinging => {
+            debug!("Sending NOTIFY for transfer ringing (180 Ringing)");
+
+            // Get transferor session ID (who we need to notify)
+            let transferor_session_id = match &session.transferor_session_id {
+                Some(id) => id,
+                None => {
+                    warn!("No transferor session ID stored, cannot send NOTIFY");
+                    return Ok(());
+                }
+            };
+
+            // Create NOTIFY handler
+            let notify_handler = crate::transfer::notify::TransferNotifyHandler::new(
+                dialog_adapter.clone()
+            );
+
+            // Send "180 Ringing" NOTIFY
+            if let Err(e) = notify_handler.notify_ringing(transferor_session_id).await {
+                error!("Failed to send NOTIFY (180 Ringing): {}", e);
+            } else {
+                info!("✅ Sent NOTIFY (180 Ringing) to transferor session {}", transferor_session_id);
+            }
+        }
+
+        Action::SendTransferNOTIFYFailure => {
+            debug!("Sending NOTIFY for transfer failure");
+
+            // Get transferor session ID (who we need to notify)
+            let transferor_session_id = match &session.transferor_session_id {
+                Some(id) => id,
+                None => {
+                    warn!("No transferor session ID stored, cannot send NOTIFY");
+                    return Ok(());
+                }
+            };
+
+            // Determine failure reason - default to 487 Request Terminated
+            let status_code = 487;
+            let reason = "Request Terminated";
+
+            // Create NOTIFY handler
+            let notify_handler = crate::transfer::notify::TransferNotifyHandler::new(
+                dialog_adapter.clone()
+            );
+
+            // Send failure NOTIFY
+            if let Err(e) = notify_handler.notify_failure(
+                transferor_session_id,
+                status_code,
+                reason
+            ).await {
+                error!("Failed to send NOTIFY (failure): {}", e);
+            } else {
+                info!("✅ Sent NOTIFY ({} {}) to transferor - transfer failed", status_code, reason);
+            }
         }
 
         Action::StoreTransferTarget => {
