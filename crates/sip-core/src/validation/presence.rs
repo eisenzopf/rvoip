@@ -368,7 +368,7 @@ mod tests {
         let mut request = Request::new(Method::Notify, "sip:alice@192.168.1.10".parse().unwrap());
         request.headers.push(TypedHeader::Event(Event::new(EventType::Token("presence".to_string()))));
         request.headers.push(TypedHeader::SubscriptionState(
-            SubscriptionState::active(3599).to_string()
+            SubscriptionState::active(3599)
         ));
         
         // NOTIFY must be in a dialog, so To must have a tag
@@ -394,7 +394,7 @@ mod tests {
         let mut request = Request::new(Method::Notify, "sip:alice@192.168.1.10".parse().unwrap());
         request.headers.push(TypedHeader::Event(Event::new(EventType::Token("presence".to_string()))));
         request.headers.push(TypedHeader::SubscriptionState(
-            SubscriptionState::active(3599).to_string()
+            SubscriptionState::active(3599)
         ));
         
         // To without tag means no dialog

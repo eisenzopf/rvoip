@@ -16,6 +16,8 @@
 - **SDP Integration**: Full Session Description Protocol support including WebRTC extensions
 - **Authentication**: Complete digest authentication with various challenge-response schemes
 - **SIMPLE Presence**: Complete RFC 3903/6665 implementation for presence services
+- **Event Notifications (NOTIFY/SUBSCRIBE)**: Full RFC 6665 event framework with subscription lifecycle
+- **Call Transfer (REFER)**: RFC 3515 blind transfer with NOTIFY progress reporting
 - **Multipart Bodies**: MIME multipart message handling for complex content scenarios
 
 ### ❌ **Delegated Responsibilities**
@@ -54,15 +56,16 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
 
 #### **Complete RFC 3261 SIP Implementation**
 - ✅ **Message Parsing**: High-performance parser with strict and lenient modes
-  - ✅ Request parsing (INVITE, REGISTER, BYE, CANCEL, ACK, OPTIONS, etc.)
+  - ✅ Request parsing (INVITE, REGISTER, BYE, CANCEL, ACK, OPTIONS, NOTIFY, SUBSCRIBE, REFER, PUBLISH, etc.)
   - ✅ Response parsing (1xx-6xx status codes with custom reason phrases)
-  - ✅ Header parsing with 60+ standard headers and custom header support
-  - ✅ Body parsing including SDP and multipart MIME content
+  - ✅ Header parsing with 65+ standard headers and custom header support
+  - ✅ Body parsing including SDP, PIDF (presence), and multipart MIME content
 - ✅ **Message Construction**: Fluent builder patterns and declarative macros
   - ✅ Type-safe header construction with automatic validation
   - ✅ URI building with comprehensive parameter support
   - ✅ SDP generation with WebRTC attribute support
   - ✅ Multipart body assembly for complex content scenarios
+  - ✅ Event notification message builders (NOTIFY, SUBSCRIBE)
 
 #### **Comprehensive Header Support (65+ Headers)**
 - ✅ **Core SIP Headers (RFC 3261)**: From, To, Via, Call-ID, CSeq, Contact, Route, etc.
@@ -84,17 +87,31 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
   - ✅ RFC 3903 presence headers (SIP-ETag, SIP-If-Match)
   - ✅ RFC 6665 enhanced event headers (Allow-Events, Min-Expires)
 
-#### **SIMPLE Presence Support (RFC 3903, RFC 6665)**
+#### **Event Notifications (RFC 3265, RFC 6665) - NOTIFY/SUBSCRIBE**
+- ✅ **NOTIFY Method (RFC 3265/6665)**: Event notification delivery
+  - ✅ Subscription-State header (active, pending, terminated with reason)
+  - ✅ Event header with package and ID parameter support
+  - ✅ Content-Type support for event payloads (PIDF, sipfrag, etc.)
+  - ✅ Full subscription lifecycle management (active → terminated)
+  - ✅ Termination reasons (deactivated, probation, rejected, timeout, giveup, noresource)
+- ✅ **SUBSCRIBE Method (RFC 6665)**: Event subscription framework
+  - ✅ Event package support (presence, message-summary, refer, dialog, etc.)
+  - ✅ Expires header for subscription duration
+  - ✅ Allow-Events header for capability advertisement
+  - ✅ Min-Expires header for 423 Interval Too Brief responses
+  - ✅ Accept header for payload format negotiation
+- ✅ **REFER Method (RFC 3515)**: Call transfer with implicit subscription
+  - ✅ Refer-To header for transfer target specification
+  - ✅ Referred-By header for transferor identification
+  - ✅ Automatic NOTIFY subscription created by REFER
+  - ✅ message/sipfrag content type for transfer progress (100 Trying, 180 Ringing, 200 OK)
+
+#### **SIMPLE Presence Support (RFC 3903)**
 - ✅ **PUBLISH Method (RFC 3903)**: Event state publication for presence
   - ✅ Initial, refresh, and remove publication operations
   - ✅ SIP-ETag and SIP-If-Match headers for conditional requests
   - ✅ Event header with package and ID parameter support
   - ✅ Automatic expiration handling with Expires header
-- ✅ **SUBSCRIBE/NOTIFY (RFC 6665)**: Event notification framework
-  - ✅ Event package support with "presence" as primary use case
-  - ✅ Subscription-State header for subscription lifecycle
-  - ✅ Allow-Events header for capability advertisement
-  - ✅ Min-Expires header for 423 Interval Too Brief responses
 - ✅ **PIDF Support (RFC 3863)**: Presence Information Data Format
   - ✅ Content-Type helpers for application/pidf+xml
   - ✅ Basic PIDF document structure and generation
@@ -154,11 +171,25 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
   - ✅ Builder guide with comprehensive header examples
   - ✅ SDP guide with WebRTC and traditional VoIP scenarios
 
-#### **Presence Message Builders**
-- ✅ **Convenience Methods**: Type-safe builders for presence operations
-  - ✅ `publish(uri, event)` - Create PUBLISH requests with Event header
+#### **Event Notification Message Builders**
+- ✅ **NOTIFY Builders**: Type-safe NOTIFY message construction
+  - ✅ `notify(uri, event, subscription_state)` - Create NOTIFY with subscription state
+  - ✅ Subscription-State header with active, pending, terminated states
+  - ✅ Termination reason support (deactivated, probation, rejected, timeout, giveup, noresource)
+  - ✅ Content-Type integration for event payloads (PIDF, sipfrag, etc.)
+  - ✅ Event header with package name and optional ID parameter
+- ✅ **SUBSCRIBE Builders**: Type-safe SUBSCRIBE message construction
   - ✅ `subscribe(uri, event, expires)` - Create SUBSCRIBE with expiration
-  - ✅ `notify(uri, event, state)` - Create NOTIFY with subscription state
+  - ✅ Event package specification (presence, refer, message-summary, etc.)
+  - ✅ Expires header for subscription duration
+  - ✅ Accept header for payload format negotiation
+- ✅ **REFER Builders**: Type-safe call transfer message construction
+  - ✅ `refer(uri, refer_to)` - Create REFER for blind transfer
+  - ✅ Refer-To header for transfer target
+  - ✅ Referred-By header for transferor identification
+  - ✅ Implicit subscription creation (automatic NOTIFY expected)
+- ✅ **Presence Builders**: Type-safe builders for presence operations
+  - ✅ `publish(uri, event)` - Create PUBLISH requests with Event header
   - ✅ `unauthorized()`, `forbidden()`, `interval_too_brief()`, `bad_event()` - Error responses
 - ✅ **Bearer Authentication**: Modern OAuth2 support
   - ✅ `authorization_bearer(token)` - Add Bearer token to requests
@@ -184,6 +215,60 @@ The SIP-Core sits at the protocol foundation layer, providing the building block
 - 🚧 **Streaming Parser**: Support for partial message parsing in network scenarios
 
 ## Usage Examples
+
+### Event Notifications - NOTIFY/SUBSCRIBE
+
+#### Creating NOTIFY Messages for Transfer Progress (RFC 3515)
+```rust,no_run
+use rvoip_sip_core::builder::SimpleRequestBuilder;
+
+// Create a NOTIFY with transfer progress (100 Trying)
+let notify_request = SimpleRequestBuilder::notify(
+    "sip:alice@192.168.1.10:5060",
+    "refer",
+    "active;expires=59"  // Subscription-State
+)
+.unwrap()
+.from("Bob", "sip:bob@example.com", Some("tag789"))
+.to("Alice", "sip:alice@example.com", Some("tag456"))
+.call_id("refer-001")
+.cseq(1)
+.via("192.168.1.20:5060", "UDP", Some("branch-def"))
+.content_type("message/sipfrag;version=2.0")
+.body("SIP/2.0 100 Trying\r\n")
+.build();
+
+// NOTIFY with transfer success (200 OK)
+let notify_success = SimpleRequestBuilder::notify(
+    "sip:alice@192.168.1.10:5060",
+    "refer",
+    "terminated;reason=noresource"  // Subscription terminated
+)
+.unwrap()
+.from("Bob", "sip:bob@example.com", Some("tag789"))
+.to("Alice", "sip:alice@example.com", Some("tag456"))
+.call_id("refer-001")
+.cseq(2)
+.via("192.168.1.20:5060", "UDP", Some("branch-ghi"))
+.content_type("message/sipfrag;version=2.0")
+.body("SIP/2.0 200 OK\r\n")
+.build();
+```
+
+#### Creating SUBSCRIBE Requests
+```rust,no_run
+// Create a SUBSCRIBE request for dialog events
+let subscribe_request = SimpleRequestBuilder::subscribe("sip:bob@example.com", "dialog", 3600)
+    .unwrap()
+    .from("Alice", "sip:alice@example.com", Some("tag123"))
+    .to("Bob", "sip:bob@example.com", None)
+    .call_id("subscribe-dialog-001")
+    .cseq(1)
+    .via("192.168.1.10:5060", "UDP", Some("branch-abc"))
+    .contact("sip:alice@192.168.1.10:5060", None)
+    .accept("application/dialog-info+xml")
+    .build();
+```
 
 ### SIMPLE Presence Operations
 
@@ -1020,16 +1105,24 @@ match parse_message(&data) {
 ### Core RFCs Implemented
 - **RFC 3261**: SIP: Session Initiation Protocol - Complete implementation
 - **RFC 8866**: SDP: Session Description Protocol - Full support with WebRTC extensions
-- **RFC 3265**: SIP-Specific Event Notification - Basic framework (updated by RFC 6665)
+- **RFC 3265**: SIP-Specific Event Notification - NOTIFY/SUBSCRIBE framework (updated by RFC 6665)
+- **RFC 6665**: SIP-Specific Event Notification - Complete SUBSCRIBE/NOTIFY implementation with full subscription lifecycle
+- **RFC 3515**: The Session Initiation Protocol (SIP) Refer Method - Complete REFER with implicit NOTIFY subscription
 - **RFC 3327**: SIP Extension Header Field for Registering Non-Adjacent Contacts - Path header
-- **RFC 3515**: The Session Initiation Protocol (SIP) Refer Method - Refer-To/Referred-By headers
 - **RFC 4028**: Session Timers in the Session Initiation Protocol (SIP) - Session-Expires/Min-SE
 
 ### Presence and Event RFCs
 - **RFC 3903**: SIP Extension for Event State Publication - PUBLISH method
-- **RFC 6665**: SIP-Specific Event Notification - Complete SUBSCRIBE/NOTIFY implementation
 - **RFC 3863**: Presence Information Data Format (PIDF) - Basic document support
 - **RFC 8898**: Third-Party Token-Based Authentication and Authorization for SIP - Bearer tokens
+
+### NOTIFY/SUBSCRIBE Implementation Status
+- ✅ **NOTIFY Method**: Full RFC 6665 compliance with Subscription-State header
+- ✅ **SUBSCRIBE Method**: Complete subscription framework with event packages
+- ✅ **Subscription-State Header**: All states (active, pending, terminated) with termination reasons
+- ✅ **Event Header**: Event package support (refer, presence, message-summary, dialog, etc.)
+- ✅ **REFER Implicit Subscriptions**: RFC 3515 blind transfer with automatic NOTIFY subscription
+- ✅ **Content-Type Support**: message/sipfrag for transfer progress, application/pidf+xml for presence
 
 ### Authentication RFCs
 - **RFC 2617**: HTTP Authentication: Basic and Digest Access Authentication - Digest auth

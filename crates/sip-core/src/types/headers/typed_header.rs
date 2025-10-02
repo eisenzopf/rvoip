@@ -57,6 +57,7 @@ use crate::types::error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList};
 use crate::types::referred_by::ReferredBy;
 use crate::types::session_expires::SessionExpires;
 use crate::types::event::{Event as EventTypeData}; // Alias to avoid clash if Event struct is also used locally
+use crate::types::subscription_state::SubscriptionState as SubscriptionStateType; // Full type from types::subscription_state
 use crate::types::MimeVersion;
 use crate::types::min_expires::MinExpires;
 use crate::types::min_se::MinSE;
@@ -137,7 +138,7 @@ pub enum TypedHeader {
     
     // Add Event and SubscriptionState headers
     Event(EventTypeData), // ADDED Event variant, using alias
-    SubscriptionState(String), // Placeholder for SubscriptionState header type
+    SubscriptionState(SubscriptionStateType), // Proper type from types::subscription_state
 
     // Placeholder Types (replace with actual types from types/* where available)
     // These might still need Serialize/Deserialize if not using a types::* struct
@@ -1157,6 +1158,12 @@ impl TryFrom<Header> for TypedHeader {
                 let value_str = std::str::from_utf8(value_bytes)
                     .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in Event header value: {}", e)))?;
                 Ok(TypedHeader::Event(EventTypeData::from_str(value_str)?))
+            },
+            HeaderName::SubscriptionState => {
+                // Parse raw bytes to SubscriptionState using FromStr implementation
+                let value_str = std::str::from_utf8(value_bytes)
+                    .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in Subscription-State header value: {}", e)))?;
+                Ok(TypedHeader::SubscriptionState(SubscriptionStateType::from_str(value_str)?))
             },
             HeaderName::MinSE => {
                 let value_str = std::str::from_utf8(value_bytes)
