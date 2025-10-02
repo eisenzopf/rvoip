@@ -76,6 +76,10 @@ pub struct SessionState {
     pub transfer_state: TransferState, // Current transfer state
     pub transfer_notify_dialog: Option<DialogId>, // Dialog to send NOTIFY messages to (for blind transfer)
 
+    // Transfer coordination fields
+    pub replaces_header: Option<String>, // Replaces header for attended transfer
+    pub is_transfer_call: bool, // Flag indicating this session is a result of a transfer
+
     // Timestamps
     pub created_at: Instant,
     
@@ -113,6 +117,8 @@ impl SessionState {
             original_session_id: None,
             transfer_state: TransferState::None,
             transfer_notify_dialog: None,
+            replaces_header: None,
+            is_transfer_call: false,
             created_at: now,
             history: None,
         }
