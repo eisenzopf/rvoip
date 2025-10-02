@@ -26,6 +26,7 @@ pub mod errors;
 // New core infrastructure
 pub mod session_registry;
 pub mod types;
+pub mod transfer;
 
 
 // Re-export main types from API
@@ -44,6 +45,9 @@ pub use types::CallState;
 
 // Re-export error types
 pub use errors::{Result, SessionError};
+
+// Re-export transfer types
+pub use transfer::{TransferCoordinator, TransferOptions, TransferResult, TransferProgress};
 
 // Re-export internal types for advanced usage
 pub use session_store::{

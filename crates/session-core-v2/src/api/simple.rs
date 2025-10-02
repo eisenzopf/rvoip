@@ -54,7 +54,11 @@ impl SimplePeer {
                 }
             }
         });
-        
+
+        // Enable automatic blind transfer handling
+        // This makes transfers "just work" for SimplePeer users
+        coordinator.enable_auto_transfer();
+
         Ok(Self {
             coordinator,
             incoming_rx,
@@ -142,9 +146,17 @@ impl SimplePeer {
         self.coordinator.send_dtmf(call_id, digit).await
     }
     
-    /// Blind transfer
+    /// Initiate a blind transfer (transferor side - Bob)
+    /// This sends REFER to the peer, asking them to call the target
     pub async fn transfer(&self, call_id: &CallId, target: &str) -> Result<()> {
         self.coordinator.blind_transfer(call_id, target).await
+    }
+
+    /// Complete a blind transfer (transferee side - Alice)
+    /// Call this when you receive a transfer request to actually make the call
+    /// Returns the new call ID to the transfer target
+    pub async fn complete_transfer(&self, call_id: &CallId, target: &str) -> Result<CallId> {
+        self.coordinator.complete_blind_transfer(call_id, target).await
     }
 
     /// Start attended transfer (returns consultation call ID)

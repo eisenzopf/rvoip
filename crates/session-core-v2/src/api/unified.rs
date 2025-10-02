@@ -58,16 +58,19 @@ impl Default for Config {
 pub struct UnifiedCoordinator {
     /// State machine helpers
     helpers: Arc<StateMachineHelpers>,
-    
+
     /// Media adapter for audio operations
     media_adapter: Arc<MediaAdapter>,
-    
+
     /// Dialog adapter for SIP operations
     dialog_adapter: Arc<DialogAdapter>,
-    
+
+    /// Transfer coordinator for blind/attended/managed transfers
+    transfer_coordinator: Arc<crate::transfer::TransferCoordinator>,
+
     /// Incoming call receiver
     incoming_rx: Arc<RwLock<mpsc::Receiver<IncomingCallInfo>>>,
-    
+
     /// Configuration
     config: Config,
 }
@@ -118,14 +121,22 @@ impl UnifiedCoordinator {
         
         // Create helpers
         let helpers = Arc::new(StateMachineHelpers::new(state_machine.clone()));
-        
+
+        // Create transfer coordinator
+        let transfer_coordinator = Arc::new(crate::transfer::TransferCoordinator::new(
+            store.clone(),
+            helpers.clone(),
+            dialog_adapter.clone(),
+        ));
+
         // Create incoming call channel
         let (incoming_tx, incoming_rx) = mpsc::channel(100);
-        
+
         let coordinator = Arc::new(Self {
             helpers,
             media_adapter: media_adapter.clone(),
             dialog_adapter: dialog_adapter.clone(),
+            transfer_coordinator,
             incoming_rx: Arc::new(RwLock::new(incoming_rx)),
             config,
         });
@@ -216,7 +227,8 @@ impl UnifiedCoordinator {
     
     // ===== Transfer Operations =====
     
-    /// Blind transfer
+    /// Blind transfer - initiates REFER to current session
+    /// This will trigger TransferRequested event when REFER is received
     pub async fn blind_transfer(&self, session_id: &SessionId, target: &str) -> Result<()> {
         self.helpers.state_machine.process_event(
             session_id,
@@ -224,7 +236,39 @@ impl UnifiedCoordinator {
         ).await?;
         Ok(())
     }
-    
+
+    /// Complete a blind transfer (called when TransferRequested event is received)
+    /// This is the helper method that applications can call to complete the transfer
+    ///
+    /// # Arguments
+    /// * `transferee_session_id` - Session receiving the REFER (Alice)
+    /// * `refer_to` - Target to transfer to (Charlie's URI)
+    ///
+    /// # Returns
+    /// New session ID for the call to transfer target
+    pub async fn complete_blind_transfer(
+        &self,
+        transferee_session_id: &SessionId,
+        refer_to: &str,
+    ) -> Result<SessionId> {
+        use crate::transfer::TransferOptions;
+
+        // Use transfer coordinator with blind transfer options
+        let options = TransferOptions::blind();
+
+        let result = self
+            .transfer_coordinator
+            .complete_transfer(transferee_session_id, refer_to, options)
+            .await
+            .map_err(|e| SessionError::InternalError(e))?;
+
+        if result.success {
+            Ok(result.new_session_id)
+        } else {
+            Err(SessionError::InternalError(result.status_message))
+        }
+    }
+
     /// Start attended transfer - puts current call on hold and creates consultation call
     /// Returns the consultation session ID
     pub async fn start_attended_transfer(&self, session_id: &SessionId, target: &str) -> Result<SessionId> {
@@ -343,12 +387,87 @@ impl UnifiedCoordinator {
     }
     
     // ===== Incoming Call Handling =====
-    
+
     /// Get the next incoming call
     pub async fn get_incoming_call(&self) -> Option<IncomingCallInfo> {
         self.incoming_rx.write().await.recv().await
     }
-    
+
+    // ===== Auto-Transfer Handling =====
+
+    /// Enable automatic blind transfer handling
+    /// When enabled, TransferRequested events will automatically trigger complete_blind_transfer()
+    /// This is used by SimplePeer to make transfers "just work"
+    ///
+    /// Follows the established pattern from SessionCrossCrateEventHandler using string parsing
+    pub fn enable_auto_transfer(self: &Arc<Self>) {
+        let coordinator = self.clone();
+
+        tokio::spawn(async move {
+            tracing::info!("🔄 Auto-transfer handler started");
+
+            // Subscribe to dialog-to-session events (following SessionCrossCrateEventHandler pattern)
+            let global_coordinator = rvoip_infra_common::events::global_coordinator().await;
+            let mut rx = match global_coordinator.subscribe("dialog_to_session").await {
+                Ok(rx) => rx,
+                Err(e) => {
+                    tracing::error!("Failed to subscribe to dialog_to_session events: {}", e);
+                    return;
+                }
+            };
+
+            loop {
+                if let Some(event) = rx.recv().await {
+                    // Use string parsing to detect TransferRequested events
+                    // This follows the established pattern per SessionCrossCrateEventHandler line 140
+                    let event_str = format!("{:?}", event);
+
+                    if event_str.contains("TransferRequested") {
+                        // Extract fields using the same helper pattern (SessionCrossCrateEventHandler lines 213-221)
+                        let session_id = Self::extract_field(&event_str, "session_id: \"");
+                        let refer_to = Self::extract_field(&event_str, "refer_to: \"");
+
+                        if let (Some(session_id_str), Some(refer_to_uri)) = (session_id, refer_to) {
+                            tracing::info!(
+                                "🔄 [Auto-Transfer] Received TransferRequested for session {}: {}",
+                                session_id_str, refer_to_uri
+                            );
+
+                            // Automatically complete the blind transfer
+                            let session_id_obj = SessionId(session_id_str);
+                            match coordinator.complete_blind_transfer(&session_id_obj, &refer_to_uri).await {
+                                Ok(new_session_id) => {
+                                    tracing::info!(
+                                        "✅ [Auto-Transfer] Transfer completed! New session: {}",
+                                        new_session_id
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        "❌ [Auto-Transfer] Transfer failed: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    /// Helper to extract field values from event debug strings
+    /// Follows the exact same pattern as SessionCrossCrateEventHandler::extract_field() (lines 213-221)
+    fn extract_field(event_str: &str, field_prefix: &str) -> Option<String> {
+        if let Some(start) = event_str.find(field_prefix) {
+            let start = start + field_prefix.len();
+            if let Some(end) = event_str[start..].find('"') {
+                return Some(event_str[start..start+end].to_string());
+            }
+        }
+        None
+    }
+
     // ===== Internal Helpers =====
     
     async fn create_dialog_api(config: &Config, global_coordinator: Arc<GlobalEventCoordinator>) -> Result<Arc<rvoip_dialog_core::api::unified::UnifiedDialogApi>> {
