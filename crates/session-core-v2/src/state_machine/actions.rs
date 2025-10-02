@@ -46,6 +46,11 @@ pub async fn execute_action(
         }
         Action::SendSIPResponse(code, _reason) => {
             dialog_adapter.send_response(&session.session_id, *code, session.local_sdp.clone()).await?;
+            // RFC 3261: Dialog is established when UAS sends 200 OK to INVITE
+            if *code == 200 {
+                session.dialog_established = true;
+                info!("Dialog established (UAS sent 200 OK) for session {}", session.session_id);
+            }
         }
         Action::SendINVITE => {
             info!("Action::SendINVITE for session {}", session.session_id);
@@ -71,17 +76,11 @@ pub async fn execute_action(
             }
         }
         Action::SendACK => {
-            // Use the stored 200 OK response if available
-            let response = if let Some(serialized) = &session.last_200_ok {
-                // Deserialize the stored response
-                bincode::deserialize::<rvoip_sip_core::Response>(serialized)
-                    .unwrap_or_else(|_| rvoip_sip_core::Response::new(rvoip_sip_core::StatusCode::Ok))
-            } else {
-                // Fallback to a dummy response if none stored
-                tracing::debug!("No 200 OK response stored for ACK, using dummy response");
-                rvoip_sip_core::Response::new(rvoip_sip_core::StatusCode::Ok)
-            };
-            dialog_adapter.send_ack(&session.session_id, &response).await?;
+            // NO-OP for SIP: dialog-core sends ACK automatically per RFC 3261
+            // However, we still set dialog_established = true here because for UAC,
+            // the dialog is considered established when ACK is sent
+            session.dialog_established = true;
+            info!("SendACK action: dialog-core handles ACK sending, dialog marked as established for UAC session {}", session.session_id);
         }
         Action::SendBYE => {
             dialog_adapter.send_bye_session(&session.session_id).await?;
@@ -128,6 +127,9 @@ pub async fn execute_action(
         // Media actions
         Action::StartMediaSession => {
             media_adapter.start_session(&session.session_id).await?;
+            // Mark media as ready after successfully starting
+            session.media_session_ready = true;
+            info!("Media session started and marked as ready for session {}", session.session_id);
         }
         Action::StopMediaSession => {
             media_adapter.stop_session(&session.session_id).await?;
@@ -137,7 +139,7 @@ pub async fn execute_action(
                 let config = media_adapter
                     .negotiate_sdp_as_uac(&session.session_id, remote_sdp)
                     .await?;
-                
+
                 // Convert to session_store NegotiatedConfig
                 let session_config = crate::session_store::state::NegotiatedConfig {
                     local_addr: config.local_addr,
@@ -147,6 +149,8 @@ pub async fn execute_action(
                     channels: 1,
                 };
                 session.negotiated_config = Some(session_config);
+                session.sdp_negotiated = true;
+                info!("SDP negotiated as UAC for session {}", session.session_id);
             }
         }
         Action::NegotiateSDPAsUAS => {
@@ -154,7 +158,7 @@ pub async fn execute_action(
                 let (local_sdp, config) = media_adapter
                     .negotiate_sdp_as_uas(&session.session_id, remote_sdp)
                     .await?;
-                
+
                 // Convert to session_store NegotiatedConfig
                 let session_config = crate::session_store::state::NegotiatedConfig {
                     local_addr: config.local_addr,
@@ -165,6 +169,8 @@ pub async fn execute_action(
                 };
                 session.local_sdp = Some(local_sdp);
                 session.negotiated_config = Some(session_config);
+                session.sdp_negotiated = true;
+                info!("SDP negotiated as UAS for session {}", session.session_id);
             }
         }
         

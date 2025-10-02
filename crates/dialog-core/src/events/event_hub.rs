@@ -283,6 +283,31 @@ impl DialogEventHub {
                 }
             }
 
+            // ACK events for state machine transitions
+            SessionCoordinationEvent::AckSent { dialog_id, .. } => {
+                // AckSent is primarily for UAC - session layer may need to know ACK was sent
+                // but typically this isn't needed for state transitions
+                // We'll pass it through in case session-core-v2 wants to track it
+                debug!("AckSent event for dialog {}, converting to cross-crate format", dialog_id);
+                None // For now, UAC doesn't need this event
+            }
+
+            SessionCoordinationEvent::AckReceived { dialog_id, negotiated_sdp, .. } => {
+                // AckReceived is critical for UAS - dialog-core received ACK, now session must transition
+                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
+                    info!("Converting AckReceived to cross-crate event for session {}", session_id);
+                    Some(RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::AckReceived {
+                            session_id,
+                            sdp: negotiated_sdp,
+                        }
+                    ))
+                } else {
+                    warn!("No session ID found for dialog {:?} in AckReceived", dialog_id);
+                    None
+                }
+            }
+
             // DTMF events would be handled separately if implemented
             // SessionCoordinationEvent doesn't have DtmfReceived yet
 

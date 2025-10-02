@@ -3,7 +3,7 @@
 use crate::adapters::dialog_adapter::DialogAdapter;
 use crate::session_store::SessionStore;
 use crate::state_machine::StateMachineHelpers;
-use crate::state_table::types::{SessionId, Role};
+use crate::state_table::types::{SessionId, Role, EventType};
 use crate::transfer::notify::TransferNotifyHandler;
 use crate::transfer::types::{TransferOptions, TransferResult};
 use crate::types::CallState;
@@ -95,36 +95,6 @@ impl TransferCoordinator {
         // We need to propagate it to the new transfer call session
         let transferor_session_id = transferee_session.transferor_session_id.clone();
 
-        // Update new session with transfer metadata
-        let mut new_session = self.session_store.get_session(&new_session_id).await
-            .map_err(|e| format!("Failed to get new session: {}", e))?;
-
-        new_session.is_transfer_call = true;
-        new_session.transfer_target = Some(refer_to.to_string());
-        new_session.transferor_session_id = transferor_session_id; // Propagate Bob's session ID
-
-        if let Some(ref replaces) = options.replaces_header {
-            new_session.replaces_header = Some(replaces.clone());
-        }
-
-        self.session_store.update_session(new_session).await
-            .map_err(|e| format!("Failed to update transfer session metadata: {}", e))?;
-
-        info!("✅ Configured new session {} as transfer call with transferor tracking", new_session_id);
-
-        // Step 3: Send NOTIFY "100 Trying" to transferor
-        if options.send_notify {
-            if let Some(ref transferor_id) = options.transferor_session_id {
-                if let Err(e) = self.notify_handler.notify_trying(transferor_id).await {
-                    warn!("Failed to send trying NOTIFY: {}", e);
-                }
-            }
-        }
-
-        // Step 4: Initiate call to transfer target using existing state machine helpers
-        // This will trigger the normal MakeCall flow: Idle → Initiating → Active
-        debug!("Initiating call to transfer target {}", refer_to);
-
         // Get the local URI from the transferee session to use as "from"
         let from_uri = match self.session_store.get_session(transferee_session_id).await {
             Ok(transferee_session) => {
@@ -136,30 +106,55 @@ impl TransferCoordinator {
             Err(e) => {
                 error!("Failed to get transferee session: {}", e);
                 return Ok(TransferResult::failure(
-                    new_session_id,
+                    new_session_id.clone(),
                     format!("Failed to get transferee session: {}", e),
                     Some(500),
                 ));
             }
         };
 
-        // Use state machine helpers to make the call (same as normal outgoing call)
-        // TODO: For attended transfer, we need to add Replaces header support in make_call
-        match self.state_machine_helpers.make_call(&from_uri, refer_to).await {
-            Ok(call_session_id) => {
-                info!(
-                    "✅ Initiated transfer call to {}, session: {}",
-                    refer_to, call_session_id
-                );
+        // Update new session with transfer metadata AND URIs for the call
+        let mut new_session = self.session_store.get_session(&new_session_id).await
+            .map_err(|e| format!("Failed to get new session: {}", e))?;
 
-                // The returned session ID should match our new_session_id
-                // If not, we have a problem
-                if call_session_id != new_session_id {
-                    warn!(
-                        "Session ID mismatch: expected {}, got {}",
-                        new_session_id, call_session_id
-                    );
+        new_session.is_transfer_call = true;
+        new_session.transfer_target = Some(refer_to.to_string());
+        new_session.transferor_session_id = transferor_session_id; // Propagate Bob's session ID
+        new_session.local_uri = Some(from_uri.clone());
+        new_session.remote_uri = Some(refer_to.to_string());
+
+        if let Some(ref replaces) = options.replaces_header {
+            new_session.replaces_header = Some(replaces.clone());
+        }
+
+        self.session_store.update_session(new_session).await
+            .map_err(|e| format!("Failed to update transfer session metadata: {}", e))?;
+
+        info!("✅ Configured new session {} as transfer call with from={} to={}", new_session_id, from_uri, refer_to);
+
+        // Step 3: Send NOTIFY "100 Trying" to transferor
+        if options.send_notify {
+            if let Some(ref transferor_id) = options.transferor_session_id {
+                if let Err(e) = self.notify_handler.notify_trying(transferor_id).await {
+                    warn!("Failed to send trying NOTIFY: {}", e);
                 }
+            }
+        }
+
+        // Step 4: Initiate call to transfer target by processing MakeCall event on the existing session
+        // This will trigger the normal MakeCall flow: Idle → Initiating → Active
+        info!("📞 Initiating call to transfer target {} from existing session {}", refer_to, new_session_id);
+
+        // Process MakeCall event on the pre-created session (don't create a new one)
+        match self.state_machine_helpers.state_machine.process_event(
+            &new_session_id,
+            EventType::MakeCall { target: refer_to.to_string() },
+        ).await {
+            Ok(_result) => {
+                info!(
+                    "✅ Initiated transfer call to {} on session {}",
+                    refer_to, new_session_id
+                );
             }
             Err(e) => {
                 error!("Failed to initiate transfer call: {}", e);
@@ -254,19 +249,13 @@ impl TransferCoordinator {
             }
         }
 
-        // Step 6: Optionally terminate old call
-        if options.terminate_old_call {
-            info!("📴 Terminating old call for session {}", transferee_session_id);
+        // Step 6: For blind transfer, transferee (Alice) does NOT hang up
+        // The transferor (Bob) is responsible for hanging up per RFC 5589
+        // Alice keeps the dialog alive to send NOTIFY messages
+        info!("🔗 Transferee keeps dialog alive for NOTIFY messages (RFC 5589)");
 
-            if let Err(e) = self.state_machine_helpers.hangup(transferee_session_id).await {
-                error!("Failed to hang up old call: {}", e);
-                // Don't fail the transfer if hangup fails - the new call is what matters
-            } else {
-                info!("✅ Hung up old call");
-            }
-        } else {
-            info!("🔗 Keeping old call alive (managed transfer mode)");
-        }
+        // Note: The transferor (Bob) should call hangup() after sending REFER
+        // This is controlled by the application logic in peer2_transferor.rs
 
         // Get dialog ID for result
         let new_dialog_id = self

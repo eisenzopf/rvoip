@@ -162,6 +162,12 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                     self.handle_reinvite_received(&event_str).await?;
                 } else if event_str.contains("TransferRequested") {
                     self.handle_transfer_requested(&event_str).await?;
+                } else if event_str.contains("AckSent") {
+                    self.handle_ack_sent(&event_str).await?;
+                } else if event_str.contains("AckReceived") {
+                    self.handle_ack_received(&event_str).await?;
+                } else {
+                    debug!("Unhandled dialog-to-session event: {}", event_str);
                 }
             }
             "media_to_session" => {
@@ -585,7 +591,69 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
+    async fn handle_ack_sent(&self, event_str: &str) -> Result<()> {
+        // Extract dialog_id from the event
+        let dialog_id_str = self.extract_field(event_str, "dialog_id: DialogId(")
+            .or_else(|| self.extract_field(event_str, "dialog_id: \""))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Parse the dialog ID to look up the session
+        if let Ok(dialog_uuid) = uuid::Uuid::parse_str(&dialog_id_str.trim_end_matches(')')) {
+            let rvoip_dialog_id = rvoip_dialog_core::DialogId(dialog_uuid);
+
+            // Find the session ID from dialog ID
+            if let Some(entry) = self.dialog_adapter.dialog_to_session.get(&rvoip_dialog_id) {
+                let session_id = entry.value().clone();
+                drop(entry);
+
+                info!("ACK was sent by dialog-core for dialog {}, triggering DialogACK event for session {}", dialog_id_str, session_id);
+
+                // Trigger DialogACK event in state machine
+                // This allows UAS to transition from "Answering" -> "Active"
+                if let Err(e) = self.state_machine.process_event(
+                    &session_id,
+                    EventType::DialogACK,
+                ).await {
+                    error!("Failed to process DialogACK event after AckSent: {}", e);
+                }
+            } else {
+                warn!("Received AckSent for unknown dialog {}", dialog_id_str);
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_ack_received(&self, event_str: &str) -> Result<()> {
+        // Extract session_id directly from the cross-crate event
+        let session_id_str = self.extract_session_id(event_str)
+            .unwrap_or_else(|| {
+                warn!("Could not extract session_id from AckReceived event");
+                "unknown".to_string()
+            });
+
+        info!("📨 ACK was received by dialog-core, triggering DialogACK event for session {}", session_id_str);
+        info!("🔍 About to call process_event with DialogACK");
+
+        // Trigger DialogACK event in state machine
+        // This allows UAS to transition from "Answering" -> "Active"
+        match self.state_machine.process_event(
+            &SessionId(session_id_str.clone()),
+            EventType::DialogACK,
+        ).await {
+            Ok(_) => {
+                info!("✅ DialogACK processed successfully for session {}", session_id_str);
+            }
+            Err(e) => {
+                error!("❌ Failed to process DialogACK event after AckReceived: {}", e);
+            }
+        }
+
+        info!("🏁 Finished handle_ack_received for session {}", session_id_str);
+        Ok(())
+    }
+
     // New media event handlers
     async fn handle_media_quality_degraded(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {

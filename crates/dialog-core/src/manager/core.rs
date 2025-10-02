@@ -374,23 +374,31 @@ impl DialogManager {
     /// Sends session coordination events for legacy compatibility and specific
     /// session management operations.
     pub async fn emit_session_coordination_event(&self, event: SessionCoordinationEvent) {
+        info!("📤 emit_session_coordination_event called with event: {:?}", event);
+
         // Try event hub first (new global event bus)
         if let Some(hub) = self.event_hub.read().await.as_ref() {
+            info!("📤 Event hub exists, publishing to global bus");
             if let Err(e) = hub.publish_session_coordination_event(event.clone()).await {
                 warn!("Failed to publish session coordination event to global bus: {}", e);
             } else {
-                debug!("Published session coordination event to global bus: {:?}", event);
+                info!("📤 Published session coordination event to global bus: {:?}", event);
                 return;
             }
+        } else {
+            info!("📤 Event hub is None, trying legacy channel");
         }
-        
+
         // Fall back to channel (legacy)
         if let Some(sender) = self.session_coordinator.read().await.as_ref() {
+            info!("📤 Legacy channel exists, sending event");
             if let Err(e) = sender.send(event.clone()).await {
                 warn!("Failed to send session coordination event: {}", e);
             } else {
-                debug!("Emitted session coordination event: {:?}", event);
+                info!("📤 Emitted session coordination event to legacy channel: {:?}", event);
             }
+        } else {
+            warn!("📤 Both event hub and legacy channel are None - event not sent!");
         }
     }
     
