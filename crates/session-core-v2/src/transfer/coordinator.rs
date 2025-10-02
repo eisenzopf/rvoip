@@ -87,10 +87,30 @@ impl TransferCoordinator {
         );
 
         // Step 2: Store transfer metadata in new session
-        // TODO: Update session with transfer metadata
-        // This requires get_session(), modify, then update_session()
-        // For Phase 1, we'll skip this - it will be implemented in Phase 2
-        debug!("TODO: Store transfer metadata (refer_to, is_transfer_call, replaces_header)");
+        // Get transferee session to extract transferor_session_id
+        let transferee_session = self.session_store.get_session(transferee_session_id).await
+            .map_err(|e| format!("Failed to get transferee session: {}", e))?;
+
+        // The transferee session should have the transferor_session_id (Bob's ID)
+        // We need to propagate it to the new transfer call session
+        let transferor_session_id = transferee_session.transferor_session_id.clone();
+
+        // Update new session with transfer metadata
+        let mut new_session = self.session_store.get_session(&new_session_id).await
+            .map_err(|e| format!("Failed to get new session: {}", e))?;
+
+        new_session.is_transfer_call = true;
+        new_session.transfer_target = Some(refer_to.to_string());
+        new_session.transferor_session_id = transferor_session_id; // Propagate Bob's session ID
+
+        if let Some(ref replaces) = options.replaces_header {
+            new_session.replaces_header = Some(replaces.clone());
+        }
+
+        self.session_store.update_session(new_session).await
+            .map_err(|e| format!("Failed to update transfer session metadata: {}", e))?;
+
+        info!("✅ Configured new session {} as transfer call with transferor tracking", new_session_id);
 
         // Step 3: Send NOTIFY "100 Trying" to transferor
         if options.send_notify {

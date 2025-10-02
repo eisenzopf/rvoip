@@ -79,6 +79,7 @@ pub struct SessionState {
     // Transfer coordination fields
     pub replaces_header: Option<String>, // Replaces header for attended transfer
     pub is_transfer_call: bool, // Flag indicating this session is a result of a transfer
+    pub transferor_session_id: Option<SessionId>, // Session ID of who sent us the REFER (for NOTIFY messages)
 
     // Timestamps
     pub created_at: Instant,
@@ -119,6 +120,7 @@ impl SessionState {
             transfer_notify_dialog: None,
             replaces_header: None,
             is_transfer_call: false,
+            transferor_session_id: None,
             created_at: now,
             history: None,
         }
