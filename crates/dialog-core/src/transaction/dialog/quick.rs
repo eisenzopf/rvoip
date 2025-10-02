@@ -379,12 +379,13 @@ pub fn notify_for_dialog(
     to_tag: impl Into<String>,
     event_type: impl Into<String>,
     notification_body: Option<String>,
+    subscription_state: Option<String>,
     cseq: u32,
     local_address: SocketAddr,
     route_set: Option<Vec<Uri>>
 ) -> Result<Request> {
     use crate::transaction::client::builders::InDialogRequestBuilder;
-    
+
     let to_uri_string = to_uri.into();
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
@@ -398,10 +399,16 @@ pub fn notify_for_dialog(
         route_set: route_set.unwrap_or_default(),
         contact: None,
     };
-    
+
     // Use InDialogRequestBuilder directly for NOTIFY since it handles Event headers properly
-    let mut builder = InDialogRequestBuilder::for_notify(event_type, notification_body)
-        .from_dialog_enhanced(
+    let mut builder = InDialogRequestBuilder::for_notify(event_type, notification_body);
+
+    // Add subscription state if provided (required for RFC 6665 compliance)
+    if let Some(state) = subscription_state {
+        builder = builder.with_subscription_state(state);
+    }
+
+    builder = builder.from_dialog_enhanced(
             &template.call_id,
             &template.from_uri,
             &template.from_tag,
@@ -412,7 +419,7 @@ pub fn notify_for_dialog(
             template.local_address,
             template.route_set
         );
-    
+
     builder.build()
 }
 

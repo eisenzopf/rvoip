@@ -49,11 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Now talking to Alice
     println!("[CHARLIE] 💬 Now talking to Alice (post-transfer)...");
-    sleep(Duration::from_secs(3)).await;
+    sleep(Duration::from_secs(5)).await;
 
-    // Wait for Alice to hang up, or hang up ourselves
-    println!("[CHARLIE] ⏳ Waiting for call to end...");
-    sleep(Duration::from_secs(3)).await;
+    // Hang up the call
+    println!("[CHARLIE] 📴 Hanging up...");
+    charlie.hangup(&incoming.id).await?;
 
     println!("[CHARLIE] ✅ Test complete!");
 

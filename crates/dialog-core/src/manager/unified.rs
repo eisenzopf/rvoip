@@ -745,15 +745,99 @@ impl UnifiedDialogManager {
         &self,
         dialog_id: &DialogId,
         event: String,
-        body: Option<String>
+        body: Option<String>,
+        subscription_state: Option<String>
     ) -> ApiResult<TransactionKey> {
-        // TODO: The event parameter will be used to set the Event header in the NOTIFY request
-        debug!("Sending NOTIFY for event: {}", event);
-        
+        debug!("Sending NOTIFY for event: {} with state: {:?}", event, subscription_state);
+
+        // Update dialog's event_package and subscription_state before building request
+        {
+            let mut dialog = self.core.get_dialog_mut(dialog_id)?;
+
+            // Set event package if not already set or if different
+            if dialog.event_package.as_ref() != Some(&event) {
+                dialog.event_package = Some(event.clone());
+            }
+
+            // Set subscription state if provided
+            if let Some(state_str) = subscription_state {
+                use crate::dialog::subscription_state::{SubscriptionState, SubscriptionTerminationReason};
+                use std::time::Duration;
+
+                // Parse simple subscription state strings to SubscriptionState enum
+                let sub_state = if state_str.starts_with("active") {
+                    // Extract expires value if present
+                    let expires = if let Some(pos) = state_str.find("expires=") {
+                        let exp_str = &state_str[pos + 8..];
+                        exp_str.split(';').next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(3600)
+                    } else {
+                        3600
+                    };
+                    SubscriptionState::Active {
+                        remaining_duration: Duration::from_secs(expires),
+                        original_duration: Duration::from_secs(expires)
+                    }
+                } else if state_str.starts_with("pending") {
+                    SubscriptionState::Pending
+                } else if state_str.starts_with("terminated") {
+                    // Extract reason if present
+                    let reason = if state_str.contains("noresource") {
+                        Some(SubscriptionTerminationReason::NoResource)
+                    } else if state_str.contains("deactivated") {
+                        Some(SubscriptionTerminationReason::ClientRequested)
+                    } else if state_str.contains("rejected") {
+                        Some(SubscriptionTerminationReason::Rejected)
+                    } else if state_str.contains("timeout") {
+                        Some(SubscriptionTerminationReason::Expired)
+                    } else {
+                        None
+                    };
+                    SubscriptionState::Terminated { reason }
+                } else {
+                    // Default to terminated if can't parse
+                    SubscriptionState::Terminated { reason: None }
+                };
+
+                dialog.subscription_state = Some(sub_state);
+            }
+        }
+
         let notify_body = body.map(|b| bytes::Bytes::from(b));
         self.send_request_in_dialog(dialog_id, Method::Notify, notify_body).await
     }
-    
+
+    /// Send NOTIFY for REFER implicit subscription (RFC 3515)
+    ///
+    /// Automatically sets Event: refer and appropriate Subscription-State based on status code
+    ///
+    /// # Arguments
+    /// * `dialog_id` - The dialog with the implicit REFER subscription
+    /// * `status_code` - SIP status code to report (100, 180, 200, etc.)
+    /// * `reason` - Reason phrase for the status
+    pub async fn send_refer_notify(
+        &self,
+        dialog_id: &DialogId,
+        status_code: u16,
+        reason: &str
+    ) -> ApiResult<TransactionKey> {
+        // RFC 3515: REFER creates implicit subscription that terminates after final response
+        let subscription_state = if status_code >= 200 {
+            "terminated;reason=noresource".to_string()  // Final response terminates subscription
+        } else {
+            "active;expires=60".to_string()  // Provisional response keeps subscription active
+        };
+
+        // Body is sipfrag format per RFC 3515
+        let sipfrag_body = format!("SIP/2.0 {} {}", status_code, reason);
+
+        self.send_notify(
+            dialog_id,
+            "refer".to_string(),
+            Some(sipfrag_body),
+            Some(subscription_state)
+        ).await
+    }
+
     /// Send UPDATE request for media modifications
     pub async fn send_update(
         &self,

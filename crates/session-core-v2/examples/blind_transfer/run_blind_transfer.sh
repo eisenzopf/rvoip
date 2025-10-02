@@ -107,7 +107,7 @@ check_timeout() {
 }
 
 # Wait for all to complete with timeout
-TIMEOUT=30
+TIMEOUT=40
 echo -e "${BLUE}⏳ Waiting for test to complete (max ${TIMEOUT}s)...${NC}"
 echo ""
 

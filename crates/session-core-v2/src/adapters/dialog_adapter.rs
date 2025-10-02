@@ -530,8 +530,10 @@ impl DialogAdapter {
         session_id: &SessionId,
         event_package: &str,
         body: Option<String>,
+        subscription_state: Option<String>
     ) -> Result<()> {
-        tracing::info!("Sending NOTIFY for session {} with event {}", session_id.0, event_package);
+        tracing::info!("Sending NOTIFY for session {} with event {} and state {:?}",
+            session_id.0, event_package, subscription_state);
 
         // Get dialog ID for this session
         let dialog_id = self.session_to_dialog.get(session_id)
@@ -539,10 +541,35 @@ impl DialogAdapter {
             .clone();
 
         // Send NOTIFY within the dialog
-        self.dialog_api.send_notify(&dialog_id, event_package.to_string(), body).await
+        self.dialog_api.send_notify(&dialog_id, event_package.to_string(), body, subscription_state).await
             .map_err(|e| SessionError::DialogError(format!("Failed to send NOTIFY: {}", e)))?;
 
         tracing::info!("NOTIFY sent successfully for session {}", session_id.0);
+        Ok(())
+    }
+
+    /// Send NOTIFY for REFER implicit subscription (RFC 3515)
+    ///
+    /// Convenience method that automatically formats NOTIFY for transfer progress
+    pub async fn send_refer_notify(
+        &self,
+        session_id: &SessionId,
+        status_code: u16,
+        reason: &str
+    ) -> Result<()> {
+        tracing::info!("Sending REFER NOTIFY for session {} with status {} {}",
+            session_id.0, status_code, reason);
+
+        // Get dialog ID for this session
+        let dialog_id = self.session_to_dialog.get(session_id)
+            .ok_or_else(|| SessionError::DialogError("No dialog for session".to_string()))?
+            .clone();
+
+        // Send REFER NOTIFY using dialog-core convenience method
+        self.dialog_api.send_refer_notify(&dialog_id, status_code, reason).await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send REFER NOTIFY: {}", e)))?;
+
+        tracing::info!("REFER NOTIFY sent successfully for session {}", session_id.0);
         Ok(())
     }
 

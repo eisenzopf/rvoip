@@ -43,28 +43,26 @@ impl TransferNotifyHandler {
         let status_code = progress.status_code();
 
         debug!(
-            "Sending NOTIFY to transferor session {} with progress: {}",
-            transferor_session_id, sipfrag
+            "Sending REFER NOTIFY to transferor session {} with progress: {} {}",
+            transferor_session_id, status_code, sipfrag
         );
 
-        // Send NOTIFY via dialog adapter
-        // Event package is "refer" per RFC 3515
-        // Body is the sipfrag content
+        // Send REFER NOTIFY via dialog adapter using RFC 3515 compliant method
         match self
             .dialog_adapter
-            .send_notify(transferor_session_id, "refer", Some(sipfrag.clone()))
+            .send_refer_notify(transferor_session_id, status_code, &sipfrag)
             .await
         {
             Ok(_) => {
                 info!(
-                    "✅ Sent NOTIFY to transferor: {} (status {})",
-                    sipfrag, status_code
+                    "✅ Sent REFER NOTIFY to transferor: {} {} (with Subscription-State)",
+                    status_code, sipfrag
                 );
                 Ok(())
             }
             Err(e) => {
-                error!("Failed to send NOTIFY to transferor: {}", e);
-                Err(format!("NOTIFY send failed: {}", e))
+                error!("Failed to send REFER NOTIFY to transferor: {}", e);
+                Err(format!("REFER NOTIFY send failed: {}", e))
             }
         }
     }
