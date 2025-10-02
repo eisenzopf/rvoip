@@ -295,7 +295,7 @@ impl DialogAdapter {
             self.outgoing_invite_tx.remove(session_id);
         } else {
             // Fallback: Try to send ACK without transaction ID (may not work properly)
-            tracing::warn!("No transaction ID stored for session {}, ACK may fail", session_id.0);
+            tracing::debug!("No transaction ID stored for session {}, ACK may fail", session_id.0);
             // The dialog-core API doesn't have a direct send_ack without transaction ID
             // so we'll need to handle this case differently in production
         }
