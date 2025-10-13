@@ -334,6 +334,7 @@ pub enum DialogToSessionEvent {
         session_id: String,
         refer_to: String,
         transfer_type: TransferType,
+        transaction_id: String,
     },
 
     /// ACK received (for UAS state transitions)

@@ -268,7 +268,7 @@ impl DialogEventHub {
                 }
             }
             
-            SessionCoordinationEvent::TransferRequest { dialog_id, refer_to, replaces, .. } => {
+            SessionCoordinationEvent::TransferRequest { dialog_id, transaction_id, refer_to, replaces, .. } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     // Convert ReferTo to string
                     let refer_to_uri = refer_to.uri().to_string();
@@ -285,6 +285,7 @@ impl DialogEventHub {
                             session_id,
                             refer_to: refer_to_uri,
                             transfer_type,
+                            transaction_id: transaction_id.to_string(),
                         }
                     ))
                 } else {

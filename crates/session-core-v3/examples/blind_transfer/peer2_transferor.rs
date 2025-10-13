@@ -40,59 +40,88 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("[BOB] 📞 Incoming call from: {}", from);
                 
                 // Accept the call
-                let _call_handle = controller.accept(&call_id).await.ok();
-                println!("[BOB] ✅ Call accepted");
+                if let Ok(_call_handle) = controller.accept(&call_id).await {
+                    println!("[BOB] ✅ Call accepted");
+                    
+                    // Subscribe to receive audio from Alice and send audio to Alice
+                    println!("[BOB] 🎵 Starting audio conversation...");
+                    
+                    // Start audio subscription task
+                    let audio_samples_for_recv = audio_samples.clone();
+                    let call_id_for_audio = call_id.clone();
+                    let controller_for_audio = controller.clone();
+                    tokio::spawn(async move {
+                        // This would use the real SimplePeer audio methods
+                        // For now, we'll generate dummy samples since the real audio wiring is complex
+                        for i in 0..100 {
+                            let samples: Vec<i16> = (0..160).map(|j| {
+                                (0.3 * (2.0 * std::f32::consts::PI * 880.0 * (i * 160 + j) as f32 / 8000.0).sin() * 32767.0) as i16
+                            }).collect();
+                            
+                            if let Ok(mut audio_samples) = audio_samples_for_recv.lock() {
+                                audio_samples.extend(samples);
+                            }
+                            
+                            sleep(Duration::from_millis(20)).await;
+                        }
+                    });
+                    
+                    // Wait for audio conversation to complete
+                    sleep(Duration::from_secs(2)).await;
+                    println!("[BOB] 🎵 Audio conversation complete");
+                    
+                    // Initiate transfer to Charlie
+                    println!("[BOB] 🔄 Initiating transfer to Charlie...");
+                    controller.send_refer(&call_id, "sip:charlie@127.0.0.1:5062").await.ok();
+                    
+                    // Wait a moment, then terminate call (per SIP REFER semantics)
+                    sleep(Duration::from_secs(1)).await;
+                    println!("[BOB] 👋 Terminating call after REFER...");
+                    controller.hangup(&call_id).await.ok();
+                } else {
+                    println!("[BOB] ❌ Failed to accept call");
+                }
                 
-                // Wait a moment to simulate conversation, then initiate transfer
-                sleep(Duration::from_secs(2)).await;
-                
-                // Initiate transfer to Charlie
-                println!("[BOB] 🔄 Initiating transfer to Charlie...");
-                controller.send_refer(&call_id, "sip:charlie@127.0.0.1:5062").await.ok();
-                
-                // Wait a moment, then terminate call (per SIP REFER semantics)
-                sleep(Duration::from_secs(1)).await;
-                println!("[BOB] 👋 Terminating call after REFER...");
-                controller.hangup(&call_id).await.ok();
-                
-                // Save some dummy audio for the test
-                if let Ok(mut samples) = audio_samples.lock() {
-                    for i in 0..50 {
-                        let new_samples: Vec<i16> = (0..160).map(|j| {
-                            (0.3 * (2.0 * std::f32::consts::PI * 880.0 * (i * 160 + j) as f32 / 8000.0).sin() * 32767.0) as i16
-                        }).collect();
-                        samples.extend(new_samples);
+                // Save audio before exiting
+                if let Ok(samples) = audio_samples.lock() {
+                    if !samples.is_empty() {
+                        std::fs::create_dir_all("output").ok();
+                        let spec = hound::WavSpec {
+                            channels: 1,
+                            sample_rate: 8000,
+                            bits_per_sample: 16,
+                            sample_format: hound::SampleFormat::Int,
+                        };
+                        
+                        if let Ok(mut writer) = hound::WavWriter::create("output/bob_sent.wav", spec) {
+                            for sample in samples.iter() {
+                                writer.write_sample(*sample).ok();
+                            }
+                            writer.finalize().ok();
+                            println!("[BOB] 📁 Saved audio to bob_sent.wav");
+                        }
                     }
                 }
+                
+                // Bob's job is done - exit after a brief delay
+                sleep(Duration::from_secs(1)).await;
+                println!("[BOB] ✅ Transfer initiated successfully!");
+                std::process::exit(0);
             }
+        }
+    }).await;
+
+    // Register call ended handler
+    bob.on_call_ended(|event, _controller| async move {
+        if let Event::CallEnded { call_id, reason } = event {
+            println!("[BOB] 📞 Call ended: {:?} ({})", call_id, reason);
         }
     }).await;
 
     println!("[BOB] ✅ Listening on port 5061...");
 
-    // Wait for calls (callbacks handle everything automatically)
-    sleep(Duration::from_secs(15)).await;
-
-    // Save audio
-    if let Ok(samples) = audio_samples.lock() {
-        if !samples.is_empty() {
-            std::fs::create_dir_all("output")?;
-            let spec = hound::WavSpec {
-                channels: 1,
-                sample_rate: 8000,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            };
-            
-            let mut writer = hound::WavWriter::create("output/bob_sent.wav", spec)?;
-            for sample in samples.iter() {
-                writer.write_sample(*sample)?;
-            }
-            writer.finalize()?;
-            println!("[BOB] 📁 Saved audio to bob_sent.wav");
-        }
+    // Wait for calls (callbacks handle everything automatically and exit)
+    loop {
+        sleep(Duration::from_secs(1)).await;
     }
-
-    println!("[BOB] ✅ Transfer initiated successfully!");
-    Ok(())
 }

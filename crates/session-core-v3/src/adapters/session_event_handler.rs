@@ -522,14 +522,32 @@ impl SessionCrossCrateEventHandler {
     }
     
     async fn handle_call_terminated(&self, event_str: &str) -> Result<()> {
-        if let Some(session_id) = self.extract_session_id(event_str) {
+        if let Some(session_id_str) = self.extract_session_id(event_str) {
+            let session_id = SessionId(session_id_str.clone());
+            let reason = self.extract_field(event_str, "reason: ").unwrap_or_else(|| "Unknown".to_string());
+            
             if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
+                &session_id,
                 EventType::DialogBYE
                 ).await {
                         error!("Failed to process call termination: {}", e);
                     }
+            
+            // Forward to SimplePeer event system
+            if let Some(ref event_tx) = self.simple_peer_event_tx {
+                debug!("🔍 [DEBUG] Forwarding CallEnded event to SimplePeer");
+                let event = crate::api::events::Event::CallEnded {
+                    call_id: session_id.clone(),
+                    reason: reason.clone(),
+                };
+                
+                if let Err(e) = event_tx.send(event).await {
+                    error!("Failed to send CallEnded event to SimplePeer: {}", e);
+                } else {
+                    debug!("🔍 [DEBUG] Successfully sent CallEnded event to SimplePeer");
                 }
+            }
+        }
         Ok(())
     }
     
@@ -635,7 +653,7 @@ impl SessionCrossCrateEventHandler {
         if let Some(session_id_str) = self.extract_session_id(event_str) {
             let refer_to = self.extract_field(event_str, "refer_to: \"").unwrap_or_else(|| "unknown".to_string());
             let transfer_type = self.extract_field(event_str, "transfer_type: \"").unwrap_or_else(|| "blind".to_string());
-            let transaction_id = self.extract_field(event_str, "transaction_id: ").unwrap_or_else(|| "unknown".to_string());
+            let transaction_id = self.extract_field(event_str, "transaction_id: \"").unwrap_or_else(|| "unknown".to_string());
 
             let session_id = SessionId(session_id_str.clone());
 

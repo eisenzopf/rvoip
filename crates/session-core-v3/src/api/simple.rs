@@ -41,18 +41,17 @@ impl Default for EventHandlers {
 /// Controller interface for handlers to perform call operations
 pub struct SimplePeerController {
     coordinator: Arc<UnifiedCoordinator>,
+    local_uri: String,
 }
 
 impl SimplePeerController {
-    fn new(coordinator: Arc<UnifiedCoordinator>) -> Self {
-        Self { coordinator }
+    fn new(coordinator: Arc<UnifiedCoordinator>, local_uri: String) -> Self {
+        Self { coordinator, local_uri }
     }
     
     /// Make an outgoing call
     pub async fn call(&self, target: &str) -> Result<CallHandle> {
-        // Use a dummy local URI - in practice this should come from config
-        let local_uri = "sip:user@127.0.0.1:5060"; // TODO: Get from SimplePeer
-        let call_id = self.coordinator.make_call(local_uri, target).await?;
+        let call_id = self.coordinator.make_call(&self.local_uri, target).await?;
         let (call_handle, _audio_rx, _audio_tx) = CallHandle::new(call_id);
         Ok(call_handle)
     }
@@ -152,7 +151,7 @@ impl SimplePeer {
         let coordinator = UnifiedCoordinator::with_simple_peer_events(config, event_tx).await?;
         debug!("🔍 [DEBUG] SimplePeer coordinator created successfully");
 
-        let controller = Arc::new(SimplePeerController::new(coordinator.clone()));
+        let controller = Arc::new(SimplePeerController::new(coordinator.clone(), local_uri.clone()));
         let handlers = Arc::new(RwLock::new(EventHandlers::default()));
         let background_task = Arc::new(Mutex::new(None));
         let is_running = Arc::new(AtomicBool::new(false));
@@ -406,6 +405,18 @@ impl SimplePeer {
     /// ```
     pub async fn send_refer(&self, call_id: &CallId, refer_to: &str) -> Result<()> {
         self.controller.send_refer(call_id, refer_to).await
+    }
+    
+    // ===== Audio Operations =====
+    
+    /// Send audio to a call
+    pub async fn send_audio(&self, call_id: &CallId, frame: rvoip_media_core::types::AudioFrame) -> Result<()> {
+        self.controller.coordinator.send_audio(call_id, frame).await
+    }
+    
+    /// Subscribe to receive audio from a call
+    pub async fn subscribe_audio(&self, call_id: &CallId) -> Result<crate::types::AudioFrameSubscriber> {
+        self.controller.coordinator.subscribe_to_audio(call_id).await
     }
     
     // ===== DTMF Operations =====

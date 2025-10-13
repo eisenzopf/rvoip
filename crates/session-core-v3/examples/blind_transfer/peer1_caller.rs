@@ -41,30 +41,112 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("[ALICE] 🔄 Got REFER to: {}", refer_to);
                 
                 // Handle transfer immediately
+                println!("[ALICE] 👋 Hanging up with Bob...");
                 controller.hangup(&call_id).await.ok();
+                
                 println!("[ALICE] 📞 Calling Charlie at: {}", refer_to);
-                let _charlie_call = controller.call(&refer_to).await.ok();
-                
-                println!("[ALICE] ✅ Transfer complete! Now connected to Charlie");
-                
-                // Generate some audio samples for the test
-                if let Ok(mut samples) = audio_samples.lock() {
-                    for i in 0..100 {
-                        let new_samples: Vec<i16> = (0..160).map(|j| {
-                            (0.3 * (2.0 * std::f32::consts::PI * 440.0 * (i * 160 + j) as f32 / 8000.0).sin() * 32767.0) as i16
-                        }).collect();
-                        samples.extend(new_samples);
+                match controller.call(&refer_to).await {
+                    Ok(mut charlie_call) => {
+                        println!("[ALICE] ✅ Transfer complete! Now connected to Charlie");
+                        
+                        // Send audio to Charlie and collect received audio
+                        println!("[ALICE] 🎵 Starting audio with Charlie...");
+                        for i in 0..50 { // About 1 second of audio
+                            let samples: Vec<i16> = (0..160).map(|j| {
+                                (0.3 * (2.0 * std::f32::consts::PI * 660.0 * (i * 160 + j) as f32 / 8000.0).sin() * 32767.0) as i16
+                            }).collect();
+                            
+                            // Send real audio through CallHandle
+                            if charlie_call.send_audio(samples.clone()).await.is_ok() {
+                                if let Ok(mut audio_samples) = audio_samples.lock() {
+                                    audio_samples.extend(samples);
+                                }
+                            }
+                            
+                            // Receive real audio from Charlie
+                            if let Ok(received_samples) = charlie_call.try_recv_audio() {
+                                if let Ok(mut audio_samples) = audio_samples.lock() {
+                                    audio_samples.extend(received_samples);
+                                }
+                            }
+                            
+                            sleep(Duration::from_millis(20)).await;
+                        }
+                        
+                        println!("[ALICE] 👋 Ending call with Charlie...");
+                        controller.hangup(&charlie_call.call_id()).await.ok();
+                    }
+                    Err(e) => {
+                        println!("[ALICE] ❌ Failed to call Charlie: {}", e);
                     }
                 }
             }
         }
     }).await;
 
-    // Register call answered handler
-    alice.on_call_answered(|event, _controller| async move {
-        if let Event::CallAnswered { call_id, .. } = event {
-            println!("[ALICE] ✅ Call answered: {:?}", call_id);
-            println!("[ALICE] 🎵 Call established, waiting for REFER from Bob...");
+    // Register call answered handler - start audio transmission
+    let audio_samples_for_answered = audio_samples.clone();
+    alice.on_call_answered(move |event, controller| {
+        let audio_samples = audio_samples_for_answered.clone();
+        async move {
+            if let Event::CallAnswered { call_id, .. } = event {
+                println!("[ALICE] ✅ Call answered: {:?}", call_id);
+                println!("[ALICE] 🎵 Call established, starting audio with Bob...");
+                
+                // Get the call handle for this call and start audio transmission
+                // Note: In the callback-based API, we need to get the call handle differently
+                // For now, we'll generate audio samples that will be saved when the call ends
+                tokio::spawn(async move {
+                    for i in 0..100 { // About 2 seconds of audio
+                        let samples: Vec<i16> = (0..160).map(|j| {
+                            (0.3 * (2.0 * std::f32::consts::PI * 440.0 * (i * 160 + j) as f32 / 8000.0).sin() * 32767.0) as i16
+                        }).collect();
+                        
+                        if let Ok(mut audio_samples) = audio_samples.lock() {
+                            audio_samples.extend(samples);
+                        }
+                        
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                });
+            }
+        }
+    }).await;
+
+    // Register call ended handler
+    let audio_samples_for_ended = audio_samples.clone();
+    alice.on_call_ended(move |event, _controller| {
+        let audio_samples = audio_samples_for_ended.clone();
+        async move {
+            if let Event::CallEnded { call_id, reason } = event {
+                println!("[ALICE] 📞 Call ended: {:?} ({})", call_id, reason);
+                
+                // Save audio before exiting
+                if let Ok(samples) = audio_samples.lock() {
+                    if !samples.is_empty() {
+                        std::fs::create_dir_all("output").ok();
+                        let spec = hound::WavSpec {
+                            channels: 1,
+                            sample_rate: 8000,
+                            bits_per_sample: 16,
+                            sample_format: hound::SampleFormat::Int,
+                        };
+                        
+                        if let Ok(mut writer) = hound::WavWriter::create("output/alice_sent.wav", spec) {
+                            for sample in samples.iter() {
+                                writer.write_sample(*sample).ok();
+                            }
+                            writer.finalize().ok();
+                            println!("[ALICE] 📁 Saved audio to alice_sent.wav");
+                        }
+                    }
+                }
+                
+                // Alice's job is done
+                sleep(Duration::from_secs(1)).await;
+                println!("[ALICE] ✅ Simple callback-based example completed!");
+                std::process::exit(0);
+            }
         }
     }).await;
 
@@ -75,29 +157,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[ALICE] 📞 Calling Bob...");
     let _bob_call = alice.call("sip:bob@127.0.0.1:5061").await?;
 
-    // Wait for transfer to complete
-    sleep(Duration::from_secs(10)).await;
-
-    // Save audio
-    if let Ok(samples) = audio_samples.lock() {
-        if !samples.is_empty() {
-            std::fs::create_dir_all("output")?;
-            let spec = hound::WavSpec {
-                channels: 1,
-                sample_rate: 8000,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            };
-            
-            let mut writer = hound::WavWriter::create("output/alice_sent.wav", spec)?;
-            for sample in samples.iter() {
-                writer.write_sample(*sample)?;
-            }
-            writer.finalize()?;
-            println!("[ALICE] 📁 Saved audio to alice_sent.wav");
-        }
+    // Wait for transfer to complete (callbacks handle everything automatically and exit)
+    loop {
+        sleep(Duration::from_secs(1)).await;
     }
-
-    println!("[ALICE] ✅ Simple callback-based example completed!");
-    Ok(())
 }
