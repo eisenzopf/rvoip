@@ -78,6 +78,8 @@ pub struct SessionState {
 
     // Transfer coordination fields
     pub replaces_header: Option<String>, // Replaces header for attended transfer
+    pub referred_by: Option<String>, // Referred-By header from REFER request
+    pub refer_transaction_id: Option<String>, // Transaction ID for REFER request (for sending response)
     pub is_transfer_call: bool, // Flag indicating this session is a result of a transfer
     pub transferor_session_id: Option<SessionId>, // Session ID of who sent us the REFER (for NOTIFY messages)
 
@@ -119,6 +121,8 @@ impl SessionState {
             transfer_state: TransferState::None,
             transfer_notify_dialog: None,
             replaces_header: None,
+            referred_by: None,
+            refer_transaction_id: None,
             is_transfer_call: false,
             transferor_session_id: None,
             created_at: now,

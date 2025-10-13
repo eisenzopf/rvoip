@@ -1,6 +1,6 @@
 //! Bob - Receives a call and sends audio
 
-use rvoip_session_core_v2::api::simple::{SimplePeer, Config, AudioFrame};
+use rvoip_session_core_v3::api::simple::{SimplePeer, Config, AudioFrame};
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;

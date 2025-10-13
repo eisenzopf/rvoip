@@ -10,6 +10,7 @@ members = [
     "crates/media-core",
     "crates/session-core",
     "crates/session-core-v2",
+    "crates/session-core-v3",
     "crates/call-engine",
     "crates/client-core",
     "crates/codec-core",

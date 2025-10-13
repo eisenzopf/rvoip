@@ -224,19 +224,7 @@ impl EventRouter {
                 }
             }
             
-            Action::InitiateBlindTransfer(target) => {
-                tracing::info!("Blind transfer from {} to {}", session_id, target);
-                self.dialog_adapter.send_refer_session(session_id, target).await?;
-            }
-            
-            Action::InitiateAttendedTransfer(target) => {
-                tracing::info!("Attended transfer from {} to {}", session_id, target);
-                // For attended transfer, we first establish a consultation call
-                // then send REFER with Replaces header
-                // For now, just do a blind transfer as a fallback
-                self.dialog_adapter.send_refer_session(session_id, target).await?;
-                tracing::info!("Attended transfer initiated (using blind transfer for now)");
-            }
+            // InitiateBlindTransfer and InitiateAttendedTransfer actions removed
             
             // Cleanup actions
             Action::StartDialogCleanup => {
@@ -311,11 +299,7 @@ impl EventRouter {
             Action::StartRecordingMixer |
             Action::StopRecordingMixer |
             Action::UpdateMediaDirection { .. } |
-            Action::SendREFER |
-            Action::SendREFERWithReplaces |
             Action::HoldCurrentCall |
-            Action::CreateConsultationCall |
-            Action::TerminateConsultationCall |
             Action::MuteLocalAudio |
             Action::UnmuteLocalAudio |
             Action::SendDTMFTone |
@@ -333,13 +317,14 @@ impl EventRouter {
             Action::ProcessMESSAGE |
             Action::CleanupDialog |
             Action::CleanupMedia |
-            Action::AcceptTransferREFER |
-            Action::SendTransferNOTIFY |
-            Action::SendTransferNOTIFYRinging |
-            Action::SendTransferNOTIFYSuccess |
-            Action::SendTransferNOTIFYFailure |
-            Action::StoreTransferTarget |
-            Action::TerminateCurrentCall => {
+            Action::PublishReferEvent |
+            Action::PublishIncomingCallEvent |
+            Action::PublishCallEndedEvent |
+            Action::PublishCallAnsweredEvent |
+            Action::PublishCallOnHoldEvent |
+            Action::PublishCallResumedEvent |
+            Action::PublishDtmfReceivedEvent |
+            Action::SendReferAccepted => {
                 tracing::debug!("Advanced action {:?} for session {} - handled by state machine", action, session_id);
             }
         }

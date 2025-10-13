@@ -7,6 +7,7 @@ use crate::{
     session_store::{SessionStore, SessionState},
     adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
     types::CallState,
+    api::events::Event,
 };
 
 use super::{actions, guards};
@@ -42,6 +43,9 @@ pub struct StateMachine {
     
     /// Event publisher (optional - for legacy compatibility)
     event_tx: Option<tokio::sync::mpsc::Sender<SessionEvent>>,
+    
+    /// SimplePeer event channel for publishing events
+    simple_peer_event_tx: Option<tokio::sync::mpsc::Sender<Event>>,
 }
 
 /// Events that flow through the system
@@ -83,6 +87,24 @@ impl StateMachine {
             dialog_adapter,
             media_adapter,
             event_tx: None, // No event channel by default
+            simple_peer_event_tx: None,
+        }
+    }
+    
+    pub fn new_with_simple_peer_events(
+        table: Arc<crate::state_table::MasterStateTable>,
+        store: Arc<SessionStore>,
+        dialog_adapter: Arc<DialogAdapter>,
+        media_adapter: Arc<MediaAdapter>,
+        simple_peer_event_tx: tokio::sync::mpsc::Sender<Event>,
+    ) -> Self {
+        Self {
+            table,
+            store,
+            dialog_adapter,
+            media_adapter,
+            event_tx: None,
+            simple_peer_event_tx: Some(simple_peer_event_tx),
         }
     }
     
@@ -98,6 +120,7 @@ impl StateMachine {
             dialog_adapter,
             media_adapter,
             event_tx: Some(event_tx),
+            simple_peer_event_tx: None,
         }
     }
     
@@ -114,8 +137,11 @@ impl StateMachine {
             dialog_adapter,
             media_adapter,
             event_tx: Some(event_tx),
+            simple_peer_event_tx: None,
         }
     }
+    
+    // Callback registry removed - using event-driven approach
     
     /// Check if a transition exists for the given state key
     pub fn has_transition(&self, key: &StateKey) -> bool {
@@ -161,19 +187,14 @@ impl StateMachine {
                     session.remote_sdp = Some(sdp_data.clone());
                 }
             }
-            EventType::BlindTransfer { target } => {
-                session.transfer_target = Some(target.clone());
-                debug!("Set blind transfer target to: {}", target);
-            }
-            EventType::TransferRequested { refer_to, transfer_type } => {
+            // BlindTransfer event removed
+            EventType::TransferRequested { refer_to, transfer_type, transaction_id } => {
                 session.transfer_target = Some(refer_to.clone());
                 session.transfer_notify_dialog = session.dialog_id.clone();
-                debug!("Set transfer target from REFER: {}, type: {:?}", refer_to, transfer_type);
+                session.refer_transaction_id = Some(transaction_id.clone());
+                debug!("Set transfer target from REFER: {}, type: {:?}, transaction: {}", refer_to, transfer_type, transaction_id);
             }
-            EventType::StartAttendedTransfer { target } => {
-                session.transfer_target = Some(target.clone());
-                debug!("Set attended transfer target to: {}", target);
-            }
+            // StartAttendedTransfer event removed
             _ => {}
         }
         
@@ -283,6 +304,7 @@ impl StateMachine {
                 &self.dialog_adapter,
                 &self.media_adapter,
                 &self.store,
+                &self.simple_peer_event_tx,
             ).await;
             let action_duration = action_start.elapsed().as_millis() as u64;
             

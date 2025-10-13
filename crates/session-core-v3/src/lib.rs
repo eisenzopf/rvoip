@@ -1,4 +1,4 @@
-//! Session-core v2 with state table architecture
+//! Session-core v3 with single session and callback-based event handling
 //! 
 //! This is a refactored version of session-core that uses a master state table
 //! to coordinate between dialog-core and media-core. The key benefits are:
@@ -26,13 +26,12 @@ pub mod errors;
 // New core infrastructure
 pub mod session_registry;
 pub mod types;
-pub mod transfer;
 
 
 // Re-export main types from API
 pub use api::{
     UnifiedCoordinator, SessionBuilder,
-    SimplePeer, CallId,
+    SimplePeer,
 };
 
 // Re-export from state_table for correct types
@@ -46,15 +45,15 @@ pub use types::CallState;
 // Re-export error types
 pub use errors::{Result, SessionError};
 
-// Re-export transfer types
-pub use transfer::{TransferCoordinator, TransferOptions, TransferResult, TransferProgress};
+// Re-export event types
+pub use api::events::{Event, CallHandle};
 
 // Re-export internal types for advanced usage
 pub use session_store::{
     SessionStore, SessionState, NegotiatedConfig,
     SessionHistory, HistoryConfig, TransitionRecord, GuardResult, ActionRecord,
-    SessionInspection, PossibleTransition, SessionHealth, ResourceUsage,
-    CleanupConfig, CleanupStats, ResourceLimits,
+    // SessionInspection, PossibleTransition, SessionHealth, ResourceUsage, // Disabled for single session
+    // CleanupConfig, CleanupStats, ResourceLimits, // Disabled for single session
 };
 pub use state_machine::StateMachine;
 pub use state_table::{Guard, Action};

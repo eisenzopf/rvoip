@@ -134,6 +134,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 SessionToDialogEvent::TransferCall { session_id, .. } => Some(session_id),
                 SessionToDialogEvent::SendDtmf { session_id, .. } => Some(session_id),
                 SessionToDialogEvent::StoreDialogMapping { session_id, .. } => Some(session_id),
+                SessionToDialogEvent::ReferResponse { .. } => None, // No session_id in ReferResponse
             },
             RvoipCrossCrateEvent::DialogToSession(event) => match event {
                 DialogToSessionEvent::IncomingCall { session_id, .. } => Some(session_id),
@@ -249,6 +250,14 @@ pub enum SessionToDialogEvent {
     StoreDialogMapping {
         session_id: String,
         dialog_id: String,
+    },
+    
+    /// Response to REFER request (Accept/Reject decision)
+    ReferResponse {
+        transaction_id: String,
+        accept: bool,
+        status_code: u16,
+        reason: String,
     },
 }
 

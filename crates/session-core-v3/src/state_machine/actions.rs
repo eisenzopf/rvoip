@@ -6,7 +6,7 @@ use crate::{
     state_table::{Action, Condition},
     session_store::{SessionState, SessionStore},
     adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
-    types::CallState,
+    api::events::Event,
 };
 
 /// Execute an action from the state table
@@ -15,7 +15,8 @@ pub async fn execute_action(
     session: &mut SessionState,
     dialog_adapter: &Arc<DialogAdapter>,
     media_adapter: &Arc<MediaAdapter>,
-    session_store: &Arc<SessionStore>,
+    _session_store: &Arc<SessionStore>,
+    simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing action: {:?}", action);
     
@@ -287,19 +288,7 @@ pub async fn execute_action(
             session.bridged_to = None;
         }
         
-        Action::InitiateBlindTransfer(target) => {
-            debug!("Blind transfer from {} to {}", session.session_id, target);
-            dialog_adapter.send_refer_session(&session.session_id, target).await?;
-        }
-        
-        Action::InitiateAttendedTransfer(target) => {
-            debug!("Attended transfer from {} to {}", session.session_id, target);
-            // For attended transfer, we first establish a consultation call
-            // then send REFER with Replaces header
-            // For now, just do a blind transfer as a fallback
-            dialog_adapter.send_refer_session(&session.session_id, target).await?;
-            info!("Attended transfer initiated (using blind transfer for now)");
-        }
+        // InitiateBlindTransfer and InitiateAttendedTransfer actions removed
         
         // Conference actions
         Action::CreateAudioMixer => {
@@ -369,26 +358,7 @@ pub async fn execute_action(
         }
         
         // Additional call control
-        Action::SendREFER => {
-            debug!("Sending REFER for transfer");
-            // The target would be in session data
-            if let Some(target) = &session.transfer_target {
-                dialog_adapter.send_refer_session(&session.session_id, target).await?;
-            }
-        }
-        
-        Action::SendREFERWithReplaces => {
-            debug!("Sending REFER with Replaces for attended transfer");
-            use crate::session_store::TransferState;
-
-            if let Some(consultation_id) = &session.consultation_session_id {
-                // Send REFER with Replaces using consultation call info
-                dialog_adapter.send_refer_with_replaces(&session.session_id, consultation_id).await?;
-                session.transfer_state = TransferState::TransferCompleted;
-            } else {
-                error!("No consultation session ID for attended transfer");
-            }
-        }
+        // SendREFER and SendREFERWithReplaces actions removed
         
         Action::MuteLocalAudio => {
             debug!("Muting local audio");
@@ -404,50 +374,9 @@ pub async fn execute_action(
             }
         }
         
-        Action::CreateConsultationCall => {
-            debug!("Creating consultation call for attended transfer");
-
-            // Store the transfer target from the event
-            // Note: The target should have been set when processing StartAttendedTransfer event
-            if let Some(target) = &session.transfer_target {
-                info!("Consultation call target: {}", target);
-                // Mark that we're in consultation mode
-                use crate::session_store::TransferState;
-                session.transfer_state = TransferState::ConsultationInProgress;
-                // The actual consultation call creation happens in the API helpers layer
-            } else {
-                warn!("No transfer target set for consultation call");
-            }
-        }
+        // CreateConsultationCall action removed
         
-        Action::TerminateConsultationCall => {
-            debug!("Terminating consultation call");
-            use crate::session_store::TransferState;
-
-            if let Some(consultation_id) = &session.consultation_session_id {
-                // Hang up the consultation call
-                if let Ok(mut consultation_session) = session_store.get_session(consultation_id).await {
-                    // Send BYE if dialog exists
-                    if consultation_session.dialog_id.is_some() {
-                        let _ = dialog_adapter.send_bye_session(&consultation_id).await;
-                    }
-
-                    // Stop media
-                    if let Some(media_id) = &consultation_session.media_session_id {
-                        let _ = media_adapter.stop_media_session(media_id.clone()).await;
-                    }
-
-                    // Update state
-                    consultation_session.call_state = CallState::Terminated;
-                    let _ = session_store.update_session(consultation_session).await;
-                }
-
-                // Clear consultation link
-                session.consultation_session_id = None;
-                session.transfer_state = TransferState::None;
-                info!("Consultation call terminated");
-            }
-        }
+        // TerminateConsultationCall action removed
         
         Action::SendDTMFTone => {
             debug!("Sending DTMF tone");
@@ -526,170 +455,6 @@ pub async fn execute_action(
             }
         }
         
-        // Blind transfer recipient actions (Phase 2B - will be fully implemented)
-        Action::AcceptTransferREFER => {
-            debug!("Accepting REFER request for transfer");
-            // dialog-core should already send 202 Accepted automatically
-            info!("REFER accepted for session {}", session.session_id);
-        }
-
-        Action::SendTransferNOTIFY => {
-            debug!("Sending NOTIFY for transfer progress (100 Trying)");
-
-            // Get transferor session ID (who we need to notify)
-            let transferor_session_id = match &session.transferor_session_id {
-                Some(id) => id,
-                None => {
-                    warn!("No transferor session ID stored, cannot send NOTIFY");
-                    return Ok(());
-                }
-            };
-
-            // Create NOTIFY handler
-            let notify_handler = crate::transfer::notify::TransferNotifyHandler::new(
-                dialog_adapter.clone()
-            );
-
-            // Send "100 Trying" NOTIFY
-            if let Err(e) = notify_handler.notify_trying(transferor_session_id).await {
-                error!("Failed to send NOTIFY (100 Trying): {}", e);
-            } else {
-                info!("✅ Sent NOTIFY (100 Trying) to transferor session {}", transferor_session_id);
-            }
-        }
-
-        Action::SendTransferNOTIFYSuccess => {
-            debug!("Sending NOTIFY for transfer success (200 OK)");
-
-            // Get transferor session ID (who we need to notify)
-            let transferor_session_id = match &session.transferor_session_id {
-                Some(id) => id,
-                None => {
-                    warn!("No transferor session ID stored, cannot send NOTIFY");
-                    return Ok(());
-                }
-            };
-
-            // Create NOTIFY handler
-            let notify_handler = crate::transfer::notify::TransferNotifyHandler::new(
-                dialog_adapter.clone()
-            );
-
-            // Send "200 OK" NOTIFY (transfer succeeded)
-            if let Err(e) = notify_handler.notify_success(transferor_session_id).await {
-                error!("Failed to send NOTIFY (200 OK): {}", e);
-            } else {
-                info!("✅ Sent NOTIFY (200 OK) to transferor session {} - transfer complete!", transferor_session_id);
-            }
-        }
-
-        Action::SendTransferNOTIFYRinging => {
-            debug!("Sending NOTIFY for transfer ringing (180 Ringing)");
-
-            // Get transferor session ID (who we need to notify)
-            let transferor_session_id = match &session.transferor_session_id {
-                Some(id) => id,
-                None => {
-                    warn!("No transferor session ID stored, cannot send NOTIFY");
-                    return Ok(());
-                }
-            };
-
-            // Create NOTIFY handler
-            let notify_handler = crate::transfer::notify::TransferNotifyHandler::new(
-                dialog_adapter.clone()
-            );
-
-            // Send "180 Ringing" NOTIFY
-            if let Err(e) = notify_handler.notify_ringing(transferor_session_id).await {
-                error!("Failed to send NOTIFY (180 Ringing): {}", e);
-            } else {
-                info!("✅ Sent NOTIFY (180 Ringing) to transferor session {}", transferor_session_id);
-            }
-        }
-
-        Action::SendTransferNOTIFYFailure => {
-            debug!("Sending NOTIFY for transfer failure");
-
-            // Get transferor session ID (who we need to notify)
-            let transferor_session_id = match &session.transferor_session_id {
-                Some(id) => id,
-                None => {
-                    warn!("No transferor session ID stored, cannot send NOTIFY");
-                    return Ok(());
-                }
-            };
-
-            // Determine failure reason - default to 487 Request Terminated
-            let status_code = 487;
-            let reason = "Request Terminated";
-
-            // Create NOTIFY handler
-            let notify_handler = crate::transfer::notify::TransferNotifyHandler::new(
-                dialog_adapter.clone()
-            );
-
-            // Send failure NOTIFY
-            if let Err(e) = notify_handler.notify_failure(
-                transferor_session_id,
-                status_code,
-                reason
-            ).await {
-                error!("Failed to send NOTIFY (failure): {}", e);
-            } else {
-                info!("✅ Sent NOTIFY ({} {}) to transferor - transfer failed", status_code, reason);
-            }
-        }
-
-        Action::StoreTransferTarget => {
-            debug!("Storing transfer target from REFER");
-            if let Some(target) = &session.transfer_target {
-                info!("Stored transfer target: {}", target);
-            }
-        }
-
-        Action::TerminateCurrentCall => {
-            debug!("Coordinating blind transfer: make new call first, then terminate current");
-
-            // Get the transfer target that was stored
-            let transfer_target = session.transfer_target.clone();
-            let _session_id = session.session_id.clone();
-            let current_dialog_id = session.dialog_id.clone();
-
-            if let Some(target) = transfer_target {
-                info!("Starting transfer coordination: new call to {} before terminating current call", target);
-
-                // Spawn background task to coordinate the transfer
-                let dialog_adapter_clone = dialog_adapter.clone();
-                let _session_store_clone = session_store.clone();
-
-                tokio::spawn(async move {
-                    // Small delay to let current action complete
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-                    // TODO: Implement proper transfer coordination:
-                    // 1. Create new session for transfer target
-                    // 2. Make call to transfer target (MakeCall event)
-                    // 3. Wait for new call to reach Active state
-                    // 4. Once Active, send BYE to current dialog
-                    // 5. Send NOTIFY success
-
-                    // For now, just send BYE immediately (true blind transfer)
-                    if let Some(dialog_id) = current_dialog_id {
-                        info!("Sending BYE to current dialog for transfer");
-                        if let Err(e) = dialog_adapter_clone.send_bye(dialog_id).await {
-                            error!("Failed to send BYE for transfer: {}", e);
-                        }
-                    }
-
-                    // The new call should be initiated by the application layer
-                    // after receiving the TransferReceived event
-                    info!("Transfer BYE sent, application should now make call to {}", target);
-                });
-            } else {
-                warn!("No transfer target stored for TerminateCurrentCall");
-            }
-        }
 
         // Missing actions that need implementation
         Action::BridgeToMixer => {
@@ -827,6 +592,128 @@ pub async fn execute_action(
             if session.media_session_id.is_some() {
                 media_adapter.cleanup_session(&session.session_id).await?;
             }
+        }
+
+        // ===== Event Publishing Actions =====
+
+        Action::PublishReferEvent => {
+            debug!("Publishing REFER event for session {}", session.session_id);
+            
+            if let Some(event_tx) = simple_peer_event_tx {
+                let event = Event::ReferReceived {
+                    call_id: session.session_id.clone(),
+                    refer_to: session.transfer_target.clone().unwrap_or_default(),
+                    referred_by: session.referred_by.clone(),
+                    replaces: session.replaces_header.clone(),
+                };
+                
+                if let Err(e) = event_tx.send(event).await {
+                    error!("Failed to publish REFER event to SimplePeer: {}", e);
+                } else {
+                    debug!("Published REFER event to SimplePeer");
+                }
+            } else {
+                debug!("No SimplePeer event channel - REFER event not published");
+            }
+        }
+
+        Action::SendReferAccepted => {
+            debug!("Sending 202 Accepted for REFER request");
+            
+            let transaction_id = session.refer_transaction_id.clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            
+            // Send ReferResponse event back to dialog-core via global event bus
+            let refer_response = rvoip_infra_common::events::cross_crate::SessionToDialogEvent::ReferResponse {
+                transaction_id,
+                accept: true,
+                status_code: 202,
+                reason: "Accepted".to_string(),
+            };
+            
+            let event = rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::SessionToDialog(refer_response);
+            
+            // Get global coordinator from dialog adapter
+            if let Err(e) = dialog_adapter.global_coordinator.publish(Arc::new(event)).await {
+                error!("Failed to publish ReferResponse event: {}", e);
+            } else {
+                debug!("Published ReferResponse (202 Accepted) event to dialog-core");
+            }
+        }
+
+        Action::PublishIncomingCallEvent => {
+            debug!("Publishing incoming call event for session {}", session.session_id);
+            
+            if let Some(event_tx) = simple_peer_event_tx {
+                let event = Event::IncomingCall {
+                    call_id: session.session_id.clone(),
+                    from: session.remote_uri.clone().unwrap_or_default(),
+                    to: session.local_uri.clone().unwrap_or_default(),
+                    sdp: session.remote_sdp.clone(),
+                };
+                
+                if let Err(e) = event_tx.send(event).await {
+                    error!("Failed to publish incoming call event to SimplePeer: {}", e);
+                } else {
+                    debug!("Published incoming call event to SimplePeer");
+                }
+            }
+        }
+
+        Action::PublishCallEndedEvent => {
+            debug!("Publishing call ended event for session {}", session.session_id);
+            
+            if let Some(event_tx) = simple_peer_event_tx {
+                let event = Event::CallEnded {
+                    call_id: session.session_id.clone(),
+                    reason: "Call terminated".to_string(),
+                };
+                
+                let _ = event_tx.send(event).await;
+            }
+        }
+
+        Action::PublishCallAnsweredEvent => {
+            debug!("Publishing call answered event for session {}", session.session_id);
+            
+            if let Some(event_tx) = simple_peer_event_tx {
+                let event = Event::CallAnswered {
+                    call_id: session.session_id.clone(),
+                    sdp: session.remote_sdp.clone(),
+                };
+                
+                let _ = event_tx.send(event).await;
+            }
+        }
+
+        Action::PublishCallOnHoldEvent => {
+            debug!("Publishing call on hold event for session {}", session.session_id);
+            
+            if let Some(event_tx) = simple_peer_event_tx {
+                let event = Event::CallOnHold {
+                    call_id: session.session_id.clone(),
+                };
+                
+                let _ = event_tx.send(event).await;
+            }
+        }
+
+        Action::PublishCallResumedEvent => {
+            debug!("Publishing call resumed event for session {}", session.session_id);
+            
+            if let Some(event_tx) = simple_peer_event_tx {
+                let event = Event::CallResumed {
+                    call_id: session.session_id.clone(),
+                };
+                
+                let _ = event_tx.send(event).await;
+            }
+        }
+
+        Action::PublishDtmfReceivedEvent => {
+            debug!("Publishing DTMF received event for session {}", session.session_id);
+            // TODO: Extract DTMF digit from session state
+            warn!("PublishDtmfReceivedEvent not fully implemented yet");
         }
     }
     

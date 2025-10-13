@@ -328,23 +328,9 @@ impl MethodHandler for DialogManager {
                 })
                 .flatten();
             
-            // Send 202 Accepted response FIRST before processing
-            // This is required by RFC 3515 - we must send 202 immediately
-            // to indicate we've accepted the REFER for processing
-            let response = crate::transaction::utils::response_builders::create_response(
-                &request, 
-                StatusCode::Accepted
-            );
-            
-            self.transaction_manager.send_response(&transaction_id, response).await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send 202 Accepted response to REFER: {}", e),
-                })?;
-            
-            debug!("Sent 202 Accepted for REFER request");
-            
-            // Now forward to session layer for processing
-            // The session layer can now safely send NOTIFY since 202 has been sent
+            // Forward to session layer FIRST - let session-core decide Accept/Reject
+            // Session-core will send the appropriate response (202 Accepted or 4xx/5xx rejection)
+            // via the transaction_id that we include in the event
             let event = crate::events::SessionCoordinationEvent::TransferRequest {
                 dialog_id: dialog_id.clone(),
                 transaction_id: transaction_id.clone(),

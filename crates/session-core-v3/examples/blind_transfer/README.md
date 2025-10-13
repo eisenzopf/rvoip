@@ -1,153 +1,161 @@
-# Blind Transfer Example
+# Blind Transfer Example - Callback-Based Approach
 
-This example demonstrates blind call transfer functionality in session-core-v2 using three peers.
+This example demonstrates the new callback-based approach to handling SIP REFER requests in session-core-v3. Unlike the previous automatic transfer system, this approach gives developers full control over transfer handling through callbacks.
 
-## Scenario
+## Key Changes from v2
 
-1. **Alice (Peer1)** calls **Bob (Peer2)** at `sip:bob@127.0.0.1:5061`
-2. Alice and Bob talk for a few seconds
-3. **Bob** initiates a blind transfer to **Charlie (Peer3)** at `sip:charlie@127.0.0.1:5062`
-4. Alice's call is transferred to Charlie
-5. Alice and Charlie are now connected, Bob drops out
+- **Single Session Constraint**: Each peer can only have one active session at a time
+- **Callback-Based REFER Handling**: REFER requests are handled via registered callbacks
+- **Manual Session Management**: Developers manually terminate and create sessions during transfers
+- **No Automatic Transfer Logic**: All transfer logic is explicit and developer-controlled
 
-## Files
+## Architecture
 
-- `peer1_caller.rs` - Alice (caller on port 5060)
-- `peer2_transferor.rs` - Bob (receives call, performs transfer on port 5061)
-- `peer3_target.rs` - Charlie (transfer target on port 5062)
-- `run_blind_transfer.sh` - Test orchestration script
-
-## Running the Example
-
-### Quick Start
-
-```bash
-cd crates/session-core-v2/examples/blind_transfer
-./run_blind_transfer.sh
 ```
-
-### With Debug Logging
-
-```bash
-./run_blind_transfer.sh --debug
-```
-
-### With Trace Logging
-
-```bash
-./run_blind_transfer.sh --trace
+Alice (Peer1)          Bob (Peer2)           Charlie (Peer3)
+    |                      |                       |
+    |------ INVITE ------->|                       |
+    |<----- 200 OK --------|                       |
+    |------ ACK ---------->|                       |
+    |                      |                       |
+    |<===== RTP Audio ====>|                       |
+    |                      |                       |
+    |<----- REFER ---------|  (to Charlie)         |
+    |------ 202 --------->|                       |
+    |                      |                       |
+    | [Callback Triggered] |                       |
+    | [Terminate Session]  |                       |
+    |                      |                       |
+    |------------- INVITE ---------------->|
+    |<------------ 200 OK -----------------|
+    |------------- ACK ------------------>|
+    |                      |                       |
+    |<========== RTP Audio ===============>|
 ```
 
 ## How It Works
 
-### SIP Blind Transfer (REFER Method)
+### 1. Alice (Caller/Transferee)
+- Makes initial call to Bob
+- Registers `on_refer` callback to handle transfer requests
+- When REFER is received:
+  - Callback is invoked with transfer details
+  - Returns `CallbackResult::Accept` to accept the transfer
+  - Manually terminates current session
+  - Manually creates new session to transfer target (Charlie)
 
-1. Alice establishes a call with Bob (INVITE → 200 OK → ACK)
-2. Bob sends a **REFER** message to Alice:
+### 2. Bob (Transferor)
+- Receives call from Alice
+- Initiates transfer by sending REFER message
+- In this example, simulated by hanging up (real implementation would send REFER)
+
+### 3. Charlie (Transfer Target)
+- Waits for incoming call from Alice (after transfer)
+- Accepts and handles the transferred call normally
+
+## Running the Example
+
+1. **Terminal 1 - Start Charlie (Transfer Target)**:
+   ```bash
+   cd crates/session-core-v3
+   cargo run --example blind_transfer_peer3_target
    ```
-   REFER sip:alice@127.0.0.1:5060 SIP/2.0
-   Refer-To: sip:charlie@127.0.0.1:5062
+
+2. **Terminal 2 - Start Bob (Transferor)**:
+   ```bash
+   cd crates/session-core-v3
+   cargo run --example blind_transfer_peer2_transferor
    ```
-3. Alice receives the REFER and:
-   - Sends `202 Accepted` to Bob
-   - Initiates a new INVITE to Charlie
-   - Sends NOTIFY to Bob about transfer progress
-4. Bob's call with Alice terminates (BYE)
-5. Alice establishes a new call with Charlie
-6. Alice and Charlie are now connected
 
-### Code Flow
+3. **Terminal 3 - Start Alice (Caller)**:
+   ```bash
+   cd crates/session-core-v3
+   cargo run --example blind_transfer_peer1_caller
+   ```
 
-**Peer1 (Alice):**
-- Calls Bob
-- Receives REFER from Bob (handled by state machine)
-- Automatically initiates new call to Charlie
-- Continues call with Charlie
-
-**Peer2 (Bob):**
-- Accepts incoming call from Alice
-- Waits a bit
-- Calls `transfer(&call_id, "sip:charlie@127.0.0.1:5062")`
-- Terminates after transfer initiated
-
-**Peer3 (Charlie):**
-- Waits for incoming call
-- Accepts the call from Alice (transferred)
-- Talks with Alice
-
-## Expected Output
-
-```
-🔄 Session-Core-V2 Blind Transfer Test
-======================================
-
-▶️  Starting Charlie (peer3 - transfer target) on port 5062...
-▶️  Starting Bob (peer2 - transferor) on port 5061...
-▶️  Starting Alice (peer1 - caller) on port 5060...
-
-[CHARLIE] Starting - Will receive transferred call from Alice...
-[CHARLIE] ✅ Listening on port 5062...
-[BOB] Starting - Will receive call from Alice and transfer to Charlie...
-[BOB] ✅ Listening on port 5061...
-[ALICE] Starting - Will call Bob and be transferred to Charlie...
-[ALICE] 📞 Calling Bob at sip:bob@127.0.0.1:5061...
-[BOB] 📞 Received call from Alice!
-[BOB] 💬 Talking to Alice...
-[BOB] 🔄 Initiating blind transfer to Charlie...
-[CHARLIE] 📞 Received transferred call!
-[ALICE] 💬 Now talking to Charlie (post-transfer)...
-
-✅ Blind transfer test completed successfully!
+Or use the provided script:
+```bash
+cd crates/session-core-v3/examples/blind_transfer
+./run_blind_transfer.sh
 ```
 
-## Implementation Details
+## Code Example
 
-### State Machine
-
-The blind transfer is implemented using the state table in `session-core-v2`:
-
-- **Active** state handles the `BlindTransfer` event
-- Transitions to **Transferring** state
-- Executes `SendREFER` action
-- Sends SIP REFER to the remote party
-
-### SimplePeer API
+### Registering REFER Callback
 
 ```rust
-// Bob performs the transfer
-bob.transfer(&call_id, "sip:charlie@127.0.0.1:5062").await?;
+use rvoip_session_core_v3::api::simple::{SimplePeer, CallbackResult, ReferEvent};
+
+let alice = SimplePeer::new("alice").await?;
+
+// Register callback to handle REFER requests
+alice.on_refer(|refer_event: ReferEvent| {
+    println!("Received REFER to: {}", refer_event.refer_to);
+    
+    // Developer decides how to handle the transfer
+    if refer_event.refer_to.contains("charlie") {
+        CallbackResult::Accept  // Accept and handle manually
+    } else {
+        CallbackResult::Reject(603, "Decline")  // Reject unwanted transfers
+    }
+}).await?;
 ```
 
-This calls the underlying state machine which:
-1. Sends REFER to Alice
-2. Waits for NOTIFY responses
-3. Terminates the call when transfer is accepted
+### Manual Transfer Handling
 
-## Testing
+```rust
+// After callback returns Accept, manually handle the transfer:
 
-The script monitors all three processes and reports:
-- Exit codes for each peer
-- Timeout detection (30s max)
-- Log file locations for debugging
+// 1. Terminate current session
+alice.terminate_current_session().await?;
 
-Logs are saved to `logs/` directory with timestamps:
-- `alice_YYYYMMDD_HHMMSS.log`
-- `bob_YYYYMMDD_HHMMSS.log`
-- `charlie_YYYYMMDD_HHMMSS.log`
+// 2. Create new session to transfer target
+let new_call_id = alice.call("sip:charlie@example.com").await?;
+
+// 3. Continue with new session
+println!("Transfer complete! Now talking to Charlie");
+```
+
+## Benefits of Callback Approach
+
+1. **Developer Control**: Full control over transfer logic
+2. **Flexibility**: Can implement custom transfer policies
+3. **Simplicity**: No complex automatic transfer state machine
+4. **Transparency**: Transfer handling is explicit and visible
+5. **Single Session**: Enforces clean session management
+
+## Callback Results
+
+- `CallbackResult::Accept`: Accept REFER and handle transfer manually
+- `CallbackResult::Reject(code, reason)`: Reject REFER with specific SIP response
+- `CallbackResult::Handle`: Callback handled everything (sent custom response)
+
+## Audio Output
+
+The example generates audio files in `examples/blind_transfer/output/`:
+- `alice_sent.wav`: Audio sent by Alice
+- `alice_received.wav`: Audio received by Alice  
+- `bob_sent.wav`: Audio sent by Bob
+- `charlie_sent.wav`: Audio sent by Charlie
+
+Each peer generates a different frequency sine wave for identification:
+- Alice: 440 Hz (A4)
+- Bob: 880 Hz (A5) 
+- Charlie: 660 Hz (E5)
 
 ## Troubleshooting
 
-**Transfer fails:**
-- Check that blind transfer is implemented in state table
-- Verify REFER handling in dialog-core
-- Check logs for SIP message exchange
+- Ensure all three peers are started in the correct order
+- Check that ports 5060, 5061, and 5062 are available
+- Enable debug logging with `RUST_LOG=debug` for detailed output
+- Audio files help verify the transfer worked correctly
 
-**Processes hang:**
-- Check port availability (5060, 5061, 5062)
-- Verify state machine transitions
-- Enable trace logging: `./run_blind_transfer.sh --trace`
+## Next Steps
 
-**Call doesn't transfer:**
-- Ensure Alice receives and processes REFER
-- Check that new INVITE to Charlie is sent
-- Verify dialog termination after REFER
+This example demonstrates the basic callback approach. In a production system, you might:
+
+1. **Implement proper REFER sending**: Use dialog adapter to send actual REFER messages
+2. **Add error handling**: Handle transfer failures gracefully  
+3. **Support attended transfers**: Implement consultation call callbacks
+4. **Add transfer policies**: Implement business logic for when to accept/reject transfers
+5. **Integrate with UI**: Connect callbacks to user interface for transfer decisions

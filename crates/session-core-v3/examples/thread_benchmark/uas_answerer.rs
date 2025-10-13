@@ -1,6 +1,6 @@
 //! UAS Answerer - accepts incoming calls on port 6000
 
-use rvoip_session_core_v2::api::simple::{SimplePeer, Config};
+use rvoip_session_core_v3::api::simple::{SimplePeer, Config};
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
 

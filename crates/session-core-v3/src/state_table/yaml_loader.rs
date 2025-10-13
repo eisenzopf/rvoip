@@ -537,12 +537,13 @@ impl YamlTableLoader {
             }),
             
             // Transfer events
-            "BlindTransfer" => Ok(EventType::BlindTransfer { target: String::new() }),
+            // "BlindTransfer" event removed
             "TransferRequested" => Ok(EventType::TransferRequested {
                 refer_to: String::new(),
-                transfer_type: String::new()
+                transfer_type: String::new(),
+                transaction_id: String::new(),
             }),
-            "TransferComplete" => Ok(EventType::TransferComplete),
+            // "TransferComplete" event removed
 
             // Internal transfer coordination events
             "InternalProceedWithTransfer" => Ok(EventType::InternalProceedWithTransfer),
@@ -699,22 +700,21 @@ impl YamlTableLoader {
             "SendMESSAGE" => Ok(Action::SendMESSAGE),
             "ProcessMESSAGE" => Ok(Action::ProcessMESSAGE),
 
-            // Bridge/Transfer
+            // Bridge/Conference
             "CreateMediaBridge" => Ok(Action::Custom("CreateMediaBridge".to_string())),
             "LinkSessions" => Ok(Action::Custom("LinkSessions".to_string())),
-            "SendREFER" => Ok(Action::SendREFER),
-            "SendREFERWithReplaces" => Ok(Action::SendREFERWithReplaces),
             "HoldOriginalCall" | "HoldCurrentCall" => Ok(Action::HoldCurrentCall),
-            "CreateConsultationDialog" | "CreateConsultationCall" => Ok(Action::CreateConsultationCall),
-            "TerminateConsultationCall" => Ok(Action::TerminateConsultationCall),
             "ResumeOriginalCall" => Ok(Action::RestoreMediaFlow),
 
-            // Blind transfer recipient actions
-            "AcceptTransferREFER" => Ok(Action::AcceptTransferREFER),
-            "SendTransferNOTIFY" => Ok(Action::SendTransferNOTIFY),
-            "SendTransferNOTIFYSuccess" => Ok(Action::SendTransferNOTIFYSuccess),
-            "StoreTransferTarget" => Ok(Action::StoreTransferTarget),
-            "TerminateCurrentCall" => Ok(Action::TerminateCurrentCall),
+            // Event publishing actions (replace callbacks)
+            "SendReferAccepted" => Ok(Action::SendReferAccepted),
+            "PublishReferEvent" => Ok(Action::PublishReferEvent),
+            "PublishIncomingCallEvent" => Ok(Action::PublishIncomingCallEvent),
+            "PublishCallEndedEvent" => Ok(Action::PublishCallEndedEvent),
+            "PublishCallAnsweredEvent" => Ok(Action::PublishCallAnsweredEvent),
+            "PublishCallOnHoldEvent" => Ok(Action::PublishCallOnHoldEvent),
+            "PublishCallResumedEvent" => Ok(Action::PublishCallResumedEvent),
+            "PublishDtmfReceivedEvent" => Ok(Action::PublishDtmfReceivedEvent),
 
             // Internal
             "CheckReadiness" => Ok(Action::Custom("CheckReadiness".to_string())),

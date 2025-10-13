@@ -168,7 +168,7 @@ impl SessionStore {
     where
         F: Fn(&SessionState) -> bool,
     {
-        let sessions = self.sessions.read().await;
+        let session_lock = self.session.read().await;
         sessions
             .iter()
             .filter(|(_, state)| predicate(state))
@@ -192,7 +192,7 @@ impl SessionStore {
     
     /// Export all session data for debugging
     pub async fn export_debug_dump(&self) -> DebugDump {
-        let sessions = self.sessions.read().await;
+        let session_lock = self.session.read().await;
         
         let mut sessions_by_state = HashMap::new();
         for state in sessions.values() {

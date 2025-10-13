@@ -2,7 +2,7 @@
 //! Usage: cargo run --example thread_benchmark/uac_caller <caller_id>
 //! Example: cargo run --example thread_benchmark/uac_caller 0
 
-use rvoip_session_core_v2::api::simple::{SimplePeer, Config};
+use rvoip_session_core_v3::api::simple::{SimplePeer, Config};
 use tokio::time::{sleep, Duration};
 use tracing::info;
 

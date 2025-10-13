@@ -131,7 +131,6 @@ pub enum EventType {
     ResumeCall,
     MuteCall,
     UnmuteCall,
-    AttendedTransfer { target: String },
 
     // Media control events
     PlayAudio { file: String },
@@ -160,7 +159,7 @@ pub enum EventType {
     DialogError(String),
     DialogStateChanged { old_state: String, new_state: String },
     ReinviteReceived { sdp: Option<String> },
-    TransferRequested { refer_to: String, transfer_type: String },
+    TransferRequested { refer_to: String, transfer_type: String, transaction_id: String }, // Kept for callback system
     
     // Media events (from media-core)
     MediaSessionCreated,
@@ -190,17 +189,9 @@ pub enum EventType {
     MuteInConference,
     UnmuteInConference,
     
-    // Bridge/Transfer events
+    // Bridge events (kept for single session bridging)
     BridgeSessions { other_session: SessionId },
     UnbridgeSessions,
-    BlindTransfer { target: String },
-    StartAttendedTransfer { target: String },
-    CompleteAttendedTransfer,
-    TransferAccepted,
-    TransferProgress,
-    TransferComplete,
-    TransferSuccess,
-    TransferFailed,
     
     // Session modification
     ModifySession,
@@ -246,8 +237,7 @@ impl EventType {
             EventType::MakeCall { .. } => EventType::MakeCall { target: String::new() },
             EventType::IncomingCall { .. } => EventType::IncomingCall { from: String::new(), sdp: None },
             EventType::RejectCall { .. } => EventType::RejectCall { reason: String::new() },
-            EventType::BlindTransfer { .. } => EventType::BlindTransfer { target: String::new() },
-            EventType::AttendedTransfer { .. } => EventType::AttendedTransfer { target: String::new() },
+            // BlindTransfer and AttendedTransfer events removed
             
             // Media events - normalize
             EventType::PlayAudio { .. } => EventType::PlayAudio { file: String::new() },
@@ -260,12 +250,12 @@ impl EventType {
 
             // Bridge events - normalize session ID
             EventType::BridgeSessions { .. } => EventType::BridgeSessions { other_session: SessionId::new() },
-            EventType::StartAttendedTransfer { .. } => EventType::StartAttendedTransfer { target: String::new() },
 
             // Transfer events - normalize
             EventType::TransferRequested { .. } => EventType::TransferRequested {
                 refer_to: String::new(),
-                transfer_type: String::new()
+                transfer_type: String::new(),
+                transaction_id: String::new(),
             },
 
             // Registration events - normalize status codes
@@ -367,21 +357,8 @@ pub enum Action {
     // Media direction actions
     UpdateMediaDirection { direction: MediaDirection },
     
-    // Transfer actions
-    SendREFER,
-    SendREFERWithReplaces,
+    // Hold/Resume actions (kept for single session)
     HoldCurrentCall,
-    CreateConsultationCall,
-    TerminateConsultationCall,
-
-    // Blind transfer recipient actions
-    AcceptTransferREFER,
-    SendTransferNOTIFY,
-    SendTransferNOTIFYRinging,
-    SendTransferNOTIFYSuccess,
-    SendTransferNOTIFYFailure,
-    StoreTransferTarget,
-    TerminateCurrentCall,
 
     // Audio control
     MuteLocalAudio,
@@ -397,8 +374,6 @@ pub enum Action {
     // Bridge/Transfer actions
     CreateBridge(SessionId),
     DestroyBridge,
-    InitiateBlindTransfer(String),
-    InitiateAttendedTransfer(String),
     
     // Resource management
     RestoreMediaFlow,
@@ -431,6 +406,16 @@ pub enum Action {
     // Generic cleanup actions
     CleanupDialog,
     CleanupMedia,
+
+    // Event publishing actions (replace callbacks)
+    SendReferAccepted,
+    PublishReferEvent,
+    PublishIncomingCallEvent,
+    PublishCallEndedEvent,
+    PublishCallAnsweredEvent,
+    PublishCallOnHoldEvent,
+    PublishCallResumedEvent,
+    PublishDtmfReceivedEvent,
 
     // Custom action for extension
     Custom(String),

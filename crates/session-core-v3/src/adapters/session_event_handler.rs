@@ -42,8 +42,7 @@ pub struct SessionCrossCrateEventHandler {
     /// Channel to send incoming call notifications
     incoming_call_tx: Option<mpsc::Sender<crate::types::IncomingCallInfo>>,
 
-    /// Transfer coordinator for auto-transfer
-    transfer_coordinator: Option<Arc<crate::transfer::TransferCoordinator>>,
+    // Transfer coordinator removed - using callback system instead
 }
 
 impl SessionCrossCrateEventHandler {
@@ -61,7 +60,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: None,
-            transfer_coordinator: None,
+            // transfer_coordinator field removed
         }
     }
     
@@ -80,13 +79,11 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: Some(incoming_call_tx),
-            transfer_coordinator: None,
+            // transfer_coordinator field removed
         }
     }
 
-    pub fn set_transfer_coordinator(&mut self, coordinator: Arc<crate::transfer::TransferCoordinator>) {
-        self.transfer_coordinator = Some(coordinator);
-    }
+    // set_transfer_coordinator method removed - using callback system instead
     
     /// Start event processing loops
     pub async fn start(&self) -> SessionResult<()> {
@@ -338,7 +335,7 @@ impl SessionCrossCrateEventHandler {
         let dialog_uuid = uuid::Uuid::parse_str(&dialog_id_str).unwrap_or_else(|_| uuid::Uuid::new_v4());
         
         // Store mapping info for state machine to use
-        self.registry.map_dialog(session_id.clone(), DialogId(dialog_uuid));
+        self.registry.map_dialog(session_id.clone(), DialogId(dialog_uuid)).await;
         self.registry.store_pending_incoming_call(
             session_id.clone(),
             crate::types::IncomingCallInfo {
@@ -348,7 +345,7 @@ impl SessionCrossCrateEventHandler {
                         call_id: call_id.clone(),
                 dialog_id: DialogId(dialog_uuid),
             }
-        );
+        ).await;
         
         // Store the mapping in dialog adapter for local reference
         // Convert our DialogId to rvoip DialogId
@@ -379,7 +376,7 @@ impl SessionCrossCrateEventHandler {
             error!("Failed to process incoming call event: {}", e);
             // Clean up on failure
             let _ = self.state_machine.store.remove_session(&session_id).await;
-            self.registry.remove_session(&session_id);
+            self.registry.remove_session(&session_id).await;
         } else {
             // Notify about incoming call after successful processing
             if let Some(ref tx) = self.incoming_call_tx {
@@ -582,6 +579,7 @@ impl SessionCrossCrateEventHandler {
         if let Some(session_id_str) = self.extract_session_id(event_str) {
             let refer_to = self.extract_field(event_str, "refer_to: \"").unwrap_or_else(|| "unknown".to_string());
             let transfer_type = self.extract_field(event_str, "transfer_type: \"").unwrap_or_else(|| "blind".to_string());
+            let transaction_id = self.extract_field(event_str, "transaction_id: ").unwrap_or_else(|| "unknown".to_string());
 
             let session_id = SessionId(session_id_str.clone());
 
@@ -595,24 +593,16 @@ impl SessionCrossCrateEventHandler {
 
             if let Err(e) = self.state_machine.process_event(
                 &session_id,
-                EventType::TransferRequested { refer_to: refer_to.clone(), transfer_type: transfer_type.clone() }
+                EventType::TransferRequested { 
+                    refer_to: refer_to.clone(), 
+                    transfer_type: transfer_type.clone(),
+                    transaction_id: transaction_id.clone(),
+                }
             ).await {
                 error!("Failed to process TransferRequested: {}", e);
             }
 
-            // Auto-transfer for blind transfers
-            if transfer_type == "Blind" && self.transfer_coordinator.is_some() {
-                info!("🔄 [Auto-Transfer] Executing blind transfer for {} to {}", session_id, refer_to);
-                let coordinator = self.transfer_coordinator.clone().unwrap();
-                let sid = session_id.clone();
-                let target = refer_to.clone();
-                tokio::spawn(async move {
-                    match coordinator.complete_blind_transfer(&sid, &target).await {
-                        Ok(new_id) => info!("✅ [Auto-Transfer] Success: {}", new_id),
-                        Err(e) => error!("❌ [Auto-Transfer] Failed: {}", e),
-                    }
-                });
-            }
+            // Auto-transfer removed - REFER handling now done via callbacks in state machine
         }
         Ok(())
     }

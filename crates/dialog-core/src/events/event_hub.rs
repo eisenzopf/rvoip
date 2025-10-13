@@ -342,8 +342,12 @@ impl CrossCrateEventHandler for DialogEventHub {
             "session_to_dialog" => {
                 info!("Processing session-to-dialog event: {}", event_str);
                 
+                // Handle ReferResponse event
+                if event_str.contains("ReferResponse") {
+                    self.handle_refer_response(&event_str).await?;
+                }
                 // Handle StoreDialogMapping event
-                if event_str.contains("StoreDialogMapping") {
+                else if event_str.contains("StoreDialogMapping") {
                     // Extract session_id and dialog_id
                     if let Some(session_id_start) = event_str.find("session_id: \"") {
                         let session_id_content_start = session_id_start + 13;
@@ -386,5 +390,78 @@ impl CrossCrateEventHandler for DialogEventHub {
         }
         
         Ok(())
+    }
+}
+
+impl DialogEventHub {
+    /// Handle ReferResponse event from session-core
+    async fn handle_refer_response(&self, event_str: &str) -> Result<()> {
+        // Extract transaction_id, accept flag, status_code, and reason
+        let transaction_id = self.extract_field(event_str, "transaction_id: \"")
+            .ok_or_else(|| anyhow::anyhow!("Missing transaction_id in ReferResponse"))?;
+        
+        let accept = event_str.contains("accept: true");
+        
+        let status_code = self.extract_field(event_str, "status_code: ")
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(if accept { 202 } else { 603 });
+            
+        let reason = self.extract_field(event_str, "reason: \"")
+            .unwrap_or_else(|| if accept { "Accepted".to_string() } else { "Decline".to_string() });
+        
+        info!("Handling ReferResponse: transaction={}, accept={}, status={} {}", 
+              transaction_id, accept, status_code, reason);
+        
+        // Parse transaction_id and send response
+        if let Ok(tx_key) = transaction_id.parse::<crate::transaction::TransactionKey>() {
+            use rvoip_sip_core::StatusCode;
+            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::Accepted);
+            
+            // Get original REFER request to build proper response
+            match self.dialog_manager.transaction_manager().original_request(&tx_key).await {
+                Ok(Some(original_request)) => {
+                    // Build proper response using the original request
+                    let response = crate::transaction::utils::response_builders::create_response(
+                        &original_request, 
+                        status
+                    );
+                    
+                    if let Err(e) = self.dialog_manager.send_response(&tx_key, response).await {
+                        error!("Failed to send REFER response: {}", e);
+                    } else {
+                        info!("Successfully sent REFER response: {} {}", status_code, reason);
+                    }
+                }
+                Ok(None) => {
+                    error!("No original request found for transaction: {}", transaction_id);
+                }
+                Err(e) => {
+                    error!("Failed to get original request for transaction {}: {}", transaction_id, e);
+                }
+            }
+        } else {
+            error!("Failed to parse transaction_id: {}", transaction_id);
+        }
+        
+        Ok(())
+    }
+    
+    /// Extract field value from event debug string
+    fn extract_field(&self, event_str: &str, field_prefix: &str) -> Option<String> {
+        if let Some(start) = event_str.find(field_prefix) {
+            let start = start + field_prefix.len();
+            if field_prefix.ends_with("\"") {
+                // String field - find closing quote
+                if let Some(end) = event_str[start..].find('"') {
+                    return Some(event_str[start..start+end].to_string());
+                }
+            } else {
+                // Numeric field - find next space or comma
+                let end = event_str[start..].find(|c: char| c.is_whitespace() || c == ',')
+                    .unwrap_or(event_str[start..].len());
+                return Some(event_str[start..start+end].to_string());
+            }
+        }
+        None
     }
 }

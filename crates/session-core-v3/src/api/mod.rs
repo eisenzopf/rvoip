@@ -302,7 +302,8 @@
 //! without code changes.
 
 // Core modules only
-pub mod types;      // Core types
+pub mod types;      // Core types (legacy)
+pub mod events;     // Event-driven API for v3
 pub mod unified;    // Unified API
 pub mod builder;    // Session builder
 pub mod simple;     // Simple peer API
@@ -319,7 +320,12 @@ pub use crate::types::CallState;
 pub use unified::{UnifiedCoordinator, Config};
 
 // Re-export the simple API (the one people should actually use)
-pub use simple::{SimplePeer, CallId, IncomingCall as SimpleIncomingCall};
+pub use simple::SimplePeer;
+
+// Re-export event types
+pub use events::{
+    Event, CallHandle, CallId,
+};
 
 
 // Re-export builder

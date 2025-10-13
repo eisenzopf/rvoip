@@ -11,6 +11,7 @@ use crate::errors::{Result, SessionError};
 use crate::types::{SessionInfo, IncomingCallInfo};
 use crate::session_store::SessionStore;
 use crate::session_registry::SessionRegistry;
+// Callback system removed - using event-driven approach
 use rvoip_media_core::types::AudioFrame;
 use std::sync::Arc;
 use std::net::{IpAddr, SocketAddr};
@@ -65,8 +66,7 @@ pub struct UnifiedCoordinator {
     /// Dialog adapter for SIP operations
     dialog_adapter: Arc<DialogAdapter>,
 
-    /// Transfer coordinator for blind/attended/managed transfers
-    transfer_coordinator: Arc<crate::transfer::TransferCoordinator>,
+    // Callback registry removed - using event-driven approach
 
     /// Incoming call receiver
     incoming_rx: Arc<RwLock<mpsc::Receiver<IncomingCallInfo>>>,
@@ -111,7 +111,7 @@ impl UnifiedCoordinator {
             )
         );
         
-        // Create state machine (without event channel - using GlobalEventCoordinator)
+        // Create state machine without event channel (original constructor)
         let state_machine = Arc::new(StateMachine::new(
             state_table,
             store.clone(),
@@ -122,13 +122,6 @@ impl UnifiedCoordinator {
         // Create helpers
         let helpers = Arc::new(StateMachineHelpers::new(state_machine.clone()));
 
-        // Create transfer coordinator
-        let transfer_coordinator = Arc::new(crate::transfer::TransferCoordinator::new(
-            store.clone(),
-            helpers.clone(),
-            dialog_adapter.clone(),
-        ));
-
         // Create incoming call channel
         let (incoming_tx, incoming_rx) = mpsc::channel(100);
 
@@ -136,7 +129,7 @@ impl UnifiedCoordinator {
             helpers,
             media_adapter: media_adapter.clone(),
             dialog_adapter: dialog_adapter.clone(),
-            transfer_coordinator,
+            // callback_registry removed
             incoming_rx: Arc::new(RwLock::new(incoming_rx)),
             config,
         });
@@ -145,7 +138,7 @@ impl UnifiedCoordinator {
         dialog_adapter.start().await?;
         
         // Create and start the centralized event handler with incoming call channel
-        let mut event_handler = crate::adapters::SessionCrossCrateEventHandler::with_incoming_call_channel(
+        let event_handler = crate::adapters::SessionCrossCrateEventHandler::with_incoming_call_channel(
             state_machine.clone(),
             global_coordinator.clone(),
             dialog_adapter.clone(),
@@ -154,8 +147,88 @@ impl UnifiedCoordinator {
             incoming_tx,
         );
 
-        // Set transfer coordinator for auto-transfer
-        event_handler.set_transfer_coordinator(transfer_coordinator.clone());
+        // Transfer coordinator removed - using callback system instead
+
+        // Start the event handler (sets up channels and subscriptions)
+        event_handler.start().await?;
+
+        Ok(coordinator)
+    }
+    
+    /// Create a new coordinator with SimplePeer event integration
+    pub async fn with_simple_peer_events(
+        config: Config, 
+        simple_peer_event_tx: tokio::sync::mpsc::Sender<crate::api::events::Event>
+    ) -> Result<Arc<Self>> {
+        // Get the global event coordinator singleton
+        let global_coordinator = rvoip_infra_common::events::global_coordinator()
+            .await
+            .clone();
+        
+        // Create core components
+        let store = Arc::new(SessionStore::new());
+        let registry = Arc::new(SessionRegistry::new());
+        
+        // Create adapters
+        let dialog_api = Self::create_dialog_api(&config, global_coordinator.clone()).await?;
+        let dialog_adapter = Arc::new(DialogAdapter::new(
+            dialog_api,
+            store.clone(),
+            global_coordinator.clone(),
+        ));
+        
+        let media_controller = Self::create_media_controller(&config, global_coordinator.clone()).await?;
+        let media_adapter = Arc::new(MediaAdapter::new(
+            media_controller,
+            store.clone(),
+            config.local_ip,
+            config.media_port_start,
+            config.media_port_end,
+        ));
+        
+        // Load state table based on config
+        let state_table = Arc::new(
+            crate::state_table::load_state_table_with_config(
+                config.state_table_path.as_deref()
+            )
+        );
+        
+        // Create state machine with SimplePeer event channel
+        let state_machine = Arc::new(StateMachine::new_with_simple_peer_events(
+            state_table,
+            store.clone(),
+            dialog_adapter.clone(),
+            media_adapter.clone(),
+            simple_peer_event_tx,
+        ));
+        
+        // Create helpers
+        let helpers = Arc::new(StateMachineHelpers::new(state_machine.clone()));
+
+        // Create incoming call channel (still needed for compatibility)
+        let (incoming_tx, incoming_rx) = mpsc::channel(100);
+
+        let coordinator = Arc::new(Self {
+            helpers,
+            media_adapter: media_adapter.clone(),
+            dialog_adapter: dialog_adapter.clone(),
+            // callback_registry removed
+            incoming_rx: Arc::new(RwLock::new(incoming_rx)),
+            config,
+        });
+        
+        // Start the dialog adapter
+        dialog_adapter.start().await?;
+        
+        // Create and start the centralized event handler with incoming call channel
+        let event_handler = crate::adapters::SessionCrossCrateEventHandler::with_incoming_call_channel(
+            state_machine.clone(),
+            global_coordinator.clone(),
+            dialog_adapter.clone(),
+            media_adapter.clone(),
+            registry.clone(),
+            incoming_tx,
+        );
 
         // Start the event handler (sets up channels and subscriptions)
         event_handler.start().await?;
@@ -228,82 +301,27 @@ impl UnifiedCoordinator {
         Ok(())
     }
     
-    // ===== Transfer Operations =====
+    // ===== Event System Integration =====
+    // Callback registry removed - using event-driven approach via SimplePeer
     
-    /// Blind transfer - initiates REFER to current session
-    /// This will trigger TransferRequested event when REFER is received
-    pub async fn blind_transfer(&self, session_id: &SessionId, target: &str) -> Result<()> {
-        self.helpers.state_machine.process_event(
-            session_id,
-            EventType::BlindTransfer { target: target.to_string() },
-        ).await?;
-        Ok(())
-    }
-
-    /// Complete a blind transfer (called when TransferRequested event is received)
-    /// This is the helper method that applications can call to complete the transfer
-    ///
-    /// # Arguments
-    /// * `transferee_session_id` - Session receiving the REFER (Alice)
-    /// * `refer_to` - Target to transfer to (Charlie's URI)
-    ///
-    /// # Returns
-    /// New session ID for the call to transfer target
-    pub async fn complete_blind_transfer(
-        &self,
-        transferee_session_id: &SessionId,
-        refer_to: &str,
-    ) -> Result<SessionId> {
-        use crate::transfer::TransferOptions;
-
-        // Use transfer coordinator with blind transfer options
-        let options = TransferOptions::blind();
-
-        let result = self
-            .transfer_coordinator
-            .complete_transfer(transferee_session_id, refer_to, options)
-            .await
-            .map_err(|e| SessionError::InternalError(e))?;
-
-        if result.success {
-            Ok(result.new_session_id)
+    /// Terminate the current session (for single session constraint)
+    pub async fn terminate_current_session(&self) -> Result<()> {
+        // Get the current session ID
+        if let Some(session_id) = self.helpers.state_machine.store.get_current_session_id().await {
+            self.hangup(&session_id).await
         } else {
-            Err(SessionError::InternalError(result.status_message))
+            Ok(()) // No session to terminate
         }
     }
-
-    /// Start attended transfer - puts current call on hold and creates consultation call
-    /// Returns the consultation session ID
-    pub async fn start_attended_transfer(&self, session_id: &SessionId, target: &str) -> Result<SessionId> {
-        // First process the event to trigger hold and state change
-        self.helpers.state_machine.process_event(
-            session_id,
-            EventType::StartAttendedTransfer { target: target.to_string() },
-        ).await?;
-
-        // Create the actual consultation call
-        let consultation_id = self.helpers.create_consultation_call(session_id, target).await?;
-
-        Ok(consultation_id)
+    
+    /// Send REFER message to initiate transfer (this will trigger callback on recipient)
+    pub async fn send_refer(&self, session_id: &SessionId, refer_to: &str) -> Result<()> {
+        self.dialog_adapter.send_refer_session(session_id, refer_to).await
     }
     
-    /// Complete attended transfer
-    pub async fn complete_attended_transfer(&self, session_id: &SessionId) -> Result<()> {
-        self.helpers.state_machine.process_event(
-            session_id,
-            EventType::CompleteAttendedTransfer,
-        ).await?;
-        Ok(())
-    }
-
-    /// Cancel attended transfer and return to original call
-    pub async fn cancel_attended_transfer(&self, original_session_id: &SessionId) -> Result<()> {
-        // Terminate consultation and resume original by sending HangupCall in ConsultationCall state
-        self.helpers.state_machine.process_event(
-            original_session_id,
-            EventType::HangupCall,
-        ).await?;
-        Ok(())
+    /// Send NOTIFY message for REFER status (used after handling transfer)
+    pub async fn send_refer_notify(&self, session_id: &SessionId, status_code: u16, reason: &str) -> Result<()> {
+        self.dialog_adapter.send_refer_notify(session_id, status_code, reason).await
     }
 
     // ===== DTMF Operations =====
@@ -404,17 +422,7 @@ impl UnifiedCoordinator {
         tracing::info!("🔄 Auto-transfer: handled by SessionEventHandler");
     }
 
-    /// Helper to extract field values from event debug strings
-    /// Follows the exact same pattern as SessionCrossCrateEventHandler::extract_field() (lines 213-221)
-    fn extract_field(event_str: &str, field_prefix: &str) -> Option<String> {
-        if let Some(start) = event_str.find(field_prefix) {
-            let start = start + field_prefix.len();
-            if let Some(end) = event_str[start..].find('"') {
-                return Some(event_str[start..start+end].to_string());
-            }
-        }
-        None
-    }
+    // extract_field method removed - no longer needed without transfer coordinator
 
     // ===== Internal Helpers =====
     

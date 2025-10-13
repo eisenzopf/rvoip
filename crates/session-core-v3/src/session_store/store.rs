@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, debug};
@@ -8,33 +7,36 @@ use super::state::SessionState;
 use crate::state_table::Role;
 use crate::types::CallState;
 
-/// Session storage with indexes for fast lookup
+/// Flexible session storage for session-core-v3
+/// 
+/// This store supports multiple sessions for legitimate use cases like transfers,
+/// while keeping the API simple for single session usage.
 pub struct SessionStore {
-    /// Primary storage - all active sessions
-    pub(crate) sessions: Arc<RwLock<HashMap<SessionId, SessionState>>>,
+    /// Multiple session storage
+    pub(crate) sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionState>>>,
     
     /// Index by dialog ID
-    pub(crate) by_dialog: Arc<RwLock<HashMap<DialogId, SessionId>>>,
+    pub(crate) by_dialog: Arc<RwLock<std::collections::HashMap<DialogId, SessionId>>>,
     
     /// Index by call ID
-    pub(crate) by_call_id: Arc<RwLock<HashMap<CallId, SessionId>>>,
+    pub(crate) by_call_id: Arc<RwLock<std::collections::HashMap<CallId, SessionId>>>,
     
     /// Index by media session ID
-    pub(crate) by_media_id: Arc<RwLock<HashMap<MediaSessionId, SessionId>>>,
+    pub(crate) by_media_id: Arc<RwLock<std::collections::HashMap<MediaSessionId, SessionId>>>,
 }
 
 impl SessionStore {
     /// Create a new session store
     pub fn new() -> Self {
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            by_dialog: Arc::new(RwLock::new(HashMap::new())),
-            by_call_id: Arc::new(RwLock::new(HashMap::new())),
-            by_media_id: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            by_dialog: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            by_call_id: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            by_media_id: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
     
-    /// Create a new session
+    /// Create a new session (supports multiple sessions for transfers)
     pub async fn create_session(
         &self,
         session_id: SessionId,
@@ -191,102 +193,29 @@ impl SessionStore {
         sessions.values().cloned().collect()
     }
 
-    // ===== Bridging methods (for peer-to-peer conferencing) =====
-
-    /// Mark two sessions as bridged for conferencing
-    pub async fn bridge_sessions(
-        &self,
-        inbound_id: &SessionId,
-        outbound_id: &SessionId,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut sessions = self.sessions.write().await;
-
-        // Update first session
-        if let Some(session1) = sessions.get_mut(inbound_id) {
-            session1.bridged_to = Some(outbound_id.clone());
-        } else {
-            return Err(format!("Session {} not found", inbound_id).into());
-        }
-
-        // Update second session
-        if let Some(session2) = sessions.get_mut(outbound_id) {
-            session2.bridged_to = Some(inbound_id.clone());
-        } else {
-            // Rollback first session changes
-            if let Some(session1) = sessions.get_mut(inbound_id) {
-                session1.bridged_to = None;
-            }
-            return Err(format!("Session {} not found", outbound_id).into());
-        }
-
-        info!("Bridged sessions {} <-> {}", inbound_id, outbound_id);
-        Ok(())
+    // ===== Multi-Session Utility Methods =====
+    
+    /// Check if any sessions exist
+    pub async fn has_session(&self) -> bool {
+        !self.sessions.read().await.is_empty()
     }
-
-    /// Unbridge two sessions
-    pub async fn unbridge_sessions(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut sessions = self.sessions.write().await;
-
-        // Get the bridged session ID
-        let bridged_id = if let Some(session) = sessions.get(session_id) {
-            session.bridged_to.clone()
-        } else {
-            return Err(format!("Session {} not found", session_id).into());
-        };
-
-        // Clear bridge info from first session
-        if let Some(session) = sessions.get_mut(session_id) {
-            session.bridged_to = None;
-        }
-
-        // Clear bridge info from bridged session
-        if let Some(bridged_id) = bridged_id {
-            if let Some(bridged) = sessions.get_mut(&bridged_id) {
-                bridged.bridged_to = None;
-            }
-            info!("Unbridged sessions {} <-> {}", session_id, bridged_id);
-        }
-
-        Ok(())
-    }
-
-    /// Get the bridged partner session
-    pub async fn get_bridged_partner(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<SessionState> {
+    
+    /// Get the most recent session ID (for API compatibility)
+    pub async fn get_current_session_id(&self) -> Option<SessionId> {
         let sessions = self.sessions.read().await;
-        if let Some(session) = sessions.get(session_id) {
-            if let Some(bridged_id) = &session.bridged_to {
-                return sessions.get(bridged_id).cloned();
-            }
-        }
-        None
+        // Return the most recently created session
+        sessions.values()
+            .max_by_key(|s| s.created_at)
+            .map(|s| s.session_id.clone())
     }
-
-    /// Get all bridged session pairs
-    pub async fn get_bridged_pairs(&self) -> Vec<(SessionId, SessionId)> {
-        let sessions = self.sessions.read().await;
-        let mut pairs = Vec::new();
-        let mut processed = std::collections::HashSet::new();
-
-        for (id, session) in sessions.iter() {
-            if !processed.contains(id) {
-                if let Some(bridged_id) = &session.bridged_to {
-                    if !processed.contains(bridged_id) {
-                        // Add the pair (only once to avoid duplicates)
-                        pairs.push((id.clone(), bridged_id.clone()));
-                        processed.insert(id.clone());
-                        processed.insert(bridged_id.clone());
-                    }
-                }
-            }
-        }
-
-        pairs
+    
+    /// Clear all session data (complete reset)
+    pub async fn clear(&self) {
+        self.sessions.write().await.clear();
+        self.by_dialog.write().await.clear();
+        self.by_call_id.write().await.clear();
+        self.by_media_id.write().await.clear();
+        info!("Cleared all session data");
     }
     
     /* Old cleanup - replaced by cleanup.rs
