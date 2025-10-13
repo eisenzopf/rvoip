@@ -1,47 +1,40 @@
-//! Truly Simple API - Callback-based SIP peer
+//! Truly Simple API - Simplified blocking handler SIP peer
 //!
-//! This is the simplest possible API - callback-based with automatic event handling.
-//! Register callbacks for events, and the library handles everything in the background.
+//! This is the simplest possible API - blocking handlers with direct SimplePeer access.
+//! Register handlers, call run(), and handle events sequentially with simple linear code.
 
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use std::pin::Pin;
-use std::future::Future;
-use tokio::sync::{mpsc, RwLock, Mutex};
-use tokio::task::JoinHandle;
-use tracing::{warn, debug, error};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tracing::{warn, debug};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
+use rvoip_media_core::types::AudioFrame;
 
 // Re-export types that users of SimplePeer will need
 pub use crate::api::unified::Config;
 pub use crate::api::events::{Event, CallHandle, CallId};
 
-/// Async event handler type
-type AsyncEventHandler = Arc<dyn Fn(Event, Arc<SimplePeerController>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+/// Simple handler types - blocking closures with direct SimplePeer access
+type IncomingCallHandler = Box<dyn FnMut(CallId, String, &mut SimplePeer) -> Result<()> + Send>;
+type ReferReceivedHandler = Box<dyn FnMut(CallId, String, &mut SimplePeer) -> Result<()> + Send>;
+type CallEndedHandler = Box<dyn FnMut(CallId, String, &mut SimplePeer) -> Result<()> + Send>;
 
-/// Event handlers for different event types
-struct EventHandlers {
-    on_incoming_call: Option<AsyncEventHandler>,
-    on_call_answered: Option<AsyncEventHandler>,
-    on_refer_received: Option<AsyncEventHandler>,
-    on_call_ended: Option<AsyncEventHandler>,
-}
-
-impl Default for EventHandlers {
-    fn default() -> Self {
-        Self {
-            on_incoming_call: None,
-            on_call_answered: None,
-            on_refer_received: None,
-            on_call_ended: None,
-        }
-    }
-}
-
-/// Controller interface for handlers to perform call operations
-pub struct SimplePeerController {
+/// A simple SIP peer that can make and receive calls using blocking handlers
+pub struct SimplePeer {
+    /// The coordinator that does all the work
     coordinator: Arc<UnifiedCoordinator>,
+    
+    /// Event receiver for all SimplePeer events
+    event_rx: mpsc::Receiver<Event>,
+    
+    /// Local SIP URI
     local_uri: String,
+    
+    /// Simple handler storage
+    on_incoming_call: Option<IncomingCallHandler>,
+    on_refer_received: Option<ReferReceivedHandler>,
+    on_call_ended: Option<CallEndedHandler>,
 }
 
 impl SimplePeerController {
@@ -52,15 +45,75 @@ impl SimplePeerController {
     /// Make an outgoing call
     pub async fn call(&self, target: &str) -> Result<CallHandle> {
         let call_id = self.coordinator.make_call(&self.local_uri, target).await?;
-        let (call_handle, _audio_rx, _audio_tx) = CallHandle::new(call_id);
+        let (call_handle, audio_rx_from_handle, audio_tx_to_handle) = CallHandle::new(call_id.clone());
+        
+        // Wire CallHandle to real media system
+        self.wire_audio_to_media_system(&call_id, audio_rx_from_handle, audio_tx_to_handle).await?;
+        
         Ok(call_handle)
     }
     
     /// Accept an incoming call
     pub async fn accept(&self, call_id: &CallId) -> Result<CallHandle> {
         self.coordinator.accept_call(call_id).await?;
-        let (call_handle, _audio_rx, _audio_tx) = CallHandle::new(call_id.clone());
+        let (call_handle, audio_rx_from_handle, audio_tx_to_handle) = CallHandle::new(call_id.clone());
+        
+        // Wire CallHandle to real media system
+        self.wire_audio_to_media_system(call_id, audio_rx_from_handle, audio_tx_to_handle).await?;
+        
         Ok(call_handle)
+    }
+    
+    /// Wire CallHandle audio channels to the real media system
+    async fn wire_audio_to_media_system(
+        &self,
+        call_id: &CallId,
+        mut audio_rx_from_handle: mpsc::Receiver<Vec<i16>>,
+        audio_tx_to_handle: mpsc::Sender<Vec<i16>>,
+    ) -> Result<()> {
+        let coordinator = self.coordinator.clone();
+        let call_id_clone = call_id.clone();
+        
+        // Task 1: Send audio from CallHandle to media system (CallHandle.send_audio() → RTP)
+        let coordinator_for_send = coordinator.clone();
+        let call_id_for_send = call_id_clone.clone();
+        tokio::spawn(async move {
+            let mut timestamp = 0u32;
+            while let Some(samples) = audio_rx_from_handle.recv().await {
+                // Convert Vec<i16> to AudioFrame and send to real media system
+                let frame = rvoip_media_core::types::AudioFrame::new(samples, 8000, 1, timestamp);
+                if let Err(e) = coordinator_for_send.send_audio(&call_id_for_send, frame).await {
+                    debug!("Failed to send audio to media system: {}", e);
+                    break;
+                }
+                timestamp += 160; // 20ms at 8kHz = 160 samples
+            }
+            debug!("CallHandle send audio task ended for {}", call_id_for_send.0);
+        });
+        
+        // Task 2: Receive audio from media system and send to CallHandle (RTP → CallHandle.try_recv_audio())
+        let coordinator_for_recv = coordinator.clone();
+        let call_id_for_recv = call_id_clone.clone();
+        tokio::spawn(async move {
+            // Subscribe to real audio from the media system
+            match coordinator_for_recv.subscribe_to_audio(&call_id_for_recv).await {
+                Ok(mut audio_subscriber) => {
+                    while let Some(frame) = audio_subscriber.recv().await {
+                        let samples = frame.samples.clone();
+                        if audio_tx_to_handle.send(samples).await.is_err() {
+                            debug!("CallHandle audio channel closed, stopping audio receive for {}", call_id_for_recv.0);
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!("Failed to subscribe to audio for {}: {}", call_id_for_recv.0, e);
+                }
+            }
+            debug!("CallHandle receive audio task ended for {}", call_id_for_recv.0);
+        });
+        
+        Ok(())
     }
     
     /// Hang up a call
@@ -103,6 +156,18 @@ impl SimplePeerController {
         } else {
             Ok(())
         }
+    }
+    
+    // ===== Audio Operations for Callbacks =====
+    
+    /// Send audio to a call (for use in callbacks)
+    pub async fn send_audio(&self, call_id: &CallId, frame: rvoip_media_core::types::AudioFrame) -> Result<()> {
+        self.coordinator.send_audio(call_id, frame).await
+    }
+    
+    /// Subscribe to receive audio from a call (for use in callbacks)
+    pub async fn subscribe_audio(&self, call_id: &CallId) -> Result<crate::types::AudioFrameSubscriber> {
+        self.coordinator.subscribe_to_audio(call_id).await
     }
 }
 
