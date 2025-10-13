@@ -34,8 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut alice = SimplePeer::with_config("alice", config).await?;
     
-    // Track which call we're on
+    // Track which call we're on and prevent duplicate handling
     let is_bob_call = Arc::new(Mutex::new(true));
+    let handled_calls = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     // Register transfer handler
     let is_bob_call_for_refer = is_bob_call.clone();
@@ -59,10 +60,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Register call answered handler - handles both Bob and Charlie
     let is_bob_call_for_answered = is_bob_call.clone();
+    let handled_calls_clone = handled_calls.clone();
     alice.on_call_answered(move |event, controller| {
         let is_bob_call = is_bob_call_for_answered.clone();
+        let handled_calls = handled_calls_clone.clone();
         async move {
             if let rvoip_session_core_v3::api::simple::Event::CallAnswered { call_id, .. } = event {
+                // Prevent duplicate handling of the same call
+                {
+                    let mut handled = handled_calls.lock().unwrap();
+                    if !handled.insert(call_id.0.clone()) {
+                        println!("[ALICE] ⚠️ Ignoring duplicate CallAnswered for {}", call_id.0);
+                        return;
+                    }
+                }
+                
                 let is_bob = is_bob_call.lock().map(|guard| *guard).unwrap_or(true);
                 
                 if is_bob {
