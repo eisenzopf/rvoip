@@ -56,9 +56,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("[BOB] ✅ Transfer complete!");
         }
     }).await;
+    
+    // Register call ended handler to exit when call ends
+    bob.on_call_ended(|event, _controller| async move {
+        if let rvoip_session_core_v3::api::simple::Event::CallEnded { call_id, reason } = event {
+            println!("[BOB] 📞 Call ended: {} ({})", call_id.0, reason);
+            // Exit after call ends
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            println!("[BOB] ✅ Completed!");
+            std::process::exit(0);
+        }
+    }).await;
 
     println!("[BOB] ✅ Listening on port 5061...");
-    // Wait for calls (callbacks handle everything)
+    // Wait for calls (callbacks handle everything and exit)
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }

@@ -34,35 +34,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut alice = SimplePeer::with_config("alice", config).await?;
     
-    // Track which call we're on and prevent duplicate handling
-    let is_bob_call = Arc::new(Mutex::new(true));
+    // Track call IDs to distinguish Bob from Charlie
+    let bob_call_id = Arc::new(Mutex::new(None::<String>));
+    let charlie_call_id = Arc::new(Mutex::new(None::<String>));
     let handled_calls = Arc::new(Mutex::new(std::collections::HashSet::new()));
 
     // Register transfer handler
-    let is_bob_call_for_refer = is_bob_call.clone();
-    alice.on_refer_received(move |event, controller| {
-        let is_bob_call = is_bob_call_for_refer.clone();
-        async move {
-            if let rvoip_session_core_v3::api::simple::Event::ReferReceived { call_id, refer_to, .. } = event {
-                println!("[ALICE] 🔄 Got REFER to: {}", refer_to);
-                
-                // Mark that the next CallAnswered will be for Charlie
-                if let Ok(mut is_bob) = is_bob_call.lock() {
-                    *is_bob = false;
-                }
-                
-                // Per RFC 3515: Alice should call Charlie (Bob will send BYE)
-                println!("[ALICE] 📞 Calling Charlie...");
-                controller.call(&refer_to).await.ok();
-            }
+    alice.on_refer_received(|event, controller| async move {
+        if let rvoip_session_core_v3::api::simple::Event::ReferReceived { call_id, refer_to, .. } = event {
+            println!("[ALICE] 🔄 Got REFER to: {}", refer_to);
+            
+            // Per RFC 3515: Alice should call Charlie (Bob will send BYE)
+            println!("[ALICE] 📞 Calling Charlie...");
+            controller.call(&refer_to).await.ok();
         }
     }).await;
     
     // Register call answered handler - handles both Bob and Charlie
-    let is_bob_call_for_answered = is_bob_call.clone();
+    let bob_call_id_for_answered = bob_call_id.clone();
+    let charlie_call_id_for_answered = charlie_call_id.clone();
     let handled_calls_clone = handled_calls.clone();
     alice.on_call_answered(move |event, controller| {
-        let is_bob_call = is_bob_call_for_answered.clone();
+        let bob_call_id = bob_call_id_for_answered.clone();
+        let charlie_call_id = charlie_call_id_for_answered.clone();
         let handled_calls = handled_calls_clone.clone();
         async move {
             if let rvoip_session_core_v3::api::simple::Event::CallAnswered { call_id, .. } = event {
@@ -75,10 +69,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 
-                let is_bob = is_bob_call.lock().map(|guard| *guard).unwrap_or(true);
+                // Check if this is the first call (Bob) or second call (Charlie)
+                let has_bob = bob_call_id.lock().unwrap().is_some();
                 
-                if is_bob {
+                if !has_bob {
+                    // First call - this is Bob
                     println!("[ALICE] ✅ Call with Bob answered");
+                    bob_call_id.lock().unwrap().replace(call_id.0.clone());
                     
                     // Exchange audio with Bob
                     if let Ok((sent, received)) = controller.exchange_audio(&call_id, Duration::from_secs(5), |i| generate_tone(440.0, i)).await {
@@ -87,7 +84,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         save_wav("output/alice_from_bob_received.wav", &received).ok();
                     }
                 } else {
+                    // Second call - this is Charlie
                     println!("[ALICE] ✅ Call with Charlie answered");
+                    charlie_call_id.lock().unwrap().replace(call_id.0.clone());
                     
                     // Exchange audio with Charlie  
                     if let Ok((sent, received)) = controller.exchange_audio(&call_id, Duration::from_secs(5), |i| generate_tone(440.0, i)).await {
@@ -101,13 +100,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }).await;
+    
+    // Register call ended handler to exit when Charlie call ends (not Bob)
+    let charlie_call_id_for_ended = charlie_call_id.clone();
+    alice.on_call_ended(move |event, _controller| {
+        let charlie_call_id = charlie_call_id_for_ended.clone();
+        async move {
+            if let rvoip_session_core_v3::api::simple::Event::CallEnded { call_id, reason } = event {
+                // Check if this is the Charlie call
+                let is_charlie_call = charlie_call_id.lock().unwrap()
+                    .as_ref()
+                    .map(|id| id == &call_id.0)
+                    .unwrap_or(false);
+                
+                if is_charlie_call {
+                    println!("[ALICE] 📞 Charlie call ended: {} ({})", call_id.0, reason);
+                    // Exit after Charlie call ends
+                    sleep(Duration::from_secs(1)).await;
+                    println!("[ALICE] ✅ Completed!");
+                    std::process::exit(0);
+                } else {
+                    println!("[ALICE] 📞 Bob call ended: {} ({})", call_id.0, reason);
+                    // Don't exit - Alice still needs to talk to Charlie
+                }
+            }
+        }
+    }).await;
 
     sleep(Duration::from_secs(3)).await; // Wait for other peers
 
     println!("[ALICE] 📞 Calling Bob...");
     let _bob_call_id = alice.call("sip:bob@127.0.0.1:5061").await?;
 
-    // Wait for transfer to complete
+    // Wait for transfer to complete (callbacks handle everything and exit)
     loop {
         sleep(Duration::from_secs(1)).await;
     }
