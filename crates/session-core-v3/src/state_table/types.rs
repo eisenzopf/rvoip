@@ -407,15 +407,8 @@ pub enum Action {
     CleanupDialog,
     CleanupMedia,
 
-    // Event publishing actions (replace callbacks)
+    // REFER response action (keep for proper REFER handling)
     SendReferAccepted,
-    PublishReferEvent,
-    PublishIncomingCallEvent,
-    PublishCallEndedEvent,
-    PublishCallAnsweredEvent,
-    PublishCallOnHoldEvent,
-    PublishCallResumedEvent,
-    PublishDtmfReceivedEvent,
 
     // Custom action for extension
     Custom(String),

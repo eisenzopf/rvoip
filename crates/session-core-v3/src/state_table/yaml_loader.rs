@@ -706,15 +706,8 @@ impl YamlTableLoader {
             "HoldOriginalCall" | "HoldCurrentCall" => Ok(Action::HoldCurrentCall),
             "ResumeOriginalCall" => Ok(Action::RestoreMediaFlow),
 
-            // Event publishing actions (replace callbacks)
+            // REFER response action (keep for proper REFER handling)
             "SendReferAccepted" => Ok(Action::SendReferAccepted),
-            "PublishReferEvent" => Ok(Action::PublishReferEvent),
-            "PublishIncomingCallEvent" => Ok(Action::PublishIncomingCallEvent),
-            "PublishCallEndedEvent" => Ok(Action::PublishCallEndedEvent),
-            "PublishCallAnsweredEvent" => Ok(Action::PublishCallAnsweredEvent),
-            "PublishCallOnHoldEvent" => Ok(Action::PublishCallOnHoldEvent),
-            "PublishCallResumedEvent" => Ok(Action::PublishCallResumedEvent),
-            "PublishDtmfReceivedEvent" => Ok(Action::PublishDtmfReceivedEvent),
 
             // Internal
             "CheckReadiness" => Ok(Action::Custom("CheckReadiness".to_string())),

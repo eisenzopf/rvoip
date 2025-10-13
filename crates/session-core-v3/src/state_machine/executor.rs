@@ -7,7 +7,7 @@ use crate::{
     session_store::{SessionStore, SessionState},
     adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
     types::CallState,
-    api::events::Event,
+    // Event import removed - events handled by SessionCrossCrateEventHandler
 };
 
 use super::{actions, guards};
@@ -44,8 +44,7 @@ pub struct StateMachine {
     /// Event publisher (optional - for legacy compatibility)
     event_tx: Option<tokio::sync::mpsc::Sender<SessionEvent>>,
     
-    /// SimplePeer event channel for publishing events
-    simple_peer_event_tx: Option<tokio::sync::mpsc::Sender<Event>>,
+    // SimplePeer events now handled by SessionCrossCrateEventHandler
 }
 
 /// Events that flow through the system
@@ -87,26 +86,11 @@ impl StateMachine {
             dialog_adapter,
             media_adapter,
             event_tx: None, // No event channel by default
-            simple_peer_event_tx: None,
+            // SimplePeer events handled by SessionCrossCrateEventHandler
         }
     }
     
-    pub fn new_with_simple_peer_events(
-        table: Arc<crate::state_table::MasterStateTable>,
-        store: Arc<SessionStore>,
-        dialog_adapter: Arc<DialogAdapter>,
-        media_adapter: Arc<MediaAdapter>,
-        simple_peer_event_tx: tokio::sync::mpsc::Sender<Event>,
-    ) -> Self {
-        Self {
-            table,
-            store,
-            dialog_adapter,
-            media_adapter,
-            event_tx: None,
-            simple_peer_event_tx: Some(simple_peer_event_tx),
-        }
-    }
+    // new_with_simple_peer_events removed - using SessionCrossCrateEventHandler for event forwarding
     
     pub fn new_with_adapters(
         store: Arc<SessionStore>,
@@ -120,7 +104,7 @@ impl StateMachine {
             dialog_adapter,
             media_adapter,
             event_tx: Some(event_tx),
-            simple_peer_event_tx: None,
+            // SimplePeer events handled by SessionCrossCrateEventHandler
         }
     }
     
@@ -137,7 +121,7 @@ impl StateMachine {
             dialog_adapter,
             media_adapter,
             event_tx: Some(event_tx),
-            simple_peer_event_tx: None,
+            // SimplePeer events handled by SessionCrossCrateEventHandler
         }
     }
     
@@ -304,7 +288,7 @@ impl StateMachine {
                 &self.dialog_adapter,
                 &self.media_adapter,
                 &self.store,
-                &self.simple_peer_event_tx,
+                &None, // No SimplePeer event channel - handled by SessionCrossCrateEventHandler
             ).await;
             let action_duration = action_start.elapsed().as_millis() as u64;
             

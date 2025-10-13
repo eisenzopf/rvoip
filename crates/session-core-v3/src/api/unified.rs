@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::{mpsc, RwLock};
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
+use tracing::debug;
 
 /// Configuration for the unified coordinator
 #[derive(Debug, Clone)]
@@ -193,13 +194,12 @@ impl UnifiedCoordinator {
             )
         );
         
-        // Create state machine with SimplePeer event channel
-        let state_machine = Arc::new(StateMachine::new_with_simple_peer_events(
+        // Create state machine (standard constructor - no separate event channel needed)
+        let state_machine = Arc::new(StateMachine::new(
             state_table,
             store.clone(),
             dialog_adapter.clone(),
             media_adapter.clone(),
-            simple_peer_event_tx,
         ));
         
         // Create helpers
@@ -220,18 +220,22 @@ impl UnifiedCoordinator {
         // Start the dialog adapter
         dialog_adapter.start().await?;
         
-        // Create and start the centralized event handler with incoming call channel
-        let event_handler = crate::adapters::SessionCrossCrateEventHandler::with_incoming_call_channel(
+        // Create and start the centralized event handler with SimplePeer event integration
+        debug!("🔍 [DEBUG] Creating SessionCrossCrateEventHandler with SimplePeer events...");
+        let event_handler = crate::adapters::SessionCrossCrateEventHandler::with_simple_peer_events(
             state_machine.clone(),
             global_coordinator.clone(),
             dialog_adapter.clone(),
             media_adapter.clone(),
             registry.clone(),
             incoming_tx,
+            simple_peer_event_tx,
         );
 
         // Start the event handler (sets up channels and subscriptions)
+        debug!("🔍 [DEBUG] Starting SessionCrossCrateEventHandler...");
         event_handler.start().await?;
+        debug!("🔍 [DEBUG] SessionCrossCrateEventHandler started successfully");
 
         Ok(coordinator)
     }

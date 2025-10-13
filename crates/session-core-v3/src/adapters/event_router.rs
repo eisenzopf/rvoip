@@ -317,13 +317,6 @@ impl EventRouter {
             Action::ProcessMESSAGE |
             Action::CleanupDialog |
             Action::CleanupMedia |
-            Action::PublishReferEvent |
-            Action::PublishIncomingCallEvent |
-            Action::PublishCallEndedEvent |
-            Action::PublishCallAnsweredEvent |
-            Action::PublishCallOnHoldEvent |
-            Action::PublishCallResumedEvent |
-            Action::PublishDtmfReceivedEvent |
             Action::SendReferAccepted => {
                 tracing::debug!("Advanced action {:?} for session {} - handled by state machine", action, session_id);
             }

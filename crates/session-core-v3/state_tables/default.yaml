@@ -142,7 +142,7 @@ transitions:
       sdp_negotiated: true
     publish:
       - "CallAnswered"
-    description: "Call answered immediately without ringing"
+    description: "Call answered immediately and event published to SimplePeer"
 
   # UAC receives 200 OK (call answered)
   - role: "UAC"
@@ -160,7 +160,7 @@ transitions:
       sdp_negotiated: true
     publish:
       - "CallEstablished"
-    description: "Call answered"
+    description: "Call answered and event published to SimplePeer"
 
   # UAS receives incoming call
   - role: "UAS"
@@ -175,7 +175,6 @@ transitions:
       - type: "SendSIPResponse"
         code: 180
         reason: "Ringing"
-      - type: "PublishIncomingCallEvent"
     publish:
       - "IncomingCallReceived"
     description: "Incoming call received and event published to SimplePeer"
@@ -381,8 +380,7 @@ transitions:
     next_state: "Active"
     actions:
       - type: "SendReferAccepted"
-      - type: "PublishReferEvent"
-    description: "Handle REFER via events - always accept and notify SimplePeer"
+    description: "Handle REFER - always accept (SimplePeer gets event via SessionCrossCrateEventHandler)"
 
   # Registration transitions
   - role: "Both"

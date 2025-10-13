@@ -42,7 +42,8 @@ pub struct SessionCrossCrateEventHandler {
     /// Channel to send incoming call notifications
     incoming_call_tx: Option<mpsc::Sender<crate::types::IncomingCallInfo>>,
 
-    // Transfer coordinator removed - using callback system instead
+    /// SimplePeer event channel for forwarding events
+    simple_peer_event_tx: Option<tokio::sync::mpsc::Sender<crate::api::events::Event>>,
 }
 
 impl SessionCrossCrateEventHandler {
@@ -60,7 +61,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: None,
-            // transfer_coordinator field removed
+            simple_peer_event_tx: None,
         }
     }
     
@@ -79,11 +80,30 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: Some(incoming_call_tx),
-            // transfer_coordinator field removed
+            simple_peer_event_tx: None,
         }
     }
 
-    // set_transfer_coordinator method removed - using callback system instead
+    /// Create event handler with SimplePeer event integration
+    pub fn with_simple_peer_events(
+        state_machine: Arc<StateMachineExecutor>,
+        global_coordinator: Arc<GlobalEventCoordinator>,
+        dialog_adapter: Arc<DialogAdapter>,
+        media_adapter: Arc<MediaAdapter>,
+        registry: Arc<SessionRegistry>,
+        incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
+        simple_peer_event_tx: tokio::sync::mpsc::Sender<crate::api::events::Event>,
+    ) -> Self {
+        Self {
+            state_machine,
+            global_coordinator,
+            dialog_adapter,
+            media_adapter,
+            registry,
+            incoming_call_tx: Some(incoming_call_tx),
+            simple_peer_event_tx: Some(simple_peer_event_tx),
+        }
+    }
     
     /// Start event processing loops
     pub async fn start(&self) -> SessionResult<()> {
@@ -328,6 +348,10 @@ impl SessionCrossCrateEventHandler {
             .map_err(|e| SessionError::InternalError(format!("Failed to get newly created session: {}", e)))?;
         session.local_uri = Some(to.clone());    // The "To" header is us (answerer)
         session.remote_uri = Some(from.clone()); // The "From" header is the caller
+        
+        // Store session data for SimplePeer event
+        let session_remote_sdp = session.remote_sdp.clone();
+        
         self.state_machine.store.update_session(session).await
             .map_err(|e| SessionError::InternalError(format!("Failed to update session URIs: {}", e)))?;
 
@@ -378,7 +402,24 @@ impl SessionCrossCrateEventHandler {
             let _ = self.state_machine.store.remove_session(&session_id).await;
             self.registry.remove_session(&session_id).await;
         } else {
-            // Notify about incoming call after successful processing
+            // Forward to SimplePeer event system
+            if let Some(ref event_tx) = self.simple_peer_event_tx {
+                debug!("🔍 [DEBUG] Forwarding IncomingCall event to SimplePeer");
+                let event = crate::api::events::Event::IncomingCall {
+                    call_id: session_id.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    sdp: session_remote_sdp,
+                };
+                
+                if let Err(e) = event_tx.send(event).await {
+                    error!("Failed to send IncomingCall event to SimplePeer: {}", e);
+                } else {
+                    debug!("🔍 [DEBUG] Successfully sent IncomingCall event to SimplePeer");
+                }
+            }
+            
+            // Legacy incoming call notification (keep for compatibility)
             if let Some(ref tx) = self.incoming_call_tx {
                 info!("Sending incoming call notification for session {}", session_id);
                 let call_info = crate::types::IncomingCallInfo {
@@ -439,6 +480,21 @@ impl SessionCrossCrateEventHandler {
             EventType::Dialog200OK
         ).await {
             error!("Failed to process CallEstablished as Dialog200OK: {}", e);
+        }
+
+        // Forward to SimplePeer event system
+        if let Some(ref event_tx) = self.simple_peer_event_tx {
+            debug!("🔍 [DEBUG] Forwarding CallAnswered event to SimplePeer");
+            let event = crate::api::events::Event::CallAnswered {
+                call_id: session_id.clone(),
+                sdp: sdp_answer,
+            };
+            
+            if let Err(e) = event_tx.send(event).await {
+                error!("Failed to send CallAnswered event to SimplePeer: {}", e);
+            } else {
+                debug!("🔍 [DEBUG] Successfully sent CallAnswered event to SimplePeer");
+            }
         }
 
         Ok(())
@@ -602,7 +658,22 @@ impl SessionCrossCrateEventHandler {
                 error!("Failed to process TransferRequested: {}", e);
             }
 
-            // Auto-transfer removed - REFER handling now done via callbacks in state machine
+            // Forward to SimplePeer event system
+            if let Some(ref event_tx) = self.simple_peer_event_tx {
+                debug!("🔍 [DEBUG] Forwarding ReferReceived event to SimplePeer");
+                let event = crate::api::events::Event::ReferReceived {
+                    call_id: session_id.clone(),
+                    refer_to: refer_to.clone(),
+                    referred_by: None, // TODO: Extract from event if available
+                    replaces: None,    // TODO: Extract from event if available
+                };
+                
+                if let Err(e) = event_tx.send(event).await {
+                    error!("Failed to send ReferReceived event to SimplePeer: {}", e);
+                } else {
+                    debug!("🔍 [DEBUG] Successfully sent ReferReceived event to SimplePeer");
+                }
+            }
         }
         Ok(())
     }

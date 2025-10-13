@@ -16,7 +16,7 @@ pub async fn execute_action(
     dialog_adapter: &Arc<DialogAdapter>,
     media_adapter: &Arc<MediaAdapter>,
     _session_store: &Arc<SessionStore>,
-    simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>,
+    _simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>, // Unused - events handled by SessionCrossCrateEventHandler
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing action: {:?}", action);
     
@@ -594,28 +594,7 @@ pub async fn execute_action(
             }
         }
 
-        // ===== Event Publishing Actions =====
-
-        Action::PublishReferEvent => {
-            debug!("Publishing REFER event for session {}", session.session_id);
-            
-            if let Some(event_tx) = simple_peer_event_tx {
-                let event = Event::ReferReceived {
-                    call_id: session.session_id.clone(),
-                    refer_to: session.transfer_target.clone().unwrap_or_default(),
-                    referred_by: session.referred_by.clone(),
-                    replaces: session.replaces_header.clone(),
-                };
-                
-                if let Err(e) = event_tx.send(event).await {
-                    error!("Failed to publish REFER event to SimplePeer: {}", e);
-                } else {
-                    debug!("Published REFER event to SimplePeer");
-                }
-            } else {
-                debug!("No SimplePeer event channel - REFER event not published");
-            }
-        }
+        // ===== REFER Response Action =====
 
         Action::SendReferAccepted => {
             debug!("Sending 202 Accepted for REFER request");
@@ -639,81 +618,6 @@ pub async fn execute_action(
             } else {
                 debug!("Published ReferResponse (202 Accepted) event to dialog-core");
             }
-        }
-
-        Action::PublishIncomingCallEvent => {
-            debug!("Publishing incoming call event for session {}", session.session_id);
-            
-            if let Some(event_tx) = simple_peer_event_tx {
-                let event = Event::IncomingCall {
-                    call_id: session.session_id.clone(),
-                    from: session.remote_uri.clone().unwrap_or_default(),
-                    to: session.local_uri.clone().unwrap_or_default(),
-                    sdp: session.remote_sdp.clone(),
-                };
-                
-                if let Err(e) = event_tx.send(event).await {
-                    error!("Failed to publish incoming call event to SimplePeer: {}", e);
-                } else {
-                    debug!("Published incoming call event to SimplePeer");
-                }
-            }
-        }
-
-        Action::PublishCallEndedEvent => {
-            debug!("Publishing call ended event for session {}", session.session_id);
-            
-            if let Some(event_tx) = simple_peer_event_tx {
-                let event = Event::CallEnded {
-                    call_id: session.session_id.clone(),
-                    reason: "Call terminated".to_string(),
-                };
-                
-                let _ = event_tx.send(event).await;
-            }
-        }
-
-        Action::PublishCallAnsweredEvent => {
-            debug!("Publishing call answered event for session {}", session.session_id);
-            
-            if let Some(event_tx) = simple_peer_event_tx {
-                let event = Event::CallAnswered {
-                    call_id: session.session_id.clone(),
-                    sdp: session.remote_sdp.clone(),
-                };
-                
-                let _ = event_tx.send(event).await;
-            }
-        }
-
-        Action::PublishCallOnHoldEvent => {
-            debug!("Publishing call on hold event for session {}", session.session_id);
-            
-            if let Some(event_tx) = simple_peer_event_tx {
-                let event = Event::CallOnHold {
-                    call_id: session.session_id.clone(),
-                };
-                
-                let _ = event_tx.send(event).await;
-            }
-        }
-
-        Action::PublishCallResumedEvent => {
-            debug!("Publishing call resumed event for session {}", session.session_id);
-            
-            if let Some(event_tx) = simple_peer_event_tx {
-                let event = Event::CallResumed {
-                    call_id: session.session_id.clone(),
-                };
-                
-                let _ = event_tx.send(event).await;
-            }
-        }
-
-        Action::PublishDtmfReceivedEvent => {
-            debug!("Publishing DTMF received event for session {}", session.session_id);
-            // TODO: Extract DTMF digit from session state
-            warn!("PublishDtmfReceivedEvent not fully implemented yet");
         }
     }
     
