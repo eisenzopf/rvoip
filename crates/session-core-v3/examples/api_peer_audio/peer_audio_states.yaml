@@ -1,0 +1,463 @@
+# Peer-to-Peer Audio Example State Table
+# This demonstrates how to define custom state transitions for your application
+
+version: "1.0"
+
+metadata:
+  description: "State table for peer-to-peer audio exchange example"
+  author: "API Example"
+  date: "2025-09-03"
+
+# Define the states used in this example
+states:
+  - name: "Idle"
+    description: "No active call"
+  - name: "Initiating"
+    description: "Starting outbound call"
+  - name: "Ringing"
+    description: "Incoming call ringing"
+  - name: "EarlyMedia"
+    description: "Early media before answer"
+  - name: "Active"
+    description: "Call established, audio flowing"
+  - name: "OnHold"
+    description: "Call on hold"
+  - name: "Resuming"
+    description: "Resuming from hold"
+  - name: "Bridged"
+    description: "Call bridged to another endpoint call"
+  - name: "Transferring"
+    description: "Call being transferred"
+  - name: "Terminating"
+    description: "Call ending"
+  - name: "Terminated"
+    description: "Call ended"
+  - name: "Failed"
+    description: "Call failed"
+
+# Conditions that can be tracked
+conditions:
+  - name: "MediaReady"
+    description: "Media channels are ready"
+    default: false
+  - name: "DialogEstablished"
+    description: "SIP dialog is established"
+    default: false
+
+# State transitions for the example
+transitions:
+  # ============= UAC (Caller) Transitions =============
+  
+  # UAC initiates a call
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "MakeCall"
+    next_state: "Initiating"
+    actions:
+      - type: "CreateDialog"
+      - type: "CreateMediaSession"
+      - type: "GenerateLocalSDP"
+      - type: "SendINVITE"
+    description: "UAC starts outbound call"
+
+  # UAC receives 200 OK (call answered)
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "Dialog200OK"
+    next_state: "Active"
+    actions:
+      - type: "StoreRemoteSDP"
+      - type: "NegotiateSDPAsUAC"
+      - type: "SendACK"
+      - type: "StartMediaSession"
+    conditions:
+      set:
+        - "MediaReady"
+        - "DialogEstablished"
+    publish:
+      - "CallEstablished"
+    description: "UAC call answered"
+
+  # UAC call rejected
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "Dialog4xxFailure"
+    next_state: "Failed"
+    actions:
+      - type: "StopMediaSession"
+    publish:
+      - "CallFailed"
+    description: "UAC call rejected"
+
+  # UAC timeout waiting for answer
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "DialogTimeout"
+    next_state: "Failed"
+    actions:
+      - type: "SendCANCEL"
+      - type: "StopMediaSession"
+    publish:
+      - "CallTimeout"
+    description: "UAC call timeout"
+
+  # UAC hangs up active call
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+      - type: "StopMediaSession"
+    description: "UAC hangs up"
+
+  # UAC puts call on hold
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "HoldCall"
+    next_state: "OnHold"
+    actions:
+      - type: "SendReINVITE"
+      - type: "PauseMedia"
+    description: "UAC holds call"
+
+  # UAC resumes from hold
+  - role: "UAC"
+    state: "OnHold"
+    event:
+      type: "ResumeCall"
+    next_state: "Active"
+    actions:
+      - type: "SendReINVITE"
+      - type: "StartMediaSession"
+    description: "UAC resumes call"
+
+  # UAC termination complete
+  - role: "UAC"
+    state: "Terminating"
+    event:
+      type: "Dialog200OK"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupSession"
+    publish:
+      - "CallTerminated"
+    description: "UAC termination complete"
+
+  # UAC hangup from idle (safety transition)
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "HangupCall"
+    next_state: "Idle"
+    actions: []
+    description: "No-op hangup when idle"
+
+  # ============= UAS (Callee) Transitions =============
+
+  # UAS receives incoming call
+  - role: "UAS"
+    state: "Idle"
+    event:
+      type: "IncomingCall"
+    next_state: "Ringing"
+    actions:
+      - type: "CreateMediaSession"
+      - type: "ProcessInvite"
+      - type: "Send180Ringing"
+      - type: "StoreRemoteSDP"
+    publish:
+      - "IncomingCallReceived"
+    description: "UAS receives call"
+
+  # UAS accepts the call
+  - role: "UAS"
+    state: "Ringing"
+    event:
+      type: "AcceptCall"
+    next_state: "Active"
+    actions:
+      - type: "GenerateLocalSDP"
+      - type: "NegotiateSDPAsUAS"
+      - type: "Send200OK"
+      - type: "StartMediaSession"
+    conditions:
+      set:
+        - "MediaReady"
+        - "DialogEstablished"
+    publish:
+      - "CallEstablished"
+    description: "UAS accepts call"
+
+  # UAS rejects the call
+  - role: "UAS"
+    state: "Ringing"
+    event:
+      type: "RejectCall"
+    next_state: "Terminated"
+    actions:
+      - type: "SendSIPResponse"
+        params:
+          code: 486
+          reason: "Busy Here"
+    publish:
+      - "CallRejected"
+    description: "UAS rejects call"
+
+  # UAS receives ACK after accepting
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "DialogACK"
+    next_state: "Active"
+    actions: []
+    description: "UAS receives ACK"
+
+  # UAS hangs up active call
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+      - type: "StopMediaSession"
+    description: "UAS hangs up"
+
+  # UAS receives remote hangup
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminating"
+    actions:
+      - type: "Send200OK"
+      - type: "StopMediaSession"
+    description: "UAS receives hangup"
+
+  # UAS puts call on hold
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "HoldCall"
+    next_state: "OnHold"
+    actions:
+      - type: "SendReINVITE"
+      - type: "PauseMedia"
+    description: "UAS holds call"
+
+  # UAS resumes from hold
+  - role: "UAS"
+    state: "OnHold"
+    event:
+      type: "ResumeCall"
+    next_state: "Active"
+    actions:
+      - type: "SendReINVITE"
+      - type: "StartMediaSession"
+    description: "UAS resumes call"
+
+  # UAS termination complete
+  - role: "UAS"
+    state: "Terminating"
+    event:
+      type: "TerminationComplete"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupSession"
+    publish:
+      - "CallTerminated"
+    description: "UAS termination complete"
+
+  # ============= Common Transitions (Both Roles) =============
+
+  # Handle media events during active call
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "PlayAudio"
+    next_state: "Active"
+    actions:
+      - type: "PlayAudioFile"
+    description: "Play audio file"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "StartRecording"
+    next_state: "Active"
+    actions:
+      - type: "StartRecordingMedia"
+    description: "Start recording"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "StopRecording"
+    next_state: "Active"
+    actions:
+      - type: "StopRecordingMedia"
+    description: "Stop recording"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "SendDTMF"
+    next_state: "Active"
+    actions:
+      - type: "SendDTMFDigits"
+    publish:
+      - "DTMFSent"
+    description: "Send DTMF"
+
+  # Error handling - apply to all active states
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "DialogError"
+    next_state: "Failed"
+    actions:
+      - type: "StopMediaSession"
+      - type: "CleanupSession"
+    publish:
+      - "Error"
+    description: "Handle dialog error during active call"
+    
+  - role: "Both"
+    state: "Initiating"
+    event:
+      type: "DialogError"
+    next_state: "Failed"
+    actions:
+      - type: "StopMediaSession"
+      - type: "CleanupSession"
+    publish:
+      - "Error"
+    description: "Handle dialog error during initiation"
+    
+  - role: "Both"
+    state: "Ringing"
+    event:
+      type: "DialogError"
+    next_state: "Failed"
+    actions:
+      - type: "StopMediaSession"
+      - type: "CleanupSession"
+    publish:
+      - "Error"
+    description: "Handle dialog error during ringing"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "MediaError"
+    next_state: "Failed"
+    actions:
+      - type: "SendBYE"
+      - type: "CleanupSession"
+    publish:
+      - "Error"
+    description: "Handle media error during active call"
+
+  # ============= Transitions for additional states =============
+  
+  # EarlyMedia transitions
+  - role: "Both"
+    state: "EarlyMedia"
+    event:
+      type: "Dialog200OK"
+    next_state: "Active"
+    actions:
+      - type: "SendACK"
+      - type: "StartMediaSession"
+    description: "Early media to active"
+    
+  - role: "Both"
+    state: "EarlyMedia"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "SendCANCEL"
+      - type: "StopMediaSession"
+    description: "Cancel early media"
+  
+  # Resuming transitions
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "Dialog200OK"
+    next_state: "Active"
+    actions:
+      - type: "StartMediaSession"
+    description: "Resume complete"
+    
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "DialogError"
+    next_state: "OnHold"
+    actions: []
+    description: "Resume failed"
+
+  # Bridged transitions (for endpoint call bridging)
+  - role: "Both"
+    state: "Bridged"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+      - type: "StopMediaSession"
+    description: "Hangup bridged call"
+
+  - role: "Both"
+    state: "Bridged"
+    event:
+      type: "UnbridgeSessions"
+    next_state: "Active"
+    actions: []
+    description: "Unbridge sessions"
+
+  # Transferring transitions
+  - role: "Both"
+    state: "Transferring"
+    event:
+      type: "TransferComplete"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupSession"
+    description: "Transfer completed"
+    
+  - role: "Both"
+    state: "Transferring"
+    event:
+      type: "TransferFailed"
+    next_state: "Active"
+    actions: []
+    description: "Transfer failed, return to active"
+
+  # Reset from terminal states
+  - role: "Both"
+    state: "Failed"
+    event:
+      type: "Reset"
+    next_state: "Idle"
+    actions:
+      - type: "CleanupSession"
+    description: "Reset from failed"
+
+  - role: "Both"
+    state: "Terminated"
+    event:
+      type: "Reset"
+    next_state: "Idle"
+    actions:
+      - type: "CleanupSession"
+    description: "Reset from terminated"
