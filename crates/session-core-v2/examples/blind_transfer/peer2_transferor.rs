@@ -56,13 +56,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wait for call to fully establish
     sleep(Duration::from_secs(1)).await;
 
-    // Talk to Alice for a bit - send 554Hz tone
+    // Talk to Alice for a bit - send 554Hz tone while receiving simultaneously
     println!("[BOB] 💬 Talking to Alice (sending 554Hz tone)...");
     let sample_rate = 8000u32;
     let duration_ms = 20u32;
     let samples_per_frame = (sample_rate * duration_ms / 1000) as usize;
 
-    // Send audio for 3 seconds (150 frames)
+    // Spawn task to receive audio while sending
+    let recv_task = tokio::spawn(async move {
+        let mut samples = Vec::new();
+        let start_time = std::time::Instant::now();
+        let receive_timeout = Duration::from_secs(3);
+
+        while start_time.elapsed() < receive_timeout {
+            match tokio::time::timeout(Duration::from_millis(100), audio_rx.recv()).await {
+                Ok(Some(frame)) => {
+                    samples.extend_from_slice(&frame.samples);
+                }
+                Ok(None) => {
+                    println!("[BOB] Audio channel closed");
+                    break;
+                }
+                Err(_) => {
+                    // Timeout, continue
+                }
+            }
+        }
+        samples
+    });
+
+    // Send audio for 3 seconds (150 frames) while receiving
     for i in 0u32..150 {
         let mut samples = Vec::with_capacity(samples_per_frame);
         for j in 0..samples_per_frame {
@@ -79,26 +102,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("[BOB] Sent {} audio samples to Alice", sent_samples.len());
 
-    // Receive audio from Alice for 3 seconds
-    println!("[BOB] Receiving audio from Alice...");
-    let start_time = std::time::Instant::now();
-    let receive_timeout = Duration::from_secs(3);
-
-    while start_time.elapsed() < receive_timeout {
-        match tokio::time::timeout(Duration::from_millis(100), audio_rx.recv()).await {
-            Ok(Some(frame)) => {
-                received_samples.extend_from_slice(&frame.samples);
-            }
-            Ok(None) => {
-                println!("[BOB] Audio channel closed");
-                break;
-            }
-            Err(_) => {
-                // Timeout, continue
-            }
-        }
-    }
-
+    // Wait for receive task to finish
+    let alice_samples = recv_task.await.unwrap_or_default();
+    received_samples.extend_from_slice(&alice_samples);
     println!("[BOB] Received {} samples from Alice", received_samples.len());
     println!("[BOB] Total: sent {} samples, received {} samples",
              sent_samples.len(), received_samples.len());
@@ -115,7 +121,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // RFC 5589: Bob (transferor) hangs up Alice (transferee) for blind transfer
     // This is the correct SIP behavior - transferor sends BYE, not transferee
     println!("[BOB] 📴 Hanging up with Alice (blind transfer per RFC 5589)...");
-    sleep(Duration::from_millis(100)).await; // Brief delay for REFER to be sent
+    // Wait longer to ensure Alice has time to:
+    // 1. Receive and process REFER
+    // 2. Send INVITE to Charlie
+    // 3. Get response from Charlie
+    sleep(Duration::from_secs(2)).await;
     bob.hangup(&incoming.id).await?;
 
     println!("[BOB] 🔄 Alice should now be talking to Charlie");

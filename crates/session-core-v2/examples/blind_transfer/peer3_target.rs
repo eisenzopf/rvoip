@@ -56,14 +56,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wait for call to fully establish
     sleep(Duration::from_secs(1)).await;
 
-    // Now talking to Alice - send 659Hz tone
+    // Now talking to Alice - send 659Hz tone while receiving simultaneously
     println!("[CHARLIE] 💬 Now talking to Alice (post-transfer, sending 659Hz tone)...");
     let sample_rate = 8000u32;
     let duration_ms = 20u32;
     let samples_per_frame = (sample_rate * duration_ms / 1000) as usize;
 
-    // Send audio for 3 seconds (150 frames)
-    for i in 0u32..150 {
+    // Spawn receiving task to run concurrently with sending
+    let receive_task = tokio::spawn(async move {
+        let mut samples = Vec::new();
+        let start_time = std::time::Instant::now();
+        let receive_timeout = Duration::from_secs(10);
+
+        while start_time.elapsed() < receive_timeout {
+            match tokio::time::timeout(Duration::from_millis(100), audio_rx.recv()).await {
+                Ok(Some(frame)) => {
+                    samples.extend_from_slice(&frame.samples);
+                }
+                Ok(None) => {
+                    println!("[CHARLIE] Audio channel closed");
+                    break;
+                }
+                Err(_) => {
+                    // Timeout, continue
+                }
+            }
+        }
+        samples
+    });
+
+    // Send audio for 10 seconds (500 frames) while receiving
+    for i in 0u32..500 {
         let mut samples = Vec::with_capacity(samples_per_frame);
         for j in 0..samples_per_frame {
             let t = ((i as usize * samples_per_frame + j) as f32) / sample_rate as f32;
@@ -79,25 +102,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("[CHARLIE] Sent {} audio samples to Alice", sent_samples.len());
 
-    // Receive audio from Alice for 3 seconds
-    println!("[CHARLIE] Receiving audio from Alice...");
-    let start_time = std::time::Instant::now();
-    let receive_timeout = Duration::from_secs(3);
-
-    while start_time.elapsed() < receive_timeout {
-        match tokio::time::timeout(Duration::from_millis(100), audio_rx.recv()).await {
-            Ok(Some(frame)) => {
-                received_samples.extend_from_slice(&frame.samples);
-            }
-            Ok(None) => {
-                println!("[CHARLIE] Audio channel closed");
-                break;
-            }
-            Err(_) => {
-                // Timeout, continue
-            }
-        }
-    }
+    // Wait for receiving task to complete
+    println!("[CHARLIE] Waiting for received audio...");
+    received_samples = receive_task.await.unwrap_or_default();
 
     println!("[CHARLIE] Received {} samples from Alice", received_samples.len());
     println!("[CHARLIE] Total: sent {} samples, received {} samples",

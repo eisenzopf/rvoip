@@ -88,23 +88,31 @@ impl TransferCoordinator {
 
         // Step 2: Store transfer metadata in new session
         // Get transferee session to extract transferor_session_id
+        info!("📖 Getting transferee session: {}", transferee_session_id);
         let transferee_session = self.session_store.get_session(transferee_session_id).await
-            .map_err(|e| format!("Failed to get transferee session: {}", e))?;
+            .map_err(|e| {
+                error!("❌ Failed to get transferee session: {}", e);
+                format!("Failed to get transferee session: {}", e)
+            })?;
 
         // The transferee session should have the transferor_session_id (Bob's ID)
         // We need to propagate it to the new transfer call session
         let transferor_session_id = transferee_session.transferor_session_id.clone();
+        info!("📋 Transferor session ID: {:?}", transferor_session_id);
 
         // Get the local URI from the transferee session to use as "from"
+        info!("🔍 Getting local URI from transferee session");
         let from_uri = match self.session_store.get_session(transferee_session_id).await {
             Ok(transferee_session) => {
-                transferee_session.local_uri.clone().unwrap_or_else(|| {
+                let uri = transferee_session.local_uri.clone().unwrap_or_else(|| {
                     warn!("No local_uri in transferee session, using placeholder");
                     "sip:user@localhost".to_string()
-                })
+                });
+                info!("✅ Got local URI: {}", uri);
+                uri
             }
             Err(e) => {
-                error!("Failed to get transferee session: {}", e);
+                error!("❌ Failed to get transferee session for local_uri: {}", e);
                 return Ok(TransferResult::failure(
                     new_session_id.clone(),
                     format!("Failed to get transferee session: {}", e),
@@ -114,8 +122,12 @@ impl TransferCoordinator {
         };
 
         // Update new session with transfer metadata AND URIs for the call
+        info!("📝 Getting new session {} to update metadata", new_session_id);
         let mut new_session = self.session_store.get_session(&new_session_id).await
-            .map_err(|e| format!("Failed to get new session: {}", e))?;
+            .map_err(|e| {
+                error!("❌ Failed to get new session: {}", e);
+                format!("Failed to get new session: {}", e)
+            })?;
 
         new_session.is_transfer_call = true;
         new_session.transfer_target = Some(refer_to.to_string());
@@ -145,7 +157,9 @@ impl TransferCoordinator {
         // This will trigger the normal MakeCall flow: Idle → Initiating → Active
         info!("📞 Initiating call to transfer target {} from existing session {}", refer_to, new_session_id);
 
-        // Process MakeCall event on the pre-created session (don't create a new one)
+        // Execute MakeCall directly (not spawned) to ensure INVITE is sent before returning
+        // This is critical for blind transfer: the transferee must send INVITE before
+        // the transferor hangs up the original call
         match self.state_machine_helpers.state_machine.process_event(
             &new_session_id,
             EventType::MakeCall { target: refer_to.to_string() },
@@ -157,25 +171,16 @@ impl TransferCoordinator {
                 );
             }
             Err(e) => {
-                error!("Failed to initiate transfer call: {}", e);
-
-                // Send failure NOTIFY
-                if options.send_notify {
-                    if let Some(ref transferor_id) = options.transferor_session_id {
-                        let _ = self
-                            .notify_handler
-                            .notify_failure(transferor_id, 500, "Call initiation failed")
-                            .await;
-                    }
-                }
-
+                error!("Failed to initiate transfer call on session {}: {}", new_session_id, e);
                 return Ok(TransferResult::failure(
-                    new_session_id,
-                    format!("Failed to initiate call: {}", e),
+                    new_session_id.clone(),
+                    format!("Failed to send INVITE: {}", e),
                     Some(500),
                 ));
             }
         }
+
+        info!("📤 MakeCall event processed for transfer session {}", new_session_id);
 
         // Step 5: Optionally wait for call establishment
         if options.wait_for_establishment {

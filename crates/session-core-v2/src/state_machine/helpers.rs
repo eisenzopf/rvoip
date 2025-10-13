@@ -224,10 +224,18 @@ impl StateMachineHelpers {
     
     /// List all active sessions
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
-        self.active_sessions.read().await
-            .values()
-            .cloned()
-            .collect()
+        // Query the session store directly to get ALL sessions, including
+        // those created by auto-transfer which bypass helpers.create_session()
+        let sessions = self.state_machine.store.get_all_sessions().await;
+
+        sessions.into_iter().map(|s| SessionInfo {
+            session_id: s.session_id.clone(),
+            from: s.local_uri.unwrap_or_default(),
+            to: s.remote_uri.unwrap_or_default(),
+            state: s.call_state,
+            start_time: std::time::SystemTime::now(), // Approximation - SessionState uses Instant
+            media_active: s.media_session_id.is_some(),
+        }).collect()
     }
     
     /// Get current state of a session

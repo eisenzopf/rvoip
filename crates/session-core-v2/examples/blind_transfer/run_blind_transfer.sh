@@ -110,7 +110,7 @@ check_timeout() {
 }
 
 # Wait for all to complete with timeout
-TIMEOUT=30
+TIMEOUT=45  # Increased for blind transfer timing
 echo -e "${BLUE}⏳ Waiting for test to complete (max ${TIMEOUT}s)...${NC}"
 echo ""
 

@@ -145,7 +145,7 @@ impl UnifiedCoordinator {
         dialog_adapter.start().await?;
         
         // Create and start the centralized event handler with incoming call channel
-        let event_handler = crate::adapters::SessionCrossCrateEventHandler::with_incoming_call_channel(
+        let mut event_handler = crate::adapters::SessionCrossCrateEventHandler::with_incoming_call_channel(
             state_machine.clone(),
             global_coordinator.clone(),
             dialog_adapter.clone(),
@@ -153,10 +153,13 @@ impl UnifiedCoordinator {
             registry.clone(),
             incoming_tx,
         );
-        
+
+        // Set transfer coordinator for auto-transfer
+        event_handler.set_transfer_coordinator(transfer_coordinator.clone());
+
         // Start the event handler (sets up channels and subscriptions)
         event_handler.start().await?;
-        
+
         Ok(coordinator)
     }
     
@@ -395,65 +398,10 @@ impl UnifiedCoordinator {
 
     // ===== Auto-Transfer Handling =====
 
-    /// Enable automatic blind transfer handling
-    /// When enabled, TransferRequested events will automatically trigger complete_blind_transfer()
-    /// This is used by SimplePeer to make transfers "just work"
-    ///
-    /// Follows the established pattern from SessionCrossCrateEventHandler using string parsing
+    /// Enable automatic blind transfer handling - DISABLED
+    /// Auto-transfer now handled in SessionEventHandler to avoid event stealing
     pub fn enable_auto_transfer(self: &Arc<Self>) {
-        let coordinator = self.clone();
-
-        tokio::spawn(async move {
-            tracing::info!("🔄 Auto-transfer handler started");
-
-            // Subscribe to dialog-to-session events (following SessionCrossCrateEventHandler pattern)
-            let global_coordinator = rvoip_infra_common::events::global_coordinator().await;
-            let mut rx = match global_coordinator.subscribe("dialog_to_session").await {
-                Ok(rx) => rx,
-                Err(e) => {
-                    tracing::error!("Failed to subscribe to dialog_to_session events: {}", e);
-                    return;
-                }
-            };
-
-            loop {
-                if let Some(event) = rx.recv().await {
-                    // Use string parsing to detect TransferRequested events
-                    // This follows the established pattern per SessionCrossCrateEventHandler line 140
-                    let event_str = format!("{:?}", event);
-
-                    if event_str.contains("TransferRequested") {
-                        // Extract fields using the same helper pattern (SessionCrossCrateEventHandler lines 213-221)
-                        let session_id = Self::extract_field(&event_str, "session_id: \"");
-                        let refer_to = Self::extract_field(&event_str, "refer_to: \"");
-
-                        if let (Some(session_id_str), Some(refer_to_uri)) = (session_id, refer_to) {
-                            tracing::info!(
-                                "🔄 [Auto-Transfer] Received TransferRequested for session {}: {}",
-                                session_id_str, refer_to_uri
-                            );
-
-                            // Automatically complete the blind transfer
-                            let session_id_obj = SessionId(session_id_str);
-                            match coordinator.complete_blind_transfer(&session_id_obj, &refer_to_uri).await {
-                                Ok(new_session_id) => {
-                                    tracing::info!(
-                                        "✅ [Auto-Transfer] Transfer completed! New session: {}",
-                                        new_session_id
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "❌ [Auto-Transfer] Transfer failed: {}",
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        tracing::info!("🔄 Auto-transfer: handled by SessionEventHandler");
     }
 
     /// Helper to extract field values from event debug strings

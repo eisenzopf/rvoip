@@ -200,6 +200,82 @@ impl SimplePeer {
     pub async fn add_to_conference(&self, host_id: &CallId, participant_id: &CallId) -> Result<()> {
         self.coordinator.add_to_conference(host_id, participant_id).await
     }
+
+    // ===== Session Management =====
+
+    /// Get the most recent active call ID
+    /// This is useful after a transfer where a new session is created
+    /// Returns None if no active calls exist
+    pub async fn get_latest_call_id(&self) -> Option<CallId> {
+        let sessions = self.coordinator.list_sessions().await;
+
+        tracing::info!("[get_latest_call_id] Total sessions: {}", sessions.len());
+        for s in &sessions {
+            tracing::info!("[get_latest_call_id] Session {}: state={:?}, is_final={}, is_in_progress={}",
+                s.session_id, s.state, s.state.is_final(), s.state.is_in_progress());
+        }
+
+        // Find the most recently created session that's NOT final
+        // Don't require is_in_progress() - just exclude terminated sessions
+        let result = sessions.into_iter()
+            .filter(|s| !s.state.is_final())
+            .max_by_key(|s| s.start_time)
+            .map(|s| s.session_id);
+
+        tracing::info!("[get_latest_call_id] Result: {:?}", result);
+        result
+    }
+
+    /// Get active call ID for a specific remote party
+    /// This is useful after a transfer to find the new session with the transfer target
+    pub async fn get_call_id_for(&self, remote_uri: &str) -> Option<CallId> {
+        let sessions = self.coordinator.list_sessions().await;
+
+        // Normalize the remote URI for comparison (remove display name, params, etc)
+        let normalized_target = Self::normalize_uri(remote_uri);
+
+        tracing::info!("[get_call_id_for] Looking for remote_uri: {}", remote_uri);
+        tracing::info!("[get_call_id_for] Normalized target: {}", normalized_target);
+        tracing::info!("[get_call_id_for] Found {} total sessions", sessions.len());
+
+        for s in &sessions {
+            tracing::info!("[get_call_id_for] Session {}: state={:?}, to={}", s.session_id, s.state, s.to);
+            let normalized_remote = Self::normalize_uri(&s.to);
+            tracing::info!("[get_call_id_for]   Normalized remote: {}", normalized_remote);
+        }
+
+        // Find active session with matching remote URI
+        // Note: Don't filter by state - include all sessions that match the URI
+        // This allows finding sessions in Initiating, Ringing, or Active states
+        let result = sessions.into_iter()
+            .filter(|s| !s.state.is_final()) // Only exclude terminated/failed sessions
+            .find(|s| {
+                let normalized_remote = Self::normalize_uri(&s.to);
+                normalized_remote == normalized_target
+            })
+            .map(|s| s.session_id);
+
+        tracing::info!("[get_call_id_for] Result: {:?}", result);
+        result
+    }
+
+    /// Helper to normalize SIP URI for comparison
+    /// Extracts just the user@host:port part
+    fn normalize_uri(uri: &str) -> String {
+        // Simple normalization: extract URI from "Display Name <sip:user@host:port>;params"
+        if let Some(start) = uri.find("sip:") {
+            let uri_part = &uri[start..];
+            if let Some(end) = uri_part.find('>') {
+                uri_part[..end].to_string()
+            } else if let Some(end) = uri_part.find(';') {
+                uri_part[..end].to_string()
+            } else {
+                uri_part.to_string()
+            }
+        } else {
+            uri.to_string()
+        }
+    }
 }
 
 /// Represents a call ID (just a SessionId)

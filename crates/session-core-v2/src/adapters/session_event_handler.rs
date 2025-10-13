@@ -26,21 +26,24 @@ use tracing::{debug, info, error, warn};
 pub struct SessionCrossCrateEventHandler {
     /// State machine executor
     state_machine: Arc<StateMachineExecutor>,
-    
+
     /// Global event coordinator
     global_coordinator: Arc<GlobalEventCoordinator>,
-    
+
     /// Dialog adapter for setting up backward compatibility channels
     dialog_adapter: Arc<DialogAdapter>,
-    
+
     /// Media adapter for setting up backward compatibility channels
     media_adapter: Arc<MediaAdapter>,
-    
+
     /// Session registry for mappings
     registry: Arc<SessionRegistry>,
-    
+
     /// Channel to send incoming call notifications
     incoming_call_tx: Option<mpsc::Sender<crate::types::IncomingCallInfo>>,
+
+    /// Transfer coordinator for auto-transfer
+    transfer_coordinator: Option<Arc<crate::transfer::TransferCoordinator>>,
 }
 
 impl SessionCrossCrateEventHandler {
@@ -51,13 +54,14 @@ impl SessionCrossCrateEventHandler {
         media_adapter: Arc<MediaAdapter>,
         registry: Arc<SessionRegistry>,
     ) -> Self {
-        Self { 
+        Self {
             state_machine,
             global_coordinator,
             dialog_adapter,
             media_adapter,
             registry,
             incoming_call_tx: None,
+            transfer_coordinator: None,
         }
     }
     
@@ -69,14 +73,19 @@ impl SessionCrossCrateEventHandler {
         registry: Arc<SessionRegistry>,
         incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
     ) -> Self {
-        Self { 
+        Self {
             state_machine,
             global_coordinator,
             dialog_adapter,
             media_adapter,
             registry,
             incoming_call_tx: Some(incoming_call_tx),
+            transfer_coordinator: None,
         }
+    }
+
+    pub fn set_transfer_coordinator(&mut self, coordinator: Arc<crate::transfer::TransferCoordinator>) {
+        self.transfer_coordinator = Some(coordinator);
     }
     
     /// Start event processing loops
@@ -99,11 +108,14 @@ impl SessionCrossCrateEventHandler {
             
         let handler = self.clone();
         tokio::spawn(async move {
+            info!("🔔 [session_event_handler] Started dialog-to-session event loop");
             while let Some(event) = dialog_sub.recv().await {
+                info!("🔔 [session_event_handler] Received event from channel: {:?}", event);
                 if let Err(e) = handler.handle(event).await {
                     error!("Error handling dialog-to-session event: {}", e);
                 }
             }
+            warn!("🔔 [session_event_handler] Dialog-to-session event loop ended");
         });
         
         // Subscribe to media-to-session events
@@ -393,10 +405,14 @@ impl SessionCrossCrateEventHandler {
     }
     
     async fn handle_call_established(&self, event_str: &str) -> Result<()> {
+        info!("🎯 [handle_call_established] Called with event: {}", event_str);
+
         // Extract session_id field from event
         // Dialog-core's event_hub retrieves the actual session_id via dialog_manager.get_session_id()
         // This is the real session ID in "session-XXX" format, not a dialog_id!
         let session_id_str = self.extract_session_id(event_str).unwrap_or_else(|| "unknown".to_string());
+
+        info!("🎯 [handle_call_established] Extracted session_id: {}", session_id_str);
 
         if session_id_str == "unknown" {
             error!("Cannot extract session_id from CallEstablished event");
@@ -405,7 +421,7 @@ impl SessionCrossCrateEventHandler {
 
         let session_id = SessionId(session_id_str);
 
-        debug!("CallEstablished event for session {}", session_id);
+        info!("🎯 [handle_call_established] Processing CallEstablished for session {}", session_id);
 
         let sdp_answer = self.extract_field(event_str, "sdp_answer: Some(\"")
             .map(|s| s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\\"", "\""));
@@ -569,12 +585,7 @@ impl SessionCrossCrateEventHandler {
 
             let session_id = SessionId(session_id_str.clone());
 
-            // RFC 3515 Compliance: Store transferor session ID for NOTIFY messages
-            // The transferor_session_id is Alice's own session ID because:
-            // - Bob sends REFER to Alice within their shared dialog
-            // - Alice must send NOTIFY back through the SAME dialog
-            // - DialogAdapter.send_notify() uses Alice's session to find the dialog
-            // - Therefore, transferor_session_id = Alice's session ID (the transferee)
+            // RFC 3515 Compliance: Store transferor session ID
             if let Ok(mut session) = self.state_machine.store.get_session(&session_id).await {
                 session.transferor_session_id = Some(session_id.clone());
                 if let Err(e) = self.state_machine.store.update_session(session).await {
@@ -584,9 +595,23 @@ impl SessionCrossCrateEventHandler {
 
             if let Err(e) = self.state_machine.process_event(
                 &session_id,
-                EventType::TransferRequested { refer_to, transfer_type }
+                EventType::TransferRequested { refer_to: refer_to.clone(), transfer_type: transfer_type.clone() }
             ).await {
                 error!("Failed to process TransferRequested: {}", e);
+            }
+
+            // Auto-transfer for blind transfers
+            if transfer_type == "Blind" && self.transfer_coordinator.is_some() {
+                info!("🔄 [Auto-Transfer] Executing blind transfer for {} to {}", session_id, refer_to);
+                let coordinator = self.transfer_coordinator.clone().unwrap();
+                let sid = session_id.clone();
+                let target = refer_to.clone();
+                tokio::spawn(async move {
+                    match coordinator.complete_blind_transfer(&sid, &target).await {
+                        Ok(new_id) => info!("✅ [Auto-Transfer] Success: {}", new_id),
+                        Err(e) => error!("❌ [Auto-Transfer] Failed: {}", e),
+                    }
+                });
             }
         }
         Ok(())

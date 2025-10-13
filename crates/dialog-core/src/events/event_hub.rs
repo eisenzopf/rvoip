@@ -87,12 +87,16 @@ impl DialogEventHub {
     /// Publish a session coordination event to the global bus
     pub async fn publish_session_coordination_event(&self, event: SessionCoordinationEvent) -> Result<()> {
         debug!("Publishing session coordination event: {:?}", event);
-        
+
         // Convert to cross-crate event
-        if let Some(cross_crate_event) = self.convert_coordination_to_cross_crate(event) {
+        if let Some(cross_crate_event) = self.convert_coordination_to_cross_crate(event.clone()) {
+            info!("🚀 [event_hub] About to publish cross-crate event for event: {:?}", event);
             self.global_coordinator.publish(Arc::new(cross_crate_event)).await?;
+            info!("✅ [event_hub] Published cross-crate event successfully");
+        } else {
+            info!("⚠️ [event_hub] convert_coordination_to_cross_crate returned None for: {:?}", event);
         }
-        
+
         Ok(())
     }
     
@@ -195,15 +199,21 @@ impl DialogEventHub {
             }
             
             SessionCoordinationEvent::CallAnswered { dialog_id, session_answer } => {
-                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
-                    Some(RvoipCrossCrateEvent::DialogToSession(
-                        DialogToSessionEvent::CallEstablished {
-                            session_id,
-                            sdp_answer: Some(session_answer),
-                        }
-                    ))
-                } else {
-                    None
+                info!("🔍 [event_hub] Processing CallAnswered for dialog: {}", dialog_id);
+                match self.dialog_manager.get_session_id(&dialog_id) {
+                    Some(session_id) => {
+                        info!("✅ [event_hub] Found session ID {} for dialog {}", session_id, dialog_id);
+                        Some(RvoipCrossCrateEvent::DialogToSession(
+                            DialogToSessionEvent::CallEstablished {
+                                session_id,
+                                sdp_answer: Some(session_answer),
+                            }
+                        ))
+                    }
+                    None => {
+                        warn!("❌ [event_hub] No session ID found for dialog {} in CallAnswered event", dialog_id);
+                        None
+                    }
                 }
             }
             
