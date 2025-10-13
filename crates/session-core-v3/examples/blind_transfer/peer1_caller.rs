@@ -3,7 +3,7 @@
 //! This demonstrates the new simplified blocking SimplePeer API.
 //! Main function is under 50 lines with simple, linear code.
 
-use rvoip_session_core_v3::api::simple::{SimplePeer, Config, CallId};
+use rvoip_session_core_v3::api::simple::{SimplePeer, Config};
 use tokio::time::{sleep, Duration};
 
 // Audio generation helper
@@ -34,30 +34,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut alice = SimplePeer::with_config("alice", config).await?;
 
-    // Register transfer handler - simple and direct!
-    alice.on_refer_received(|call_id, refer_to, peer| async move {
-        println!("[ALICE] 🔄 Got REFER to: {}", refer_to);
-        
-        peer.hangup(&call_id).await?;
-        println!("[ALICE] 📞 Calling Charlie...");
-        
-        let charlie_call_id = peer.call(&refer_to).await?;
-        let (sent, received) = peer.exchange_audio(&charlie_call_id, Duration::from_secs(3), |i| generate_tone(440.0, i)).await?;
-        
-        println!("[ALICE] 📁 Saving audio ({} sent, {} received samples)", sent.len(), received.len());
-        save_wav("output/alice_sent.wav", &sent)?;
-        save_wav("output/alice_received.wav", &received)?;
-        
-        peer.hangup(&charlie_call_id).await?;
-        Ok(())
-    });
+    // Register transfer handler - clean and simple!
+    alice.on_refer_received(|event, controller| async move {
+        if let rvoip_session_core_v3::api::simple::Event::ReferReceived { call_id, refer_to, .. } = event {
+            println!("[ALICE] 🔄 Got REFER to: {}", refer_to);
+            
+            // Per RFC 3515: Alice (transferee) should NOT hangup - Bob will send BYE
+            // Alice should immediately call Charlie
+            println!("[ALICE] 📞 Calling Charlie...");
+            
+            if let Ok(charlie_call_id) = controller.call(&refer_to).await {
+                println!("[ALICE] ✅ Connected to Charlie!");
+                
+                // Exchange audio with Charlie (longer duration for better reception)
+                if let Ok((sent, received)) = controller.exchange_audio(&charlie_call_id, Duration::from_secs(5), |i| generate_tone(440.0, i)).await {
+                    println!("[ALICE] 📁 Saving Charlie audio ({} sent, {} received samples)", sent.len(), received.len());
+                    save_wav("output/alice_to_charlie_sent.wav", &sent).ok();
+                    save_wav("output/alice_from_charlie_received.wav", &received).ok();
+                }
+                
+                controller.hangup(&charlie_call_id).await.ok();
+            } else {
+                println!("[ALICE] ❌ Failed to call Charlie");
+            }
+        }
+    }).await;
+    
+    // Register call answered handler to track Bob audio
+    alice.on_call_answered(|event, controller| async move {
+        if let rvoip_session_core_v3::api::simple::Event::CallAnswered { call_id, .. } = event {
+            println!("[ALICE] ✅ Call with Bob answered");
+            
+            // Exchange audio with Bob (longer duration for better reception)
+            if let Ok((sent, received)) = controller.exchange_audio(&call_id, Duration::from_secs(5), |i| generate_tone(440.0, i)).await {
+                println!("[ALICE] 📁 Saving Bob audio ({} sent, {} received samples)", sent.len(), received.len());
+                save_wav("output/alice_to_bob_sent.wav", &sent).ok();
+                save_wav("output/alice_from_bob_received.wav", &received).ok();
+            }
+        }
+    }).await;
 
     sleep(Duration::from_secs(3)).await; // Wait for other peers
 
     println!("[ALICE] 📞 Calling Bob...");
     let _bob_call_id = alice.call("sip:bob@127.0.0.1:5061").await?;
 
-    alice.run().await?; // Simple event loop!
+    // Wait for transfer to complete (callbacks handle everything)
+    loop {
+        sleep(Duration::from_secs(1)).await;
+    }
     
     println!("[ALICE] ✅ Completed!");
     Ok(())

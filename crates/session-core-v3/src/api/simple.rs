@@ -1,11 +1,13 @@
-//! Truly Simple API - Simplified blocking handler SIP peer
+//! Truly Simple API - Callback-based SIP peer
 //!
-//! This is the simplest possible API - blocking handlers with direct SimplePeer access.
-//! Register handlers, call run(), and handle events sequentially with simple linear code.
+//! This is the simplest possible API - callback-based with automatic event handling.
+//! Register callbacks for events, and the library handles everything in the background.
 
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::pin::Pin;
+use std::future::Future;
+use tokio::sync::{mpsc, RwLock, Mutex};
+use tokio::task::JoinHandle;
 use tracing::{warn, debug};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
@@ -15,26 +17,32 @@ use rvoip_media_core::types::AudioFrame;
 pub use crate::api::unified::Config;
 pub use crate::api::events::{Event, CallHandle, CallId};
 
-/// Simple handler types - blocking closures with direct SimplePeer access
-type IncomingCallHandler = Box<dyn FnMut(CallId, String, &mut SimplePeer) -> Result<()> + Send>;
-type ReferReceivedHandler = Box<dyn FnMut(CallId, String, &mut SimplePeer) -> Result<()> + Send>;
-type CallEndedHandler = Box<dyn FnMut(CallId, String, &mut SimplePeer) -> Result<()> + Send>;
+/// Async event handler type
+type AsyncEventHandler = Arc<dyn Fn(Event, Arc<SimplePeerController>) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
-/// A simple SIP peer that can make and receive calls using blocking handlers
-pub struct SimplePeer {
-    /// The coordinator that does all the work
+/// Event handlers for different event types
+struct EventHandlers {
+    on_incoming_call: Option<AsyncEventHandler>,
+    on_call_answered: Option<AsyncEventHandler>,
+    on_refer_received: Option<AsyncEventHandler>,
+    on_call_ended: Option<AsyncEventHandler>,
+}
+
+impl Default for EventHandlers {
+    fn default() -> Self {
+        Self {
+            on_incoming_call: None,
+            on_call_answered: None,
+            on_refer_received: None,
+            on_call_ended: None,
+        }
+    }
+}
+
+/// Controller interface for handlers to perform call operations
+pub struct SimplePeerController {
     coordinator: Arc<UnifiedCoordinator>,
-    
-    /// Event receiver for all SimplePeer events
-    event_rx: mpsc::Receiver<Event>,
-    
-    /// Local SIP URI
     local_uri: String,
-    
-    /// Simple handler storage
-    on_incoming_call: Option<IncomingCallHandler>,
-    on_refer_received: Option<ReferReceivedHandler>,
-    on_call_ended: Option<CallEndedHandler>,
 }
 
 impl SimplePeerController {
@@ -43,77 +51,13 @@ impl SimplePeerController {
     }
     
     /// Make an outgoing call
-    pub async fn call(&self, target: &str) -> Result<CallHandle> {
-        let call_id = self.coordinator.make_call(&self.local_uri, target).await?;
-        let (call_handle, audio_rx_from_handle, audio_tx_to_handle) = CallHandle::new(call_id.clone());
-        
-        // Wire CallHandle to real media system
-        self.wire_audio_to_media_system(&call_id, audio_rx_from_handle, audio_tx_to_handle).await?;
-        
-        Ok(call_handle)
+    pub async fn call(&self, target: &str) -> Result<CallId> {
+        self.coordinator.make_call(&self.local_uri, target).await
     }
     
     /// Accept an incoming call
-    pub async fn accept(&self, call_id: &CallId) -> Result<CallHandle> {
-        self.coordinator.accept_call(call_id).await?;
-        let (call_handle, audio_rx_from_handle, audio_tx_to_handle) = CallHandle::new(call_id.clone());
-        
-        // Wire CallHandle to real media system
-        self.wire_audio_to_media_system(call_id, audio_rx_from_handle, audio_tx_to_handle).await?;
-        
-        Ok(call_handle)
-    }
-    
-    /// Wire CallHandle audio channels to the real media system
-    async fn wire_audio_to_media_system(
-        &self,
-        call_id: &CallId,
-        mut audio_rx_from_handle: mpsc::Receiver<Vec<i16>>,
-        audio_tx_to_handle: mpsc::Sender<Vec<i16>>,
-    ) -> Result<()> {
-        let coordinator = self.coordinator.clone();
-        let call_id_clone = call_id.clone();
-        
-        // Task 1: Send audio from CallHandle to media system (CallHandle.send_audio() → RTP)
-        let coordinator_for_send = coordinator.clone();
-        let call_id_for_send = call_id_clone.clone();
-        tokio::spawn(async move {
-            let mut timestamp = 0u32;
-            while let Some(samples) = audio_rx_from_handle.recv().await {
-                // Convert Vec<i16> to AudioFrame and send to real media system
-                let frame = rvoip_media_core::types::AudioFrame::new(samples, 8000, 1, timestamp);
-                if let Err(e) = coordinator_for_send.send_audio(&call_id_for_send, frame).await {
-                    debug!("Failed to send audio to media system: {}", e);
-                    break;
-                }
-                timestamp += 160; // 20ms at 8kHz = 160 samples
-            }
-            debug!("CallHandle send audio task ended for {}", call_id_for_send.0);
-        });
-        
-        // Task 2: Receive audio from media system and send to CallHandle (RTP → CallHandle.try_recv_audio())
-        let coordinator_for_recv = coordinator.clone();
-        let call_id_for_recv = call_id_clone.clone();
-        tokio::spawn(async move {
-            // Subscribe to real audio from the media system
-            match coordinator_for_recv.subscribe_to_audio(&call_id_for_recv).await {
-                Ok(mut audio_subscriber) => {
-                    while let Some(frame) = audio_subscriber.recv().await {
-                        let samples = frame.samples.clone();
-                        if audio_tx_to_handle.send(samples).await.is_err() {
-                            debug!("CallHandle audio channel closed, stopping audio receive for {}", call_id_for_recv.0);
-                            break;
-                        }
-                    }
-                }
-                Err(e) => {
-                    debug!("Failed to subscribe to audio for {}: {}", call_id_for_recv.0, e);
-                }
-            }
-            debug!("CallHandle receive audio task ended for {}", call_id_for_recv.0);
-        });
-        
-        Ok(())
+    pub async fn accept(&self, call_id: &CallId) -> Result<()> {
+        self.coordinator.accept_call(call_id).await
     }
     
     /// Hang up a call
@@ -126,48 +70,58 @@ impl SimplePeerController {
         self.coordinator.send_refer(call_id, target).await
     }
     
-    /// Hold a call
-    pub async fn hold(&self, call_id: &CallId) -> Result<()> {
-        self.coordinator.hold(call_id).await
-    }
-    
-    /// Resume a held call
-    pub async fn resume(&self, call_id: &CallId) -> Result<()> {
-        self.coordinator.resume(call_id).await
-    }
-    
-    /// Mute a call
-    pub async fn mute(&self, _call_id: &CallId) -> Result<()> {
-        warn!("Mute functionality not yet implemented");
-        Ok(())
-    }
-    
-    /// Unmute a call
-    pub async fn unmute(&self, _call_id: &CallId) -> Result<()> {
-        warn!("Unmute functionality not yet implemented");
-        Ok(())
-    }
-    
-    /// Send DTMF tones
-    pub async fn send_dtmf(&self, call_id: &CallId, tones: &str) -> Result<()> {
-        // UnifiedCoordinator expects a single char, so send first char
-        if let Some(digit) = tones.chars().next() {
-            self.coordinator.send_dtmf(call_id, digit).await
-        } else {
-            Ok(())
+    /// Exchange audio for a duration (send and receive simultaneously)
+    pub async fn exchange_audio(
+        &self,
+        call_id: &CallId,
+        duration: std::time::Duration,
+        generator: impl Fn(usize) -> Vec<i16>,
+    ) -> Result<(Vec<i16>, Vec<i16>)> {
+        let mut sent_samples = Vec::new();
+        let mut received_samples = Vec::new();
+        
+        // Subscribe to receive audio
+        let mut audio_rx = self.coordinator.subscribe_to_audio(call_id).await?;
+        
+        // Spawn receiving task
+        let (tx, mut rx) = mpsc::channel(1000);
+        tokio::spawn(async move {
+            while let Some(frame) = audio_rx.recv().await {
+                if tx.send(frame.samples).await.is_err() {
+                    break;
+                }
+            }
+        });
+        
+        // Send and receive for duration
+        let start = std::time::Instant::now();
+        let mut timestamp = 0u32;
+        let mut frame_count = 0;
+        
+        while start.elapsed() < duration {
+            // Generate and send REAL audio to media system → RTP
+            let samples = generator(frame_count);
+            let frame = AudioFrame::new(samples.clone(), 8000, 1, timestamp);
+            self.coordinator.send_audio(call_id, frame).await?;
+            sent_samples.extend(samples);
+            
+            // Receive REAL audio from RTP → media system (non-blocking)
+            while let Ok(samples) = rx.try_recv() {
+                received_samples.extend(samples);
+            }
+            
+            timestamp += 160;
+            frame_count += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-    }
-    
-    // ===== Audio Operations for Callbacks =====
-    
-    /// Send audio to a call (for use in callbacks)
-    pub async fn send_audio(&self, call_id: &CallId, frame: rvoip_media_core::types::AudioFrame) -> Result<()> {
-        self.coordinator.send_audio(call_id, frame).await
-    }
-    
-    /// Subscribe to receive audio from a call (for use in callbacks)
-    pub async fn subscribe_audio(&self, call_id: &CallId) -> Result<crate::types::AudioFrameSubscriber> {
-        self.coordinator.subscribe_to_audio(call_id).await
+        
+        // Collect any remaining received audio
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        while let Ok(samples) = rx.try_recv() {
+            received_samples.extend(samples);
+        }
+        
+        Ok((sent_samples, received_samples))
     }
 }
 
@@ -212,9 +166,7 @@ impl SimplePeer {
         let (event_tx, event_rx) = mpsc::channel(100);
         
         // Create coordinator with event channel
-        debug!("🔍 [DEBUG] SimplePeer creating coordinator with event channel...");
         let coordinator = UnifiedCoordinator::with_simple_peer_events(config, event_tx).await?;
-        debug!("🔍 [DEBUG] SimplePeer coordinator created successfully");
 
         let controller = Arc::new(SimplePeerController::new(coordinator.clone(), local_uri.clone()));
         let handlers = Arc::new(RwLock::new(EventHandlers::default()));
@@ -239,16 +191,6 @@ impl SimplePeer {
     // ===== Event Handler Registration =====
     
     /// Register a handler for incoming call events
-    /// 
-    /// # Example
-    /// ```rust,no_run
-    /// peer.on_incoming_call(|event, controller| async move {
-    ///     if let Event::IncomingCall { call_id, from, .. } = event {
-    ///         println!("Call from: {}", from);
-    ///         controller.accept(&call_id).await.ok();
-    ///     }
-    /// });
-    /// ```
     pub async fn on_incoming_call<F, Fut>(&mut self, handler: F) -> &mut Self
     where 
         F: Fn(Event, Arc<SimplePeerController>) -> Fut + Send + Sync + 'static,
@@ -320,7 +262,7 @@ impl SimplePeer {
     
     /// Start background event processing (called automatically in constructor)
     async fn start_background_processing(&mut self, mut event_rx: mpsc::Receiver<Event>) -> Result<()> {
-        debug!("🔍 [DEBUG] Starting SimplePeer background event processing...");
+        debug!("SimplePeer background task starting");
         
         let handlers = self.handlers.clone();
         let controller = self.controller.clone();
@@ -329,22 +271,14 @@ impl SimplePeer {
         is_running.store(true, Ordering::Relaxed);
         
         let task = tokio::spawn(async move {
-            debug!("🔍 [DEBUG] SimplePeer background task started");
-            
             while is_running.load(Ordering::Relaxed) {
                 match event_rx.recv().await {
                     Some(event) => {
-                        debug!("🔍 [DEBUG] SimplePeer background task received event: {:?}", event);
                         Self::dispatch_event(event, &handlers, controller.clone()).await;
                     }
-                    None => {
-                        debug!("🔍 [DEBUG] SimplePeer event channel closed, stopping background task");
-                        break;
-                    }
+                    None => break,
                 }
             }
-            
-            debug!("🔍 [DEBUG] SimplePeer background task ended");
         });
         
         {
@@ -352,7 +286,6 @@ impl SimplePeer {
             *bg_task = Some(task);
         }
         
-        debug!("🔍 [DEBUG] SimplePeer background processing started successfully");
         Ok(())
     }
     
@@ -369,131 +302,41 @@ impl SimplePeer {
             Event::CallAnswered { .. } => handlers_guard.on_call_answered.clone(),
             Event::ReferReceived { .. } => handlers_guard.on_refer_received.clone(),
             Event::CallEnded { .. } => handlers_guard.on_call_ended.clone(),
-            _ => None, // Ignore other events for now
+            _ => None,
         };
         
-        drop(handlers_guard); // Release lock before spawning handler
+        drop(handlers_guard);
         
         if let Some(handler) = handler {
             let event_clone = event.clone();
             let controller_clone = controller.clone();
             
             tokio::spawn(async move {
-                debug!("🔍 [DEBUG] Executing handler for event: {:?}", event_clone);
                 handler(event_clone, controller_clone).await;
-                debug!("🔍 [DEBUG] Handler completed");
             });
-        } else {
-            debug!("🔍 [DEBUG] No handler registered for event: {:?}", event);
         }
     }
     
     // ===== Core Operations =====
     
-    /// Make an outgoing call and get a call handle
-    /// 
-    /// # Returns
-    /// CallHandle with audio channels for this specific call
-    /// 
-    /// # Example
-    /// ```rust,no_run
-    /// let alice = SimplePeer::new("alice").await?;
-    /// let call_handle = alice.call("sip:bob@example.com").await?;
-    /// 
-    /// // Send audio via the call handle
-    /// let samples = vec![100, 200, 300]; // Simple audio data
-    /// call_handle.send_audio(samples).await?;
-    /// ```
-    pub async fn call(&self, target: &str) -> Result<CallHandle> {
+    /// Make an outgoing call
+    pub async fn call(&self, target: &str) -> Result<CallId> {
         self.controller.call(target).await
     }
     
-    /// Accept an incoming call and get a call handle
-    /// 
-    /// # Returns
-    /// CallHandle with audio channels for this specific call
-    /// 
-    /// # Example
-    /// ```rust,no_run
-    /// alice.on_incoming_call(|event, controller| async move {
-    ///     if let Event::IncomingCall { call_id, from, .. } = event {
-    ///         let call_handle = controller.accept(&call_id).await?;
-    ///         // Use call_handle for audio
-    ///     }
-    /// });
-    /// ```
-    pub async fn accept(&self, call_id: &CallId) -> Result<CallHandle> {
+    /// Accept an incoming call
+    pub async fn accept(&self, call_id: &CallId) -> Result<()> {
         self.controller.accept(call_id).await
     }
     
     /// Hangup a call
-    /// 
-    /// # Example
-    /// ```rust,no_run
-    /// alice.hangup(&call_handle.call_id()).await?;
-    /// ```
     pub async fn hangup(&self, call_id: &CallId) -> Result<()> {
         self.controller.hangup(call_id).await
     }
     
-    // ===== Call Control =====
-    
-    /// Put call on hold
-    pub async fn hold(&self, call_id: &CallId) -> Result<()> {
-        self.controller.hold(call_id).await
-    }
-    
-    /// Resume from hold
-    pub async fn resume(&self, call_id: &CallId) -> Result<()> {
-        self.controller.resume(call_id).await
-    }
-    
-    /// Mute microphone for call
-    pub async fn mute(&self, call_id: &CallId) -> Result<()> {
-        self.controller.mute(call_id).await
-    }
-    
-    /// Unmute microphone for call
-    pub async fn unmute(&self, call_id: &CallId) -> Result<()> {
-        self.controller.unmute(call_id).await
-    }
-    
-    // ===== Transfer Operations =====
-    
-    /// Send REFER message to initiate transfer
-    /// 
-    /// # Example
-    /// ```rust,no_run
-    /// // Bob sends REFER to Alice
-    /// bob.send_refer(&call_id, "sip:charlie@example.com").await?;
-    /// // Alice will receive Event::ReferReceived via callback
-    /// ```
+    /// Send REFER for call transfer
     pub async fn send_refer(&self, call_id: &CallId, refer_to: &str) -> Result<()> {
         self.controller.send_refer(call_id, refer_to).await
-    }
-    
-    // ===== Audio Operations =====
-    
-    /// Send audio to a call
-    pub async fn send_audio(&self, call_id: &CallId, frame: rvoip_media_core::types::AudioFrame) -> Result<()> {
-        self.controller.coordinator.send_audio(call_id, frame).await
-    }
-    
-    /// Subscribe to receive audio from a call
-    pub async fn subscribe_audio(&self, call_id: &CallId) -> Result<crate::types::AudioFrameSubscriber> {
-        self.controller.coordinator.subscribe_to_audio(call_id).await
-    }
-    
-    // ===== DTMF Operations =====
-    
-    /// Send DTMF tones
-    /// 
-    /// # Example
-    /// ```rust,no_run
-    /// alice.send_dtmf(&call_id, "123#").await?;
-    /// ```
-    pub async fn send_dtmf(&self, call_id: &CallId, tones: &str) -> Result<()> {
-        self.controller.send_dtmf(call_id, tones).await
     }
 }
 
@@ -502,8 +345,6 @@ impl Drop for SimplePeer {
     fn drop(&mut self) {
         self.is_running.store(false, Ordering::Relaxed);
         
-        // Note: Can't use async in Drop, so we'll abort the task directly
-        // The background task will detect is_running = false and exit gracefully
         if let Ok(mut bg_task) = self.background_task.try_lock() {
             if let Some(task) = bg_task.take() {
                 task.abort();

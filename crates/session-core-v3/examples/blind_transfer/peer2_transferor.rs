@@ -2,7 +2,7 @@
 //! 
 //! This demonstrates the simplified blocking SimplePeer API for the transferor role.
 
-use rvoip_session_core_v3::api::simple::{SimplePeer, Config, CallId};
+use rvoip_session_core_v3::api::simple::{SimplePeer, Config};
 use tokio::time::Duration;
 
 // Audio generation helper  
@@ -33,31 +33,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut bob = SimplePeer::with_config("bob", config).await?;
 
-    // Register incoming call handler - simple and direct!
-    bob.on_incoming_call(|call_id, from, peer| async move {
-        println!("[BOB] 📞 Incoming call from: {}", from);
-        
-        peer.accept(&call_id).await?;
-        println!("[BOB] ✅ Call accepted");
-        
-        // Exchange real audio with Alice
-        let (sent, received) = peer.exchange_audio(&call_id, Duration::from_secs(2), |i| generate_tone(880.0, i)).await?;
-        
-        println!("[BOB] 📁 Saving audio ({} sent, {} received samples)", sent.len(), received.len());
-        save_wav("output/bob_sent.wav", &sent)?;
-        save_wav("output/bob_received.wav", &received)?;
-        
-        // Transfer to Charlie
-        println!("[BOB] 🔄 Initiating transfer...");
-        peer.send_refer(&call_id, "sip:charlie@127.0.0.1:5062").await?;
-        peer.hangup(&call_id).await?;
-        
-        println!("[BOB] ✅ Transfer complete!");
-        Ok(())
-    });
+    // Register incoming call handler - clean and simple!
+    bob.on_incoming_call(|event, controller| async move {
+        if let rvoip_session_core_v3::api::simple::Event::IncomingCall { call_id, from, .. } = event {
+            println!("[BOB] 📞 Incoming call from: {}", from);
+            
+            controller.accept(&call_id).await.ok();
+            println!("[BOB] ✅ Call accepted");
+            
+            // Exchange real audio with Alice (longer duration for better reception)
+            if let Ok((sent, received)) = controller.exchange_audio(&call_id, Duration::from_secs(5), |i| generate_tone(880.0, i)).await {
+                println!("[BOB] 📁 Saving audio ({} sent, {} received samples)", sent.len(), received.len());
+                save_wav("output/bob_sent.wav", &sent).ok();
+                save_wav("output/bob_received.wav", &received).ok();
+            }
+            
+            // Transfer to Charlie
+            println!("[BOB] 🔄 Initiating transfer...");
+            controller.send_refer(&call_id, "sip:charlie@127.0.0.1:5062").await.ok();
+            controller.hangup(&call_id).await.ok();
+            
+            println!("[BOB] ✅ Transfer complete!");
+        }
+    }).await;
 
     println!("[BOB] ✅ Listening on port 5061...");
-    bob.run().await?; // Simple event loop!
+    // Wait for calls (callbacks handle everything)
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     
     Ok(())
 }

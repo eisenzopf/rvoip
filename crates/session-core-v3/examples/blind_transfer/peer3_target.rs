@@ -2,7 +2,7 @@
 //! 
 //! This demonstrates the simplified blocking SimplePeer API for the transfer target role.
 
-use rvoip_session_core_v3::api::simple::{SimplePeer, Config, CallId};
+use rvoip_session_core_v3::api::simple::{SimplePeer, Config};
 use tokio::time::Duration;
 
 // Audio generation helper
@@ -33,26 +33,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut charlie = SimplePeer::with_config("charlie", config).await?;
 
-    // Register incoming call handler - simple and direct!
-    charlie.on_incoming_call(|call_id, from, peer| async move {
-        println!("[CHARLIE] 📞 Transferred call from: {}", from);
-        
-        peer.accept(&call_id).await?;
-        println!("[CHARLIE] ✅ Call accepted");
-        
-        // Exchange real audio with Alice
-        let (sent, received) = peer.exchange_audio(&call_id, Duration::from_secs(3), |i| generate_tone(660.0, i)).await?;
-        
-        println!("[CHARLIE] 📁 Saving audio ({} sent, {} received samples)", sent.len(), received.len());
-        save_wav("output/charlie_sent.wav", &sent)?;
-        save_wav("output/charlie_received.wav", &received)?;
-        
-        println!("[CHARLIE] ✅ Transfer call complete!");
-        Ok(())
-    });
+    // Register incoming call handler - clean and simple!
+    charlie.on_incoming_call(|event, controller| async move {
+        if let rvoip_session_core_v3::api::simple::Event::IncomingCall { call_id, from, .. } = event {
+            println!("[CHARLIE] 📞 Transferred call from: {}", from);
+            
+            controller.accept(&call_id).await.ok();
+            println!("[CHARLIE] ✅ Call accepted");
+            
+            // Exchange real audio with Alice (longer duration for better reception)
+            if let Ok((sent, received)) = controller.exchange_audio(&call_id, Duration::from_secs(5), |i| generate_tone(660.0, i)).await {
+                println!("[CHARLIE] 📁 Saving audio ({} sent, {} received samples)", sent.len(), received.len());
+                save_wav("output/charlie_sent.wav", &sent).ok();
+                save_wav("output/charlie_received.wav", &received).ok();
+            }
+            
+            println!("[CHARLIE] ✅ Transfer call complete!");
+        }
+    }).await;
 
     println!("[CHARLIE] ✅ Listening on port 5062...");
-    charlie.run().await?; // Simple event loop!
+    // Wait for transferred calls (callbacks handle everything)
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
     
     Ok(())
 }
