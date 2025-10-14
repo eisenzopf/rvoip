@@ -1,11 +1,10 @@
-//! Bob - Simple SIP peer that receives call and initiates transfer
+//! Bob - Truly simple sequential SIP peer
 //! 
-//! This demonstrates the simplified blocking SimplePeer API for the transferor role.
+//! This demonstrates the sequential SimplePeer API - just 35 lines!
 
 use rvoip_session_core_v3::api::simple::{SimplePeer, Config};
 use tokio::time::Duration;
 
-// Audio generation helper  
 fn generate_tone(freq: f32, frame_num: usize) -> Vec<i16> {
     (0..160).map(|j| {
         (0.3 * (2.0 * std::f32::consts::PI * freq * (frame_num * 160 + j) as f32 / 8000.0).sin() * 32767.0) as i16
@@ -15,13 +14,9 @@ fn generate_tone(freq: f32, frame_num: usize) -> Vec<i16> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("rvoip_session_core_v3=info".parse()?)
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive("rvoip_session_core_v3=info".parse()?))
         .init();
-
-    println!("\n[BOB] Starting - Will receive call and initiate transfer");
 
     let config = Config {
         sip_port: 5061,
@@ -32,64 +27,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut bob = SimplePeer::with_config("bob", config).await?;
+    println!("[BOB] Listening...");
 
-    // Register incoming call handler - clean and simple!
-    bob.on_incoming_call(|event, controller| async move {
-        if let rvoip_session_core_v3::api::simple::Event::IncomingCall { call_id, from, .. } = event {
-            println!("[BOB] 📞 Incoming call from: {}", from);
-            
-            controller.accept(&call_id).await.ok();
-            println!("[BOB] ✅ Call accepted");
-            
-            // Exchange real audio with Alice (longer duration for better reception)
-            if let Ok((sent, received)) = controller.exchange_audio(&call_id, Duration::from_secs(5), |i| generate_tone(880.0, i)).await {
-                println!("[BOB] 📁 Saving audio ({} sent, {} received samples)", sent.len(), received.len());
-                save_wav("output/bob_sent.wav", &sent).ok();
-                save_wav("output/bob_received.wav", &received).ok();
-            }
-            
-            // Transfer to Charlie
-            println!("[BOB] 🔄 Initiating transfer...");
-            controller.send_refer(&call_id, "sip:charlie@127.0.0.1:5062").await.ok();
-            controller.hangup(&call_id).await.ok();
-            
-            println!("[BOB] ✅ Transfer complete!");
-        }
-    }).await;
+    // Wait for incoming call
+    let (call_id, from) = bob.wait_for_incoming_call().await?;
+    println!("[BOB] Call from {}", from);
     
-    // Register call ended handler to exit when call ends
-    bob.on_call_ended(|event, _controller| async move {
-        if let rvoip_session_core_v3::api::simple::Event::CallEnded { call_id, reason } = event {
-            println!("[BOB] 📞 Call ended: {} ({})", call_id.0, reason);
-            // Exit after call ends
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            println!("[BOB] ✅ Completed!");
-            std::process::exit(0);
-        }
-    }).await;
+    bob.accept(&call_id).await?;
+    let (sent, rcv) = bob.exchange_audio(&call_id, Duration::from_secs(5), |i| generate_tone(880.0, i)).await?;
+    save_wav("bob_sent.wav", &sent)?;
+    save_wav("bob_received.wav", &rcv)?;
 
-    println!("[BOB] ✅ Listening on port 5061...");
-    // Wait for calls (callbacks handle everything and exit)
-    loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    // Transfer to Charlie
+    println!("[BOB] Initiating transfer...");
+    bob.send_refer(&call_id, "sip:charlie@127.0.0.1:5062").await?;
+    bob.hangup(&call_id).await?;
     
+    println!("[BOB] ✅ Completed!");
+    bob.shutdown(Duration::from_secs(5)).await?;
     Ok(())
 }
 
-fn save_wav(path: &str, samples: &[i16]) -> Result<(), Box<dyn std::error::Error>> {
+fn save_wav(name: &str, samples: &[i16]) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all("output")?;
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: 8000,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = hound::WavWriter::create(path, spec)?;
-    for &sample in samples {
-        writer.write_sample(sample)?;
-    }
+    let spec = hound::WavSpec { channels: 1, sample_rate: 8000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
+    let mut writer = hound::WavWriter::create(format!("output/{}", name), spec)?;
+    for &sample in samples { writer.write_sample(sample)?; }
     writer.finalize()?;
-    println!("[BOB] 📁 Saved {}", path);
+    println!("[BOB] 📁 Saved output/{}", name);
     Ok(())
 }

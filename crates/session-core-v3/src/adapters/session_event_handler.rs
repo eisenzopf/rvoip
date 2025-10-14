@@ -526,11 +526,13 @@ impl SessionCrossCrateEventHandler {
             let session_id = SessionId(session_id_str.clone());
             let reason = self.extract_field(event_str, "reason: ").unwrap_or_else(|| "Unknown".to_string());
             
+            // Process DialogTerminated to complete Terminating → Terminated transition
+            // (DialogBYE was already processed when hangup was initiated)
             if let Err(e) = self.state_machine.process_event(
                 &session_id,
-                EventType::DialogBYE
+                EventType::DialogTerminated
                 ).await {
-                        error!("Failed to process call termination: {}", e);
+                        error!("Failed to process dialog terminated: {}", e);
                     }
             
             // Forward to SimplePeer event system

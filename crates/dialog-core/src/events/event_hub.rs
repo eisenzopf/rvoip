@@ -319,6 +319,22 @@ impl DialogEventHub {
                 }
             }
 
+            SessionCoordinationEvent::CallTerminating { dialog_id, reason } => {
+                // When BYE completes, notify session-core that dialog is terminating
+                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
+                    info!("Converting CallTerminating to CallTerminated for session {}", session_id);
+                    Some(RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::CallTerminated {
+                            session_id,
+                            reason: rvoip_infra_common::events::cross_crate::TerminationReason::RemoteHangup,
+                        }
+                    ))
+                } else {
+                    warn!("No session ID found for dialog {:?} in CallTerminating", dialog_id);
+                    None
+                }
+            }
+
             // DTMF events would be handled separately if implemented
             // SessionCoordinationEvent doesn't have DtmfReceived yet
 

@@ -614,6 +614,17 @@ impl DialogManager {
                         }
                     }
                 }
+                
+                // Check if this is a 200 OK to BYE - dialog is terminating
+                if transaction_id.method() == &rvoip_sip_core::Method::Bye {
+                    info!("✅ Received 200 OK to BYE, dialog {} is terminating", dialog_id);
+                    
+                    // Emit CallTerminating event to notify session-core
+                    self.emit_session_coordination_event(SessionCoordinationEvent::CallTerminating {
+                        dialog_id: dialog_id.clone(),
+                        reason: "BYE completed successfully".to_string(),
+                    }).await;
+                }
 
                 // Successful completion - could be call answered, request completed, etc.
                 if !response.body().is_empty() {
