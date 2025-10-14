@@ -718,12 +718,14 @@ impl SessionCrossCrateEventHandler {
 
             // Forward to SimplePeer event system
             if let Some(ref event_tx) = self.simple_peer_event_tx {
-                debug!("🔍 [DEBUG] Forwarding ReferReceived event to SimplePeer");
+                debug!("🔍 [DEBUG] Forwarding ReferReceived event to SimplePeer with transaction_id and transfer_type");
                 let event = crate::api::events::Event::ReferReceived {
                     call_id: session_id.clone(),
                     refer_to: refer_to.clone(),
                     referred_by: None, // TODO: Extract from event if available
                     replaces: None,    // TODO: Extract from event if available
+                    transaction_id: transaction_id.clone(),  // NEW: Include for NOTIFY correlation
+                    transfer_type: transfer_type.clone(),     // NEW: Include transfer type
                 };
                 
                 // Use try_send to avoid blocking if receiver stopped draining

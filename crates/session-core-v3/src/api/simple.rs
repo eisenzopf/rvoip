@@ -14,6 +14,15 @@ use rvoip_media_core::types::AudioFrame;
 pub use crate::api::unified::Config;
 pub use crate::api::events::{Event, CallId};
 
+/// Information about an incoming REFER request
+#[derive(Debug, Clone)]
+pub struct ReferRequest {
+    pub call_id: CallId,
+    pub refer_to: String,
+    pub transaction_id: String,
+    pub transfer_type: String, // "blind" or "attended"
+}
+
 /// A simple SIP peer with sequential API
 pub struct SimplePeer {
     coordinator: Arc<UnifiedCoordinator>,
@@ -21,6 +30,8 @@ pub struct SimplePeer {
     local_uri: String,
     // Keep these for forceful shutdown
     is_shutdown: Arc<std::sync::atomic::AtomicBool>,
+    // Track pending transfer context
+    pending_refer: Arc<tokio::sync::Mutex<Option<ReferRequest>>>,
 }
 
 impl SimplePeer {
@@ -46,6 +57,7 @@ impl SimplePeer {
             event_rx,
             local_uri,
             is_shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pending_refer: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
     
@@ -78,11 +90,23 @@ impl SimplePeer {
         Err(crate::errors::SessionError::Other("Event channel closed".to_string()))
     }
     
-    /// Wait for REFER request
-    pub async fn wait_for_refer(&mut self) -> Result<Option<String>> {
+    /// Wait for REFER request with full context
+    pub async fn wait_for_refer(&mut self) -> Result<Option<ReferRequest>> {
         while let Some(event) = self.event_rx.recv().await {
             match event {
-                Event::ReferReceived { refer_to, .. } => return Ok(Some(refer_to)),
+                Event::ReferReceived { call_id, refer_to, transaction_id, transfer_type, .. } => {
+                    let refer = ReferRequest {
+                        call_id,
+                        refer_to,
+                        transaction_id,
+                        transfer_type,
+                    };
+                    
+                    // Store for later use
+                    *self.pending_refer.lock().await = Some(refer.clone());
+                    
+                    return Ok(Some(refer));
+                }
                 Event::CallEnded { .. } => return Ok(None),
                 _ => {} // Ignore other events
             }
@@ -173,6 +197,31 @@ impl SimplePeer {
     /// Send REFER for call transfer
     pub async fn send_refer(&mut self, call_id: &CallId, refer_to: &str) -> Result<()> {
         self.coordinator.send_refer(call_id, refer_to).await
+    }
+    
+    /// Complete a blind transfer by terminating current call and calling target
+    pub async fn complete_blind_transfer(
+        &mut self, 
+        refer: &ReferRequest,
+    ) -> Result<CallId> {
+        tracing::info!("[SimplePeer] Completing blind transfer from call {} to {}", 
+                       refer.call_id, refer.refer_to);
+        
+        // 1. Hangup current call (this triggers BYE)
+        self.hangup(&refer.call_id).await?;
+        
+        // 2. Wait for call to actually end
+        let ended_call = self.wait_for_call_ended().await?;
+        tracing::info!("[SimplePeer] Original call {} ended", ended_call);
+        
+        // 3. Make new call to transfer target
+        let new_call_id = self.call(&refer.refer_to).await?;
+        tracing::info!("[SimplePeer] Transfer call initiated: {}", new_call_id);
+        
+        // 4. When call is established, the state machine will send NOTIFY (success)
+        // This happens automatically via the state table transitions
+        
+        Ok(new_call_id)
     }
     
     /// Wait for call to end

@@ -38,12 +38,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     save_wav("alice_to_bob_sent.wav", &sent)?;
     save_wav("alice_from_bob_received.wav", &rcv)?;
 
-    // Wait for REFER and call Charlie
-    if let Some(refer_to) = alice.wait_for_refer().await? {
-        println!("[ALICE] Got REFER to {}", refer_to);
-        let charlie_id = alice.call(&refer_to).await?;
+    // Wait for REFER and complete transfer to Charlie
+    if let Some(refer) = alice.wait_for_refer().await? {
+        println!("[ALICE] Got REFER to {} (type: {}, txn: {})", 
+                 refer.refer_to, refer.transfer_type, refer.transaction_id);
+        
+        // Use the new complete_blind_transfer helper
+        let charlie_id = alice.complete_blind_transfer(&refer).await?;
         alice.wait_for_answered(&charlie_id).await?;
         
+        println!("[ALICE] Now talking to Charlie (post-transfer)...");
         let (sent, rcv) = alice.exchange_audio(&charlie_id, Duration::from_secs(5), |i| generate_tone(440.0, i)).await?;
         save_wav("alice_to_charlie_sent.wav", &sent)?;
         save_wav("alice_from_charlie_received.wav", &rcv)?;

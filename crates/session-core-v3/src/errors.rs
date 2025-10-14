@@ -51,6 +51,9 @@ pub enum SessionError {
     #[error("Not implemented: {0}")]
     NotImplemented(String),
     
+    #[error("Transfer failed: {0}")]
+    TransferFailed(String),
+    
     #[error("Other error: {0}")]
     Other(String),
 }

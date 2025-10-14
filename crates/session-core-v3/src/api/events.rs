@@ -142,6 +142,35 @@ pub enum Event {
         refer_to: String,
         referred_by: Option<String>,
         replaces: Option<String>,
+        transaction_id: String,    // For NOTIFY correlation
+        transfer_type: String,      // "blind" or "attended"
+    },
+    
+    /// Transfer accepted by recipient
+    TransferAccepted {
+        call_id: CallId,
+        refer_to: String,
+    },
+    
+    /// Transfer completed successfully
+    TransferCompleted {
+        old_call_id: CallId,
+        new_call_id: CallId,
+        target: String,
+    },
+    
+    /// Transfer failed
+    TransferFailed {
+        call_id: CallId,
+        reason: String,
+        status_code: u16,
+    },
+    
+    /// Transfer progress update (for transferor monitoring)
+    TransferProgress {
+        call_id: CallId,
+        status_code: u16,
+        reason: String,
     },
     
     // ===== Call State Events =====
@@ -205,6 +234,9 @@ impl Event {
             Event::CallEnded { call_id, .. } |
             Event::CallFailed { call_id, .. } |
             Event::ReferReceived { call_id, .. } |
+            Event::TransferAccepted { call_id, .. } |
+            Event::TransferFailed { call_id, .. } |
+            Event::TransferProgress { call_id, .. } |
             Event::CallOnHold { call_id, .. } |
             Event::CallResumed { call_id, .. } |
             Event::CallMuted { call_id, .. } |
@@ -212,6 +244,7 @@ impl Event {
             Event::DtmfReceived { call_id, .. } |
             Event::MediaQualityChanged { call_id, .. } |
             Event::AuthenticationRequired { call_id, .. } => Some(call_id),
+            Event::TransferCompleted { old_call_id, .. } => Some(old_call_id),
             Event::NetworkError { call_id, .. } => call_id.as_ref(),
         }
     }
@@ -228,7 +261,13 @@ impl Event {
     
     /// Check if this is a transfer-related event
     pub fn is_transfer_event(&self) -> bool {
-        matches!(self, Event::ReferReceived { .. })
+        matches!(self, 
+            Event::ReferReceived { .. } |
+            Event::TransferAccepted { .. } |
+            Event::TransferCompleted { .. } |
+            Event::TransferFailed { .. } |
+            Event::TransferProgress { .. }
+        )
     }
     
     /// Check if this is a media-related event
