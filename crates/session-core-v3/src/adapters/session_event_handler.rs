@@ -238,9 +238,13 @@ impl SessionCrossCrateEventHandler {
         if let Some(start) = event_str.find("session_id: \"") {
             let start = start + 13;
             if let Some(end) = event_str[start..].find('"') {
-                return Some(event_str[start..start+end].to_string());
+                let session_id = event_str[start..start+end].to_string();
+                info!("✅ [extract_session_id] Successfully extracted: {}", session_id);
+                return Some(session_id);
             }
         }
+        warn!("⚠️ [extract_session_id] Failed to extract session_id from event: {}", 
+              if event_str.len() > 200 { &event_str[..200] } else { event_str });
         None
     }
     
@@ -412,10 +416,15 @@ impl SessionCrossCrateEventHandler {
                     sdp: session_remote_sdp,
                 };
                 
-                if let Err(e) = event_tx.send(event).await {
-                    error!("Failed to send IncomingCall event to SimplePeer: {}", e);
-                } else {
-                    debug!("🔍 [DEBUG] Successfully sent IncomingCall event to SimplePeer");
+                // Use try_send to avoid blocking if receiver stopped draining
+                match event_tx.try_send(event) {
+                    Ok(_) => debug!("🔍 [DEBUG] Successfully sent IncomingCall event to SimplePeer"),
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        warn!("⚠️ Event channel full, dropping IncomingCall event (receiver not draining)");
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        debug!("Event channel closed, receiver already shut down");
+                    }
                 }
             }
             
@@ -490,10 +499,15 @@ impl SessionCrossCrateEventHandler {
                 sdp: sdp_answer,
             };
             
-            if let Err(e) = event_tx.send(event).await {
-                error!("Failed to send CallAnswered event to SimplePeer: {}", e);
-            } else {
-                debug!("🔍 [DEBUG] Successfully sent CallAnswered event to SimplePeer");
+            // Use try_send to avoid blocking if receiver stopped draining
+            match event_tx.try_send(event) {
+                Ok(_) => debug!("🔍 [DEBUG] Successfully sent CallAnswered event to SimplePeer"),
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    warn!("⚠️ Event channel full, dropping CallAnswered event (receiver not draining)");
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    debug!("Event channel closed, receiver already shut down");
+                }
             }
         }
 
@@ -522,9 +536,17 @@ impl SessionCrossCrateEventHandler {
     }
     
     async fn handle_call_terminated(&self, event_str: &str) -> Result<()> {
+        info!("🎯 [handle_call_terminated] Called with event: {}", 
+              if event_str.len() > 200 { &event_str[..200] } else { event_str });
+        
         if let Some(session_id_str) = self.extract_session_id(event_str) {
+            info!("🎯 [handle_call_terminated] Extracted session_id: {}", session_id_str);
+            
             let session_id = SessionId(session_id_str.clone());
             let reason = self.extract_field(event_str, "reason: ").unwrap_or_else(|| "Unknown".to_string());
+            
+            info!("🎯 [handle_call_terminated] Processing DialogTerminated for session {} with reason: {}", 
+                  session_id, reason);
             
             // Process DialogTerminated to complete Terminating → Terminated transition
             // (DialogBYE was already processed when hangup was initiated)
@@ -533,23 +555,39 @@ impl SessionCrossCrateEventHandler {
                 EventType::DialogTerminated
                 ).await {
                         error!("Failed to process dialog terminated: {}", e);
+                    } else {
+                        info!("✅ [handle_call_terminated] DialogTerminated processed successfully for {}", session_id);
                     }
             
             // Forward to SimplePeer event system
             if let Some(ref event_tx) = self.simple_peer_event_tx {
-                debug!("🔍 [DEBUG] Forwarding CallEnded event to SimplePeer");
+                info!("🔔 [handle_call_terminated] Forwarding CallEnded event to SimplePeer for session {}", session_id);
                 let event = crate::api::events::Event::CallEnded {
                     call_id: session_id.clone(),
                     reason: reason.clone(),
                 };
                 
-                if let Err(e) = event_tx.send(event).await {
-                    error!("Failed to send CallEnded event to SimplePeer: {}", e);
-                } else {
-                    debug!("🔍 [DEBUG] Successfully sent CallEnded event to SimplePeer");
+                // Use try_send to avoid blocking if the receiver stopped draining events
+                // (e.g., if user code doesn't have an event loop after hangup)
+                match event_tx.try_send(event) {
+                    Ok(_) => {
+                        info!("✅ Successfully sent CallEnded event to SimplePeer for session {}", session_id);
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        warn!("⚠️ Event channel full, dropping CallEnded event for session {} (receiver not draining)", session_id);
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        debug!("Event channel closed, receiver already shut down for session {}", session_id);
+                    }
                 }
+            } else {
+                warn!("⚠️ [handle_call_terminated] simple_peer_event_tx is None, cannot forward CallEnded for session {}", session_id);
             }
+        } else {
+            warn!("⚠️ [handle_call_terminated] Failed to extract session_id, cannot forward CallEnded event");
         }
+        
+        info!("🏁 [handle_call_terminated] Completed");
         Ok(())
     }
     
@@ -688,10 +726,15 @@ impl SessionCrossCrateEventHandler {
                     replaces: None,    // TODO: Extract from event if available
                 };
                 
-                if let Err(e) = event_tx.send(event).await {
-                    error!("Failed to send ReferReceived event to SimplePeer: {}", e);
-                } else {
-                    debug!("🔍 [DEBUG] Successfully sent ReferReceived event to SimplePeer");
+                // Use try_send to avoid blocking if receiver stopped draining
+                match event_tx.try_send(event) {
+                    Ok(_) => debug!("🔍 [DEBUG] Successfully sent ReferReceived event to SimplePeer"),
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        warn!("⚠️ Event channel full, dropping ReferReceived event (receiver not draining)");
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                        debug!("Event channel closed, receiver already shut down");
+                    }
                 }
             }
         }

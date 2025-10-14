@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use dashmap::DashMap;
 use tracing::{info, debug};
 use crate::state_table::{SessionId, DialogId, MediaSessionId, CallId};
 
@@ -11,28 +11,30 @@ use crate::types::CallState;
 /// 
 /// This store supports multiple sessions for legitimate use cases like transfers,
 /// while keeping the API simple for single session usage.
+/// 
+/// Uses DashMap for lock-free concurrent access to avoid deadlocks.
 pub struct SessionStore {
-    /// Multiple session storage
-    pub(crate) sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionState>>>,
+    /// Multiple session storage (lock-free with DashMap)
+    pub(crate) sessions: Arc<DashMap<SessionId, SessionState>>,
     
-    /// Index by dialog ID
-    pub(crate) by_dialog: Arc<RwLock<std::collections::HashMap<DialogId, SessionId>>>,
+    /// Index by dialog ID (lock-free with DashMap)
+    pub(crate) by_dialog: Arc<DashMap<DialogId, SessionId>>,
     
-    /// Index by call ID
-    pub(crate) by_call_id: Arc<RwLock<std::collections::HashMap<CallId, SessionId>>>,
+    /// Index by call ID (lock-free with DashMap)
+    pub(crate) by_call_id: Arc<DashMap<CallId, SessionId>>,
     
-    /// Index by media session ID
-    pub(crate) by_media_id: Arc<RwLock<std::collections::HashMap<MediaSessionId, SessionId>>>,
+    /// Index by media session ID (lock-free with DashMap)
+    pub(crate) by_media_id: Arc<DashMap<MediaSessionId, SessionId>>,
 }
 
 impl SessionStore {
     /// Create a new session store
     pub fn new() -> Self {
         Self {
-            sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            by_dialog: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            by_call_id: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            by_media_id: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            sessions: Arc::new(DashMap::new()),
+            by_dialog: Arc::new(DashMap::new()),
+            by_call_id: Arc::new(DashMap::new()),
+            by_media_id: Arc::new(DashMap::new()),
         }
     }
     
@@ -50,12 +52,12 @@ impl SessionStore {
             SessionState::new(session_id.clone(), role)
         };
         
-        let mut sessions = self.sessions.write().await;
-        if sessions.contains_key(&session_id) {
+        // DashMap: Lock-free insert with check
+        if self.sessions.contains_key(&session_id) {
             return Err(format!("Session {} already exists", session_id).into());
         }
         
-        sessions.insert(session_id.clone(), session.clone());
+        self.sessions.insert(session_id.clone(), session.clone());
         info!("Created new session {} with role {:?}", session_id, role);
         
         Ok(session)
@@ -66,14 +68,11 @@ impl SessionStore {
         &self,
         session_id: &SessionId,
     ) -> Result<SessionState, Box<dyn std::error::Error + Send + Sync>> {
-        let sessions = self.sessions.read().await;
-        debug!("Looking for session {}, store has {} sessions", session_id, sessions.len());
-        for (id, _) in sessions.iter() {
-            debug!("  Store contains session: {}", id);
-        }
-        sessions
+        // DashMap: Lock-free read
+        debug!("Looking for session {}, store has {} sessions", session_id, self.sessions.len());
+        self.sessions
             .get(session_id)
-            .cloned()
+            .map(|entry| entry.value().clone())
             .ok_or_else(|| format!("Session {} not found", session_id).into())
     }
     
@@ -83,40 +82,42 @@ impl SessionStore {
         session: SessionState,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let session_id = session.session_id.clone();
-        let mut sessions = self.sessions.write().await;
         
-        // Update indexes if IDs have changed
-        if let Some(old_session) = sessions.get(&session_id) {
-            // Remove old indexes
+        // DashMap: Lock-free update with index management
+        // Get old session to check for index changes
+        if let Some(old_entry) = self.sessions.get(&session_id) {
+            let old_session = old_entry.value();
+            
+            // Update indexes if IDs have changed
             if old_session.dialog_id != session.dialog_id {
                 if let Some(old_id) = &old_session.dialog_id {
-                    self.by_dialog.write().await.remove(old_id);
+                    self.by_dialog.remove(old_id);
                 }
                 if let Some(new_id) = &session.dialog_id {
-                    self.by_dialog.write().await.insert(new_id.clone(), session_id.clone());
+                    self.by_dialog.insert(new_id.clone(), session_id.clone());
                 }
             }
             
             if old_session.media_session_id != session.media_session_id {
                 if let Some(old_id) = &old_session.media_session_id {
-                    self.by_media_id.write().await.remove(old_id);
+                    self.by_media_id.remove(old_id);
                 }
                 if let Some(new_id) = &session.media_session_id {
-                    self.by_media_id.write().await.insert(new_id.clone(), session_id.clone());
+                    self.by_media_id.insert(new_id.clone(), session_id.clone());
                 }
             }
             
             if old_session.call_id != session.call_id {
                 if let Some(old_id) = &old_session.call_id {
-                    self.by_call_id.write().await.remove(old_id);
+                    self.by_call_id.remove(old_id);
                 }
                 if let Some(new_id) = &session.call_id {
-                    self.by_call_id.write().await.insert(new_id.clone(), session_id.clone());
+                    self.by_call_id.insert(new_id.clone(), session_id.clone());
                 }
             }
         }
         
-        sessions.insert(session_id.clone(), session);
+        self.sessions.insert(session_id.clone(), session);
         debug!("Updated session {}", session_id);
         
         Ok(())
@@ -127,18 +128,17 @@ impl SessionStore {
         &self,
         session_id: &SessionId,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut sessions = self.sessions.write().await;
-        
-        if let Some(session) = sessions.remove(session_id) {
+        // DashMap: Lock-free remove
+        if let Some((_, session)) = self.sessions.remove(session_id) {
             // Clean up indexes
             if let Some(dialog_id) = &session.dialog_id {
-                self.by_dialog.write().await.remove(dialog_id);
+                self.by_dialog.remove(dialog_id);
             }
             if let Some(media_id) = &session.media_session_id {
-                self.by_media_id.write().await.remove(media_id);
+                self.by_media_id.remove(media_id);
             }
             if let Some(call_id) = &session.call_id {
-                self.by_call_id.write().await.remove(call_id);
+                self.by_call_id.remove(call_id);
             }
             
             info!("Removed session {}", session_id);
@@ -153,12 +153,12 @@ impl SessionStore {
         &self,
         dialog_id: &DialogId,
     ) -> Option<SessionState> {
-        let by_dialog = self.by_dialog.read().await;
-        if let Some(session_id) = by_dialog.get(dialog_id) {
-            self.get_session(session_id).await.ok()
-        } else {
-            None
-        }
+        // DashMap: Lock-free lookup
+        self.by_dialog.get(dialog_id)
+            .and_then(|entry| {
+                let session_id = entry.value();
+                self.sessions.get(session_id).map(|s| s.value().clone())
+            })
     }
     
     /// Find session by media session ID
@@ -166,12 +166,12 @@ impl SessionStore {
         &self,
         media_id: &MediaSessionId,
     ) -> Option<SessionState> {
-        let by_media = self.by_media_id.read().await;
-        if let Some(session_id) = by_media.get(media_id) {
-            self.get_session(session_id).await.ok()
-        } else {
-            None
-        }
+        // DashMap: Lock-free lookup
+        self.by_media_id.get(media_id)
+            .and_then(|entry| {
+                let session_id = entry.value();
+                self.sessions.get(session_id).map(|s| s.value().clone())
+            })
     }
     
     /// Find session by call ID
@@ -179,42 +179,43 @@ impl SessionStore {
         &self,
         call_id: &CallId,
     ) -> Option<SessionState> {
-        let by_call = self.by_call_id.read().await;
-        if let Some(session_id) = by_call.get(call_id) {
-            self.get_session(session_id).await.ok()
-        } else {
-            None
-        }
+        // DashMap: Lock-free lookup
+        self.by_call_id.get(call_id)
+            .and_then(|entry| {
+                let session_id = entry.value();
+                self.sessions.get(session_id).map(|s| s.value().clone())
+            })
     }
     
     /// Get all active sessions
     pub async fn get_all_sessions(&self) -> Vec<SessionState> {
-        let sessions = self.sessions.read().await;
-        sessions.values().cloned().collect()
+        // DashMap: Lock-free iteration
+        self.sessions.iter().map(|entry| entry.value().clone()).collect()
     }
 
     // ===== Multi-Session Utility Methods =====
     
     /// Check if any sessions exist
     pub async fn has_session(&self) -> bool {
-        !self.sessions.read().await.is_empty()
+        // DashMap: Lock-free check
+        !self.sessions.is_empty()
     }
     
     /// Get the most recent session ID (for API compatibility)
     pub async fn get_current_session_id(&self) -> Option<SessionId> {
-        let sessions = self.sessions.read().await;
-        // Return the most recently created session
-        sessions.values()
-            .max_by_key(|s| s.created_at)
-            .map(|s| s.session_id.clone())
+        // DashMap: Lock-free iteration
+        self.sessions.iter()
+            .max_by_key(|entry| entry.value().created_at)
+            .map(|entry| entry.key().clone())
     }
     
     /// Clear all session data (complete reset)
     pub async fn clear(&self) {
-        self.sessions.write().await.clear();
-        self.by_dialog.write().await.clear();
-        self.by_call_id.write().await.clear();
-        self.by_media_id.write().await.clear();
+        // DashMap: Lock-free clear
+        self.sessions.clear();
+        self.by_dialog.clear();
+        self.by_call_id.clear();
+        self.by_media_id.clear();
         info!("Cleared all session data");
     }
     
@@ -263,10 +264,11 @@ impl SessionStore {
     
     /// Get session statistics
     pub async fn get_stats(&self) -> SessionStats {
-        let sessions = self.sessions.read().await;
+        // DashMap: Lock-free iteration
         let mut stats = SessionStats::default();
         
-        for session in sessions.values() {
+        for entry in self.sessions.iter() {
+            let session = entry.value();
             stats.total += 1;
             match session.call_state {
                 CallState::Idle => stats.idle += 1,

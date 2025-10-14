@@ -6,7 +6,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::debug;
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 use rvoip_media_core::types::AudioFrame;
@@ -39,7 +38,7 @@ impl SimplePeer {
         }
         let local_uri = config.local_uri.clone();
         
-        let (event_tx, event_rx) = mpsc::channel(100);
+        let (event_tx, event_rx) = mpsc::channel(1000);
         let coordinator = UnifiedCoordinator::with_simple_peer_events(config, event_tx).await?;
 
         Ok(Self {
@@ -96,16 +95,25 @@ impl SimplePeer {
         self.coordinator.accept_call(call_id).await
     }
     
-    /// Hangup a call (with timeout to prevent hanging)
+    /// Hangup a call (fire-and-forget to avoid blocking)
     pub async fn hangup(&mut self, call_id: &CallId) -> Result<()> {
-        // Use timeout to prevent hanging if BYE doesn't complete
-        match tokio::time::timeout(Duration::from_secs(2), self.coordinator.hangup(call_id)).await {
-            Ok(result) => result,
-            Err(_) => {
-                debug!("Hangup timed out after 2 seconds, continuing anyway");
-                Ok(()) // Timeout is OK - just continue
+        tracing::info!("[SimplePeer] hangup() called - initiating BYE (fire-and-forget)");
+        
+        // Fire-and-forget: Spawn hangup in background to avoid blocking
+        // The background event loop will handle the BYE response and CallEnded event
+        // This prevents deadlocks from nested locks in state machine
+        let coordinator = self.coordinator.clone();
+        let call_id_clone = call_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = coordinator.hangup(&call_id_clone).await {
+                tracing::warn!("Background hangup failed for {}: {}", call_id_clone, e);
+            } else {
+                tracing::info!("[SimplePeer] Background hangup completed for {}", call_id_clone);
             }
-        }
+        });
+        
+        tracing::info!("[SimplePeer] hangup() returning immediately (BYE sent in background)");
+        Ok(())
     }
     
     /// Exchange audio for a duration (send and receive simultaneously)
@@ -178,26 +186,12 @@ impl SimplePeer {
     }
     
     /// Forceful shutdown - stops EVERYTHING and exits
-    pub async fn shutdown(mut self, timeout: Duration) -> Result<()> {
-        debug!("SimplePeer FORCEFUL shutdown initiated");
-        
-        // Drain events for the timeout duration to let pending operations complete
-        let shutdown_deadline = tokio::time::Instant::now() + timeout;
-        while tokio::time::Instant::now() < shutdown_deadline {
-            match tokio::time::timeout(Duration::from_millis(50), self.event_rx.recv()).await {
-                Ok(Some(_)) => {},  // Drain event
-                Ok(None) => {
-                    debug!("Event channel closed naturally");
-                    break;
-                }
-                Err(_) => {},  // Continue draining
-            }
-        }
-        
-        debug!("SimplePeer shutdown draining complete, forcing process exit");
+    pub async fn shutdown(self, _timeout: Duration) -> Result<()> {
+        tracing::info!("[SimplePeer] shutdown() called - exiting immediately");
         
         // FORCEFUL: Kill the entire process immediately
         // This stops all tokio tasks, all threads, everything
+        // Background event loop tasks would keep the process alive otherwise
         std::process::exit(0);
     }
 }
