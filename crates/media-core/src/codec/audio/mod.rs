@@ -4,7 +4,8 @@
 pub mod common;
 pub mod g711;  // G.711 codec implementation
 pub mod opus;  // Opus codec implementation
-pub mod g729;  // Add G.729 codec
+pub mod g729_engine; // Pure Rust G.729A engine
+pub mod g729;  // G.729 codec (backed by g729_engine)
 
 pub use common::*;
 

@@ -477,9 +477,9 @@ rvoip is organized into 17 crates, each with specific responsibilities in the Vo
 | Category | Feature | Status | Standards | Description |
 |----------|---------|--------|-----------|-------------|
 | **Audio Codecs** | G.711 PCMU/PCMA | ✅ Complete | ITU-T G.711 | u-law/A-law, 8kHz |
-| | Opus | 🔶 Partial | RFC 6716 | Behind optional feature gate |
-| | G.722 | 🚧 In Progress | ITU-T G.722 | RTP payload handler only, no codec |
-| | G.729 | ❌ Not Implemented | ITU-T G.729 | Dependency disabled |
+| | Opus | ✅ Complete | RFC 6716 | Real encode/decode, feature-gated |
+| | G.722 | ✅ Complete | ITU-T G.722 | Pure Rust ADPCM + QMF sub-band coding, 16kHz |
+| | G.729 | 🔶 Partial | ITU-T G.729 | Framework + config complete, codec engine WIP |
 | **Audio Processing** | Echo Cancellation | ✅ Complete | Advanced AEC | 16.4 dB ERLE improvement |
 | | Gain Control | ✅ Complete | Advanced AGC | Multi-band processing |
 | | Voice Activity | ✅ Complete | Advanced VAD | Spectral analysis |
