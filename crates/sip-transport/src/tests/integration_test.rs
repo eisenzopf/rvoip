@@ -137,6 +137,9 @@ impl SimplifiedTransactionCore {
                         // Transport closed, we can break the loop
                         break;
                     },
+                    _ => {
+                        // Handle shutdown and other events
+                    },
                 }
             }
         });

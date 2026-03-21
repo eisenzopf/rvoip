@@ -59,13 +59,13 @@ impl ApiTestConfig {
 
 /// Test handler that tracks all events for verification
 #[derive(Debug)]
-pub struct TestCallHandler {
+pub struct ApiTestCallHandler {
     pub incoming_calls: Arc<std::sync::Mutex<Vec<IncomingCall>>>,
     pub ended_calls: Arc<std::sync::Mutex<Vec<(CallSession, String)>>>,
     pub default_decision: CallDecision,
 }
 
-impl TestCallHandler {
+impl ApiTestCallHandler {
     pub fn new(default_decision: CallDecision) -> Self {
         Self {
             incoming_calls: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -97,7 +97,7 @@ impl TestCallHandler {
 }
 
 #[async_trait]
-impl CallHandler for TestCallHandler {
+impl CallHandler for ApiTestCallHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         self.incoming_calls.lock().unwrap().push(call);
         self.default_decision.clone()
@@ -124,7 +124,7 @@ impl ApiBuilderTestHelper {
 
     /// Create a test SessionManagerBuilder with common test settings
     pub fn create_test_builder(&self) -> SessionManagerBuilder {
-//         let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
+//         let handler = Arc::new(ApiTestCallHandler::new(CallDecision::Accept(None)));
         
         SessionManagerBuilder::new()
             .with_sip_port(0) // Use random port for testing
@@ -134,7 +134,7 @@ impl ApiBuilderTestHelper {
 
     /// Create a P2P test builder
     pub fn create_p2p_builder(&self) -> SessionManagerBuilder {
-//         let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
+//         let handler = Arc::new(ApiTestCallHandler::new(CallDecision::Accept(None)));
         
         SessionManagerBuilder::new()
             .with_sip_port(0)
@@ -162,7 +162,7 @@ impl ApiBuilderTestHelper {
                 .with_sip_port(0) // Random port for testing
                 .with_local_address("sip:test@127.0.0.1")
                 .with_media_ports(10000, 20000)
-                .with_handler(Arc::new(TestCallHandler::new(CallDecision::Accept(None))))
+                .with_handler(Arc::new(ApiTestCallHandler::new(CallDecision::Accept(None))))
                 ,
         ]
     }

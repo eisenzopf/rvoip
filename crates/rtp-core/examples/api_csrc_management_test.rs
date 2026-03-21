@@ -69,9 +69,9 @@ impl ConferenceMixer {
     fn new() -> Self {
         let mut rng = rand::thread_rng();
         Self {
-            ssrc: rng.gen(),
-            sequence: rng.gen(),
-            timestamp: rng.gen(),
+            ssrc: rng.r#gen(),
+            sequence: rng.r#gen(),
+            timestamp: rng.r#gen(),
             active_sources: Vec::new(),
         }
     }
@@ -178,8 +178,8 @@ async fn run_test() -> Result<(), Box<dyn std::error::Error>> {
     let dummy_frame = MediaFrame {
         frame_type: MediaFrameType::Audio,
         data: dummy_data,
-        timestamp: rng.gen(),
-        sequence: rng.gen(),
+        timestamp: rng.r#gen(),
+        sequence: rng.r#gen(),
         marker: false,
         payload_type: 0,
         ssrc: client_ssrc,

@@ -84,6 +84,9 @@ pub mod device;
 pub mod format;
 
 
+// Codec implementations
+pub mod codec;
+
 // Audio pipeline
 pub mod pipeline;
 

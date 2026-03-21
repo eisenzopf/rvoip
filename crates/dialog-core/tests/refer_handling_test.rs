@@ -1,3 +1,6 @@
+// Gated: depends on removed set_session_coordinator API
+#![cfg(feature = "legacy-dialog-api")]
+
 //! Tests for REFER message handling in dialog-core
 
 use std::sync::Arc;

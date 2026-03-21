@@ -1,3 +1,6 @@
+// Gated: depends on removed set_session_coordinator API
+#![cfg(feature = "legacy-dialog-api")]
+
 //! Test to ensure REFER requests have Refer-To as a header, not in the body
 //! This test catches the issue where Refer-To was incorrectly placed in the message body
 

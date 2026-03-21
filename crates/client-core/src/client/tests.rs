@@ -46,6 +46,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await;
@@ -73,6 +74,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -104,6 +106,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -147,6 +150,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -184,6 +188,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -221,6 +226,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -258,6 +264,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -302,6 +309,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -340,6 +348,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -376,6 +385,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -418,6 +428,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -460,6 +471,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();
@@ -517,6 +529,7 @@ mod tests {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         };
         
         let manager = manager::ClientManager::new(config).await.unwrap();

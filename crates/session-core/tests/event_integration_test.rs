@@ -23,11 +23,9 @@ async fn test_monolithic_event_integration() {
 
     // Step 1: Create global event coordinator
     info!("Creating global event coordinator...");
-    let coordinator = Arc::new(
-        rvoip_infra_common::events::global_coordinator()
-            .await
-            .expect("Failed to create global event coordinator")
-    );
+    let coordinator = rvoip_infra_common::events::global_coordinator()
+        .await
+        .clone();
 
     // Step 2: Create session event adapter 
     info!("Creating session event adapter...");
@@ -154,11 +152,9 @@ async fn test_thread_count_comparison() {
     info!("=== Unified Approach (Single Global Coordinator) ===");
     
     // New approach: Single global coordinator manages all cross-crate events
-    let coordinator = Arc::new(
-        rvoip_infra_common::events::global_coordinator()
-            .await
-            .clone()
-    );
+    let coordinator = rvoip_infra_common::events::global_coordinator()
+        .await
+        .clone();
     
     // Create adapters for different crates - but they all share the same coordinator
     let session_adapter = SessionEventAdapter::new(coordinator.clone())
@@ -207,11 +203,9 @@ async fn test_thread_count_comparison() {
 async fn test_cross_crate_event_conversion() {
     info!("=== Cross-Crate Event Conversion Test ===");
 
-    let coordinator = Arc::new(
-        rvoip_infra_common::events::global_coordinator()
-            .await
-            .clone()
-    );
+    let coordinator = rvoip_infra_common::events::global_coordinator()
+        .await
+        .clone();
 
     let adapter = SessionEventAdapter::new(coordinator.clone())
         .await
@@ -245,11 +239,9 @@ async fn test_cross_crate_event_conversion() {
 async fn test_event_system_performance() {
     info!("=== Event System Performance Test ===");
 
-    let coordinator = Arc::new(
-        rvoip_infra_common::events::global_coordinator()
-            .await
-            .clone()
-    );
+    let coordinator = rvoip_infra_common::events::global_coordinator()
+        .await
+        .clone();
 
     let adapter = SessionEventAdapter::new(coordinator.clone())
         .await

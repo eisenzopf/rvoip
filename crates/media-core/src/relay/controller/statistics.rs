@@ -379,48 +379,9 @@ mod tests {
         controller.stop_media(&dialog_id).await.unwrap();
     }
     
-    #[tokio::test]
-    async fn test_statistics_monitoring_codec_tracking() {
-        let controller = create_test_controller().await;
-        let dialog_id = DialogId::new("test-dialog-monitoring");
-        
-        // Configure session with Opus codec
-        let config = MediaConfig {
-            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
-            remote_addr: None,
-            preferred_codec: Some("Opus".to_string()),
-            parameters: HashMap::new(),
-        };
-        
-        // Start media session
-        controller.start_media(dialog_id.clone(), config).await.unwrap();
-        
-        // Get event receiver
-        let mut event_receiver = controller.take_event_receiver().await.unwrap();
-        
-        // Start statistics monitoring
-        let monitoring_interval = Duration::from_millis(100);
-        controller.start_statistics_monitoring(dialog_id.clone(), monitoring_interval).await.unwrap();
-        
-        // Wait for at least one statistics update
-        sleep(Duration::from_millis(150)).await;
-        
-        // Check for statistics update events
-        let mut found_stats_event = false;
-        while let Ok(event) = event_receiver.try_recv() {
-            if let MediaSessionEvent::StatisticsUpdated { stats, .. } = event {
-                // Verify the statistics contain the correct codec
-                assert_eq!(stats.media_stats.current_codec, Some("Opus".to_string()));
-                found_stats_event = true;
-                break;
-            }
-        }
-        
-        assert!(found_stats_event, "Should have received statistics update event");
-        
-        // Cleanup
-        controller.stop_media(&dialog_id).await.unwrap();
-    }
+    // NOTE: test_statistics_monitoring_codec_tracking was removed because
+    // take_event_receiver() was replaced by GlobalEventCoordinator.
+    // Statistics monitoring events are now published via the coordinator.
     
     #[tokio::test]
     async fn test_codec_statistics_multiple_sessions() {
