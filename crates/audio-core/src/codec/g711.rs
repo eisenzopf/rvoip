@@ -118,7 +118,7 @@ fn linear_to_mu_law(sample: i16) -> u8 {
     
     // Convert to μ-law
     let mask = if pcm < 0 { 0x7F } else { 0xFF };
-    let pcm = if pcm < 0 { (-pcm) as u16 } else { pcm as u16 };
+    let pcm = if pcm < 0 { pcm.unsigned_abs() } else { pcm as u16 };
     let pcm = pcm + 33;
     
     let exp = if pcm > 0x1FFF {

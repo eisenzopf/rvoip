@@ -270,18 +270,18 @@ use crate::error::Result;
 #[macro_export]
 macro_rules! sdp {
     (
-        origin: ($username:expr, $sess_id:expr, $sess_version:expr, $net_type:expr, $addr_type:expr, $unicast_address:expr),
-        session_name: $session_name:expr
-        $(, connection: ($conn_net_type:expr, $conn_addr_type:expr, $conn_address:expr))?
-        $(, time: ($start_time:expr, $stop_time:expr))?
+        origin: ($username:expr_2021, $sess_id:expr_2021, $sess_version:expr_2021, $net_type:expr_2021, $addr_type:expr_2021, $unicast_address:expr_2021),
+        session_name: $session_name:expr_2021
+        $(, connection: ($conn_net_type:expr_2021, $conn_addr_type:expr_2021, $conn_address:expr_2021))?
+        $(, time: ($start_time:expr_2021, $stop_time:expr_2021))?
         $(, media: {
-            type: $media_type:expr,
-            port: $media_port:expr,
-            protocol: $media_protocol:expr,
-            formats: [$($format:expr),*]
-            $(, rtpmap: ($rtpmap_pt:expr, $rtpmap_encoding:expr))*
-            $(, fmtp: ($fmtp_pt:expr, $fmtp_params:expr))*
-            $(, direction: $media_direction:expr)?
+            type: $media_type:expr_2021,
+            port: $media_port:expr_2021,
+            protocol: $media_protocol:expr_2021,
+            formats: [$($format:expr_2021),*]
+            $(, rtpmap: ($rtpmap_pt:expr_2021, $rtpmap_encoding:expr_2021))*
+            $(, fmtp: ($fmtp_pt:expr_2021, $fmtp_params:expr_2021))*
+            $(, direction: $media_direction:expr_2021)?
         })*
     ) => {{
         // Create the origin

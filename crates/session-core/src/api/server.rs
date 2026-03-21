@@ -54,7 +54,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            bind_address: "0.0.0.0:5060".parse().unwrap(),
+            bind_address: std::net::SocketAddr::from(([0, 0, 0, 0], 5060)),
             transport_protocol: TransportProtocol::Udp,
             max_sessions: 1000,
             session_timeout: Duration::from_secs(3600), // 1 hour

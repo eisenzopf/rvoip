@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::time::{Duration, Instant};
 
 /// Types of metrics that can be collected
@@ -129,13 +130,13 @@ impl MetricsCollector {
     
     /// Register a metric
     pub fn register(&self, metric: Metric) {
-        let mut metrics = self.metrics.write().unwrap();
+        let mut metrics = self.metrics.write();
         metrics.insert(metric.name.clone(), metric);
     }
     
     /// Increment a counter
     pub fn increment(&self, name: &str, amount: f64) {
-        let mut metrics = self.metrics.write().unwrap();
+        let mut metrics = self.metrics.write();
         if let Some(metric) = metrics.get_mut(name) {
             if metric.metric_type == MetricType::Counter {
                 metric.value += amount;
@@ -145,7 +146,7 @@ impl MetricsCollector {
     
     /// Set a gauge value
     pub fn set_gauge(&self, name: &str, value: f64) {
-        let mut metrics = self.metrics.write().unwrap();
+        let mut metrics = self.metrics.write();
         if let Some(metric) = metrics.get_mut(name) {
             if metric.metric_type == MetricType::Gauge {
                 metric.value = value;
@@ -155,17 +156,17 @@ impl MetricsCollector {
     
     /// Start a timer
     pub fn start_timer(&self, name: &str) {
-        let mut timers = self.timers.write().unwrap();
+        let mut timers = self.timers.write();
         timers.insert(name.to_string(), Instant::now());
     }
     
     /// Stop a timer and record the duration
     pub fn stop_timer(&self, name: &str) -> Option<Duration> {
-        let mut timers = self.timers.write().unwrap();
+        let mut timers = self.timers.write();
         let start = timers.remove(name)?;
         let duration = start.elapsed();
         
-        let mut metrics = self.metrics.write().unwrap();
+        let mut metrics = self.metrics.write();
         if let Some(metric) = metrics.get_mut(name) {
             if metric.metric_type == MetricType::Timer {
                 metric.value = duration.as_secs_f64();
@@ -177,18 +178,18 @@ impl MetricsCollector {
     
     /// Get a snapshot of all metrics
     pub fn snapshot(&self) -> HashMap<String, Metric> {
-        self.metrics.read().unwrap().clone()
+        self.metrics.read().clone()
     }
     
     /// Get a specific metric
     pub fn get(&self, name: &str) -> Option<Metric> {
-        self.metrics.read().unwrap().get(name).cloned()
+        self.metrics.read().get(name).cloned()
     }
     
     /// Clear all metrics
     pub fn clear(&self) {
-        self.metrics.write().unwrap().clear();
-        self.timers.write().unwrap().clear();
+        self.metrics.write().clear();
+        self.timers.write().clear();
     }
 }
 

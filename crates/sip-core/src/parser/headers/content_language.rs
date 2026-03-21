@@ -115,7 +115,7 @@ fn parse_language_tag(input: &[u8]) -> IResult<&[u8], LanguageTag> {
     
     let language_tag = parts
         .iter()
-        .map(|part| std::str::from_utf8(part).unwrap().to_lowercase())
+        .map(|part| std::str::from_utf8(part).unwrap_or_default().to_lowercase())
         .collect::<Vec<_>>()
         .join("-");
     

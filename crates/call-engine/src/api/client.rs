@@ -711,7 +711,7 @@ impl CallCenterClient {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn session_manager(&self) -> &Arc<rvoip_session_core::SessionCoordinator> {
+    pub fn session_manager(&self) -> crate::error::Result<&Arc<rvoip_session_core::SessionCoordinator>> {
         self.engine.session_manager()
     }
     
@@ -753,9 +753,12 @@ impl CallCenterClient {
     /// # }
     /// ```
     pub fn call_handler(&self) -> Arc<dyn CallHandler> {
-        Arc::new(crate::orchestrator::handler::CallCenterCallHandler {
-            engine: Arc::downgrade(&self.engine),
-        })
+        let handler = crate::orchestrator::handler::CallCenterCallHandler {
+            engine: std::sync::OnceLock::new(),
+        };
+        // OnceLock on a fresh instance should never fail, but handle gracefully
+        let _ = handler.engine.set(Arc::downgrade(&self.engine));
+        Arc::new(handler)
     }
     
     /// Create a builder for constructing a CallCenterClient

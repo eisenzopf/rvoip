@@ -169,35 +169,52 @@ use crate::errors::Result;
 // Re-export MediaConfig from the media module
 pub use crate::media::types::MediaConfig;
 
+/// SIP transport type selection
+///
+/// Controls which transport protocol is used for SIP signaling.
+/// UDP is the default. Use `Ws` or `Wss` for WebSocket-based SIP (RFC 7118).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SipTransportType {
+    /// UDP transport (default, RFC 3261)
+    Udp,
+    /// WebSocket transport (RFC 7118)
+    Ws,
+    /// Secure WebSocket transport (RFC 7118 over TLS)
+    Wss,
+}
+
 /// Configuration for the SessionManager
 #[derive(Debug, Clone)]
 pub struct SessionManagerConfig {
     /// SIP listening port
     pub sip_port: u16,
-    
+
     /// Local SIP address (e.g., "user@domain")
     pub local_address: String,
-    
+
     /// Local bind address for media (RTP/RTCP)
     pub local_bind_addr: std::net::SocketAddr,
-    
+
     /// Media port range start
     pub media_port_start: u16,
-    
+
     /// Media port range end
     pub media_port_end: u16,
-    
+
     /// Enable STUN for NAT traversal
     pub enable_stun: bool,
-    
+
     /// STUN server address
     pub stun_server: Option<String>,
-    
+
     /// Enable SIP client features (REGISTER, MESSAGE, etc.)
     pub enable_sip_client: bool,
-    
+
     /// Media configuration preferences
     pub media_config: MediaConfig,
+
+    /// SIP transport type (UDP, WS, or WSS)
+    pub sip_transport: SipTransportType,
 }
 
 impl Default for SessionManagerConfig {
@@ -205,13 +222,14 @@ impl Default for SessionManagerConfig {
         Self {
             sip_port: 5060,
             local_address: "sip:user@localhost".to_string(),
-            local_bind_addr: "127.0.0.1:5060".parse().unwrap(), // Default to localhost for safety
+            local_bind_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 5060)), // Default to localhost for safety
             media_port_start: 10000,
             media_port_end: 20000,
             enable_stun: false,
             stun_server: None,
             enable_sip_client: false,
             media_config: MediaConfig::default(),
+            sip_transport: SipTransportType::Udp,
         }
     }
 }
@@ -445,7 +463,52 @@ impl SessionManagerBuilder {
         self.config.enable_sip_client = true;
         self
     }
-    
+
+    /// Use WebSocket (WS) transport for SIP signaling instead of UDP
+    ///
+    /// This enables SIP over WebSocket as defined in RFC 7118.
+    /// The local bind address and port are still used for the WebSocket listener.
+    ///
+    /// # Example
+    /// ```rust
+    /// use rvoip_session_core::SessionManagerBuilder;
+    ///
+    /// let builder = SessionManagerBuilder::new()
+    ///     .with_sip_port(8080)
+    ///     .with_websocket();
+    /// ```
+    pub fn with_websocket(mut self) -> Self {
+        self.config.sip_transport = SipTransportType::Ws;
+        self
+    }
+
+    /// Use Secure WebSocket (WSS) transport for SIP signaling instead of UDP
+    ///
+    /// This enables SIP over Secure WebSocket as defined in RFC 7118.
+    /// TLS certificate validation is enforced; use proper certificates in production.
+    ///
+    /// # Example
+    /// ```rust
+    /// use rvoip_session_core::SessionManagerBuilder;
+    ///
+    /// let builder = SessionManagerBuilder::new()
+    ///     .with_sip_port(8443)
+    ///     .with_secure_websocket();
+    /// ```
+    pub fn with_secure_websocket(mut self) -> Self {
+        self.config.sip_transport = SipTransportType::Wss;
+        self
+    }
+
+    /// Set SIP transport type directly
+    ///
+    /// # Arguments
+    /// * `transport` - The transport type to use for SIP signaling
+    pub fn with_transport(mut self, transport: SipTransportType) -> Self {
+        self.config.sip_transport = transport;
+        self
+    }
+
     /// Set music-on-hold WAV file path
     /// 
     /// When a call is placed on hold, this WAV file will be played to the remote party.

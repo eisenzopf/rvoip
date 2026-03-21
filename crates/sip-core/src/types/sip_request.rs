@@ -865,13 +865,11 @@ impl fmt::Display for Request {
             write!(f, "\r\n{}", header)?;
         }
         
-        // Write separator
-        write!(f, "\r\n")?;
-        
+        // Write blank line separator (CRLF after last header + CRLF for blank line)
+        write!(f, "\r\n\r\n")?;
+
         // Write body if present
         if !self.body.is_empty() {
-            write!(f, "\r\n")?;
-            
             // Try to decode body as UTF-8, fall back to hex representation
             match std::str::from_utf8(&self.body) {
                 Ok(body_str) => write!(f, "{}", body_str)?,

@@ -97,42 +97,111 @@ pub struct CodecInfo {
     pub channels: u8,
 }
 
+/// ICE configuration for NAT traversal
+#[derive(Debug, Clone)]
+pub struct IceConfig {
+    /// Whether ICE is enabled
+    pub enabled: bool,
+    /// STUN server addresses (e.g., "74.125.250.129:19302")
+    pub stun_servers: Vec<std::net::SocketAddr>,
+    /// TURN relay server configurations (UDP only).
+    pub turn_servers: Vec<rvoip_rtp_core::turn::TurnServerConfig>,
+}
+
+impl Default for IceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            stun_servers: Vec::new(),
+            turn_servers: Vec::new(),
+        }
+    }
+}
+
+impl IceConfig {
+    /// Create an ICE config with default Google STUN server.
+    pub fn with_google_stun() -> Self {
+        // Use the resolved IP for stun.l.google.com:19302
+        let stun_addr = std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(74, 125, 250, 129)),
+            19302,
+        );
+        Self {
+            enabled: true,
+            stun_servers: vec![stun_addr],
+            turn_servers: Vec::new(),
+        }
+    }
+}
+
 /// Media configuration for session management
 #[derive(Debug, Clone)]
 pub struct MediaConfig {
     /// Preferred codecs in priority order
     pub preferred_codecs: Vec<String>,
-    
+
     /// RTP port range for media sessions
     pub port_range: Option<(RtpPort, RtpPort)>,
-    
+
     /// Enable quality monitoring and metrics collection
     pub quality_monitoring: bool,
-    
+
     /// Enable DTMF support
     pub dtmf_support: bool,
-    
+
     /// Enable echo cancellation
     pub echo_cancellation: bool,
-    
+
     /// Enable noise suppression
     pub noise_suppression: bool,
-    
+
     /// Enable automatic gain control
     pub auto_gain_control: bool,
-    
+
     /// Path to music-on-hold WAV file
     /// If None, silence will be sent during hold
     pub music_on_hold_path: Option<std::path::PathBuf>,
-    
+
     /// Maximum bandwidth in kbps
     pub max_bandwidth_kbps: Option<u32>,
-    
+
     /// Preferred packetization time
     pub preferred_ptime: Option<u8>,
-    
+
     /// Custom SDP attributes for advanced use cases
     pub custom_sdp_attributes: std::collections::HashMap<String, String>,
+
+    /// ICE configuration for NAT traversal
+    pub ice: IceConfig,
+
+    /// SRTP (DTLS-SRTP) configuration for encrypted media
+    pub srtp: SrtpConfig,
+}
+
+/// Configuration for DTLS-SRTP encrypted media.
+#[derive(Debug, Clone)]
+pub struct SrtpConfig {
+    /// Whether to offer SRTP in outgoing SDP.
+    /// When `true`, SDP offers will include `a=fingerprint` and use
+    /// `RTP/SAVP` instead of `RTP/AVP`.
+    ///
+    /// Incoming calls that offer DTLS-SRTP are always accepted regardless
+    /// of this flag.
+    pub enabled: bool,
+
+    /// Local DTLS certificate fingerprint (hex, colon-separated).
+    /// When `None` and `enabled` is `true`, a self-signed certificate
+    /// fingerprint will be generated at session start.
+    pub local_fingerprint: Option<String>,
+}
+
+impl Default for SrtpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            local_fingerprint: None,
+        }
+    }
 }
 
 impl Default for MediaConfig {
@@ -149,6 +218,8 @@ impl Default for MediaConfig {
             max_bandwidth_kbps: None,
             preferred_ptime: Some(20),
             custom_sdp_attributes: std::collections::HashMap::new(),
+            ice: IceConfig::default(),
+            srtp: SrtpConfig::default(),
         }
     }
 }

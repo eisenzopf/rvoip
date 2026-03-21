@@ -213,8 +213,8 @@ use crate::transaction::transport::{
 
 // Type aliases without Sync requirement
 type BoxedTransaction = Box<dyn Transaction + Send>;
-/// Type alias for a boxed client transaction
-type BoxedClientTransaction = Box<dyn ClientTransaction + Send>;
+/// Type alias for a shared client transaction (Arc enables clone-under-lock without removing)
+type BoxedClientTransaction = Arc<dyn ClientTransaction + Send + Sync>;
 /// Type alias for an Arc wrapped server transaction
 type BoxedServerTransaction = Arc<dyn ServerTransaction>;
 
@@ -261,6 +261,8 @@ pub struct TransactionManager {
     timer_manager: Arc<TimerManager>,
     /// Timer factory
     timer_factory: TimerFactory,
+    /// Broadcast shutdown signal for spawned tasks
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 // Define RFC3261 Branch magic cookie
@@ -339,7 +341,9 @@ impl TransactionManager {
         
         // Create timer factory with the timer manager
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-        
+
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+
         let manager = Self {
             transport,
             client_transactions,
@@ -355,11 +359,12 @@ impl TransactionManager {
             timer_settings,
             timer_manager,
             timer_factory,
+            shutdown_tx,
         };
-        
+
         // Start the message processing loop
         manager.start_message_loop();
-        
+
         Ok((manager, events_rx))
     }
 
@@ -444,7 +449,9 @@ impl TransactionManager {
         // Create the timer manager with custom config
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-        
+
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+
         let manager = Self {
             transport,
             client_transactions,
@@ -460,11 +467,12 @@ impl TransactionManager {
             timer_settings,
             timer_manager,
             timer_factory,
+            shutdown_tx,
         };
-        
+
         // Start the message processing loop
         manager.start_message_loop();
-        
+
         Ok((manager, events_rx))
     }
 
@@ -573,6 +581,8 @@ impl TransactionManager {
         // Create timer factory with the timer manager
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
         
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+
         let manager = Self {
             transport: default_transport,
             client_transactions,
@@ -588,8 +598,9 @@ impl TransactionManager {
             timer_settings,
             timer_manager,
             timer_factory,
+            shutdown_tx,
         };
-        
+
         // Start the message processing loop
         manager.start_message_loop();
         
@@ -654,6 +665,8 @@ impl TransactionManager {
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
         
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+
         Self {
             transport,
             client_transactions,
@@ -669,6 +682,7 @@ impl TransactionManager {
             timer_settings,
             timer_manager,
             timer_factory,
+            shutdown_tx,
         }
     }
 
@@ -711,7 +725,9 @@ impl TransactionManager {
         let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
         let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
         let next_subscriber_id = Arc::new(Mutex::new(0));
-        
+
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+
         Self {
             transport,
             events_tx,
@@ -727,6 +743,7 @@ impl TransactionManager {
             transaction_to_subscribers,
             next_subscriber_id,
             transport_rx: Arc::new(Mutex::new(transport_rx)),
+            shutdown_tx,
         }
     }
 
@@ -778,14 +795,14 @@ impl TransactionManager {
         // We need to get the transaction and clone only when needed
         let mut locked_txs = self.client_transactions.lock().await;
         
-        // Check if transaction exists
-        if !locked_txs.contains_key(transaction_id) {
-            debug!(%transaction_id, "TransactionManager::send_request - transaction not found");
-            return Err(Error::transaction_not_found(transaction_id.clone(), "send_request - transaction not found"));
-        }
-        
         // Get a reference to the transaction to determine its type
-        let tx = locked_txs.get_mut(transaction_id).unwrap();
+        let tx = match locked_txs.get_mut(transaction_id) {
+            Some(tx) => tx,
+            None => {
+                debug!(%transaction_id, "TransactionManager::send_request - transaction not found");
+                return Err(Error::transaction_not_found(transaction_id.clone(), "send_request - transaction not found"));
+            }
+        };
         debug!(%transaction_id, kind=?tx.kind(), state=?tx.state(), "TransactionManager::send_request - found transaction");
         
         // Remember initial state to detect quick state transitions
@@ -970,13 +987,13 @@ impl TransactionManager {
         // We need to get the transaction and clone only when needed
         let mut locked_txs = self.server_transactions.lock().await;
         
-        // Check if transaction exists
-        if !locked_txs.contains_key(transaction_id) {
-            return Err(Error::transaction_not_found(transaction_id.clone(), "send_response - transaction not found"));
-        }
-        
         // Get a reference to the transaction to determine its type
-        let tx = locked_txs.get_mut(transaction_id).unwrap();
+        let tx = match locked_txs.get_mut(transaction_id) {
+            Some(tx) => tx,
+            None => {
+                return Err(Error::transaction_not_found(transaction_id.clone(), "send_response - transaction not found"));
+            }
+        };
         
         // Use the TransactionExt trait to safely downcast
         use crate::transaction::server::TransactionExt;
@@ -1180,6 +1197,14 @@ impl TransactionManager {
         )
     }
 
+    /// Subscribe to the shutdown broadcast signal.
+    ///
+    /// Spawned tasks can use the returned receiver to exit gracefully when
+    /// the transaction manager is shutting down.
+    pub fn subscribe_shutdown(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.shutdown_tx.subscribe()
+    }
+
     /// Gets a reference to the transport layer used by this transaction manager.
     ///
     /// This method provides access to the underlying transport layer,
@@ -1361,13 +1386,17 @@ impl TransactionManager {
     /// 5. Clear event subscribers
     pub async fn shutdown(&self) {
         info!("TransactionManager shutting down gracefully");
-        
+
         // Step 1: Stop the message processing loop FIRST
         // This prevents new messages from being processed
         {
             let mut running = self.running.lock().await;
             *running = false;
         }
+
+        // Send shutdown signal to all spawned tasks
+        let _ = self.shutdown_tx.send(());
+
         debug!("Message processing loop signaled to stop");
         
         // Step 2: Transport should already be closed by this point via events
@@ -1704,6 +1733,7 @@ impl TransactionManager {
         let event_subscribers = self.event_subscribers.clone();
         let running = self.running.clone();
         let manager_arc = self.clone();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         tokio::spawn(async move {
             debug!("Starting transaction message loop");
@@ -1747,12 +1777,16 @@ impl TransactionManager {
                     Some(transaction_event) = internal_rx.recv() => {
                         // Handle transaction events, particularly termination events
                         Self::broadcast_event(
-                            transaction_event, 
-                            &events_tx, 
+                            transaction_event,
+                            &events_tx,
                             &event_subscribers,
                             Some(&manager_arc.transaction_to_subscribers),
                             Some(manager_arc.clone()),
                         ).await;
+                    }
+                    _ = shutdown_rx.recv() => {
+                        info!("Transaction message loop received shutdown signal");
+                        break;
                     }
                     else => {
                         // Both channels have been closed; exit loop
@@ -1844,7 +1878,7 @@ impl TransactionManager {
         }
         
         // Create the appropriate transaction based on the request method
-        let transaction: Box<dyn ClientTransaction + Send> = match modified_request.method() {
+        let transaction: Arc<dyn ClientTransaction + Send + Sync> = match modified_request.method() {
             Method::Invite => {
                 tracing::trace!("Creating ClientInviteTransaction: {}", key);
                 let tx = ClientInviteTransaction::new(
@@ -1856,14 +1890,14 @@ impl TransactionManager {
                     self.timer_settings_for_request(&modified_request)
                 )?;
                 tracing::trace!("Created ClientInviteTransaction: {}", key);
-                Box::new(tx)
+                Arc::new(tx)
             },
             Method::Cancel => {
                 // Validate the CANCEL request
                 if let Err(e) = cancel::validate_cancel_request(&modified_request) {
                     warn!(method = %modified_request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
                 }
-                
+
                 let tx = ClientNonInviteTransaction::new(
                     key.clone(),
                     modified_request.clone(),
@@ -1872,14 +1906,14 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request)
                 )?;
-                Box::new(tx)
+                Arc::new(tx)
             },
             Method::Update => {
                 // Validate the UPDATE request
                 if let Err(e) = update::validate_update_request(&modified_request) {
                     warn!(method = %modified_request.method(), error = %e, "Creating transaction for UPDATE with possible validation issues");
                 }
-                
+
                 let tx = ClientNonInviteTransaction::new(
                     key.clone(),
                     modified_request.clone(),
@@ -1888,7 +1922,7 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request)
                 )?;
-                Box::new(tx)
+                Arc::new(tx)
             },
             _ => {
                 let tx = ClientNonInviteTransaction::new(
@@ -1899,7 +1933,7 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request)
                 )?;
-                Box::new(tx)
+                Arc::new(tx)
             }
         };
         
@@ -2086,9 +2120,8 @@ impl TransactionManager {
         // Check if this is a retransmission of an existing transaction
         {
             let server_txs = self.server_transactions.lock().await;
-            if server_txs.contains_key(&key) {
+            if let Some(transaction) = server_txs.get(&key).cloned() {
                 // This is a retransmission, get the existing transaction
-                let transaction = server_txs.get(&key).unwrap().clone();
                 drop(server_txs); // Release lock
                 
                 // Process the request in the existing transaction

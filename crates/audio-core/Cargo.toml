@@ -32,17 +32,19 @@ cpal = { version = "0.15", optional = true }
 dasp = { version = "0.11", features = ["std", "signal", "interpolate", "interpolate-linear"], optional = true }
 
 # Async runtime and utilities
-tokio = { version = "1.0", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
 
 # Data structures and utilities
-uuid = { version = "1.0", features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
 serde = { version = "1.0", features = ["derive"] }
 
 # Logging and error handling
-thiserror = "1.0"
+tracing = "0.1"
+thiserror = { workspace = true }
 
 # Time and synchronization
 chrono = { version = "0.4", features = ["serde"] }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

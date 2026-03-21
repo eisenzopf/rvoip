@@ -79,6 +79,10 @@ pub mod api;
 pub mod security;
 pub mod feedback;
 pub mod events;
+pub mod stun;
+pub mod turn;
+pub mod ice;
+pub mod sctp;
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;

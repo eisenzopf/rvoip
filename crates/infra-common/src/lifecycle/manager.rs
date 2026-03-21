@@ -3,7 +3,8 @@ use crate::lifecycle::dependency::DependencyGraph;
 use crate::errors::types::{Error, Result};
 use std::collections::HashMap;
 use std::fmt::{self, Debug, Formatter};
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::Arc;
+use parking_lot::{RwLock, Mutex};
 use thiserror::Error;
 
 
@@ -65,13 +66,13 @@ impl LifecycleManager {
         let deps = component.dependencies();
         
         // Check for existing component with the same name
-        let mut components = self.components.write().unwrap();
+        let mut components = self.components.write();
         if components.contains_key(&name) {
             return Err(LifecycleError::ComponentAlreadyExists(name).into());
         }
         
         // Register dependencies
-        let mut dependencies = self.dependencies.write().unwrap();
+        let mut dependencies = self.dependencies.write();
         for dep in deps {
             dependencies.add_dependency(&name, dep)?;
         }
@@ -84,13 +85,13 @@ impl LifecycleManager {
     
     /// Initialize all components in dependency order
     pub async fn init_all(&self) -> Result<()> {
-        let mut components = self.components.write().unwrap();
+        let mut components = self.components.write();
         let order = self.get_init_order()?;
         
         for name in order {
             if let Some(component) = components.get(&name) {
                 // Mutex to access mutably
-                let mut component_guard = component.lock().unwrap();
+                let mut component_guard = component.lock();
                 if let Err(e) = component_guard.init().await {
                     return Err(Error::Component(
                         format!("Failed to initialize component {}: {}", name, e)
@@ -104,13 +105,13 @@ impl LifecycleManager {
     
     /// Start all components in dependency order
     pub async fn start_all(&self) -> Result<()> {
-        let mut components = self.components.write().unwrap();
+        let mut components = self.components.write();
         let order = self.get_init_order()?;
         
         for name in order {
             if let Some(component) = components.get(&name) {
                 // Mutex to access mutably
-                let mut component_guard = component.lock().unwrap();
+                let mut component_guard = component.lock();
                 if let Err(e) = component_guard.start().await {
                     return Err(Error::Component(
                         format!("Failed to start component {}: {}", name, e)
@@ -124,14 +125,14 @@ impl LifecycleManager {
     
     /// Stop all components in reverse dependency order
     pub async fn stop_all(&self) -> Result<()> {
-        let mut components = self.components.write().unwrap();
+        let mut components = self.components.write();
         let mut order = self.get_init_order()?;
         order.reverse(); // Reverse order for shutdown
         
         for name in order {
             if let Some(component) = components.get(&name) {
                 // Mutex to access mutably
-                let mut component_guard = component.lock().unwrap();
+                let mut component_guard = component.lock();
                 if let Err(e) = component_guard.stop().await {
                     return Err(Error::Component(
                         format!("Failed to stop component {}: {}", name, e)
@@ -145,14 +146,14 @@ impl LifecycleManager {
     
     /// Shut down all components in reverse dependency order
     pub async fn shutdown_all(&self) -> Result<()> {
-        let mut components = self.components.write().unwrap();
+        let mut components = self.components.write();
         let mut order = self.get_init_order()?;
         order.reverse(); // Reverse order for shutdown
         
         for name in order {
             if let Some(component) = components.get(&name) {
                 // Mutex to access mutably
-                let mut component_guard = component.lock().unwrap();
+                let mut component_guard = component.lock();
                 if let Err(e) = component_guard.shutdown().await {
                     return Err(Error::Component(
                         format!("Failed to shut down component {}: {}", name, e)
@@ -166,13 +167,13 @@ impl LifecycleManager {
     
     /// Get a component by name
     pub fn get_component(&self, name: &str) -> Option<ThreadSafeComponent> {
-        let components = self.components.read().unwrap();
+        let components = self.components.read();
         components.get(name).cloned()
     }
     
     /// Get the initialization order based on dependencies
     fn get_init_order(&self) -> Result<Vec<String>> {
-        let dependencies = self.dependencies.read().unwrap();
+        let dependencies = self.dependencies.read();
         let order = dependencies.resolve_order()
             .map_err(|e| Error::Component(format!("Failed to resolve dependencies: {}", e)))?;
         
@@ -182,7 +183,7 @@ impl LifecycleManager {
 
 impl Debug for LifecycleManager {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let components = self.components.read().unwrap();
+        let components = self.components.read();
         let component_count = components.len();
         
         f.debug_struct("LifecycleManager")

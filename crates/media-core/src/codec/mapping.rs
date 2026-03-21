@@ -390,7 +390,7 @@ impl CodecMapper {
         // Collect codecs to remove (those not using static payload types)
         let codecs_to_remove: Vec<String> = self.name_to_payload
             .iter()
-            .filter(|(_, &payload_type)| !static_payload_types.contains(&payload_type))
+            .filter(|(_, payload_type)| !static_payload_types.contains(payload_type))
             .map(|(name, _)| name.clone())
             .collect();
         

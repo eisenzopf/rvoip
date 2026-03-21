@@ -116,7 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Set up audio channels (waits for call to be active and media ready)
     tracing::info!("📻 Setting up audio channels");
-    let (audio_tx, mut audio_rx) = call.audio_channels();
+    let (audio_tx, mut audio_rx) = call.audio_channels()?;
     
     // Set up audio capture
     let capture = Arc::new(Mutex::new(AudioCapture::new(output_dir.join("output.wav"))));

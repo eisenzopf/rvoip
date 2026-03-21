@@ -165,7 +165,7 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Domain(vec![domain.into()]));
         }
         self
@@ -184,7 +184,7 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_opaque(mut self, opaque: impl Into<String>) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Opaque(opaque.into()));
         }
         self
@@ -204,7 +204,7 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_stale(mut self, stale: bool) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Stale(stale));
         }
         self
@@ -222,7 +222,7 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_algorithm(mut self, algorithm: Algorithm) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Algorithm(algorithm));
         }
         self
@@ -241,7 +241,7 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_qop(mut self, qop: Qop) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Qop(vec![qop]));
         }
         self
@@ -260,7 +260,7 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_qops(mut self, qops: Vec<Qop>) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
             params.push(DigestParam::Qop(qops));
         }
         self

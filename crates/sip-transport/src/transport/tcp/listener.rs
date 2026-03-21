@@ -17,7 +17,8 @@ impl TcpListener {
             .await
             .map_err(|e| Error::BindFailed(addr, e))?;
         
-        info!("TCP listener bound to {}", listener.local_addr().unwrap());
+        let local_addr = listener.local_addr().unwrap_or(addr);
+        info!("TCP listener bound to {}", local_addr);
         
         Ok(Self { listener })
     }

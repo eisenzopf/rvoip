@@ -699,10 +699,124 @@ impl AudioFrameSubscriber {
     }
 }
 
+// =============================================================================
+// STATE TABLE CALL STATE BRIDGING
+// =============================================================================
+
+/// Convert from v1 CallState to v2 state-table CallState.
+///
+/// v1's CallState maps directly to the common subset of v2's richer state model.
+#[cfg(feature = "state-table")]
+impl From<CallState> for crate::state_table::types::CallState {
+    fn from(v1: CallState) -> Self {
+        use crate::state_table::types::{CallState as V2, FailureReason};
+        match v1 {
+            CallState::Initiating => V2::Initiating,
+            CallState::Ringing => V2::Ringing,
+            CallState::Active => V2::Active,
+            CallState::OnHold => V2::OnHold,
+            CallState::Transferring => V2::Transferring,
+            CallState::Terminating => V2::Terminating,
+            CallState::Terminated => V2::Terminated,
+            CallState::Cancelled => V2::Cancelled,
+            CallState::Failed(reason) => {
+                let fr = match reason.to_lowercase().as_str() {
+                    s if s.contains("timeout") => FailureReason::Timeout,
+                    s if s.contains("reject") => FailureReason::Rejected,
+                    s if s.contains("network") => FailureReason::NetworkError,
+                    s if s.contains("media") => FailureReason::MediaError,
+                    s if s.contains("protocol") => FailureReason::ProtocolError,
+                    _ => FailureReason::Other,
+                };
+                V2::Failed(fr)
+            }
+        }
+    }
+}
+
+/// Convert from v2 state-table CallState to v1 CallState.
+///
+/// v2 has additional states (Idle, Answering, EarlyMedia, Muted, Bridged, etc.)
+/// that have no direct v1 equivalent. These are mapped to the closest v1 state.
+#[cfg(feature = "state-table")]
+impl From<crate::state_table::types::CallState> for CallState {
+    fn from(v2: crate::state_table::types::CallState) -> Self {
+        use crate::state_table::types::CallState as V2;
+        match v2 {
+            V2::Idle => CallState::Initiating, // Closest v1 equivalent
+            V2::Initiating => CallState::Initiating,
+            V2::Ringing => CallState::Ringing,
+            V2::Answering => CallState::Ringing, // Still ringing from v1 perspective
+            V2::EarlyMedia => CallState::Ringing, // Early media is a ringing variant
+            V2::Active => CallState::Active,
+            V2::OnHold => CallState::OnHold,
+            V2::Resuming => CallState::OnHold, // Resuming from hold
+            V2::Muted => CallState::Active, // Muted is still active
+            V2::Bridged => CallState::Active, // Bridged is active with media routing
+            V2::Transferring => CallState::Transferring,
+            V2::TransferringCall => CallState::Transferring,
+            V2::ConsultationCall => CallState::Transferring,
+            V2::Terminating => CallState::Terminating,
+            V2::Terminated => CallState::Terminated,
+            V2::Cancelled => CallState::Cancelled,
+            V2::Failed(reason) => CallState::Failed(reason.to_string()),
+            // Registration/subscription/auth/messaging states map to Initiating
+            // as they represent non-call session types
+            V2::Registering | V2::Registered | V2::Unregistering => {
+                CallState::Active // Registration is an active session type
+            }
+            V2::Subscribing | V2::Subscribed | V2::Publishing => {
+                CallState::Active
+            }
+            V2::Authenticating => CallState::Initiating,
+            V2::Messaging => CallState::Active,
+        }
+    }
+}
+
+/// Convert v2 state-table SessionId to v1 SessionId
+#[cfg(feature = "state-table")]
+impl From<crate::state_table::types::SessionId> for SessionId {
+    fn from(v2: crate::state_table::types::SessionId) -> Self {
+        SessionId(v2.0)
+    }
+}
+
+/// Convert v1 SessionId to v2 state-table SessionId
+#[cfg(feature = "state-table")]
+impl From<SessionId> for crate::state_table::types::SessionId {
+    fn from(v1: SessionId) -> Self {
+        crate::state_table::types::SessionId(v1.0)
+    }
+}
+
+/// Convert v2 state-table Role to v1 SessionRole
+#[cfg(feature = "state-table")]
+impl From<crate::state_table::types::Role> for SessionRole {
+    fn from(v2: crate::state_table::types::Role) -> Self {
+        match v2 {
+            crate::state_table::types::Role::UAC => SessionRole::UAC,
+            crate::state_table::types::Role::UAS => SessionRole::UAS,
+            crate::state_table::types::Role::Both => SessionRole::UAC, // Default to UAC
+        }
+    }
+}
+
+/// Convert v1 SessionRole to v2 state-table Role
+#[cfg(feature = "state-table")]
+impl From<SessionRole> for crate::state_table::types::Role {
+    fn from(v1: SessionRole) -> Self {
+        match v1 {
+            SessionRole::UAC => crate::state_table::types::Role::UAC,
+            SessionRole::UAS => crate::state_table::types::Role::UAS,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_session_id_creation() {
         let id1 = SessionId::new();
@@ -710,12 +824,10 @@ mod tests {
         assert_ne!(id1, id2);
         assert!(id1.0.starts_with("sess_"));
     }
-    
+
     #[test]
     fn test_call_state_display() {
         assert_eq!(CallState::Active.to_string(), "Active");
         assert_eq!(CallState::Failed("timeout".to_string()).to_string(), "Failed: timeout");
     }
 }
-
- 

@@ -238,7 +238,10 @@ impl PresencePublisher {
             self.target.clone(),
             self.presentity.clone(),
         )
-        .if_match(self.entity_tag.as_ref().unwrap())
+        .if_match(self.entity_tag.as_ref().ok_or_else(|| DialogError::InvalidState {
+            expected: "entity-tag present".to_string(),
+            actual: "no entity-tag".to_string(),
+        })?)
         .send()
         .await?;
         

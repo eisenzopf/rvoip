@@ -154,6 +154,17 @@ pub enum SessionEvent {
         can_receive: bool,
     },
     
+    /// Trickle ICE candidate received via SIP INFO (RFC 8840)
+    TrickleIceCandidate {
+        session_id: SessionId,
+        candidate_line: String,
+    },
+
+    /// Trickle ICE end-of-candidates received via SIP INFO (RFC 8840)
+    TrickleIceEndOfCandidates {
+        session_id: SessionId,
+    },
+
     /// DTMF digits received
     DtmfReceived {
         session_id: SessionId,

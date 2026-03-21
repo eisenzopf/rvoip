@@ -59,7 +59,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # Collections
-dashmap = "5.5"
+dashmap = { workspace = true }
 parking_lot = "0.12"
 
 # For examples

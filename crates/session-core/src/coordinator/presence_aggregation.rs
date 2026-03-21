@@ -282,24 +282,30 @@ impl PresenceAggregator {
     
     /// Aggregate using "most recent" strategy
     fn aggregate_most_recent(&self, devices: &HashMap<String, DevicePresence>) -> PresenceInfo {
-        let most_recent = devices
-            .values()
-            .max_by_key(|d| d.last_updated)
-            .expect("Should have at least one device");
-        
-        PresenceInfo::new(String::new(), most_recent.status.clone())
-            .with_note(most_recent.note.clone())
+        match devices.values().max_by_key(|d| d.last_updated) {
+            Some(most_recent) => {
+                PresenceInfo::new(String::new(), most_recent.status.clone())
+                    .with_note(most_recent.note.clone())
+            }
+            None => {
+                warn!("aggregate_most_recent called with empty devices map");
+                PresenceInfo::new(String::new(), PresenceStatus::Offline)
+            }
+        }
     }
-    
+
     /// Aggregate using "highest priority" strategy
     fn aggregate_highest_priority(&self, devices: &HashMap<String, DevicePresence>) -> PresenceInfo {
-        let highest_priority = devices
-            .values()
-            .max_by_key(|d| d.priority)
-            .expect("Should have at least one device");
-        
-        PresenceInfo::new(String::new(), highest_priority.status.clone())
-            .with_note(highest_priority.note.clone())
+        match devices.values().max_by_key(|d| d.priority) {
+            Some(highest_priority) => {
+                PresenceInfo::new(String::new(), highest_priority.status.clone())
+                    .with_note(highest_priority.note.clone())
+            }
+            None => {
+                warn!("aggregate_highest_priority called with empty devices map");
+                PresenceInfo::new(String::new(), PresenceStatus::Offline)
+            }
+        }
     }
     
     /// Aggregate using custom rules

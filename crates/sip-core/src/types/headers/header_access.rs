@@ -153,7 +153,9 @@ where
             
         // Via headers should always count as multiple headers since the struct contains a Vec of ViaHeader
         for via in vias {
-            // For Via headers, we count each entry as separate header
+            // SAFETY: The enclosing `if` guard at the top of this block verified that
+            // `TypeId::of::<T>() == TypeId::of::<Via>()`, so `T` is `Via`. The pointer
+            // cast from `&T` to `&Via` is therefore an identity transmute and is sound.
             let via_obj = unsafe { &*(via as *const T as *const crate::types::via::Via) };
             for _ in via_obj.headers() {
                 result.push(via);

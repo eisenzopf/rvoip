@@ -81,15 +81,19 @@ impl Transcoder {
         
         // Return existing session if available
         if self.sessions.contains_key(&path) {
-            return Ok(self.sessions.get_mut(&path).unwrap());
+            return self.sessions.get_mut(&path).ok_or_else(|| CodecError::NotFound {
+                name: format!("transcoding session {} -> {}", from_codec, to_codec),
+            }.into());
         }
-        
+
         // Create new transcoding session
         let session = self.create_transcoding_session(from_codec, to_codec)?;
         self.sessions.insert(path.clone(), session);
-        
+
         debug!("Created transcoding session: {} -> {}", from_codec, to_codec);
-        Ok(self.sessions.get_mut(&path).unwrap())
+        self.sessions.get_mut(&path).ok_or_else(|| CodecError::NotFound {
+            name: format!("transcoding session {} -> {}", from_codec, to_codec),
+        }.into())
     }
     
     /// Transcode audio data from one codec to another

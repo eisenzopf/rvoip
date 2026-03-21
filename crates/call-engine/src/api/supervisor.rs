@@ -1224,8 +1224,4 @@ pub struct PerformanceMetrics {
     pub end_time: DateTime<Utc>,
 }
 
-impl Default for SupervisorApi {
-    fn default() -> Self {
-        panic!("SupervisorApi requires an engine instance")
-    }
-} 
+// SupervisorApi intentionally does not implement Default — it requires an engine instance via SupervisorApi::new(). 

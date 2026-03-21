@@ -92,13 +92,12 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
                 
                 // Parse the remaining part after the URI (space + SIP/2.0 + CRLF)
                 let version_part = &input[space_pos..];
-                if let Ok((remaining, version)) = 
-                    tuple((space1, sip_version, crlf))(version_part) {
+                match tuple((space1, sip_version, crlf))(version_part) { Ok((remaining, version)) => {
                     
                     Ok((remaining, (method, uri, version.1)))
-                } else {
+                } _ => {
                     Err(nom::Err::Error(NomError::new(version_part, ErrorKind::Tag)))
-                }
+                }}
             } else {
                 // No space found after URI
                 Err(nom::Err::Error(NomError::new(input, ErrorKind::Space)))

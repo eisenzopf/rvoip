@@ -635,7 +635,11 @@ impl RtpHeader {
         
         // If we have an existing extensions container with a different format,
         // we need to convert it
-        let extensions = self.extensions.as_mut().unwrap();
+        // Safe: we checked self.extensions.is_none() above and created it if needed
+        let extensions = match self.extensions.as_mut() {
+            Some(ext) => ext,
+            None => return Ok(()),
+        };
         if extensions.format == format {
             return Ok(());
         }

@@ -411,4 +411,119 @@ impl DialogManager {
         
         Ok(request)
     }
-} 
+}
+
+/// Send an INFO request within a dialog with an explicit Content-Type.
+///
+/// This is a standalone function (not on the trait) because the generic
+/// `TransactionIntegration::send_request_in_dialog` does not accept a
+/// content-type parameter.  Used for trickle ICE SDP fragments
+/// (`application/trickle-ice-sdpfrag`) and other typed INFO payloads.
+pub async fn send_request_in_dialog_with_content_type(
+    manager: &DialogManager,
+    dialog_id: &DialogId,
+    method: Method,
+    body: Option<bytes::Bytes>,
+    content_type: &str,
+) -> DialogResult<TransactionKey> {
+    debug!(
+        "Sending {} request with Content-Type '{}' for dialog {}",
+        method, content_type, dialog_id
+    );
+
+    let content_type_owned = content_type.to_string();
+
+    let (destination, request) = {
+        let mut dialog = manager.get_dialog_mut(dialog_id)?;
+
+        let destination = dialog.get_remote_target_address().await
+            .ok_or_else(|| crate::errors::DialogError::routing_error(
+                "No remote target address available",
+            ))?;
+
+        let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
+
+        let template = dialog.create_request_template(method.clone());
+
+        let local_tag = match &template.local_tag {
+            Some(tag) if !tag.is_empty() => tag.clone(),
+            _ => {
+                let new_tag = dialog.generate_local_tag();
+                dialog.local_tag = Some(new_tag.clone());
+                new_tag
+            }
+        };
+
+        let remote_tag = match (&template.remote_tag, dialog.state.clone()) {
+            (Some(tag), _) if !tag.is_empty() => Some(tag.clone()),
+            (_, crate::dialog::DialogState::Confirmed) => {
+                return Err(crate::errors::DialogError::protocol_error(
+                    &format!("{} request in confirmed dialog missing remote tag", method),
+                ));
+            }
+            _ => None,
+        };
+
+        let remote_tag = remote_tag.ok_or_else(|| {
+            crate::errors::DialogError::protocol_error(
+                &format!("{} request requires remote tag in established dialog", method),
+            )
+        })?;
+
+        let content = body_string.unwrap_or_default();
+
+        // Build using info_for_dialog (works for any INFO-like method)
+        let request = dialog_quick::info_for_dialog(
+            &template.call_id,
+            &template.local_uri.to_string(),
+            &local_tag,
+            &template.remote_uri.to_string(),
+            &remote_tag,
+            &content,
+            Some(content_type_owned),
+            template.cseq_number,
+            manager.local_address,
+            if template.route_set.is_empty() {
+                None
+            } else {
+                Some(template.route_set.clone())
+            },
+        )
+        .map_err(|e| crate::errors::DialogError::InternalError {
+            message: format!(
+                "Failed to build {} request with content-type: {}",
+                method, e
+            ),
+            context: None,
+        })?;
+
+        (destination, request)
+    };
+
+    let transaction_id = manager
+        .transaction_manager
+        .create_non_invite_client_transaction(request, destination)
+        .await
+        .map_err(|e| crate::errors::DialogError::TransactionError {
+            message: format!("Failed to create {} transaction: {}", method, e),
+        })?;
+
+    manager
+        .transaction_to_dialog
+        .insert(transaction_id.clone(), dialog_id.clone());
+
+    manager
+        .transaction_manager
+        .send_request(&transaction_id)
+        .await
+        .map_err(|e| crate::errors::DialogError::TransactionError {
+            message: format!("Failed to send request: {}", e),
+        })?;
+
+    debug!(
+        "Sent {} with Content-Type '{}' for dialog {} (transaction: {})",
+        method, content_type, dialog_id, transaction_id
+    );
+
+    Ok(transaction_id)
+}

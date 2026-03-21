@@ -58,7 +58,7 @@ impl ServerConfigBuilder {
     pub fn new() -> Self {
         Self {
             config: ServerConfig {
-                local_address: "0.0.0.0:0".parse().unwrap(),
+                local_address: "0.0.0.0:0".parse().expect("BUG: constant address literal must parse"),
                 default_payload_type: 0,
                 clock_rate: 8000,
                 security_config: ServerSecurityConfig::default(),

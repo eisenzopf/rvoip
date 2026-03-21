@@ -107,6 +107,11 @@ impl AdvancedAutomaticGainControl {
                config.num_bands, config.target_lufs);
         
         // Validate configuration
+        if config.num_bands < 1 {
+            return Err(AudioProcessingError::InvalidFormat {
+                details: "num_bands must be >= 1".to_string(),
+            }.into());
+        }
         if config.crossover_frequencies.len() != config.num_bands - 1 {
             return Err(AudioProcessingError::InvalidFormat {
                 details: "Crossover frequencies must be num_bands - 1".to_string(),

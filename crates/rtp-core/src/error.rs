@@ -114,6 +114,22 @@ pub enum Error {
     /// Serialization error
     #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    /// STUN protocol error
+    #[error("STUN error: {0}")]
+    StunError(String),
+
+    /// TURN protocol error
+    #[error("TURN error: {0}")]
+    TurnError(String),
+
+    /// ICE protocol error
+    #[error("ICE error: {0}")]
+    IceError(String),
+
+    /// SCTP protocol error
+    #[error("SCTP error: {0}")]
+    SctpError(String),
 }
 
 impl From<io::Error> for Error {

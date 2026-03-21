@@ -303,27 +303,61 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
 
     async fn complete_handshake(&self, remote_addr: SocketAddr, remote_fingerprint: &str) -> Result<(), SecurityError> {
         debug!("Starting complete handshake process with {}", remote_addr);
-        
+
         // Set remote address and fingerprint
         self.set_remote_address(remote_addr).await?;
         self.set_remote_fingerprint(remote_fingerprint, "sha-256").await?;
-        
+
         // Start handshake
         self.start_handshake().await?;
-        
+
         // Wait for handshake with a reasonable timeout
         let start_time = std::time::Instant::now();
         let timeout = Duration::from_secs(5);
-        
+
         while !self.is_handshake_complete().await? {
             if start_time.elapsed() > timeout {
                 return Err(SecurityError::Handshake("Handshake timed out after 5 seconds".to_string()));
             }
-            
+
             tokio::time::sleep(Duration::from_millis(100)).await;
             debug!("Waiting for handshake completion... ({:?} elapsed)", start_time.elapsed());
         }
-        
+
+        // Perform fingerprint verification if configured
+        if self.config.validate_fingerprint {
+            let fp_guard = self.remote_fingerprint.lock().await;
+            let algo_guard = self.remote_fingerprint_algorithm.lock().await;
+
+            if let (Some(expected_fp), Some(algo)) = (fp_guard.as_ref(), algo_guard.as_ref()) {
+                debug!("Verifying remote certificate fingerprint (algorithm: {})", algo);
+                match verify::verify_fingerprint(&self.connection, expected_fp, algo).await {
+                    Ok(true) => {
+                        debug!("Remote certificate fingerprint verification passed");
+                    }
+                    Ok(false) => {
+                        error!("Remote certificate fingerprint verification FAILED");
+                        return Err(SecurityError::HandshakeVerification(
+                            "Remote certificate fingerprint does not match the expected value from SDP".to_string()
+                        ));
+                    }
+                    Err(e) => {
+                        // Fingerprint validation is enabled but verification failed.
+                        // This must be treated as a hard error to prevent MITM attacks.
+                        error!(
+                            "Could not verify remote fingerprint: {}",
+                            e
+                        );
+                        return Err(SecurityError::HandshakeVerification(
+                            format!("Remote certificate fingerprint verification error: {}", e)
+                        ));
+                    }
+                }
+            } else {
+                warn!("Fingerprint validation is enabled but no remote fingerprint was provided");
+            }
+        }
+
         debug!("Handshake completed successfully");
         Ok(())
     }
@@ -450,23 +484,24 @@ async fn init_new_connection(socket: &Arc<UdpSocket>, remote_addr: SocketAddr)
     let start_result = transport_arc.lock().await.start().await;
 
     // Only proceed if the transport started successfully
-    if start_result.is_ok() {
-        debug!("DTLS transport started successfully for new connection");
-        
-        // Set the transport on the connection (clone the Arc)
-        connection.set_transport(transport_arc.clone());
-        
-        // Start the handshake
-        if let Err(e) = connection.start_handshake(remote_addr).await {
-            return Err(SecurityError::Handshake(format!("Failed to start handshake: {}", e)));
+    match start_result {
+        Ok(()) => {
+            debug!("DTLS transport started successfully for new connection");
+
+            // Set the transport on the connection (clone the Arc)
+            connection.set_transport(transport_arc.clone());
+
+            // Start the handshake
+            if let Err(e) = connection.start_handshake(remote_addr).await {
+                return Err(SecurityError::Handshake(format!("Failed to start handshake: {}", e)));
+            }
+
+            debug!("Started handshake on new connection");
+            Ok(connection)
         }
-        
-        debug!("Started handshake on new connection");
-        Ok(connection)
-    } else {
-        // Log the error and return it
-        let err = start_result.err().unwrap();
-        error!("Failed to start DTLS transport for new connection: {}", err);
-        Err(SecurityError::Configuration(format!("Failed to start DTLS transport: {}", err)))
+        Err(err) => {
+            error!("Failed to start DTLS transport for new connection: {}", err);
+            Err(SecurityError::Configuration(format!("Failed to start DTLS transport: {}", err)))
+        }
     }
 } 

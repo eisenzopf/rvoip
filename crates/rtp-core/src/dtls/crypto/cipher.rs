@@ -171,20 +171,24 @@ impl CipherSuiteId {
     }
 }
 
-impl From<u16> for CipherSuiteId {
-    fn from(value: u16) -> Self {
+impl TryFrom<u16> for CipherSuiteId {
+    type Error = crate::error::Error;
+
+    fn try_from(value: u16) -> std::result::Result<Self, Self::Error> {
         match value {
-            0x002F => CipherSuiteId::TLS_RSA_WITH_AES_128_CBC_SHA,
-            0x0035 => CipherSuiteId::TLS_RSA_WITH_AES_256_CBC_SHA,
-            0xC009 => CipherSuiteId::TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
-            0xC00A => CipherSuiteId::TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
-            0xC013 => CipherSuiteId::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
-            0xC014 => CipherSuiteId::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-            0xC02B => CipherSuiteId::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-            0xC02C => CipherSuiteId::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-            0xC02F => CipherSuiteId::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-            0xC030 => CipherSuiteId::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-            _ => panic!("Unsupported cipher suite: {}", value),
+            0x002F => Ok(CipherSuiteId::TLS_RSA_WITH_AES_128_CBC_SHA),
+            0x0035 => Ok(CipherSuiteId::TLS_RSA_WITH_AES_256_CBC_SHA),
+            0xC009 => Ok(CipherSuiteId::TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA),
+            0xC00A => Ok(CipherSuiteId::TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA),
+            0xC013 => Ok(CipherSuiteId::TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA),
+            0xC014 => Ok(CipherSuiteId::TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA),
+            0xC02B => Ok(CipherSuiteId::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256),
+            0xC02C => Ok(CipherSuiteId::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384),
+            0xC02F => Ok(CipherSuiteId::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256),
+            0xC030 => Ok(CipherSuiteId::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384),
+            _ => Err(crate::error::Error::UnsupportedFeature(
+                format!("Unsupported cipher suite: 0x{:04X}", value),
+            )),
         }
     }
 }
@@ -326,75 +330,151 @@ impl fmt::Display for HashAlgorithm {
 /// Encryptor for protecting DTLS packets
 pub trait Encryptor {
     /// Encrypt plaintext data
-    fn encrypt(&self, plaintext: &[u8], additional_data: &[u8]) -> Result<Bytes>;
+    ///
+    /// The `epoch` and `sequence_number` are used to derive a unique per-record
+    /// nonce for AEAD ciphers (RFC 6347 / RFC 5116). The 2-byte epoch and 6-byte
+    /// sequence number form the 8-byte explicit nonce which is XORed with the
+    /// implicit IV from the key material.
+    fn encrypt(&self, plaintext: &[u8], additional_data: &[u8], epoch: u16, sequence_number: u64) -> Result<Bytes>;
 }
 
 /// Decryptor for unprotecting DTLS packets
 pub trait Decryptor {
     /// Decrypt ciphertext data
-    fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Bytes>;
+    ///
+    /// The `epoch` and `sequence_number` are used to derive the unique per-record
+    /// nonce for AEAD ciphers (RFC 6347 / RFC 5116). Must match the values used
+    /// during encryption for the corresponding record.
+    fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8], epoch: u16, sequence_number: u64) -> Result<Bytes>;
 }
 
 /// AEAD implementation for GCM ciphers
+///
+/// Per RFC 6347 (DTLS 1.2) and RFC 5116, the nonce for each record is derived
+/// by XORing the implicit IV (from key material) with an 8-byte explicit nonce
+/// composed of the 2-byte epoch and 6-byte sequence number, left-padded to the
+/// IV length (12 bytes for GCM). Reusing a nonce with GCM is catastrophic and
+/// allows key recovery, so this struct enforces per-record nonce derivation.
 pub struct AeadImpl {
     /// Cipher key
     key: Bytes,
-    
-    /// Initialization vector
-    iv: Bytes,
-    
+
+    /// Implicit IV (write_iv from key material, used as base for nonce derivation)
+    implicit_iv: Bytes,
+
     /// Cipher type
     cipher_type: CipherType,
 }
 
 impl AeadImpl {
     /// Create a new AEAD implementation
-    pub fn new(key: Bytes, iv: Bytes, cipher_type: CipherType) -> Self {
+    ///
+    /// The `implicit_iv` parameter is the write IV from the TLS key material.
+    /// It is NOT used directly as the nonce; instead, it is XORed with the
+    /// per-record explicit nonce (epoch + sequence number) to produce a unique
+    /// nonce for each record.
+    pub fn new(key: Bytes, implicit_iv: Bytes, cipher_type: CipherType) -> Self {
         Self {
             key,
-            iv,
+            implicit_iv,
             cipher_type,
         }
+    }
+
+    /// Derive a per-record nonce from the implicit IV and the record's
+    /// epoch + sequence number, per RFC 6347 Section 4.1.2.1.
+    ///
+    /// The explicit nonce is formed as:
+    ///   bytes[0..2]  = epoch (big-endian)
+    ///   bytes[2..8]  = sequence_number (big-endian, 48-bit)
+    ///
+    /// This 8-byte value is left-padded with zeros to match the IV length
+    /// (12 bytes for GCM), then XORed with the implicit IV.
+    fn derive_nonce(&self, epoch: u16, sequence_number: u64) -> Result<Vec<u8>> {
+        let iv_len = self.implicit_iv.len();
+        if iv_len == 0 {
+            return Err(crate::error::Error::CryptoError(
+                "Implicit IV has zero length".to_string()
+            ));
+        }
+
+        // Build the 8-byte explicit nonce: 2 bytes epoch + 6 bytes sequence number
+        let mut explicit_nonce = [0u8; 8];
+        explicit_nonce[0] = (epoch >> 8) as u8;
+        explicit_nonce[1] = epoch as u8;
+        // sequence_number is a 48-bit value (6 bytes), stored in the lower 48 bits of u64
+        explicit_nonce[2] = ((sequence_number >> 40) & 0xFF) as u8;
+        explicit_nonce[3] = ((sequence_number >> 32) & 0xFF) as u8;
+        explicit_nonce[4] = ((sequence_number >> 24) & 0xFF) as u8;
+        explicit_nonce[5] = ((sequence_number >> 16) & 0xFF) as u8;
+        explicit_nonce[6] = ((sequence_number >> 8) & 0xFF) as u8;
+        explicit_nonce[7] = (sequence_number & 0xFF) as u8;
+
+        // Left-pad to IV length (for GCM, iv_len = 12, so 4 zero bytes + 8 explicit bytes)
+        let mut padded = vec![0u8; iv_len];
+        if iv_len >= 8 {
+            padded[iv_len - 8..].copy_from_slice(&explicit_nonce);
+        } else {
+            // IV shorter than 8 bytes: take the rightmost iv_len bytes of explicit_nonce
+            padded.copy_from_slice(&explicit_nonce[8 - iv_len..]);
+        }
+
+        // XOR with implicit IV
+        for (i, byte) in padded.iter_mut().enumerate() {
+            *byte ^= self.implicit_iv[i];
+        }
+
+        Ok(padded)
     }
 }
 
 impl Encryptor for AeadImpl {
-    fn encrypt(&self, plaintext: &[u8], additional_data: &[u8]) -> Result<Bytes> {
-        // Create a nonce from the IV
-        let nonce = Nonce::<Aes128Gcm>::from_slice(&self.iv);
-        
+    fn encrypt(&self, plaintext: &[u8], additional_data: &[u8], epoch: u16, sequence_number: u64) -> Result<Bytes> {
+        // Derive a unique per-record nonce from implicit IV XOR (epoch || sequence_number)
+        let nonce_bytes = self.derive_nonce(epoch, sequence_number)?;
+
         // Encrypt the data based on cipher type
         match self.cipher_type {
             CipherType::Aes128Gcm => {
+                let expected_nonce_len = 12; // AES-128-GCM nonce size
+                if nonce_bytes.len() != expected_nonce_len {
+                    return Err(crate::error::Error::CryptoError(
+                        format!("AES-128-GCM nonce length mismatch: expected {}, got {}", expected_nonce_len, nonce_bytes.len())
+                    ));
+                }
+                let nonce = Nonce::<Aes128Gcm>::from_slice(&nonce_bytes);
                 let cipher = Aes128Gcm::new_from_slice(&self.key)
                     .map_err(|e| crate::error::Error::CryptoError(format!("Failed to initialize AES-128-GCM: {}", e)))?;
-                
-                // Create the payload
+
                 let payload = Payload {
                     msg: plaintext,
                     aad: additional_data,
                 };
-                
-                // Encrypt
+
                 let ciphertext = cipher.encrypt(nonce, payload)
                     .map_err(|e| crate::error::Error::CryptoError(format!("AEAD encryption failed: {}", e)))?;
-                
+
                 Ok(Bytes::from(ciphertext))
             },
             CipherType::Aes256Gcm => {
+                let expected_nonce_len = 12; // AES-256-GCM nonce size
+                if nonce_bytes.len() != expected_nonce_len {
+                    return Err(crate::error::Error::CryptoError(
+                        format!("AES-256-GCM nonce length mismatch: expected {}, got {}", expected_nonce_len, nonce_bytes.len())
+                    ));
+                }
+                let nonce = Nonce::<Aes256Gcm>::from_slice(&nonce_bytes);
                 let cipher = Aes256Gcm::new_from_slice(&self.key)
                     .map_err(|e| crate::error::Error::CryptoError(format!("Failed to initialize AES-256-GCM: {}", e)))?;
-                
-                // Create the payload
+
                 let payload = Payload {
                     msg: plaintext,
                     aad: additional_data,
                 };
-                
-                // Encrypt
-                let ciphertext = cipher.encrypt(Nonce::<Aes256Gcm>::from_slice(&self.iv), payload)
+
+                let ciphertext = cipher.encrypt(nonce, payload)
                     .map_err(|e| crate::error::Error::CryptoError(format!("AEAD encryption failed: {}", e)))?;
-                
+
                 Ok(Bytes::from(ciphertext))
             },
             _ => Err(crate::error::Error::UnsupportedFeature(
@@ -405,39 +485,52 @@ impl Encryptor for AeadImpl {
 }
 
 impl Decryptor for AeadImpl {
-    fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Bytes> {
+    fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8], epoch: u16, sequence_number: u64) -> Result<Bytes> {
+        // Derive the same per-record nonce used during encryption
+        let nonce_bytes = self.derive_nonce(epoch, sequence_number)?;
+
         // Decrypt the data based on cipher type
         match self.cipher_type {
             CipherType::Aes128Gcm => {
+                let expected_nonce_len = 12; // AES-128-GCM nonce size
+                if nonce_bytes.len() != expected_nonce_len {
+                    return Err(crate::error::Error::CryptoError(
+                        format!("AES-128-GCM nonce length mismatch: expected {}, got {}", expected_nonce_len, nonce_bytes.len())
+                    ));
+                }
+                let nonce = Nonce::<Aes128Gcm>::from_slice(&nonce_bytes);
                 let cipher = Aes128Gcm::new_from_slice(&self.key)
                     .map_err(|e| crate::error::Error::CryptoError(format!("Failed to initialize AES-128-GCM: {}", e)))?;
-                
-                // Create the payload
+
                 let payload = Payload {
                     msg: ciphertext,
                     aad: additional_data,
                 };
-                
-                // Decrypt
-                let plaintext = cipher.decrypt(Nonce::<Aes128Gcm>::from_slice(&self.iv), payload)
+
+                let plaintext = cipher.decrypt(nonce, payload)
                     .map_err(|e| crate::error::Error::CryptoError(format!("AEAD decryption failed: {}", e)))?;
-                
+
                 Ok(Bytes::from(plaintext))
             },
             CipherType::Aes256Gcm => {
+                let expected_nonce_len = 12; // AES-256-GCM nonce size
+                if nonce_bytes.len() != expected_nonce_len {
+                    return Err(crate::error::Error::CryptoError(
+                        format!("AES-256-GCM nonce length mismatch: expected {}, got {}", expected_nonce_len, nonce_bytes.len())
+                    ));
+                }
+                let nonce = Nonce::<Aes256Gcm>::from_slice(&nonce_bytes);
                 let cipher = Aes256Gcm::new_from_slice(&self.key)
                     .map_err(|e| crate::error::Error::CryptoError(format!("Failed to initialize AES-256-GCM: {}", e)))?;
-                
-                // Create the payload
+
                 let payload = Payload {
                     msg: ciphertext,
                     aad: additional_data,
                 };
-                
-                // Decrypt
-                let plaintext = cipher.decrypt(Nonce::<Aes256Gcm>::from_slice(&self.iv), payload)
+
+                let plaintext = cipher.decrypt(nonce, payload)
                     .map_err(|e| crate::error::Error::CryptoError(format!("AEAD decryption failed: {}", e)))?;
-                
+
                 Ok(Bytes::from(plaintext))
             },
             _ => Err(crate::error::Error::UnsupportedFeature(
@@ -529,7 +622,7 @@ impl BlockCipherImpl {
 }
 
 impl Encryptor for BlockCipherImpl {
-    fn encrypt(&self, plaintext: &[u8], additional_data: &[u8]) -> Result<Bytes> {
+    fn encrypt(&self, plaintext: &[u8], additional_data: &[u8], _epoch: u16, _sequence_number: u64) -> Result<Bytes> {
         // First compute the MAC over the additional data and plaintext
         let mut mac_input = BytesMut::with_capacity(additional_data.len() + plaintext.len());
         mac_input.extend_from_slice(additional_data);
@@ -619,7 +712,7 @@ impl Encryptor for BlockCipherImpl {
 }
 
 impl Decryptor for BlockCipherImpl {
-    fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8]) -> Result<Bytes> {
+    fn decrypt(&self, ciphertext: &[u8], additional_data: &[u8], _epoch: u16, _sequence_number: u64) -> Result<Bytes> {
         // Make sure ciphertext is a multiple of the block size
         if ciphertext.len() % 16 != 0 {
             return Err(crate::error::Error::InvalidPacket("Ciphertext length is not a multiple of block size".to_string()));
@@ -773,11 +866,144 @@ mod tests {
     fn test_mac_algorithm_properties() {
         let mac = MacAlgorithm::HmacSha1;
         assert_eq!(mac.hash_size(), 20);
-        
+
         let mac = MacAlgorithm::HmacSha256;
         assert_eq!(mac.hash_size(), 32);
-        
+
         let mac = MacAlgorithm::HmacSha384;
         assert_eq!(mac.hash_size(), 48);
+    }
+
+    #[test]
+    fn test_aead_nonce_derivation_basic() {
+        // 12-byte implicit IV (GCM standard)
+        let implicit_iv = Bytes::from(vec![0xAA; 12]);
+        let aead = AeadImpl::new(
+            Bytes::from(vec![0u8; 16]), // key (unused for nonce test)
+            implicit_iv.clone(),
+            CipherType::Aes128Gcm,
+        );
+
+        let nonce = aead.derive_nonce(0, 0).unwrap_or_else(|e| panic!("derive_nonce failed: {}", e));
+        // epoch=0, seq=0 => explicit nonce is all zeros => padded is all zeros
+        // XOR with 0xAA... => all 0xAA
+        assert_eq!(nonce, vec![0xAA; 12]);
+    }
+
+    #[test]
+    fn test_aead_nonce_derivation_with_epoch_and_seq() {
+        let implicit_iv = Bytes::from(vec![0x00; 12]);
+        let aead = AeadImpl::new(
+            Bytes::from(vec![0u8; 16]),
+            implicit_iv,
+            CipherType::Aes128Gcm,
+        );
+
+        // epoch=1, sequence_number=5
+        let nonce = aead.derive_nonce(1, 5).unwrap_or_else(|e| panic!("derive_nonce failed: {}", e));
+        // explicit_nonce = [0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05]
+        // padded (12 bytes) = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05]
+        // XOR with all-zero IV => same as padded
+        let expected = vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05];
+        assert_eq!(nonce, expected);
+    }
+
+    #[test]
+    fn test_aead_nonce_derivation_xor_with_iv() {
+        // Non-zero IV to verify XOR behavior
+        let implicit_iv = Bytes::from(vec![
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C,
+        ]);
+        let aead = AeadImpl::new(
+            Bytes::from(vec![0u8; 16]),
+            implicit_iv,
+            CipherType::Aes128Gcm,
+        );
+
+        // epoch=0, seq=0 => padded is all zeros => nonce = IV itself
+        let nonce = aead.derive_nonce(0, 0).unwrap_or_else(|e| panic!("derive_nonce failed: {}", e));
+        assert_eq!(nonce, vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C]);
+
+        // epoch=0, seq=1 => padded = [0,0,0,0, 0,0,0,0, 0,0,0,1]
+        // XOR: last byte = 0x0C ^ 0x01 = 0x0D
+        let nonce = aead.derive_nonce(0, 1).unwrap_or_else(|e| panic!("derive_nonce failed: {}", e));
+        assert_eq!(nonce[11], 0x0C ^ 0x01);
+    }
+
+    #[test]
+    fn test_aead_different_sequences_produce_different_nonces() {
+        let implicit_iv = Bytes::from(vec![0x42; 12]);
+        let aead = AeadImpl::new(
+            Bytes::from(vec![0u8; 16]),
+            implicit_iv,
+            CipherType::Aes128Gcm,
+        );
+
+        let nonce_0 = aead.derive_nonce(1, 0).unwrap_or_else(|e| panic!("derive_nonce failed: {}", e));
+        let nonce_1 = aead.derive_nonce(1, 1).unwrap_or_else(|e| panic!("derive_nonce failed: {}", e));
+        let nonce_2 = aead.derive_nonce(1, 2).unwrap_or_else(|e| panic!("derive_nonce failed: {}", e));
+        let nonce_diff_epoch = aead.derive_nonce(2, 0).unwrap_or_else(|e| panic!("derive_nonce failed: {}", e));
+
+        // All nonces must be unique
+        assert_ne!(nonce_0, nonce_1);
+        assert_ne!(nonce_1, nonce_2);
+        assert_ne!(nonce_0, nonce_diff_epoch);
+    }
+
+    #[test]
+    fn test_aead_encrypt_decrypt_roundtrip_aes128gcm() {
+        let key = Bytes::from(vec![0x55u8; 16]);
+        let iv = Bytes::from(vec![0xBB; 12]);
+        let aead = AeadImpl::new(key, iv, CipherType::Aes128Gcm);
+
+        let plaintext = b"hello DTLS world";
+        let aad = b"additional data";
+        let epoch = 1u16;
+        let seq = 42u64;
+
+        let ciphertext = aead.encrypt(plaintext, aad, epoch, seq)
+            .unwrap_or_else(|e| panic!("encrypt failed: {}", e));
+        let decrypted = aead.decrypt(&ciphertext, aad, epoch, seq)
+            .unwrap_or_else(|e| panic!("decrypt failed: {}", e));
+
+        assert_eq!(&decrypted[..], plaintext);
+    }
+
+    #[test]
+    fn test_aead_decrypt_wrong_sequence_fails() {
+        let key = Bytes::from(vec![0x55u8; 16]);
+        let iv = Bytes::from(vec![0xBB; 12]);
+        let aead = AeadImpl::new(key, iv, CipherType::Aes128Gcm);
+
+        let plaintext = b"secret message";
+        let aad = b"aad";
+        let epoch = 1u16;
+        let seq = 10u64;
+
+        let ciphertext = aead.encrypt(plaintext, aad, epoch, seq)
+            .unwrap_or_else(|e| panic!("encrypt failed: {}", e));
+
+        // Decrypting with a different sequence number must fail (wrong nonce)
+        let result = aead.decrypt(&ciphertext, aad, epoch, seq + 1);
+        assert!(result.is_err(), "Decryption with wrong sequence number should fail");
+    }
+
+    #[test]
+    fn test_aead_encrypt_decrypt_roundtrip_aes256gcm() {
+        let key = Bytes::from(vec![0x77u8; 32]);
+        let iv = Bytes::from(vec![0xCC; 12]);
+        let aead = AeadImpl::new(key, iv, CipherType::Aes256Gcm);
+
+        let plaintext = b"AES-256-GCM test data";
+        let aad = b"more aad";
+        let epoch = 2u16;
+        let seq = 100u64;
+
+        let ciphertext = aead.encrypt(plaintext, aad, epoch, seq)
+            .unwrap_or_else(|e| panic!("encrypt failed: {}", e));
+        let decrypted = aead.decrypt(&ciphertext, aad, epoch, seq)
+            .unwrap_or_else(|e| panic!("decrypt failed: {}", e));
+
+        assert_eq!(&decrypted[..], plaintext);
     }
 }

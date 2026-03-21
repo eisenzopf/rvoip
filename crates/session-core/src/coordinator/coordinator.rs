@@ -101,6 +101,9 @@ pub struct SessionCoordinator {
     // Shutdown handles for event loops
     event_loop_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     dialog_event_loop_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+
+    // Broadcast shutdown signal for spawned tasks
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 impl SessionCoordinator {
@@ -149,6 +152,8 @@ impl SessionCoordinator {
             max_bandwidth_kbps: config.media_config.max_bandwidth_kbps,
             preferred_ptime: config.media_config.preferred_ptime,
             custom_sdp_attributes: config.media_config.custom_sdp_attributes.clone(),
+            ice: config.media_config.ice.clone(),
+            srtp: config.media_config.srtp.clone(),
         };
         
         let media_manager = Arc::new(MediaManager::with_port_range_and_config(
@@ -192,6 +197,9 @@ impl SessionCoordinator {
         // Create conference manager with configured local IP
         let conference_manager = Arc::new(ConferenceManager::new(config.local_bind_addr.ip()));
 
+        // Create broadcast shutdown channel for spawned tasks
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+
         let coordinator = Arc::new(Self {
             registry,
             event_processor,
@@ -211,6 +219,7 @@ impl SessionCoordinator {
             session_readiness: Arc::new(RwLock::new(HashMap::new())),
             event_loop_handle: Arc::new(Mutex::new(None)),
             dialog_event_loop_handle: Arc::new(Mutex::new(None)),
+            shutdown_tx,
         });
 
         // Initialize subsystems
@@ -263,22 +272,36 @@ impl SessionCoordinator {
             .await
             .map_err(|e| SessionError::internal(&format!("Failed to initialize dialog coordinator: {}", e)))?;
 
-        // Start dialog event loop
+        // Start dialog event loop with shutdown signal
         let dialog_coordinator = self.dialog_coordinator.clone();
+        let mut dialog_shutdown_rx = self.shutdown_tx.subscribe();
         let dialog_handle = tokio::spawn(async move {
-            if let Err(e) = dialog_coordinator.start_event_loop(dialog_coord_rx).await {
-                tracing::error!("Dialog event loop error: {}", e);
+            tokio::select! {
+                result = dialog_coordinator.start_event_loop(dialog_coord_rx) => {
+                    if let Err(e) = result {
+                        tracing::error!("Dialog event loop error: {}", e);
+                    }
+                }
+                _ = dialog_shutdown_rx.recv() => {
+                    tracing::info!("Dialog event loop received shutdown signal");
+                }
             }
         });
-        
+
         // Store the dialog event loop handle
         let mut dialog_event_loop_handle = self.dialog_event_loop_handle.lock().await;
         *dialog_event_loop_handle = Some(dialog_handle);
 
-        // Start main event loop using broadcast channel
+        // Start main event loop using broadcast channel with shutdown signal
         let coordinator = self.clone();
+        let mut main_shutdown_rx = self.shutdown_tx.subscribe();
         let handle = tokio::spawn(async move {
-            coordinator.run_event_loop().await;
+            tokio::select! {
+                _ = coordinator.run_event_loop() => {}
+                _ = main_shutdown_rx.recv() => {
+                    tracing::info!("Main event loop received shutdown signal");
+                }
+            }
         });
         
         // Store the handle for clean shutdown
@@ -380,18 +403,27 @@ impl SessionCoordinator {
         self.event_processor.stop().await?;
         tracing::debug!("✅ SHUTDOWN: Event processor stopped");
         
-        // Step 4: Cancel event loop tasks
-        tracing::debug!("🛑 SHUTDOWN: Cancelling event loops...");
+        // Step 4: Signal all spawned tasks to stop via broadcast, then wait
+        tracing::debug!("SHUTDOWN: Sending broadcast shutdown signal to spawned tasks");
+        let _ = self.shutdown_tx.send(());
+
         let mut event_loop_handle = self.event_loop_handle.lock().await;
         if let Some(handle) = event_loop_handle.take() {
-            handle.abort();
+            // Give tasks a chance to exit gracefully before aborting
+            match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+                Ok(_) => tracing::debug!("SHUTDOWN: Main event loop exited gracefully"),
+                Err(_) => tracing::debug!("SHUTDOWN: Main event loop timed out, it will be dropped"),
+            }
         }
-        
+
         let mut dialog_event_loop_handle = self.dialog_event_loop_handle.lock().await;
         if let Some(handle) = dialog_event_loop_handle.take() {
-            handle.abort();
+            match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
+                Ok(_) => tracing::debug!("SHUTDOWN: Dialog event loop exited gracefully"),
+                Err(_) => tracing::debug!("SHUTDOWN: Dialog event loop timed out, it will be dropped"),
+            }
         }
-        tracing::debug!("✅ SHUTDOWN: Event loops cancelled");
+        tracing::debug!("SHUTDOWN: Event loops stopped");
         
         // Step 5: Stop cleanup manager
         tracing::debug!("🛑 SHUTDOWN: Stopping cleanup manager...");
@@ -408,8 +440,12 @@ impl SessionCoordinator {
         if !active_session_ids.is_empty() {
             tracing::debug!("🛑 SHUTDOWN: Cleaning up {} remaining sessions", active_session_ids.len());
             for session_id in active_session_ids {
-                let _ = self.stop_media_session(&session_id).await;
-                let _ = self.registry.unregister_session(&session_id).await;
+                if let Err(e) = self.stop_media_session(&session_id).await {
+                    tracing::warn!("Failed to stop media session {} during shutdown: {}", session_id, e);
+                }
+                if let Err(e) = self.registry.unregister_session(&session_id).await {
+                    tracing::warn!("Failed to unregister session {} during shutdown: {}", session_id, e);
+                }
             }
         }
         
@@ -532,10 +568,12 @@ impl SessionCoordinator {
         
         // Send cleanup confirmation for media layer
         // Media cleanup is synchronous, so we can immediately confirm
-        let _ = self.publish_event(SessionEvent::CleanupConfirmation {
+        if let Err(e) = self.publish_event(SessionEvent::CleanupConfirmation {
             session_id: session_id.clone(),
             layer: "Media".to_string(),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish media CleanupConfirmation for session {}: {}", session_id, e);
+        }
         
         Ok(())
     }
@@ -555,7 +593,23 @@ impl SessionCoordinator {
         
         // Store negotiated config
         self.negotiated_configs.write().await.insert(session_id.clone(), negotiated.clone());
-        
+
+        // Initiate DTLS-SRTP if the remote SDP indicates secure media.
+        // This inspects the answer for a=fingerprint / RTP/SAVP and, when
+        // present, creates an SRTP bridge, retrieves the RTP socket, and
+        // drives the DTLS handshake.  Plain RTP sessions are unaffected.
+        if let Err(e) = self.media_manager.initiate_srtp_for_session(
+            session_id,
+            their_answer,
+            negotiated.remote_addr,
+        ).await {
+            tracing::warn!(
+                session = %session_id,
+                error = %e,
+                "DTLS-SRTP setup failed for UAC -- falling back to plain RTP"
+            );
+        }
+
         // Emit MediaNegotiated event
         let _ = self.publish_event(SessionEvent::MediaNegotiated {
             session_id: session_id.clone(),
@@ -563,45 +617,45 @@ impl SessionCoordinator {
             remote_addr: negotiated.remote_addr,
             codec: negotiated.codec.clone(),
         }).await;
-        
+
         // Only emit MediaSessionReady if media session already exists
         // For upfront SDP cases, the media session doesn't exist yet and MediaSessionReady
         // will be published later when start_media_session is called
         if let Ok(Some(media_info)) = self.media_manager.get_media_info(session_id).await {
-            tracing::info!("✅ Media session exists for UAC {}, has remote SDP: {}", 
+            tracing::info!("Media session exists for UAC {}, has remote SDP: {}",
                 session_id, media_info.remote_sdp.is_some());
             let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
             let _ = self.publish_event(SessionEvent::MediaSessionReady {
                 session_id: session_id.clone(),
                 dialog_id,
             }).await;
-            
+
             // CRITICAL: Also publish MediaFlowEstablished for UAC
             // This ensures both UAC and UAS publish the event when media is ready
-            tracing::info!("📢 Publishing MediaFlowEstablished event for UAC session {} after SDP negotiation", session_id);
+            tracing::info!("Publishing MediaFlowEstablished event for UAC session {} after SDP negotiation", session_id);
             let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
                 session_id: session_id.clone(),
                 local_addr: negotiated.local_addr.to_string(),
                 remote_addr: negotiated.remote_addr.to_string(),
                 direction: crate::manager::events::MediaFlowDirection::Both,
             }).await;
-            tracing::info!("✅ MediaFlowEstablished event published for UAC {}", session_id);
+            tracing::info!("MediaFlowEstablished event published for UAC {}", session_id);
         } else {
-            tracing::warn!("⚠️ Media session doesn't exist yet for UAC {} (upfront SDP), deferring MediaSessionReady to start_media_session", session_id);
+            tracing::warn!("Media session doesn't exist yet for UAC {} (upfront SDP), deferring MediaSessionReady to start_media_session", session_id);
             // For UAC, we should still publish MediaFlowEstablished since SDP is negotiated
-            tracing::info!("📢 Publishing MediaFlowEstablished event for UAC {} even though media session doesn't exist yet", session_id);
+            tracing::info!("Publishing MediaFlowEstablished event for UAC {} even though media session doesn't exist yet", session_id);
             let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
                 session_id: session_id.clone(),
                 local_addr: negotiated.local_addr.to_string(),
                 remote_addr: negotiated.remote_addr.to_string(),
                 direction: crate::manager::events::MediaFlowDirection::Both,
             }).await;
-            tracing::info!("✅ MediaFlowEstablished event published for UAC {}", session_id);
+            tracing::info!("MediaFlowEstablished event published for UAC {}", session_id);
         }
-        
+
         Ok(negotiated)
     }
-    
+
     /// Negotiate SDP as UAS (we received offer, generate answer)
     pub async fn negotiate_sdp_as_uas(
         &self,
@@ -613,10 +667,25 @@ impl SessionCoordinator {
             session_id,
             their_offer,
         ).await?;
-        
+
         // Store negotiated config
         self.negotiated_configs.write().await.insert(session_id.clone(), negotiated.clone());
-        
+
+        // Initiate DTLS-SRTP if the remote SDP (their offer) indicates
+        // secure media.  For UAS the remote_role from the offer is typically
+        // "actpass" so we become the DTLS client.
+        if let Err(e) = self.media_manager.initiate_srtp_for_session(
+            session_id,
+            their_offer,
+            negotiated.remote_addr,
+        ).await {
+            tracing::warn!(
+                session = %session_id,
+                error = %e,
+                "DTLS-SRTP setup failed for UAS -- falling back to plain RTP"
+            );
+        }
+
         // Emit MediaNegotiated event
         let _ = self.publish_event(SessionEvent::MediaNegotiated {
             session_id: session_id.clone(),
@@ -624,45 +693,45 @@ impl SessionCoordinator {
             remote_addr: negotiated.remote_addr,
             codec: negotiated.codec.clone(),
         }).await;
-        
+
         // Only emit MediaSessionReady if media session already exists
         // For upfront SDP cases, the media session doesn't exist yet and MediaSessionReady
         // will be published later when start_media_session is called
         if let Ok(Some(media_info)) = self.media_manager.get_media_info(session_id).await {
-            tracing::info!("✅ Media session exists for UAS {}, has remote SDP: {}", 
+            tracing::info!("Media session exists for UAS {}, has remote SDP: {}",
                 session_id, media_info.remote_sdp.is_some());
             let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
             let _ = self.publish_event(SessionEvent::MediaSessionReady {
                 session_id: session_id.clone(),
                 dialog_id,
             }).await;
-            
+
             // CRITICAL: Also publish MediaFlowEstablished for UAS
             // This is needed because when accept_incoming_call directly calls
             // negotiate_sdp_as_uas, it doesn't go through the SdpNegotiationRequested
             // event handler that would normally publish this event
-            tracing::info!("📢 Publishing MediaFlowEstablished event for UAS session {} after SDP negotiation", session_id);
+            tracing::info!("Publishing MediaFlowEstablished event for UAS session {} after SDP negotiation", session_id);
             let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
                 session_id: session_id.clone(),
                 local_addr: negotiated.local_addr.to_string(),
                 remote_addr: negotiated.remote_addr.to_string(),
                 direction: crate::manager::events::MediaFlowDirection::Both,
             }).await;
-            tracing::info!("✅ MediaFlowEstablished event published for UAS {}", session_id);
+            tracing::info!("MediaFlowEstablished event published for UAS {}", session_id);
         } else {
-            tracing::warn!("⚠️ Media session doesn't exist yet for UAS {} (upfront SDP), deferring MediaSessionReady to start_media_session", session_id);
+            tracing::warn!("Media session doesn't exist yet for UAS {} (upfront SDP), deferring MediaSessionReady to start_media_session", session_id);
             // For UAS, we should still publish MediaFlowEstablished since SDP is negotiated
             // The media session will be created when the call transitions to Active
-            tracing::info!("📢 Publishing MediaFlowEstablished event for UAS {} even though media session doesn't exist yet", session_id);
+            tracing::info!("Publishing MediaFlowEstablished event for UAS {} even though media session doesn't exist yet", session_id);
             let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
                 session_id: session_id.clone(),
                 local_addr: negotiated.local_addr.to_string(),
                 remote_addr: negotiated.remote_addr.to_string(),
                 direction: crate::manager::events::MediaFlowDirection::Both,
             }).await;
-            tracing::info!("✅ MediaFlowEstablished event published for UAS {}", session_id);
+            tracing::info!("MediaFlowEstablished event published for UAS {}", session_id);
         }
-        
+
         Ok((answer, negotiated))
     }
     
@@ -729,6 +798,20 @@ impl SessionCoordinator {
     /// This provides access to the broadcast sender from the event processor
     pub async fn event_tx(&self) -> Result<tokio::sync::mpsc::Sender<crate::manager::events::SessionEvent>> {
         self.event_processor.create_mpsc_forwarder().await
+    }
+
+    /// Subscribe to the shutdown broadcast signal.
+    ///
+    /// Spawned tasks can use the returned receiver to exit gracefully:
+    /// ```ignore
+    /// let mut shutdown_rx = coordinator.subscribe_shutdown();
+    /// tokio::select! {
+    ///     _ = shutdown_rx.recv() => { /* clean up and return */ }
+    ///     _ = do_work() => {}
+    /// }
+    /// ```
+    pub fn subscribe_shutdown(&self) -> tokio::sync::broadcast::Receiver<()> {
+        self.shutdown_tx.subscribe()
     }
 }
 

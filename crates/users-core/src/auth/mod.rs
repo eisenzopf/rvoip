@@ -231,7 +231,13 @@ impl AuthenticationService {
         // Generate tokens (API keys get shorter-lived tokens)
         let access_token = self.jwt_issuer.create_access_token(&user)?;
         let refresh_token = self.jwt_issuer.create_refresh_token(&user.id)?;
-        
+
+        // Store refresh token JTI for revocation (same as password login)
+        if let Some(pool) = &self.pool {
+            let claims = self.jwt_issuer.validate_refresh_token(&refresh_token)?;
+            self.store_refresh_token(pool, &claims).await?;
+        }
+
         Ok(AuthenticationResult {
             user,
             access_token,

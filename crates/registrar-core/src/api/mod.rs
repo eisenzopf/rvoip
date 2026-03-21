@@ -285,8 +285,12 @@ impl RegistrarService {
         for other_user in all_users {
             if other_user != user_id {
                 // Create bidirectional subscriptions
-                let _ = self.presence.subscribe(user_id, &other_user, self.config.default_expires).await;
-                let _ = self.presence.subscribe(&other_user, user_id, self.config.default_expires).await;
+                if let Err(e) = self.presence.subscribe(user_id, &other_user, self.config.default_expires).await {
+                    tracing::warn!("Failed to set up presence subscription from {} to {}: {}", user_id, other_user, e);
+                }
+                if let Err(e) = self.presence.subscribe(&other_user, user_id, self.config.default_expires).await {
+                    tracing::warn!("Failed to set up presence subscription from {} to {}: {}", other_user, user_id, e);
+                }
             }
         }
         

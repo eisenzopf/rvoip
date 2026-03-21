@@ -54,10 +54,20 @@ pub struct DatabaseManager {
 impl DatabaseManager {
     /// Create a new database manager with automatic migrations
     pub async fn new(database_url: &str) -> Result<Self> {
-        info!("🗄️ Initializing sqlx database manager: {}", database_url);
-        
-        // Connect to database
-        let pool = SqlitePool::connect(database_url).await
+        Self::with_pool_options(database_url, 10, 30).await
+    }
+
+    /// Create a new database manager with custom pool options
+    pub async fn with_pool_options(database_url: &str, max_connections: u32, acquire_timeout_secs: u64) -> Result<Self> {
+        info!("🗄️ Initializing sqlx database manager: {} (max_connections={}, timeout={}s)",
+              database_url, max_connections, acquire_timeout_secs);
+
+        // Connect to database with pool options
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(max_connections)
+            .acquire_timeout(std::time::Duration::from_secs(acquire_timeout_secs))
+            .connect(database_url)
+            .await
             .map_err(|e| anyhow!("Failed to connect to database: {}", e))?;
         
         // Run migrations
@@ -477,7 +487,7 @@ impl DatabaseManager {
             "SELECT call_id, session_id, queue_id, customer_info, priority, enqueued_at, attempts, last_attempt, expires_at
              FROM call_queue 
              WHERE queue_id = ? AND expires_at > datetime('now')
-             ORDER BY priority DESC, enqueued_at ASC
+             ORDER BY priority ASC, enqueued_at ASC
              LIMIT 1"
         )
         .bind(queue_id)
@@ -651,8 +661,89 @@ impl DatabaseManager {
     }
     
     pub async fn dequeue_call_for_agent(&self, queue_id: &str, agent_id: &str) -> Result<Option<DbQueuedCall>> {
-        // For now, just get next call in queue
-        self.get_next_queued_call(queue_id).await
+        let mut tx = self.pool.begin().await?;
+
+        // 1. Verify agent is AVAILABLE and has capacity (inside the transaction)
+        let agent_row = sqlx::query(
+            "SELECT status, current_calls, max_calls FROM agents WHERE agent_id = ?"
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let agent_row = match agent_row {
+            Some(r) => r,
+            None => {
+                tx.rollback().await?;
+                return Err(anyhow!("Agent {} not found", agent_id));
+            }
+        };
+
+        let status: String = agent_row.try_get("status")?;
+        let current_calls: i32 = agent_row.try_get("current_calls")?;
+        let max_calls: i32 = agent_row.try_get("max_calls")?;
+
+        if status != "AVAILABLE" || current_calls >= max_calls {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "Agent {} not available (status={}, current_calls={}, max_calls={})",
+                agent_id, status, current_calls, max_calls
+            ));
+        }
+
+        // 2. Dequeue the next call (ordered by priority, then enqueued_at)
+        let call_row = sqlx::query(
+            "SELECT call_id, session_id, queue_id, customer_info, priority, enqueued_at, attempts, last_attempt, expires_at
+             FROM call_queue
+             WHERE queue_id = ? AND expires_at > datetime('now')
+             ORDER BY priority ASC, enqueued_at ASC
+             LIMIT 1"
+        )
+        .bind(queue_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let call_row = match call_row {
+            Some(r) => r,
+            None => {
+                tx.rollback().await?;
+                return Ok(None);
+            }
+        };
+
+        let queued_call = DbQueuedCall::from_row(&call_row)?;
+
+        // 3. Delete call from queue
+        sqlx::query("DELETE FROM call_queue WHERE session_id = ?")
+            .bind(&queued_call.session_id)
+            .execute(&mut *tx)
+            .await?;
+
+        // 4. Insert active call record
+        let now = Utc::now();
+        let call_id = format!("call-{}", &queued_call.session_id);
+        sqlx::query(
+            "INSERT INTO active_calls (call_id, agent_id, session_id, assigned_at) VALUES (?, ?, ?, ?)"
+        )
+        .bind(&call_id)
+        .bind(agent_id)
+        .bind(&queued_call.session_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        // 5. Update agent: increment current_calls and set status to RESERVED
+        sqlx::query(
+            "UPDATE agents SET current_calls = current_calls + 1, status = 'RESERVED' WHERE agent_id = ?"
+        )
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        info!("Atomically dequeued call {} and assigned to agent {}", queued_call.session_id, agent_id);
+
+        Ok(Some(queued_call))
     }
     
     pub async fn update_agent_call_count_with_retry(&self, agent_id: &str, delta: i32) -> Result<()> {
@@ -666,9 +757,71 @@ impl DatabaseManager {
     }
     
     pub async fn atomic_assign_call_to_agent(&self, session_id: &str, agent_id: &str, _customer_sdp: String) -> Result<()> {
-        // Use a placeholder call_id for now
+        let mut tx = self.pool.begin().await?;
+
+        // 1. Check agent is AVAILABLE and has capacity
+        let agent_row = sqlx::query(
+            "SELECT status, current_calls, max_calls FROM agents WHERE agent_id = ?"
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let agent_row = match agent_row {
+            Some(r) => r,
+            None => {
+                tx.rollback().await?;
+                return Err(anyhow!("Agent {} not found", agent_id));
+            }
+        };
+
+        let status: String = agent_row.try_get("status")?;
+        let current_calls: i32 = agent_row.try_get("current_calls")?;
+        let max_calls: i32 = agent_row.try_get("max_calls")?;
+
+        if status != "AVAILABLE" && status != "RESERVED" {
+            tx.rollback().await?;
+            return Err(anyhow!("Agent {} not available (status={})", agent_id, status));
+        }
+
+        if current_calls >= max_calls {
+            tx.rollback().await?;
+            return Err(anyhow!(
+                "Agent {} already busy (current_calls={}, max_calls={})",
+                agent_id, current_calls, max_calls
+            ));
+        }
+
+        // 2. Remove call from queue (if present)
+        sqlx::query("DELETE FROM call_queue WHERE session_id = ?")
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
+
+        // 3. Insert active call record
         let call_id = format!("call-{}", session_id);
-        self.assign_call_to_agent(&call_id, session_id, agent_id).await
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO active_calls (call_id, agent_id, session_id, assigned_at) VALUES (?, ?, ?, ?)"
+        )
+        .bind(&call_id)
+        .bind(agent_id)
+        .bind(session_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        // 4. Update agent call count
+        sqlx::query(
+            "UPDATE agents SET current_calls = current_calls + 1 WHERE agent_id = ?"
+        )
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        info!("Atomically assigned call {} to agent {} (verified availability)", session_id, agent_id);
+        Ok(())
     }
     
     pub async fn query(&self, sql: &str, _params: &[&str]) -> Result<()> {

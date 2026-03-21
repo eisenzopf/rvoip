@@ -1154,7 +1154,7 @@ impl EventSubscription {
 /// ```
 pub struct EventEmitter {
     /// List of active event subscriptions
-    subscriptions: std::sync::RwLock<Vec<EventSubscription>>,
+    subscriptions: parking_lot::RwLock<Vec<EventSubscription>>,
 }
 
 impl EventEmitter {
@@ -1172,7 +1172,7 @@ impl EventEmitter {
     /// ```
     pub fn new() -> Self {
         Self {
-            subscriptions: std::sync::RwLock::new(Vec::new()),
+            subscriptions: parking_lot::RwLock::new(Vec::new()),
         }
     }
     
@@ -1214,7 +1214,7 @@ impl EventEmitter {
     /// ```
     pub fn subscribe(&self, subscription: EventSubscription) -> uuid::Uuid {
         let id = subscription.id();
-        self.subscriptions.write().unwrap().push(subscription);
+        self.subscriptions.write().push(subscription);
         id
     }
     
@@ -1258,7 +1258,7 @@ impl EventEmitter {
     /// assert_eq!(emitter.subscription_count(), 0);
     /// ```
     pub fn unsubscribe(&self, subscription_id: uuid::Uuid) -> bool {
-        let mut subscriptions = self.subscriptions.write().unwrap();
+        let mut subscriptions = self.subscriptions.write();
         if let Some(pos) = subscriptions.iter().position(|s| s.id() == subscription_id) {
             subscriptions.remove(pos);
             true
@@ -1294,7 +1294,7 @@ impl EventEmitter {
     /// # }
     /// ```
     pub async fn emit(&self, event: ClientEvent) {
-        let subscriptions = self.subscriptions.read().unwrap().clone();
+        let subscriptions = self.subscriptions.read().clone();
         
         // Deliver event to all matching subscriptions in parallel
         let tasks: Vec<_> = subscriptions
@@ -1347,7 +1347,7 @@ impl EventEmitter {
     /// assert_eq!(emitter.subscription_count(), 1);
     /// ```
     pub fn subscription_count(&self) -> usize {
-        self.subscriptions.read().unwrap().len()
+        self.subscriptions.read().len()
     }
 }
 

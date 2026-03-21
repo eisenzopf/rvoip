@@ -1160,7 +1160,8 @@ pub mod quick {
             .call_id(&format!("message-{}", Uuid::new_v4()))
             .cseq(1)
             .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
-            .header(TypedHeader::ContentType(ContentType::from_str("text/plain").unwrap()))
+            .header(TypedHeader::ContentType(ContentType::from_str("text/plain")
+                .map_err(|e| Error::Other(format!("Failed to parse content type: {}", e)))?))
             .header(TypedHeader::ContentLength(ContentLength::new(content.len() as u32)))
             .body(content.as_bytes().to_vec())
             .build();

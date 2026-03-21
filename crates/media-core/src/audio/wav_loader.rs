@@ -173,42 +173,42 @@ pub async fn load_music_on_hold(path: &Path) -> Result<Vec<u8>> {
 
 /// Cache for loaded music-on-hold files to avoid repeated disk I/O
 pub struct MusicOnHoldCache {
-    cache: std::sync::RwLock<std::collections::HashMap<std::path::PathBuf, Vec<u8>>>,
+    cache: parking_lot::RwLock<std::collections::HashMap<std::path::PathBuf, Vec<u8>>>,
 }
 
 impl MusicOnHoldCache {
     pub fn new() -> Self {
         Self {
-            cache: std::sync::RwLock::new(std::collections::HashMap::new()),
+            cache: parking_lot::RwLock::new(std::collections::HashMap::new()),
         }
     }
-    
+
     /// Get or load music-on-hold audio
     pub async fn get_or_load(&self, path: &Path) -> Result<Vec<u8>> {
         // Check cache first
         {
-            let cache = self.cache.read().unwrap();
+            let cache = self.cache.read();
             if let Some(cached) = cache.get(path) {
                 debug!("Using cached MoH audio for: {}", path.display());
                 return Ok(cached.clone());
             }
         }
-        
+
         // Load and cache
         let ulaw_audio = load_music_on_hold(path).await?;
-        
+
         {
-            let mut cache = self.cache.write().unwrap();
+            let mut cache = self.cache.write();
             cache.insert(path.to_path_buf(), ulaw_audio.clone());
             info!("Cached MoH audio for: {}", path.display());
         }
-        
+
         Ok(ulaw_audio)
     }
-    
+
     /// Clear the cache
     pub fn clear(&self) {
-        let mut cache = self.cache.write().unwrap();
+        let mut cache = self.cache.write();
         cache.clear();
         info!("Cleared MoH cache");
     }

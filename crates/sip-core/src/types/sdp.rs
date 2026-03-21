@@ -508,11 +508,11 @@ impl SdpSession {
     ///     println!("Group attribute: {}", value);
     /// }
     /// ```
-    pub fn get_generic_attribute_value(&self, key: &str) -> Option<Option<&str>> {
+    pub fn get_generic_attribute_value(&self, key: &str) -> Option<Option<String>> {
         self.generic_attributes.iter().find_map(|a| match a {
-            ParsedAttribute::Value(k, v) if k.eq_ignore_ascii_case(key) => Some(Some(v.as_str())),
+            ParsedAttribute::Value(k, v) if k.eq_ignore_ascii_case(key) => Some(Some(v.clone())),
             ParsedAttribute::Flag(k) if k.eq_ignore_ascii_case(key) => Some(None),
-            ParsedAttribute::Other(k, v) if k.eq_ignore_ascii_case(key) => Some(v.as_deref()),
+            ParsedAttribute::Other(k, v) if k.eq_ignore_ascii_case(key) => Some(v.clone()),
              // Add checks for dedicated fields if applicable at session level
              ParsedAttribute::Direction(_) if key.eq_ignore_ascii_case(self.direction.map(|d| d.to_string()).as_deref().unwrap_or("")) => Some(None),
             _ => None
@@ -737,13 +737,13 @@ impl MediaDescription {
     ///     println!("Media ID: {}", value);
     /// }
     /// ```
-    pub fn get_generic_attribute_value(&self, key: &str) -> Option<Option<&str>> {
+    pub fn get_generic_attribute_value(&self, key: &str) -> Option<Option<String>> {
         self.generic_attributes.iter().find_map(|a| match a {
-            ParsedAttribute::Value(k, v) if k.eq_ignore_ascii_case(key) => Some(Some(v.as_str())),
+            ParsedAttribute::Value(k, v) if k.eq_ignore_ascii_case(key) => Some(Some(v.clone())),
             ParsedAttribute::Flag(k) if k.eq_ignore_ascii_case(key) => Some(None),
-            ParsedAttribute::Other(k, v) if k.eq_ignore_ascii_case(key) => Some(v.as_deref()),
+            ParsedAttribute::Other(k, v) if k.eq_ignore_ascii_case(key) => Some(v.clone()),
              // Add checks for dedicated fields
-             ParsedAttribute::Ptime(v) if key.eq_ignore_ascii_case("ptime") => Some(Some(Box::leak(v.to_string().into_boxed_str()))), // Leak! Needs better way
+             ParsedAttribute::Ptime(v) if key.eq_ignore_ascii_case("ptime") => Some(Some(v.to_string())),
              ParsedAttribute::Direction(_) if key.eq_ignore_ascii_case(self.direction.map(|d| d.to_string()).as_deref().unwrap_or("")) => Some(None),
             _ => None
         })

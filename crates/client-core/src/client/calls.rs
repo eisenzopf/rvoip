@@ -173,7 +173,18 @@ impl super::manager::ClientManager {
                 message: "Client is not started. Call start() before making calls.".to_string()
             });
         }
-        
+
+        // Enforce max concurrent calls limit
+        let active_count = self.get_active_calls().await.len();
+        if active_count >= self.max_concurrent_calls {
+            return Err(ClientError::InternalError {
+                message: format!(
+                    "Maximum concurrent calls limit reached ({}/{})",
+                    active_count, self.max_concurrent_calls
+                ),
+            });
+        }
+
         // Create call via session-core with retry logic for network errors
         let prepared_call = retry_with_backoff(
             "prepare_outgoing_call",

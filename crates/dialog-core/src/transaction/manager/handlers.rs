@@ -73,7 +73,7 @@ use super::types::*;
 pub async fn handle_transport_message(
     event: TransportEvent,
     transport: &Arc<dyn Transport>,
-    client_transactions: &Arc<Mutex<HashMap<TransactionKey, Box<dyn ClientTransaction + Send>>>>,
+    client_transactions: &Arc<Mutex<HashMap<TransactionKey, Arc<dyn ClientTransaction + Send + Sync>>>>,
     server_transactions: &Arc<Mutex<HashMap<TransactionKey, Arc<dyn ServerTransaction>>>>,
     events_tx: &mpsc::Sender<TransactionEvent>,
     event_subscribers: &Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
@@ -270,8 +270,7 @@ pub async fn handle_transport_message(
                         // Check if we have a matching INVITE transaction with the same branch
                         let tx_clone_opt = {
                             let server_txs = server_transactions.lock().await;
-                            if server_txs.contains_key(&invite_tx_id) {
-                                let tx = server_txs.get(&invite_tx_id).unwrap();
+                            if let Some(tx) = server_txs.get(&invite_tx_id) {
                                 if tx.kind() == TransactionKind::InviteServer {
                                     // Clone the transaction while we have the lock
                                     Some((tx.clone(), invite_tx_id.clone()))
@@ -445,46 +444,41 @@ pub async fn handle_transport_message(
                         }
                     };
                     
-                    // Look up the client transaction using the same pattern
-                    let mut client_txs = client_transactions.lock().await;
-                    
-                    // Check if we have a matching transaction
-                    if client_txs.contains_key(&tx_id) {
-                        let tx_kind = client_txs[&tx_id].kind();
-                        let remote_addr = client_txs[&tx_id].remote_addr();
-                        
-                        debug!(%tx_id, status = ?response.status(), "Routing response to client transaction");
-                        
-                        // Check transaction lifecycle before processing
-                        let lifecycle = client_txs[&tx_id].data().get_lifecycle();
+                    // Look up the client transaction using the same pattern.
+                    // Clone the Arc handle under the lock so we can release it before awaiting.
+                    let tx_info = {
+                        let client_txs = client_transactions.lock().await;
+                        client_txs.get(&tx_id).map(|tx| {
+                            let lifecycle = tx.data().get_lifecycle();
+                            (tx.clone(), tx.kind(), tx.remote_addr(), lifecycle)
+                        })
+                        // Lock is dropped here at end of block
+                    };
+
+                    if let Some((tx_handle, tx_kind, remote_addr, lifecycle)) = tx_info {
                         if !matches!(lifecycle, TransactionLifecycle::Active) {
                             debug!(%tx_id, ?lifecycle, "Skipping response processing for non-active transaction");
-                            drop(client_txs);
                             return Ok(());
                         }
-                        
-                        // Process the response while still holding the lock
-                        let result = client_txs[&tx_id].process_response(response.clone()).await;
-                        
-                        // Now we can drop the lock
-                        drop(client_txs);
-                        
-                        // Check for errors
-                        result?;
-                        
+
+                        debug!(%tx_id, status = ?response.status(), "Routing response to client transaction");
+
+                        // Process the response without holding the lock
+                        tx_handle.process_response(response.clone()).await?;
+
                         // Automatic ACK for non-2xx responses to INVITE
                         if !response.status().is_success() && tx_kind == TransactionKind::InviteClient {
                             debug!(%tx_id, status=%response.status(), "Sending ACK automatically for non-2xx response");
-                            
+
                             // Create a dummy request for ACK creation
                             let dummy_uri = if let Some(to) = response.to() {
                                 to.address().uri.clone()
                             } else {
                                 Uri::sip("invalid")
                             };
-                            
+
                             let dummy_request = Request::new(Method::Invite, dummy_uri);
-                            
+
                             match create_ack_from_invite(&dummy_request, &response) {
                                 Ok(ack_request) => {
                                     // Send the ACK
@@ -499,13 +493,10 @@ pub async fn handle_transport_message(
                                 }
                             }
                         }
-                        
+
                         return Ok(());
                     }
-                    
-                    // Drop the lock
-                    drop(client_txs);
-                    
+
                     // If we get here, this is a stray response
                     debug!(status=%response.status(), "Received stray response that doesn't match any client transaction");
                     
@@ -822,42 +813,34 @@ impl TransactionManager {
                 )));
             }
 
-            // First try to send directly to the transaction via events_tx
-            // Use the original approach but with larger channel capacity to prevent errors
-            let mut client_txs_guard = self.client_transactions.lock().await;
+            // Clone the Arc handle under the lock so we can release it before awaiting.
+            // The transaction stays in the map so concurrent packets still find it.
             let mut processed = false;
-            
-            if client_txs_guard.contains_key(&key) {
-                debug!("🔍 RESPONSE HANDLER: Found matching client transaction, processing response");
-                
+            let tx_handle = {
+                let client_txs_guard = self.client_transactions.lock().await;
+                client_txs_guard.get(&key).cloned()
+                // Lock is dropped here at end of block
+            };
+
+            if let Some(transaction) = tx_handle {
+                debug!("RESPONSE HANDLER: Found matching client transaction, processing response");
+
                 // Check transaction lifecycle before processing
-                let lifecycle = client_txs_guard[&key].data().get_lifecycle();
+                let lifecycle = transaction.data().get_lifecycle();
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
                     debug!(%key, ?lifecycle, "Skipping response processing for non-active transaction");
-                    drop(client_txs_guard);
                     return Ok(());
                 }
-                
-                let transaction = client_txs_guard.remove(&key).unwrap();
-                
-                // Drop the lock so we can do async operations
-                drop(client_txs_guard);
-                
-                // Process the response - should succeed now with larger channel capacity
+
+                // Process the response without holding the lock
                 if let Err(e) = transaction.process_response(response.clone()).await {
-                    warn!(id=%key, error=%e, "Error processing response - this should be rare now");
+                    warn!(id=%key, error=%e, "Error processing response");
                 } else {
-                    debug!("🔍 RESPONSE HANDLER: Successfully processed response in transaction");
+                    debug!("RESPONSE HANDLER: Successfully processed response in transaction");
                     processed = true;
                 }
-                
-                // Put the transaction back (if it's not terminated)
-                let mut client_txs_guard = self.client_transactions.lock().await;
-                client_txs_guard.insert(key.clone(), transaction);
-                drop(client_txs_guard);
             } else {
-                debug!("🔍 RESPONSE HANDLER: No matching client transaction found for key {}", key);
-                drop(client_txs_guard);
+                debug!("RESPONSE HANDLER: No matching client transaction found for key {}", key);
             }
             
             // If not processed via transaction, still send the event

@@ -7,7 +7,7 @@ use crate::api::control::SessionControl;
 use crate::api::media::MediaControl;
 use crate::api::handlers::CallHandler;
 use crate::api::types::{IncomingCall, CallDecision, SessionId};
-use crate::api::builder::SessionManagerConfig;
+use crate::api::builder::{SessionManagerConfig, SipTransportType};
 use crate::coordinator::SessionCoordinator;
 use crate::errors::Result;
 use super::{UasConfig, AlwaysAcceptHandler, UasCallHandler, UasCallHandle};
@@ -66,7 +66,7 @@ impl SimpleUasServer {
         
         // Parse local address to get bind address
         let local_bind_addr: std::net::SocketAddr = bind_addr.parse()
-            .unwrap_or_else(|_| "0.0.0.0:5061".parse().unwrap());
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 5061)));
         
         // Create SessionManagerConfig
         let manager_config = SessionManagerConfig {
@@ -79,6 +79,7 @@ impl SimpleUasServer {
             stun_server: None,
             enable_sip_client: false,
             media_config: Default::default(),
+            sip_transport: SipTransportType::Udp,
         };
         
         // Wrap the UasCallHandler to implement CallHandler
@@ -176,7 +177,7 @@ impl SimpleUasServer {
         
         // Parse local address to get bind address
         let local_bind_addr: std::net::SocketAddr = config.local_addr.parse()
-            .unwrap_or_else(|_| "0.0.0.0:5060".parse().unwrap());
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 5060)));
         
         // Create SessionManagerConfig
         let manager_config = SessionManagerConfig {
@@ -189,6 +190,7 @@ impl SimpleUasServer {
             stun_server: None,
             enable_sip_client: false,
             media_config: Default::default(),
+            sip_transport: SipTransportType::Udp,
         };
         
         // Create coordinator with auto-accept handler
@@ -231,7 +233,7 @@ impl SimpleUasServer {
         
         // Parse local address to get bind address
         let local_bind_addr: std::net::SocketAddr = config.local_addr.parse()
-            .unwrap_or_else(|_| "0.0.0.0:5060".parse().unwrap());
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 5060)));
         
         // Create SessionManagerConfig
         let manager_config = SessionManagerConfig {
@@ -244,6 +246,7 @@ impl SimpleUasServer {
             stun_server: None,
             enable_sip_client: false,
             media_config: Default::default(),
+            sip_transport: SipTransportType::Udp,
         };
         
         let coordinator = SessionCoordinator::new(
@@ -283,7 +286,7 @@ impl SimpleUasServer {
         
         // Parse local address to get bind address
         let local_bind_addr: std::net::SocketAddr = config.local_addr.parse()
-            .unwrap_or_else(|_| "0.0.0.0:5060".parse().unwrap());
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 5060)));
         
         // Create SessionManagerConfig
         let manager_config = SessionManagerConfig {
@@ -296,6 +299,7 @@ impl SimpleUasServer {
             stun_server: None,
             enable_sip_client: false,
             media_config: Default::default(),
+            sip_transport: SipTransportType::Udp,
         };
         
         let coordinator = SessionCoordinator::new(

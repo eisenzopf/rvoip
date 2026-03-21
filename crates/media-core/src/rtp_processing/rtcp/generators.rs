@@ -613,13 +613,13 @@ impl ComprehensiveFeedbackGenerator {
         // Return highest priority feedback, or combine if multiple
         if !high_priority.is_empty() {
             if high_priority.len() == 1 {
-                high_priority.into_iter().next().unwrap()
+                high_priority.into_iter().next().unwrap_or(FeedbackDecision::None)
             } else {
                 FeedbackDecision::Multiple(high_priority)
             }
         } else if !normal_priority.is_empty() {
             if normal_priority.len() == 1 {
-                normal_priority.into_iter().next().unwrap()
+                normal_priority.into_iter().next().unwrap_or(FeedbackDecision::None)
             } else {
                 FeedbackDecision::Multiple(normal_priority)
             }

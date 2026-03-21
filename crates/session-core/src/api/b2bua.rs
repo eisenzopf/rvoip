@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::{mpsc, RwLock};
-use crate::api::builder::SessionManagerConfig;
+use crate::api::builder::{SessionManagerConfig, SipTransportType};
 use crate::api::types::{SessionId, IncomingCall, CallDecision};
 use crate::api::call::SimpleCall;
 use crate::api::bridge::CallBridge;
@@ -101,6 +101,7 @@ impl SimpleB2BUA {
             stun_server: None,
             enable_sip_client: false,  // Server mode
             media_config: Default::default(),
+            sip_transport: SipTransportType::Udp,
         };
         
         let coordinator = SessionCoordinator::new(config, None).await?;

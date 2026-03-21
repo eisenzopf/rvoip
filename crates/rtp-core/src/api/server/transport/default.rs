@@ -498,7 +498,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         // Stop event task first to prevent new client connections
         {
             let mut event_task = self.event_task.lock().await;
-            if let Some(task) = event_task.take() {
+            match event_task.take() { Some(task) => {
                 debug!("Aborting main event task");
                 task.abort();
                 // Try to wait for the task to finish (with timeout)
@@ -506,9 +506,9 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                     Ok(_) => debug!("Event task terminated gracefully"),
                     Err(_) => debug!("Event task termination timed out"),
                 }
-            } else {
+            } _ => {
                 debug!("No event task to abort");
-            }
+            }}
         }
         
         debug!("Disconnecting all clients");
@@ -575,14 +575,14 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         // Close main socket if available
         debug!("Closing main socket");
         let mut main_socket = self.main_socket.write().await;
-        if let Some(socket) = main_socket.take() {
+        match main_socket.take() { Some(socket) => {
             debug!("Closing main transport socket");
             if let Err(e) = socket.close().await {
                 warn!("Error closing main socket: {}", e);
             }
-        } else {
+        } _ => {
             debug!("No main socket to close");
-        }
+        }}
         
         // Ensure we release broadcast channel resources
         debug!("Ensuring broadcast channel resources are released");

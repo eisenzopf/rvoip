@@ -2,7 +2,6 @@
 
 use crate::common::{types::*, errors::Result};
 use async_trait::async_trait;
-use std::sync::Arc;
 
 /// Trait for implementing routing logic
 #[async_trait]

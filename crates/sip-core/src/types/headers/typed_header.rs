@@ -240,70 +240,105 @@ impl TypedHeader {
     }
 
     /// Try to convert this TypedHeader to a reference of a specific header type
-    /// 
+    ///
     /// This method is used internally by the HeaderAccess trait implementations
     /// to provide type-safe access to headers.
-    pub fn as_typed_ref<'a, T: TypedHeaderTrait + 'static>(&'a self) -> Option<&'a T> 
-    where 
+    ///
+    /// # Safety invariant
+    ///
+    /// Each match arm below pairs an enum variant (which holds a value of a known
+    /// concrete type `C`) with a `TypeId` guard that ensures `T == C`. Because the
+    /// enum variant guarantees the in-memory type is `C` and the guard guarantees
+    /// `T` is the same type, the pointer cast `&C -> &T` is sound. The header name
+    /// check at the top is an additional early-out but is not relied upon for
+    /// soundness; the `TypeId` comparison is the authoritative check.
+    pub fn as_typed_ref<'a, T: TypedHeaderTrait + 'static>(&'a self) -> Option<&'a T>
+    where
         <T as TypedHeaderTrait>::Name: std::fmt::Debug,
         T: std::fmt::Debug
     {
         if self.name() != T::header_name().into() {
             return None;
         }
-        
+
         let type_id_t = std::any::TypeId::of::<T>();
-        
+
         match self {
-            TypedHeader::CallId(h) if type_id_t == std::any::TypeId::of::<crate::types::CallId>() => 
+            // SAFETY: The match arm destructures a CallId variant (concrete type `CallId`)
+            // and the guard verifies `T == CallId`, so the cast is a no-op identity transmute.
+            TypedHeader::CallId(h) if type_id_t == std::any::TypeId::of::<crate::types::CallId>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::From(h) if type_id_t == std::any::TypeId::of::<crate::types::from::From>() => 
+            // SAFETY: variant holds `From`, guard ensures `T == From`.
+            TypedHeader::From(h) if type_id_t == std::any::TypeId::of::<crate::types::from::From>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::To(h) if type_id_t == std::any::TypeId::of::<crate::types::to::To>() => 
+            // SAFETY: variant holds `To`, guard ensures `T == To`.
+            TypedHeader::To(h) if type_id_t == std::any::TypeId::of::<crate::types::to::To>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::Via(h) if type_id_t == std::any::TypeId::of::<crate::types::via::Via>() => 
+            // SAFETY: variant holds `Via`, guard ensures `T == Via`.
+            TypedHeader::Via(h) if type_id_t == std::any::TypeId::of::<crate::types::via::Via>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::CSeq(h) if type_id_t == std::any::TypeId::of::<crate::types::CSeq>() => 
+            // SAFETY: variant holds `CSeq`, guard ensures `T == CSeq`.
+            TypedHeader::CSeq(h) if type_id_t == std::any::TypeId::of::<crate::types::CSeq>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::ContentLength(h) if type_id_t == std::any::TypeId::of::<crate::types::content_length::ContentLength>() => 
+            // SAFETY: variant holds `ContentLength`, guard ensures `T == ContentLength`.
+            TypedHeader::ContentLength(h) if type_id_t == std::any::TypeId::of::<crate::types::content_length::ContentLength>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::MaxForwards(h) if type_id_t == std::any::TypeId::of::<crate::types::MaxForwards>() => 
+            // SAFETY: variant holds `MaxForwards`, guard ensures `T == MaxForwards`.
+            TypedHeader::MaxForwards(h) if type_id_t == std::any::TypeId::of::<crate::types::MaxForwards>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::Contact(h) if type_id_t == std::any::TypeId::of::<crate::types::contact::Contact>() => 
+            // SAFETY: variant holds `Contact`, guard ensures `T == Contact`.
+            TypedHeader::Contact(h) if type_id_t == std::any::TypeId::of::<crate::types::contact::Contact>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::ContentType(h) if type_id_t == std::any::TypeId::of::<crate::types::content_type::ContentType>() => 
+            // SAFETY: variant holds `ContentType`, guard ensures `T == ContentType`.
+            TypedHeader::ContentType(h) if type_id_t == std::any::TypeId::of::<crate::types::content_type::ContentType>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::Require(h) if type_id_t == std::any::TypeId::of::<crate::types::require::Require>() => 
+            // SAFETY: variant holds `Require`, guard ensures `T == Require`.
+            TypedHeader::Require(h) if type_id_t == std::any::TypeId::of::<crate::types::require::Require>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::Supported(h) if type_id_t == std::any::TypeId::of::<crate::types::supported::Supported>() => 
+            // SAFETY: variant holds `Supported`, guard ensures `T == Supported`.
+            TypedHeader::Supported(h) if type_id_t == std::any::TypeId::of::<crate::types::supported::Supported>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::ContentDisposition(h) if type_id_t == std::any::TypeId::of::<crate::types::content_disposition::ContentDisposition>() => 
+            // SAFETY: variant holds `ContentDisposition`, guard ensures `T == ContentDisposition`.
+            TypedHeader::ContentDisposition(h) if type_id_t == std::any::TypeId::of::<crate::types::content_disposition::ContentDisposition>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::InReplyTo(h) if type_id_t == std::any::TypeId::of::<crate::types::in_reply_to::InReplyTo>() => 
+            // SAFETY: variant holds `InReplyTo`, guard ensures `T == InReplyTo`.
+            TypedHeader::InReplyTo(h) if type_id_t == std::any::TypeId::of::<crate::types::in_reply_to::InReplyTo>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::ReplyTo(h) if type_id_t == std::any::TypeId::of::<crate::types::reply_to::ReplyTo>() => 
+            // SAFETY: variant holds `ReplyTo`, guard ensures `T == ReplyTo`.
+            TypedHeader::ReplyTo(h) if type_id_t == std::any::TypeId::of::<crate::types::reply_to::ReplyTo>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::Reason(h) if type_id_t == std::any::TypeId::of::<crate::types::reason::Reason>() => 
+            // SAFETY: variant holds `Reason`, guard ensures `T == Reason`.
+            TypedHeader::Reason(h) if type_id_t == std::any::TypeId::of::<crate::types::reason::Reason>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::ErrorInfo(h) if type_id_t == std::any::TypeId::of::<crate::types::error_info::ErrorInfoHeader>() => 
+            // SAFETY: variant holds `ErrorInfoHeader`, guard ensures `T == ErrorInfoHeader`.
+            TypedHeader::ErrorInfo(h) if type_id_t == std::any::TypeId::of::<crate::types::error_info::ErrorInfoHeader>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::AlertInfo(h) if type_id_t == std::any::TypeId::of::<crate::types::alert_info::AlertInfoHeader>() => 
+            // SAFETY: variant holds `AlertInfoHeader`, guard ensures `T == AlertInfoHeader`.
+            TypedHeader::AlertInfo(h) if type_id_t == std::any::TypeId::of::<crate::types::alert_info::AlertInfoHeader>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
-            TypedHeader::CallInfo(h) if type_id_t == std::any::TypeId::of::<crate::types::call_info::CallInfo>() => 
+            // SAFETY: variant holds `CallInfo`, guard ensures `T == CallInfo`.
+            TypedHeader::CallInfo(h) if type_id_t == std::any::TypeId::of::<crate::types::call_info::CallInfo>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
+            // SAFETY: variant holds `Expires`, guard ensures `T == Expires`.
             TypedHeader::Expires(h_inner) if type_id_t == std::any::TypeId::of::<crate::types::expires::Expires>() => {
                 Some(unsafe { &*(h_inner as *const _ as *const T) })
             }
+            // SAFETY: variant holds `SessionExpires`, guard ensures `T == SessionExpires`.
             TypedHeader::SessionExpires(h) if type_id_t == std::any::TypeId::of::<crate::types::session_expires::SessionExpires>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
+            // SAFETY: variant holds `Event`, guard ensures `T == Event`.
             TypedHeader::Event(h) if type_id_t == std::any::TypeId::of::<crate::types::event::Event>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
+            // SAFETY: variant holds `MinSE`, guard ensures `T == MinSE`.
             TypedHeader::MinSE(h) if type_id_t == std::any::TypeId::of::<crate::types::min_se::MinSE>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
+            // SAFETY: variant holds `RSeq`, guard ensures `T == RSeq`.
             TypedHeader::RSeq(h) if type_id_t == std::any::TypeId::of::<crate::types::rseq::RSeq>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
+            // SAFETY: variant holds `ReferTo`, guard ensures `T == ReferTo`.
             TypedHeader::ReferTo(h) if type_id_t == std::any::TypeId::of::<crate::types::refer_to::ReferTo>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
+            // SAFETY: variant holds `ReferredBy`, guard ensures `T == ReferredBy`.
             TypedHeader::ReferredBy(h) if type_id_t == std::any::TypeId::of::<crate::types::referred_by::ReferredBy>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
             _ => None,

@@ -135,23 +135,23 @@ pub async fn process_dtls_packet(
                 },
                 crate::dtls::handshake::HandshakeStep::Complete => {
                     debug!("Handshake complete");
-                    
+
                     // Set handshake completed flag
                     let mut completed = handshake_completed.lock().await;
                     if !*completed {
                         *completed = true;
-                        
+
                         // Extract SRTP keys if the connection is in the connected state
                         if conn.state() == crate::dtls::connection::ConnectionState::Connected {
                             // Drop the connection guard before extracting keys to avoid deadlock
                             drop(conn_guard);
-                            
+
                             // Extract keys
                             if let Err(e) = keys::extract_srtp_keys(connection, srtp_context, handshake_completed).await {
                                 warn!("Failed to extract SRTP keys: {}", e);
                                 return Err(e);
                             }
-                            
+
                             info!("DTLS handshake completed and SRTP keys extracted");
                         }
                     }

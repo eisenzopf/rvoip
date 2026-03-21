@@ -13,6 +13,8 @@ pub struct ApiKey {
     pub name: String,
     #[serde(skip_serializing)]
     pub key_hash: String,
+    #[serde(skip_serializing)]
+    pub key_prefix: String,
     pub permissions: Vec<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used: Option<DateTime<Utc>>,

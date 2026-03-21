@@ -152,7 +152,7 @@ impl Dialog {
     pub fn generate_local_tag(&self) -> String {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        format!("{:08x}", rng.gen::<u32>())
+        format!("{:08x}", rng.r#gen::<u32>())
     }
     
     /// Confirm the dialog with a local tag

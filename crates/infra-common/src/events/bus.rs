@@ -138,7 +138,7 @@ impl EventBus {
                         
                         tokio::spawn(async move {
                             for subscriber in subscribers_clone {
-                                let _ = subscriber.handle_event((*event_clone).clone()).await;
+                                subscriber.handle_event((*event_clone).clone()).await;
                                 metrics.total_delivered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         });
@@ -354,13 +354,17 @@ impl EventBus {
             // Process in batches when batch is full or channel is empty
             if batch.len() >= event_bus.config.batch_size || rx.try_recv().is_err() {
                 let events = std::mem::take(&mut batch);
-                let _ = event_bus.publish_batch(events).await;
+                if let Err(e) = event_bus.publish_batch(events).await {
+                    tracing::warn!("Failed to publish event batch: {}", e);
+                }
             }
         }
         
         // Process any remaining events
         if !batch.is_empty() {
-            let _ = event_bus.publish_batch(batch).await;
+            if let Err(e) = event_bus.publish_batch(batch).await {
+                tracing::warn!("Failed to publish remaining event batch: {}", e);
+            }
         }
     }
     
@@ -461,13 +465,17 @@ impl<E: Event> std::ops::Deref for PooledEvent<E> {
     type Target = E;
     
     fn deref(&self) -> &Self::Target {
-        self.event.as_ref().expect("Event should not be None")
+        // BUG: event is always Some from construction until Drop::drop takes it.
+        // Deref cannot be called after drop, so this is structurally unreachable.
+        self.event.as_ref().expect("BUG: PooledEvent accessed after drop")
     }
 }
 
 impl<E: Event> std::ops::DerefMut for PooledEvent<E> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.event.as_mut().expect("Event should not be None")
+        // BUG: event is always Some from construction until Drop::drop takes it.
+        // DerefMut cannot be called after drop, so this is structurally unreachable.
+        self.event.as_mut().expect("BUG: PooledEvent accessed after drop")
     }
 }
 

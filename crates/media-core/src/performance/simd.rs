@@ -29,12 +29,11 @@ impl SimdProcessor {
     
     /// Apply gain with optimal processing (scalar for G.711)
     pub fn apply_gain(&self, input: &[i16], gain: f32, output: &mut [i16]) {
-        if input.len() != output.len() {
-            panic!("Input and output slices must have the same length");
-        }
-        
+        // Process only the overlapping portion; ignore excess in either slice
+        let len = input.len().min(output.len());
+
         // For G.711 frames (160 samples), scalar is faster
-        self.apply_gain_scalar(input, gain, output);
+        self.apply_gain_scalar(&input[..len], gain, &mut output[..len]);
     }
     
     /// Apply gain in-place (optimal for zero-copy processing)

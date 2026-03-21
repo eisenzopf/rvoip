@@ -781,18 +781,16 @@ impl CallCenterServer {
     
     /// Display server information
     fn display_info(&self) {
-        println!("\n📞 CALL CENTER IS READY!");
-        println!("=======================");
-        println!("\n🔧 Configuration:");
-        println!("  - SIP Address: {}", self.config.general.local_signaling_addr);
-        println!("  - Domain: {}", self.config.general.domain);
-        println!("\n📋 How to Test:");
-        println!("  1. Configure agent SIP phones to register");
-        println!("  2. Point them to this server ({})", self.config.general.local_signaling_addr);
-        println!("  3. Once registered, they'll show as 'available'");
-        println!("  4. Make test calls to configured queues");
-        println!("  5. Calls will be routed to available agents");
-        println!("\n🛑 Press Ctrl+C to stop the server\n");
+        info!("CALL CENTER IS READY");
+        info!(
+            sip_address = %self.config.general.local_signaling_addr,
+            domain = %self.config.general.domain,
+            "Server configuration"
+        );
+        info!(
+            sip_address = %self.config.general.local_signaling_addr,
+            "To test: configure agent SIP phones to register against this server, then make calls to configured queues"
+        );
     }
     
     /// Internal monitoring loop

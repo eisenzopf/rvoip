@@ -96,19 +96,59 @@ impl SessionCoordinator {
         Ok(())
     }
 
-    /// Send DTMF tones on an active session
+    /// Send DTMF tones on an active session.
+    ///
+    /// Dual-mode: attempts RFC 4733 RTP telephone-event first (if the media
+    /// session has a negotiated telephone-event payload type), then falls back
+    /// to SIP INFO for each digit.
     pub async fn send_dtmf(&self, session_id: &SessionId, digits: &str) -> Result<()> {
         // Verify session exists and is active
         if let Some(session) = self.find_session(session_id).await? {
             match session.state {
                 CallState::Active => {
-                    // Send DTMF through the dialog manager
-                    self.dialog_manager
-                        .send_dtmf(session_id, digits)
-                        .await
-                        .map_err(|e| SessionError::internal(&format!("Failed to send DTMF: {}", e)))?;
-                    
-                    tracing::info!("Sent DTMF '{}' for session {}", digits, session_id);
+                    // Attempt RFC 4733 via the media controller
+                    let dialog_id_opt = self.dialog_coordinator
+                        .get_dialog_id_for_session(session_id)
+                        .await;
+
+                    let mut rfc4733_sent = false;
+
+                    if let Some(dialog_id) = dialog_id_opt {
+                        let media_dialog_id = rvoip_media_core::types::DialogId::new(&dialog_id.to_string());
+                        let controller = self.media_manager.controller();
+
+                        for ch in digits.chars() {
+                            if let Some(event) = rvoip_media_core::dtmf::DtmfEvent::from_char(ch) {
+                                // Use the default PT 101; a future improvement
+                                // could store the negotiated PT per-session.
+                                let pt = rvoip_media_core::dtmf::TELEPHONE_EVENT_PT;
+                                match controller
+                                    .send_dtmf_rtp(&media_dialog_id, event, 160, pt)
+                                    .await
+                                {
+                                    Ok(()) => {
+                                        rfc4733_sent = true;
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            "RFC 4733 DTMF failed for session {}: {}, falling back to SIP INFO",
+                                            session_id, e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Fall back to SIP INFO if RFC 4733 was not used
+                    if !rfc4733_sent {
+                        self.dialog_manager
+                            .send_dtmf(session_id, digits)
+                            .await
+                            .map_err(|e| SessionError::internal(&format!("Failed to send DTMF: {}", e)))?;
+                    }
+
+                    tracing::info!("Sent DTMF '{}' for session {} (rfc4733={})", digits, session_id, rfc4733_sent);
                     Ok(())
                 }
                 _ => {
@@ -197,4 +237,92 @@ impl SessionCoordinator {
         
         Ok(())
     }
-} 
+
+    // ---------------------------------------------------------------
+    // Trickle ICE (RFC 8838 / RFC 8840)
+    // ---------------------------------------------------------------
+
+    /// Send a trickle ICE candidate to the remote peer via SIP INFO.
+    ///
+    /// The candidate is formatted as an RFC 8840 `trickle-ice-sdpfrag`
+    /// body and sent using the INFO method with Content-Type
+    /// `application/trickle-ice-sdpfrag`.
+    pub async fn send_trickle_candidate(
+        &self,
+        session_id: &SessionId,
+        candidate: &rvoip_rtp_core::ice::IceCandidate,
+    ) -> Result<()> {
+        let dialog_id = self
+            .dialog_coordinator
+            .get_dialog_id_for_session(session_id)
+            .await
+            .ok_or_else(|| {
+                SessionError::internal(&format!(
+                    "No dialog found for session {} (trickle candidate)",
+                    session_id
+                ))
+            })?;
+
+        let body = format!("a=candidate:{}\r\n", candidate.to_sdp_attribute());
+
+        self.dialog_manager
+            .send_info_with_content_type(
+                &dialog_id,
+                body,
+                "application/trickle-ice-sdpfrag",
+            )
+            .await
+            .map_err(|e| {
+                SessionError::internal(&format!(
+                    "Failed to send trickle ICE candidate for session {}: {}",
+                    session_id, e
+                ))
+            })?;
+
+        tracing::info!(
+            "Sent trickle ICE candidate for session {}: {}",
+            session_id,
+            candidate
+        );
+
+        Ok(())
+    }
+
+    /// Send an end-of-candidates indication to the remote peer via SIP INFO.
+    pub async fn send_end_of_candidates(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        let dialog_id = self
+            .dialog_coordinator
+            .get_dialog_id_for_session(session_id)
+            .await
+            .ok_or_else(|| {
+                SessionError::internal(&format!(
+                    "No dialog found for session {} (end-of-candidates)",
+                    session_id
+                ))
+            })?;
+
+        self.dialog_manager
+            .send_info_with_content_type(
+                &dialog_id,
+                "a=end-of-candidates\r\n".to_string(),
+                "application/trickle-ice-sdpfrag",
+            )
+            .await
+            .map_err(|e| {
+                SessionError::internal(&format!(
+                    "Failed to send end-of-candidates for session {}: {}",
+                    session_id, e
+                ))
+            })?;
+
+        tracing::info!(
+            "Sent end-of-candidates for session {}",
+            session_id
+        );
+
+        Ok(())
+    }
+}

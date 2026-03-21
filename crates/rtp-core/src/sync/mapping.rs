@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 
 use crate::RtpSsrc;
 use crate::RtpTimestamp;
@@ -141,26 +142,24 @@ impl TimestampMapper {
     
     /// Register a new stream with its clock rate
     pub fn register_stream(&self, ssrc: RtpSsrc, clock_rate: u32, initial_rtp: RtpTimestamp) {
-        if let Ok(mut clocks) = self.clocks.lock() {
-            // Create a new media clock for this stream
-            let clock = MediaClock::now(clock_rate, initial_rtp);
-            clocks.insert(ssrc, clock);
-        }
+        let mut clocks = self.clocks.lock();
+        // Create a new media clock for this stream
+        let clock = MediaClock::now(clock_rate, initial_rtp);
+        clocks.insert(ssrc, clock);
     }
-    
+
     /// Update stream timing information from an RTCP sender report
     pub fn update_from_sr(&self, ssrc: RtpSsrc, ntp: NtpTimestamp, rtp: RtpTimestamp) {
-        if let Ok(mut clocks) = self.clocks.lock() {
-            // If we have a clock for this stream, update it
-            if let Some(clock) = clocks.get_mut(&ssrc) {
-                clock.update_reference(rtp, ntp);
-            } else {
-                // If not, create one if we know the clock rate
-                // (fallback to common rates based on payload type)
-                let clock_rate = 8000; // Default to 8kHz
-                let clock = MediaClock::new(clock_rate, rtp, ntp);
-                clocks.insert(ssrc, clock);
-            }
+        let mut clocks = self.clocks.lock();
+        // If we have a clock for this stream, update it
+        if let Some(clock) = clocks.get_mut(&ssrc) {
+            clock.update_reference(rtp, ntp);
+        } else {
+            // If not, create one if we know the clock rate
+            // (fallback to common rates based on payload type)
+            let clock_rate = 8000; // Default to 8kHz
+            let clock = MediaClock::new(clock_rate, rtp, ntp);
+            clocks.insert(ssrc, clock);
         }
     }
     
@@ -174,33 +173,29 @@ impl TimestampMapper {
         ntp: NtpTimestamp,
     ) -> Option<f64> {
         // Get the clock rates
-        let (source_rate, target_rate) = if let Ok(clocks) = self.clocks.lock() {
+        let (source_rate, target_rate) = {
+            let clocks = self.clocks.lock();
             let source_clock = clocks.get(&source_ssrc)?;
             let target_clock = clocks.get(&target_ssrc)?;
             (source_clock.clock_rate(), target_clock.clock_rate())
-        } else {
-            return None;
         };
-        
-        if let Ok(mut mappings) = self.mappings.lock() {
-            let key = (source_ssrc, target_ssrc);
-            
-            // Check if mapping already exists
-            if let Some(mapping) = mappings.get_mut(&key) {
-                // Update existing mapping
-                let drift = mapping.update(source_rtp, target_rtp, ntp);
-                Some(drift)
-            } else {
-                // Create new mapping
-                let mapping = StreamMapping::new(
-                    source_ssrc, target_ssrc, source_rate, target_rate,
-                    source_rtp, target_rtp, ntp
-                );
-                mappings.insert(key, mapping);
-                Some(0.0) // No drift initially
-            }
+
+        let mut mappings = self.mappings.lock();
+        let key = (source_ssrc, target_ssrc);
+
+        // Check if mapping already exists
+        if let Some(mapping) = mappings.get_mut(&key) {
+            // Update existing mapping
+            let drift = mapping.update(source_rtp, target_rtp, ntp);
+            Some(drift)
         } else {
-            None
+            // Create new mapping
+            let mapping = StreamMapping::new(
+                source_ssrc, target_ssrc, source_rate, target_rate,
+                source_rtp, target_rtp, ntp
+            );
+            mappings.insert(key, mapping);
+            Some(0.0) // No drift initially
         }
     }
     
@@ -211,61 +206,45 @@ impl TimestampMapper {
         target_ssrc: RtpSsrc,
         source_rtp: RtpTimestamp,
     ) -> Option<RtpTimestamp> {
-        if let Ok(mappings) = self.mappings.lock() {
-            let key = (source_ssrc, target_ssrc);
-            
-            if let Some(mapping) = mappings.get(&key) {
-                // Direct mapping exists
-                Some(mapping.map_timestamp(source_rtp))
-            } else {
-                // Try indirect mapping via NTP timestamps
-                if let Ok(clocks) = self.clocks.lock() {
-                    let source_clock = clocks.get(&source_ssrc)?;
-                    let target_clock = clocks.get(&target_ssrc)?;
-                    
-                    // Convert source RTP to NTP
-                    let ntp = source_clock.rtp_to_ntp(source_rtp);
-                    
-                    // Convert NTP to target RTP
-                    Some(target_clock.ntp_to_rtp(ntp))
-                } else {
-                    None
-                }
-            }
+        let mappings = self.mappings.lock();
+        let key = (source_ssrc, target_ssrc);
+
+        if let Some(mapping) = mappings.get(&key) {
+            // Direct mapping exists
+            Some(mapping.map_timestamp(source_rtp))
         } else {
-            None
+            // Try indirect mapping via NTP timestamps
+            let clocks = self.clocks.lock();
+            let source_clock = clocks.get(&source_ssrc)?;
+            let target_clock = clocks.get(&target_ssrc)?;
+
+            // Convert source RTP to NTP
+            let ntp = source_clock.rtp_to_ntp(source_rtp);
+
+            // Convert NTP to target RTP
+            Some(target_clock.ntp_to_rtp(ntp))
         }
     }
     
     /// Get estimated clock drift between two streams in PPM
     pub fn get_drift(&self, source_ssrc: RtpSsrc, target_ssrc: RtpSsrc) -> Option<f64> {
-        if let Ok(mappings) = self.mappings.lock() {
-            let key = (source_ssrc, target_ssrc);
-            
-            mappings.get(&key).map(|mapping| mapping.drift_ppm)
-        } else {
-            None
-        }
+        let mappings = self.mappings.lock();
+        let key = (source_ssrc, target_ssrc);
+        mappings.get(&key).map(|mapping| mapping.drift_ppm)
     }
     
     /// Convert an RTP timestamp to wall clock time
     pub fn rtp_to_wallclock(&self, ssrc: RtpSsrc, rtp: RtpTimestamp) -> Option<Instant> {
-        if let Ok(clocks) = self.clocks.lock() {
-            let clock = clocks.get(&ssrc)?;
-            Some(clock.rtp_to_system_time(rtp))
-        } else {
-            None
-        }
+        let clocks = self.clocks.lock();
+        let clock = clocks.get(&ssrc)?;
+        Some(clock.rtp_to_system_time(rtp))
     }
-    
+
     /// Convert wall clock time to an RTP timestamp
     pub fn wallclock_to_rtp(&self, ssrc: RtpSsrc, time: Instant) -> Option<RtpTimestamp> {
-        if let Ok(clocks) = self.clocks.lock() {
-            let clock = clocks.get(&ssrc)?;
-            Some(clock.system_time_to_rtp(time))
-        } else {
-            None
-        }
+        let clocks = self.clocks.lock();
+        let clock = clocks.get(&ssrc)?;
+        Some(clock.system_time_to_rtp(time))
     }
     
     /// Get the synchronization offset between two streams in milliseconds
@@ -274,44 +253,42 @@ impl TimestampMapper {
     /// and should be delayed to achieve synchronization.
     pub fn get_sync_offset(&self, source_ssrc: RtpSsrc, target_ssrc: RtpSsrc) -> Option<f64> {
         // Try to get the direct mapping
-        if let Ok(mappings) = self.mappings.lock() {
+        {
+            let mappings = self.mappings.lock();
             let key = (source_ssrc, target_ssrc);
-            
+
             if let Some(mapping) = mappings.get(&key) {
                 // Calculate how far the streams have drifted
                 let elapsed = Instant::now().duration_since(mapping.last_update).as_secs_f64();
-                
+
                 // Drift in ms per second * elapsed seconds = total drift in ms
                 let drift_ms = (mapping.drift_ppm / 1000.0) * elapsed;
-                
+
                 return Some(drift_ms);
             }
         }
-        
+
         // If no direct mapping, try to calculate via NTP timestamps
-        if let Ok(clocks) = self.clocks.lock() {
-            let source_clock = clocks.get(&source_ssrc)?;
-            let target_clock = clocks.get(&target_ssrc)?;
-            
-            // Create a common reference point (now)
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
-            let ntp = NtpTimestamp::from_duration_since_unix_epoch(now);
-            
-            // Convert to RTP timestamps in each stream's clock domain
-            let source_rtp = source_clock.ntp_to_rtp(ntp);
-            let target_rtp = target_clock.ntp_to_rtp(ntp);
-            
-            // Calculate playback points in seconds
-            let source_seconds = source_rtp as f64 / source_clock.clock_rate() as f64;
-            let target_seconds = target_rtp as f64 / target_clock.clock_rate() as f64;
-            
-            // Calculate offset in milliseconds
-            let offset_ms = (target_seconds - source_seconds) * 1000.0;
-            
-            Some(offset_ms)
-        } else {
-            None
-        }
+        let clocks = self.clocks.lock();
+        let source_clock = clocks.get(&source_ssrc)?;
+        let target_clock = clocks.get(&target_ssrc)?;
+
+        // Create a common reference point (now)
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+        let ntp = NtpTimestamp::from_duration_since_unix_epoch(now);
+
+        // Convert to RTP timestamps in each stream's clock domain
+        let source_rtp = source_clock.ntp_to_rtp(ntp);
+        let target_rtp = target_clock.ntp_to_rtp(ntp);
+
+        // Calculate playback points in seconds
+        let source_seconds = source_rtp as f64 / source_clock.clock_rate() as f64;
+        let target_seconds = target_rtp as f64 / target_clock.clock_rate() as f64;
+
+        // Calculate offset in milliseconds
+        let offset_ms = (target_seconds - source_seconds) * 1000.0;
+
+        Some(offset_ms)
     }
 }
 

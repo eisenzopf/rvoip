@@ -9,6 +9,7 @@ use crate::dtls::Result;
 // Add crypto imports
 use x509_parser::prelude::*;
 use sha2::{Sha256, Digest};
+use tracing::{debug, warn};
 
 /// Certificate for DTLS connections
 #[derive(Debug, Clone)]
@@ -124,7 +125,10 @@ impl Certificate {
             });
         }
         
-        Ok(self.parsed.as_ref().unwrap())
+        self.parsed.as_ref()
+            .ok_or_else(|| crate::error::Error::CryptoError(
+                "Certificate parsing produced no result".to_string()
+            ))
     }
     
     /// Get the certificate's fingerprint
@@ -222,45 +226,171 @@ pub struct BasicCertificateVerifier;
 
 impl CertificateVerifier for BasicCertificateVerifier {
     fn verify(&self, cert: &Certificate, trusted_roots: &[Certificate]) -> Result<bool> {
-        let mut cert_clone = cert.clone();
-        let parsed = cert_clone.parse()?;
-        
+        // Parse the certificate directly from DER to get full x509 access
+        let (_, x509_cert) = X509Certificate::from_der(cert.der())
+            .map_err(|e| crate::error::Error::CertificateValidationError(
+                format!("Failed to parse certificate for verification: {}", e)
+            ))?;
+
+        // Check validity period against current time
+        if !check_validity_period(&x509_cert)? {
+            return Ok(false);
+        }
+
         // Check if the certificate is signed by a trusted root
         for root in trusted_roots {
-            let mut root_clone = root.clone();
-            let root_parsed = root_clone.parse()?;
-            
+            let (_, root_x509) = X509Certificate::from_der(root.der())
+                .map_err(|e| crate::error::Error::CertificateValidationError(
+                    format!("Failed to parse root certificate: {}", e)
+                ))?;
+
             // If the issuer of the certificate matches the subject of the root,
             // then the certificate might be signed by the root
-            if parsed.issuer == root_parsed.subject {
-                // In a real implementation, we would check if the signature is valid
-                // using the public key of the root certificate, but for simplicity
-                // we'll assume it's valid
-                
-                // Also check if the certificate is not expired
-                // Parse not_before and not_after strings to DateTime
-                // For simplicity, we'll just assume it's valid
-                
+            if x509_cert.issuer() == root_x509.subject() {
+                // Verify the signature using the root certificate's public key
+                if let Err(e) = x509_cert.verify_signature(Some(&root_x509.tbs_certificate.subject_pki)) {
+                    warn!(
+                        "Certificate signature verification failed against root '{}': {}",
+                        root_x509.subject(), e
+                    );
+                    continue;
+                }
+
+                debug!(
+                    "Certificate '{}' verified against root '{}'",
+                    x509_cert.subject(), root_x509.subject()
+                );
                 return Ok(true);
             }
         }
-        
+
         // No matching root found
+        warn!(
+            "No trusted root found for certificate issuer '{}'",
+            x509_cert.issuer()
+        );
         Ok(false)
     }
 }
 
 /// Self-signed certificate verifier
 ///
-/// This is useful for testing and development, but should not be used in production
-pub struct SelfSignedCertificateVerifier;
+/// Verifies that a self-signed certificate has a valid signature (signed by its own key)
+/// and is within its validity period. Optionally verifies a fingerprint if provided.
+pub struct SelfSignedCertificateVerifier {
+    /// Optional expected fingerprint algorithm (e.g. "SHA-256")
+    expected_fingerprint_algorithm: Option<String>,
+
+    /// Optional expected fingerprint value
+    expected_fingerprint: Option<String>,
+}
+
+impl SelfSignedCertificateVerifier {
+    /// Create a new self-signed certificate verifier without fingerprint checking
+    pub fn new() -> Self {
+        Self {
+            expected_fingerprint_algorithm: None,
+            expected_fingerprint: None,
+        }
+    }
+
+    /// Create a new self-signed certificate verifier with fingerprint checking
+    pub fn with_fingerprint(algorithm: String, fingerprint: String) -> Self {
+        Self {
+            expected_fingerprint_algorithm: Some(algorithm),
+            expected_fingerprint: Some(fingerprint),
+        }
+    }
+}
 
 impl CertificateVerifier for SelfSignedCertificateVerifier {
-    fn verify(&self, _cert: &Certificate, _trusted_roots: &[Certificate]) -> Result<bool> {
-        // In a self-signed certificate verifier, we assume all certificates are valid
-        // This is ONLY intended for testing and development
+    fn verify(&self, cert: &Certificate, _trusted_roots: &[Certificate]) -> Result<bool> {
+        // Parse the certificate from DER
+        let (_, x509_cert) = X509Certificate::from_der(cert.der())
+            .map_err(|e| crate::error::Error::CertificateValidationError(
+                format!("Failed to parse self-signed certificate: {}", e)
+            ))?;
+
+        // Check validity period
+        if !check_validity_period(&x509_cert)? {
+            return Ok(false);
+        }
+
+        // Verify the self-signed signature: the certificate should be signed by its own public key
+        if let Err(e) = x509_cert.verify_signature(Some(&x509_cert.tbs_certificate.subject_pki)) {
+            warn!(
+                "Self-signed certificate signature verification failed for '{}': {}",
+                x509_cert.subject(), e
+            );
+            return Err(crate::error::Error::CertificateValidationError(
+                format!("Self-signed signature verification failed: {}", e)
+            ));
+        }
+
+        debug!(
+            "Self-signed certificate '{}' signature verified successfully",
+            x509_cert.subject()
+        );
+
+        // If a fingerprint is provided, verify it matches
+        if let (Some(algorithm), Some(expected_fp)) =
+            (&self.expected_fingerprint_algorithm, &self.expected_fingerprint)
+        {
+            let mut cert_clone = cert.clone();
+            let actual_fp = cert_clone.fingerprint(algorithm)?;
+            if !actual_fp.eq_ignore_ascii_case(expected_fp) {
+                warn!(
+                    "Fingerprint mismatch: expected '{}', got '{}'",
+                    expected_fp, actual_fp
+                );
+                return Err(crate::error::Error::CertificateValidationError(
+                    format!(
+                        "Fingerprint mismatch: expected '{}', got '{}'",
+                        expected_fp, actual_fp
+                    )
+                ));
+            }
+            debug!("Fingerprint verification passed");
+        }
+
         Ok(true)
     }
+}
+
+/// Check the validity period of an X.509 certificate against the current system time.
+///
+/// Returns `Ok(true)` if the certificate is currently valid, `Ok(false)` if it is
+/// expired or not yet valid. Returns an error only if the system time cannot be determined.
+fn check_validity_period(x509_cert: &X509Certificate<'_>) -> Result<bool> {
+    let validity = x509_cert.validity();
+
+    // x509-parser's ASN1Time can be compared directly with time::OffsetDateTime
+    let now = ::time::OffsetDateTime::now_utc();
+
+    // Convert ASN1Time to a comparable form using the raw timestamp
+    let not_before_ts = validity.not_before.timestamp();
+    let not_after_ts = validity.not_after.timestamp();
+    let now_ts = now.unix_timestamp();
+
+    if now_ts < not_before_ts {
+        warn!(
+            "Certificate '{}' is not yet valid (not_before: {})",
+            x509_cert.subject(),
+            validity.not_before
+        );
+        return Ok(false);
+    }
+
+    if now_ts > not_after_ts {
+        warn!(
+            "Certificate '{}' has expired (not_after: {})",
+            x509_cert.subject(),
+            validity.not_after
+        );
+        return Ok(false);
+    }
+
+    Ok(true)
 }
 
 /// Certificate chain verifier

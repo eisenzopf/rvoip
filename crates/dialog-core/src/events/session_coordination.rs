@@ -207,6 +207,73 @@ pub enum SessionCoordinationEvent {
         layer: String, // "media", "client", etc.
     },
     
+    /// PUBLISH request received (RFC 3903 event state publication)
+    PublishReceived {
+        /// Transaction ID for the PUBLISH
+        transaction_id: TransactionKey,
+
+        /// Event type from the Event header
+        event_type: String,
+
+        /// Body content (event state document)
+        body: Option<Vec<u8>>,
+
+        /// Content-Type of the body
+        content_type: Option<String>,
+
+        /// Source address
+        source: SocketAddr,
+    },
+
+    /// PRACK request received (RFC 3262 reliable provisional response acknowledgement)
+    PrackReceived {
+        /// Dialog ID for the PRACK
+        dialog_id: DialogId,
+
+        /// Transaction ID for the PRACK
+        transaction_id: TransactionKey,
+
+        /// RAck header value (response-num cseq-num method)
+        rack_value: String,
+
+        /// The PRACK request
+        request: Request,
+    },
+
+    /// MESSAGE request received (RFC 3428 instant messaging)
+    MessageReceived {
+        /// Transaction ID for the MESSAGE
+        transaction_id: TransactionKey,
+
+        /// Body content (message text)
+        body: Option<Vec<u8>>,
+
+        /// Content-Type of the body
+        content_type: Option<String>,
+
+        /// Source address
+        source: SocketAddr,
+
+        /// The original MESSAGE request
+        request: Request,
+    },
+
+    /// Forked response detected (RFC 3261 Section 13.2.2.4)
+    ///
+    /// Emitted when a 1xx or 2xx response to a client INVITE arrives with a
+    /// different To-tag than any existing dialog for this Call-ID, indicating
+    /// that a downstream proxy forked the request.
+    ForkedResponse {
+        /// Call-ID shared by every fork in the group
+        call_id: String,
+
+        /// Dialog created (or matched) for this particular fork
+        dialog_id: DialogId,
+
+        /// Status code of the forked response (e.g. 180, 200)
+        status_code: u16,
+    },
+
     /// Call transfer request received (REFER)
     TransferRequest {
         /// Dialog ID for the call being transferred

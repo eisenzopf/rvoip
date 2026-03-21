@@ -11,6 +11,9 @@ use crate::api::types::{SessionId, IncomingCall, CallDecision};
 use crate::api::call::SimpleCall;
 use crate::api::handlers::CallHandler;
 use crate::coordinator::SessionCoordinator;
+use crate::coordinator::registration::{
+    self, ManagedRegistration, RegistrationConfig, RegistrationState,
+};
 use crate::errors::{Result, SessionError};
 
 /// A SIP peer that can make and receive calls
@@ -53,6 +56,11 @@ pub struct SimplePeer {
     registrar: Option<String>,
     pub(crate) local_addr: String,
     pub(crate) port: u16,
+    /// Active managed registration (handles refresh and auth)
+    managed_registration: Option<Arc<ManagedRegistration>>,
+    /// Optional credentials for authenticated registration
+    auth_username: Option<String>,
+    auth_password: Option<String>,
 }
 
 /// Builder for creating a SimplePeer with custom configuration
@@ -60,6 +68,7 @@ pub struct PeerBuilder {
     identity: String,
     local_addr: Option<String>,
     port: Option<u16>,
+    transport: Option<crate::api::builder::SipTransportType>,
 }
 
 impl PeerBuilder {
@@ -68,10 +77,28 @@ impl PeerBuilder {
         self.local_addr = Some(addr.to_string());
         self
     }
-    
+
     /// Set the port to bind to (default: 5060)
     pub fn port(mut self, port: u16) -> Self {
         self.port = Some(port);
+        self
+    }
+
+    /// Use WebSocket (WS) transport for SIP signaling
+    ///
+    /// Enables SIP over WebSocket as defined in RFC 7118.
+    /// The port defaults to 8080 when WebSocket is selected and no port is specified.
+    pub fn with_websocket(mut self) -> Self {
+        self.transport = Some(crate::api::builder::SipTransportType::Ws);
+        self
+    }
+
+    /// Use Secure WebSocket (WSS) transport for SIP signaling
+    ///
+    /// Enables SIP over Secure WebSocket (TLS) as defined in RFC 7118.
+    /// The port defaults to 8443 when WSS is selected and no port is specified.
+    pub fn with_secure_websocket(mut self) -> Self {
+        self.transport = Some(crate::api::builder::SipTransportType::Wss);
         self
     }
 }
@@ -84,9 +111,19 @@ impl std::future::IntoFuture for PeerBuilder {
     fn into_future(self) -> Self::IntoFuture {
         Box::pin(async move {
             let local_addr = self.local_addr.unwrap_or_else(|| "0.0.0.0".to_string());
-            let port = self.port.unwrap_or(5060);
-            
-            SimplePeer::create(&self.identity, &local_addr, port).await
+            let default_port = match &self.transport {
+                Some(crate::api::builder::SipTransportType::Ws) => 8080,
+                Some(crate::api::builder::SipTransportType::Wss) => 8443,
+                _ => 5060,
+            };
+            let port = self.port.unwrap_or(default_port);
+
+            SimplePeer::create_with_transport(
+                &self.identity,
+                &local_addr,
+                port,
+                self.transport,
+            ).await
         })
     }
 }
@@ -200,39 +237,55 @@ impl SimplePeer {
             identity: identity.to_string(),
             local_addr: None,
             port: None,
+            transport: None,
         }
     }
-    
+
     /// Internal method to create a peer with specific configuration
     async fn create(identity: &str, local_addr: &str, port: u16) -> Result<Self> {
+        Self::create_with_transport(identity, local_addr, port, None).await
+    }
+
+    /// Internal method to create a peer with specific transport configuration
+    async fn create_with_transport(
+        identity: &str,
+        local_addr: &str,
+        port: u16,
+        transport: Option<crate::api::builder::SipTransportType>,
+    ) -> Result<Self> {
         use crate::api::builder::SessionManagerBuilder;
-        
+
         // Create channel for incoming calls
         let (tx, rx) = mpsc::channel(100);
-        
+
         // Create handler with a deferred coordinator reference
-        let handler = Arc::new(IncomingCallRouter { 
+        let handler = Arc::new(IncomingCallRouter {
             tx,
             coordinator: Arc::new(RwLock::new(None)),
         });
-        
+
         // Parse the bind address
         let bind_addr = format!("{}:{}", local_addr, port);
         let local_bind_addr = bind_addr.parse()
             .map_err(|_| SessionError::ConfigError("Invalid address".to_string()))?;
-        
+
         // Use SessionManagerBuilder to properly create the coordinator with handler
-        let coordinator = SessionManagerBuilder::new()
+        let mut builder = SessionManagerBuilder::new()
             .with_sip_port(port)
             .with_local_address(&format!("sip:{}@{}:{}", identity, local_addr, port))
             .with_local_bind_addr(local_bind_addr)
-            .with_handler(handler.clone())
-            .build()
-            .await?;
-        
+            .with_handler(handler.clone());
+
+        // Apply transport type if specified
+        if let Some(t) = transport {
+            builder = builder.with_transport(t);
+        }
+
+        let coordinator = builder.build().await?;
+
         // Now set the coordinator reference in the handler
         *handler.coordinator.write().await = Some(coordinator.clone());
-        
+
         Ok(Self {
             identity: identity.to_string(),
             coordinator,
@@ -240,26 +293,100 @@ impl SimplePeer {
             registrar: None,
             local_addr: local_addr.to_string(),
             port,
+            managed_registration: None,
+            auth_username: None,
+            auth_password: None,
         })
     }
     
+    /// Set authentication credentials for registration
+    ///
+    /// Call this before `register()` if the registrar requires authentication.
+    ///
+    /// # Arguments
+    /// * `username` - Authentication username
+    /// * `password` - Authentication password
+    pub fn set_credentials(&mut self, username: &str, password: &str) {
+        self.auth_username = Some(username.to_string());
+        self.auth_password = Some(password.to_string());
+    }
+
     /// Register with a SIP server
-    /// 
+    ///
     /// After registration, you can make calls using just the username
     /// (e.g., "bob" instead of "bob@server.com").
+    ///
+    /// If the registrar responds with 401/407, credentials set via
+    /// `set_credentials()` are used for digest authentication.
+    ///
+    /// A background task will automatically refresh the registration
+    /// at 85% of the expiry interval.
     pub async fn register(&mut self, server: &str) -> Result<()> {
+        let contact_uri = format!("sip:{}@{}:{}", self.identity, self.local_addr, self.port);
+        let from_uri = if server.contains("@") {
+            // Server URI might contain a domain we can use
+            format!("sip:{}@{}", self.identity, server.trim_start_matches("sip:"))
+        } else {
+            let domain = server.trim_start_matches("sip:").trim_start_matches("sips:");
+            format!("sip:{}@{}", self.identity, domain)
+        };
+        let registrar_uri = if server.starts_with("sip:") || server.starts_with("sips:") {
+            server.to_string()
+        } else {
+            format!("sip:{}", server)
+        };
+
+        let config = RegistrationConfig {
+            registrar_uri: registrar_uri.clone(),
+            from_uri,
+            contact_uri,
+            expires: 3600,
+            username: self.auth_username.clone(),
+            password: self.auth_password.clone(),
+        };
+
+        let managed = registration::register_managed(&self.coordinator, config).await?;
+        self.managed_registration = Some(managed);
         self.registrar = Some(server.to_string());
-        // TODO: Implement actual SIP REGISTER
-        tracing::info!("Registered {} to {}", self.identity, server);
+
+        tracing::info!(
+            identity = %self.identity,
+            registrar = %registrar_uri,
+            "Registration active with refresh timer"
+        );
         Ok(())
     }
-    
+
+    /// Register with a SIP server using explicit credentials
+    ///
+    /// Convenience method that sets credentials and registers in one call.
+    pub async fn register_with_credentials(
+        &mut self,
+        server: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<()> {
+        self.set_credentials(username, password);
+        self.register(server).await
+    }
+
+    /// Get the current registration state, if registered
+    pub fn registration_state(&self) -> Option<RegistrationState> {
+        self.managed_registration.as_ref().map(|r| r.state())
+    }
+
     /// Unregister from the SIP server
+    ///
+    /// Sends REGISTER with Expires: 0 and stops the refresh timer.
     pub async fn unregister(&mut self) -> Result<()> {
-        if let Some(server) = self.registrar.take() {
-            // TODO: Send unregister
-            tracing::info!("Unregistered {} from {}", self.identity, server);
+        if let Some(managed) = self.managed_registration.take() {
+            registration::unregister_managed(&self.coordinator, &managed).await?;
+            tracing::info!(
+                identity = %self.identity,
+                "Unregistered from SIP server"
+            );
         }
+        self.registrar.take();
         Ok(())
     }
     
@@ -317,7 +444,7 @@ impl SimplePeer {
             format!("tel:{}", target)
         } else if target.contains("@") {
             // User@host format
-            if target.contains(":") && target.split('@').nth(1).unwrap().contains(":") {
+            if target.contains(":") && target.split('@').nth(1).map_or(false, |host| host.contains(":")) {
                 // Already has port
                 format!("sip:{}", target)
             } else {

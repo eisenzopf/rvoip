@@ -67,8 +67,9 @@ fn test_crypto_suite(name: &str, suite: SrtpCryptoSuite) -> Result<()> {
     
     let srtp_key = SrtpCryptoKey::new(master_key, master_salt);
     
-    // Create SRTP crypto context
-    let crypto = SrtpCrypto::new(suite.clone(), srtp_key)?;
+    // Create separate SRTP crypto contexts for encrypt and decrypt directions
+    let mut crypto = SrtpCrypto::new(suite.clone(), srtp_key.clone())?;
+    let mut decrypt_crypto = SrtpCrypto::new(suite.clone(), srtp_key)?;
     
     // Create test RTP packets with different payload types and content
     let packets = vec![
@@ -114,8 +115,8 @@ fn test_crypto_suite(name: &str, suite: SrtpCryptoSuite) -> Result<()> {
             println!("Added authentication tag of {} bytes", tag.len());
         }
         
-        // Decrypt the packet
-        let decrypted = crypto.decrypt_rtp(&packet_with_auth)?;
+        // Decrypt the packet using the separate decrypt context
+        let decrypted = decrypt_crypto.decrypt_rtp(&packet_with_auth)?;
         
         // Print decrypted packet details
         println!("Decrypted: PT={}, SEQ={}, TS={}, SSRC={:#X}, Payload[{}]: {:?}",
@@ -155,21 +156,21 @@ fn test_tamper_resistance() -> Result<()> {
     
     let srtp_key = SrtpCryptoKey::new(master_key, master_salt);
     
-    // Create SRTP crypto context
-    let crypto = SrtpCrypto::new(suite.clone(), srtp_key.clone())?;
-    
+    // Create separate SRTP crypto contexts for encrypt and decrypt
+    let mut enc_crypto = SrtpCrypto::new(suite.clone(), srtp_key.clone())?;
+
     // Create a test packet
-    let packet = create_test_packet(96, 1000, 12345, 0xABCD0001, 
+    let packet = create_test_packet(96, 1000, 12345, 0xABCD0001,
                                   "This packet will be tampered with");
-    
+
     // Encrypt the packet and get authentication tag
-    let (encrypted, auth_tag) = crypto.encrypt_rtp(&packet)?;
+    let (encrypted, auth_tag) = enc_crypto.encrypt_rtp(&packet)?;
     let serialized = encrypted.serialize()?;
-    
+
     // Build packet with authentication tag
     let mut packet_with_auth = BytesMut::with_capacity(serialized.len() + suite.tag_length);
     packet_with_auth.extend_from_slice(&serialized);
-    
+
     if let Some(tag) = auth_tag {
         packet_with_auth.extend_from_slice(&tag);
         println!("Added authentication tag of {} bytes", tag.len());
@@ -177,43 +178,46 @@ fn test_tamper_resistance() -> Result<()> {
         println!("ERROR: No authentication tag returned, cannot test tamper resistance");
         return Ok(());
     }
-    
-    // Try decrypting untampered packet - should succeed
+
+    // Try decrypting untampered packet - should succeed (fresh decrypt context)
     println!("Attempting to decrypt untampered packet...");
-    match crypto.decrypt_rtp(&packet_with_auth) {
+    let mut dec_crypto1 = SrtpCrypto::new(suite.clone(), srtp_key.clone())?;
+    match dec_crypto1.decrypt_rtp(&packet_with_auth) {
         Ok(_) => println!("Success: Untampered packet decrypted correctly"),
         Err(e) => println!("ERROR: Failed to decrypt untampered packet: {}", e),
     }
-    
+
     // Now tamper with the payload
     println!("\nAttempting to decrypt packet with tampered payload...");
     let mut tampered = packet_with_auth.to_vec();
-    
+
     // Modify a byte in the middle of the packet (payload)
     let header_size = 12; // Standard RTP header size
     if tampered.len() > header_size + 5 {
         // Flip some bits in the payload
         tampered[header_size + 5] ^= 0x42;
-        
+
         // Try to decrypt the tampered packet - should fail due to auth tag mismatch
-        let result = crypto.decrypt_rtp(&tampered);
+        let mut dec_crypto2 = SrtpCrypto::new(suite.clone(), srtp_key.clone())?;
+        let result = dec_crypto2.decrypt_rtp(&tampered);
         match result {
             Ok(_) => println!("ERROR: Tampered packet was accepted!"),
             Err(e) => println!("Success: Tampered packet correctly rejected: {}", e),
         }
     }
-    
+
     // Now tamper with the authentication tag itself
     println!("\nAttempting to decrypt packet with tampered authentication tag...");
     let mut tampered = packet_with_auth.to_vec();
-    
+
     // Modify the last byte of the auth tag
-    if tampered.len() > 0 {
+    if !tampered.is_empty() {
         let last_idx = tampered.len() - 1;
         tampered[last_idx] ^= 0xFF; // Flip all bits in last byte
-        
+
         // Try to decrypt the tampered packet - should fail
-        let result = crypto.decrypt_rtp(&tampered);
+        let mut dec_crypto3 = SrtpCrypto::new(suite, srtp_key)?;
+        let result = dec_crypto3.decrypt_rtp(&tampered);
         match result {
             Ok(_) => println!("ERROR: Packet with tampered auth tag was accepted!"),
             Err(e) => println!("Success: Packet with tampered auth tag correctly rejected: {}", e),

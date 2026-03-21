@@ -104,11 +104,11 @@ impl TransportManager {
         // Initialize UDP transport if enabled
         if self.config.enable_udp {
             let addresses = if self.config.bind_addresses.is_empty() {
-                vec!["0.0.0.0:5060".parse().unwrap()]
+                vec![SocketAddr::from(([0, 0, 0, 0], 5060))]
             } else {
                 self.config.bind_addresses.clone()
             };
-            
+
             for addr in addresses {
                 match self.add_udp_transport(addr).await {
                     Ok(transport) => {
@@ -130,11 +130,11 @@ impl TransportManager {
         // Initialize TCP transport if enabled
         if self.config.enable_tcp {
             let addresses = if self.config.bind_addresses.is_empty() {
-                vec!["0.0.0.0:5060".parse().unwrap()]
+                vec![SocketAddr::from(([0, 0, 0, 0], 5060))]
             } else {
                 self.config.bind_addresses.clone()
             };
-            
+
             for addr in addresses {
                 match self.add_tcp_transport(addr, false).await {
                     Ok(_) => {
@@ -152,7 +152,7 @@ impl TransportManager {
                     warn!("TLS is enabled but certificate or key path is missing");
                 } else {
                     let addresses = if self.config.bind_addresses.is_empty() {
-                        vec!["0.0.0.0:5061".parse().unwrap()]
+                        vec![SocketAddr::from(([0, 0, 0, 0], 5061))]
                     } else {
                         self.config.bind_addresses.clone()
                     };
@@ -174,7 +174,7 @@ impl TransportManager {
         // Initialize WebSocket transport if enabled
         if self.config.enable_ws {
             let addresses = if self.config.bind_addresses.is_empty() {
-                vec!["0.0.0.0:8080".parse().unwrap()]
+                vec![SocketAddr::from(([0, 0, 0, 0], 8080))]
             } else {
                 self.config.bind_addresses.clone()
             };
@@ -196,7 +196,7 @@ impl TransportManager {
                     warn!("TLS is enabled but certificate or key path is missing");
                 } else {
                     let addresses = if self.config.bind_addresses.is_empty() {
-                        vec!["0.0.0.0:8443".parse().unwrap()]
+                        vec![SocketAddr::from(([0, 0, 0, 0], 8443))]
                     } else {
                         self.config.bind_addresses.clone()
                     };
@@ -344,7 +344,12 @@ impl TransportManager {
     
     /// Starts processing transport events
     fn start_event_processing(&self) {
-        *self.running.try_lock().unwrap() = true;
+        match self.running.try_lock() {
+            Ok(mut guard) => *guard = true,
+            Err(_) => {
+                warn!("Failed to acquire lock for start_event_processing, another task may be holding it");
+            }
+        }
     }
     
     /// Processes events from a specific transport

@@ -214,7 +214,9 @@ impl AudioCodec for G729Codec {
         {
             self.ensure_encoder()?;
             
-            let encoder = self.encoder.as_mut().unwrap();
+            let encoder = self.encoder.as_mut().ok_or_else(|| CodecError::InitializationFailed {
+                reason: "G.729 encoder not initialized after ensure_encoder".to_string(),
+            })?;
             let encoded = encoder.encode(&audio_frame.samples)
                 .map_err(|e| CodecError::EncodingFailed {
                     reason: format!("G.729 encoding failed: {:?}", e),
@@ -244,7 +246,9 @@ impl AudioCodec for G729Codec {
         {
             self.ensure_decoder()?;
             
-            let decoder = self.decoder.as_mut().unwrap();
+            let decoder = self.decoder.as_mut().ok_or_else(|| CodecError::InitializationFailed {
+                reason: "G.729 decoder not initialized after ensure_decoder".to_string(),
+            })?;
             let decoded_samples = decoder.decode(encoded_data)
                 .map_err(|e| CodecError::DecodingFailed {
                     reason: format!("G.729 decoding failed: {:?}", e),

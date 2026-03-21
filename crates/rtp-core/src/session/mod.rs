@@ -13,7 +13,8 @@ use bytes::Bytes;
 use rand::Rng;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, broadcast};
@@ -93,7 +94,7 @@ pub struct RtpSessionConfig {
 impl Default for RtpSessionConfig {
     fn default() -> Self {
         Self {
-            local_addr: "0.0.0.0:0".parse().unwrap(),
+            local_addr: "0.0.0.0:0".parse().expect("BUG: constant address literal must parse"),
             remote_addr: None,
             ssrc: None,
             payload_type: 0,
@@ -222,7 +223,7 @@ pub struct RtpSession {
     stats: Arc<Mutex<RtpSessionStats>>,
     
     /// Media synchronization context
-    media_sync: Option<Arc<std::sync::RwLock<crate::sync::MediaSync>>>,
+    media_sync: Option<Arc<parking_lot::RwLock<crate::sync::MediaSync>>>,
     
     /// Whether the session is active
     active: bool,
@@ -243,7 +244,7 @@ impl RtpSession {
         // Generate SSRC if not provided
         let ssrc = config.ssrc.unwrap_or_else(|| {
             let mut rng = rand::thread_rng();
-            rng.gen::<u32>()
+            rng.r#gen::<u32>()
         });
         
         // Create transport config - respect provided ports!
@@ -269,8 +270,8 @@ impl RtpSession {
         // Create scheduler if needed
         let scheduler = Some(RtpScheduler::new(
             config.clock_rate,
-            rand::thread_rng().gen::<u16>(), // Random starting sequence
-            rand::thread_rng().gen::<u32>(), // Random starting timestamp
+            rand::thread_rng().r#gen::<u16>(), // Random starting sequence
+            rand::thread_rng().r#gen::<u32>(), // Random starting timestamp
         ));
         
         // Create RTCP report generator
@@ -403,7 +404,8 @@ impl RtpSession {
                 debug!("Successfully sent RTP packet to {}", dest);
                 
                 // Update stats
-                if let Ok(mut session_stats) = stats_send.lock() {
+                {
+                    let mut session_stats = stats_send.lock();
                     session_stats.packets_sent += 1;
                     session_stats.bytes_sent += packet.size() as u64;
                 }
@@ -423,7 +425,7 @@ impl RtpSession {
                 match transport_events.recv().await {
                     Ok(crate::traits::RtpEvent::RtcpReceived { data, source }) => {
                         // Try to parse the RTCP packet
-                        if let Ok(rtcp_packet) = crate::packet::rtcp::RtcpPacket::parse(&data) {
+                        match crate::packet::rtcp::RtcpPacket::parse(&data) { Ok(rtcp_packet) => {
                             // Handle the RTCP packet based on its type
                             match rtcp_packet {
                                 crate::packet::rtcp::RtcpPacket::Goodbye(bye) => {
@@ -447,7 +449,8 @@ impl RtpSession {
                                     debug!("Received RTCP SR from SSRC={:08x}", report_ssrc);
                                     
                                     // Update stream statistics if this stream exists
-                                    if let Ok(mut streams) = streams_map.lock() {
+                                    {
+                                        let mut streams = streams_map.lock();
                                         if let Some(stream) = streams.get_mut(&report_ssrc) {
                                             // Update the stream's RTCP SR info
                                             // This will be used for calculating round-trip time
@@ -462,7 +465,8 @@ impl RtpSession {
                                     
                                     // If media sync is enabled, update it
                                     if let Some(sync) = &media_sync {
-                                        if let Ok(mut media_sync) = sync.write() {
+                                        {
+                                            let mut media_sync = sync.write();
                                             // Update synchronization data
                                             media_sync.update_from_sr(report_ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
                                         }
@@ -491,12 +495,13 @@ impl RtpSession {
                                             debug!("Processing report block about our SSRC={:08x}", ssrc);
                                             
                                             // Update session stats with packet loss info
-                                            if let Ok(mut stats) = stats_recv.lock() {
+                                            {
+                                                let mut stats = stats_recv.lock();
                                                 stats.packets_lost = block.cumulative_lost as u64;
-                                                
+
                                                 // Calculate packet loss percentage
                                                 let fraction_lost = block.fraction_lost as f64 / 256.0;
-                                                debug!("Packet loss: {}% (fraction={})", 
+                                                debug!("Packet loss: {}% (fraction={})",
                                                        fraction_lost * 100.0, block.fraction_lost);
                                             }
                                         }
@@ -514,9 +519,9 @@ impl RtpSession {
                                     trace!("Received RTCP packet: {:?}", rtcp_packet);
                                 }
                             }
-                        } else {
+                        } _ => {
                             warn!("Failed to parse RTCP packet");
-                        }
+                        }}
                     }
                     Ok(crate::traits::RtpEvent::MediaReceived { payload_type, timestamp, payload, source, ssrc: ssrc_from_event, marker, .. }) => {
                         // Handle RTP packets received via transport events
@@ -543,7 +548,8 @@ impl RtpSession {
                         };
                         
                         // Update stats
-                        if let Ok(mut session_stats) = stats_recv.lock() {
+                        {
+                            let mut session_stats = stats_recv.lock();
                             session_stats.packets_received += 1;
                             session_stats.bytes_received += payload.len() as u64 + 12; // payload + header
                             session_stats.remote_addr = Some(source);
@@ -554,13 +560,7 @@ impl RtpSession {
                         
                         // Get or create the stream for this SSRC
                         let (is_new_stream, output_packet) = {
-                            let mut streams = match streams_map.lock() {
-                                Ok(streams) => streams,
-                                Err(e) => {
-                                    error!("Failed to lock streams map: {}", e);
-                                    continue;
-                                }
-                            };
+                            let mut streams = streams_map.lock();
                             
                             let is_new = !streams.contains_key(&packet_ssrc);
                             let stream = streams.entry(packet_ssrc).or_insert_with(|| {
@@ -632,14 +632,15 @@ impl RtpSession {
                     }
                     
                     // Update RTP statistics before sending the report
-                    if let Ok(session_stats) = stats.lock() {
+                    {
+                        let session_stats = stats.lock();
                         rtcp_generator.update_sent_stats(
                             session_stats.packets_sent as u32,
                             session_stats.bytes_sent as u32
                         );
-                        
+
                         // Log the current stats for debugging
-                        debug!("Current stats for RTCP report: packets={}, bytes={}", 
+                        debug!("Current stats for RTCP report: packets={}, bytes={}",
                                session_stats.packets_sent, session_stats.bytes_sent);
                     }
                     
@@ -727,6 +728,48 @@ impl RtpSession {
         }
     }
     
+    /// Send an RTP packet with an explicit payload type, overriding the
+    /// session's default.  This is used for RFC 4733 telephone-event packets
+    /// which carry a different PT than the audio codec.
+    pub async fn send_packet_with_pt(
+        &mut self,
+        timestamp: RtpTimestamp,
+        payload: Bytes,
+        marker: bool,
+        payload_type: u8,
+    ) -> Result<()> {
+        let mut header = RtpHeader::new(
+            payload_type,
+            0, // Sequence number managed by scheduler / send path
+            timestamp,
+            self.ssrc,
+        );
+        header.marker = marker;
+
+        let packet = RtpPacket::new(header, payload);
+
+        if let Some(scheduler) = &mut self.scheduler {
+            scheduler.schedule_packet(packet)
+        } else {
+            self.sender
+                .send(packet)
+                .await
+                .map_err(|_| Error::SessionError("Failed to send packet".to_string()))
+        }
+    }
+
+    /// Returns the last RTP timestamp that was sent.
+    ///
+    /// This is useful for computing the base timestamp of an RFC 4733
+    /// telephone-event sequence, which should start just after the last
+    /// audio packet.
+    pub fn last_timestamp(&self) -> RtpTimestamp {
+        let stats = self.stats.lock();
+        // Use packets_sent * 160 as an approximation (8 kHz, 20 ms ptime).
+        // This keeps the implementation simple without adding extra state.
+        (stats.packets_sent as u32).wrapping_mul(160)
+    }
+
     /// Receive an RTP packet
     pub async fn receive_packet(&mut self) -> Result<RtpPacket> {
         self.receiver.recv()
@@ -736,11 +779,7 @@ impl RtpSession {
     
     /// Get the session statistics
     pub fn get_stats(&self) -> RtpSessionStats {
-        if let Ok(stats) = self.stats.lock() {
-            stats.clone()
-        } else {
-            RtpSessionStats::default()
-        }
+        self.stats.lock().clone()
     }
     
     /// Set the remote address
@@ -748,7 +787,8 @@ impl RtpSession {
         self.config.remote_addr = Some(addr);
         
         // Update stats with remote address
-        if let Ok(mut stats) = self.stats.lock() {
+        {
+            let mut stats = self.stats.lock();
             stats.remote_addr = Some(addr);
         }
         
@@ -867,58 +907,36 @@ impl RtpSession {
     
     /// Get a stream by SSRC, if it exists
     pub async fn get_stream(&self, ssrc: RtpSsrc) -> Option<RtpStreamStats> {
-        let streams = match self.streams.lock() {
-            Ok(streams) => streams,
-            Err(_) => return None,
-        };
-        
+        let streams = self.streams.lock();
         streams.get(&ssrc).map(|stream| stream.get_stats())
     }
-    
+
     /// Get a list of all current streams
     pub async fn get_all_streams(&self) -> Vec<RtpStreamStats> {
-        let streams = match self.streams.lock() {
-            Ok(streams) => streams,
-            Err(_) => return Vec::new(),
-        };
-        
+        let streams = self.streams.lock();
         streams.values().map(|stream| stream.get_stats()).collect()
     }
-    
+
     /// Get the number of active streams
     pub async fn stream_count(&self) -> usize {
-        let streams = match self.streams.lock() {
-            Ok(streams) => streams,
-            Err(_) => return 0,
-        };
-        
+        let streams = self.streams.lock();
         streams.len()
     }
-    
+
     /// Get a list of all SSRCs known to this session
-    /// 
+    ///
     /// This returns all SSRCs that have been seen, even if their streams
     /// haven't released any packets from their jitter buffers yet.
     pub async fn get_all_ssrcs(&self) -> Vec<RtpSsrc> {
-        if let Ok(streams) = self.streams.lock() {
-            streams.keys().copied().collect()
-        } else {
-            Vec::new()
-        }
+        self.streams.lock().keys().copied().collect()
     }
-    
+
     /// Force creation of a stream for a specific SSRC
-    /// 
+    ///
     /// This is useful when we want to ensure a stream exists for an SSRC
     /// even if no packets have been received yet.
     pub async fn create_stream_for_ssrc(&mut self, ssrc: RtpSsrc) -> bool {
-        let mut streams = match self.streams.lock() {
-            Ok(streams) => streams,
-            Err(e) => {
-                error!("Failed to lock streams map: {}", e);
-                return false;
-            }
-        };
+        let mut streams = self.streams.lock();
         
         // Check if this SSRC already exists
         if streams.contains_key(&ssrc) {
@@ -1008,11 +1026,7 @@ impl RtpSession {
         };
         
         // Get session stats
-        let session_stats = if let Ok(stats) = self.stats.lock() {
-            stats.clone()
-        } else {
-            RtpSessionStats::default()
-        };
+        let session_stats = self.stats.lock().clone();
         
         // Create a new SR packet
         let mut sr = crate::packet::rtcp::RtcpSenderReport::new(self.ssrc);
@@ -1026,41 +1040,41 @@ impl RtpSession {
         // Set packet and octet count from session stats
         sr.sender_packet_count = session_stats.packets_sent as u32;
         sr.sender_octet_count = session_stats.bytes_sent as u32;
-        
+
         // Add report blocks for active streams (remote SSRCs we're receiving from)
-        if let Ok(streams) = self.streams.lock() {
+        {
+            let streams = self.streams.lock();
             // Add report blocks for up to 31 streams (max allowed by RTCP)
             for (ssrc, stream) in streams.iter().take(31) {
                 let stream_stats = stream.get_stats();
-                
+
                 // Create a report block for this source
                 let mut block = crate::packet::rtcp::RtcpReportBlock::new(*ssrc);
-                
+
                 // Set statistics
                 let expected_packets = stream_stats.highest_seq - stream_stats.first_seq + 1;
-                let (fraction_lost, cumulative_lost) = 
+                let (fraction_lost, cumulative_lost) =
                     block.calculate_packet_loss(expected_packets, stream_stats.received);
-                
+
                 block.fraction_lost = fraction_lost;
                 block.cumulative_lost = cumulative_lost as u32;
                 block.highest_seq = stream_stats.highest_seq;
                 block.jitter = stream_stats.jitter;
-                
+
                 // TODO: Set last_sr and delay_since_last_sr when we process incoming SRs
-                
+
                 // Add the block to the SR
                 sr.add_report_block(block);
             }
         }
-        
+
         // **FIX: Update our own MediaSync context with the SR data we're sending**
         // This ensures our own timing data flows into MediaSync for API access
         if let Some(media_sync) = &self.media_sync {
-            if let Ok(mut sync) = media_sync.write() {
-                sync.update_from_sr(self.ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
-                debug!("Updated MediaSync with our own SR: SSRC={:08x}, NTP={:?}, RTP={}", 
-                       self.ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
-            }
+            let mut sync = media_sync.write();
+            sync.update_from_sr(self.ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
+            debug!("Updated MediaSync with our own SR: SSRC={:08x}, NTP={:?}, RTP={}",
+                   self.ssrc, sr.ntp_timestamp, sr.rtp_timestamp);
         }
         
         // Create RTCP packet
@@ -1098,31 +1112,32 @@ impl RtpSession {
         let mut rr = crate::packet::rtcp::RtcpReceiverReport::new(self.ssrc);
         
         // Add report blocks for active streams (remote SSRCs we're receiving from)
-        if let Ok(streams) = self.streams.lock() {
+        {
+            let streams = self.streams.lock();
             // Add report blocks for up to 31 streams (max allowed by RTCP)
             for (ssrc, stream) in streams.iter().take(31) {
                 let stream_stats = stream.get_stats();
-                
+
                 // Create a report block for this source
                 let mut block = crate::packet::rtcp::RtcpReportBlock::new(*ssrc);
-                
+
                 // Set statistics
                 let expected_packets = stream_stats.highest_seq - stream_stats.first_seq + 1;
-                let (fraction_lost, cumulative_lost) = 
+                let (fraction_lost, cumulative_lost) =
                     block.calculate_packet_loss(expected_packets, stream_stats.received);
-                
+
                 block.fraction_lost = fraction_lost;
                 block.cumulative_lost = cumulative_lost as u32;
                 block.highest_seq = stream_stats.highest_seq;
                 block.jitter = stream_stats.jitter;
-                
+
                 // TODO: Set last_sr and delay_since_last_sr when we process incoming SRs
-                
+
                 // Add the block to the RR
                 rr.add_report_block(block);
             }
         }
-        
+
         // Create RTCP packet
         let rtcp_packet = crate::packet::rtcp::RtcpPacket::ReceiverReport(rr);
         
@@ -1138,12 +1153,13 @@ impl RtpSession {
     }
     
     /// Enable media synchronization
-    pub fn enable_media_sync(&mut self) -> Arc<std::sync::RwLock<crate::sync::MediaSync>> {
-        let sync = Arc::new(std::sync::RwLock::new(crate::sync::MediaSync::new()));
+    pub fn enable_media_sync(&mut self) -> Arc<parking_lot::RwLock<crate::sync::MediaSync>> {
+        let sync = Arc::new(parking_lot::RwLock::new(crate::sync::MediaSync::new()));
         self.media_sync = Some(sync.clone());
         
         // Register our stream
-        if let Ok(mut media_sync) = sync.write() {
+        {
+            let mut media_sync = sync.write();
             media_sync.register_stream(self.ssrc, self.config.clock_rate);
         }
         
@@ -1151,7 +1167,7 @@ impl RtpSession {
     }
     
     /// Get the media synchronization context
-    pub fn media_sync(&self) -> Option<Arc<std::sync::RwLock<crate::sync::MediaSync>>> {
+    pub fn media_sync(&self) -> Option<Arc<parking_lot::RwLock<crate::sync::MediaSync>>> {
         self.media_sync.clone()
     }
     

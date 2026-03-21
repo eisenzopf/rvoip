@@ -499,6 +499,23 @@ impl ServerInviteLogic {
                 // No state transition needed for INVITE retransmission
                 Ok(None)
             },
+            TransactionState::Completed => {
+                // RFC 3261 17.2.1: In Completed state, receiving INVITE retransmit
+                // must retransmit the final response
+                debug!(id=%tx_id, "Received INVITE retransmission in Completed state, retransmitting final response");
+
+                let last_response = data.last_response.lock().await;
+                if let Some(response) = &*last_response {
+                    if let Err(e) = data.transport.send_message(
+                        Message::Response(response.clone()),
+                        data.remote_addr
+                    ).await {
+                        error!(id=%tx_id, error=%e, "Failed to retransmit final response in Completed state");
+                    }
+                }
+
+                Ok(None)
+            },
             _ => {
                 // INVITE retransmissions in other states are ignored
                 trace!(id=%tx_id, state=?current_state, "Ignoring INVITE retransmission in state {:?}", current_state);
@@ -658,9 +675,13 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
             },
             TransactionState::Terminated => {
                 debug!(id=%tx_id, "Entered Terminated state, canceling all timers");
-                
+
                 // Cancel all timers
                 self.cancel_all_specific_timers(timer_handles);
+
+                // Unregister from timer manager when terminated
+                let timer_manager = self.timer_factory.timer_manager();
+                timer_utils::unregister_transaction(&timer_manager, tx_id).await;
             },
             _ => {
                 trace!(id=%tx_id, state=?new_state, "Entered state with no specific timer actions");

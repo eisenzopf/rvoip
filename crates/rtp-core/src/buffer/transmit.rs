@@ -852,8 +852,7 @@ impl TransmitBuffer {
             PacketPriority::Low,
         ] {
             if let Some(queue) = self.queues.get_mut(&priority) {
-                if !queue.is_empty() {
-                    let queued_packet = queue.pop_front().unwrap();
+                if let Some(queued_packet) = queue.pop_front() {
                     
                     // Update stats
                     self.stats.queued_packets = self.total_queued_packets();

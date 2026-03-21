@@ -40,6 +40,7 @@ use crate::types::param::Param;
 use crate::parser::ParseResult;
 use crate::types::uri::Scheme;
 use crate::error::Error;
+use tracing;
 
 use authority::parse_authority;
 
@@ -181,14 +182,14 @@ fn parse_generic_uri(input: &[u8]) -> ParseResult<Uri> {
 // Fixed implementation of SIP URI parser that correctly handles params and headers
 fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
     let (input, _) = tag_no_case(b"sip:")(input)?;
-    
+
     // Get the user info (if any)
-    let mut userinfo_present = false;
+    let mut found_at_pos: Option<usize> = None;
     let user_info;
-    
+
     // Check if @ symbol exists in input
     if let Some(at_pos) = input.iter().position(|&c| c == b'@') {
-        userinfo_present = true;
+        found_at_pos = Some(at_pos);
         match userinfo(&input[..at_pos + 1]) {
             Ok((_, parsed_userinfo)) => {
                 user_info = Some(parsed_userinfo);
@@ -196,16 +197,15 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
             _ => {
                 // If userinfo fails to parse, treat as no userinfo
                 user_info = None;
-                userinfo_present = false;
+                found_at_pos = None;
             }
         }
     } else {
         user_info = None;
     }
-    
+
     // Skip past user info if present
-    let input = if userinfo_present {
-        let at_pos = input.iter().position(|&c| c == b'@').unwrap();
+    let input = if let Some(at_pos) = found_at_pos {
         &input[at_pos + 1..]
     } else {
         input
@@ -292,7 +292,7 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
                         params = parsed_params;
                     },
                     Err(e) => {
-                        eprintln!("Parameter parsing failed: {:?}", e);
+                        tracing::debug!(error = ?e, "URI parameter parsing failed");
                         // Return the error instead of silently continuing
                         return Err(e);
                     }
@@ -336,7 +336,7 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
             Ok((current_remaining, uri))
         },
         Err(e) => {
-            eprintln!("Hostport parsing failed: {:?}", e);
+            tracing::debug!(error = ?e, "Hostport parsing failed");
             // Just propagate the error
             Err(e)
         }
@@ -346,14 +346,14 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
 // Fixed implementation of SIPS URI parser that correctly handles params and headers
 fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
     let (input, _) = tag_no_case(b"sips:")(input)?;
-    
+
     // Get the user info (if any)
-    let mut userinfo_present = false;
+    let mut found_at_pos: Option<usize> = None;
     let user_info;
-    
+
     // Check if @ symbol exists in input
     if let Some(at_pos) = input.iter().position(|&c| c == b'@') {
-        userinfo_present = true;
+        found_at_pos = Some(at_pos);
         match userinfo(&input[..at_pos + 1]) {
             Ok((_, parsed_userinfo)) => {
                 user_info = Some(parsed_userinfo);
@@ -361,16 +361,15 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
             _ => {
                 // If userinfo fails to parse, treat as no userinfo
                 user_info = None;
-                userinfo_present = false;
+                found_at_pos = None;
             }
         }
     } else {
         user_info = None;
     }
-    
+
     // Skip past user info if present
-    let input = if userinfo_present {
-        let at_pos = input.iter().position(|&c| c == b'@').unwrap();
+    let input = if let Some(at_pos) = found_at_pos {
         &input[at_pos + 1..]
     } else {
         input
@@ -500,7 +499,7 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<Uri> {
             Ok((current_remaining, uri))
         },
         Err(e) => {
-            eprintln!("Hostport parsing failed: {:?}", e);
+            tracing::debug!(error = ?e, "Hostport parsing failed");
             // Just propagate the error
             Err(e)
         }

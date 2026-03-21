@@ -69,57 +69,26 @@ impl UdpTransport {
 
     /// Create a default dummy UDP transport (used only for creating dummy transaction managers)
     /// This transport doesn't work for real communication
-    pub fn default() -> Self {
+    pub fn default() -> Result<Self> {
         // Create a dummy event channel
         let (events_tx, _) = mpsc::channel(1);
-        
-        // Use a more compatible approach to create a dummy socket 
-        let socket = match std::net::UdpSocket::bind("127.0.0.1:0") {
-            Ok(std_socket) => {
-                match std_socket.set_nonblocking(true) {
-                    Ok(_) => {
-                        // Use from_std in a way that won't panic with tokio
-                        #[cfg(tokio_allow_from_blocking_fd)]
-                        let socket = UdpSocket::from_std(std_socket).unwrap();
-                        
-                        #[cfg(not(tokio_allow_from_blocking_fd))]
-                        let socket = unsafe {
-                            // SAFETY: This is only used for a dummy transport that won't actually be used
-                            // for communication, so it's safe to create it this way.
-                            UdpSocket::from_std(std_socket).unwrap_or_else(|_| {
-                                // Create a placeholder socket (this will never be used for actual I/O)
-                                let std_socket = std::net::UdpSocket::bind("127.0.0.1:0")
-                                    .expect("Failed to create dummy socket");
-                                UdpSocket::from_std(std_socket).expect("Failed to create tokio socket")
-                            })
-                        };
-                        
-                        socket
-                    },
-                    Err(_) => {
-                        // Fallback path
-                        let std_socket = std::net::UdpSocket::bind("127.0.0.1:0")
-                            .expect("Failed to create dummy socket");
-                        UdpSocket::from_std(std_socket).expect("Failed to create tokio socket")
-                    }
-                }
-            },
-            Err(_) => {
-                // Fallback - this is a dummy socket that will never be used for I/O
-                let std_socket = std::net::UdpSocket::bind("127.0.0.1:0")
-                    .expect("Failed to create dummy socket");
-                UdpSocket::from_std(std_socket).expect("Failed to create tokio socket")
-            }
-        };
-        
+
+        // Create a dummy socket - bind to ephemeral port on loopback
+        let std_socket = std::net::UdpSocket::bind("127.0.0.1:0")
+            .map_err(|e| Error::BindFailed("127.0.0.1:0".parse().unwrap_or_else(|_| SocketAddr::from(([127, 0, 0, 1], 0))), e))?;
+        std_socket.set_nonblocking(true)
+            .map_err(|e| Error::IoError(e))?;
+        let socket = UdpSocket::from_std(std_socket)
+            .map_err(|e| Error::IoError(e))?;
+
         // Create and return the transport with closed=true so it won't be used
-        UdpTransport {
+        Ok(UdpTransport {
             inner: Arc::new(UdpTransportInner {
                 socket,
                 closed: AtomicBool::new(true), // Mark as closed
                 events_tx,
             }),
-        }
+        })
     }
 
     // Spawns a task to receive packets from the UDP socket

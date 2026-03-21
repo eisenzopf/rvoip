@@ -32,10 +32,10 @@ fn parse_hostname(input: &str) -> IResult<&str, &str> {
     let parse_label = verify(
         take_while1(|c: char| c.is_alphanumeric() || c == '-'),
         |s: &str| {
-            !s.is_empty() && 
-            s.len() <= 63 && 
-            s.chars().next().unwrap().is_alphanumeric() && 
-            s.chars().last().unwrap().is_alphanumeric()
+            !s.is_empty() &&
+            s.len() <= 63 &&
+            s.as_bytes().first().map_or(false, |b| b.is_ascii_alphanumeric()) &&
+            s.as_bytes().last().map_or(false, |b| b.is_ascii_alphanumeric())
         }
     );
     
@@ -76,8 +76,8 @@ pub fn is_valid_hostname(hostname: &str) -> bool {
         }
         
         // Labels must start and end with alphanumeric characters
-        if !label.chars().next().unwrap().is_alphanumeric() 
-           || !label.chars().last().unwrap().is_alphanumeric() {
+        if !label.as_bytes().first().map_or(false, |b| b.is_ascii_alphanumeric())
+           || !label.as_bytes().last().map_or(false, |b| b.is_ascii_alphanumeric()) {
             return false;
         }
         
