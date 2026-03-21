@@ -189,9 +189,12 @@ fn lp_to_lsp(a: &[f32], lsp: &mut [f32], lsp_old: &[f32]) -> bool {
         }
     }
 
-    // Find roots by evaluating Chebyshev polynomial on a grid
+    // Find roots by evaluating Chebyshev polynomial on a grid.
+    // P-polynomial roots go at even LSP indices (0, 2, 4, …)
+    // Q-polynomial roots go at odd  LSP indices (1, 3, 5, …)
     let grid_points = 100;
-    let mut found = 0;
+    let mut found_p = 0usize; // number of P roots found so far
+    let mut found_q = 0usize; // number of Q roots found so far
     let mut prev_val_p = eval_chebyshev(&p, 1.0);
     let mut prev_val_q = eval_chebyshev(&q, 1.0);
 
@@ -200,29 +203,31 @@ fn lp_to_lsp(a: &[f32], lsp: &mut [f32], lsp_old: &[f32]) -> bool {
         let val_p = eval_chebyshev(&p, x);
         let val_q = eval_chebyshev(&q, x);
 
-        if found < half && prev_val_p * val_p <= 0.0 {
+        if found_p < half && prev_val_p * val_p <= 0.0 {
             // Root of P found between prev and current
             let root = bisect_root(&p, x + (std::f32::consts::PI / grid_points as f32).cos() - x, x, prev_val_p, val_p);
             let omega = root.acos();
-            if found * 2 < order {
-                lsp[found * 2] = omega;
-            }
-            found += 1;
-        }
-        if found < half && prev_val_q * val_q <= 0.0 {
-            let root = bisect_root(&q, x + (std::f32::consts::PI / grid_points as f32).cos() - x, x, prev_val_q, val_q);
-            let omega = root.acos();
-            let idx = found * 2 - 1;
+            let idx = found_p * 2; // P roots at even indices
             if idx < order {
                 lsp[idx] = omega;
             }
-            found += 1;
+            found_p += 1;
+        }
+        if found_q < half && prev_val_q * val_q <= 0.0 {
+            let root = bisect_root(&q, x + (std::f32::consts::PI / grid_points as f32).cos() - x, x, prev_val_q, val_q);
+            let omega = root.acos();
+            let idx = found_q * 2 + 1; // Q roots at odd indices
+            if idx < order {
+                lsp[idx] = omega;
+            }
+            found_q += 1;
         }
 
         prev_val_p = val_p;
         prev_val_q = val_q;
     }
 
+    let found = found_p + found_q;
     if found < half {
         // Failed to find all roots, use previous LSP
         lsp[..order].copy_from_slice(&lsp_old[..order]);
@@ -747,8 +752,14 @@ fn quantize_gains(pitch_gain: f32, fixed_gain: f32) -> (u32, u32) {
 /// Dequantize adaptive and fixed codebook gains
 fn dequantize_gains(ga_index: u32, gb_index: u32) -> (f32, f32) {
     let pitch_gain = (ga_index as f32 / 7.0 * 1.2).clamp(0.0, 1.2);
-    let fg_log = gb_index as f32 / 15.0 * 7.5;
-    let fixed_gain = (fg_log - 2.0).exp();
+    // gb_index=0 encodes silence / near-zero fixed gain; treat as zero to avoid
+    // artifacts when encoding silence.
+    let fixed_gain = if gb_index == 0 {
+        0.0
+    } else {
+        let fg_log = gb_index as f32 / 15.0 * 7.5;
+        (fg_log - 2.0).exp()
+    };
     (pitch_gain, fixed_gain)
 }
 

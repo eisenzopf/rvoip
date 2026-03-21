@@ -439,7 +439,7 @@ mod tests {
     /// ICE-CONTROLLED), MESSAGE-INTEGRITY, and FINGERPRINT.
     /// Also validates MESSAGE-INTEGRITY against the password used to build it.
     #[test]
-    fn test_ice_check_message_attributes() {
+    fn test_ice_check_message_attributes() -> Result<(), Error> {
         let username = "remote:local";
         let password = "supersecretpassword42";
         let priority = 2_130_706_431u32;
@@ -524,11 +524,12 @@ mod tests {
             bad_decoder.decode(&encoded).is_err(),
             "MESSAGE-INTEGRITY should fail with wrong key"
         );
+        Ok(())
     }
 
     /// Verify ICE-CONTROLLED attribute appears when controlling=false.
     #[test]
-    fn test_ice_check_controlled_attribute() {
+    fn test_ice_check_controlled_attribute() -> Result<(), Error> {
         let encoded = StunClientAdapter::build_ice_check(
             "remote:local",
             "apassword",
@@ -559,6 +560,7 @@ mod tests {
         // ICE-CONTROLLING should NOT be present
         use stun_rs::attributes::ice::IceControlling;
         assert!(msg.get::<IceControlling>().is_none(), "ICE-CONTROLLING should not be present");
+        Ok(())
     }
 
     /// Ensure that a wrong password fails verification.
