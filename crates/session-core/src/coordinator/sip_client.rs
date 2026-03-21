@@ -215,12 +215,62 @@ impl SipClient for Arc<SessionCoordinator> {
                 reason: "enable_sip_client must be set to true in configuration".to_string(),
             });
         }
-        
-        // TODO: Implement SUBSCRIBE sending
-        tracing::warn!("SipClient::subscribe - not yet implemented");
-        
-        Err(SessionError::NotImplemented {
-            feature: "SUBSCRIBE requests".to_string(),
+
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+
+        // Generate unique identifiers
+        let call_id = format!("sub-{}-{}", std::process::id(), uuid::Uuid::new_v4());
+        let from_tag = format!("tag-{}", uuid::Uuid::new_v4().simple());
+        let branch = format!("z9hG4bK{}", uuid::Uuid::new_v4().simple());
+
+        // Get local address and from URI
+        let local_addr = self.get_bound_address();
+        let from_uri = &self.config.local_address;
+
+        // Build SUBSCRIBE request (RFC 6665)
+        let request = SimpleRequestBuilder::new(Method::Subscribe, target_uri)
+            .map_err(|e| SessionError::invalid_uri(&format!("Invalid target URI: {}", e)))?
+            .from("", from_uri, Some(&from_tag))
+            .to("", target_uri, None)
+            .call_id(&call_id)
+            .cseq(1)
+            .via(&local_addr.to_string(), "UDP", Some(&branch))
+            .max_forwards(70)
+            .user_agent("RVoIP-SessionCore/1.0")
+            .event(event_type)
+            .expires(expires)
+            .build();
+
+        // Parse target URI to get destination address
+        let uri: rvoip_sip_core::Uri = target_uri.parse()
+            .map_err(|e| SessionError::invalid_uri(&format!("Invalid target URI: {}", e)))?;
+
+        // Resolve URI to socket address
+        let destination = rvoip_dialog_core::dialog::dialog_utils::uri_resolver::resolve_uri_to_socketaddr(&uri)
+            .await
+            .ok_or_else(|| SessionError::network_error(&format!("Failed to resolve target address: {}", target_uri)))?;
+
+        tracing::info!("Sending SUBSCRIBE for event '{}' to {} ({})", event_type, target_uri, destination);
+
+        // Send the SUBSCRIBE request via dialog-core
+        let response = self.dialog_coordinator.dialog_api()
+            .send_non_dialog_request(request, destination, Duration::from_secs(32))
+            .await
+            .map_err(|e| SessionError::internal(&format!("SUBSCRIBE failed: {}", e)))?;
+
+        let status = response.status_code();
+        if status >= 300 {
+            return Err(SessionError::SipError(format!(
+                "SUBSCRIBE rejected with {} {}",
+                status,
+                response.reason_phrase()
+            )));
+        }
+
+        Ok(SubscriptionHandle {
+            dialog_id: call_id,
+            event_type: event_type.to_string(),
+            expires_at: std::time::Instant::now() + Duration::from_secs(u64::from(expires)),
         })
     }
     
