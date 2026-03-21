@@ -18,6 +18,7 @@ members = [
     "crates/infra-common",
     "crates/registrar-core", "crates/users-core",
     "crates/intermediary-core",
+    "crates/integration-tests",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,
