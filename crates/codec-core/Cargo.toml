@@ -33,6 +33,9 @@ bytes.workspace = true
 tracing-subscriber = "0.3"   # Logging initialization
 once_cell = { workspace = true }           # Lazy static initialization for lookup tables
 
+# Media codecs (optional)
+opus = { version = "0.3", optional = true }
+
 [dev-dependencies]
 # Testing
 tokio.workspace = true       # Async runtime for tests
@@ -43,3 +46,4 @@ default = ["g711"]
 
 # Codec features
 g711 = []                    # G.711 μ-law/A-law codec (always available)
+opus = ["dep:opus"]          # Opus codec (requires libopus)
