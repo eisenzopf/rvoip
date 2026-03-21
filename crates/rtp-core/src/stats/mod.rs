@@ -13,7 +13,8 @@ pub use loss::{PacketLossTracker, PacketLossStats, PacketLossResult};
 pub use rtt::{RttEstimator, RttStats};
 pub use reports::{RtcpReportGenerator, RTCP_MIN_INTERVAL, RTCP_BANDWIDTH_FRACTION};
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::RtpSequenceNumber;
@@ -115,12 +116,12 @@ impl RtpStatsManager {
     
     /// Get a copy of the current statistics
     pub fn get_stats(&self) -> RtpStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().clone()
     }
     
     /// Reset all statistics
     pub fn reset(&mut self) {
-        *self.stats.lock().unwrap() = RtpStats::default();
+        *self.stats.lock() = RtpStats::default();
         self.jitter_estimator.reset();
         self.loss_tracker.reset();
         self.rtt_estimator.reset();
@@ -134,7 +135,7 @@ impl RtpStatsManager {
     
     /// Update statistics for a sent packet
     pub fn update_sent(&mut self, bytes: usize) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock();
         stats.packets_sent += 1;
         stats.bytes_sent += bytes as u64;
         
@@ -146,7 +147,7 @@ impl RtpStatsManager {
     
     /// Update statistics for a received packet
     pub fn update_received(&mut self, seq: RtpSequenceNumber, timestamp: u32, bytes: usize, arrival_time: Instant) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock();
         
         // Update basic counters
         stats.packets_received += 1;
@@ -197,13 +198,13 @@ impl RtpStatsManager {
     
     /// Update round-trip time
     pub fn update_rtt(&self, rtt_ms: f64) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock();
         stats.round_trip_time_ms = Some(rtt_ms);
     }
     
     /// Update RTCP SR information
     pub fn update_sr_info(&self, last_sr: NtpTimestamp, delay_ms: u32) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock();
         stats.last_sr_timestamp = Some(last_sr);
         stats.delay_since_last_sr_ms = Some(delay_ms);
     }

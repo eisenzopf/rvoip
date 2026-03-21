@@ -149,11 +149,34 @@ impl SdpNegotiator {
         // Generate answer based on offer and our preferences
         let mut converter = MediaConfigConverter::with_media_config(&self.media_config);
         let local_ip = self.media_manager.local_bind_addr.ip().to_string();
-        let our_answer = converter.generate_sdp_answer(their_offer, &local_ip, local_port)
-            .map_err(|e| SessionError::MediaIntegration { 
-                message: format!("Failed to generate SDP answer: {}", e) 
-            })?;
-        
+        // Generate answer, upgrading to DTLS-SRTP when the offer indicates
+        // secure media and we have a local fingerprint.
+        let (srtp_offered, _, _) =
+            crate::media::srtp_bridge::extract_dtls_params_from_sdp(their_offer);
+
+        let our_answer = if srtp_offered {
+            if let Some(ref fp) = self.media_config.srtp.local_fingerprint {
+                converter
+                    .generate_sdp_answer_secure(their_offer, &local_ip, local_port, fp)
+                    .map_err(|e| SessionError::MediaIntegration {
+                        message: format!("Failed to generate secure SDP answer: {e}"),
+                    })?
+            } else {
+                // Offer has SRTP but we have no fingerprint -- answer plain.
+                converter
+                    .generate_sdp_answer(their_offer, &local_ip, local_port)
+                    .map_err(|e| SessionError::MediaIntegration {
+                        message: format!("Failed to generate SDP answer: {e}"),
+                    })?
+            }
+        } else {
+            converter
+                .generate_sdp_answer(their_offer, &local_ip, local_port)
+                .map_err(|e| SessionError::MediaIntegration {
+                    message: format!("Failed to generate SDP answer: {e}"),
+                })?
+        };
+
         debug!("Our answer: {}", our_answer);
         
         // Parse the offer to get remote endpoint

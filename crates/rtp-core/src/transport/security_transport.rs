@@ -117,12 +117,18 @@ impl SecurityRtpTransport {
                                         decryption_success = true;
                                     },
                                     Err(e) => {
-                                        debug!("SRTP decryption failed, treating as plain RTP: {}", e);
-                                        // Will fall through to process as plain RTP
+                                        // SECURITY: When SRTP context is active, decryption failure
+                                        // MUST drop the packet per RFC 5764. Never fall back to
+                                        // processing as plain RTP when SRTP is negotiated.
+                                        warn!("SRTP decryption failed, dropping packet from {} ({} bytes): {}", addr, size, e);
+                                        decryption_success = true; // Prevent plain RTP fallback
                                     }
                                 }
                             } else {
-                                debug!("SRTP enabled but no context available");
+                                // SECURITY: SRTP enabled but no context yet - drop packet
+                                // rather than processing as plain RTP
+                                warn!("SRTP enabled but no context available, dropping packet from {} ({} bytes)", addr, size);
+                                decryption_success = true; // Prevent plain RTP fallback
                             }
                             // Release the write lock by dropping srtp_guard
                             drop(srtp_guard);
@@ -237,39 +243,47 @@ impl RtpTransport for SecurityRtpTransport {
                 match srtp_context.protect(packet) {
                     Ok(protected_packet) => {
                         // Serialize the protected packet
-                        match protected_packet.serialize() {
-                            Ok(protected_bytes) => {
-                                debug!("SRTP encryption successful: {} -> {} bytes", 
-                                       packet.serialize()?.len(), protected_bytes.len());
-                                
-                                // Send the encrypted bytes
-                                return self.inner.send_rtp_bytes(&protected_bytes, dest).await;
-                            },
-                            Err(e) => {
-                                error!("Failed to serialize protected RTP packet: {}", e);
-                                // Fall through to send unencrypted
-                            }
-                        }
+                        let protected_bytes = protected_packet.serialize().map_err(|e| {
+                            error!("Failed to serialize protected RTP packet: {}", e);
+                            e
+                        })?;
+                        debug!("SRTP encryption successful: {} -> {} bytes",
+                               packet.serialize()?.len(), protected_bytes.len());
+
+                        // Send the encrypted bytes
+                        return self.inner.send_rtp_bytes(&protected_bytes, dest).await;
                     },
                     Err(e) => {
-                        error!("SRTP encryption failed: {}", e);
-                        // Fall through to send unencrypted
+                        // SECURITY: Do NOT fall back to plaintext when SRTP is enabled
+                        error!("SRTP encryption failed, dropping packet: {}", e);
+                        return Err(e);
                     }
                 }
             } else {
-                warn!("SRTP enabled but no context available - sending unencrypted");
+                // SECURITY: Do NOT send unencrypted when SRTP is enabled but context is missing
+                error!("SRTP enabled but no context available - dropping RTP packet");
+                return Err(Error::SrtpError(
+                    "SRTP enabled but no SRTP context available; refusing to send unencrypted RTP".into()
+                ));
             }
         }
-        
-        // Send unencrypted (either SRTP disabled or encryption failed)
-        debug!("Sending unencrypted RTP packet");
+
+        // SRTP is disabled - send unencrypted
+        debug!("Sending unencrypted RTP packet (SRTP disabled)");
         self.inner.send_rtp(packet, dest).await
     }
     
     async fn send_rtp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
-        // For raw bytes, we can't encrypt them (we need an RTP packet structure)
-        // So just pass through to the inner transport
-        debug!("Sending raw RTP bytes (cannot encrypt)");
+        if self.srtp_enabled {
+            // SECURITY: Cannot encrypt raw bytes without RTP packet structure.
+            // Refuse to send unencrypted when SRTP is enabled.
+            error!("Cannot send raw RTP bytes when SRTP is enabled - packet structure required for encryption");
+            return Err(Error::SrtpError(
+                "Cannot send raw RTP bytes when SRTP is enabled; use send_rtp() with a parsed packet instead".into()
+            ));
+        }
+        // SRTP disabled - pass through
+        debug!("Sending raw RTP bytes (SRTP disabled)");
         self.inner.send_rtp_bytes(bytes, dest).await
     }
     
@@ -279,36 +293,33 @@ impl RtpTransport for SecurityRtpTransport {
             let mut srtp_guard = self.srtp_context.write().await;
             if let Some(srtp_context) = srtp_guard.as_mut() {
                 debug!("Encrypting RTCP packet with SRTCP");
-                
+
                 // Serialize the RTCP packet first
-                match packet.serialize() {
-                    Ok(rtcp_bytes) => {
-                        match srtp_context.protect_rtcp(&rtcp_bytes) {
-                            Ok(protected_bytes) => {
-                                debug!("SRTCP encryption successful: {} -> {} bytes", 
-                                       rtcp_bytes.len(), protected_bytes.len());
-                                
-                                // Send the encrypted bytes
-                                return self.inner.send_rtcp_bytes(&protected_bytes, dest).await;
-                            },
-                            Err(e) => {
-                                error!("SRTCP encryption failed: {}", e);
-                                // Fall through to send unencrypted
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        error!("Failed to serialize RTCP packet: {}", e);
-                        // Fall through to send unencrypted
-                    }
-                }
+                let rtcp_bytes = packet.serialize().map_err(|e| {
+                    error!("Failed to serialize RTCP packet: {}", e);
+                    e
+                })?;
+                let protected_bytes = srtp_context.protect_rtcp(&rtcp_bytes).map_err(|e| {
+                    // SECURITY: Do NOT fall back to plaintext when SRTP is enabled
+                    error!("SRTCP encryption failed, dropping packet: {}", e);
+                    e
+                })?;
+                debug!("SRTCP encryption successful: {} -> {} bytes",
+                       rtcp_bytes.len(), protected_bytes.len());
+
+                // Send the encrypted bytes
+                return self.inner.send_rtcp_bytes(&protected_bytes, dest).await;
             } else {
-                warn!("SRTP enabled but no context available - sending unencrypted RTCP");
+                // SECURITY: Do NOT send unencrypted when SRTP is enabled but context is missing
+                error!("SRTP enabled but no context available - dropping RTCP packet");
+                return Err(Error::SrtpError(
+                    "SRTP enabled but no SRTP context available; refusing to send unencrypted RTCP".into()
+                ));
             }
         }
-        
-        // Send unencrypted RTCP
-        debug!("Sending unencrypted RTCP packet");
+
+        // SRTP is disabled - send unencrypted RTCP
+        debug!("Sending unencrypted RTCP packet (SRTP disabled)");
         self.inner.send_rtcp(packet, dest).await
     }
     
@@ -318,73 +329,77 @@ impl RtpTransport for SecurityRtpTransport {
             let mut srtp_guard = self.srtp_context.write().await;
             if let Some(srtp_context) = srtp_guard.as_mut() {
                 debug!("Encrypting raw RTCP bytes with SRTCP");
-                
-                match srtp_context.protect_rtcp(bytes) {
-                    Ok(protected_bytes) => {
-                        debug!("SRTCP encryption successful: {} -> {} bytes", 
-                               bytes.len(), protected_bytes.len());
-                        
-                        // Send the encrypted bytes
-                        return self.inner.send_rtcp_bytes(&protected_bytes, dest).await;
-                    },
-                    Err(e) => {
-                        error!("SRTCP encryption failed: {}", e);
-                        // Fall through to send unencrypted
-                    }
-                }
+
+                let protected_bytes = srtp_context.protect_rtcp(bytes).map_err(|e| {
+                    // SECURITY: Do NOT fall back to plaintext when SRTP is enabled
+                    error!("SRTCP encryption failed, dropping packet: {}", e);
+                    e
+                })?;
+                debug!("SRTCP encryption successful: {} -> {} bytes",
+                       bytes.len(), protected_bytes.len());
+
+                // Send the encrypted bytes
+                return self.inner.send_rtcp_bytes(&protected_bytes, dest).await;
             } else {
-                warn!("SRTP enabled but no context available - sending unencrypted RTCP");
+                // SECURITY: Do NOT send unencrypted when SRTP is enabled but context is missing
+                error!("SRTP enabled but no context available - dropping RTCP bytes");
+                return Err(Error::SrtpError(
+                    "SRTP enabled but no SRTP context available; refusing to send unencrypted RTCP".into()
+                ));
             }
         }
-        
-        // Send unencrypted RTCP
-        debug!("Sending unencrypted RTCP bytes");
+
+        // SRTP is disabled - send unencrypted RTCP
+        debug!("Sending unencrypted RTCP bytes (SRTP disabled)");
         self.inner.send_rtcp_bytes(bytes, dest).await
     }
     
     async fn receive_packet(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr)> {
         // Receive from underlying transport
         let (size, addr) = self.inner.receive_packet(buffer).await?;
-        
+
         if self.srtp_enabled {
             // Try to decrypt with SRTP
             let mut srtp_guard = self.srtp_context.write().await;
             if let Some(srtp_context) = srtp_guard.as_mut() {
                 debug!("Decrypting received packet with SRTP: {} bytes from {}", size, addr);
-                
+
                 // Attempt SRTP decryption
                 match srtp_context.unprotect(&buffer[0..size]) {
                     Ok(decrypted_packet) => {
-                        debug!("SRTP decryption successful: {} -> {} bytes", 
+                        debug!("SRTP decryption successful: {} -> {} bytes",
                                size, decrypted_packet.size());
-                        
+
                         // Serialize decrypted packet back to buffer
-                        match decrypted_packet.serialize() {
-                            Ok(decrypted_bytes) => {
-                                let copy_len = std::cmp::min(decrypted_bytes.len(), buffer.len());
-                                buffer[0..copy_len].copy_from_slice(&decrypted_bytes[0..copy_len]);
-                                
-                                debug!("Successfully decrypted and copied {} bytes to buffer", copy_len);
-                                return Ok((copy_len, addr));
-                            },
-                            Err(e) => {
-                                error!("Failed to serialize decrypted RTP packet: {}", e);
-                                // Fall through to return unencrypted data
-                            }
-                        }
+                        let decrypted_bytes = decrypted_packet.serialize().map_err(|e| {
+                            error!("Failed to serialize decrypted RTP packet: {}", e);
+                            e
+                        })?;
+                        let copy_len = std::cmp::min(decrypted_bytes.len(), buffer.len());
+                        buffer[0..copy_len].copy_from_slice(&decrypted_bytes[0..copy_len]);
+
+                        debug!("Successfully decrypted and copied {} bytes to buffer", copy_len);
+                        return Ok((copy_len, addr));
                     },
                     Err(e) => {
-                        debug!("SRTP decryption failed, assuming plain RTP: {}", e);
-                        // Fall through to return unencrypted data
+                        // SECURITY: Do NOT pass through unencrypted data when SRTP is enabled
+                        warn!("SRTP decryption failed, dropping received packet from {}: {}", addr, e);
+                        return Err(Error::SrtpError(
+                            format!("SRTP decryption failed for packet from {}; dropping to prevent cleartext leak: {}", addr, e)
+                        ));
                     }
                 }
             } else {
-                debug!("SRTP enabled but no context available - passing through unencrypted");
+                // SECURITY: Do NOT pass through unencrypted data when SRTP is enabled but context is missing
+                warn!("SRTP enabled but no context available - dropping received packet from {}", addr);
+                return Err(Error::SrtpError(
+                    "SRTP enabled but no SRTP context available; refusing to pass through unencrypted packet".into()
+                ));
             }
         }
-        
-        // Return original data (either SRTP disabled or decryption failed)
-        debug!("Returning original packet data: {} bytes from {}", size, addr);
+
+        // SRTP is disabled - return original data
+        debug!("Returning original packet data: {} bytes from {} (SRTP disabled)", size, addr);
         Ok((size, addr))
     }
     

@@ -55,14 +55,22 @@ impl DependencyGraph {
         self.reverse_dependencies.entry(dependency.to_string()).or_insert_with(HashSet::new);
         
         // Add the dependency relationship
-        self.dependencies.get_mut(dependent).unwrap().insert(dependency.to_string());
-        self.reverse_dependencies.get_mut(dependency).unwrap().insert(dependent.to_string());
-        
+        if let Some(deps) = self.dependencies.get_mut(dependent) {
+            deps.insert(dependency.to_string());
+        }
+        if let Some(rdeps) = self.reverse_dependencies.get_mut(dependency) {
+            rdeps.insert(dependent.to_string());
+        }
+
         // Check for circular dependencies
         if self.has_circular_dependencies() {
             // Remove the dependency we just added
-            self.dependencies.get_mut(dependent).unwrap().remove(dependency);
-            self.reverse_dependencies.get_mut(dependency).unwrap().remove(dependent);
+            if let Some(deps) = self.dependencies.get_mut(dependent) {
+                deps.remove(dependency);
+            }
+            if let Some(rdeps) = self.reverse_dependencies.get_mut(dependency) {
+                rdeps.remove(dependent);
+            }
             
             return Err(DependencyError::CircularDependency(
                 format!("{} -> {}", dependent, dependency)
@@ -82,8 +90,12 @@ impl DependencyGraph {
             return Err(DependencyError::NodeNotFound(dependency.to_string()).into());
         }
         
-        self.dependencies.get_mut(dependent).unwrap().remove(dependency);
-        self.reverse_dependencies.get_mut(dependency).unwrap().remove(dependent);
+        if let Some(deps) = self.dependencies.get_mut(dependent) {
+            deps.remove(dependency);
+        }
+        if let Some(rdeps) = self.reverse_dependencies.get_mut(dependency) {
+            rdeps.remove(dependent);
+        }
         
         Ok(())
     }
@@ -168,11 +180,12 @@ impl DependencyGraph {
             
             if let Some(dependents) = self.reverse_dependencies.get(&node) {
                 for dependent in dependents {
-                    let degree = in_degree.get_mut(dependent).unwrap();
-                    *degree -= 1;
-                    
-                    if *degree == 0 {
-                        queue.push_back(dependent.clone());
+                    if let Some(degree) = in_degree.get_mut(dependent) {
+                        *degree -= 1;
+
+                        if *degree == 0 {
+                            queue.push_back(dependent.clone());
+                        }
                     }
                 }
             }

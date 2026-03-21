@@ -1,7 +1,8 @@
 //! B2BUA-specific functionality
 
 use crate::common::{types::*, errors::Result};
-use rvoip_session_core_v2::api::simple::{SimplePeer, CallId};
+use rvoip_session_core::api::peer::SimplePeer;
+use rvoip_session_core::api::types::SessionId as CallId;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
@@ -71,7 +72,7 @@ impl B2BUACoordinator {
         // Create session pair ID
         let pair_id = IntermediarySessionId::new();
 
-        // TODO: Create inbound and outbound legs using session-core-v2
+        // TODO: Create inbound and outbound legs using session-core
         // This would involve:
         // 1. Creating inbound leg (UAS) using SimplePeer
         // 2. Accepting the incoming call

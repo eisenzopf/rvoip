@@ -87,33 +87,50 @@ pub const SRTP_NULL_NULL: SrtpCryptoSuite = SrtpCryptoSuite {
     tag_length: 0,
 };
 
-/// AEAD AES-128 GCM
+/// AEAD AES-128 GCM (RFC 7714)
+///
+/// **NOT YET IMPLEMENTED.** These constants exist for profile negotiation only.
+/// Attempting to create an `SrtpContext` with these profiles will return an error.
+/// The encryption/authentication fields are placeholders and do NOT provide real
+/// AEAD-GCM security.
 pub const SRTP_AEAD_AES_128_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
-    encryption: SrtpEncryptionAlgorithm::AesCm, // Using AesCm as placeholder
-    authentication: SrtpAuthenticationAlgorithm::Null, // Authentication is part of AEAD
+    encryption: SrtpEncryptionAlgorithm::AesCm, // Placeholder — not real GCM
+    authentication: SrtpAuthenticationAlgorithm::Null, // Placeholder — not real AEAD
     key_length: 16, // 128 bits
     tag_length: 16, // 128 bits for GCM
 };
 
-/// AEAD AES-256 GCM
+/// AEAD AES-256 GCM (RFC 7714)
+///
+/// **NOT YET IMPLEMENTED.** These constants exist for profile negotiation only.
+/// Attempting to create an `SrtpContext` with these profiles will return an error.
+/// The encryption/authentication fields are placeholders and do NOT provide real
+/// AEAD-GCM security.
 pub const SRTP_AEAD_AES_256_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
-    encryption: SrtpEncryptionAlgorithm::AesCm, // Using AesCm as placeholder
-    authentication: SrtpAuthenticationAlgorithm::Null, // Authentication is part of AEAD
+    encryption: SrtpEncryptionAlgorithm::AesCm, // Placeholder — not real GCM
+    authentication: SrtpAuthenticationAlgorithm::Null, // Placeholder — not real AEAD
     key_length: 32, // 256 bits
     tag_length: 16, // 128 bits for GCM
 };
 
 /// SRTP context for a session
+///
+/// Maintains separate crypto contexts for inbound and outbound directions.
+/// When created via `new()`, both directions use the same key material.
+/// When created via `new_from_keys()`, outbound uses local keys and inbound uses remote keys.
 pub struct SrtpContext {
     /// Whether encryption is enabled
     enabled: bool,
-    
-    /// SRTP crypto context
-    crypto: crypto::SrtpCrypto,
-    
+
+    /// SRTP crypto context for outbound (encrypt/protect) operations
+    outbound_crypto: crypto::SrtpCrypto,
+
+    /// SRTP crypto context for inbound (decrypt/unprotect) operations
+    inbound_crypto: crypto::SrtpCrypto,
+
     /// Key rotation frequency
     key_rotation: key_derivation::KeyRotationFrequency,
-    
+
     /// Current packet index (sequence number + rollover counter)
     packet_index: u64,
 }
@@ -147,18 +164,27 @@ impl ProtectedRtpPacket {
 
 impl SrtpContext {
     /// Create a new SRTP context
+    ///
+    /// Both inbound and outbound directions use the same key material.
+    /// For DTLS-SRTP scenarios with separate local/remote keys, use `new_from_keys()`.
     pub fn new(suite: SrtpCryptoSuite, key: crypto::SrtpCryptoKey) -> Result<Self, crate::Error> {
-        let crypto = crypto::SrtpCrypto::new(suite, key)?;
-        
+        let outbound_crypto = crypto::SrtpCrypto::new(suite.clone(), key.clone())?;
+        let inbound_crypto = crypto::SrtpCrypto::new(suite, key)?;
+
         Ok(Self {
             enabled: true,
-            crypto,
+            outbound_crypto,
+            inbound_crypto,
             key_rotation: key_derivation::KeyRotationFrequency::None,
             packet_index: 0,
         })
     }
     
     /// Create a new SRTP context from separate local and remote keys
+    ///
+    /// Outbound (protect/encrypt) uses `local_key` + `local_salt`.
+    /// Inbound (unprotect/decrypt) uses `remote_key` + `remote_salt`.
+    /// This is required for DTLS-SRTP where each direction has distinct keying material.
     pub fn new_from_keys(
         local_key: Vec<u8>,
         remote_key: Vec<u8>,
@@ -166,11 +192,19 @@ impl SrtpContext {
         remote_salt: Vec<u8>,
         profile: SrtpCryptoSuite,
     ) -> Result<Self, crate::Error> {
-        // Create a combined key for simplicity in this implementation
-        // In a full implementation, you'd want to handle local and remote keys separately
-        let combined_key = crypto::SrtpCryptoKey::new(local_key, local_salt);
-        
-        Self::new(profile, combined_key)
+        let outbound_key = crypto::SrtpCryptoKey::new(local_key, local_salt);
+        let inbound_key = crypto::SrtpCryptoKey::new(remote_key, remote_salt);
+
+        let outbound_crypto = crypto::SrtpCrypto::new(profile.clone(), outbound_key)?;
+        let inbound_crypto = crypto::SrtpCrypto::new(profile, inbound_key)?;
+
+        Ok(Self {
+            enabled: true,
+            outbound_crypto,
+            inbound_crypto,
+            key_rotation: key_derivation::KeyRotationFrequency::None,
+            packet_index: 0,
+        })
     }
     
     /// Enable or disable SRTP
@@ -202,8 +236,8 @@ impl SrtpContext {
         // Increment packet index
         self.packet_index += 1;
         
-        // Encrypt the packet using SRTP
-        let (encrypted, auth_tag) = self.crypto.encrypt_rtp(packet)?;
+        // Encrypt the packet using SRTP (outbound direction)
+        let (encrypted, auth_tag) = self.outbound_crypto.encrypt_rtp(packet)?;
         
         // Return the encrypted packet with its authentication tag
         Ok(ProtectedRtpPacket {
@@ -220,8 +254,8 @@ impl SrtpContext {
             return crate::packet::RtpPacket::parse(data);
         }
         
-        // Decrypt using SRTP (which handles authentication verification internally)
-        self.crypto.decrypt_rtp(data)
+        // Decrypt using SRTP (inbound direction, handles authentication verification internally)
+        self.inbound_crypto.decrypt_rtp(data)
     }
     
     /// Protect an RTCP packet (SRTCP encryption)
@@ -232,8 +266,8 @@ impl SrtpContext {
             return Ok(bytes::Bytes::copy_from_slice(data));
         }
         
-        // Encrypt using SRTCP
-        let (encrypted, auth_tag) = self.crypto.encrypt_rtcp(data)?;
+        // Encrypt using SRTCP (outbound direction)
+        let (encrypted, auth_tag) = self.outbound_crypto.encrypt_rtcp(data)?;
         
         // If authentication is used, append the tag
         if let Some(tag) = auth_tag {
@@ -254,8 +288,8 @@ impl SrtpContext {
             return Ok(bytes::Bytes::copy_from_slice(data));
         }
         
-        // Decrypt using SRTCP (which handles authentication verification internally)
-        self.crypto.decrypt_rtcp(data)
+        // Decrypt using SRTCP (inbound direction, handles authentication verification internally)
+        self.inbound_crypto.decrypt_rtcp(data)
     }
 }
 

@@ -32,7 +32,8 @@ async fn test_oauth_presence_flow() -> Result<()> {
         },
         cache_ttl: Duration::from_secs(300),
         realm: "test".to_string(),
-        allow_insecure: true, // For testing only
+        #[allow(deprecated)]
+        allow_insecure: true, // Deprecated and ignored
     };
     
     // Create OAuth validator

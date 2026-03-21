@@ -144,16 +144,16 @@ impl BenchmarkResults {
     pub fn print_results(&self) {
         let summary = self.calculate_improvements();
         
-        println!("\n🚀 {} Results", self.test_config.test_name);
-        println!("================================================");
-        println!("⏱️  Latency Results:");
-        println!("  Traditional:  {:?}", summary.traditional_avg_latency);
-        println!("  Zero-Copy:    {:?}", summary.zero_copy_avg_latency);
-        println!("  Pooled:       {:?}", summary.pooled_avg_latency);
+        tracing::info!("\n🚀 {} Results", self.test_config.test_name);
+        tracing::info!("================================================");
+        tracing::info!("⏱️  Latency Results:");
+        tracing::info!("  Traditional:  {:?}", summary.traditional_avg_latency);
+        tracing::info!("  Zero-Copy:    {:?}", summary.zero_copy_avg_latency);
+        tracing::info!("  Pooled:       {:?}", summary.pooled_avg_latency);
         
-        println!("\n📈 Performance Improvements:");
-        println!("  Zero-Copy Speedup:    {:.2}x", summary.zero_copy_speedup);
-        println!("  Pooled Speedup:       {:.2}x", summary.pooled_speedup);
+        tracing::info!("\n📈 Performance Improvements:");
+        tracing::info!("  Zero-Copy Speedup:    {:.2}x", summary.zero_copy_speedup);
+        tracing::info!("  Pooled Speedup:       {:.2}x", summary.pooled_speedup);
     }
 }
 
@@ -193,18 +193,18 @@ impl AudioFrameBenchmark {
     pub fn run_comprehensive_benchmark(&self) -> BenchmarkResults {
         let mut results = BenchmarkResults::new(self.config.clone());
         
-        println!("🔬 Running comprehensive audio frame benchmark...");
+        tracing::info!("🔬 Running comprehensive audio frame benchmark...");
         
         // Benchmark traditional AudioFrame processing
-        println!("Testing traditional AudioFrame...");
+        tracing::info!("Testing traditional AudioFrame...");
         results.traditional_metrics = self.benchmark_traditional_frames();
         
         // Benchmark zero-copy processing  
-        println!("Testing zero-copy AudioFrame...");
+        tracing::info!("Testing zero-copy AudioFrame...");
         results.zero_copy_metrics = self.benchmark_zero_copy_frames();
         
         // Benchmark pooled processing
-        println!("Testing pooled AudioFrame...");
+        tracing::info!("Testing pooled AudioFrame...");
         results.pooled_metrics = self.benchmark_pooled_frames();
         
         results
@@ -308,7 +308,7 @@ impl AudioFrameBenchmark {
     
     /// Benchmark codec processing pipeline
     pub fn benchmark_codec_pipeline(&self) -> BenchmarkResults {
-        println!("🔬 Benchmarking codec processing pipeline...");
+        tracing::info!("🔬 Benchmarking codec processing pipeline...");
         
         let mut results = BenchmarkResults::new(self.config.clone());
         

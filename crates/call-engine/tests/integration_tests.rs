@@ -157,8 +157,8 @@ async fn test_session_manager_access() {
     let call_center = create_test_call_center().await.expect("Call center creation failed");
     
     // Test session manager access
-    let session_manager = call_center.session_manager();
-    
+    let session_manager = call_center.session_manager().expect("session manager should be available");
+
     // Verify we can access session-core APIs (these should not fail even without live SIP)
     let active_sessions = session_manager.list_active_sessions().await;
     match active_sessions {

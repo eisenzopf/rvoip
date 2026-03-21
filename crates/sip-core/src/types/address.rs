@@ -529,7 +529,10 @@ impl Address {
         let clamped_q = q.max(0.0).min(1.0);
         // Remove existing q param before adding new one
         self.params.retain(|p| !matches!(p, Param::Q(_)));
-        self.params.push(Param::Q(NotNan::try_from(clamped_q).expect("Clamped q value should not be NaN")));
+        if let Ok(q_val) = NotNan::try_from(clamped_q) {
+            self.params.push(Param::Q(q_val));
+        }
+        // If clamped_q is somehow NaN (should not happen after clamping), silently ignore
     }
 
     /// Check if a parameter exists (case-insensitive key).
@@ -615,31 +618,30 @@ impl Address {
     /// addr.set_param("custom", Some("value"));
     /// 
     /// // Test parameter retrieval
-    /// assert_eq!(addr.get_param("tag"), Some(Some("1234")));
+    /// assert_eq!(addr.get_param("tag"), Some(Some("1234".to_string())));
     /// assert_eq!(addr.get_param("lr"), Some(None)); // Flag parameter
-    /// assert_eq!(addr.get_param("custom"), Some(Some("value")));
+    /// assert_eq!(addr.get_param("custom"), Some(Some("value".to_string())));
     /// ```
-    pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
+    pub fn get_param(&self, key: &str) -> Option<Option<String>> {
         self.params
             .iter()
             .find_map(|p| match p {
-                Param::Branch(val) if key.eq_ignore_ascii_case("branch") => Some(Some(val.as_str())),
-                Param::Tag(val) if key.eq_ignore_ascii_case("tag") => Some(Some(val.as_str())),
-                Param::Expires(val) if key.eq_ignore_ascii_case("expires") => Some(Some(Box::leak(val.to_string().into_boxed_str()))), // Inefficient leak!
-                Param::Received(val) if key.eq_ignore_ascii_case("received") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-                Param::Maddr(val) if key.eq_ignore_ascii_case("maddr") => Some(Some(val.as_str())),
-                Param::Ttl(val) if key.eq_ignore_ascii_case("ttl") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                Param::Branch(val) if key.eq_ignore_ascii_case("branch") => Some(Some(val.to_string())),
+                Param::Tag(val) if key.eq_ignore_ascii_case("tag") => Some(Some(val.to_string())),
+                Param::Expires(val) if key.eq_ignore_ascii_case("expires") => Some(Some(val.to_string())),
+                Param::Received(val) if key.eq_ignore_ascii_case("received") => Some(Some(val.to_string())),
+                Param::Maddr(val) if key.eq_ignore_ascii_case("maddr") => Some(Some(val.to_string())),
+                Param::Ttl(val) if key.eq_ignore_ascii_case("ttl") => Some(Some(val.to_string())),
                 Param::Lr if key.eq_ignore_ascii_case("lr") => Some(None), // Keep as Some(None) for flag params
-                Param::Q(val) if key.eq_ignore_ascii_case("q") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-                Param::Transport(val) if key.eq_ignore_ascii_case("transport") => Some(Some(val.as_str())),
-                Param::User(val) if key.eq_ignore_ascii_case("user") => Some(Some(val.as_str())),
-                Param::Method(val) if key.eq_ignore_ascii_case("method") => Some(Some(val.as_str())),
-                // Wrap the Option<&str> in Some to match expected Option<Option<&str>>
-                Param::Other(k, v_opt) if k.eq_ignore_ascii_case(key) => Some(v_opt.as_ref().and_then(|gv| gv.as_str())),
-                Param::Handling(val) if key.eq_ignore_ascii_case("handling") => Some(Some(val.as_str())),
-                Param::Duration(val) if key.eq_ignore_ascii_case("duration") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
+                Param::Q(val) if key.eq_ignore_ascii_case("q") => Some(Some(val.to_string())),
+                Param::Transport(val) if key.eq_ignore_ascii_case("transport") => Some(Some(val.as_str().to_string())),
+                Param::User(val) if key.eq_ignore_ascii_case("user") => Some(Some(val.as_str().to_string())),
+                Param::Method(val) if key.eq_ignore_ascii_case("method") => Some(Some(val.as_str().to_string())),
+                Param::Other(k, v_opt) if k.eq_ignore_ascii_case(key) => Some(v_opt.as_ref().and_then(|gv| gv.as_str()).map(|s| s.to_string())),
+                Param::Handling(val) if key.eq_ignore_ascii_case("handling") => Some(Some(val.as_str().to_string())),
+                Param::Duration(val) if key.eq_ignore_ascii_case("duration") => Some(Some(val.to_string())),
                 Param::Rport(val) if key.eq_ignore_ascii_case("rport") => match val {
-                    Some(port) => Some(Some(Box::leak(port.to_string().into_boxed_str()))),
+                    Some(port) => Some(Some(port.to_string())),
                     None => Some(None) // Flag parameter
                 },
                 _ => None,
@@ -668,7 +670,7 @@ impl Address {
     ///
     /// // Set a parameter with a value
     /// addr.set_param("custom", Some("value"));
-    /// assert_eq!(addr.get_param("custom"), Some(Some("value")));
+    /// assert_eq!(addr.get_param("custom"), Some(Some("value".to_string())));
     ///
     /// // For flag parameters like 'lr', it's better to use the specific enum variant
     /// addr.params.push(Param::Lr);
@@ -676,7 +678,7 @@ impl Address {
     ///
     /// // Replace an existing parameter
     /// addr.set_param("custom", Some("new-value"));
-    /// assert_eq!(addr.get_param("custom"), Some(Some("new-value")));
+    /// assert_eq!(addr.get_param("custom"), Some(Some("new-value".to_string())));
     /// ```
     pub fn set_param(&mut self, key: impl Into<String>, value: Option<impl Into<String>>) {
         let key_string = key.into();

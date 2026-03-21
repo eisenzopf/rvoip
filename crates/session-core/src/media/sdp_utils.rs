@@ -155,10 +155,11 @@ pub fn parse_media_directions(sdp: &str) -> Vec<(usize, MediaDirection)> {
         
         // New media section
         if trimmed.starts_with("m=") {
-            current_media_index = Some(directions.len());
+            let idx = directions.len();
+            current_media_index = Some(idx);
             // Default to session direction or sendrecv
             directions.push((
-                current_media_index.unwrap(),
+                idx,
                 session_direction.unwrap_or(MediaDirection::SendRecv)
             ));
         }

@@ -257,105 +257,126 @@ impl SqliteUserStore {
 impl crate::ApiKeyStore for SqliteUserStore {
     async fn create_api_key(&self, request: crate::api_keys::CreateApiKeyRequest) -> Result<(crate::ApiKey, String)> {
         use rand::Rng;
-        use sha2::{Sha256, Digest};
-        
+        use argon2::{Argon2, PasswordHasher};
+        use argon2::password_hash::SaltString;
+        use rand::rngs::OsRng;
+
         // Validate the request first
         request.validate()?;
-        
+
         // Generate the actual API key
-        let raw_key = format!("rvoip_ak_live_{}", 
+        let raw_key = format!("rvoip_ak_live_{}",
             rand::thread_rng()
                 .sample_iter(&rand::distributions::Alphanumeric)
                 .take(32)
                 .map(char::from)
                 .collect::<String>()
         );
-        
-        // Hash the key for storage
-        let mut hasher = Sha256::new();
-        hasher.update(raw_key.as_bytes());
-        let key_hash = format!("{:x}", hasher.finalize());
-        
+
+        // Store a prefix for lookup (first 16 chars after the "rvoip_ak_live_" prefix)
+        let key_prefix = raw_key.chars().take(30).collect::<String>();
+
+        // Hash the key with Argon2id for secure storage
+        let salt = SaltString::generate(&mut OsRng);
+        let argon2 = Argon2::default();
+        let key_hash = argon2
+            .hash_password(raw_key.as_bytes(), &salt)
+            .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to hash API key: {}", e)))?
+            .to_string();
+
         let api_key = crate::ApiKey {
             id: crate::User::new_id(),
             user_id: request.user_id,
             name: request.name,
             key_hash: key_hash.clone(),
+            key_prefix: key_prefix.clone(),
             permissions: request.permissions,
             expires_at: request.expires_at,
             last_used: None,
             created_at: Utc::now(),
         };
-        
-        let permissions_json = serde_json::to_string(&api_key.permissions).unwrap();
-        
+
+        let permissions_json = serde_json::to_string(&api_key.permissions)
+            .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to serialize permissions: {}", e)))?;
+
         sqlx::query(
-            "INSERT INTO api_keys (id, user_id, name, key_hash, permissions, expires_at, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO api_keys (id, user_id, name, key_hash, key_prefix, permissions, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&api_key.id)
         .bind(&api_key.user_id)
         .bind(&api_key.name)
         .bind(&api_key.key_hash)
+        .bind(&api_key.key_prefix)
         .bind(&permissions_json)
         .bind(&api_key.expires_at)
         .bind(&api_key.created_at)
         .execute(&self.pool)
         .await?;
-        
+
         Ok((api_key, raw_key))
     }
     
     async fn validate_api_key(&self, key: &str) -> Result<Option<crate::ApiKey>> {
-        use sha2::{Sha256, Digest};
-        
-        // Hash the provided key
-        let mut hasher = Sha256::new();
-        hasher.update(key.as_bytes());
-        let key_hash = format!("{:x}", hasher.finalize());
-        
-        let row = sqlx::query(
-            "SELECT id, user_id, name, key_hash, permissions, expires_at, last_used, created_at
-             FROM api_keys WHERE key_hash = ?"
+        use argon2::{Argon2, PasswordVerifier};
+        use argon2::password_hash::PasswordHash;
+
+        // Extract prefix for candidate lookup
+        let key_prefix: String = key.chars().take(30).collect();
+
+        // Find candidate keys by prefix, then verify with Argon2
+        let rows = sqlx::query(
+            "SELECT id, user_id, name, key_hash, key_prefix, permissions, expires_at, last_used, created_at
+             FROM api_keys WHERE key_prefix = ?"
         )
-        .bind(&key_hash)
-        .fetch_optional(&self.pool)
+        .bind(&key_prefix)
+        .fetch_all(&self.pool)
         .await?;
-        
-        if let Some(row) = row {
-            let mut api_key = crate::ApiKey {
-                id: row.get("id"),
-                user_id: row.get("user_id"),
-                name: row.get("name"),
-                key_hash: row.get("key_hash"),
-                permissions: serde_json::from_str(row.get("permissions")).unwrap_or_default(),
-                expires_at: row.get("expires_at"),
-                last_used: row.get("last_used"),
-                created_at: row.get("created_at"),
+
+        let argon2 = Argon2::default();
+
+        for row in rows {
+            let stored_hash: String = row.get("key_hash");
+            let parsed_hash = match PasswordHash::new(&stored_hash) {
+                Ok(h) => h,
+                Err(_) => continue,
             };
-            
-            // Check if expired
-            if let Some(expires_at) = api_key.expires_at {
-                if expires_at < Utc::now() {
-                    return Err(Error::ApiKeyExpired);
+
+            if argon2.verify_password(key.as_bytes(), &parsed_hash).is_ok() {
+                let mut api_key = crate::ApiKey {
+                    id: row.get("id"),
+                    user_id: row.get("user_id"),
+                    name: row.get("name"),
+                    key_hash: stored_hash,
+                    key_prefix: row.get("key_prefix"),
+                    permissions: serde_json::from_str(row.get("permissions")).unwrap_or_default(),
+                    expires_at: row.get("expires_at"),
+                    last_used: row.get("last_used"),
+                    created_at: row.get("created_at"),
+                };
+
+                // Check if expired
+                if let Some(expires_at) = api_key.expires_at {
+                    if expires_at < Utc::now() {
+                        return Err(Error::ApiKeyExpired);
+                    }
                 }
+
+                // Update last_used
+                let now = Utc::now();
+                sqlx::query("UPDATE api_keys SET last_used = ? WHERE id = ?")
+                    .bind(&now)
+                    .bind(&api_key.id)
+                    .execute(&self.pool)
+                    .await?;
+
+                api_key.last_used = Some(now);
+
+                return Ok(Some(api_key));
             }
-            
-            // Update last_used
-            let now = Utc::now();
-            sqlx::query("UPDATE api_keys SET last_used = ? WHERE id = ?")
-                .bind(&now)
-                .bind(&api_key.id)
-                .execute(&self.pool)
-                .await?;
-            
-            // Update the returned object to reflect the change
-            api_key.last_used = Some(now);
-            
-            Ok(Some(api_key))
-        } else {
-            Ok(None)
         }
+
+        Ok(None)
     }
     
     async fn revoke_api_key(&self, id: &str) -> Result<()> {
@@ -373,18 +394,19 @@ impl crate::ApiKeyStore for SqliteUserStore {
     
     async fn list_api_keys(&self, user_id: &str) -> Result<Vec<crate::ApiKey>> {
         let rows = sqlx::query(
-            "SELECT id, user_id, name, key_hash, permissions, expires_at, last_used, created_at
+            "SELECT id, user_id, name, key_hash, key_prefix, permissions, expires_at, last_used, created_at
              FROM api_keys WHERE user_id = ? ORDER BY created_at DESC"
         )
         .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
-        
+
         Ok(rows.into_iter().map(|row| crate::ApiKey {
             id: row.get("id"),
             user_id: row.get("user_id"),
             name: row.get("name"),
             key_hash: row.get("key_hash"),
+            key_prefix: row.get("key_prefix"),
             permissions: serde_json::from_str(row.get("permissions")).unwrap_or_default(),
             expires_at: row.get("expires_at"),
             last_used: row.get("last_used"),

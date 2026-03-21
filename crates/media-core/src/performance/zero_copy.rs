@@ -56,6 +56,36 @@ impl SharedAudioBuffer {
     pub fn samples(&self) -> &[i16] {
         &self.data[self.offset..self.offset + self.length]
     }
+
+    /// Get mutable access to samples using copy-on-write semantics.
+    ///
+    /// If this buffer is the sole owner of the underlying data and the view
+    /// covers the entire allocation, the data is mutated in place. Otherwise
+    /// the viewed region is copied into a fresh, uniquely-owned allocation so
+    /// the caller always receives a valid `&mut [i16]`.
+    pub fn samples_mut(&mut self) -> &mut [i16] {
+        self.ensure_unique_ownership();
+
+        // After ensure_unique_ownership, strong_count == 1 and offset == 0,
+        // so Arc::get_mut is guaranteed to succeed.
+        Arc::get_mut(&mut self.data)
+            .map(|s| &mut s[..self.length])
+            .unwrap_or(&mut [])
+    }
+
+    /// Ensure this buffer has unique ownership of the underlying data.
+    /// After this call, `self.data` has strong_count == 1 and `self.offset == 0`.
+    fn ensure_unique_ownership(&mut self) {
+        let needs_cow = Arc::strong_count(&self.data) > 1
+            || self.offset != 0
+            || self.length != self.data.len();
+
+        if needs_cow {
+            let owned: Vec<i16> = self.data[self.offset..self.offset + self.length].to_vec();
+            self.data = Arc::from(owned.into_boxed_slice());
+            self.offset = 0;
+        }
+    }
     
     /// Get the length of this buffer view
     pub fn len(&self) -> usize {
@@ -101,6 +131,8 @@ impl ZeroCopyAudioFrame {
         channels: u8,
         timestamp: u32,
     ) -> Self {
+        let channels = if channels == 0 { 1 } else { channels };
+        let sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
         let buffer = SharedAudioBuffer::new(samples);
         let sample_count = buffer.len() / channels as usize;
         let duration = Duration::from_secs_f64(sample_count as f64 / sample_rate as f64);

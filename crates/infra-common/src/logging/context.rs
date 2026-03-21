@@ -118,7 +118,7 @@ where
 /// Macro for logging with context
 #[macro_export]
 macro_rules! log_with_context {
-    ($level:expr, $ctx:expr, $($arg:tt)+) => {
+    ($level:expr_2021, $ctx:expr_2021, $($arg:tt)+) => {
         let span = $ctx.span($level);
         let _guard = span.enter();
         tracing::event!($level, $($arg)+);
@@ -128,7 +128,7 @@ macro_rules! log_with_context {
 /// Macro for logging with a new context
 #[macro_export]
 macro_rules! log_ctx {
-    ($level:expr, $component:expr, $operation:expr, $($arg:tt)+) => {
+    ($level:expr_2021, $component:expr_2021, $operation:expr_2021, $($arg:tt)+) => {
         let ctx = $crate::logging::context::LogContext::with_operation($component, $operation);
         $crate::log_with_context!($level, &ctx, $($arg)+);
     };

@@ -6,12 +6,13 @@ use bytes::{BytesMut, Buf};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::SinkExt;
 use futures_util::StreamExt;
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, trace, warn};
 
 #[cfg(feature = "ws")]
-use tokio_tungstenite::{tungstenite, WebSocketStream, MaybeTlsStream};
+use tokio_tungstenite::{tungstenite, WebSocketStream};
+#[cfg(feature = "ws")]
+use super::stream::WsStream;
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::protocol::{Message as WsMessage, Role};
 
@@ -29,7 +30,7 @@ const MAX_MESSAGE_SIZE: usize = 65535;
 pub struct WebSocketConnection {
     /// The WebSocket stream (writer half)
     #[cfg(feature = "ws")]
-    ws_writer: Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>>,
+    ws_writer: Mutex<SplitSink<WebSocketStream<WsStream>, WsMessage>>,
     /// The peer's address
     peer_addr: SocketAddr,
     /// Whether the connection is closed
@@ -44,7 +45,7 @@ impl WebSocketConnection {
     /// Creates a WebSocket connection from an existing WebSocket stream
     #[cfg(feature = "ws")]
     pub fn from_writer(
-        ws_writer: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>,
+        ws_writer: SplitSink<WebSocketStream<WsStream>, WsMessage>,
         peer_addr: SocketAddr, 
         secure: bool,
         subprotocol: String,

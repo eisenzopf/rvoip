@@ -103,6 +103,13 @@ impl AdvancedAcousticEchoCanceller {
         debug!("Creating AdvancedAcousticEchoCanceller: FFT size={}, partitions={}", 
                config.fft_size, config.num_partitions);
         
+        // Validate num_partitions
+        if config.num_partitions < 1 {
+            return Err(AudioProcessingError::InvalidFormat {
+                details: "num_partitions must be >= 1".to_string(),
+            }.into());
+        }
+
         // Validate FFT size is power of 2
         if config.fft_size == 0 || !config.fft_size.is_power_of_two() || config.fft_size < 64 {
             return Err(AudioProcessingError::InvalidFormat {

@@ -60,6 +60,7 @@ use ordered_float::NotNan;
 use serde::{Serialize, Deserialize};
 use crate::types::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
 use crate::error::{Error, Result};
+use tracing;
 
 /// Represents a single parsed contact-param item (address + params)
 /// Used by the parser and the updated ContactValue enum.
@@ -188,7 +189,7 @@ impl Contact {
             // RFC allows empty Contact header, but usually implies registration removal.
             // Representing as empty Params list might be okay, or maybe a dedicated Empty variant?
             // Sticking with empty Params for now.
-            println!("Warning: Creating Contact with empty parameter list.");
+            tracing::warn!("Creating Contact with empty parameter list");
         }
         Self(vec![ContactValue::Params(params)])
     }
@@ -388,16 +389,11 @@ impl Contact {
     }
     
     /// Sets or replaces the expires parameter on the *first* contact.
-    /// Adds the first contact if the list is empty.
-    /// Panics if called on a Star contact.
+    /// Does nothing if called on a Star contact or an empty Params list.
     ///
     /// # Parameters
     ///
     /// - `expires`: The expiration time in seconds
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a Star contact or an empty Params list
     ///
     /// # Examples
     ///
@@ -420,12 +416,12 @@ impl Contact {
                 ContactValue::Params(params) => {
                     if let Some(cp_info) = params.first_mut() {
                         cp_info.address.set_param("expires", Some(expires.to_string()));
-                    } else {
-                        // Handle case where Params list is empty? This seems unlikely for set_expires.
-                        panic!("Cannot set expires on an empty Contact parameter list");
                     }
+                    // Silently ignore if Params list is empty
                 },
-                ContactValue::Star => panic!("Cannot set expires on star Contact"),
+                ContactValue::Star => {
+                    // Cannot set expires on star Contact; silently ignore
+                },
             }
         }
     }
@@ -458,7 +454,7 @@ impl Contact {
     }
     
     /// Sets or replaces the q parameter on the *first* contact.
-    /// Panics if called on a Star contact or if list is empty.
+    /// Does nothing if called on a Star contact, an empty Params list, or if q is NaN.
     ///
     /// The q parameter indicates a relative preference for this contact
     /// compared to other contacts. Values are clamped between 0 and 1,
@@ -467,11 +463,6 @@ impl Contact {
     /// # Parameters
     ///
     /// - `q`: The q-value (clamped between 0.0 and 1.0)
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a Star contact, if the Params list is empty, 
-    /// or if the provided value is NaN
     ///
     /// # Examples
     ///
@@ -495,19 +486,23 @@ impl Contact {
     /// ```
     pub fn set_q(&mut self, q: f32) {
         let clamped_q = q.max(0.0).min(1.0);
-        if clamped_q.is_nan() { panic!("q value cannot be NaN"); }
+        if clamped_q.is_nan() {
+            // NaN q value is invalid; silently ignore
+            return;
+        }
         let q_value_str = clamped_q.to_string();
-        
+
         if let Some(value) = self.0.first_mut() {
             match value {
                 ContactValue::Params(params) => {
                     if let Some(cp_info) = params.first_mut() {
                         cp_info.address.set_param("q", Some(q_value_str));
-                    } else {
-                        panic!("Cannot set q on an empty Contact parameter list");
                     }
+                    // Silently ignore if Params list is empty
                 },
-                ContactValue::Star => panic!("Cannot set q on star Contact"),
+                ContactValue::Star => {
+                    // Cannot set q on star Contact; silently ignore
+                },
             }
         }
     }
@@ -533,15 +528,11 @@ impl Contact {
     }
     
     /// Sets or replaces the tag parameter on the *first* contact.
-    /// Panics if called on a Star contact or if list is empty.
+    /// Does nothing if called on a Star contact or an empty Params list.
     ///
     /// # Parameters
     ///
     /// - `tag`: The tag value to set
-    ///
-    /// # Panics
-    ///
-    /// Panics if called on a Star contact or if the Params list is empty
     ///
     /// # Examples
     ///
@@ -564,11 +555,12 @@ impl Contact {
                 ContactValue::Params(params) => {
                     if let Some(addr) = params.first_mut() {
                         addr.address.set_tag(tag);
-                    } else {
-                        panic!("Cannot set tag on an empty Contact parameter list");
                     }
+                    // Silently ignore if Params list is empty
                 },
-                ContactValue::Star => panic!("Cannot set tag on star Contact"),
+                ContactValue::Star => {
+                    // Cannot set tag on star Contact; silently ignore
+                },
             }
         }
     }

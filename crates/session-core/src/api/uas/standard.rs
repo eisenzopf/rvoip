@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use crate::api::control::SessionControl;
 use crate::api::media::MediaControl;
 use crate::api::types::{SessionId, CallState, IncomingCall, CallDecision};
-use crate::api::builder::SessionManagerConfig;
+use crate::api::builder::{SessionManagerConfig, SipTransportType};
 use crate::api::handlers::CallHandler;
 use crate::coordinator::SessionCoordinator;
 use crate::errors::Result;
@@ -45,7 +45,7 @@ impl UasServer {
         
         // Parse local address to get bind address
         let local_bind_addr: std::net::SocketAddr = config.local_addr.parse()
-            .unwrap_or_else(|_| "0.0.0.0:5060".parse().unwrap());
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 5060)));
         
         // Create SessionManagerConfig
         let manager_config = SessionManagerConfig {
@@ -58,8 +58,9 @@ impl UasServer {
             stun_server: None,
             enable_sip_client: false,
             media_config: Default::default(),
+            sip_transport: SipTransportType::Udp,
         };
-        
+
         // Create coordinator with the adapter
         let coordinator = SessionCoordinator::new(
             manager_config,

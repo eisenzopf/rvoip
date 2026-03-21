@@ -333,11 +333,8 @@ impl Sdes {
             }
         }
         
-        if selected_attr.is_none() {
-            return Err(Error::InvalidMessage("No crypto attributes in answer".into()));
-        }
-        
-        let selected = selected_attr.unwrap();
+        let selected = selected_attr
+            .ok_or_else(|| Error::InvalidMessage("No crypto attributes in answer".into()))?;
         
         // Find matching local attribute by tag
         let local_attr = self.local_attrs.iter().find(|a| a.tag == selected.tag);

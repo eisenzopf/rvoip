@@ -54,7 +54,7 @@ pub async fn global_coordinator() -> &'static Arc<GlobalEventCoordinator> {
         Arc::new(
             GlobalEventCoordinator::new(config)
                 .await
-                .expect("Failed to initialize global event coordinator")
+                .expect("BUG: Failed to initialize global event coordinator")
         )
     }).await
 }
@@ -316,16 +316,16 @@ impl GlobalEventCoordinator {
         debug!("Publishing event type: {}", event_type);
         
         // Call registered handlers for this event type
-        if let Some(handlers) = self.handlers.get(event_type) {
+        match self.handlers.get(event_type) { Some(handlers) => {
             debug!("Found {} handlers for event type: {}", handlers.len(), event_type);
             for handler in handlers.iter() {
                 if let Err(e) = handler.handle(event.clone()).await {
                     warn!("Handler failed for event type {}: {}", event_type, e);
                 }
             }
-        } else {
+        } _ => {
             debug!("No handlers registered for event type: {}", event_type);
-        }
+        }}
         
         // TODO: Add plane-aware routing for cross-crate events
         debug!("Routing cross-crate event through planes");

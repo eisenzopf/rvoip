@@ -24,7 +24,9 @@ pub fn parse_scalability_mode(mode: &str) -> Result<(String, Option<u32>, Option
     }
     
     // Basic pattern is a letter followed by optional numbers and more patterns
-    let pattern_char = mode.chars().next().unwrap().to_ascii_uppercase();
+    let pattern_char = mode.chars().next()
+        .ok_or_else(|| Error::SdpParsingError("Empty scalability mode".to_string()))?
+        .to_ascii_uppercase();
     
     // Validate pattern character
     if !['L', 'S', 'K'].contains(&pattern_char) {
@@ -73,7 +75,9 @@ pub fn parse_scalability_mode(mode: &str) -> Result<(String, Option<u32>, Option
                     "Invalid spatial layer in scalability mode: {}", spatial_part
                 )));
             }
-            spatial_layers = Some(spatial_part.parse::<u32>().unwrap());
+            spatial_layers = Some(spatial_part.parse::<u32>().map_err(|_| {
+                Error::SdpParsingError(format!("Invalid spatial layer number: {}", spatial_part))
+            })?);
         }
         
         // Temporal part must not be empty
@@ -94,7 +98,9 @@ pub fn parse_scalability_mode(mode: &str) -> Result<(String, Option<u32>, Option
             return Err(Error::SdpParsingError("Missing temporal layer value".to_string()));
         }
         
-        temporal_layers = Some(numeric_part.parse::<u32>().unwrap());
+        temporal_layers = Some(numeric_part.parse::<u32>().map_err(|_| {
+            Error::SdpParsingError(format!("Invalid temporal layer number: {}", numeric_part))
+        })?);
         
         // Any remaining content is treated as extra information
         if numeric_end < temporal_and_extra.len() {
@@ -104,7 +110,9 @@ pub fn parse_scalability_mode(mode: &str) -> Result<(String, Option<u32>, Option
         // No 'T' marker found - should be just spatial layers or invalid
         if rest.chars().all(|c| c.is_ascii_digit()) {
             // Just a number, must be spatial layers
-            spatial_layers = Some(rest.parse::<u32>().unwrap());
+            spatial_layers = Some(rest.parse::<u32>().map_err(|_| {
+                Error::SdpParsingError(format!("Invalid spatial layer number: {}", rest))
+            })?);
         } else {
             // Non-numeric content is not valid
             return Err(Error::SdpParsingError(format!(

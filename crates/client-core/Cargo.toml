@@ -23,13 +23,13 @@ workspace = true
 rvoip-session-core.workspace = true
 
 # Async runtime and utilities
-tokio = { version = "1.0", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
 async-trait = "0.1"
 futures = "0.3"
 
 # Data structures and utilities
-uuid = { version = "1.0", features = ["v4", "serde"] }
-dashmap = "5.5"
+uuid = { workspace = true, features = ["v4", "serde"] }
+dashmap = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 parking_lot = "0.12"
@@ -40,7 +40,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Logging and error handling
 tracing = "0.1"
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = { workspace = true }
 
 # Random number generation for jitter
 rand = "0.8"

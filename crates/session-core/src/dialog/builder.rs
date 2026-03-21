@@ -46,20 +46,49 @@ impl DialogBuilder {
         if let Some(api) = self.dialog_api {
             return Ok(api);
         }
-        
+
         // Validate configuration compatibility
         self.config_converter.validate_compatibility()?;
-        
+
         // Create dialog configuration using the session configuration
         let dialog_config = self.create_dialog_config().await?;
-        
-        // Create the UnifiedDialogApi
-        let api = UnifiedDialogApi::create(dialog_config)
-            .await
-            .map_err(|e| DialogError::DialogCreation {
-                reason: format!("Failed to create dialog API: {}", e),
-            })?;
-        
+
+        // Check if a non-default transport type is configured
+        let session_config = self.config_converter.session_config();
+        let transport_type = &session_config.sip_transport;
+
+        use crate::api::builder::SipTransportType;
+        let api = match transport_type {
+            SipTransportType::Udp => {
+                // Default path: UDP only
+                UnifiedDialogApi::create(dialog_config)
+                    .await
+                    .map_err(|e| DialogError::DialogCreation {
+                        reason: format!("Failed to create dialog API: {}", e),
+                    })?
+            }
+            SipTransportType::Ws | SipTransportType::Wss => {
+                // WebSocket path: enable WS transport, disable UDP
+                let bind_addr = dialog_config.local_address();
+                let enable_tls = *transport_type == SipTransportType::Wss;
+
+                let transport_config = rvoip_dialog_core::transaction::transport::TransportManagerConfig {
+                    enable_udp: false,
+                    enable_tcp: false,
+                    enable_ws: true,
+                    enable_tls,
+                    bind_addresses: vec![bind_addr],
+                    ..Default::default()
+                };
+
+                UnifiedDialogApi::create_with_transport_config(dialog_config, transport_config)
+                    .await
+                    .map_err(|e| DialogError::DialogCreation {
+                        reason: format!("Failed to create dialog API with WebSocket transport: {}", e),
+                    })?
+            }
+        };
+
         Ok(Arc::new(api))
     }
     

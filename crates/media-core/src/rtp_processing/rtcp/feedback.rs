@@ -330,7 +330,7 @@ impl Default for StreamStats {
             rtt_ms: None,
             bitrate_bps: 0,
             discard_rate: 0.0,
-            remote_addr: "0.0.0.0:0".parse().unwrap(),
+            remote_addr: std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
         }
     }
 }

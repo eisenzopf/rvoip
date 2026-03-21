@@ -181,6 +181,8 @@ mod duration_ms {
 impl AudioFrame {
     /// Create a new audio frame
     pub fn new(samples: Vec<i16>, sample_rate: u32, channels: u8, timestamp: u32) -> Self {
+        let channels = if channels == 0 { 1 } else { channels };
+        let sample_rate = if sample_rate == 0 { 8000 } else { sample_rate };
         let sample_count = samples.len() / channels as usize;
         let duration = Duration::from_secs_f64(sample_count as f64 / sample_rate as f64);
         

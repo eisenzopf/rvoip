@@ -645,8 +645,9 @@ impl CallCenterEngine {
             customer_dialog_id: incoming_dialog_id, // PHASE 17.3: Store the dialog ID
             agent_dialog_id: None,
             related_session_id: None, // Will be set when agent is assigned
+            metadata: std::collections::HashMap::new(),
         };
-        
+
         // Store call info
         self.active_calls.insert(session_id.clone(), call_info);
         
@@ -657,7 +658,8 @@ impl CallCenterEngine {
         // Generate B2BUA's SDP answer for the customer
         let sdp_answer = if let Some(ref customer_sdp) = call.sdp {
             // Generate our SDP answer based on customer's offer
-            match self.session_coordinator.as_ref().unwrap()
+            match self.session_coordinator.as_ref()
+                .ok_or_else(|| CallCenterError::orchestration("Session coordinator not initialized"))?
                 .generate_sdp_answer(&session_id, customer_sdp).await {
                 Ok(answer) => {
                     info!("✅ Generated SDP answer for customer ({} bytes)", answer.len());
@@ -721,7 +723,9 @@ impl CallCenterEngine {
                             
                             // TODO: Re-queue or find another agent
                             if let Some(coordinator) = &self.session_coordinator {
-                                let _ = coordinator.terminate_session(&session_id).await;
+                                if let Err(e2) = coordinator.terminate_session(&session_id).await {
+                                    tracing::warn!("Failed to terminate session {} after agent assignment failure: {}", session_id, e2);
+                                }
                             }
                         }
                     },
@@ -734,7 +738,9 @@ impl CallCenterEngine {
                             error!("Failed to ensure queue {} exists: {}", queue_id, e);
                             // Terminate the call if we can't create the queue
                             if let Some(coordinator) = &self.session_coordinator {
-                                let _ = coordinator.terminate_session(&session_id).await;
+                                if let Err(e2) = coordinator.terminate_session(&session_id).await {
+                                    tracing::warn!("Failed to terminate session {} after queue creation failure: {}", session_id, e2);
+                                }
                             }
                             return;
                         }
@@ -808,13 +814,17 @@ impl CallCenterEngine {
                         } else {
                             // Also add to in-memory queue
                             let mut queue_manager = self.queue_manager.write().await;
-                            let _ = queue_manager.enqueue_call(&queue_id, queued_call);
+                            if let Err(e) = queue_manager.enqueue_call(&queue_id, queued_call) {
+                                tracing::warn!("Failed to enqueue call {} to in-memory queue {}: {}", session_id, queue_id, e);
+                            }
                         }
-                        
+
                         if !enqueue_success {
                             // Terminate the call if we can't queue it
                             if let Some(coordinator) = &self.session_coordinator {
-                                let _ = coordinator.terminate_session(&session_id).await;
+                                if let Err(e) = coordinator.terminate_session(&session_id).await {
+                                    tracing::warn!("Failed to terminate session {} after enqueue failure: {}", session_id, e);
+                                }
                             }
                             return;
                         }
@@ -842,7 +852,9 @@ impl CallCenterEngine {
                         
                         // Since we already accepted, we need to terminate
                         if let Some(coordinator) = &self.session_coordinator {
-                            let _ = coordinator.terminate_session(&session_id).await;
+                            if let Err(e) = coordinator.terminate_session(&session_id).await {
+                                tracing::warn!("Failed to terminate rejected session {}: {}", session_id, e);
+                            }
                         }
                         
                         // Update routing stats
@@ -862,11 +874,13 @@ impl CallCenterEngine {
                 
                 // Terminate the call
                 if let Some(coordinator) = &self.session_coordinator {
-                    let _ = coordinator.terminate_session(&session_id).await;
+                    if let Err(e2) = coordinator.terminate_session(&session_id).await {
+                        tracing::warn!("Failed to terminate session {} after routing failure: {}", session_id, e2);
+                    }
                 }
             }
         }
-        
+
         // Update routing time metrics
         let routing_time = routing_start.elapsed().as_millis() as u64;
         {
@@ -935,8 +949,9 @@ impl CallCenterEngine {
         };
         
         // Now proceed with the SIP call setup
-        let coordinator = self.session_coordinator.as_ref().unwrap();
-        
+        let coordinator = self.session_coordinator.as_ref()
+            .ok_or_else(|| CallCenterError::orchestration("Session coordinator not initialized"))?;
+
         // Verify customer session is ready
         match coordinator.find_session(&session_id).await {
             Ok(Some(customer_session)) => {
@@ -1018,8 +1033,9 @@ impl CallCenterEngine {
                     customer_dialog_id: None,
                     agent_dialog_id: None,
                     related_session_id: Some(session_id.clone()),
+                    metadata: std::collections::HashMap::new(),
                 };
-                
+
                 // Store the agent's call info
                 self.active_calls.insert(call_session.id.clone(), agent_call_info);
                 info!("📋 Created CallInfo for agent session {} with agent_id={}", call_session.id, agent_id);
@@ -1077,7 +1093,9 @@ impl CallCenterEngine {
                 
                 // Terminate the agent call
                 if let Some(coordinator) = &engine.session_coordinator {
-                    let _ = coordinator.terminate_session(&timeout_agent_session_id).await;
+                    if let Err(e) = coordinator.terminate_session(&timeout_agent_session_id).await {
+                        tracing::warn!("Failed to terminate timed-out agent session {}: {}", timeout_agent_session_id, e);
+                    }
                 }
                 
                 // Rollback database changes
@@ -1319,8 +1337,10 @@ impl CallCenterEngine {
         // Clean up bridge if call had one
         if let Some(call_info) = &call_info {
             if let Some(bridge_id) = &call_info.bridge_id {
-                if let Err(e) = self.session_coordinator.as_ref().unwrap().destroy_bridge(&bridge_id).await {
-                    warn!("Failed to destroy bridge {}: {}", bridge_id, e);
+                if let Some(coordinator) = self.session_coordinator.as_ref() {
+                    if let Err(e) = coordinator.destroy_bridge(&bridge_id).await {
+                        warn!("Failed to destroy bridge {}: {}", bridge_id, e);
+                    }
                 }
             }
         }
@@ -1399,7 +1419,9 @@ impl CallCenterEngine {
                                 
                                 // Terminate the customer call
                                 if let Some(coordinator) = engine.session_coordinator.as_ref() {
-                                    let _ = coordinator.terminate_session(&session_id).await;
+                                    if let Err(e) = coordinator.terminate_session(&session_id).await {
+                                        tracing::warn!("Failed to terminate session {} after max retries: {}", session_id, e);
+                                    }
                                 }
                                 return;
                             }
@@ -1415,7 +1437,9 @@ impl CallCenterEngine {
                                 
                                 // Last resort: terminate the call if we can't re-queue
                                 if let Some(coordinator) = engine.session_coordinator.as_ref() {
-                                    let _ = coordinator.terminate_session(&session_id).await;
+                                    if let Err(e2) = coordinator.terminate_session(&session_id).await {
+                                        tracing::warn!("Failed to terminate session {} after re-queue failure: {}", session_id, e2);
+                                    }
                                 }
                             } else {
                                 info!("📞 Re-queued call {} to {} with higher priority", session_id, queue_id);
@@ -1451,15 +1475,16 @@ impl CallCenterEngine {
             // 2. It has a queue_id (was queued)
             // 3. It's not in pending_assignments (no agent is handling it)
             if matches!(call_info.status, super::types::CallStatus::Connecting) &&
-               call_info.queue_id.is_some() &&
                !self.pending_assignments.contains_key(session_id) {
-                
-                // Check how long it's been in this state
-                let duration = chrono::Utc::now().signed_duration_since(call_info.created_at);
-                if duration.num_seconds() > 5 {  // Stuck for more than 5 seconds
-                    warn!("⚠️ Found stuck call {} in Connecting state for {}s", 
-                          session_id, duration.num_seconds());
-                    stuck_calls.push((session_id.clone(), call_info.queue_id.clone().unwrap()));
+
+                if let Some(queue_id) = &call_info.queue_id {
+                    // Check how long it's been in this state
+                    let duration = chrono::Utc::now().signed_duration_since(call_info.created_at);
+                    if duration.num_seconds() > 5 {  // Stuck for more than 5 seconds
+                        warn!("⚠️ Found stuck call {} in Connecting state for {}s",
+                              session_id, duration.num_seconds());
+                        stuck_calls.push((session_id.clone(), queue_id.clone()));
+                    }
                 }
             }
         }
@@ -1501,7 +1526,9 @@ impl CallCenterEngine {
                         error!("Failed to re-queue stuck call {}: {}", session_id, e);
                         // As a last resort, terminate the call if we can't re-queue
                         if let Some(coordinator) = &self.session_coordinator {
-                            let _ = coordinator.terminate_session(&session_id).await;
+                            if let Err(e2) = coordinator.terminate_session(&session_id).await {
+                                tracing::warn!("Failed to terminate stuck session {} after re-queue failure: {}", session_id, e2);
+                            }
                         }
                     }
                 }

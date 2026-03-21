@@ -6,14 +6,14 @@
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::str::FromStr;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
 use async_trait::async_trait;
 use anyhow::{Result, anyhow};
 use tracing::{debug, info, warn, error};
 use dashmap::DashMap;
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_core::{Message as SipMessage, TypedHeader, HeaderValue, Response, StatusCode};
+use rvoip_sip_core::{Message as SipMessage, Request, TypedHeader, HeaderValue, Response, StatusCode};
 use chrono::{Utc, Duration};
 use rvoip_dialog_core::Dialog;
 use rvoip_registrar_core::{
@@ -67,6 +67,13 @@ pub struct RegistrarIntegration {
     
     /// Service mode (P2P or B2BUA)
     mode: ServiceMode,
+
+    /// Channel for sending outbound SIP requests (e.g., NOTIFY)
+    /// The receiver end should be consumed by the coordinator that owns the transport.
+    outbound_tx: tokio::sync::mpsc::UnboundedSender<Request>,
+
+    /// Receiver for outbound SIP requests (taken once by the coordinator)
+    outbound_rx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Request>>>>,
 }
 
 impl RegistrarIntegration {
@@ -103,6 +110,9 @@ impl RegistrarIntegration {
         // Create OAuth validator
         let oauth_validator = OAuth2Validator::new(oauth_config).await?;
 
+        // Create channel for outbound SIP requests (e.g., NOTIFY)
+        let (outbound_tx, outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+
         Ok(Self {
             registrar: Arc::new(registrar),
             oauth_validator: Arc::new(oauth_validator),
@@ -111,7 +121,18 @@ impl RegistrarIntegration {
             event_system,
             config: Arc::new(registrar_config),
             mode,
+            outbound_tx,
+            outbound_rx: Arc::new(Mutex::new(Some(outbound_rx))),
         })
+    }
+
+    /// Take the outbound request receiver.
+    ///
+    /// The coordinator that owns the transport layer should call this once
+    /// to obtain the receiver end, then forward each `Request` through
+    /// the dialog/transaction layer.
+    pub async fn take_outbound_rx(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<Request>> {
+        self.outbound_rx.lock().await.take()
     }
 
     /// Process a REGISTER request
@@ -351,15 +372,18 @@ impl RegistrarIntegration {
                 id: None,
                 params: Default::default(),
             }))
-            .header(TypedHeader::SubscriptionState(SubscriptionState::active(3600).to_string()))
+            .header(TypedHeader::SubscriptionState(SubscriptionState::active(3600)))
             .content_type("application/pidf+xml")
             .body(pidf_body)
             .build();
         
-        // TODO: Send NOTIFY through proper transaction manager
-        // This needs to be integrated with DialogManager or TransactionManager
-        warn!("NOTIFY sending not yet integrated - needs DialogManager");
-        
+        // Send NOTIFY through the outbound channel
+        if let Err(e) = self.outbound_tx.send(notify) {
+            error!("Failed to send NOTIFY through outbound channel: {}", e);
+            return Err(anyhow!("Failed to send NOTIFY: outbound channel closed"));
+        }
+        debug!("NOTIFY queued for subscription call_id={}", call_id);
+
         Ok(())
     }
 
@@ -439,12 +463,16 @@ impl RegistrarIntegration {
                     id: None,
                     params: Default::default(),
                 }))
-                .header(TypedHeader::SubscriptionState(SubscriptionState::terminated(TerminationReason::Timeout).to_string()))
+                .header(TypedHeader::SubscriptionState(SubscriptionState::terminated(TerminationReason::Timeout)))
                 .body(Vec::<u8>::new())
                 .build();
             
-            // TODO: Send final NOTIFY through proper transaction manager
-            warn!("Final NOTIFY sending not yet integrated - needs DialogManager");
+            // Send final NOTIFY through the outbound channel
+            if let Err(e) = self.outbound_tx.send(notify) {
+                error!("Failed to send final NOTIFY through outbound channel: {}", e);
+                return Err(anyhow!("Failed to send final NOTIFY: outbound channel closed"));
+            }
+            debug!("Final NOTIFY (terminated) queued for subscription call_id={}", call_id);
         }
         
         // Remove from user subscriptions
@@ -552,7 +580,8 @@ mod tests {
             introspect_client_id: None,
             introspect_client_secret: None,
             realm: "sip".to_string(),
-            allow_insecure: true, // Allow insecure for testing
+            #[allow(deprecated)]
+            allow_insecure: true, // Deprecated and ignored
             cache_ttl: std::time::Duration::from_secs(300),
             required_scopes: crate::auth::oauth::OAuth2Scopes::default(),
         };

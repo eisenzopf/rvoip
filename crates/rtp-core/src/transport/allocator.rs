@@ -644,8 +644,16 @@ impl GlobalPortAllocator {
             }
         }
         
-        // Return a clone of the Arc
-        allocator.as_ref().unwrap().clone()
+        // Return a clone of the Arc (always Some after the init block above)
+        match allocator.as_ref() {
+            Some(alloc) => alloc.clone(),
+            None => {
+                // This should never happen since we just set it above, but handle gracefully
+                let fallback = Arc::new(PortAllocator::new());
+                *allocator = Some(fallback.clone());
+                fallback
+            }
+        }
     }
 }
 

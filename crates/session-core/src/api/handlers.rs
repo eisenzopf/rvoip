@@ -376,7 +376,7 @@
 //!         
 //!         if let Some(servers) = self.regions.get(region) {
 //!             // Round-robin within region
-//!             let mut indices = self.current_index.lock().unwrap();
+//!             let mut indices = self.current_index.lock();
 //!             let index = indices.entry(region.to_string()).or_insert(0);
 //!             let server = &servers[*index % servers.len()];
 //!             *index = (*index + 1) % servers.len();
@@ -408,7 +408,8 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use crate::api::types::{IncomingCall, CallSession, CallDecision, SessionId, CallState};
@@ -583,10 +584,10 @@ pub trait CallHandler: Send + Sync + std::fmt::Debug {
     }
     
     /// Called when transfer progress updates occur
-    /// 
+    ///
     /// This method provides updates on the progress of an outgoing transfer
     /// that was initiated via transfer_session().
-    /// 
+    ///
     /// # Arguments
     /// * `session_id` - The session that initiated the transfer
     /// * `status` - The current transfer status
@@ -599,6 +600,80 @@ pub trait CallHandler: Send + Sync + std::fmt::Debug {
         tracing::info!(
             "Call {} transfer progress: {:?}",
             session_id, status
+        );
+    }
+
+    /// Called when a new subscription is created (e.g., presence SUBSCRIBE)
+    ///
+    /// # Arguments
+    /// * `subscription_id` - Identifier for the subscription (dialog ID)
+    /// * `event_type` - The event package (e.g., "presence", "message-summary")
+    /// * `from` - The URI of the subscriber
+    async fn on_subscription_created(
+        &self,
+        subscription_id: &str,
+        event_type: &str,
+        from: &str,
+    ) {
+        // Default: log the subscription creation
+        tracing::debug!(
+            "Subscription created: id={}, event={}, from={}",
+            subscription_id, event_type, from
+        );
+    }
+
+    /// Called when a subscription is terminated
+    ///
+    /// # Arguments
+    /// * `subscription_id` - Identifier for the subscription (dialog ID)
+    /// * `reason` - Optional reason for termination
+    async fn on_subscription_terminated(
+        &self,
+        subscription_id: &str,
+        reason: Option<&str>,
+    ) {
+        // Default: log the termination
+        tracing::debug!(
+            "Subscription terminated: id={}, reason={:?}",
+            subscription_id, reason
+        );
+    }
+
+    /// Called when a NOTIFY is received for an active subscription
+    ///
+    /// # Arguments
+    /// * `subscription_id` - Identifier for the subscription (dialog ID)
+    /// * `event_type` - The event package (e.g., "presence")
+    /// * `body` - Optional body content of the NOTIFY
+    async fn on_notify_received(
+        &self,
+        subscription_id: &str,
+        event_type: &str,
+        body: Option<&[u8]>,
+    ) {
+        // Default: log the NOTIFY reception
+        tracing::debug!(
+            "NOTIFY received: subscription={}, event={}, has_body={}",
+            subscription_id, event_type, body.is_some()
+        );
+    }
+
+    /// Called when a presence status update is received or published
+    ///
+    /// # Arguments
+    /// * `from` - The URI of the user whose presence changed
+    /// * `status` - The presence status string (e.g., "available", "busy", "away")
+    /// * `note` - Optional human-readable note about the presence
+    async fn on_presence_update(
+        &self,
+        from: &str,
+        status: &str,
+        note: Option<&str>,
+    ) {
+        // Default: log the presence update
+        tracing::debug!(
+            "Presence update: from={}, status={}, note={:?}",
+            from, status, note
         );
     }
 }
@@ -638,26 +713,26 @@ impl QueueHandler {
 
     /// Set up a notification channel for when calls are queued
     pub fn set_notify_channel(&self, sender: mpsc::UnboundedSender<IncomingCall>) {
-        *self.notify.lock().unwrap() = Some(sender);
+        *self.notify.lock() = Some(sender);
     }
 
     /// Get the next call from the queue
     pub fn dequeue(&self) -> Option<IncomingCall> {
-        self.queue.lock().unwrap().pop()
+        self.queue.lock().pop()
     }
 
     /// Get the current queue size
     pub fn queue_size(&self) -> usize {
-        self.queue.lock().unwrap().len()
+        self.queue.lock().len()
     }
 
     /// Add a call to the queue (internal use)
     pub async fn enqueue(&self, call: IncomingCall) {
-        let mut queue = self.queue.lock().unwrap();
+        let mut queue = self.queue.lock();
         queue.push(call.clone());
         
         // Notify if there's a listener
-        if let Some(sender) = self.notify.lock().unwrap().as_ref() {
+        if let Some(sender) = self.notify.lock().as_ref() {
             let _ = sender.send(call);
         }
     }
@@ -667,7 +742,7 @@ impl QueueHandler {
 impl CallHandler for QueueHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         let queue_size = {
-            let queue = self.queue.lock().unwrap();
+            let queue = self.queue.lock();
             queue.len()
         };
 

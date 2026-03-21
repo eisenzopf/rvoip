@@ -33,7 +33,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
 # UUID generation
-uuid = { version = "1.11", features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
@@ -47,7 +47,7 @@ async-trait = "0.1"
 
 # Web framework (for REST API)
 axum = { version = "0.7", features = ["http2", "json", "tokio", "macros"] }
-axum-server = { version = "0.6", features = ["tls-rustls"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
@@ -60,7 +60,7 @@ config = "0.14"
 
 # Cryptography
 rand = "0.8"
-base64 = "0.22"
+base64 = { workspace = true }
 sha2 = "0.10"
 
 # HTTP client (for examples)
@@ -70,7 +70,8 @@ rsa = { version = "0.9", features = ["pem"] }
 # Validation
 validator = { version = "0.18", features = ["derive"] }
 regex = "1.10"
-once_cell = "1.19"
+once_cell = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.5"
@@ -100,8 +101,8 @@ name = "multi_device_presence"
 path = "examples/multi_device_presence.rs"
 
 [[example]]
-name = "session_core_v2_integration"
-path = "examples/session_core_v2_integration.rs"
+name = "session_core_integration"
+path = "examples/session_core_integration.rs"
 
 [[example]]
 name = "rest_api_demo_server"

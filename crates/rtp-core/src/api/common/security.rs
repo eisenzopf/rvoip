@@ -330,7 +330,7 @@ impl SecurityManager {
         };
         
         // We have both client and server - this is the local testing case
-        println!("SecurityManager: Performing local handshake (client and server in same process)");
+        tracing::debug!("SecurityManager: Performing local handshake (client and server in same process)");
         
         // If we have the remote fingerprint, set it on the client
         if let Some(fingerprint) = remote_fingerprint.or_else(|| self.config.remote_fingerprint.clone()) {
@@ -346,12 +346,12 @@ impl SecurityManager {
         // 3. Client initiates handshake with proper sequencing
         
         // First, ensure server is ready to process packets
-        println!("SecurityManager: Starting server packet handler");
+        tracing::debug!("SecurityManager: Starting server packet handler");
         server_ctx.start_packet_handler().await?;
         
         // Verify server is fully ready - new addition based on dtls_test.rs
         if !server_ctx.is_ready().await? {
-            println!("SecurityManager: Waiting for server to be ready...");
+            tracing::debug!("SecurityManager: Waiting for server to be ready...");
             // Small delay to let server fully initialize
             let max_attempts = 30;  // 3 seconds total
             for _ in 0..max_attempts {
@@ -365,15 +365,15 @@ impl SecurityManager {
                 return Err(SecurityError::Timeout("Server not ready after waiting".to_string()));
             }
         }
-        println!("SecurityManager: Server is ready to receive handshake messages");
+        tracing::debug!("SecurityManager: Server is ready to receive handshake messages");
         
         // Next, start client packet handling
-        println!("SecurityManager: Starting client packet handler");
+        tracing::debug!("SecurityManager: Starting client packet handler");
         client_ctx.start_packet_handler().await?;
         
         // Verify client is ready
         if !client_ctx.is_ready().await? {
-            println!("SecurityManager: Waiting for client to be ready...");
+            tracing::debug!("SecurityManager: Waiting for client to be ready...");
             let max_attempts = 30;  // 3 seconds total
             for _ in 0..max_attempts {
                 if client_ctx.is_ready().await? {
@@ -386,17 +386,17 @@ impl SecurityManager {
                 return Err(SecurityError::Timeout("Client not ready after waiting".to_string()));
             }
         }
-        println!("SecurityManager: Client is ready to start handshake");
+        tracing::debug!("SecurityManager: Client is ready to start handshake");
         
         // NOW start the handshake - AFTER transport is ready
-        println!("SecurityManager: Starting client handshake");
+        tracing::debug!("SecurityManager: Starting client handshake");
         client_ctx.start_handshake().await?;
         
         // Poll for handshake completion with timeout
         let start_time = std::time::Instant::now();
         let handshake_timeout = std::time::Duration::from_secs(15);
         
-        println!("SecurityManager: Waiting for handshake to complete");
+        tracing::debug!("SecurityManager: Waiting for handshake to complete");
         
         while !client_ctx.is_handshake_complete().await? {
             if start_time.elapsed() > handshake_timeout {
@@ -409,11 +409,11 @@ impl SecurityManager {
             // Debugging info every 5 seconds for first handshake
             let elapsed_secs = start_time.elapsed().as_secs();
             if elapsed_secs > 0 && elapsed_secs % 5 == 0 {
-                println!("SecurityManager: Handshake in progress... ({:?} elapsed)", start_time.elapsed());
+                tracing::debug!("SecurityManager: Handshake in progress... ({:?} elapsed)", start_time.elapsed());
             }
         }
         
-        println!("SecurityManager: DTLS handshake completed successfully");
+        tracing::info!("SecurityManager: DTLS handshake completed successfully");
         return Ok(());
     }
     
@@ -432,12 +432,12 @@ impl SecurityManager {
         // 2. THEN start handshake after transport is ready
         
         // Start the packet handler first so it's ready to process responses
-        println!("SecurityManager: Starting client packet handler");
+        tracing::debug!("SecurityManager: Starting client packet handler");
         client_ctx.start_packet_handler().await?;
         
         // Verify client is ready before starting handshake
         if !client_ctx.is_ready().await? {
-            println!("SecurityManager: Waiting for client to be ready...");
+            tracing::debug!("SecurityManager: Waiting for client to be ready...");
             let max_attempts = 30;  // 3 seconds total
             for _ in 0..max_attempts {
                 if client_ctx.is_ready().await? {
@@ -450,17 +450,17 @@ impl SecurityManager {
                 return Err(SecurityError::Timeout("Client not ready after waiting".to_string()));
             }
         }
-        println!("SecurityManager: Client is ready to start handshake");
+        tracing::debug!("SecurityManager: Client is ready to start handshake");
         
         // Then start the handshake - AFTER we've verified readiness
-        println!("SecurityManager: Starting client handshake");
+        tracing::debug!("SecurityManager: Starting client handshake");
         client_ctx.start_handshake().await?;
         
         // Poll for handshake completion with timeout
         let start_time = std::time::Instant::now();
         let handshake_timeout = std::time::Duration::from_secs(15);
         
-        println!("SecurityManager: Waiting for handshake to complete");
+        tracing::debug!("SecurityManager: Waiting for handshake to complete");
         
         while !client_ctx.is_handshake_complete().await? {
             if start_time.elapsed() > handshake_timeout {
@@ -473,11 +473,11 @@ impl SecurityManager {
             // Debugging info every 5 seconds for first handshake
             let elapsed_secs = start_time.elapsed().as_secs();
             if elapsed_secs > 0 && elapsed_secs % 5 == 0 {
-                println!("SecurityManager: Handshake in progress... ({:?} elapsed)", start_time.elapsed());
+                tracing::debug!("SecurityManager: Handshake in progress... ({:?} elapsed)", start_time.elapsed());
             }
         }
         
-        println!("SecurityManager: DTLS handshake completed successfully");
+        tracing::info!("SecurityManager: DTLS handshake completed successfully");
         return Ok(());
     }
     

@@ -391,22 +391,26 @@ impl AdaptiveJitterBuffer {
             if self.next_seq.is_none() {
                 // Initialize next_seq if it's not set
                 self.next_seq = Some(lowest as u16);
-            } else if lowest < self.next_seq.unwrap() as u32 {
-                // Found a packet with lower sequence number than expected
+            } else if let Some(next_seq) = self.next_seq {
+                if lowest < next_seq as u32 {
+                    // Found a packet with lower sequence number than expected
 
-                // Special case for sequence wraparound:
-                // If lowest is very low (close to 0) and next_seq is very high (close to 65535),
-                // this is likely a wraparound condition. In this case, don't reset next_seq.
-                let next_seq = self.next_seq.unwrap();
-                if !(lowest < 1000 && next_seq > 60000) {
-                    self.next_seq = Some(lowest as u16);
+                    // Special case for sequence wraparound:
+                    // If lowest is very low (close to 0) and next_seq is very high (close to 65535),
+                    // this is likely a wraparound condition. In this case, don't reset next_seq.
+                    if !(lowest < 1000 && next_seq > 60000) {
+                        self.next_seq = Some(lowest as u16);
+                    }
                 }
             }
         } else {
             return None;
         }
-        
-        let next_seq = self.next_seq.unwrap();
+
+        let next_seq = match self.next_seq {
+            Some(s) => s,
+            None => return None,
+        };
         let next_seq_u32 = next_seq as u32;
         
         trace!("Getting next packet, expecting seq={}", next_seq);
@@ -465,7 +469,10 @@ impl AdaptiveJitterBuffer {
         debug!("Handling packet loss, skipping to seq={}", next_available as u16);
         
         // Return the packet
-        let (packet, arrival_time) = self.packets.remove(&next_available).unwrap();
+        let (packet, arrival_time) = match self.packets.remove(&next_available) {
+            Some(entry) => entry,
+            None => return None,
+        };
         
         // Update stats
         self.stats.packets_played += 1;
@@ -498,8 +505,7 @@ impl AdaptiveJitterBuffer {
     /// Get an extended sequence number that accounts for wraparound
     fn get_extended_seq(&mut self, seq: RtpSequenceNumber) -> u32 {
         // Detect sequence number cycle (wraparound from 65535 to 0)
-        if self.next_seq.is_some() {
-            let next_seq = self.next_seq.unwrap();
+        if let Some(next_seq) = self.next_seq {
             // If the sequence is much lower than the expected one, we probably wrapped around
             if next_seq > 0xf000 && seq < 0x1000 {
                 debug!("Sequence wraparound detected in get_extended_seq: {} -> {}", next_seq, seq);

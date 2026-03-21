@@ -209,12 +209,18 @@ impl DialogStore for DialogManager {
         // Get the dialog and terminate it
         if let Some(mut dialog_entry) = self.dialogs.get_mut(dialog_id) {
             let dialog = dialog_entry.value_mut();
-            
+
             // Only terminate if not already terminated
             if dialog.state != DialogState::Terminated {
                 let previous_state = dialog.state.clone();
+
+                // Collect lookup keys before terminating so we can remove them
+                let lookup_keys: Option<(String, String)> = dialog.dialog_id_tuple().map(|tuple| {
+                    crate::manager::utils::DialogUtils::create_bidirectional_keys(&tuple.0, &tuple.1, &tuple.2)
+                });
+
                 dialog.terminate();
-                
+
                 // Send session coordination event for dialog state change
                 if let Some(ref coordinator) = self.session_coordinator.read().await.as_ref() {
                     let event = SessionCoordinationEvent::DialogStateChanged {
@@ -222,17 +228,30 @@ impl DialogStore for DialogManager {
                         new_state: "Terminated".to_string(),
                         previous_state: format!("{:?}", previous_state),
                     };
-                    
+
                     if let Err(e) = coordinator.send(event).await {
                         warn!("Failed to send dialog termination event: {}", e);
                     }
                 }
-                
+
+                // Remove from dialog_lookup map to prevent memory leak
+                if let Some((key1, key2)) = lookup_keys {
+                    self.dialog_lookup.remove(&key1);
+                    self.dialog_lookup.remove(&key2);
+                }
+
                 debug!("Dialog {} terminated (was: {:?})", dialog_id, previous_state);
             } else {
                 debug!("Dialog {} already terminated", dialog_id);
             }
-            
+
+            // Drop the mutable reference before removing from dialogs
+            drop(dialog_entry);
+
+            // Remove terminated dialog from dialogs map to prevent memory leak
+            self.dialogs.remove(dialog_id);
+            debug!("Removed terminated dialog {} from dialogs map", dialog_id);
+
             Ok(())
         } else {
             Err(DialogError::dialog_not_found(&dialog_id.to_string()))

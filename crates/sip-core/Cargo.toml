@@ -37,6 +37,8 @@ tracing.workspace = true
 chrono.workspace = true
 rand.workspace = true
 log.workspace = true
+md-5.workspace = true
+sha2.workspace = true
 
 # Crate-specific dependencies not in workspace
 serde_bytes.workspace = true

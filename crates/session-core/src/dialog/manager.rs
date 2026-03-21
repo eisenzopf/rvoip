@@ -75,7 +75,7 @@ impl DialogManager {
     ) -> DialogResult<()> {
         // Send NOTIFY through dialog-core
         self.dialog_api
-            .send_notify(dialog_id, event, body)
+            .send_notify(dialog_id, event, body, Some(subscription_state))
             .await
             .map_err(|e| DialogError::DialogCore {
                 source: Box::new(e),
@@ -427,7 +427,33 @@ impl DialogManager {
         Ok(())
     }
     
-    /// Update media for a session (send re-INVITE with new SDP)
+    /// Send an INFO request with a specific Content-Type.
+    ///
+    /// Used for trickle ICE (`application/trickle-ice-sdpfrag`) and other
+    /// typed INFO payloads.
+    pub async fn send_info_with_content_type(
+        &self,
+        dialog_id: &DialogId,
+        body: String,
+        content_type: &str,
+    ) -> DialogResult<()> {
+        let _tx_key = self
+            .dialog_api
+            .send_info_with_content_type(dialog_id, body, content_type)
+            .await
+            .map_err(|e| DialogError::DialogCore {
+                source: Box::new(e),
+            })?;
+
+        tracing::debug!(
+            "Sent INFO with Content-Type '{}' for dialog {}",
+            content_type,
+            dialog_id
+        );
+        Ok(())
+    }
+
+    /// Update media for a session (send re-INVOKE with new SDP)
     pub async fn update_media(&self, session_id: &SessionId, sdp: &str) -> DialogResult<()> {
         let dialog_id = self.get_dialog_id_for_session(session_id)?;
         

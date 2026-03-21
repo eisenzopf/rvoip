@@ -12,10 +12,11 @@ async fn test_user_rate_limiting() {
         login_attempts_per_hour: 3,
         lockout_duration: Duration::from_secs(1),
         cleanup_interval: Duration::from_secs(60),
+        trusted_proxies: Vec::new(),
     };
-    
+
     let limiter = EnhancedRateLimiter::new(config);
-    
+
     // Test user rate limiting - should allow 5 requests
     for i in 0..5 {
         let result = limiter.check_rate_limit(RateLimitIdentifier::User("user1".to_string())).await;
@@ -39,10 +40,11 @@ async fn test_ip_rate_limiting() {
         login_attempts_per_hour: 5,
         lockout_duration: Duration::from_secs(1),
         cleanup_interval: Duration::from_secs(60),
+        trusted_proxies: Vec::new(),
     };
-    
+
     let limiter = EnhancedRateLimiter::new(config);
-    
+
     // Test IP rate limiting
     for i in 0..10 {
         let result = limiter.check_rate_limit(RateLimitIdentifier::Ip("192.168.1.1".to_string())).await;
@@ -66,10 +68,11 @@ async fn test_failed_login_lockout() {
         login_attempts_per_hour: 3,
         lockout_duration: Duration::from_secs(2),
         cleanup_interval: Duration::from_secs(60),
+        trusted_proxies: Vec::new(),
     };
-    
+
     let limiter = EnhancedRateLimiter::new(config);
-    
+
     // Record 3 failed login attempts
     for i in 0..3 {
         let result = limiter.record_failed_login("testuser").await;
@@ -101,10 +104,11 @@ async fn test_successful_login_clears_failed_attempts() {
         login_attempts_per_hour: 3,
         lockout_duration: Duration::from_secs(1),
         cleanup_interval: Duration::from_secs(60),
+        trusted_proxies: Vec::new(),
     };
-    
+
     let limiter = EnhancedRateLimiter::new(config);
-    
+
     // Record 2 failed attempts
     for _ in 0..2 {
         let result = limiter.record_failed_login("testuser").await;
@@ -133,10 +137,11 @@ async fn test_rate_limit_window_reset() {
         login_attempts_per_hour: 5,
         lockout_duration: Duration::from_secs(1),
         cleanup_interval: Duration::from_secs(60),
+        trusted_proxies: Vec::new(),
     };
-    
+
     let limiter = EnhancedRateLimiter::new(config);
-    
+
     // Use up the limit
     for _ in 0..5 {
         let result = limiter.check_rate_limit(RateLimitIdentifier::User("test_user".to_string())).await;
@@ -160,10 +165,11 @@ async fn test_concurrent_rate_limiting() {
         login_attempts_per_hour: 5,
         lockout_duration: Duration::from_secs(1),
         cleanup_interval: Duration::from_secs(60),
+        trusted_proxies: Vec::new(),
     };
-    
+
     let limiter = EnhancedRateLimiter::new(config);
-    
+
     // Test concurrent requests from same user
     let mut handles = Vec::new();
     for i in 0..15 {
@@ -203,10 +209,11 @@ async fn test_different_identifiers_separate_limits() {
         login_attempts_per_hour: 3,
         lockout_duration: Duration::from_secs(1),
         cleanup_interval: Duration::from_secs(60),
+        trusted_proxies: Vec::new(),
     };
-    
+
     let limiter = EnhancedRateLimiter::new(config);
-    
+
     // Use up user limit
     for _ in 0..5 {
         limiter.check_rate_limit(RateLimitIdentifier::User("user1".to_string())).await.unwrap();
@@ -229,10 +236,11 @@ async fn test_lockout_duration_in_error() {
         login_attempts_per_hour: 1,
         lockout_duration: Duration::from_secs(15 * 60), // 15 minutes
         cleanup_interval: Duration::from_secs(60),
+        trusted_proxies: Vec::new(),
     };
-    
+
     let limiter = EnhancedRateLimiter::new(config);
-    
+
     // Trigger lockout
     let result = limiter.record_failed_login("locktest").await;
     

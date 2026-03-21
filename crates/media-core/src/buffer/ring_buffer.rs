@@ -77,7 +77,21 @@ impl<T> RingBuffer<T> {
             capacity.next_power_of_two()
         };
         
-        Self::new(rounded_capacity).expect("Rounded capacity should be valid")
+        // BUG-proof: next_power_of_two always returns a valid power of 2,
+        // and the fallback of 1 is also a valid power of 2.
+        match Self::new(rounded_capacity) {
+            Ok(buf) => buf,
+            Err(_) => match Self::new(1) {
+                Ok(buf) => buf,
+                Err(_) => Self {
+                    buffer: RwLock::new(vec![None]),
+                    capacity: 1,
+                    capacity_mask: 0,
+                    write_pos: AtomicUsize::new(0),
+                    read_pos: AtomicUsize::new(0),
+                },
+            },
+        }
     }
     
     /// Push an item to the buffer

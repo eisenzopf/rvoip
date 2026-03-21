@@ -306,26 +306,38 @@ pub struct FeedbackGeneratorFactory;
 
 impl FeedbackGeneratorFactory {
     /// Create a loss-based feedback generator
-    pub fn create_loss_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::LossFeedbackGenerator")
+    ///
+    /// # Errors
+    /// Always returns an error. Implementation moved to media-core.
+    /// Use `media_core::rtp_processing::rtcp::LossFeedbackGenerator` instead.
+    pub fn create_loss_generator() -> crate::Result<Box<dyn FeedbackGenerator>> {
+        Err(crate::error::Error::NotImplemented("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::LossFeedbackGenerator".to_string()))
     }
-    
+
     /// Create a congestion-based feedback generator
-    pub fn create_congestion_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::CongestionFeedbackGenerator")
+    ///
+    /// # Errors
+    /// Always returns an error. Implementation moved to media-core.
+    /// Use `media_core::rtp_processing::rtcp::CongestionFeedbackGenerator` instead.
+    pub fn create_congestion_generator() -> crate::Result<Box<dyn FeedbackGenerator>> {
+        Err(crate::error::Error::NotImplemented("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::CongestionFeedbackGenerator".to_string()))
     }
-    
+
     /// Create a quality-based feedback generator
-    pub fn create_quality_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::QualityFeedbackGenerator")
+    ///
+    /// # Errors
+    /// Always returns an error. Implementation moved to media-core.
+    /// Use `media_core::rtp_processing::rtcp::QualityFeedbackGenerator` instead.
+    pub fn create_quality_generator() -> crate::Result<Box<dyn FeedbackGenerator>> {
+        Err(crate::error::Error::NotImplemented("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::QualityFeedbackGenerator".to_string()))
     }
-    
+
     /// Create a comprehensive feedback generator (combines all strategies)
-    pub fn create_comprehensive_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::ComprehensiveFeedbackGenerator")
+    ///
+    /// # Errors
+    /// Always returns an error. Implementation moved to media-core.
+    /// Use `media_core::rtp_processing::rtcp::ComprehensiveFeedbackGenerator` instead.
+    pub fn create_comprehensive_generator() -> crate::Result<Box<dyn FeedbackGenerator>> {
+        Err(crate::error::Error::NotImplemented("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::ComprehensiveFeedbackGenerator".to_string()))
     }
 } 

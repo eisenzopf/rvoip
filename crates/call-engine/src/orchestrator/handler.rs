@@ -552,7 +552,7 @@
 
 //! CallHandler implementation for the call center
 
-use std::sync::Weak;
+use std::sync::{Weak, OnceLock};
 use async_trait::async_trait;
 use tracing::{debug, info, warn, error};
 use rvoip_session_core::{
@@ -567,9 +567,9 @@ use crate::agent::AgentStatus;
 use crate::error::CallCenterError;
 
 /// CallHandler implementation for the call center
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CallCenterCallHandler {
-    pub engine: Weak<CallCenterEngine>,
+    pub engine: OnceLock<Weak<CallCenterEngine>>,
 }
 
 #[async_trait]
@@ -578,7 +578,7 @@ impl CallHandler for CallCenterCallHandler {
         debug!("CallCenterCallHandler: Received incoming call {}", call.id);
         
         // Try to get a strong reference to the engine
-        if let Some(engine) = self.engine.upgrade() {
+        if let Some(engine) = self.engine.get().and_then(|w| w.upgrade()) {
             // Process the incoming call through the call center's routing logic
             match engine.process_incoming_call(call).await {
                 Ok(decision) => decision,
@@ -596,7 +596,7 @@ impl CallHandler for CallCenterCallHandler {
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
         info!("📞 Call {} ended: {}", call.id(), reason);
         
-        if let Some(engine) = self.engine.upgrade() {
+        if let Some(engine) = self.engine.get().and_then(|w| w.upgrade()) {
             // CRITICAL: Clean up from database queue first to prevent re-queueing
             if let Some(db_manager) = &engine.db_manager {
                 // Remove from queue and active calls (this method handles both tables)
@@ -614,8 +614,12 @@ impl CallHandler for CallCenterCallHandler {
                 
                 // Return agent to available in database since they never actually took the call
                 if let Some(db_manager) = &engine.db_manager {
-                    let _ = db_manager.update_agent_call_count(&pending_assignment.agent_id.0, -1).await;
-                    let _ = db_manager.update_agent_status(&pending_assignment.agent_id.0, AgentStatus::Available).await;
+                    if let Err(e) = db_manager.update_agent_call_count(&pending_assignment.agent_id.0, -1).await {
+                        tracing::warn!("Failed to decrement agent call count for {}: {}", pending_assignment.agent_id.0, e);
+                    }
+                    if let Err(e) = db_manager.update_agent_status(&pending_assignment.agent_id.0, AgentStatus::Available).await {
+                        tracing::warn!("Failed to reset agent {} status to Available: {}", pending_assignment.agent_id.0, e);
+                    }
                 }
                 
                 // Don't re-queue - the customer hung up
@@ -650,7 +654,9 @@ impl CallHandler for CallCenterCallHandler {
                 
                 // Clean up related session from database too
                 if let Some(db_manager) = &engine.db_manager {
-                    let _ = db_manager.remove_call_from_queue(&related_id.to_string()).await;
+                    if let Err(e) = db_manager.remove_call_from_queue(&related_id.to_string()).await {
+                        tracing::warn!("Failed to remove related call {} from queue in DB: {}", related_id, e);
+                    }
                 }
                 
                 // Terminate the related dialog
@@ -690,15 +696,18 @@ impl CallHandler for CallCenterCallHandler {
         debug!("Local SDP available: {}, Remote SDP available: {}", 
                local_sdp.is_some(), remote_sdp.is_some());
         
-        if let Some(engine) = self.engine.upgrade() {
+        if let Some(engine) = self.engine.get().and_then(|w| w.upgrade()) {
             // Check if this is a pending agent assignment
             if let Some((_, pending_assignment)) = engine.pending_assignments.remove(&call.id) {
                 info!("🔔 Agent {} answered for pending assignment", pending_assignment.agent_id);
                 
                 // This is an agent answering - complete the bridge
-                let coordinator = engine.session_coordinator.as_ref().unwrap();
+                let Some(coordinator) = engine.session_coordinator.as_ref() else {
+                    error!("Session coordinator not initialized, cannot bridge sessions");
+                    return;
+                };
                 let bridge_start = Instant::now();
-                
+
                 match coordinator.bridge_sessions(
                     &pending_assignment.customer_session_id, 
                     &pending_assignment.agent_session_id
@@ -730,13 +739,21 @@ impl CallHandler for CallCenterCallHandler {
                         error!("Failed to bridge sessions after agent answered: {}", e);
                         
                         // Hang up both calls on bridge failure
-                        let _ = coordinator.terminate_session(&pending_assignment.agent_session_id).await;
-                        let _ = coordinator.terminate_session(&pending_assignment.customer_session_id).await;
-                        
+                        if let Err(e) = coordinator.terminate_session(&pending_assignment.agent_session_id).await {
+                            tracing::warn!("Failed to terminate agent session {} after bridge failure: {}", pending_assignment.agent_session_id, e);
+                        }
+                        if let Err(e) = coordinator.terminate_session(&pending_assignment.customer_session_id).await {
+                            tracing::warn!("Failed to terminate customer session {} after bridge failure: {}", pending_assignment.customer_session_id, e);
+                        }
+
                         // Return agent to available in database
                         if let Some(db_manager) = &engine.db_manager {
-                            let _ = db_manager.update_agent_call_count(&pending_assignment.agent_id.0, -1).await;
-                            let _ = db_manager.update_agent_status(&pending_assignment.agent_id.0, AgentStatus::Available).await;
+                            if let Err(e) = db_manager.update_agent_call_count(&pending_assignment.agent_id.0, -1).await {
+                                tracing::warn!("Failed to decrement agent call count for {} after bridge failure: {}", pending_assignment.agent_id.0, e);
+                            }
+                            if let Err(e) = db_manager.update_agent_status(&pending_assignment.agent_id.0, AgentStatus::Available).await {
+                                tracing::warn!("Failed to reset agent {} status after bridge failure: {}", pending_assignment.agent_id.0, e);
+                            }
                         }
                     }
                 }
@@ -759,7 +776,7 @@ impl CallHandler for CallCenterCallHandler {
         info!("📞 Call {} state changed from {:?} to {:?} (reason: {:?})", 
               session_id, old_state, new_state, reason);
         
-        if let Some(engine) = self.engine.upgrade() {
+        if let Some(engine) = self.engine.get().and_then(|w| w.upgrade()) {
             // Update call status based on state change
             if let Some(mut call_info) = engine.active_calls.get_mut(session_id) {
                 match new_state {
@@ -782,7 +799,7 @@ impl CallHandler for CallCenterCallHandler {
         debug!("CallCenterCallHandler: Call {} quality - MOS: {}, Loss: {}%, Alert: {:?}", 
                session_id, mos_score, packet_loss, alert_level);
         
-        if let Some(engine) = self.engine.upgrade() {
+        if let Some(engine) = self.engine.get().and_then(|w| w.upgrade()) {
             // Store quality metrics
             if let Err(e) = engine.record_quality_metrics(session_id, mos_score, packet_loss).await {
                 error!("Failed to record quality metrics: {}", e);
@@ -801,7 +818,7 @@ impl CallHandler for CallCenterCallHandler {
         info!("CallCenterCallHandler: Call {} received DTMF '{}' ({}ms)", 
               session_id, digit, duration_ms);
         
-        if let Some(engine) = self.engine.upgrade() {
+        if let Some(engine) = self.engine.get().and_then(|w| w.upgrade()) {
             // Process DTMF for IVR or agent features
             if let Err(e) = engine.process_dtmf_input(session_id, digit).await {
                 error!("Failed to process DTMF: {}", e);
@@ -819,7 +836,7 @@ impl CallHandler for CallCenterCallHandler {
         debug!("CallCenterCallHandler: Call {} media flow {:?} {} (codec: {})", 
                session_id, direction, if active { "started" } else { "stopped" }, codec);
         
-        if let Some(engine) = self.engine.upgrade() {
+        if let Some(engine) = self.engine.get().and_then(|w| w.upgrade()) {
             // Track media flow status
             if let Err(e) = engine.update_media_flow(session_id, direction, active, codec).await {
                 error!("Failed to update media flow status: {}", e);
@@ -840,7 +857,7 @@ impl CallHandler for CallCenterCallHandler {
                          category, message),
         }
         
-        if let Some(engine) = self.engine.upgrade() {
+        if let Some(engine) = self.engine.get().and_then(|w| w.upgrade()) {
             // Log warnings for monitoring
             if let Err(e) = engine.log_warning(session_id, category, message).await {
                 error!("Failed to log warning: {}", e);

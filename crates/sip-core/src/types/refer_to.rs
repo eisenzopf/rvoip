@@ -300,12 +300,12 @@ impl ReferTo {
     /// let refer_to = ReferTo::new(address);
     ///
     /// // Verify we can get the tag parameter
-    /// assert_eq!(refer_to.get_param("tag"), Some(Some("1234")));
+    /// assert_eq!(refer_to.get_param("tag"), Some(Some("1234".to_string())));
     ///
     /// // Non-existent parameter
     /// assert_eq!(refer_to.get_param("unknown"), None);
     /// ```
-    pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
+    pub fn get_param(&self, key: &str) -> Option<Option<String>> {
         self.0.get_param(key)
     }
 }

@@ -434,7 +434,7 @@ mod tests {
         // Create a HashMap to store the transaction
         let mut transactions = HashMap::new();
         let tx_id = transaction.id().clone();
-        transactions.insert(tx_id.clone(), Box::new(transaction) as Box<dyn ClientTransaction + Send>);
+        transactions.insert(tx_id.clone(), Arc::new(transaction) as Arc<dyn ClientTransaction + Send + Sync>);
         
         // Wrap in a Mutex
         let transactions = Mutex::new(transactions);

@@ -744,8 +744,8 @@ impl Default for GeneralConfig {
             max_agents: 500,
             default_call_timeout: 300, // 5 minutes
             cleanup_interval: Duration::from_secs(60),
-            local_signaling_addr: "0.0.0.0:5060".parse().unwrap(),
-            local_media_addr: "0.0.0.0:10000".parse().unwrap(),
+            local_signaling_addr: SocketAddr::from(([0, 0, 0, 0], 5060)),
+            local_media_addr: SocketAddr::from(([0, 0, 0, 0], 10000)),
             user_agent: "rvoip-call-center/0.1.0".to_string(),
             domain: "call-center.local".to_string(),
             local_ip: "127.0.0.1".to_string(),  // Safe default for development

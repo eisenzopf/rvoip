@@ -536,7 +536,7 @@ where
                     f.to_string()
                 } else if v.is_bool() {
                     // Handle boolean values
-                    v.as_bool().unwrap().to_string()
+                    v.as_bool().unwrap_or_default().to_string()
                 } else if v.is_null() {
                     // Handle null values
                     "null".to_string()

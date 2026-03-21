@@ -9,8 +9,6 @@ members = [
     "crates/rtp-core",
     "crates/media-core",
     "crates/session-core",
-    "crates/session-core-v2",
-    "crates/session-core-v3",
     "crates/call-engine",
     "crates/client-core",
     "crates/codec-core",
@@ -19,6 +17,7 @@ members = [
     "crates/rvoip",
     "crates/infra-common",
     "crates/registrar-core", "crates/users-core",
+    "crates/intermediary-core",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,
@@ -44,13 +43,13 @@ default-members = [
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
 [workspace.package]
 version = "0.1.26"  # 🎯 SINGLE VERSION TO MANAGE!
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/eisenzopf/rvoip"
-repository = "https://github.com/eisenzopf/rvoip"
+homepage = "https://github.com/openprx/rvoip"
+repository = "https://github.com/openprx/rvoip"
 documentation = "https://docs.rs/rvoip"
 authors = ["RVOIP AUTHORS"]
-rust-version = "1.70"  # Minimum supported Rust version
+rust-version = "1.85"  # Minimum for Edition 2024
 categories = ["network-programming", "multimedia", "web-programming"]
 keywords = ["sip", "voip", "rtp", "communication", "telephony"]
 
@@ -167,6 +166,7 @@ serde_bytes = "0.11"
 base64 = "0.21"
 nom = "7.1"
 log = "0.4"
+once_cell = "1.19"
 ordered-float = { version = "4.2.0", features = ["serde"] }
 socket2 = { version = "0.5", features = ["all"] }
 mio = { version = "0.8", features = ["os-poll", "net"] }

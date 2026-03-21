@@ -54,11 +54,14 @@ impl EventPackage for PresencePackage {
     }
     
     fn accept_types(&self) -> Vec<ContentType> {
-        vec![
-            ContentType::from_str("application/pidf+xml").unwrap(),
-            ContentType::from_str("application/xpidf+xml").unwrap(),
-            ContentType::from_str("application/simple-message-summary").unwrap(),
+        [
+            "application/pidf+xml",
+            "application/xpidf+xml",
+            "application/simple-message-summary",
         ]
+        .iter()
+        .filter_map(|s| ContentType::from_str(s).ok())
+        .collect()
     }
     
     fn validate_body(&self, body: &[u8]) -> Result<(), String> {
@@ -85,9 +88,10 @@ impl EventPackage for DialogPackage {
     }
     
     fn accept_types(&self) -> Vec<ContentType> {
-        vec![
-            ContentType::from_str("application/dialog-info+xml").unwrap(),
-        ]
+        ["application/dialog-info+xml"]
+            .iter()
+            .filter_map(|s| ContentType::from_str(s).ok())
+            .collect()
     }
     
     fn validate_body(&self, _body: &[u8]) -> Result<(), String> {
@@ -109,9 +113,10 @@ impl EventPackage for MessageSummaryPackage {
     }
     
     fn accept_types(&self) -> Vec<ContentType> {
-        vec![
-            ContentType::from_str("application/simple-message-summary").unwrap(),
-        ]
+        ["application/simple-message-summary"]
+            .iter()
+            .filter_map(|s| ContentType::from_str(s).ok())
+            .collect()
     }
     
     fn validate_body(&self, _body: &[u8]) -> Result<(), String> {
@@ -133,9 +138,10 @@ impl EventPackage for ReferPackage {
     }
     
     fn accept_types(&self) -> Vec<ContentType> {
-        vec![
-            ContentType::from_str("message/sipfrag").unwrap(),
-        ]
+        ["message/sipfrag"]
+            .iter()
+            .filter_map(|s| ContentType::from_str(s).ok())
+            .collect()
     }
     
     fn validate_body(&self, _body: &[u8]) -> Result<(), String> {

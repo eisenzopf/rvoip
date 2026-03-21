@@ -216,9 +216,9 @@ impl CSeq {
     ///
     /// A new `CSeq` with the sequence number incremented by 1 and the same method
     ///
-    /// # Panics
-    /// 
-    /// Panics if the sequence number would overflow (exceed u32::MAX).
+    /// # Overflow Behavior
+    ///
+    /// If the sequence number is at u32::MAX, it saturates at u32::MAX.
     ///
     /// # Examples
     ///
@@ -236,7 +236,7 @@ impl CSeq {
     /// ```
     pub fn increment(&self) -> Self {
         Self {
-            seq: self.seq.checked_add(1).expect("CSeq sequence number overflow"),
+            seq: self.seq.saturating_add(1),
             method: self.method.clone(),
         }
     }
@@ -254,9 +254,9 @@ impl CSeq {
     ///
     /// A new `CSeq` with the sequence number incremented by 1 and the specified method
     /// 
-    /// # Panics
-    /// 
-    /// Panics if the sequence number would overflow (exceed u32::MAX).
+    /// # Overflow Behavior
+    ///
+    /// If the sequence number is at u32::MAX, it saturates at u32::MAX.
     ///
     /// # Examples
     ///
@@ -279,7 +279,7 @@ impl CSeq {
     /// ```
     pub fn increment_with_method(&self, method: Method) -> Self {
         Self {
-            seq: self.seq.checked_add(1).expect("CSeq sequence number overflow"),
+            seq: self.seq.saturating_add(1),
             method,
         }
     }

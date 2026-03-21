@@ -99,15 +99,8 @@ impl BufferPool {
         if initial_capacity > 0 {
             // Since we allocated initial_capacity buffers, mark those permits as acquired
             // This ensures we won't exceed max_buffers total
-            match buffer_limit.clone().try_acquire_many_owned(initial_capacity as u32) {
-                Ok(_) => {
-                    // This is expected - we're just reducing the available permits
-                    // We immediately drop the permit because we're using the initial_capacity
-                    // buffers that we pre-allocated
-                }
-                Err(_) => {
-                    panic!("Failed to acquire initial permits - semaphore capacity too small");
-                }
+            if let Err(_) = buffer_limit.clone().try_acquire_many_owned(initial_capacity as u32) {
+                tracing::error!("Failed to acquire initial permits - semaphore capacity too small, proceeding without reserving");
             }
         }
         
@@ -128,8 +121,14 @@ impl BufferPool {
         let permit = match self.buffer_limit.clone().acquire_owned().await {
             Ok(permit) => permit,
             Err(_) => {
-                // Semaphore was closed - this should never happen in normal operation
-                panic!("Buffer pool semaphore was closed");
+                // Semaphore was closed - return an empty buffer without a permit
+                tracing::error!("Buffer pool semaphore was closed, returning fallback buffer");
+                return PooledBuffer {
+                    buffer: Some(BytesMut::with_capacity(self.buffer_size)),
+                    original_capacity: self.buffer_size,
+                    pool: self.clone(),
+                    permit: None,
+                };
             }
         };
         
@@ -194,8 +193,8 @@ impl BufferPool {
             buffer = Some(new_buffer);
         }
         
-        // Unwrap is safe because we either got a buffer or created one
-        let buffer = buffer.unwrap();
+        // We either got a buffer or created one above
+        let buffer = buffer.unwrap_or_else(|| BytesMut::with_capacity(self.buffer_size));
         let original_capacity = buffer.capacity();
         
         Some(PooledBuffer {
@@ -288,15 +287,15 @@ impl PooledBuffer {
     
     /// Consume the buffer and return the inner BytesMut
     pub fn into_inner(mut self) -> BytesMut {
-        self.buffer.take().unwrap()
+        self.buffer.take().unwrap_or_default()
     }
-    
+
     /// Freeze the buffer into immutable Bytes
     ///
     /// This consumes the buffer and returns an immutable view that
     /// efficiently handles reference counting.
     pub fn freeze(mut self) -> Bytes {
-        let buffer = self.buffer.take().unwrap();
+        let buffer = self.buffer.take().unwrap_or_default();
         buffer.freeze()
     }
 }

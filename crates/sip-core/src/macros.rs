@@ -295,7 +295,7 @@ use std::str::FromStr;
 #[doc(hidden)]
 macro_rules! option_expr {
     () => { None::<String> };
-    ($expr:expr) => { Some($expr.to_string()) };
+    ($expr:expr_2021) => { Some($expr.to_string()) };
 }
 
 /// Macro for creating SIP request messages with a concise syntax.
@@ -357,27 +357,27 @@ macro_rules! option_expr {
 #[macro_export]
 macro_rules! sip_request {
     (
-        method: $method:expr,
-        uri: $uri:expr
-        $(, from_name: $from_name:expr)?
-        $(, from_uri: $from_uri:expr)?
-        $(, from_tag: $from_tag:expr)?
-        $(, to_name: $to_name:expr)?
-        $(, to_uri: $to_uri:expr)?
-        $(, to_tag: $to_tag:expr)?
-        $(, call_id: $call_id:expr)?
-        $(, cseq: $cseq:expr)?
-        $(, via_host: $via_host:expr)?
-        $(, via_transport: $via_transport:expr)?
-        $(, via_branch: $via_branch:expr)?
-        $(, max_forwards: $max_forwards:expr)?
-        $(, contact_uri: $contact_uri:expr)?
-        $(, contact_name: $contact_name:expr)?
-        $(, content_type: $content_type:expr)?
+        method: $method:expr_2021,
+        uri: $uri:expr_2021
+        $(, from_name: $from_name:expr_2021)?
+        $(, from_uri: $from_uri:expr_2021)?
+        $(, from_tag: $from_tag:expr_2021)?
+        $(, to_name: $to_name:expr_2021)?
+        $(, to_uri: $to_uri:expr_2021)?
+        $(, to_tag: $to_tag:expr_2021)?
+        $(, call_id: $call_id:expr_2021)?
+        $(, cseq: $cseq:expr_2021)?
+        $(, via_host: $via_host:expr_2021)?
+        $(, via_transport: $via_transport:expr_2021)?
+        $(, via_branch: $via_branch:expr_2021)?
+        $(, max_forwards: $max_forwards:expr_2021)?
+        $(, contact_uri: $contact_uri:expr_2021)?
+        $(, contact_name: $contact_name:expr_2021)?
+        $(, content_type: $content_type:expr_2021)?
         $(, headers: {
-            $($header_name:ident : $header_value:expr),* $(,)?
+            $($header_name:ident : $header_value:expr_2021),* $(,)?
         })?
-        $(, body: $body:expr)?
+        $(, body: $body:expr_2021)?
         $(,)?
     ) => {
         {
@@ -386,8 +386,10 @@ macro_rules! sip_request {
             use std::str::FromStr;
 
             // Create the builder with method and URI
-            let mut builder = SimpleRequestBuilder::new($method, $uri)
-                .expect("Failed to create SimpleRequestBuilder with the provided URI");
+            let mut builder = match SimpleRequestBuilder::new($method, $uri) {
+                Ok(b) => b,
+                Err(e) => panic!("BUG: sip_request! macro received invalid URI: {}", e),
+            };
             
             // Add From header if required parts are provided
             if let (Some(name), Some(uri)) = (
@@ -461,7 +463,7 @@ macro_rules! sip_request {
                     // Special handling for common headers
                     match header_name {
                         "MaxForwards" => {
-                            builder = builder.max_forwards(header_value.parse::<u32>().expect("Invalid Max-Forwards value"));
+                            builder = builder.max_forwards(header_value.parse::<u32>().unwrap_or(70));
                         },
                         "UserAgent" => {
                             // Handle User-Agent header with custom logic if needed
@@ -573,28 +575,28 @@ macro_rules! sip_request {
 #[macro_export]
 macro_rules! sip_response {
     (
-        status: $status:expr
-        $(, reason: $reason:expr)?
-        $(, from_name: $from_name:expr)?
-        $(, from_uri: $from_uri:expr)?
-        $(, from_tag: $from_tag:expr)?
-        $(, to_name: $to_name:expr)?
-        $(, to_uri: $to_uri:expr)?
-        $(, to_tag: $to_tag:expr)?
-        $(, call_id: $call_id:expr)?
-        $(, cseq: $cseq:expr)?
-        $(, cseq_method: $cseq_method:expr)?
-        $(, via_host: $via_host:expr)?
-        $(, via_transport: $via_transport:expr)?
-        $(, via_branch: $via_branch:expr)?
-        $(, max_forwards: $max_forwards:expr)?
-        $(, contact_uri: $contact_uri:expr)?
-        $(, contact_name: $contact_name:expr)?
-        $(, content_type: $content_type:expr)?
+        status: $status:expr_2021
+        $(, reason: $reason:expr_2021)?
+        $(, from_name: $from_name:expr_2021)?
+        $(, from_uri: $from_uri:expr_2021)?
+        $(, from_tag: $from_tag:expr_2021)?
+        $(, to_name: $to_name:expr_2021)?
+        $(, to_uri: $to_uri:expr_2021)?
+        $(, to_tag: $to_tag:expr_2021)?
+        $(, call_id: $call_id:expr_2021)?
+        $(, cseq: $cseq:expr_2021)?
+        $(, cseq_method: $cseq_method:expr_2021)?
+        $(, via_host: $via_host:expr_2021)?
+        $(, via_transport: $via_transport:expr_2021)?
+        $(, via_branch: $via_branch:expr_2021)?
+        $(, max_forwards: $max_forwards:expr_2021)?
+        $(, contact_uri: $contact_uri:expr_2021)?
+        $(, contact_name: $contact_name:expr_2021)?
+        $(, content_type: $content_type:expr_2021)?
         $(, headers: {
-            $($header_name:ident : $header_value:expr),* $(,)?
+            $($header_name:ident : $header_value:expr_2021),* $(,)?
         })?
-        $(, body: $body:expr)?
+        $(, body: $body:expr_2021)?
         $(,)?
     ) => {
         {
@@ -698,7 +700,7 @@ macro_rules! sip_response {
                             use $crate::types::max_forwards::MaxForwards;
                             
                             builder = builder.header(TypedHeader::MaxForwards(
-                                MaxForwards::new(header_value.parse::<u8>().expect("Invalid Max-Forwards value"))
+                                MaxForwards::new(header_value.parse::<u8>().unwrap_or(70))
                         ));
                     },
                         "Server" => {

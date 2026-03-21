@@ -88,17 +88,10 @@ impl SessionDialogCoordinator {
     }
     
     /// Initialize session coordination with dialog-core
-    pub async fn initialize(&self, session_events_tx: mpsc::Sender<SessionCoordinationEvent>) -> DialogResult<()> {
-        // Set up session coordination with dialog-core
-        tracing::debug!("🔗 SETUP: Setting up session coordination with dialog-core");
-        self.dialog_api
-            .set_session_coordinator(session_events_tx)
-            .await
-            .map_err(|e| DialogError::Coordination {
-                message: format!("Failed to set session coordinator: {}", e),
-            })?;
-        tracing::debug!("✅ SETUP: Session coordination setup complete");
-        
+    /// Note: Channel-based communication was removed from dialog-core in favor of GlobalEventCoordinator.
+    /// This method is retained for API compatibility but is now a no-op.
+    pub async fn initialize(&self, _session_events_tx: mpsc::Sender<SessionCoordinationEvent>) -> DialogResult<()> {
+        tracing::debug!("Session coordination now uses GlobalEventCoordinator (channel-based API removed from dialog-core)");
         Ok(())
     }
     
@@ -207,12 +200,42 @@ impl SessionDialogCoordinator {
                 }
             }
             
+            SessionCoordinationEvent::ForkedResponse { call_id, dialog_id, status_code } => {
+                self.handle_forked_response(call_id, dialog_id, status_code).await?;
+            }
+
             _ => {
                 tracing::debug!("Unhandled session coordination event: {:?}", event);
                 // TODO: Handle other events as needed
             }
         }
-        
+
+        Ok(())
+    }
+
+    /// Handle a forked response (RFC 3261 §13.2.2.4).
+    ///
+    /// When a proxy forks an INVITE, multiple endpoints may ring or answer.
+    /// Dialog-core creates additional early/confirmed dialogs and notifies us
+    /// here.  For 1xx forks we log and track them; for 2xx forks the dialog
+    /// layer has already sent ACK and will BYE the extras.
+    async fn handle_forked_response(
+        &self,
+        call_id: String,
+        dialog_id: DialogId,
+        status_code: u16,
+    ) -> DialogResult<()> {
+        if status_code >= 200 {
+            tracing::info!(
+                "Fork confirmed (2xx) for Call-ID {} – new dialog {} (dialog-core handles teardown of extras)",
+                call_id, dialog_id
+            );
+        } else {
+            tracing::info!(
+                "Fork ringing ({}) for Call-ID {} – additional early dialog {}",
+                status_code, call_id, dialog_id
+            );
+        }
         Ok(())
     }
     
@@ -1083,7 +1106,7 @@ impl SessionDialogCoordinator {
         Ok(())
     }
     
-    /// Handle INFO request (typically DTMF)
+    /// Handle INFO request (DTMF, trickle ICE, or other application data)
     async fn handle_info_request(
         &self,
         dialog_id: DialogId,
@@ -1091,30 +1114,87 @@ impl SessionDialogCoordinator {
         request: rvoip_sip_core::Request,
     ) -> DialogResult<()> {
         tracing::info!("Handling INFO request for dialog {}", dialog_id);
-        
-        // Extract DTMF from request body
+
         let body = String::from_utf8_lossy(request.body());
-        if body.starts_with("DTMF:") {
+
+        // Check Content-Type to determine how to handle the INFO
+        let content_type = request
+            .get_header_value(&rvoip_sip_core::HeaderName::ContentType)
+            .unwrap_or("");
+
+        if content_type.contains("trickle-ice-sdpfrag") {
+            // RFC 8840: Trickle ICE candidate or end-of-candidates
+            self.handle_trickle_ice_info(&dialog_id, &body).await?;
+        } else if body.starts_with("DTMF:") {
             let dtmf_digits = body.strip_prefix("DTMF:").unwrap_or("").trim();
             tracing::info!("Received DTMF: '{}' for dialog {}", dtmf_digits, dialog_id);
-            
-            // Find the session and notify handler if available
+
             if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
                 let session_id = session_id_ref.value().clone();
-                
-                // Send DTMF received event
                 self.send_session_event(SessionEvent::DtmfReceived {
                     session_id,
                     digits: dtmf_digits.to_string(),
                 }).await?;
             }
+        } else {
+            tracing::debug!(
+                "INFO with Content-Type '{}' for dialog {} (unhandled payload)",
+                content_type,
+                dialog_id
+            );
         }
-        
+
         // Send 200 OK response
         if let Err(e) = self.send_response(&transaction_id, 200, "OK").await {
             tracing::error!("Failed to send 200 OK response to INFO: {}", e);
         }
-        
+
+        Ok(())
+    }
+
+    /// Handle a trickle ICE SDP fragment received via SIP INFO (RFC 8840).
+    ///
+    /// The body may contain one or more `a=candidate:` lines and/or
+    /// `a=end-of-candidates`.
+    async fn handle_trickle_ice_info(
+        &self,
+        dialog_id: &DialogId,
+        body: &str,
+    ) -> DialogResult<()> {
+        let session_id = match self.dialog_to_session.get(dialog_id) {
+            Some(entry) => entry.value().clone(),
+            None => {
+                tracing::warn!(
+                    "Received trickle ICE INFO for unknown dialog {}",
+                    dialog_id
+                );
+                return Ok(());
+            }
+        };
+
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("a=candidate:") {
+                tracing::info!(
+                    "Trickle ICE: received candidate for session {}: {}",
+                    session_id,
+                    trimmed
+                );
+                self.send_session_event(SessionEvent::TrickleIceCandidate {
+                    session_id: session_id.clone(),
+                    candidate_line: trimmed.to_string(),
+                }).await?;
+            } else if trimmed == "a=end-of-candidates" {
+                tracing::info!(
+                    "Trickle ICE: received end-of-candidates for session {}",
+                    session_id
+                );
+                self.send_session_event(SessionEvent::TrickleIceEndOfCandidates {
+                    session_id: session_id.clone(),
+                }).await?;
+            }
+        }
+
         Ok(())
     }
     

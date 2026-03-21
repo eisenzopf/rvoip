@@ -72,6 +72,7 @@
 //!     customer_dialog_id: None,
 //!     agent_dialog_id: None,
 //!     related_session_id: None,
+//!     metadata: std::collections::HashMap::new(),
 //! };
 //! 
 //! println!("📞 Call Information:");
@@ -467,6 +468,9 @@ pub struct CallInfo {
     // B2BUA tracking
     /// The related session ID (customer session for agent leg, agent session for customer leg)
     pub related_session_id: Option<SessionId>,
+
+    /// Freeform metadata for runtime data (DTMF buffer, IVR state, etc.)
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 /// Enhanced agent information for tracking

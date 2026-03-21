@@ -34,16 +34,16 @@ impl LocationService {
     
     /// Remove a binding
     pub async fn remove_binding(&self, user_id: &str, contact_uri: &str) -> Result<()> {
-        if let Some(mut entry) = self.locations.get_mut(user_id) {
+        match self.locations.get_mut(user_id) { Some(mut entry) => {
             entry.retain(|c| c.uri != contact_uri);
             if entry.is_empty() {
                 drop(entry);
                 self.locations.remove(user_id);
             }
             Ok(())
-        } else {
+        } _ => {
             Err(RegistrarError::UserNotFound(user_id.to_string()))
-        }
+        }}
     }
     
     /// Find all contacts for a user

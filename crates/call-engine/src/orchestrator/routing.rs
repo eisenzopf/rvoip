@@ -685,15 +685,20 @@ impl CallCenterEngine {
     
     /// Check if call should be overflowed to alternate routing
     pub(super) async fn should_overflow_call(&self, customer_type: &CustomerType, priority: u8) -> bool {
-        // **FUTURE**: Implement sophisticated overflow logic
-        // For now, simple check based on queue lengths
-        
         let queue_manager = self.queue_manager.read().await;
-        
-        // Check total queue load (simplified)
-        // In production, this would check specific queue capacities, wait times, etc.
-        
-        false // For now, don't overflow
+        let max_queue_size = self.config.queues.max_queue_size;
+        let total_queued = queue_manager.total_queued_calls();
+
+        // Overflow when total queued calls exceed the configured max queue size
+        if total_queued >= max_queue_size {
+            warn!(
+                "Queue overflow triggered: {} calls queued >= max_queue_size {} (customer: {:?}, priority: {})",
+                total_queued, max_queue_size, customer_type, priority
+            );
+            return true;
+        }
+
+        false
     }
     
     /// Ensure a queue exists, create if necessary
@@ -1124,8 +1129,9 @@ impl CallCenterEngine {
             customer_dialog_id: None,
             agent_dialog_id: None,
             related_session_id: Some(session_id.clone()),
+            metadata: std::collections::HashMap::new(),
         };
-        
+
         // Store the agent's call info
         engine.active_calls.insert(agent_session_id.clone(), agent_call_info);
         info!("📋 FULL ROUTING: Created CallInfo for agent session {} with agent_id={}", agent_session_id, agent_id);
@@ -1168,7 +1174,9 @@ impl CallCenterEngine {
                 
                 // Terminate the agent call
                 if let Some(coordinator) = &timeout_engine.session_coordinator {
-                    let _ = coordinator.terminate_session(&timeout_agent_session_id).await;
+                    if let Err(e) = coordinator.terminate_session(&timeout_agent_session_id).await {
+                        tracing::warn!("Failed to terminate timed-out agent session {}: {}", timeout_agent_session_id, e);
+                    }
                 }
                 
                 // Full rollback

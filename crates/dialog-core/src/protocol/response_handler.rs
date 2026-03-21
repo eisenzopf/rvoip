@@ -81,22 +81,46 @@ impl DialogManager {
                     }
                 }
             } else if response.status_code() >= 300 {
-                // 3xx+ response - terminate dialog
-                dialog.terminate();
-                debug!("Terminated dialog {} due to final non-2xx response", dialog_id);
+                // 3xx+ response - only terminate for INVITE establishment failures (early dialog).
+                // For in-dialog non-INVITE responses (e.g., failed re-INVITE, MESSAGE),
+                // don't terminate the established dialog per RFC 3261.
+                let is_invite = response.cseq()
+                    .map(|cseq| *cseq.method() == rvoip_sip_core::prelude::Method::Invite)
+                    .unwrap_or(false);
+                let is_early_or_initial = matches!(dialog.state, DialogState::Early | DialogState::Initial);
+
+                if is_invite && is_early_or_initial {
+                    dialog.terminate();
+                    debug!("Terminated early dialog {} due to INVITE failure response {}", dialog_id, response.status_code());
+                } else {
+                    debug!("Non-2xx response {} for dialog {} in {:?} state (method INVITE={}), dialog not terminated",
+                        response.status_code(), dialog_id, dialog.state, is_invite);
+                }
             }
         }
         
+        // Check if dialog was actually terminated to decide which event to send
+        let dialog_terminated = self.get_dialog(&dialog_id)
+            .map(|d| d.state == DialogState::Terminated)
+            .unwrap_or(true); // If dialog was removed, treat as terminated
+
         // Send appropriate session coordination event
         let event = if response.status_code() >= 200 && response.status_code() < 300 {
             SessionCoordinationEvent::CallAnswered {
                 dialog_id: dialog_id.clone(),
                 session_answer: response.body_string().unwrap_or_default(),
             }
-        } else if response.status_code() >= 300 {
+        } else if response.status_code() >= 300 && dialog_terminated {
             SessionCoordinationEvent::CallTerminated {
                 dialog_id: dialog_id.clone(),
                 reason: format!("{} {}", response.status_code(), response.reason_phrase()),
+            }
+        } else if response.status_code() >= 300 {
+            // Non-INVITE failure in established dialog - report as progress, not termination
+            SessionCoordinationEvent::CallProgress {
+                dialog_id: dialog_id.clone(),
+                status_code: response.status_code(),
+                reason_phrase: response.reason_phrase().to_string(),
             }
         } else {
             SessionCoordinationEvent::CallProgress {
@@ -268,13 +292,13 @@ impl DialogManager {
         // Handle specific successful response types
         match response.status_code() {
             200 => {
-                println!("🎯 RESPONSE HANDLER: Processing 200 OK, checking if INVITE response needs ACK");
+                debug!("Processing 200 OK, checking if INVITE response needs ACK");
                 
                 // For 200 OK responses to INVITE, automatically send ACK
                 // Check if this is a response to an INVITE by looking at the transaction
                 if let Some(original_request_method) = self.get_transaction_method(&transaction_id) {
                     if original_request_method == rvoip_sip_core::Method::Invite {
-                        println!("🚀 RESPONSE HANDLER: This is a 200 OK to INVITE - sending automatic ACK");
+                        debug!("200 OK to INVITE - sending automatic ACK");
                         
                         // Create and send ACK for this 2xx response
                         if let Err(e) = self.send_automatic_ack_for_2xx(&transaction_id, &response, &dialog_id).await {
@@ -419,13 +443,13 @@ impl DialogManager {
     ) -> DialogResult<()> {
         debug!("Sending automatic ACK for 2xx response to INVITE using proper architecture");
         
-        println!("📧 RESPONSE HANDLER: Using existing send_ack_for_2xx_response method");
+        debug!("Using existing send_ack_for_2xx_response method");
         
         // Use the existing dialog-core method that properly delegates to transaction-core
         // This maintains separation of concerns: dialog-core → transaction-core → transport
         self.send_ack_for_2xx_response(dialog_id, original_invite_tx_id, response).await?;
         
-        println!("✅ RESPONSE HANDLER: Successfully sent ACK for 2xx response via proper channels");
+        debug!("Successfully sent ACK for 2xx response via proper channels");
         Ok(())
     }
 } 

@@ -22,10 +22,7 @@ pub trait AudioDevice: Send + Sync + std::fmt::Debug {
     }
     
     /// Get as Any for downcasting
-    fn as_any(&self) -> &dyn std::any::Any {
-        // Default implementation that panics - concrete types should override
-        panic!("AudioDevice::as_any not implemented")
-    }
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 /// Audio device manager for discovering and managing audio devices

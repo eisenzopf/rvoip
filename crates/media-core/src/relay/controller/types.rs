@@ -126,6 +126,13 @@ pub enum MediaSessionEvent {
         new_payload_type: u8,
         new_clock_rate: u32,
     },
+    /// RFC 4733 DTMF digit received via RTP telephone-event
+    DtmfReceived {
+        dialog_id: DialogId,
+        digit: char,
+        duration_ms: u32,
+    },
+
     /// Statistics updated
     StatisticsUpdated {
         dialog_id: DialogId,

@@ -155,7 +155,7 @@ impl TypeRegistry {
             // This is safer than transmute as we know the type matches by TypeId
             let any_sender = sender.as_any();
             let typed_sender = any_sender.downcast_ref::<TypedBroadcastSender<E>>()
-                .expect("Type mismatch in registry");
+                .expect("BUG: Type mismatch in registry - TypeId key does not match stored type");
             typed_sender.clone()
         })
     }
@@ -168,7 +168,7 @@ impl TypeRegistry {
         if let Some(sender) = self.senders.get(&key) {
             let any_sender = sender.as_any();
             let typed_sender = any_sender.downcast_ref::<TypedBroadcastSender<E>>()
-                .expect("Type mismatch in registry");
+                .expect("BUG: Type mismatch in registry - TypeId key does not match stored type");
             return typed_sender.clone();
         }
         

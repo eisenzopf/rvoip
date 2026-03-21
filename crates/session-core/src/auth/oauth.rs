@@ -31,11 +31,14 @@ pub struct OAuth2Config {
     /// OAuth realm for WWW-Authenticate headers
     pub realm: String,
     
-    /// Allow insecure connections (for testing only)
+    /// Deprecated: previously allowed insecure TLS connections.
+    /// This field is now ignored. Use proper TLS certificates instead.
+    #[deprecated(note = "insecure TLS bypass has been removed; this field is ignored")]
     pub allow_insecure: bool,
 }
 
 impl Default for OAuth2Config {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             jwks_uri: None,
@@ -135,14 +138,13 @@ pub struct OAuth2Validator {
 impl OAuth2Validator {
     /// Create a new OAuth validator
     pub async fn new(config: OAuth2Config) -> AuthResult<Self> {
-        let http_client = if config.allow_insecure {
-            reqwest::Client::builder()
-                .danger_accept_invalid_certs(true)
-                .build()
-                .map_err(|e| AuthError::ConfigError(e.to_string()))?
-        } else {
-            reqwest::Client::new()
-        };
+        #[allow(deprecated)]
+        if config.allow_insecure {
+            warn!("OAuth2Config.allow_insecure is deprecated and ignored. \
+                   Insecure TLS bypass has been removed for security. \
+                   Use properly signed certificates instead.");
+        }
+        let http_client = reqwest::Client::new();
         
         let validator = Self {
             config,

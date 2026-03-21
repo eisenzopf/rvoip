@@ -137,18 +137,25 @@ impl PlatformSocketStrategy {
             let size = self.buffer_size as i32;
             let optval = &size as *const i32 as *const libc::c_void;
             let optlen = std::mem::size_of::<i32>() as libc::socklen_t;
+            // SAFETY: `fd` is a valid file descriptor obtained from `AsRawFd` on an open socket.
+            // `optval` points to a valid i32 with lifetime spanning this call, and `optlen` is
+            // the correct size of the pointed-to value. The kernel copies the value, so no
+            // aliasing issues arise.
             if unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVBUF, optval, optlen) } < 0 {
                 return Err(io::Error::last_os_error());
             }
-            
+
             // Set send buffer size
+            // SAFETY: Same as above - valid fd, valid pointer to i32, correct optlen.
             if unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_SNDBUF, optval, optlen) } < 0 {
                 return Err(io::Error::last_os_error());
             }
-            
+
             // Set SO_REUSEADDR if needed
             if self.use_reuse_addr {
                 let optval = &1 as *const i32 as *const libc::c_void;
+                // SAFETY: Valid fd from open socket, optval points to a stack-allocated i32
+                // with correct optlen. The socket option SO_REUSEADDR expects an int value.
                 if unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR, optval, optlen) } < 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -163,14 +170,19 @@ impl PlatformSocketStrategy {
                 #[cfg(target_os = "linux")]
                 let opt = libc::SO_REUSEPORT;
                 
+                // SAFETY: Valid fd from open socket, optval points to a stack-allocated i32
+                // with correct optlen. SO_REUSEPORT is available on this platform (cfg-gated).
                 if unsafe { libc::setsockopt(fd, libc::SOL_SOCKET, opt, optval, optlen) } < 0 {
                     return Err(io::Error::last_os_error());
                 }
             }
-            
+
             // Set IPV6_V6ONLY if needed
             if self.set_ipv6_only && socket.local_addr()?.is_ipv6() {
                 let optval = if self.ipv6_only { &1 } else { &0 } as *const i32 as *const libc::c_void;
+                // SAFETY: Valid fd from open socket confirmed to be IPv6 above. optval points
+                // to a stack-allocated i32 (0 or 1), and optlen matches. IPV6_V6ONLY expects
+                // an int value indicating whether the socket is restricted to IPv6.
                 if unsafe { libc::setsockopt(fd, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY, optval, optlen) } < 0 {
                     return Err(io::Error::last_os_error());
                 }

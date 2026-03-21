@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
@@ -227,51 +228,49 @@ impl RtpStream {
     
     /// Add a packet to the jitter buffer
     fn add_to_jitter_buffer(&self, packet: RtpPacket, buffer: Arc<Mutex<VecDeque<RtpPacket>>>) {
-        if let Ok(mut buffer_lock) = buffer.lock() {
-            if buffer_lock.len() >= self.max_jitter_size {
-                // Buffer is full, remove oldest packet
-                buffer_lock.pop_front();
-                warn!("Jitter buffer full, dropping oldest packet");
-            }
-            
-            // Find the correct position to insert this packet (sorted by sequence number)
-            let seq = packet.header.sequence_number;
-            let pos = buffer_lock.iter().position(|p| {
-                let p_seq = p.header.sequence_number;
-                is_sequence_newer(seq, p_seq)
-            });
-            
-            if let Some(pos) = pos {
-                buffer_lock.insert(pos, packet);
-            } else {
-                // Add to end
-                buffer_lock.push_back(packet);
-            }
+        let mut buffer_lock = buffer.lock();
+        if buffer_lock.len() >= self.max_jitter_size {
+            // Buffer is full, remove oldest packet
+            buffer_lock.pop_front();
+            warn!("Jitter buffer full, dropping oldest packet");
+        }
+
+        // Find the correct position to insert this packet (sorted by sequence number)
+        let seq = packet.header.sequence_number;
+        let pos = buffer_lock.iter().position(|p| {
+            let p_seq = p.header.sequence_number;
+            is_sequence_newer(seq, p_seq)
+        });
+
+        if let Some(pos) = pos {
+            buffer_lock.insert(pos, packet);
+        } else {
+            // Add to end
+            buffer_lock.push_back(packet);
         }
     }
     
     /// Get the next packet from the jitter buffer if it's ready to be processed
     fn get_next_from_jitter_buffer(&self, buffer: Arc<Mutex<VecDeque<RtpPacket>>>) -> Option<RtpPacket> {
-        if let Ok(mut buffer_lock) = buffer.lock() {
-            if buffer_lock.is_empty() {
-                return None;
-            }
-            
-            // Check if the oldest packet is old enough to be released
-            let first_packet = buffer_lock.front()?;
-            let expected_seq = (self.latest_seq as u32 + 1) & 0xFFFF;
-            
-            // Release packet if it's the next expected one, or if it's old
-            if first_packet.header.sequence_number == expected_seq as u16 {
-                return buffer_lock.pop_front();
-            }
-            
-            // If buffer has enough packets or packet is too old, release it
-            if buffer_lock.len() > self.max_jitter_size / 2 {
-                return buffer_lock.pop_front();
-            }
+        let mut buffer_lock = buffer.lock();
+        if buffer_lock.is_empty() {
+            return None;
         }
-        
+
+        // Check if the oldest packet is old enough to be released
+        let first_packet = buffer_lock.front()?;
+        let expected_seq = (self.latest_seq as u32 + 1) & 0xFFFF;
+
+        // Release packet if it's the next expected one, or if it's old
+        if first_packet.header.sequence_number == expected_seq as u16 {
+            return buffer_lock.pop_front();
+        }
+
+        // If buffer has enough packets or packet is too old, release it
+        if buffer_lock.len() > self.max_jitter_size / 2 {
+            return buffer_lock.pop_front();
+        }
+
         None
     }
     

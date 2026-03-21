@@ -506,20 +506,18 @@ impl AdvancedSipClient {
             })?;
         
         // Hold via client-core
-        // TODO: client-core doesn't expose hold API yet
-        return Err(SipClientError::NotImplemented {
-            feature: "call_hold".to_string(),
-        });
-        
+        self.core_client.hold_call(call_id).await
+            .map_err(|e| SipClientError::Internal {
+                message: format!("Failed to hold call: {}", e),
+            })?;
+
         // Pause audio pipeline
-        if let Some(pipeline) = &call_state.custom_pipeline {
-            // In a real implementation, we would pause the pipeline
-        }
-        
-        self.event_emitter.emit(SipClientEvent::CallOnHold { 
-            call: call_state.call.clone() 
+        // In a real implementation, we would pause the pipeline
+
+        self.event_emitter.emit(SipClientEvent::CallOnHold {
+            call: call_state.call.clone()
         });
-        
+
         Ok(())
     }
     
@@ -532,20 +530,18 @@ impl AdvancedSipClient {
             })?;
         
         // Resume via client-core
-        // TODO: client-core doesn't expose resume API yet
-        return Err(SipClientError::NotImplemented {
-            feature: "call_resume".to_string(),
-        });
-        
+        self.core_client.resume_call(call_id).await
+            .map_err(|e| SipClientError::Internal {
+                message: format!("Failed to resume call: {}", e),
+            })?;
+
         // Resume audio pipeline
-        if let Some(pipeline) = &call_state.custom_pipeline {
-            // In a real implementation, we would resume the pipeline
-        }
-        
-        self.event_emitter.emit(SipClientEvent::CallResumed { 
-            call: call_state.call.clone() 
+        // In a real implementation, we would resume the pipeline
+
+        self.event_emitter.emit(SipClientEvent::CallResumed {
+            call: call_state.call.clone()
         });
-        
+
         Ok(())
     }
     
@@ -568,16 +564,16 @@ impl AdvancedSipClient {
         }
         
         // Send DTMF via client-core
-        // TODO: client-core doesn't expose send_dtmf API yet
-        return Err(SipClientError::NotImplemented {
-            feature: "dtmf_send".to_string(),
-        });
-        
-        self.event_emitter.emit(SipClientEvent::DtmfSent { 
+        self.core_client.send_dtmf(call_id, digits).await
+            .map_err(|e| SipClientError::Internal {
+                message: format!("Failed to send DTMF: {}", e),
+            })?;
+
+        self.event_emitter.emit(SipClientEvent::DtmfSent {
             call: call_state.call.clone(),
             digits: digits.to_string(),
         });
-        
+
         Ok(())
     }
     

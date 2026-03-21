@@ -87,11 +87,13 @@ impl TlsTransport {
         };
         
         // Start listening
+        let event_tx = transport.event_tx.clone()
+            .ok_or_else(|| Error::InvalidState("event_tx not initialized".to_string()))?;
         tokio::spawn(Self::listen(
-            local_addr, 
+            local_addr,
             transport.acceptor.clone(),
             transport.connections.clone(),
-            transport.event_tx.clone().unwrap(),
+            event_tx,
         ));
         
         Ok((transport, rx))

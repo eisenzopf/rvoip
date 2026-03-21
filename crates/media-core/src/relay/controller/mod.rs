@@ -266,6 +266,53 @@ impl MediaSessionController {
         }
     }
 
+    /// Inspect an incoming RTP packet and detect RFC 4733 DTMF events.
+    ///
+    /// If the packet's payload type matches the negotiated telephone-event PT,
+    /// the payload is decoded and (on end-of-event) a `DtmfReceived` media
+    /// session event is emitted so higher layers can act on the digit.
+    ///
+    /// Call this from the RTP receive path for every inbound packet.
+    pub async fn handle_incoming_rtp_dtmf(
+        &self,
+        dialog_id: &DialogId,
+        payload_type: u8,
+        telephone_event_pt: u8,
+        payload: &[u8],
+    ) {
+        if payload_type != telephone_event_pt {
+            return;
+        }
+
+        match crate::dtmf::decode_dtmf_packet(payload) {
+            Ok(pkt) => {
+                if pkt.end_of_event {
+                    let duration_ms = (pkt.duration as u32) * 1000
+                        / crate::dtmf::TELEPHONE_EVENT_CLOCK_RATE;
+                    tracing::info!(
+                        "RFC 4733 DTMF '{}' detected on dialog {} ({}ms)",
+                        pkt.event,
+                        dialog_id,
+                        duration_ms,
+                    );
+                    self.emit_event(MediaSessionEvent::DtmfReceived {
+                        dialog_id: dialog_id.clone(),
+                        digit: pkt.event.to_char(),
+                        duration_ms,
+                    })
+                    .await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to decode DTMF telephone-event packet on dialog {}: {}",
+                    dialog_id,
+                    e,
+                );
+            }
+        }
+    }
+
     /// Create a new media session controller with custom port range
     pub fn with_port_range(base_port: u16, max_port: u16) -> Self {
         let mut controller = Self::new();
@@ -757,11 +804,11 @@ impl MediaSessionController {
                         match event {
                             rtp_core::session::RtpSessionEvent::PacketReceived(packet) => {
                                 // Count RTP packets for debugging
-                                static RTP_COUNTERS: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<String, u64>>> = 
-                                    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-                                
+                                static RTP_COUNTERS: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, u64>>> =
+                                    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
                                 let rtp_count = {
-                                    let mut counters = RTP_COUNTERS.lock().unwrap();
+                                    let mut counters = RTP_COUNTERS.lock();
                                     let count = counters.entry(dialog_id.to_string()).or_insert(0);
                                     *count += 1;
                                     *count
@@ -806,11 +853,11 @@ impl MediaSessionController {
                                 let callbacks = audio_frame_callbacks.read().await;
                                 if let Some(sender) = callbacks.get(&dialog_id) {
                                     // Count frames for debugging
-                                    static FRAME_COUNTERS: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashMap<String, u64>>> = 
-                                        once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-                                    
+                                    static FRAME_COUNTERS: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, u64>>> =
+                                        once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
                                     let frame_count = {
-                                        let mut counters = FRAME_COUNTERS.lock().unwrap();
+                                        let mut counters = FRAME_COUNTERS.lock();
                                         let count = counters.entry(dialog_id.to_string()).or_insert(0);
                                         *count += 1;
                                         *count
@@ -833,10 +880,10 @@ impl MediaSessionController {
                                     }
                                 } else {
                                     // Log only once per dialog to avoid spam
-                                    static LOGGED_MISSING: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashSet<String>>> = 
-                                        once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-                                    
-                                    let mut logged = LOGGED_MISSING.lock().unwrap();
+                                    static LOGGED_MISSING: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashSet<String>>> =
+                                        once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+                                    let mut logged = LOGGED_MISSING.lock();
                                     if !logged.contains(dialog_id.as_str()) {
                                         info!("⚠️ No audio frame callback registered yet for dialog {}", dialog_id);
                                         logged.insert(dialog_id.to_string());

@@ -15,18 +15,33 @@ impl SessionCoordinator {
     pub(crate) async fn run_event_loop(self: Arc<Self>) {
         tracing::info!("Starting main coordinator event loop (unified broadcast)");
 
+        let mut shutdown_rx = self.subscribe_shutdown();
+
         // Subscribe to the unified broadcast channel
         match self.event_processor.subscribe().await {
             Ok(mut subscriber) => {
-                while let Ok(event) = subscriber.receive().await {
-                    // Non-blocking: spawn event handling to avoid deadlocks
-                    // The state machines should handle out-of-order events
-                    let self_clone = self.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = self_clone.handle_event(event).await {
-                            tracing::error!("Error handling event: {}", e);
+                loop {
+                    tokio::select! {
+                        result = subscriber.receive() => {
+                            match result {
+                                Ok(event) => {
+                                    // Non-blocking: spawn event handling to avoid deadlocks
+                                    // The state machines should handle out-of-order events
+                                    let self_clone = self.clone();
+                                    tokio::spawn(async move {
+                                        if let Err(e) = self_clone.handle_event(event).await {
+                                            tracing::error!("Error handling event: {}", e);
+                                        }
+                                    });
+                                }
+                                Err(_) => break,
+                            }
                         }
-                    });
+                        _ = shutdown_rx.recv() => {
+                            tracing::info!("Event loop received shutdown signal, exiting");
+                            break;
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -96,6 +111,14 @@ impl SessionCoordinator {
                 }
             }
             
+            SessionEvent::TrickleIceCandidate { session_id, candidate_line } => {
+                self.handle_trickle_ice_candidate(session_id, candidate_line).await?;
+            }
+
+            SessionEvent::TrickleIceEndOfCandidates { session_id } => {
+                self.handle_trickle_ice_end_of_candidates(session_id).await?;
+            }
+
             SessionEvent::DtmfDigit { session_id, digit, duration_ms, .. } => {
                 // Notify handler about DTMF digit
                 if let Some(handler) = &self.handler {
@@ -421,7 +444,9 @@ impl SessionCoordinator {
                     if is_upfront_sdp {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         tracing::info!("Checking call establishment after media setup for upfront SDP call {}", session_id_clone);
-                        let _ = self_clone.check_and_trigger_call_established(&session_id_clone).await;
+                        if let Err(e) = self_clone.check_and_trigger_call_established(&session_id_clone).await {
+                            tracing::warn!("Failed to check/trigger call establishment for session {}: {}", session_id_clone, e);
+                        }
                     }
                 });
             }
@@ -468,13 +493,15 @@ impl SessionCoordinator {
                 tracing::error!("Failed to update session to Terminating state: {}", e);
             } else {
                 // Emit state change event
-                let _ = self.publish_event(SessionEvent::StateChanged {
+                if let Err(e) = self.publish_event(SessionEvent::StateChanged {
                     session_id: session_id.clone(),
                     old_state: old_state.clone(),
                     new_state: CallState::Terminating,
-                }).await;
+                }).await {
+                    tracing::warn!("Failed to publish Terminating state change event for session {}: {}", session_id, e);
+                }
             }
-            
+
             // Notify handler about terminating state (Phase 1)
             if let Some(handler) = &self.handler {
                 let call_session = session.as_call_session().clone();
@@ -551,10 +578,12 @@ impl SessionCoordinator {
                 
                 // Trigger Phase 2 - final termination
                 tracing::debug!("🔴 Triggering Phase 2 termination for session {}", session_id);
-                let _ = self.publish_event(SessionEvent::SessionTerminated {
+                if let Err(e) = self.publish_event(SessionEvent::SessionTerminated {
                     session_id: session_id.clone(),
                     reason,
-                }).await;
+                }).await {
+                    tracing::warn!("Failed to publish SessionTerminated event for session {}: {}", session_id, e);
+                }
             }
         } else {
             tracing::warn!("Received cleanup confirmation for unknown session: {}", session_id);
@@ -596,11 +625,13 @@ impl SessionCoordinator {
                 tracing::error!("Failed to update session to Terminated state: {}", e);
             } else {
                 // Emit state change event
-                let _ = self.publish_event(SessionEvent::StateChanged {
+                if let Err(e) = self.publish_event(SessionEvent::StateChanged {
                     session_id: session_id.clone(),
                     old_state,
                     new_state: CallState::Terminated,
-                }).await;
+                }).await {
+                    tracing::warn!("Failed to publish Terminated state change event for session {}: {}", session_id, e);
+                }
             }
             
             // Now get the updated session with Terminated state for handler notification
@@ -623,9 +654,11 @@ impl SessionCoordinator {
             tracing::debug!("⚠️ COORDINATOR: No handler configured");
         }
 
-        // Don't unregister immediately - let cleanup handle it later
-        // This allows tests and other components to verify the Terminated state
-        // self.registry.unregister_session(&session_id).await?;
+        // Unregister the terminated session from the registry to prevent leaks.
+        // The handler has already been notified above, so the session data is no longer needed.
+        if let Err(e) = self.registry.unregister_session(&session_id).await {
+            tracing::warn!("Failed to unregister terminated session {}: {}", session_id, e);
+        }
 
         Ok(())
     }
@@ -855,9 +888,9 @@ impl SessionCoordinator {
                             {
                                 let mut readiness_map = self.session_readiness.write().await;
                                 
-                                println!("📋 Current sessions in readiness map:");
+                                tracing::debug!("Current sessions in readiness map:");
                                 for (sid, r) in readiness_map.iter() {
-                                    println!("  - {}: local={}, remote={}, negotiated={}", 
+                                    tracing::debug!("  - {}: local={}, remote={}, negotiated={}",
                                         sid, r.local_sdp.is_some(), r.remote_sdp.is_some(), r.sdp_negotiated);
                                 }
                                 
@@ -877,7 +910,7 @@ impl SessionCoordinator {
                                        readiness.remote_sdp.is_none() {
                                         readiness.remote_sdp = Some(sdp.clone());
                                         tracing::info!("Updated outbound session {} with remote SDP", sid);
-                                        println!("🎯 Updated outbound session {} with remote SDP", sid);
+                                        tracing::debug!("Updated outbound session {} with remote SDP", sid);
                                         break;
                                     }
                                 }
@@ -887,8 +920,8 @@ impl SessionCoordinator {
                             // Extract addresses from SDP (simplified - in production would parse properly)
                             let _ = self.publish_event(SessionEvent::MediaNegotiated {
                                 session_id: session_id.clone(),
-                                local_addr: "0.0.0.0:0".parse().unwrap(), // Would be parsed from SDP
-                                remote_addr: "0.0.0.0:0".parse().unwrap(), // Would be parsed from SDP
+                                local_addr: std::net::SocketAddr::from(([0, 0, 0, 0], 0)), // Would be parsed from SDP
+                                remote_addr: std::net::SocketAddr::from(([0, 0, 0, 0], 0)), // Would be parsed from SDP
                                 codec: "PCMU".to_string(), // Would be determined from negotiation
                             }).await;
                             
@@ -1116,7 +1149,15 @@ impl SessionCoordinator {
                     // If no SDP answer provided but we have an offer, generate one
                     if sdp_answer.is_none() && incoming_call.sdp.is_some() {
                         tracing::info!("Generating SDP answer for incoming call {}", session_id);
-                        match generate_sdp_answer(self, &session_id, incoming_call.sdp.as_ref().unwrap()).await {
+                        // SAFETY: We just checked incoming_call.sdp.is_some() above
+                        let sdp_offer = match incoming_call.sdp.as_ref() {
+                            Some(sdp) => sdp,
+                            None => {
+                                tracing::error!("SDP offer disappeared unexpectedly for session {}", session_id);
+                                return Ok(());
+                            }
+                        };
+                        match generate_sdp_answer(self, &session_id, sdp_offer).await {
                             Ok(answer) => {
                                 tracing::info!("Generated SDP answer for call {}", session_id);
                                 sdp_answer = Some(answer);
@@ -1370,14 +1411,16 @@ impl SessionCoordinator {
             
             // Mark the subscription as active in dialog-core
             if let Some(subscription_manager) = self.dialog_manager.subscription_manager() {
-                let _ = subscription_manager.activate_subscription(&dialog_id).await;
+                if let Err(e) = subscription_manager.activate_subscription(&dialog_id).await {
+                    tracing::warn!("Failed to activate subscription for dialog {}: {}", dialog_id, e);
+                }
             }
         }
         
         // Notify application handler if present
         if let Some(handler) = &self.handler {
-            // TODO: Add subscription callbacks to CallHandler trait
-            tracing::debug!("Would notify handler about subscription creation");
+            let dialog_id_str = dialog_id.to_string();
+            handler.on_subscription_created(&dialog_id_str, &event_package, &from_uri).await;
         }
         
         Ok(())
@@ -1410,8 +1453,12 @@ impl SessionCoordinator {
         
         // Notify application handler if present
         if let Some(handler) = &self.handler {
-            // TODO: Add NOTIFY callbacks to CallHandler trait
-            tracing::debug!("Would notify handler about NOTIFY reception");
+            let dialog_id_str = dialog_id.to_string();
+            handler.on_notify_received(
+                &dialog_id_str,
+                &event_package,
+                body.as_deref(),
+            ).await;
         }
         
         Ok(())
@@ -1427,15 +1474,20 @@ impl SessionCoordinator {
             "Subscription terminated: dialog={}, reason={:?}",
             dialog_id, reason
         );
-        
+
+        // Capture dialog_id string before ownership moves to terminate_subscription
+        let dialog_id_str = dialog_id.to_string();
+
         // Clean up presence subscription
         let presence_coordinator = self.presence_coordinator.read().await;
         presence_coordinator.terminate_subscription(dialog_id, reason.clone()).await?;
-        
+
         // Notify application handler if present
         if let Some(handler) = &self.handler {
-            // TODO: Add subscription termination callbacks to CallHandler trait
-            tracing::debug!("Would notify handler about subscription termination");
+            handler.on_subscription_terminated(
+                &dialog_id_str,
+                reason.as_deref(),
+            ).await;
         }
         
         Ok(())
@@ -1467,14 +1519,73 @@ impl SessionCoordinator {
         
         // Update presence state and notify watchers
         let presence_coordinator = self.presence_coordinator.read().await;
-        presence_coordinator.update_presence(user_uri, presence_status, note).await?;
-        
+        presence_coordinator.update_presence(user_uri.clone(), presence_status, note.clone()).await?;
+
         // Notify application handler if present
         if let Some(handler) = &self.handler {
-            // TODO: Add presence update callbacks to CallHandler trait
-            tracing::debug!("Would notify handler about presence state update");
+            handler.on_presence_update(
+                &user_uri,
+                &state,
+                note.as_deref(),
+            ).await;
         }
         
         Ok(())
     }
-} 
+
+    // ---------------------------------------------------------------
+    // Trickle ICE (RFC 8838 / RFC 8840) event handlers
+    // ---------------------------------------------------------------
+
+    /// Handle a trickle ICE candidate received via SIP INFO.
+    async fn handle_trickle_ice_candidate(
+        &self,
+        session_id: SessionId,
+        candidate_line: String,
+    ) -> Result<()> {
+        tracing::info!(
+            "Trickle ICE: adding remote candidate for session {}: {}",
+            session_id,
+            candidate_line
+        );
+
+        if let Err(e) = self
+            .media_manager
+            .add_remote_ice_candidate(&session_id, &candidate_line)
+            .await
+        {
+            tracing::error!(
+                "Failed to add trickle ICE candidate for session {}: {}",
+                session_id,
+                e
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Handle a trickle ICE end-of-candidates indication.
+    async fn handle_trickle_ice_end_of_candidates(
+        &self,
+        session_id: SessionId,
+    ) -> Result<()> {
+        tracing::info!(
+            "Trickle ICE: end-of-candidates for session {}",
+            session_id
+        );
+
+        if let Err(e) = self
+            .media_manager
+            .set_remote_end_of_candidates(&session_id)
+            .await
+        {
+            tracing::error!(
+                "Failed to set end-of-candidates for session {}: {}",
+                session_id,
+                e
+            );
+        }
+
+        Ok(())
+    }
+}

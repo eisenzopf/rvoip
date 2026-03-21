@@ -176,18 +176,22 @@ impl MediaBufferPool {
 impl PooledMediaBuffer {
     /// Get a mutable reference to the buffer data
     pub fn as_mut(&mut self) -> &mut BytesMut {
-        self.buffer.as_mut().expect("Buffer should be present")
+        // The buffer is always present during normal usage; it is only taken on drop/freeze.
+        self.buffer.get_or_insert_with(|| BytesMut::new())
     }
-    
+
     /// Get a reference to the buffer data
     pub fn as_ref(&self) -> &BytesMut {
-        self.buffer.as_ref().expect("Buffer should be present")
+        static EMPTY: once_cell::sync::Lazy<BytesMut> = once_cell::sync::Lazy::new(BytesMut::new);
+        self.buffer.as_ref().unwrap_or(&EMPTY)
     }
-    
+
     /// Convert the buffer to Bytes (consumes the buffer)
     pub fn freeze(mut self) -> Bytes {
-        let buffer = self.buffer.take().expect("Buffer should be present");
-        buffer.freeze()
+        match self.buffer.take() {
+            Some(buffer) => buffer.freeze(),
+            None => Bytes::new(),
+        }
     }
     
     /// Get the size of the buffer
@@ -204,11 +208,14 @@ impl PooledMediaBuffer {
 impl Drop for PooledMediaBuffer {
     fn drop(&mut self) {
         if let Some(buffer) = self.buffer.take() {
-            // Return buffer to pool asynchronously
+            // Return buffer to pool asynchronously, only if a tokio runtime is available
             let pool = self.pool.clone();
-            tokio::spawn(async move {
-                pool.return_buffer(buffer).await;
-            });
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    pool.return_buffer(buffer).await;
+                });
+            }
+            // If no runtime is available, the buffer is simply dropped
         }
     }
 }

@@ -199,11 +199,13 @@ impl MediaConfigConverter {
         // Time
         sdp.push_str("t=0 0\r\n");
         
-        // Media description - codecs in preference order
+        // Media description - codecs in preference order, plus telephone-event
         sdp.push_str(&format!("m=audio {} RTP/AVP", local_port));
         for codec in &ordered_codecs {
             sdp.push_str(&format!(" {}", codec.payload_type));
         }
+        // Add telephone-event payload type for RFC 4733 DTMF
+        sdp.push_str(&format!(" {}", rvoip_media_core::dtmf::TELEPHONE_EVENT_PT));
         sdp.push_str("\r\n");
         
         // RTP map attributes - in preference order
@@ -229,26 +231,70 @@ impl MediaConfigConverter {
                     // Add standard Opus parameters
                     fmtp_params.push("useinbandfec=1".to_string());
                     
-                    if config.max_bitrate.is_some() {
-                        fmtp_params.push(format!("maxaveragebitrate={}", config.max_bitrate.unwrap()));
+                    if let Some(bitrate) = config.max_bitrate {
+                        fmtp_params.push(format!("maxaveragebitrate={}", bitrate));
                     }
-                    
+
                     if config.sample_rate < 48000 {
                         fmtp_params.push(format!("maxplaybackrate={}", config.sample_rate));
                     }
-                    
+
                     if !fmtp_params.is_empty() {
-                        sdp.push_str(&format!("a=fmtp:{} {}\r\n", 
-                                            codec.payload_type, 
+                        sdp.push_str(&format!("a=fmtp:{} {}\r\n",
+                                            codec.payload_type,
                                             fmtp_params.join("; ")));
                     }
                 }
             }
         }
         
+        // RFC 4733 telephone-event for DTMF
+        sdp.push_str(&format!("a=rtpmap:{}\r\n",
+            rvoip_media_core::dtmf::sdp_rtpmap(
+                rvoip_media_core::dtmf::TELEPHONE_EVENT_PT,
+                rvoip_media_core::dtmf::TELEPHONE_EVENT_CLOCK_RATE,
+            )));
+        sdp.push_str(&format!("a=fmtp:{}\r\n",
+            rvoip_media_core::dtmf::sdp_fmtp(
+                rvoip_media_core::dtmf::TELEPHONE_EVENT_PT,
+            )));
+
         // Additional attributes
         sdp.push_str("a=sendrecv\r\n");
-        
+
+        Ok(sdp)
+    }
+
+    /// Generate an SDP offer that includes DTLS-SRTP attributes when a
+    /// local certificate fingerprint is provided.
+    ///
+    /// The media line uses `RTP/SAVP` instead of `RTP/AVP` to signal
+    /// secure media, and the fingerprint + setup attributes are appended.
+    pub fn generate_sdp_offer_secure(
+        &self,
+        local_ip: &str,
+        local_port: RtpPort,
+        local_fingerprint: &str,
+    ) -> super::MediaResult<String> {
+        // Generate the base SDP (plain RTP)
+        let mut sdp = self.generate_sdp_offer(local_ip, local_port)?;
+
+        // Upgrade from RTP/AVP to RTP/SAVP
+        sdp = sdp.replace("RTP/AVP", "RTP/SAVP");
+
+        // Append DTLS-SRTP attributes (before the final sendrecv line or at end)
+        let dtls_attrs = crate::media::srtp_bridge::generate_dtls_sdp_attributes(
+            local_fingerprint,
+            true, // this is an offer
+        );
+
+        // Insert the DTLS attributes just before the sendrecv attribute
+        if let Some(pos) = sdp.rfind("a=sendrecv") {
+            sdp.insert_str(pos, &dtls_attrs);
+        } else {
+            sdp.push_str(&dtls_attrs);
+        }
+
         Ok(sdp)
     }
     
@@ -266,18 +312,19 @@ impl MediaConfigConverter {
     }
     
     /// Parse SDP answer and determine negotiated parameters
-    /// 
+    ///
     /// This will be expanded with logic from src-old/media/config.rs
     /// to parse SDP answers and determine the negotiated codec and parameters.
     pub fn parse_sdp_answer(&self, sdp: &str) -> super::MediaResult<NegotiatedConfig> {
         tracing::debug!("Parsing SDP answer");
-        
+
         // Parse SDP to extract codecs and parameters
         let mut remote_ip = None;
         let mut remote_port = None;
         let mut negotiated_codec = None;
         let mut opus_configs = Vec::new();
-        
+        let mut telephone_event_pt: Option<u8> = None;
+
         for line in sdp.lines() {
             if line.starts_with("c=IN IP4 ") {
                 remote_ip = Some(line[9..].trim().to_string());
@@ -287,37 +334,45 @@ impl MediaConfigConverter {
                     if let Ok(port) = parts[1].parse::<RtpPort>() {
                         remote_port = Some(port);
                     }
-                    
+
                     // Extract payload types
                     if parts.len() > 3 {
                         for pt_str in &parts[3..] {
                             if let Ok(pt) = pt_str.parse::<u8>() {
                                 // Find matching codec
-                                if let Some(codec) = self.supported_codecs.iter()
-                                    .find(|c| c.payload_type == pt) {
-                                    negotiated_codec = Some(codec.clone());
-                                    break;
+                                if negotiated_codec.is_none() {
+                                    if let Some(codec) = self.supported_codecs.iter()
+                                        .find(|c| c.payload_type == pt) {
+                                        negotiated_codec = Some(codec.clone());
+                                    }
                                 }
                             }
                         }
                     }
                 }
             } else if line.starts_with("a=rtpmap:") {
-                // Parse rtpmap for Opus configurations
                 if let Some(codec_info) = line.strip_prefix("a=rtpmap:") {
+                    // Detect telephone-event for RFC 4733 DTMF
+                    if rvoip_media_core::dtmf::is_telephone_event_rtpmap(codec_info) {
+                        if let Some((pt, _clock)) = rvoip_media_core::dtmf::parse_telephone_event_rtpmap(codec_info) {
+                            telephone_event_pt = pt;
+                            tracing::debug!("SDP answer includes telephone-event PT {:?}", pt);
+                        }
+                    }
+
+                    // Parse rtpmap for Opus configurations
                     let parts: Vec<&str> = codec_info.split_whitespace().collect();
                     if parts.len() >= 2 {
                         if let Ok(payload_type) = parts[0].parse::<u8>() {
                             let codec_parts: Vec<&str> = parts[1].split('/').collect();
                             if codec_parts.len() >= 2 && codec_parts[0].eq_ignore_ascii_case("opus") {
-                                // Parse Opus configuration
                                 let sample_rate = codec_parts[1].parse().unwrap_or(48000);
                                 let channels = if codec_parts.len() > 2 {
                                     codec_parts[2].parse().unwrap_or(1)
                                 } else {
                                     1
                                 };
-                                
+
                                 let opus_config = OpusConfig::new(sample_rate, channels);
                                 opus_configs.push((opus_config, payload_type));
                             }
@@ -326,24 +381,23 @@ impl MediaConfigConverter {
                 }
             }
         }
-        
+
         // Register discovered Opus configurations
         if !opus_configs.is_empty() {
-            // We need to create a mutable copy to register configurations
-            // This is a limitation of the current design that should be improved
             tracing::debug!("Discovered {} Opus configurations in SDP answer", opus_configs.len());
         }
-        
+
         Ok(NegotiatedConfig {
-            remote_ip: remote_ip.ok_or_else(|| MediaError::SdpProcessing { 
-                message: "No remote IP found in SDP".to_string() 
+            remote_ip: remote_ip.ok_or_else(|| MediaError::SdpProcessing {
+                message: "No remote IP found in SDP".to_string()
             })?,
-            remote_port: remote_port.ok_or_else(|| MediaError::SdpProcessing { 
-                message: "No remote port found in SDP".to_string() 
+            remote_port: remote_port.ok_or_else(|| MediaError::SdpProcessing {
+                message: "No remote port found in SDP".to_string()
             })?,
-            codec: negotiated_codec.ok_or_else(|| MediaError::CodecNegotiation { 
-                reason: "No compatible codec found".to_string() 
+            codec: negotiated_codec.ok_or_else(|| MediaError::CodecNegotiation {
+                reason: "No compatible codec found".to_string()
             })?,
+            telephone_event_pt,
         })
     }
     
@@ -449,9 +503,21 @@ impl MediaConfigConverter {
         sdp.push_str(&format!("c=IN IP4 {}\r\n", local_ip));
         sdp.push_str("t=0 0\r\n");
         
+        // Check if the offer includes telephone-event for RFC 4733 DTMF
+        let offer_has_telephone_event = offer_sdp.lines().any(|line| {
+            line.starts_with("a=rtpmap:") && rvoip_media_core::dtmf::is_telephone_event_rtpmap(
+                line.strip_prefix("a=rtpmap:").unwrap_or("")
+            )
+        });
+
         // Use first compatible codec
         let selected_codec = &compatible_codecs[0];
-        sdp.push_str(&format!("m=audio {} RTP/AVP {}\r\n", local_port, selected_codec.payload_type));
+        let mut media_line = format!("m=audio {} RTP/AVP {}", local_port, selected_codec.payload_type);
+        if offer_has_telephone_event {
+            media_line.push_str(&format!(" {}", rvoip_media_core::dtmf::TELEPHONE_EVENT_PT));
+        }
+        media_line.push_str("\r\n");
+        sdp.push_str(&media_line);
         
         if selected_codec.channels == 1 {
             sdp.push_str(&format!("a=rtpmap:{} {}/{}\r\n", 
@@ -474,27 +540,71 @@ impl MediaConfigConverter {
                 // Add standard Opus parameters
                 fmtp_params.push("useinbandfec=1".to_string());
                 
-                if config.max_bitrate.is_some() {
-                    fmtp_params.push(format!("maxaveragebitrate={}", config.max_bitrate.unwrap()));
+                if let Some(bitrate) = config.max_bitrate {
+                    fmtp_params.push(format!("maxaveragebitrate={}", bitrate));
                 }
-                
+
                 if config.sample_rate < 48000 {
                     fmtp_params.push(format!("maxplaybackrate={}", config.sample_rate));
                 }
-                
+
                 if !fmtp_params.is_empty() {
-                    sdp.push_str(&format!("a=fmtp:{} {}\r\n", 
-                                        selected_codec.payload_type, 
+                    sdp.push_str(&format!("a=fmtp:{} {}\r\n",
+                                        selected_codec.payload_type,
                                         fmtp_params.join("; ")));
                 }
             }
         }
         
+        // Include telephone-event in answer if the offer had it
+        if offer_has_telephone_event {
+            sdp.push_str(&format!("a=rtpmap:{}\r\n",
+                rvoip_media_core::dtmf::sdp_rtpmap(
+                    rvoip_media_core::dtmf::TELEPHONE_EVENT_PT,
+                    rvoip_media_core::dtmf::TELEPHONE_EVENT_CLOCK_RATE,
+                )));
+            sdp.push_str(&format!("a=fmtp:{}\r\n",
+                rvoip_media_core::dtmf::sdp_fmtp(
+                    rvoip_media_core::dtmf::TELEPHONE_EVENT_PT,
+                )));
+        }
+
         sdp.push_str("a=sendrecv\r\n");
-        
+
         Ok(sdp)
     }
-    
+
+    /// Generate an SDP answer that includes DTLS-SRTP attributes when the
+    /// offer indicated secure media and a local fingerprint is available.
+    pub fn generate_sdp_answer_secure(
+        &mut self,
+        offer_sdp: &str,
+        local_ip: &str,
+        local_port: RtpPort,
+        local_fingerprint: &str,
+    ) -> super::MediaResult<String> {
+        let mut sdp = self.generate_sdp_answer(offer_sdp, local_ip, local_port)?;
+
+        // Upgrade transport to SAVP if the offer used SAVP
+        if offer_sdp.contains("RTP/SAVP") {
+            sdp = sdp.replace("RTP/AVP", "RTP/SAVP");
+        }
+
+        // Append DTLS-SRTP attributes
+        let dtls_attrs = crate::media::srtp_bridge::generate_dtls_sdp_attributes(
+            local_fingerprint,
+            false, // this is an answer
+        );
+
+        if let Some(pos) = sdp.rfind("a=sendrecv") {
+            sdp.insert_str(pos, &dtls_attrs);
+        } else {
+            sdp.push_str(&dtls_attrs);
+        }
+
+        Ok(sdp)
+    }
+
     /// Convert media configuration to MediaEngine config
     pub fn to_media_config(&self, negotiated: &NegotiatedConfig) -> MediaConfig {
         MediaConfig {
@@ -509,9 +619,11 @@ impl MediaConfigConverter {
             max_bandwidth_kbps: None,
             preferred_ptime: Some(20),
             custom_sdp_attributes: std::collections::HashMap::new(),
+            ice: super::types::IceConfig::default(),
+            srtp: super::types::SrtpConfig::default(),
         }
     }
-    
+
     /// Get supported codecs
     pub fn get_supported_codecs(&self) -> &[CodecInfo] {
         &self.supported_codecs
@@ -533,12 +645,16 @@ impl MediaConfigConverter {
 pub struct NegotiatedConfig {
     /// Remote IP address
     pub remote_ip: String,
-    
+
     /// Remote RTP port
     pub remote_port: RtpPort,
-    
+
     /// Negotiated codec
     pub codec: CodecInfo,
+
+    /// Negotiated telephone-event payload type for RFC 4733 DTMF.
+    /// `Some(pt)` when the remote accepts telephone-event, `None` otherwise.
+    pub telephone_event_pt: Option<u8>,
 }
 
 impl Default for MediaConfigConverter {

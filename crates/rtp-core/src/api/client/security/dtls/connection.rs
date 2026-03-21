@@ -34,8 +34,8 @@ pub async fn init_connection(
     }
     
     // Create DTLS connection config from our API config
-    let dtls_config = api_create_dtls_config(config);
-    
+    let dtls_config = api_create_dtls_config(config)?;
+
     // Create DTLS connection
     let mut connection_obj = DtlsConnection::new(dtls_config);
     
@@ -95,22 +95,23 @@ pub async fn init_connection(
     let start_result = transport.lock().await.start().await;
     
     // Only proceed if the transport started successfully
-    if start_result.is_ok() {
-        debug!("DTLS transport started successfully");
-        
-        // Set the transport on the connection
-        connection_obj.set_transport(transport);
-        
-        // Store the connection
-        let mut conn_guard = connection.lock().await;
-        *conn_guard = Some(connection_obj);
-        
-        Ok(())
-    } else {
-        // Log the error and return it
-        let err = start_result.err().unwrap();
-        error!("Failed to start DTLS transport: {}", err);
-        Err(SecurityError::Configuration(format!("Failed to start DTLS transport: {}", err)))
+    match start_result {
+        Ok(()) => {
+            debug!("DTLS transport started successfully");
+
+            // Set the transport on the connection
+            connection_obj.set_transport(transport);
+
+            // Store the connection
+            let mut conn_guard = connection.lock().await;
+            *conn_guard = Some(connection_obj);
+
+            Ok(())
+        }
+        Err(err) => {
+            error!("Failed to start DTLS transport: {}", err);
+            Err(SecurityError::Configuration(format!("Failed to start DTLS transport: {}", err)))
+        }
     }
 }
 
@@ -153,23 +154,24 @@ pub async fn create_connection(
     let start_result = transport_arc.lock().await.start().await;
 
     // Only proceed if the transport started successfully
-    if start_result.is_ok() {
-        debug!("DTLS transport started successfully for new connection");
-        
-        // Set the transport on the connection (clone the Arc)
-        connection.set_transport(transport_arc.clone());
-        
-        debug!("Transport set on new connection");
-        Ok(connection)
-    } else {
-        // Log the error and return it
-        let err = start_result.err().unwrap();
-        error!("Failed to start DTLS transport for new connection: {}", err);
-        Err(SecurityError::Configuration(format!("Failed to start DTLS transport: {}", err)))
+    match start_result {
+        Ok(()) => {
+            debug!("DTLS transport started successfully for new connection");
+
+            // Set the transport on the connection (clone the Arc)
+            connection.set_transport(transport_arc.clone());
+
+            debug!("Transport set on new connection");
+            Ok(connection)
+        }
+        Err(err) => {
+            error!("Failed to start DTLS transport for new connection: {}", err);
+            Err(SecurityError::Configuration(format!("Failed to start DTLS transport: {}", err)))
+        }
     }
 }
 
 /// Create a DTLS configuration from the client security configuration
-pub fn create_dtls_config(config: &ClientSecurityConfig) -> DtlsConfig {
+pub fn create_dtls_config(config: &ClientSecurityConfig) -> Result<DtlsConfig, SecurityError> {
     api_create_dtls_config(config)
 } 

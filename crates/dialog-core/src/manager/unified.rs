@@ -856,6 +856,35 @@ impl UnifiedDialogManager {
     ) -> ApiResult<TransactionKey> {
         self.send_request_in_dialog(dialog_id, Method::Info, Some(bytes::Bytes::from(info_body))).await
     }
+
+    /// Send INFO request with an explicit Content-Type header.
+    ///
+    /// Used for trickle ICE (`application/trickle-ice-sdpfrag`) and other
+    /// INFO payloads that require a specific MIME type rather than the
+    /// default `application/info`.
+    pub async fn send_info_with_content_type(
+        &self,
+        dialog_id: &DialogId,
+        body: String,
+        content_type: &str,
+    ) -> ApiResult<TransactionKey> {
+        debug!("Sending INFO with Content-Type '{}' in dialog {}", content_type, dialog_id);
+        self.core
+            .send_request_with_content_type(
+                dialog_id,
+                Method::Info,
+                Some(bytes::Bytes::from(body)),
+                content_type,
+            )
+            .await
+            .map_err(|e| {
+                error!(
+                    "Failed to send INFO with Content-Type '{}' in dialog {}: {}",
+                    content_type, dialog_id, e
+                );
+                ApiError::from(e)
+            })
+    }
     
     /// Send CANCEL request to cancel a pending INVITE
     ///

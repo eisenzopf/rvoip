@@ -65,7 +65,7 @@ pub fn create_ack_from_invite(original_request: &Request, response: &Response) -
 }
 
 /// Create a test SIP request with the specified method
-pub fn create_test_request(method: Method) -> Request {
+pub fn create_test_request(method: Method) -> Result<Request> {
     // Create a Scheme and Host for URI
     let scheme = Scheme::Sip;
     let example_com = Host::Domain("example.com".to_string());
@@ -90,14 +90,15 @@ pub fn create_test_request(method: Method) -> Request {
         "example.com",      // host
         None,               // port
         vec![Param::branch(&generate_branch())]  // parameters
-    ).unwrap();  // Handle potential error
-    
+    ).map_err(|e| Error::Other(format!("Failed to create Via header: {}", e)))?;
+
     let cseq = CSeq::new(1, method.clone());
-    
-    let builder = RequestBuilder::new(method, &request_uri_string).unwrap();  // Handle potential error
+
+    let builder = RequestBuilder::new(method, &request_uri_string)
+        .map_err(|e| Error::Other(format!("Failed to create request builder: {}", e)))?;
     
     // Add headers
-    builder
+    Ok(builder
         .header(TypedHeader::From(From::new(from_addr)))
         .header(TypedHeader::To(To::new(to_addr)))
         .header(TypedHeader::Via(via))
@@ -105,5 +106,5 @@ pub fn create_test_request(method: Method) -> Request {
         .header(TypedHeader::CSeq(cseq))
         .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
         .header(TypedHeader::ContentLength(ContentLength::new(0)))
-        .build()
+        .build())
 } 

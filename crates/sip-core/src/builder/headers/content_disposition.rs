@@ -8,6 +8,7 @@ use crate::types::{
 };
 use crate::types::content_disposition::{ContentDisposition, DispositionType, Handling};
 use super::HeaderSetter;
+use tracing;
 
 /// Content-Disposition Header Builder for SIP Messages
 ///
@@ -400,18 +401,8 @@ where
             params,
         };
         
-        // Debug print
-        eprintln!("Setting ContentDisposition header: {:?}", header_value);
-        
-        // Try to convert it to a header and back to see if conversion is working
-        let header = header_value.to_header();
-        eprintln!("Created header: {:?}", header);
-        
-        match ContentDisposition::from_header(&header) {
-            Ok(cd) => eprintln!("Converted back to ContentDisposition: {:?}", cd),
-            Err(e) => eprintln!("Failed to convert back: {:?}", e),
-        }
-        
+        tracing::debug!(?header_value, "Setting ContentDisposition header");
+
         self.set_header(header_value)
     }
 

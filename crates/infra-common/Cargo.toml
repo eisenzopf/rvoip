@@ -29,10 +29,11 @@ tracing-subscriber = { workspace = true, features = ["json"] }
 futures.workspace = true
 async-trait.workspace = true
 dashmap.workspace = true
+parking_lot.workspace = true
 
 # Crate-specific dependencies
 config = "0.13"
-once_cell = "1.18.0"
+once_cell = { workspace = true }
 mimalloc = { version = "0.1", default-features = false }
 anyhow = "1.0"
 tokio-util = "0.7.16"

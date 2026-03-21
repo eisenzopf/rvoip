@@ -191,7 +191,7 @@ impl Default for SipClientConfig {
             sip_identity: String::new(),
             sip_server: None,
             sip_registrar: None,
-            local_address: "0.0.0.0:5060".parse().unwrap(),
+            local_address: std::net::SocketAddr::from(([0, 0, 0, 0], 5060)),
             audio: AudioConfig::default(),
             codecs: CodecConfig::default(),
             user_agent: format!("RVOIP-SipClient/{}", crate::VERSION),

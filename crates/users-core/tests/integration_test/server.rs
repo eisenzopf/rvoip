@@ -109,8 +109,9 @@ pub async fn start_test_server() -> anyhow::Result<TestServer> {
         login_attempts_per_hour: 3,        // Only 3 attempts before lockout
         lockout_duration: Duration::from_secs(2), // 2 seconds for quick testing
         cleanup_interval: Duration::from_secs(60),
+        trusted_proxies: Vec::new(),
     };
-    
+
     // Create API state with custom rate limiter
     let rate_limiter = EnhancedRateLimiter::new(rate_limit_config);
     let api_state = ApiState {

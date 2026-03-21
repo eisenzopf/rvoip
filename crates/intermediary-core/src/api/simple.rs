@@ -22,7 +22,7 @@ impl Default for IntermediaryConfig {
     fn default() -> Self {
         Self {
             mode: IntermediaryMode::B2BUA,
-            local_ip: "127.0.0.1".parse().unwrap(),
+            local_ip: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             sip_port: 5060,
             media_port_start: 10000,
             media_port_end: 20000,

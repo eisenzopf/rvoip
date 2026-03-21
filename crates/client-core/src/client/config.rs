@@ -784,7 +784,7 @@ impl MediaConfig {
 pub struct ClientConfig {
     /// Local SIP bind address
     pub local_sip_addr: SocketAddr,
-    /// Local media bind address  
+    /// Local media bind address
     pub local_media_addr: SocketAddr,
     /// User agent string
     pub user_agent: String,
@@ -800,6 +800,12 @@ pub struct ClientConfig {
     pub enable_video: bool,
     /// SIP domain (optional)
     pub domain: Option<String>,
+    /// Use WebSocket transport for SIP signaling (WS or WSS)
+    ///
+    /// When `Some`, the client uses WebSocket transport instead of UDP.
+    /// Set to `true` for secure WebSocket (WSS), `false` for plain WS.
+    /// When `None`, UDP transport is used (the default).
+    pub websocket: Option<bool>,
 }
 
 impl ClientConfig {
@@ -859,8 +865,8 @@ impl ClientConfig {
     /// ```
     pub fn new() -> Self {
         Self {
-            local_sip_addr: "127.0.0.1:5060".parse().unwrap(),
-            local_media_addr: "127.0.0.1:0".parse().unwrap(), // Port 0 = automatic allocation via GlobalPortAllocator
+            local_sip_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 5060)),
+            local_media_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)), // Port 0 = automatic allocation via GlobalPortAllocator
             user_agent: "rvoip-client-core/0.1.0".to_string(),
             media: MediaConfig::default(),
             max_concurrent_calls: 10,
@@ -868,6 +874,7 @@ impl ClientConfig {
             enable_audio: true,
             enable_video: false,
             domain: None,
+            websocket: None,
         }
     }
 

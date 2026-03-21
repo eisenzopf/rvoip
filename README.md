@@ -4,9 +4,9 @@
 
 <div align="center">
 
-[![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/yourusername/rvoip#license)
-[![Build Status](https://img.shields.io/github/workflow/status/yourusername/rvoip/CI)](https://github.com/yourusername/rvoip/actions)
+[![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](https://github.com/openprx/rvoip#license)
+[![Build Status](https://img.shields.io/github/workflow/status/openprx/rvoip/CI)](https://github.com/openprx/rvoip/actions)
 [![Crates.io](https://img.shields.io/crates/v/rvoip.svg)](https://crates.io/crates/rvoip)
 [![Documentation](https://docs.rs/rvoip/badge.svg)](https://docs.rs/rvoip)
 
@@ -18,7 +18,7 @@
 
 ---
 
-> **⚠️ Alpha Release** - This is an alpha release with rapidly evolving APIs. Libraries will change significantly as we move toward production readiness, but the core architecture and design principles are stable. The intent is to make this library production-ready for enterprise VoIP deployments. We are in the process of doing real-world testing and would appreciate any feedback, feature requests, contributions, or bug reports.
+> **Beta Quality** - Core SIP, transport, security, and media features are complete and functional. APIs are stabilizing but may still see changes as we move toward 1.0. The intent is to make this library production-ready for enterprise VoIP deployments. We are in the process of doing real-world testing and would appreciate any feedback, feature requests, contributions, or bug reports.
 
 ## 📋 Table of Contents
 
@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
     let session_manager = SessionManagerBuilder::new()
         .with_sip_port(5060)
         .build().await?;
-    
+
     println!("✅ SIP server running on port 5060");
     tokio::signal::ctrl_c().await?;
     Ok(())
@@ -79,16 +79,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             preferred_codecs: vec!["PCMU".to_string(), "PCMA".to_string()],
             ..Default::default()
         });
-    
+
     let client = ClientManager::new(config).await?;
     client.start().await?;
-    
+
     let call_id = client.make_call(
         "sip:alice@127.0.0.1".to_string(),
         "sip:bob@example.com".to_string(),
         None
     ).await?;
-    
+
     println!("📞 Call initiated to bob@example.com");
     Ok(())
 }
@@ -97,20 +97,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### 🏢 Enterprise Call Center
 
 ```rust
-use rvoip::call_engine::prelude::*;
+use rvoip::call_engine::{prelude::*, CallCenterServerBuilder};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = CallCenterConfig::default();
     config.general.local_signaling_addr = "0.0.0.0:5060".parse()?;
     config.general.domain = "127.0.0.1".to_string();
-    
+
     let mut server = CallCenterServerBuilder::new()
         .with_config(config)
         .with_database_path(":memory:".to_string())
         .build()
         .await?;
-    
+
     server.start().await?;
     println!("🏢 Call Center Server starting...");
     server.run().await?;
@@ -124,34 +124,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 <div align="center">
 
-| 🦀 **Pure Rust** | 🏗️ **Modular** | 📋 **RFC Compliant** | 🏢 **Production Ready** |
+| 🦀 **Pure Rust** | 🏗️ **Modular** | 📋 **RFC Compliant** | 🔶 **Beta** |
 |:---:|:---:|:---:|:---:|
-| Zero FFI dependencies | Clean separation of concerns | Standards-compliant SIP | Enterprise deployment ready |
-| Memory safety & performance | Specialized crates | Extensive RFC support | High availability design |
+| Zero FFI dependencies | Clean separation of concerns | Standards-compliant SIP | Core features complete, APIs stabilizing |
+| Memory safety & performance | Specialized crates | Extensive RFC support | Real-world testing in progress |
 
 </div>
 
 rvoip is a pure Rust set of libraries built from the ground up and follows SIP best practices for separation of concerns:
 
 - 🦀 **Pure Rust Implementation**: Zero FFI dependencies, leveraging Rust's safety and performance
-- 🏗️ **Modular Architecture**: Clean separation of concerns across specialized crates  
+- 🏗️ **Modular Architecture**: Clean separation of concerns across specialized crates
 - 📋 **RFC Compliance**: Standards-compliant SIP implementation with extensive RFC support
-- 🏢 **Production Ready**: Designed for enterprise deployment with high availability
+- 🔶 **Beta Quality**: Core features complete, designed for enterprise deployment, real-world testing in progress
 - 👨‍💻 **Developer Friendly**: Multiple API levels from low-level protocol to high-level applications
 
 ## 📦 Library Structure
 
-rvoip is organized into 9 core crates, each with specific responsibilities in the VoIP stack:
+rvoip is organized into 17 crates, each with specific responsibilities in the VoIP stack:
 
 ### 🏗️ Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    Application Layer                        │
-│        ┌─────────────────┐  ┌─────────────────┐             │
-│        │   call-engine   │  │   client-core   │             │
-│        │ (Call Center)   │  │ (SIP Client)    │             │
-│        └─────────────────┘  └─────────────────┘             │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
+│  │ call-engine  │  │ client-core  │  │  sip-client  │      │
+│  │(Call Center) │  │ (SIP Client) │  │(Simple API)  │      │
+│  └──────────────┘  └──────────────┘  └──────────────┘      │
 ├─────────────────────────────────────────────────────────────┤
 │               Session & Coordination Layer                  │
 │                   ┌─────────────────┐                       │
@@ -160,36 +160,48 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 │                   └─────────────────┘                       │
 ├─────────────────────────────────────────────────────────────┤
 │               Protocol & Processing Layer                   │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────┐  │
-│  │   dialog-core   │  │   media-core    │  │transaction  │  │
-│  │ (SIP Dialogs)   │  │ (Audio Process) │  │   -core     │  │
-│  └─────────────────┘  └─────────────────┘  └─────────────┘  │
+│  ┌─────────────────┐  ┌─────────────────┐                   │
+│  │   dialog-core   │  │   media-core    │                   │
+│  │  (SIP Dialogs   │  │ (Audio Process) │                   │
+│  │  + Transactions) │  └─────────────────┘                   │
+│  └─────────────────┘                                        │
 ├─────────────────────────────────────────────────────────────┤
 │               Transport & Media Layer                       │
-│      ┌─────────────────┐  ┌─────────────────┐               │
-│      │ sip-transport   │  │   rtp-core      │               │
-│      │ (SIP Transport) │  │ (RTP/SRTP)      │               │
-│      └─────────────────┘  └─────────────────┘               │
+│  ┌─────────────────┐  ┌─────────────────┐                   │
+│  │ sip-transport   │  │   rtp-core      │                   │
+│  │ (SIP Transport) │  │ (RTP/SRTP)      │                   │
+│  └─────────────────┘  └─────────────────┘                   │
 ├─────────────────────────────────────────────────────────────┤
 │                    Foundation Layer                         │
-│                  ┌─────────────────┐                        │
-│                  │    sip-core     │                        │
-│                  │ (SIP Protocol)  │                        │
-│                  └─────────────────┘                        │
+│  ┌─────────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │    sip-core     │  │  codec-core  │  │  audio-core  │   │
+│  │ (SIP Protocol)  │  │  (Codecs)    │  │  (Audio DSP) │   │
+│  └─────────────────┘  └──────────────┘  └──────────────┘   │
+├─────────────────────────────────────────────────────────────┤
+│                    Support Crates                           │
+│  ┌───────────────┐ ┌────────────────┐ ┌──────────────────┐ │
+│  │ infra-common  │ │ registrar-core │ │ intermediary-core│ │
+│  └───────────────┘ └────────────────┘ └──────────────────┘ │
+│  ┌───────────────┐ ┌────────────────┐ ┌──────────────────┐ │
+│  │  users-core   │ │   auth-core*   │ │      rvoip       │ │
+│  └───────────────┘ └────────────────┘ │    (facade)      │ │
+│                                       └──────────────────┘ │
+│  * auth-core exists on disk but is not yet a workspace     │
+│    member                                                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## 🔧 Core Crates
 
 <details>
-<summary><strong>📞 call-engine</strong> - Complete Call Center Solution</summary>
+<summary><strong>📞 call-engine</strong> - Call Center Orchestration</summary>
 
-**Purpose**: Proof of concept call center orchestration with agent management, queuing, and routing  
-**Status**: ⚠️ **Not Production Ready** - Limited functionality and not yet tested in production
+**Purpose**: Proof of concept call center orchestration with agent management, queuing, and routing
+**Status**: ⚠️ **Alpha** — ~70% complete, not production tested
 
 **🎯 Key Features**:
 - 👥 Agent SIP registration and status management
-- 🗄️ Database-backed call queuing with priority handling  
+- 🗄️ Database-backed call queuing with priority handling
 - ⚖️ Round-robin load balancing and overflow management
 - 🔗 B2BUA call bridging with bidirectional audio
 - 📊 Real-time queue monitoring and statistics
@@ -201,8 +213,8 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 <details>
 <summary><strong>📱 client-core</strong> - High-Level SIP Client Library</summary>
 
-**Purpose**: Simplified SIP client library for building VoIP applications  
-**Status**: ✅ **Alpha Quality** - Complete client functionality with comprehensive API but not yet tested in production. API will change significantly as we move toward production readiness.
+**Purpose**: Simplified SIP client library for building VoIP applications
+**Status**: ⚠️ **Alpha** — Complete client functionality with comprehensive API but not yet tested in production. API will change significantly.
 
 **🎯 Key Features**:
 - 📞 High-level call management (make, answer, hold, transfer, terminate)
@@ -216,68 +228,66 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 </details>
 
 <details>
+<summary><strong>📱 sip-client</strong> - Simplified SIP Client</summary>
+
+**Purpose**: Higher-level SIP client with `simple-api` feature for rapid prototyping
+**Status**: ⚠️ **Alpha** — Wraps client-core with a simpler interface
+
+**🎯 Key Features**:
+- 🔧 Simple API feature gate for easy usage
+- 📞 Streamlined call operations
+- ⚡ Quick prototyping for SIP applications
+
+**💼 Use Cases**: Rapid prototyping, simple SIP integrations
+
+</details>
+
+<details>
 <summary><strong>🎛️ session-core</strong> - Session Management Hub</summary>
 
-**Purpose**: Central coordination for SIP sessions, media, and call control  
-**Status**: ✅ **Alpha Quality** - Core session management with comprehensive API for SIP and media coordination. API will change significantly as we move toward production readiness. Missing authentication and encryption which are available in rtp-core but not yet exposed in session-core.
+**Purpose**: Central coordination for SIP sessions, media, and call control
+**Status**: 🔶 **Beta** — Core session management with comprehensive API. Includes state-table feature for deterministic state machine behavior. Digest Auth (RFC 2617/7616) and DTLS-SRTP encryption are fully integrated.
 
 **🎯 Key Features**:
 - 🔄 Session lifecycle management from creation to termination
 - 🤝 SIP-Media coordination with real media-core integration
 - 🎮 Call control operations (hold, resume, transfer, bridge)
 - ⚡ Event-driven architecture with session state management
-- 👥 Multi-party call coordination and conference support
+- 📋 State-table feature for deterministic, table-driven state transitions
 
 **💼 Use Cases**: VoIP platform foundation, session coordination, call control
 
 </details>
 
 <details>
-<summary><strong>💬 dialog-core</strong> - SIP Dialog Management</summary>
+<summary><strong>💬 dialog-core</strong> - SIP Dialog & Transaction Management</summary>
 
-**Purpose**: RFC 3261 compliant SIP dialog state machine and message routing  
-**Status**: ✅ **Alpha Quality** - Full dialog lifecycle management but not yet tested in production. API will change significantly as we move toward production readiness. Missing some SIP RFC extensions.
+**Purpose**: RFC 3261 compliant SIP dialog state machine, message routing, and transaction layer (transaction-core was merged into this crate)
+**Status**: ⚠️ **Alpha** — Full dialog lifecycle management and transaction support. Missing some SIP RFC extensions.
 
 **🎯 Key Features**:
 - 📋 Complete RFC 3261 dialog state machine implementation
+- 🔁 SIP transaction layer with automatic retransmission and timeouts
 - 🚀 Early and confirmed dialog management
+- 📱 Client and server transaction support
 - 🧭 In-dialog request routing and state tracking
 - 🔧 Dialog recovery and cleanup mechanisms
-- 📡 Session coordination with event propagation
 
-**💼 Use Cases**: SIP protocol implementation, dialog state management
-
-</details>
-
-<details>
-<summary><strong>🔄 transaction-core</strong> - SIP Transaction Layer</summary>
-
-**Purpose**: Reliable SIP message delivery with retransmission and timeouts  
-**Status**: ✅ **Alpha Quality** - Full client/server transaction support but not yet tested in production. API will change significantly as we move toward production readiness. Missing some SIP RFC extensions.
-
-**🎯 Key Features**:
-- 📋 Complete RFC 3261 transaction state machines
-- 🔁 Automatic retransmission and timeout handling
-- 📱 Client and server transaction support
-- ⏰ Timer management with configurable intervals
-- 🔗 Transaction correlation and message reliability
-
-**💼 Use Cases**: SIP protocol reliability, message delivery guarantees
+**💼 Use Cases**: SIP protocol implementation, dialog state management, reliable message delivery
 
 </details>
 
 <details>
 <summary><strong>🎧 media-core</strong> - Media Processing Engine</summary>
 
-**Purpose**: Audio processing, codec management, and media session coordination  
-**Status**: ✅ **Alpha Quality** - Advanced audio processing with quality monitoring but not yet tested in production. API will change significantly as we move toward production readiness.
+**Purpose**: Audio processing, codec management, and media session coordination
+**Status**: ⚠️ **Alpha** — Advanced audio processing with quality monitoring but not yet tested in production.
 
 **🎯 Key Features**:
 - 🎙️ Advanced audio processing (AEC, AGC, VAD, noise suppression)
-- 🎤 Multi-codec support (G.711, G.722, Opus, G.729)
+- 🎤 Multi-codec support via codec-core
 - 📈 Real-time quality monitoring and MOS scoring
-- ⚡ Zero-copy optimizations and SIMD acceleration
-- 🎵 Conference mixing and N-way audio processing
+- 🎵 Conference mixing (mixer exists, session integration TODO)
 
 **💼 Use Cases**: VoIP audio processing, codec transcoding, media quality
 
@@ -286,42 +296,47 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 <details>
 <summary><strong>📡 rtp-core</strong> - RTP/RTCP Implementation</summary>
 
-**Purpose**: Real-time media transport with comprehensive RTP/RTCP support. Some WebRTC support is available like SRTP/SRTCP but not yet tested in production.  
-**Status**: ✅ **Alpha Quality** - Full-featured RTP stack with security but not yet tested in production. API will change significantly as we move toward production readiness.
+**Purpose**: Real-time media transport with comprehensive RTP/RTCP support, security protocols, and NAT traversal
+**Status**: 🔶 **Beta** — Core RTP stack functional, DTLS-SRTP complete, full ICE/STUN/TURN support.
 
 **🎯 Key Features**:
 - 📋 Complete RFC 3550 RTP/RTCP implementation
-- 🔒 SRTP/SRTCP encryption with multiple cipher suites
-- 🔐 DTLS-SRTP, ZRTP, and MIKEY security protocols
+- 🔒 SRTP/SRTCP with AES-CM (AEAD GCM not yet implemented)
+- 🔐 DTLS-SRTP complete (full handshake, cipher activation, media integration)
+- 🔐 ZRTP (simplified implementation, not full RFC 6189)
+- 🔑 MIKEY-PSK and MIKEY-PKE (PKE is framework-only, crypto placeholder)
+- 🧊 Full ICE agent (gathering, connectivity checks, trickle ICE, consent freshness)
+- 📡 STUN client (binding requests, NAT detection)
+- 🔄 TURN client (relay allocation, channel binding)
 - 📈 Adaptive jitter buffering and quality monitoring
-- ⚡ High-performance buffer management
 
-**💼 Use Cases**: Secure media transport, RTP streaming, WebRTC compatibility
+**💼 Use Cases**: Secure media transport, RTP streaming, WebRTC compatibility, NAT traversal
 
 </details>
 
 <details>
 <summary><strong>🌐 sip-transport</strong> - SIP Transport Layer</summary>
 
-**Purpose**: Multi-protocol SIP transport (UDP/TCP/TLS/WebSocket)  
-**Status**: ✅ **Alpha Quality** - UDP/TCP complete, TLS/WebSocket functional but not yet tested in production. API will change significantly as we move toward production readiness. May merge with rtp-core in the future so we have a single transport layer.
+**Purpose**: Multi-protocol SIP transport
+**Status**: 🔶 **Beta** — All transports complete: UDP, TCP, TLS, WebSocket (WS + WSS, client + server).
 
 **🎯 Key Features**:
-- 🔌 Multiple transport protocols (UDP, TCP, TLS, WebSocket)
-- 🔗 Connection management and lifecycle
+- 🔌 UDP and TCP transport (complete)
+- 🔒 TLS transport (complete)
+- 🌐 WebSocket transport (WS + WSS, client + server)
 - 🏭 Transport factory for URI-based selection
 - 🔧 Error handling and recovery mechanisms
 - ⚡ Event-driven architecture
 
-**💼 Use Cases**: SIP network transport, protocol abstraction
+**💼 Use Cases**: SIP network transport, protocol abstraction, secure signaling
 
 </details>
 
 <details>
 <summary><strong>🔧 sip-core</strong> - SIP Protocol Foundation</summary>
 
-**Purpose**: Core SIP message parsing, serialization, and validation  
-**Status**: ✅ **Alpha Quality** - Complete RFC 3261 implementation but not yet tested in production. API will change significantly as we move toward production readiness. Missing some SIP RFC extensions. Has strict parsing mode and lenient parsing mode which may need further improvements.
+**Purpose**: Core SIP message parsing, serialization, and validation
+**Status**: ⚠️ **Alpha** — Complete RFC 3261 implementation with strict and lenient parsing modes. Missing some SIP RFC extensions.
 
 **🎯 Key Features**:
 - 📋 RFC 3261 compliant message parsing and serialization
@@ -331,6 +346,94 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 - 🔗 Comprehensive URI processing (SIP, SIPS, TEL)
 
 **💼 Use Cases**: SIP protocol foundation, message processing, parser
+
+</details>
+
+<details>
+<summary><strong>🎵 codec-core</strong> - Audio Codec Library</summary>
+
+**Purpose**: Audio codec implementations and codec negotiation
+**Status**: ⚠️ **Alpha** — G.711 complete, others at varying stages
+
+**🎯 Key Features**:
+- 🎤 G.711 PCMU/PCMA codec (complete)
+- 🔊 Opus codec (behind optional feature gate)
+- 📋 Codec negotiation and selection framework
+
+**💼 Use Cases**: Audio encoding/decoding, codec management
+
+</details>
+
+<details>
+<summary><strong>🔊 audio-core</strong> - Audio DSP Library</summary>
+
+**Purpose**: Low-level audio processing primitives
+**Status**: ⚠️ **Alpha** — Core DSP functionality
+
+**🎯 Key Features**:
+- 🎙️ Audio sample processing and conversion
+- 📈 Signal processing utilities
+- 🔧 Audio buffer management
+
+**💼 Use Cases**: Audio processing foundation, DSP operations
+
+</details>
+
+<details>
+<summary><strong>🏗️ infra-common</strong> - Shared Infrastructure</summary>
+
+**Purpose**: Common utilities and types shared across crates
+**Status**: ⚠️ **Alpha**
+
+**💼 Use Cases**: Internal shared code, common types
+
+</details>
+
+<details>
+<summary><strong>📋 registrar-core</strong> - SIP Registrar</summary>
+
+**Purpose**: SIP registration and contact management
+**Status**: ⚠️ **Alpha**
+
+**🎯 Key Features**:
+- 📋 SIP REGISTER request handling
+- 👤 Contact and binding management
+
+**💼 Use Cases**: SIP registrar server, user location service
+
+</details>
+
+<details>
+<summary><strong>👤 users-core</strong> - User Management</summary>
+
+**Purpose**: User account and identity management for SIP systems
+**Status**: ⚠️ **Alpha** — Not included in default workspace members
+
+**💼 Use Cases**: User provisioning, identity management
+
+</details>
+
+<details>
+<summary><strong>🔀 intermediary-core</strong> - SIP Proxy/Intermediary</summary>
+
+**Purpose**: SIP proxy and intermediary functionality
+**Status**: ⚠️ **Alpha**
+
+**💼 Use Cases**: SIP proxy servers, routing logic
+
+</details>
+
+<details>
+<summary><strong>📦 rvoip</strong> - Facade Crate</summary>
+
+**Purpose**: Re-exports all crates under the `rvoip::*` namespace
+**Status**: ⚠️ **Alpha**
+
+**🎯 Key Features**:
+- 🔗 Unified import path: `rvoip::session_core::prelude::*`
+- 📦 Single dependency for full stack access
+
+**💼 Use Cases**: Application development, unified API access
 
 </details>
 
@@ -346,37 +449,37 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 | **CANCEL** | ✅ Complete | RFC 3261 | Request cancellation | Transaction correlation, state management |
 | **REGISTER** | ✅ Complete | RFC 3261 | User registration | Contact management, expiration handling |
 | **OPTIONS** | ✅ Complete | RFC 3261 | Capability discovery | Method advertisement, feature negotiation |
-| **SUBSCRIBE** | ✅ Complete | RFC 6665 | Event notification subscription | Event packages, subscription state |
-| **NOTIFY** | ✅ Complete | RFC 6665 | Event notifications | Event delivery, subscription management |
-| **MESSAGE** | ✅ Complete | RFC 3428 | Instant messaging | Message delivery, content types |
 | **UPDATE** | ✅ Complete | RFC 3311 | Session modification | Mid-session updates, SDP negotiation |
-| **INFO** | ✅ Complete | RFC 6086 | Mid-session information | DTMF relay, application data |
-| **PRACK** | ✅ Complete | RFC 3262 | Provisional response acknowledgment | Reliable provisionals, sequence tracking |
-| **REFER** | ✅ Complete | RFC 3515 | Call transfer initiation | Transfer correlation, refer-to handling |
-| **PUBLISH** | ✅ Complete | RFC 3903 | Event state publication | Presence publishing, event state |
+| **SUBSCRIBE** | 🔶 Partial | RFC 6665 | Event notification subscription | Incoming works, callbacks connected |
+| **NOTIFY** | 🔶 Partial | RFC 6665 | Event notifications | Receive works, callbacks connected |
+| **MESSAGE** | 🔶 Partial | RFC 3428 | Instant messaging | Outbound only, inbound not dispatched |
+| **INFO** | ✅ Complete | RFC 6086 | Mid-session information | DTMF + trickle ICE support |
+| **REFER** | ✅ Complete | RFC 3515 | Call transfer initiation | Blind + attended transfer |
+| **PRACK** | 🚧 In Progress | RFC 3262 | Provisional response acknowledgment | Parsed only, no dialog-core handler |
+| **PUBLISH** | 🚧 In Progress | RFC 3903 | Event state publication | No dialog-core handler, presence API is TODO |
 
 ### 🔐 Authentication & Security
 
 | Feature | Status | Algorithms | RFC | Description |
 |---------|--------|------------|-----|-------------|
-| **Digest Authentication** | ✅ Complete | MD5, SHA-256, SHA-512-256 | RFC 3261 | Challenge-response authentication |
-| **Quality of Protection** | ✅ Complete | auth, auth-int | RFC 3261 | Integrity protection levels |
-| **SRTP/SRTCP** | ✅ Complete | AES-CM, AES-GCM, HMAC-SHA1 | RFC 3711 | Secure media transport |
-| **DTLS-SRTP** | ✅ Complete | ECDHE, RSA | RFC 5763 | WebRTC-compatible security |
-| **ZRTP** | ✅ Complete | DH, ECDH, SAS | RFC 6189 | Peer-to-peer key agreement |
-| **MIKEY-PSK** | ✅ Complete | Pre-shared keys | RFC 3830 | Enterprise key management |
-| **MIKEY-PKE** | ✅ Complete | RSA, X.509 | RFC 3830 | Certificate-based keys |
+| **Digest Authentication** | ✅ Complete | MD5, SHA-256, SHA-512-256 | RFC 2617/7616 | Challenge-response authentication |
+| **Quality of Protection** | ✅ Complete | auth, auth-int | RFC 2617 | Integrity protection levels |
+| **DTLS-SRTP** | ✅ Complete | ECDHE, RSA | RFC 5763 | Full handshake, cipher activation, media integration |
+| **TLS Transport** | ✅ Complete | TLS 1.2/1.3 | RFC 3261 | Secure SIP signaling transport |
 | **SDES-SRTP** | ✅ Complete | SDP-based | RFC 4568 | SIP signaling key exchange |
-| **TLS Transport** | ✅ Complete | TLS 1.2/1.3 | RFC 3261 | Secure SIP transport |
+| **MIKEY-PSK** | ✅ Complete | Pre-shared keys | RFC 3830 | Enterprise key management |
+| **SRTP/SRTCP** | 🔶 Partial | AES-CM, HMAC-SHA1 | RFC 3711 | AES-CM works, AEAD GCM not implemented |
+| **ZRTP** | 🔶 Partial | DH, SAS | RFC 6189 | Simplified implementation, not full RFC 6189 |
+| **MIKEY-PKE** | 🔶 Partial | RSA, X.509 | RFC 3830 | Framework exists, crypto is placeholder |
 
 ### 🎵 Media & Codec Support
 
 | Category | Feature | Status | Standards | Description |
 |----------|---------|--------|-----------|-------------|
-| **Audio Codecs** | G.711 PCMU/PCMA | ✅ Complete | ITU-T G.711 | μ-law/A-law, 8kHz |
-| | G.722 | ✅ Complete | ITU-T G.722 | Wideband audio, 16kHz |
-| | Opus | ✅ Complete | RFC 6716 | Adaptive bitrate, 8-48kHz |
-| | G.729 | ✅ Complete | ITU-T G.729 | Low bandwidth, 8kHz |
+| **Audio Codecs** | G.711 PCMU/PCMA | ✅ Complete | ITU-T G.711 | u-law/A-law, 8kHz |
+| | Opus | 🔶 Partial | RFC 6716 | Behind optional feature gate |
+| | G.722 | 🚧 In Progress | ITU-T G.722 | RTP payload handler only, no codec |
+| | G.729 | ❌ Not Implemented | ITU-T G.729 | Dependency disabled |
 | **Audio Processing** | Echo Cancellation | ✅ Complete | Advanced AEC | 16.4 dB ERLE improvement |
 | | Gain Control | ✅ Complete | Advanced AGC | Multi-band processing |
 | | Voice Activity | ✅ Complete | Advanced VAD | Spectral analysis |
@@ -384,27 +487,27 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 | **RTP Features** | RTP/RTCP | ✅ Complete | RFC 3550 | Packet transport, statistics |
 | | RTCP Feedback | ✅ Complete | RFC 4585 | Quality feedback |
 | | RTP Extensions | ✅ Complete | RFC 8285 | Header extensions |
-| **Conference** | Audio Mixing | ✅ Complete | N-way mixing | Multi-party conferences |
-| | Media Bridging | ✅ Complete | B2BUA | Call bridging |
+| **Conference** | Audio Mixing | 🔶 Partial | N-way mixing | Mixer exists, session integration TODO |
+| | Media Bridging | 🔶 Partial | B2BUA | Call bridging (B2BUA in progress) |
 
 ### 🌐 Transport Protocol Support
 
 | Transport | Status | Security | RFC | Description |
 |-----------|--------|----------|-----|-------------|
 | **UDP** | ✅ Complete | Optional SRTP | RFC 3261 | Primary SIP transport |
-| **TCP** | ✅ Complete | Optional TLS | RFC 3261 | Reliable transport |
-| **TLS** | ✅ Complete | TLS 1.2/1.3 | RFC 3261 | Secure transport |
-| **WebSocket** | ✅ Complete | WSS support | RFC 7118 | Web browser compatibility |
-| **SCTP** | 🚧 Planned | DTLS-SCTP | RFC 4168 | Multi-streaming transport |
+| **TCP** | ✅ Complete | — | RFC 3261 | Reliable transport |
+| **WebSocket** | ✅ Complete | WS + WSS | RFC 7118 | Client + server, secure WebSocket |
+| **TLS** | ✅ Complete | TLS 1.2/1.3 | RFC 3261 | Secure SIP signaling |
+| **SCTP** | ✅ Complete | DTLS-SCTP | RFC 4960 | DTLS-SCTP data channels (not SIP-over-SCTP) |
 
 ### 🔌 NAT Traversal Support
 
 | Feature | Status | RFC | Description |
 |---------|--------|-----|-------------|
-| **STUN Client** | ✅ Complete | RFC 5389 | NAT binding discovery |
-| **TURN Client** | 🚧 Partial | RFC 5766 | Relay through NAT |
-| **ICE** | 🚧 Partial | RFC 8445 | Connectivity establishment |
 | **Symmetric RTP** | ✅ Complete | RFC 4961 | Bidirectional media flow |
+| **ICE** | ✅ Complete | RFC 8445 | Full agent, trickle ICE, consent freshness |
+| **STUN Client** | ✅ Complete | RFC 5389 | Binding requests, NAT detection |
+| **TURN Client** | ✅ Complete | RFC 5766 | Relay allocation, channel binding |
 
 ### 📞 Dialog & Session Management
 
@@ -414,7 +517,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 | **Confirmed Dialogs** | ✅ Complete | RFC 3261 | 2xx response handling |
 | **Dialog Recovery** | ✅ Complete | RFC 3261 | State persistence |
 | **Session Timers** | ✅ Complete | RFC 4028 | Keep-alive mechanism |
-| **Dialog Forking** | 🚧 Planned | RFC 3261 | Parallel/sequential forking |
+| **Dialog Forking** | ✅ Complete | RFC 3261 | Parallel/sequential forking |
 
 ### 📋 SDP (Session Description Protocol)
 
@@ -431,56 +534,63 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| **Call Center Operations** | ✅ Complete | Agent management, queuing, routing |
-| **B2BUA Operations** | ✅ Complete | Back-to-back user agent |
+| **Call Hold/Resume** | 🔶 Partial | client-core works, sip-client not wired |
+| **Call Transfer** | ✅ Complete | Blind + attended transfer |
+| **DTMF Support** | ✅ Complete | SIP INFO + RFC 4733 RTP events (dual mode) |
+| **Conference Mixing** | 🔶 Partial | Mixer exists, session integration TODO |
+| **Call Center Operations** | 🔶 Partial | ~70% complete, agent management and queuing working |
 | **Media Quality Monitoring** | ✅ Complete | Real-time MOS scoring |
-| **Conference Mixing** | ✅ Complete | Multi-party audio mixing |
-| **Call Transfer** | ✅ Complete | Blind transfer support |
-| **Call Hold/Resume** | ✅ Complete | Media session control |
-| **DTMF Support** | ✅ Complete | RFC 2833 DTMF relay |
+| **B2BUA Operations** | 🚧 In Progress | Back-to-back user agent |
 
 
 
 ## 🧪 Testing & Quality
 
 ### Comprehensive Test Coverage
-- **Unit Tests**: 400+ tests across all crates
+- **Unit Tests**: 2,500+ tests across all crates
 - **Integration Tests**: End-to-end call flows with SIPp
 - **RFC Compliance**: Torture tests based on RFC 4475
 - **Performance Tests**: Benchmarks for critical paths
-- **Interoperability**: Testing with commercial SIP systems
 
-### Production Validation
-- **Load Testing**: 100+ concurrent calls per server
+### Quality Assurance
 - **Memory Management**: Comprehensive resource cleanup
 - **Error Recovery**: Graceful degradation and failover
-- **Security Testing**: Penetration testing and vulnerability assessment
+- **CI**: Automated build and test across the workspace
 
 ## 📋 Development Status
 
-### ✅ Production-Ready Components
-- **sip-core**: Complete RFC 3261 implementation
-- **session-core**: Full session management
-- **dialog-core**: Complete dialog state machine
-- **transaction-core**: Full transaction layer
-- **media-core**: Advanced audio processing
-- **rtp-core**: Complete RTP/RTCP/SRTP
-- **client-core**: Production-ready client framework
-- **call-engine**: Working call center with database
-- **sip-transport**: UDP/TCP complete, TLS/WS functional
+### 🔶 Beta Components
+Core crates are **beta quality**. The architecture is stable and APIs are stabilizing.
 
-### 🚧 In Progress
-- **NAT Traversal**: Full ICE/STUN/TURN implementation
-- **Video Support**: Video codecs and processing
-- **Advanced Features**: Call transfer, conference (3+ party)
+- **sip-core**: RFC 3261 implementation, strict and lenient parsing
+- **dialog-core**: Dialog state machine + merged transaction layer
+- **session-core**: Session management with state-table feature, Digest Auth + DTLS-SRTP
+- **media-core**: Audio processing (AEC, AGC, VAD, NS)
+- **rtp-core**: RTP/RTCP with DTLS-SRTP, ICE, STUN, TURN
+- **sip-transport**: UDP, TCP, TLS, WebSocket (WS + WSS) all complete
+- **client-core**: High-level client framework
+- **call-engine**: Call center orchestration (~70% complete)
+- **codec-core**: G.711 complete, Opus partial
+- **audio-core**: Core audio DSP
+
+### 🚧 Known Gaps
+- **Opus codec**: Partial implementation behind feature gate
+- **SIP-over-SCTP**: DTLS-SCTP data channels work, but SIP-over-SCTP (RFC 4168) not implemented
+- **SRTP AEAD GCM**: AES-CM works, AEAD GCM cipher suite not yet implemented
+- **Conference integration**: Audio mixer exists but session-level integration is TODO
+- **Call Hold in sip-client**: Works in client-core but not wired through sip-client
 
 ### 🔮 Roadmap
+- **Full Opus codec support**: Complete Opus encoder/decoder integration
+- **Video codec support**: H.264, VP8 for video calling
+- **SIP-over-SCTP**: RFC 4168 multi-streaming SIP transport
 - **WebRTC Gateway**: Full WebRTC interoperability
-- **Clustering**: High availability and scaling
-- **API Management**: REST/WebSocket interfaces
 - **Mobile SDKs**: iOS and Android bindings
+- **Clustering/HA**: High availability and horizontal scaling
 
 ## 🏢 Enterprise Deployment
+
+rvoip is designed for enterprise use cases with core features now at beta quality. The architecture supports:
 
 ### Deployment Options
 - **Standalone**: Single binary deployment
@@ -488,11 +598,11 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 - **Cloud Native**: AWS/GCP/Azure optimized
 - **On-Premises**: Traditional server deployment
 
-### Scalability Features
-- **High Performance**: 100,000+ concurrent calls
+### Design Goals
 - **Event-Driven**: Real-time monitoring and control
-- **Security**: Enterprise-grade encryption and authentication
-- **Reliability**: Comprehensive error handling and recovery
+- **Modular**: Use only the crates you need
+- **Secure**: Enterprise-grade encryption and authentication (TLS, DTLS-SRTP, Digest Auth)
+- **Reliable**: Comprehensive error handling and recovery
 
 ## 🤝 Contributing
 
@@ -506,9 +616,9 @@ We welcome contributions! Here's how you can help:
 
 <div align="center">
 
-[![Contributors](https://img.shields.io/github/contributors/yourusername/rvoip.svg)](https://github.com/yourusername/rvoip/graphs/contributors)
-[![Issues](https://img.shields.io/github/issues/yourusername/rvoip.svg)](https://github.com/yourusername/rvoip/issues)
-[![Pull Requests](https://img.shields.io/github/issues-pr/yourusername/rvoip.svg)](https://github.com/yourusername/rvoip/pulls)
+[![Contributors](https://img.shields.io/github/contributors/openprx/rvoip.svg)](https://github.com/openprx/rvoip/graphs/contributors)
+[![Issues](https://img.shields.io/github/issues/openprx/rvoip.svg)](https://github.com/openprx/rvoip/issues)
+[![Pull Requests](https://img.shields.io/github/issues-pr/openprx/rvoip.svg)](https://github.com/openprx/rvoip/pulls)
 
 </div>
 
@@ -526,14 +636,14 @@ at your option.
 
 ### 🚀 Ready to Build the Future of VoIP?
 
-**[📚 Read the Docs](https://docs.rs/rvoip)** • **[💡 Try Examples](examples/)** • **[🐛 Report Issues](https://github.com/yourusername/rvoip/issues)** • **[💬 Join Discussions](https://github.com/yourusername/rvoip/discussions)**
+**[📚 Read the Docs](https://docs.rs/rvoip)** • **[💡 Try Examples](examples/)** • **[🐛 Report Issues](https://github.com/openprx/rvoip/issues)** • **[💬 Join Discussions](https://github.com/openprx/rvoip/discussions)**
 
 ---
 
 **💡 Ready to get started?** Check out the [examples](examples/) directory for working code samples, or dive into the individual crate documentation for detailed usage patterns.
 
-**🏢 Enterprise users:** This library is designed for production deployment. While currently in alpha, the architecture is stable and suitable for evaluation and development.
+**Core features are beta quality** with complete SIP signaling, secure transport (TLS, DTLS-SRTP), NAT traversal (ICE/STUN/TURN), and call control (hold, transfer, DTMF). APIs are stabilizing as we move toward 1.0.
 
 <sub>Built with ❤️ in Rust</sub>
 
-</div> 
+</div>

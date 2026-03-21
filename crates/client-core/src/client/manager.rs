@@ -240,7 +240,9 @@ pub struct ClientManager {
     
     /// Handle to the audio setup task
     audio_setup_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    
+
+    /// Maximum number of concurrent calls allowed
+    pub(crate) max_concurrent_calls: usize,
 }
 
 impl ClientManager {
@@ -448,6 +450,7 @@ impl ClientManager {
             preferred_ptime: config.media.preferred_ptime,
             custom_sdp_attributes: config.media.custom_sdp_attributes.clone(),
             music_on_hold_path: config.media.music_on_hold_path.clone(),
+            ..Default::default()
         };
         
         // Note: If media port is 0, it signals automatic allocation
@@ -464,18 +467,29 @@ impl ClientManager {
         .with_call_established_tx(call_established_tx.clone()));
         
         // Create session manager using session-core builder with media preferences
-        let coordinator = SessionManagerBuilder::new()
+        let mut session_builder = SessionManagerBuilder::new()
             .with_local_address(&format!("sip:client@{}", config.local_sip_addr.ip()))
             .with_sip_port(config.local_sip_addr.port())
             .with_local_bind_addr(config.local_sip_addr)  // Add this line to propagate bind address
             .with_media_ports(config.media.rtp_port_start, config.media.rtp_port_end)
             .with_media_config(session_media_config)  // Pass media preferences to session-core
             .with_handler(call_handler.clone() as Arc<dyn CallHandler>)
-            .enable_sip_client()  // Enable SIP client features for REGISTER support
+            .enable_sip_client();  // Enable SIP client features for REGISTER support
+
+        // Apply WebSocket transport if configured
+        if let Some(secure) = config.websocket {
+            if secure {
+                session_builder = session_builder.with_secure_websocket();
+            } else {
+                session_builder = session_builder.with_websocket();
+            }
+        }
+
+        let coordinator = session_builder
             .build()
             .await
-            .map_err(|e| ClientError::InternalError { 
-                message: format!("Failed to create session coordinator: {}", e) 
+            .map_err(|e| ClientError::InternalError {
+                message: format!("Failed to create session coordinator: {}", e)
             })?;
         
         // Now set the session event channel on the call handler
@@ -525,6 +539,7 @@ impl ClientManager {
             event_tx,
             audio_setup_calls,
             audio_setup_task: Arc::new(Mutex::new(None)),
+            max_concurrent_calls: config.max_concurrent_calls,
         });
         
         // Spawn task to handle call establishment notifications
@@ -1275,40 +1290,60 @@ impl ClientManager {
     /// }
     /// ```
     pub async fn register(&self, config: RegistrationConfig) -> ClientResult<Uuid> {
-        // Use SipClient trait to register with retry logic for network errors
+        // Use SipClient trait to register with retry logic for network errors.
+        // If credentials are provided, use register_with_credentials for 401/407 handling.
+        let has_credentials = config.username.is_some() && config.password.is_some();
+        let config_clone = config.clone();
         let registration_handle = retry_with_backoff(
             "sip_registration",
             RetryConfig::slow(),  // Use slower retry for registration
-            || async {
-                SipClient::register(
-                    &self.coordinator,
-                    &config.server_uri,
-                    &config.from_uri,
-                    &config.contact_uri,
-                    config.expires,
-                )
-                .await
-                .map_err(|e| {
-                    // Categorize the error properly based on response
-                    let error_msg = e.to_string();
-                    if error_msg.contains("401") || error_msg.contains("407") {
-                        ClientError::AuthenticationFailed {
-                            reason: format!("Authentication required: {}", e)
-                        }
-                    } else if error_msg.contains("timeout") {
-                        ClientError::NetworkError {
-                            reason: format!("Registration timeout: {}", e)
-                        }
-                    } else if error_msg.contains("403") {
-                        ClientError::RegistrationFailed {
-                            reason: format!("Registration forbidden: {}", e)
-                        }
+            || {
+                let cfg = config_clone.clone();
+                let coord = self.coordinator.clone();
+                async move {
+                    let result = if has_credentials {
+                        let username = cfg.username.as_deref().unwrap_or_default();
+                        let password = cfg.password.as_deref().unwrap_or_default();
+                        SipClient::register_with_credentials(
+                            &coord,
+                            &cfg.server_uri,
+                            &cfg.from_uri,
+                            &cfg.contact_uri,
+                            cfg.expires,
+                            username,
+                            password,
+                        ).await
                     } else {
-                        ClientError::RegistrationFailed {
-                            reason: format!("Registration failed: {}", e)
+                        SipClient::register(
+                            &coord,
+                            &cfg.server_uri,
+                            &cfg.from_uri,
+                            &cfg.contact_uri,
+                            cfg.expires,
+                        ).await
+                    };
+                    result.map_err(|e| {
+                        // Categorize the error properly based on response
+                        let error_msg = e.to_string();
+                        if error_msg.contains("401") || error_msg.contains("407") {
+                            ClientError::AuthenticationFailed {
+                                reason: format!("Authentication required: {}", e)
+                            }
+                        } else if error_msg.contains("timeout") {
+                            ClientError::NetworkError {
+                                reason: format!("Registration timeout: {}", e)
+                            }
+                        } else if error_msg.contains("403") {
+                            ClientError::RegistrationFailed {
+                                reason: format!("Registration forbidden: {}", e)
+                            }
+                        } else {
+                            ClientError::RegistrationFailed {
+                                reason: format!("Registration failed: {}", e)
+                            }
                         }
-                    }
-                })
+                    })
+                }
             }
         )
         .await

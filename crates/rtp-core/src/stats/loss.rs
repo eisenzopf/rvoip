@@ -81,7 +81,14 @@ impl PacketLossTracker {
         }
         
         // Check for sequence number wraparound
-        let prev_seq = self.prev_seq.unwrap();
+        let prev_seq = match self.prev_seq {
+            Some(s) => s,
+            None => {
+                // Should not happen since base_seq was set above, but handle gracefully
+                self.prev_seq = Some(seq);
+                return PacketLossResult::Unknown;
+            }
+        };
         if seq < 0x1000 && prev_seq > 0xf000 {
             // Sequence number wrapped around from 65535 to 0
             self.cycles += 1;

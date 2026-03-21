@@ -235,7 +235,7 @@ impl fmt::Display for HeaderValue {
                     write!(f, "{:?}", bytes)
                 }
             },
-            HeaderValue::CallInfo(ref values) => {
+            HeaderValue::CallInfo(values) => {
                 let mut first = true;
                 for value in values {
                     if !first {

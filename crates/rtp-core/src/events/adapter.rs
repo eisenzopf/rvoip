@@ -18,20 +18,24 @@ use rvoip_infra_common::events::cross_crate::{
 use rvoip_infra_common::planes::LayerTaskManager;
 
 use crate::api::common::events::MediaTransportEvent;
+use crate::stats::RtpStats;
 
 /// RTP Event Adapter that bridges local RTP events with global cross-crate events
 pub struct RtpEventAdapter {
     /// Global event coordinator for cross-crate communication
     global_coordinator: Arc<GlobalEventCoordinator>,
-    
+
     /// Task manager for event processing tasks
     task_manager: Arc<LayerTaskManager>,
-    
+
     /// Channel for backward compatibility with existing RTP event consumers
     transport_event_sender: Arc<RwLock<Option<mpsc::Sender<MediaTransportEvent>>>>,
-    
+
     /// Running state
     is_running: Arc<RwLock<bool>>,
+
+    /// Current RTP statistics snapshot for event conversion
+    stats_snapshot: Arc<RwLock<RtpStats>>,
 }
 
 impl RtpEventAdapter {
@@ -44,6 +48,7 @@ impl RtpEventAdapter {
             task_manager,
             transport_event_sender: Arc::new(RwLock::new(None)),
             is_running: Arc::new(RwLock::new(false)),
+            stats_snapshot: Arc::new(RwLock::new(RtpStats::default())),
         })
     }
     
@@ -123,7 +128,7 @@ impl RtpEventAdapter {
     /// Publish a media transport event (backward compatibility + cross-crate)
     pub async fn publish_transport_event(&self, event: MediaTransportEvent) -> Result<()> {
         // Convert to cross-crate event if applicable
-        if let Some(cross_crate_event) = self.convert_transport_to_cross_crate_event(&event) {
+        if let Some(cross_crate_event) = self.convert_transport_to_cross_crate_event(&event).await {
             // Publish cross-crate event
             if let Err(e) = self.global_coordinator.publish(Arc::new(cross_crate_event)).await {
                 error!("Failed to publish cross-crate event from rtp-core: {}", e);
@@ -140,6 +145,19 @@ impl RtpEventAdapter {
         Ok(())
     }
     
+    /// Update the internal stats snapshot with the latest RTP statistics
+    ///
+    /// Call this periodically or after significant events to keep the
+    /// cross-crate event statistics accurate.
+    pub async fn update_stats(&self, stats: RtpStats) {
+        *self.stats_snapshot.write().await = stats;
+    }
+
+    /// Get a copy of the current stats snapshot
+    pub async fn get_stats(&self) -> RtpStats {
+        self.stats_snapshot.read().await.clone()
+    }
+
     /// Check if adapter is running
     pub async fn is_running(&self) -> bool {
         *self.is_running.read().await
@@ -150,17 +168,17 @@ impl RtpEventAdapter {
     // =============================================================================
     
     /// Convert local RTP transport events to cross-crate events where applicable
-    fn convert_transport_to_cross_crate_event(&self, event: &MediaTransportEvent) -> Option<RvoipCrossCrateEvent> {
+    async fn convert_transport_to_cross_crate_event(&self, event: &MediaTransportEvent) -> Option<RvoipCrossCrateEvent> {
         match event {
             MediaTransportEvent::Connected => {
                 Some(RvoipCrossCrateEvent::RtpToMedia(
                     RtpToMediaEvent::RtpStreamStarted {
-                        session_id: "unknown_session".to_string(), // TODO: Get actual session ID
+                        session_id: "unknown_session".to_string(),
                         local_port: 5004,
                     }
                 ))
             }
-            
+
             MediaTransportEvent::Disconnected => {
                 Some(RvoipCrossCrateEvent::RtpToMedia(
                     RtpToMediaEvent::RtpStreamStopped {
@@ -169,19 +187,25 @@ impl RtpEventAdapter {
                     }
                 ))
             }
-            
-            MediaTransportEvent::QualityChanged { quality } => {
-                // Convert quality metrics to RTP statistics
+
+            MediaTransportEvent::QualityChanged { quality: _ } => {
+                // Read actual stats from the stats snapshot
+                let stats = self.stats_snapshot.read().await;
+                let packet_loss_rate = if stats.packets_received > 0 {
+                    stats.packets_lost as f64 / (stats.packets_received + stats.packets_lost) as f64
+                } else {
+                    0.0
+                };
                 Some(RvoipCrossCrateEvent::RtpToMedia(
                     RtpToMediaEvent::RtpStatisticsUpdate {
                         session_id: "unknown_session".to_string(),
                         stats: RtpStatistics {
-                            packets_sent: 0,     // TODO: Get actual stats
-                            packets_received: 0, // TODO: Get actual stats
-                            bytes_sent: 0,       // TODO: Get actual stats
-                            bytes_received: 0,   // TODO: Get actual stats
-                            packet_loss_rate: 0.0, // TODO: Derive from quality
-                            jitter_ms: 0.0,     // TODO: Get actual jitter
+                            packets_sent: stats.packets_sent,
+                            packets_received: stats.packets_received,
+                            bytes_sent: stats.bytes_sent,
+                            bytes_received: stats.bytes_received,
+                            packet_loss_rate,
+                            jitter_ms: stats.jitter * 1000.0,
                         },
                     }
                 ))

@@ -836,6 +836,21 @@ impl UnifiedDialogApi {
     ) -> ApiResult<TransactionKey> {
         self.manager.send_info(dialog_id, info_body).await
     }
+
+    /// Send INFO request with an explicit Content-Type header.
+    ///
+    /// Used for trickle ICE (`application/trickle-ice-sdpfrag`) and other
+    /// INFO payloads that require a specific MIME type.
+    pub async fn send_info_with_content_type(
+        &self,
+        dialog_id: &DialogId,
+        body: String,
+        content_type: &str,
+    ) -> ApiResult<TransactionKey> {
+        self.manager
+            .send_info_with_content_type(dialog_id, body, content_type)
+            .await
+    }
     
     /// Send CANCEL request to cancel a pending INVITE
     ///
@@ -1079,7 +1094,50 @@ impl UnifiedDialogApi {
         // Create the unified dialog API with all components
         Self::with_global_events(Arc::new(transaction_manager), global_rx, config).await
     }
-    
+
+    /// Create a UnifiedDialogApi with a custom transport configuration
+    ///
+    /// This method is similar to `create()` but allows the caller to specify
+    /// which transports should be enabled (UDP, TCP, WS, WSS, TLS).
+    /// Use this when you need WebSocket or other non-default transports.
+    ///
+    /// # Arguments
+    /// * `config` - The dialog manager configuration (mode, credentials, etc.)
+    /// * `transport_config` - Transport layer configuration specifying which
+    ///   transports to enable and their bind addresses
+    pub async fn create_with_transport_config(
+        config: DialogManagerConfig,
+        transport_config: crate::transaction::transport::TransportManagerConfig,
+    ) -> ApiResult<Self> {
+        use crate::transaction::{TransactionManager, transport::TransportManager};
+
+        info!(
+            "Creating UnifiedDialogApi with custom transport config in {:?} mode",
+            Self::mode_name(&config)
+        );
+
+        let (mut transport, transport_rx) = TransportManager::new(transport_config).await
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to create transport manager: {}", e),
+            })?;
+
+        transport.initialize().await
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to initialize transport: {}", e),
+            })?;
+
+        let (transaction_manager, global_rx) = TransactionManager::with_transport_manager(
+            transport,
+            transport_rx,
+            Some(10000),
+        ).await
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to create transaction manager: {}", e),
+            })?;
+
+        Self::with_global_events(Arc::new(transaction_manager), global_rx, config).await
+    }
+
     // ========================================
     // NON-DIALOG OPERATIONS
     // ========================================
