@@ -943,4 +943,114 @@ mod tests {
         let result = adapter.start_checks().await;
         assert!(result.is_err());
     }
+
+    // ── IceCandidate roundtrip tests (our type -> SDP -> parse back) ────
+
+    #[test]
+    fn test_host_candidate_sdp_roundtrip() {
+        let original = IceCandidate {
+            foundation: "1".to_string(),
+            component: ComponentId::Rtp,
+            transport: "udp".to_string(),
+            priority: 2130706431,
+            address: "192.168.1.100:5000"
+                .parse()
+                .unwrap_or_else(|e| panic!("parse: {e}")),
+            candidate_type: CandidateType::Host,
+            related_address: None,
+            ufrag: "abcd".to_string(),
+        };
+
+        // Convert to SDP attribute string and parse back
+        let sdp_attr = original.to_sdp_attribute();
+        let parsed = IceCandidate::from_sdp_attribute(&sdp_attr)
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+
+        assert_eq!(parsed.address, original.address);
+        assert_eq!(parsed.candidate_type, original.candidate_type);
+        assert_eq!(parsed.priority, original.priority);
+        assert_eq!(parsed.foundation, original.foundation);
+        assert_eq!(parsed.component, original.component);
+        assert_eq!(parsed.transport, original.transport);
+        assert!(parsed.related_address.is_none());
+    }
+
+    #[test]
+    fn test_srflx_candidate_sdp_roundtrip_preserves_related_address() {
+        let related: std::net::SocketAddr = "192.168.1.100:5000"
+            .parse()
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+
+        let original = IceCandidate {
+            foundation: "2".to_string(),
+            component: ComponentId::Rtp,
+            transport: "udp".to_string(),
+            priority: 1694498815,
+            address: "203.0.113.5:12345"
+                .parse()
+                .unwrap_or_else(|e| panic!("parse: {e}")),
+            candidate_type: CandidateType::ServerReflexive,
+            related_address: Some(related),
+            ufrag: "wxyz".to_string(),
+        };
+
+        let sdp_attr = original.to_sdp_attribute();
+        let parsed = IceCandidate::from_sdp_attribute(&sdp_attr)
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+
+        assert_eq!(parsed.candidate_type, CandidateType::ServerReflexive);
+        assert_eq!(parsed.address, original.address);
+        assert_eq!(parsed.priority, original.priority);
+        assert_eq!(
+            parsed.related_address,
+            Some(related),
+            "related_address must survive the SDP roundtrip"
+        );
+    }
+
+    #[test]
+    fn test_relay_candidate_type_preference() {
+        // RFC 8445 Section 5.1.2.1: relay type_preference is 0
+        assert_eq!(CandidateType::Relay.type_preference(), 0);
+
+        let relay = IceCandidate {
+            foundation: "3".to_string(),
+            component: ComponentId::Rtp,
+            transport: "udp".to_string(),
+            priority: 16777215,
+            address: "198.51.100.1:54321"
+                .parse()
+                .unwrap_or_else(|e| panic!("parse: {e}")),
+            candidate_type: CandidateType::Relay,
+            related_address: Some(
+                "203.0.113.5:12345"
+                    .parse()
+                    .unwrap_or_else(|e| panic!("parse: {e}")),
+            ),
+            ufrag: "rlyt".to_string(),
+        };
+
+        let sdp_attr = relay.to_sdp_attribute();
+        let parsed = IceCandidate::from_sdp_attribute(&sdp_attr)
+            .unwrap_or_else(|e| panic!("parse: {e}"));
+
+        assert_eq!(parsed.candidate_type, CandidateType::Relay);
+        assert_eq!(parsed.candidate_type.type_preference(), 0);
+        assert!(parsed.related_address.is_some());
+    }
+
+    #[test]
+    fn test_candidate_type_mapping_roundtrip() {
+        // Verify that our -> webrtc -> our mapping preserves all types
+        for ct in &[
+            CandidateType::Host,
+            CandidateType::ServerReflexive,
+            CandidateType::PeerReflexive,
+            CandidateType::Relay,
+        ] {
+            let webrtc_ct = map_candidate_type_to_webrtc(*ct);
+            let back = map_candidate_type(webrtc_ct);
+            assert_eq!(*ct, back, "candidate type roundtrip failed for {:?}", ct);
+        }
+    }
 }

@@ -453,4 +453,121 @@ mod tests {
         assert!(roundtripped.header.marker);
         assert_eq!(roundtripped.header.payload_type, 111);
     }
+
+    // ── RTCP adapter roundtrip tests ────────────────────────────────────
+
+    #[test]
+    fn test_rtcp_sender_report_roundtrip_via_adapter() {
+        use crate::packet::adapter::rtcp_adapter::*;
+        use crate::packet::rtcp::{RtcpSenderReport, RtcpReportBlock, NtpTimestamp};
+
+        // Build our SenderReport with non-trivial fields
+        let mut sr = RtcpSenderReport::new(0xAABBCCDD);
+        sr.ntp_timestamp = NtpTimestamp { seconds: 0x11223344, fraction: 0x55667788 };
+        sr.rtp_timestamp = 0xDEAD_BEEF;
+        sr.sender_packet_count = 4200;
+        sr.sender_octet_count = 672000;
+        sr.add_report_block(RtcpReportBlock {
+            ssrc: 0x12345678,
+            fraction_lost: 25,
+            cumulative_lost: 300,
+            highest_seq: 65000,
+            jitter: 42,
+            last_sr: 0xABCD_1234,
+            delay_since_last_sr: 5000,
+        });
+
+        // Convert ours -> webrtc
+        let webrtc_sr = sender_report_to_webrtc(&sr);
+
+        // Convert webrtc -> ours
+        let roundtripped = sender_report_from_webrtc(&webrtc_sr);
+
+        // Verify every field survives the roundtrip
+        assert_eq!(roundtripped.ssrc, sr.ssrc);
+        assert_eq!(roundtripped.ntp_timestamp, sr.ntp_timestamp);
+        assert_eq!(roundtripped.rtp_timestamp, sr.rtp_timestamp);
+        assert_eq!(roundtripped.sender_packet_count, sr.sender_packet_count);
+        assert_eq!(roundtripped.sender_octet_count, sr.sender_octet_count);
+        assert_eq!(roundtripped.report_blocks.len(), 1);
+        let rb = &roundtripped.report_blocks[0];
+        let orig_rb = &sr.report_blocks[0];
+        assert_eq!(rb.ssrc, orig_rb.ssrc);
+        assert_eq!(rb.fraction_lost, orig_rb.fraction_lost);
+        assert_eq!(rb.cumulative_lost, orig_rb.cumulative_lost);
+        assert_eq!(rb.highest_seq, orig_rb.highest_seq);
+        assert_eq!(rb.jitter, orig_rb.jitter);
+        assert_eq!(rb.last_sr, orig_rb.last_sr);
+        assert_eq!(rb.delay_since_last_sr, orig_rb.delay_since_last_sr);
+    }
+
+    #[test]
+    fn test_rtcp_receiver_report_roundtrip_via_adapter() {
+        use crate::packet::adapter::rtcp_adapter::*;
+        use crate::packet::rtcp::{RtcpReceiverReport, RtcpReportBlock};
+
+        let mut rr = RtcpReceiverReport::new(0x99887766);
+        rr.add_report_block(RtcpReportBlock {
+            ssrc: 0xFEDCBA98,
+            fraction_lost: 128,
+            cumulative_lost: 10_000,
+            highest_seq: 200_000,
+            jitter: 500,
+            last_sr: 0x1111_2222,
+            delay_since_last_sr: 7500,
+        });
+        rr.add_report_block(RtcpReportBlock {
+            ssrc: 0x55443322,
+            fraction_lost: 0,
+            cumulative_lost: 0,
+            highest_seq: 100,
+            jitter: 1,
+            last_sr: 0,
+            delay_since_last_sr: 0,
+        });
+
+        let webrtc_rr = receiver_report_to_webrtc(&rr);
+        let roundtripped = receiver_report_from_webrtc(&webrtc_rr);
+
+        assert_eq!(roundtripped.ssrc, rr.ssrc);
+        assert_eq!(roundtripped.report_blocks.len(), 2);
+        for (rt, orig) in roundtripped.report_blocks.iter().zip(rr.report_blocks.iter()) {
+            assert_eq!(rt.ssrc, orig.ssrc);
+            assert_eq!(rt.fraction_lost, orig.fraction_lost);
+            assert_eq!(rt.cumulative_lost, orig.cumulative_lost);
+            assert_eq!(rt.highest_seq, orig.highest_seq);
+            assert_eq!(rt.jitter, orig.jitter);
+            assert_eq!(rt.last_sr, orig.last_sr);
+            assert_eq!(rt.delay_since_last_sr, orig.delay_since_last_sr);
+        }
+    }
+
+    #[test]
+    fn test_rtcp_goodbye_roundtrip_via_adapter() {
+        use crate::packet::adapter::rtcp_adapter::*;
+        use crate::packet::rtcp::RtcpGoodbye;
+
+        // Goodbye with multiple sources and a reason
+        let bye = RtcpGoodbye {
+            sources: vec![0x11111111, 0x22222222, 0x33333333],
+            reason: Some("session ending".to_string()),
+        };
+
+        let webrtc_bye = goodbye_to_webrtc(&bye);
+        let roundtripped = goodbye_from_webrtc(&webrtc_bye);
+
+        assert_eq!(roundtripped.sources, bye.sources);
+        assert_eq!(roundtripped.reason, bye.reason);
+
+        // Also test the no-reason variant
+        let bye_no_reason = RtcpGoodbye {
+            sources: vec![0xAAAA_BBBB],
+            reason: None,
+        };
+        let webrtc_bye2 = goodbye_to_webrtc(&bye_no_reason);
+        let roundtripped2 = goodbye_from_webrtc(&webrtc_bye2);
+
+        assert_eq!(roundtripped2.sources, bye_no_reason.sources);
+        assert_eq!(roundtripped2.reason, None);
+    }
 }
