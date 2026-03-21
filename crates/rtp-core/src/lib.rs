@@ -123,6 +123,10 @@ pub use packet::extension::{
     uris::VIDEO_CONTENT_TYPE
 };
 
+// Re-export webrtc-rs adapter types for interoperability
+pub use packet::adapter::{WebrtcRtpPacket, WebrtcRtpHeader, WebrtcRtpExtension};
+pub use packet::adapter::rtcp_adapter;
+
 // Re-export session types
 pub use session::{RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSessionStats, RtpStream, RtpStreamStats};
 

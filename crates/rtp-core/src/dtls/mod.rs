@@ -2,7 +2,23 @@
 //!
 //! This module provides a DTLS 1.2 implementation for use with SRTP key exchange.
 //! It follows RFC 6347 (DTLS) and RFC 5764 (DTLS-SRTP) specifications.
+//!
+//! ## Production adapter (recommended)
+//!
+//! The [`adapter`] sub-module wraps the battle-tested `webrtc-dtls` 0.12 crate
+//! (3.4M downloads) and should be preferred for all new code. The self-built
+//! modules (`connection`, `handshake`, `record`, etc.) are **deprecated** and
+//! retained only for backward compatibility.
 
+// ---------------------------------------------------------------------------
+// Production adapter backed by webrtc-dtls 0.12
+// ---------------------------------------------------------------------------
+pub mod adapter;
+
+// ---------------------------------------------------------------------------
+// Legacy self-built implementation (deprecated -- prefer `adapter`)
+// ---------------------------------------------------------------------------
+#[deprecated(note = "Use dtls::adapter::DtlsConnectionAdapter instead")]
 pub mod connection;
 pub mod handshake;
 pub mod record;
@@ -12,7 +28,8 @@ pub mod message;
 pub mod transport;
 pub mod srtp;
 
-// Re-export key public API types
+// Re-export key public API types (legacy)
+#[allow(deprecated)]
 pub use connection::DtlsConnection;
 pub use srtp::extractor::DtlsSrtpContext;
 pub use crypto::keys::DtlsKeyingMaterial;

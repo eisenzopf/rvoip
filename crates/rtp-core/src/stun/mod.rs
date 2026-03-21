@@ -6,8 +6,10 @@
 //!
 //! # Modules
 //!
-//! - [`message`]: Low-level STUN message encoding and decoding.
-//! - [`client`]: STUN Binding Request client with retransmission.
+//! - [`adapter`]: **Recommended.** Production adapter backed by the `stun-rs`
+//!   crate (comprehensive RFC 5389 / RFC 8489 support).
+//! - [`message`]: *(Deprecated)* Legacy hand-rolled STUN message encode/decode.
+//! - [`client`]: *(Deprecated)* Legacy STUN Binding Request client.
 //! - [`discovery`]: Higher-level NAT type discovery and convenience functions.
 //!
 //! # Quick Start
@@ -28,13 +30,23 @@
 //! # }
 //! ```
 
+pub mod adapter;
+
+#[deprecated(since = "0.1.27", note = "use stun::adapter (backed by stun-rs) instead")]
 pub mod message;
+#[deprecated(since = "0.1.27", note = "use stun::adapter::StunClientAdapter instead")]
 pub mod client;
 pub mod discovery;
 
-// Re-export key types at module level for convenience.
+// Re-export the new adapter as the primary API.
+pub use adapter::StunClientAdapter;
+
+// Re-export legacy types for backward compatibility (marked deprecated at
+// their definition sites or via the module-level deprecation above).
+#[allow(deprecated)]
 pub use client::{StunClient, StunClientConfig, StunBindingResult};
 pub use discovery::{NatType, NatInfo, discover_nat_type, get_public_address, DEFAULT_STUN_SERVERS};
+#[allow(deprecated)]
 pub use message::{
     StunMessage, TransactionId, StunAttribute, MAGIC_COOKIE, HEADER_SIZE, ATTR_HEADER_SIZE,
     BINDING_REQUEST, BINDING_RESPONSE, BINDING_ERROR_RESPONSE,

@@ -71,6 +71,9 @@ biquad = "0.4"               # Used in AGC v2 for digital filters
 opus = { version = "0.3", optional = true }
 # G.729A is now implemented as pure Rust in g729_engine.rs — no external dependency needed
 
+# WebRTC Audio Processing Module (optional, requires CMake + C++ compiler)
+webrtc-audio-processing = { version = "0.4", optional = true }
+
 # WAV file support
 hound = "3.5"
 
@@ -81,6 +84,7 @@ pcma = []
 g722 = []
 # g729 is now pure Rust — no feature gate needed
 opus = ["dep:opus"]
+webrtc-apm = ["dep:webrtc-audio-processing"]
 all-codecs = ["pcmu", "pcma", "g722", "opus"]  # removed g729 due to missing dependency
 
 [dev-dependencies]

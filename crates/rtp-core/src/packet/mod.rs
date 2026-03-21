@@ -7,10 +7,15 @@ pub mod rtp;
 pub mod header;
 pub mod rtcp;
 pub mod extension;
+pub mod adapter;
 
 pub use rtp::*;
 pub use header::*;
 pub use extension::*;
+
+// Re-export webrtc-rs adapter types for convenient access
+pub use adapter::{WebrtcRtpPacket, WebrtcRtpHeader, WebrtcRtpExtension};
+pub use adapter::rtcp_adapter;
 
 #[cfg(test)]
 mod tests {
