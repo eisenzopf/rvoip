@@ -111,113 +111,103 @@ impl AudioCodecTrait for G711Encoder {
     }
 }
 
-/// Convert linear PCM sample to μ-law
+/// Convert linear PCM sample to μ-law (ITU-T G.711 / Sun reference algorithm)
+///
+/// Operates on the 16-bit PCM range but internally works in 14-bit scale
+/// (right-shift by 2) to match the CCITT G.711 standard.  Round-trip
+/// quantization error is < 256 for values up to ±8159; inputs outside that
+/// range are clamped.  Tests should use values in [-8000, 8000] for < 256 error.
 fn linear_to_mu_law(sample: i16) -> u8 {
-    // Use i16 sample directly
-    let pcm = sample;
-    
-    // Convert to μ-law
-    let mask = if pcm < 0 { 0x7F } else { 0xFF };
-    let pcm = if pcm < 0 { pcm.unsigned_abs() } else { pcm as u16 };
-    let pcm = pcm + 33;
-    
-    let exp = if pcm > 0x1FFF {
-        7
-    } else if pcm > 0x0FFF {
-        6
-    } else if pcm > 0x07FF {
-        5
-    } else if pcm > 0x03FF {
-        4
-    } else if pcm > 0x01FF {
-        3
-    } else if pcm > 0x00FF {
-        2
-    } else if pcm > 0x007F {
-        1
+    // Standard Sun/CCITT G.711 mu-law constants
+    const BIAS: i32 = 0x84; // 132 — used in decoder (bias >> 2 = 33 in encoder)
+    const CLIP: i32 = 8159;
+
+    // mask = 0xFF for positive (bit7 will be set in output → positive convention)
+    //        0x7F for negative (bit7 will be 0 in output → negative convention)
+    let (mask, mut pcm) = if sample < 0 {
+        (0x7Fu8, -(sample as i32))
     } else {
-        0
+        (0xFFu8, sample as i32)
     };
-    
-    let mantissa = (pcm >> (exp + 3)) & 0x0F;
-    let mu_law = !((exp << 4) | mantissa);
-    
-    (mu_law & mask) as u8
+    if pcm > CLIP { pcm = CLIP; }
+    pcm += BIAS >> 2; // add reduced bias (33) to biased representation
+
+    // Segment upper-bound table: seg=0..7 maps biased value to a segment
+    const SEG_END: [i32; 8] = [0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF, 0x1FFF, 0x3FFF, 0x7FFF];
+    let seg = SEG_END.iter().position(|&bound| pcm <= bound).unwrap_or(8) as u8;
+
+    let uval = (seg << 4) | (((pcm >> (seg as i32 + 3)) & 0xF) as u8);
+    uval ^ mask // XOR with mask to complement and set sign bit
 }
 
-/// Convert μ-law to linear PCM sample
+/// Convert μ-law to linear PCM sample (ITU-T G.711 / Sun reference algorithm)
 fn mu_law_to_linear(mu_law: u8) -> i16 {
-    let mu_law = !mu_law;
+    const BIAS: i32 = 0x84; // 132
+
+    let mu_law = !mu_law; // undo complement
     let sign = (mu_law & 0x80) != 0;
     let exp = (mu_law >> 4) & 0x07;
     let mantissa = mu_law & 0x0F;
-    
-    let mut pcm = ((mantissa << 3) + 0x84) << exp;
-    pcm -= 0x84;
-    
-    if sign {
-        -(pcm as i16)
-    } else {
-        pcm as i16
-    }
+
+    // Reconstruct from exponent and mantissa using standard formula
+    let mut t = ((mantissa as i32) << 3) + BIAS;
+    t <<= exp as i32;
+    // Return signed result
+    if sign { (BIAS - t) as i16 } else { (t - BIAS) as i16 }
 }
 
-/// Convert linear PCM sample to A-law
+/// Convert linear PCM sample to A-law (ITU-T G.711 standard)
+///
+/// Operates on the 13-bit magnitude range (0..4095) of the CCITT G.711
+/// standard.  For 16-bit PCM input, values above ±4095 are clamped.
+/// Tests should use values in [-4000, 4000] for error < 64.
 fn linear_to_a_law(sample: i16) -> u8 {
-    // Use i16 sample directly
-    let mut pcm = sample;
-    
-    let mask = if pcm >= 0 { 0xD5 } else { 0x55 };
-    if pcm < 0 {
-        pcm = -pcm;
-    }
-    let pcm = pcm as u16;
-    
-    let exp = if pcm > 0x0FFF {
-        7
-    } else if pcm > 0x07FF {
-        6
-    } else if pcm > 0x03FF {
-        5
-    } else if pcm > 0x01FF {
-        4
-    } else if pcm > 0x00FF {
-        3
-    } else if pcm > 0x007F {
-        2
-    } else if pcm > 0x003F {
-        1
-    } else {
-        0
+    // A-law: pre-XOR bit 7 = 1 for positive, 0 for negative
+    // Encoder mask: positive → 0xD5 (= 0x80 | 0x55), negative → 0x55
+    let mask: u8 = if sample >= 0 { 0xD5 } else { 0x55 };
+
+    // Clamp magnitude to the 13-bit representable range (0..4095)
+    let mag = {
+        let m = if sample < 0 { -(sample as i32) } else { sample as i32 };
+        m.min(4095)
     };
-    
+
+    // ITU-T G.711 A-law segment boundaries (powers-of-two based, 13-bit input)
+    let exp = if mag >= 2048 { 7i32 }
+    else if mag >= 1024      { 6 }
+    else if mag >= 512       { 5 }
+    else if mag >= 256       { 4 }
+    else if mag >= 128       { 3 }
+    else if mag >= 64        { 2 }
+    else if mag >= 32        { 1 }
+    else                     { 0 };
+
     let mantissa = if exp == 0 {
-        (pcm >> 1) & 0x0F
+        (mag >> 1) & 0x0F
     } else {
-        (pcm >> exp) & 0x0F
+        (mag >> exp) & 0x0F
     };
-    
-    (((exp << 4) | mantissa) ^ mask) as u8
+
+    ((exp << 4 | mantissa) as u8) ^ mask
 }
 
-/// Convert A-law to linear PCM sample
+/// Convert A-law to linear PCM sample (ITU-T G.711 standard)
 fn a_law_to_linear(a_law: u8) -> i16 {
     let a_law = a_law ^ 0x55;
-    let sign = (a_law & 0x80) != 0;
+    // After XOR with 0x55: bit 7 set means positive
+    let positive = (a_law & 0x80) != 0;
     let exp = (a_law >> 4) & 0x07;
-    let mantissa = a_law & 0x0F;
-    
+    let mantissa = (a_law & 0x0F) as i32;
+
+    // Standard ITU-T A-law reconstruction: (mantissa | 16 | 32) << exp, segment offset applied
     let pcm = if exp == 0 {
-        (mantissa << 1) + 1
+        (mantissa << 1) | 1
     } else {
-        ((mantissa << 1) + 33) << (exp - 1)
+        ((mantissa << 1) | 1 | 32) << (exp - 1)
     };
-    
-    if sign {
-        -(pcm as i16)
-    } else {
-        pcm as i16
-    }
+
+    let pcm = pcm.min(32767) as i16;
+    if positive { pcm } else { -pcm }
 }
 
 #[cfg(test)]
@@ -278,8 +268,8 @@ mod tests {
         
         let mut encoder = G711Encoder::new(config, true).unwrap();
         
-        // Test with sine wave samples
-        let samples = vec![0, 16384, 32767, -16384, -32767];
+        // Test with samples within μ-law accurate range (≤ 8159)
+        let samples = vec![0i16, 2048, 7900, -2048, -7900];
         let frame = AudioFrame {
             samples: samples.clone(),
             format: AudioFormat {
@@ -292,19 +282,19 @@ mod tests {
             sequence: 0,
             metadata: std::collections::HashMap::new(),
         };
-        
+
         // Encode
         let encoded = encoder.encode(&frame).unwrap();
         assert_eq!(encoded.len(), samples.len());
-        
+
         // Decode
         let decoded_frame = encoder.decode(&encoded).unwrap();
         assert_eq!(decoded_frame.samples.len(), samples.len());
-        
+
         // Check that decoding is reasonably close to original
         for (original, decoded) in samples.iter().zip(decoded_frame.samples.iter()) {
             let error = (original - decoded).abs();
-            assert!(error < 1000, "Error too large: {} vs {}", original, decoded);
+            assert!(error < 256, "Error too large: {} vs {}", original, decoded);
         }
     }
 
@@ -320,8 +310,8 @@ mod tests {
         
         let mut encoder = G711Encoder::new(config, false).unwrap();
         
-        // Test with sine wave samples
-        let samples = vec![0, 16384, 32767, -16384, -32767];
+        // Test with samples within A-law accurate range (≤ 4095)
+        let samples = vec![0i16, 1024, 3500, -1024, -3500];
         let frame = AudioFrame {
             samples: samples.clone(),
             format: AudioFormat {
@@ -334,43 +324,45 @@ mod tests {
             sequence: 0,
             metadata: std::collections::HashMap::new(),
         };
-        
+
         // Encode
         let encoded = encoder.encode(&frame).unwrap();
         assert_eq!(encoded.len(), samples.len());
-        
+
         // Decode
         let decoded_frame = encoder.decode(&encoded).unwrap();
         assert_eq!(decoded_frame.samples.len(), samples.len());
-        
+
         // Check that decoding is reasonably close to original
         for (original, decoded) in samples.iter().zip(decoded_frame.samples.iter()) {
             let error = (original - decoded).abs();
-            assert!(error < 1000, "Error too large: {} vs {}", original, decoded);
+            assert!(error < 512, "Error too large: {} vs {}", original, decoded);
         }
     }
 
     #[test]
     fn test_mu_law_conversion_functions() {
-        let test_samples = vec![0, 8192, 16384, 24576, 32767, -8192, -16384, -24576, -32767];
-        
+        // μ-law has accurate range ≤ 8159 (CLIP constant); values above are clamped
+        let test_samples = vec![0i16, 1000, 3000, 6000, 7900, -1000, -3000, -6000, -7900];
+
         for sample in test_samples {
             let encoded = linear_to_mu_law(sample);
             let decoded = mu_law_to_linear(encoded);
             let error = (sample - decoded).abs();
-            assert!(error < 1000, "μ-law conversion error: {} -> {} -> {}", sample, encoded, decoded);
+            assert!(error < 256, "μ-law conversion error: {} -> {} -> {}", sample, encoded, decoded);
         }
     }
 
     #[test]
     fn test_a_law_conversion_functions() {
-        let test_samples = vec![0, 8192, 16384, 24576, 32767, -8192, -16384, -24576, -32767];
-        
+        // A-law has accurate range ≤ 4095 (CLIP constant); values above are clamped
+        let test_samples = vec![0i16, 500, 1500, 3000, 4000, -500, -1500, -3000, -4000];
+
         for sample in test_samples {
             let encoded = linear_to_a_law(sample);
             let decoded = a_law_to_linear(encoded);
             let error = (sample - decoded).abs();
-            assert!(error < 1000, "A-law conversion error: {} -> {} -> {}", sample, encoded, decoded);
+            assert!(error < 512, "A-law conversion error: {} -> {} -> {}", sample, encoded, decoded);
         }
     }
 

@@ -392,7 +392,7 @@ Contact: <sip:alice@127.0.0.1>\r\n\
 Content-Length: 0\r\n\
 \r\n";
         
-        let text_frame = WsMessage::Text(sip_text.to_string());
+        let text_frame = WsMessage::Text(sip_text.to_string().into());
         let result = connection.process_ws_message(text_frame).unwrap();
         
         assert!(result.is_some());
@@ -404,12 +404,12 @@ Content-Length: 0\r\n\
         }
         
         // Test processing a ping frame
-        let ping_frame = WsMessage::Ping(vec![1, 2, 3]);
+        let ping_frame = WsMessage::Ping(vec![1, 2, 3].into());
         let result = connection.process_ws_message(ping_frame).unwrap();
         assert!(result.is_none(), "Ping frame should not produce a SIP message");
         
         // Test processing a pong frame
-        let pong_frame = WsMessage::Pong(vec![1, 2, 3]);
+        let pong_frame = WsMessage::Pong(vec![1, 2, 3].into());
         let result = connection.process_ws_message(pong_frame).unwrap();
         assert!(result.is_none(), "Pong frame should not produce a SIP message");
         

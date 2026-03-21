@@ -6,7 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, trace, warn};
 
 #[cfg(feature = "ws")]
-use tokio_tungstenite::{accept_async, tungstenite, WebSocketStream};
+use tokio_tungstenite::{accept_hdr_async, tungstenite, WebSocketStream};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 #[cfg(feature = "ws")]
@@ -160,21 +160,31 @@ impl WebSocketListener {
             WsStream::Plain(tcp_stream)
         };
 
-        // Perform WebSocket upgrade handshake
-        let ws = accept_async(ws_stream).await
-            .map_err(|e| {
-                error!("WebSocket handshake failed with {}: {}", peer_addr, e);
-                Error::WebSocketHandshakeFailed(e.to_string())
-            })?;
-
-        debug!("WebSocket handshake completed with {}", peer_addr);
-
         // Select the appropriate subprotocol
         let subprotocol = if self.secure {
             SIP_WSS_SUBPROTOCOL
         } else {
             SIP_WS_SUBPROTOCOL
         }.to_string();
+
+        // Perform WebSocket upgrade handshake, echoing back the sip/sips subprotocol
+        // so that tungstenite 0.26+ does not reject the handshake on the client side.
+        let negotiated = subprotocol.clone();
+        let ws = accept_hdr_async(ws_stream, move |_req: &Request, mut response: Response| {
+            response.headers_mut().insert(
+                "Sec-WebSocket-Protocol",
+                HeaderValue::from_str(&negotiated)
+                    .unwrap_or_else(|_| HeaderValue::from_static("sip")),
+            );
+            Ok(response)
+        })
+        .await
+        .map_err(|e| {
+            error!("WebSocket handshake failed with {}: {}", peer_addr, e);
+            Error::WebSocketHandshakeFailed(e.to_string())
+        })?;
+
+        debug!("WebSocket handshake completed with {}", peer_addr);
 
         // Split the stream for separate reading and writing
         let (ws_writer, ws_reader) = ws.split();

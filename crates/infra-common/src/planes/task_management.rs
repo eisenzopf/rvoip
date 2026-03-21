@@ -77,22 +77,22 @@ impl TaskHandle {
 pub struct LayerTaskManager {
     /// Unique task ID counter
     next_task_id: AtomicUsize,
-    
+
     /// All tracked task handles
     tasks: Arc<Mutex<Vec<TaskHandle>>>,
-    
+
     /// Cancellation token for graceful shutdown
     cancel_token: CancellationToken,
-    
-    /// Number of active tasks
-    active_count: AtomicUsize,
-    
+
+    /// Number of active tasks — wrapped in Arc so spawned tasks can decrement it
+    active_count: Arc<AtomicUsize>,
+
     /// Layer name for logging
     layer_name: String,
-    
+
     /// Maximum tasks allowed
     max_tasks: usize,
-    
+
     /// Shutdown timeout
     shutdown_timeout: Duration,
 }
@@ -104,13 +104,13 @@ impl LayerTaskManager {
             next_task_id: AtomicUsize::new(0),
             tasks: Arc::new(Mutex::new(Vec::new())),
             cancel_token: CancellationToken::new(),
-            active_count: AtomicUsize::new(0),
+            active_count: Arc::new(AtomicUsize::new(0)),
             layer_name: layer_name.into(),
             max_tasks: 1000,
             shutdown_timeout: Duration::from_secs(5),
         }
     }
-    
+
     /// Create with custom configuration
     pub fn with_config(
         layer_name: impl Into<String>,
@@ -121,7 +121,7 @@ impl LayerTaskManager {
             next_task_id: AtomicUsize::new(0),
             tasks: Arc::new(Mutex::new(Vec::new())),
             cancel_token: CancellationToken::new(),
-            active_count: AtomicUsize::new(0),
+            active_count: Arc::new(AtomicUsize::new(0)),
             layer_name: layer_name.into(),
             max_tasks,
             shutdown_timeout,
@@ -155,17 +155,19 @@ impl LayerTaskManager {
         let cancel_token = self.cancel_token.clone();
         let layer_name = self.layer_name.clone();
         let task_name_clone = task_name.clone();
-        
-        // Clone the atomic counter to move into the future
-        let active_count_clone = Arc::new(AtomicUsize::new(0));
-        
+
+        // Clone the Arc<AtomicUsize> so the spawned task can decrement the shared counter
+        let active_count_clone = Arc::clone(&self.active_count);
+
+        // Increment before spawning so the count is correct immediately after this call returns
+        self.active_count.fetch_add(1, Ordering::Relaxed);
+
         let wrapped_future = async move {
-            active_count_clone.fetch_add(1, Ordering::Relaxed);
             debug!(
                 "Task started: {} [{}] in layer {}",
                 task_name_clone, task_id, layer_name
             );
-            
+
             tokio::select! {
                 _ = future => {
                     debug!(
@@ -180,15 +182,12 @@ impl LayerTaskManager {
                     );
                 }
             }
-            
+
             active_count_clone.fetch_sub(1, Ordering::Relaxed);
         };
-        
-        // Update the main counter
-        self.active_count.fetch_add(1, Ordering::Relaxed);
-        
+
         let handle = tokio::spawn(wrapped_future);
-        
+
         // Store the task handle
         let task_handle = TaskHandle::new(task_id, task_name, handle, priority);
         self.tasks.lock().await.push(task_handle);

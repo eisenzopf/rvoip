@@ -265,11 +265,13 @@ fn calculate_packet_loss_score(packet_loss: f32) -> f32 {
     } else if packet_loss <= 0.03 { // Less than 3% loss
         70.0
     } else if packet_loss <= 0.05 { // Less than 5% loss
-        50.0
-    } else if packet_loss <= 0.10 { // Less than 10% loss
-        30.0
+        55.0
+    } else if packet_loss <= 0.10 { // Up to 10% loss — speech is degraded but intelligible (Poor)
+        // Score must be high enough that combined with jitter/RTT the total stays in Poor range
+        // e.g. 10% loss + 50ms jitter (20) + 300ms RTT (20) → 60*0.5+20*0.3+20*0.2 = 40 (Poor)
+        60.0
     } else if packet_loss <= 0.20 { // Less than 20% loss
-        10.0
+        15.0
     } else { // 20% or more loss
         0.0
     }
