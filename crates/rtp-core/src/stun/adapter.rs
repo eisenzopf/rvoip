@@ -434,6 +434,133 @@ mod tests {
         );
     }
 
+    /// Verify that an ICE connectivity check message built by `build_ice_check`
+    /// contains the required attributes: USERNAME, PRIORITY, ICE-CONTROLLING (or
+    /// ICE-CONTROLLED), MESSAGE-INTEGRITY, and FINGERPRINT.
+    /// Also validates MESSAGE-INTEGRITY against the password used to build it.
+    #[test]
+    fn test_ice_check_message_attributes() {
+        let username = "remote:local";
+        let password = "supersecretpassword42";
+        let priority = 2_130_706_431u32;
+        let tie_breaker = 0xDEAD_BEEF_CAFE_BABEu64;
+
+        let encoded = StunClientAdapter::build_ice_check(
+            username,
+            password,
+            priority,
+            true,   // use_candidate
+            true,   // controlling
+            tie_breaker,
+        )
+        .unwrap_or_else(|e| panic!("build_ice_check failed: {e}"));
+
+        // Basic STUN header validation
+        assert!(encoded.len() >= 20, "STUN message too short");
+        // First two bits must be 0 (STUN)
+        assert_eq!(encoded[0] & 0xC0, 0, "not a STUN message");
+        // Magic cookie
+        let cookie = u32::from_be_bytes([encoded[4], encoded[5], encoded[6], encoded[7]]);
+        assert_eq!(cookie, 0x2112_A442, "magic cookie mismatch");
+
+        // Decode the message to verify attributes are present.
+        // We use the stun-rs decoder with the correct key so that
+        // MESSAGE-INTEGRITY verification passes.
+        let hmac_key = stun_rs::HMACKey::new_short_term(password)
+            .unwrap_or_else(|e| panic!("hmac key: {e}"));
+        let ctx = stun_rs::DecoderContextBuilder::default()
+            .with_key(hmac_key)
+            .with_validation()
+            .build();
+        let decoder = stun_rs::MessageDecoderBuilder::default()
+            .with_context(ctx)
+            .build();
+
+        let (msg, _size) = decoder.decode(&encoded)
+            .unwrap_or_else(|e| panic!(
+                "decode failed (MESSAGE-INTEGRITY validation should pass): {e:?}"
+            ));
+
+        // Verify method = BINDING, class = Request
+        assert_eq!(msg.method(), stun_rs::methods::BINDING);
+        assert_eq!(msg.class(), stun_rs::MessageClass::Request);
+
+        // Check USERNAME attribute is present with expected value
+        use stun_rs::attributes::stun::UserName;
+        let user_attr = msg.get::<UserName>();
+        assert!(user_attr.is_some(), "USERNAME attribute missing");
+
+        // Check PRIORITY attribute
+        use stun_rs::attributes::ice::Priority;
+        let prio_attr = msg.get::<Priority>();
+        assert!(prio_attr.is_some(), "PRIORITY attribute missing");
+
+        // Check ICE-CONTROLLING (since controlling=true)
+        use stun_rs::attributes::ice::IceControlling;
+        let ctrl_attr = msg.get::<IceControlling>();
+        assert!(ctrl_attr.is_some(), "ICE-CONTROLLING attribute missing");
+
+        // Check FINGERPRINT
+        use stun_rs::attributes::stun::Fingerprint;
+        let fp_attr = msg.get::<Fingerprint>();
+        assert!(fp_attr.is_some(), "FINGERPRINT attribute missing");
+
+        // Check MESSAGE-INTEGRITY
+        use stun_rs::attributes::stun::MessageIntegrity;
+        let mi_attr = msg.get::<MessageIntegrity>();
+        assert!(mi_attr.is_some(), "MESSAGE-INTEGRITY attribute missing");
+
+        // Also verify that a wrong password fails the integrity check
+        let wrong_key = stun_rs::HMACKey::new_short_term("wrong-password")
+            .unwrap_or_else(|e| panic!("hmac key: {e}"));
+        let bad_ctx = stun_rs::DecoderContextBuilder::default()
+            .with_key(wrong_key)
+            .with_validation()
+            .build();
+        let bad_decoder = stun_rs::MessageDecoderBuilder::default()
+            .with_context(bad_ctx)
+            .build();
+        assert!(
+            bad_decoder.decode(&encoded).is_err(),
+            "MESSAGE-INTEGRITY should fail with wrong key"
+        );
+    }
+
+    /// Verify ICE-CONTROLLED attribute appears when controlling=false.
+    #[test]
+    fn test_ice_check_controlled_attribute() {
+        let encoded = StunClientAdapter::build_ice_check(
+            "remote:local",
+            "apassword",
+            1000,
+            false,  // no use_candidate
+            false,  // controlled
+            0x1234_5678_9ABC_DEF0,
+        )
+        .unwrap_or_else(|e| panic!("build_ice_check failed: {e}"));
+
+        let hmac_key = stun_rs::HMACKey::new_short_term("apassword")
+            .unwrap_or_else(|e| panic!("hmac key: {e}"));
+        let ctx = stun_rs::DecoderContextBuilder::default()
+            .with_key(hmac_key)
+            .with_validation()
+            .build();
+        let decoder = stun_rs::MessageDecoderBuilder::default()
+            .with_context(ctx)
+            .build();
+
+        let (msg, _) = decoder.decode(&encoded)
+            .unwrap_or_else(|e| panic!("decode failed: {e:?}"));
+
+        use stun_rs::attributes::ice::IceControlled;
+        let ctrl_attr = msg.get::<IceControlled>();
+        assert!(ctrl_attr.is_some(), "ICE-CONTROLLED attribute missing");
+
+        // ICE-CONTROLLING should NOT be present
+        use stun_rs::attributes::ice::IceControlling;
+        assert!(msg.get::<IceControlling>().is_none(), "ICE-CONTROLLING should not be present");
+    }
+
     /// Ensure that a wrong password fails verification.
     #[test]
     fn test_verify_integrity_wrong_key() {
