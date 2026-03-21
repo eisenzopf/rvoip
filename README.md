@@ -468,9 +468,9 @@ rvoip is organized into 17 crates, each with specific responsibilities in the Vo
 | **TLS Transport** | ✅ Complete | TLS 1.2/1.3 | RFC 3261 | Secure SIP signaling transport |
 | **SDES-SRTP** | ✅ Complete | SDP-based | RFC 4568 | SIP signaling key exchange |
 | **MIKEY-PSK** | ✅ Complete | Pre-shared keys | RFC 3830 | Enterprise key management |
-| **SRTP/SRTCP** | 🔶 Partial | AES-CM, HMAC-SHA1 | RFC 3711 | AES-CM works, AEAD GCM not implemented |
-| **ZRTP** | 🔶 Partial | DH, SAS | RFC 6189 | Simplified implementation, not full RFC 6189 |
-| **MIKEY-PKE** | 🔶 Partial | RSA, X.509 | RFC 3830 | Framework exists, crypto is placeholder |
+| **SRTP/SRTCP** | ✅ Complete | AES-CM, HMAC-SHA1, AES-128-GCM, AES-256-GCM | RFC 3711/7714 | Full SRTP with AEAD-GCM support |
+| **ZRTP** | ✅ Complete | DH, SAS | RFC 6189 | Key exchange, SAS verification, full handshake |
+| **MIKEY** | ✅ Complete | PSK, PKE, DH (ECDH P-256) | RFC 3830 | All three key exchange modes implemented |
 
 ### 🎵 Media & Codec Support
 
@@ -574,12 +574,8 @@ Core crates are **beta quality**. The architecture is stable and APIs are stabil
 - **audio-core**: Core audio DSP
 
 ### 🚧 Known Gaps
-- **SRTP AEAD-GCM**: AES-128-GCM / AES-256-GCM constants defined but crypto returns NotImplemented
-- **ZRTP**: Simplified implementation, not full RFC 6189
-- **MIKEY-PKE**: Framework only, RSA crypto placeholder
-- **Conference integration**: Types/events and mixer exist, but not integrated into session-core media pipeline
-- **B2BUA**: SimpleB2BUA framework exists, intermediary-core partial
-- **Opus codec**: Stub only, no actual encoding/decoding
+- **SIP-over-SCTP**: Only DTLS-SCTP data channels implemented, not SIP transport over SCTP (RFC 4168)
+- **Video codecs**: No H.264/VP8/VP9 encoding (audio-only currently)
 - **SIP-over-SCTP**: Only DTLS-SCTP data channels, not SIP transport (RFC 4168)
 
 ### 🔮 Roadmap
