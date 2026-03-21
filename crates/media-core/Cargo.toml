@@ -69,7 +69,7 @@ biquad = "0.4"               # Used in AGC v2 for digital filters
 
 # Media codecs (optional)
 opus = { version = "0.3", optional = true }
-# g729 = { version = "0.3", optional = true }  # Commented out due to missing dependency
+# G.729A is now implemented as pure Rust in g729_engine.rs — no external dependency needed
 
 # WAV file support
 hound = "3.5"
@@ -79,7 +79,7 @@ default = ["pcmu", "pcma"]
 pcmu = []
 pcma = []
 g722 = []
-# g729 = ["dep:g729"]  # Commented out due to missing dependency
+# g729 is now pure Rust — no feature gate needed
 opus = ["dep:opus"]
 all-codecs = ["pcmu", "pcma", "g722", "opus"]  # removed g729 due to missing dependency
 
