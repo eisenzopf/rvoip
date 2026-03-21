@@ -453,7 +453,7 @@ mod tests {
             true,   // controlling
             tie_breaker,
         )
-        .unwrap_or_else(|e| panic!("build_ice_check failed: {e}"));
+        .map_err(|e| Error::StunError(format!("build_ice_check: {e}")))?;
 
         // Basic STUN header validation
         assert!(encoded.len() >= 20, "STUN message too short");
@@ -467,7 +467,7 @@ mod tests {
         // We use the stun-rs decoder with the correct key so that
         // MESSAGE-INTEGRITY verification passes.
         let hmac_key = stun_rs::HMACKey::new_short_term(password)
-            .unwrap_or_else(|e| panic!("hmac key: {e}"));
+            .map_err(|e| Error::StunError(format!("hmac key: {e}")))?;
         let ctx = stun_rs::DecoderContextBuilder::default()
             .with_key(hmac_key)
             .with_validation()
@@ -512,7 +512,7 @@ mod tests {
 
         // Also verify that a wrong password fails the integrity check
         let wrong_key = stun_rs::HMACKey::new_short_term("wrong-password")
-            .unwrap_or_else(|e| panic!("hmac key: {e}"));
+            .map_err(|e| Error::StunError(format!("hmac key: {e}")))?;
         let bad_ctx = stun_rs::DecoderContextBuilder::default()
             .with_key(wrong_key)
             .with_validation()
@@ -537,10 +537,10 @@ mod tests {
             false,  // controlled
             0x1234_5678_9ABC_DEF0,
         )
-        .unwrap_or_else(|e| panic!("build_ice_check failed: {e}"));
+        .map_err(|e| Error::StunError(format!("build_ice_check: {e}")))?;
 
         let hmac_key = stun_rs::HMACKey::new_short_term("apassword")
-            .unwrap_or_else(|e| panic!("hmac key: {e}"));
+            .map_err(|e| Error::StunError(format!("hmac key: {e}")))?;
         let ctx = stun_rs::DecoderContextBuilder::default()
             .with_key(hmac_key)
             .with_validation()
@@ -550,7 +550,7 @@ mod tests {
             .build();
 
         let (msg, _) = decoder.decode(&encoded)
-            .unwrap_or_else(|e| panic!("decode failed: {e:?}"));
+            .map_err(|e| Error::StunError(format!("decode: {e:?}")))?;
 
         use stun_rs::attributes::ice::IceControlled;
         let ctrl_attr = msg.get::<IceControlled>();

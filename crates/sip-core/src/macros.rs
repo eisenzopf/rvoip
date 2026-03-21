@@ -386,10 +386,7 @@ macro_rules! sip_request {
             use std::str::FromStr;
 
             // Create the builder with method and URI
-            let mut builder = match SimpleRequestBuilder::new($method, $uri) {
-                Ok(b) => b,
-                Err(e) => panic!("BUG: sip_request! macro received invalid URI: {}", e),
-            };
+            let mut builder = SimpleRequestBuilder::new($method, $uri)?;
             
             // Add From header if required parts are provided
             if let (Some(name), Some(uri)) = (
@@ -766,7 +763,7 @@ mod tests {
     };
 
     #[test]
-    fn test_sip_request_basic() {
+    fn test_sip_request_basic() -> Result<(), Box<dyn std::error::Error>> {
         let request = sip_request! {
             method: Method::Invite,
             uri: "sip:bob@example.com",
@@ -791,32 +788,34 @@ mod tests {
             assert!(from_header.to_string().contains("sip:alice@example.com"));
             assert!(from_header.to_string().contains("tag=1928301774"));
         } else {
-            panic!("Missing From header");
+            assert!(false, "Missing From header");
         }
-        
+
         if let Some(to_header) = request.header(&HeaderName::To) {
             assert!(to_header.to_string().contains("Bob"));
             assert!(to_header.to_string().contains("sip:bob@example.com"));
         } else {
-            panic!("Missing To header");
+            assert!(false, "Missing To header");
         }
-        
+
         if let Some(via_header) = request.header(&HeaderName::Via) {
             assert!(via_header.to_string().contains("SIP/2.0/UDP pc33.atlanta.com"));
             assert!(via_header.to_string().contains("branch=z9hG4bK776asdhds"));
         } else {
-            panic!("Missing Via header");
+            assert!(false, "Missing Via header");
         }
         
         if let Some(cseq_header) = request.header(&HeaderName::CSeq) {
             assert!(cseq_header.to_string().contains("314159"));
         } else {
-            panic!("Missing CSeq header");
+            assert!(false, "Missing CSeq header");
         }
+
+        Ok(())
     }
-    
+
     #[test]
-    fn test_sip_request_with_body() {
+    fn test_sip_request_with_body() -> Result<(), Box<dyn std::error::Error>> {
         let body_content = "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n";
         let request = sip_request! {
             method: Method::Invite,
@@ -831,16 +830,18 @@ mod tests {
         if let Some(content_type) = request.header(&HeaderName::ContentType) {
             assert_eq!(content_type.to_string(), "Content-Type: application/sdp");
         } else {
-            panic!("Missing Content-Type header");
+            assert!(false, "Missing Content-Type header");
         }
-        
+
         if let Some(content_length) = request.header(&HeaderName::ContentLength) {
             assert_eq!(content_length.to_string(), format!("Content-Length: {}", body_content.len()));
         } else {
-            panic!("Missing Content-Length header");
+            assert!(false, "Missing Content-Length header");
         }
-        
+
         assert_eq!(String::from_utf8_lossy(request.body()), body_content);
+
+        Ok(())
     }
 
     #[test]
@@ -870,28 +871,28 @@ mod tests {
             assert!(from_header.to_string().contains("sip:alice@example.com"));
             assert!(from_header.to_string().contains("tag=1928301774"));
         } else {
-            panic!("Missing From header");
+            assert!(false, "Missing From header");
         }
-        
+
         if let Some(to_header) = response.header(&HeaderName::To) {
             assert!(to_header.to_string().contains("Bob"));
             assert!(to_header.to_string().contains("sip:bob@example.com"));
             assert!(to_header.to_string().contains("tag=a6c85cf"));
         } else {
-            panic!("Missing To header");
+            assert!(false, "Missing To header");
         }
-        
+
         if let Some(via_header) = response.header(&HeaderName::Via) {
             assert!(via_header.to_string().contains("SIP/2.0/UDP pc33.atlanta.com"));
             assert!(via_header.to_string().contains("branch=z9hG4bK776asdhds"));
         } else {
-            panic!("Missing Via header");
+            assert!(false, "Missing Via header");
         }
-        
+
         if let Some(cseq_header) = response.header(&HeaderName::CSeq) {
             assert!(cseq_header.to_string().contains("314159 INVITE"));
         } else {
-            panic!("Missing CSeq header");
+            assert!(false, "Missing CSeq header");
         }
     }
 
@@ -913,20 +914,20 @@ mod tests {
         if let Some(content_type) = response.header(&HeaderName::ContentType) {
             assert_eq!(content_type.to_string(), "Content-Type: application/sdp");
         } else {
-            panic!("Missing Content-Type header");
+            assert!(false, "Missing Content-Type header");
         }
-        
+
         if let Some(content_length) = response.header(&HeaderName::ContentLength) {
             assert_eq!(content_length.to_string(), format!("Content-Length: {}", body_content.len()));
         } else {
-            panic!("Missing Content-Length header");
+            assert!(false, "Missing Content-Length header");
         }
-        
+
         assert_eq!(String::from_utf8_lossy(response.body()), body_content);
     }
 
     #[test]
-    fn test_request_with_custom_headers() {
+    fn test_request_with_custom_headers() -> Result<(), Box<dyn std::error::Error>> {
         let request = sip_request! {
             method: Method::Invite,
             uri: "sip:bob@example.com",
@@ -945,9 +946,9 @@ mod tests {
         if let Some(ua_header) = request.header(&HeaderName::UserAgent) {
             assert_eq!(ua_header.to_string(), "User-Agent: My Custom UA");
         } else {
-            panic!("Missing User-Agent header");
+            assert!(false, "Missing User-Agent header");
         }
-        
+
         if let Some(subject_header) = request.header(&HeaderName::Subject) {
             assert_eq!(subject_header.to_string(), "Subject: Test Call");
         } else {
@@ -970,12 +971,14 @@ mod tests {
         if let Some(custom_header) = request.header(&HeaderName::Other("CustomHeader".to_string())) {
             assert_eq!(custom_header.to_string(), "CustomHeader: Custom Value");
         } else {
-            panic!("Missing custom header");
+            assert!(false, "Missing custom header");
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_error_handling_for_invalid_uris() {
+    fn test_error_handling_for_invalid_uris() -> Result<(), Box<dyn std::error::Error>> {
         // The macro should still work even with an invalid URI in the from/to fields
         // (only the initial URI validation in new() will fail)
         let request = sip_request! {
@@ -1004,10 +1007,12 @@ mod tests {
         } else {
             println!("Missing To header despite invalid URI - known issue");
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_no_parameters_provided() {
+    fn test_no_parameters_provided() -> Result<(), Box<dyn std::error::Error>> {
         // The macro should work with minimal parameters
         let request = sip_request! {
             method: Method::Options,
@@ -1021,5 +1026,7 @@ mod tests {
         assert!(request.header(&HeaderName::From).is_none());
         assert!(request.header(&HeaderName::To).is_none());
         assert!(request.header(&HeaderName::CallId).is_none());
+
+        Ok(())
     }
 } 
