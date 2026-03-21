@@ -1,20 +1,38 @@
-//! Minimal SCTP-over-DTLS implementation for WebRTC Data Channels
+//! SCTP-over-DTLS for WebRTC Data Channels
 //!
-//! This module implements the subset of SCTP (RFC 4960) required for
-//! WebRTC Data Channels (RFC 8831 / RFC 8832). It is designed to run
-//! on top of a [`DtlsConnection`](crate::dtls::DtlsConnection) and
-//! provides reliable, ordered message delivery.
+//! This module provides SCTP transport on top of a
+//! [`DtlsConnection`](crate::dtls::DtlsConnection) for WebRTC Data
+//! Channels (RFC 8831 / RFC 8832).
 //!
-//! The implementation is intentionally minimal -- only the chunk types
-//! needed for association setup, data transfer, acknowledgment, and
-//! teardown are supported.
+//! ## Adapter (production)
+//!
+//! The [`adapter`] sub-module wraps the `webrtc-sctp` crate, which
+//! provides a full RFC 4960 implementation with reliability, flow
+//! control, and congestion control. **New code should use
+//! [`adapter::SctpAssociationAdapter`].**
+//!
+//! ## Legacy stub
+//!
+//! The [`association`] sub-module contains a minimal, hand-rolled SCTP
+//! implementation (~20% RFC coverage, no retransmission or congestion
+//! control). It is **deprecated** and retained only for reference.
 
+pub mod adapter;
+#[deprecated(
+    since = "0.1.26",
+    note = "Use `adapter::SctpAssociationAdapter` backed by webrtc-sctp instead"
+)]
 pub mod association;
 pub mod channel;
 mod chunks;
 
-pub use association::SctpAssociation;
+pub use adapter::{DtlsConnBridge, SctpAssociationAdapter, SctpStreamAdapter};
 pub use channel::{DataChannel, DataChannelConfig, DataChannelEvent, DataChannelState};
+
+// Re-export the legacy association under a deprecated name so existing
+// call-sites get a compiler warning.
+#[allow(deprecated)]
+pub use association::SctpAssociation;
 
 /// Generate an SDP `m=application` line for WebRTC data channels.
 ///

@@ -1,55 +1,36 @@
 //! ICE (Interactive Connectivity Establishment) implementation per RFC 8445.
 //!
-//! Provides a full ICE agent for NAT traversal and connectivity establishment
-//! between VoIP endpoints. Builds on the STUN module for binding requests
-//! and server-reflexive candidate gathering.
+//! Provides ICE agents for NAT traversal and connectivity establishment
+//! between VoIP endpoints.
 //!
 //! # Architecture
 //!
 //! - [`types`]: Core types (candidates, pairs, credentials, states).
 //! - [`gather`]: Candidate gathering (host + server-reflexive via STUN).
 //! - [`checklist`]: Candidate pair formation, sorting, pruning, and check building.
-//! - [`agent`]: The ICE agent state machine that orchestrates the full process.
+//! - [`agent`]: The **legacy** self-built ICE agent (kept as fallback).
+//! - [`adapter`]: Production-grade adapter wrapping `webrtc-ice` 0.17 (recommended).
 //!
-//! # Quick Start
+//! # Recommended usage
+//!
+//! Use [`IceAgentAdapter`] for new code. It delegates to the battle-tested
+//! `webrtc-ice` crate with full RFC 8445 compliance (aggressive nomination,
+//! ICE restart, peer-reflexive candidates, consent freshness, etc.).
 //!
 //! ```rust,no_run
-//! use rvoip_rtp_core::ice::{IceAgent, IceRole, IceCandidate, CandidateType, ComponentId};
+//! use rvoip_rtp_core::ice::{IceAgentAdapter, IceRole};
 //!
 //! # async fn example() -> Result<(), rvoip_rtp_core::Error> {
-//! // Create a controlling ICE agent
-//! let mut agent = IceAgent::new(IceRole::Controlling);
-//!
-//! // Get local credentials for SDP offer
+//! let mut agent = IceAgentAdapter::new(IceRole::Controlling);
 //! let creds = agent.local_credentials();
 //! println!("ice-ufrag: {}", creds.ufrag);
-//! println!("ice-pwd: {}", creds.pwd);
 //!
-//! // Gather candidates
 //! let local_addr = "0.0.0.0:0".parse().unwrap();
 //! let stun_servers = vec!["74.125.250.129:19302".parse().unwrap()];
 //! let candidates = agent.gather_candidates(local_addr, &stun_servers).await?;
 //!
-//! // After receiving remote SDP answer, set remote credentials
 //! agent.set_remote_credentials("remote_ufrag".into(), "remote_password_22chars".into());
-//!
-//! // Add remote candidates from SDP
-//! // agent.add_remote_candidate(remote_candidate);
-//!
-//! // Start connectivity checks
-//! agent.start_checks()?;
-//!
-//! // Check pairs until connected
-//! while let Some(idx) = agent.next_check() {
-//!     let (request, remote_addr) = agent.check_pair(idx)?;
-//!     // Send request to remote_addr via UDP socket
-//!     // Handle response with agent.handle_stun_response(...)
-//! }
-//!
-//! // Get selected pair for media transport
-//! if let Some(pair) = agent.selected_pair() {
-//!     println!("Selected: {} <-> {}", pair.local.address, pair.remote.address);
-//! }
+//! agent.start_checks().await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -58,6 +39,7 @@ pub mod types;
 pub mod gather;
 pub mod checklist;
 pub mod agent;
+pub mod adapter;
 
 // Re-export key types at module level for convenience.
 pub use types::{
@@ -65,5 +47,15 @@ pub use types::{
     IceCandidate, IceCandidatePair, CandidatePairState,
     IceCredentials,
 };
+
+/// The legacy self-built ICE agent. Kept as fallback.
+///
+/// Prefer [`IceAgentAdapter`] for new code — it wraps the production-grade
+/// `webrtc-ice` crate with full RFC 8445 compliance.
+#[deprecated(since = "0.1.27", note = "Use IceAgentAdapter instead for full RFC 8445 compliance")]
 pub use agent::IceAgent;
+
+/// Production-grade ICE agent adapter backed by `webrtc-ice`.
+pub use adapter::IceAgentAdapter;
+
 pub use gather::{compute_priority, generate_foundation, gather_relay_candidates};

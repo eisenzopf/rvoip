@@ -58,6 +58,10 @@ nix = { version = "0.27.1", features = ["socket", "net"] }
 libc = "0.2"
 winapi = { version = "0.3", features = ["winsock2", "ws2def"] }
 time = { version = "0.3", features = ["std"] }
+webrtc-sctp = "0.17.1"
+webrtc-util = "0.17.1"
+# Production-grade ICE implementation (RFC 8445)
+webrtc-ice = "0.17"
 
 [dev-dependencies]
 tokio-test = "0.4"
