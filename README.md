@@ -278,10 +278,7 @@ Adapter roundtrip tests cover all 7 production library integrations. RFC 4475 to
 
 ## Known Gaps
 
-There are two known gaps in the current implementation:
-
 - **Video codecs** -- No H.264/VP8/VP9 support. rvoip is audio-only.
-- **SIP-over-SCTP** -- Only DTLS-SCTP data channels are implemented, not SIP transport over SCTP (RFC 4168).
 
 ## Roadmap
 
@@ -289,6 +286,7 @@ There are two known gaps in the current implementation:
 - Mobile SDKs (iOS and Android via FFI)
 - Clustering and high availability
 - WebRTC gateway (browser-to-SIP interop)
+- REST/GraphQL management API
 - REST/GraphQL management API
 
 ## Contributing

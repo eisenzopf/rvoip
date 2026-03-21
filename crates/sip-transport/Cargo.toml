@@ -41,6 +41,10 @@ rustls-pemfile = { version = "1.0", optional = true }
 tokio-tungstenite = { version = "0.19", optional = true }
 http = { version = "0.2", optional = true }
 
+# SCTP support (RFC 4168) - user-space SCTP over UDP
+webrtc-sctp = { version = "0.17.1", optional = true }
+webrtc-util = { version = "0.17.1", optional = true }
+
 # Add futures-util dependency
 futures-util = "0.3"
 
@@ -50,6 +54,7 @@ udp = []
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile"]
 tcp = []
 ws = ["dep:tokio-tungstenite", "dep:http"]
+sctp = ["dep:webrtc-sctp", "dep:webrtc-util"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

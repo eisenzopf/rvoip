@@ -9,11 +9,15 @@ pub mod udp;
 pub mod tcp;
 pub mod tls;
 pub mod ws;
+#[cfg(feature = "sctp")]
+pub mod sctp;
 
 pub use udp::UdpTransport;
 pub use tcp::TcpTransport;
 pub use tls::TlsTransport;
 pub use ws::WebSocketTransport;
+#[cfg(feature = "sctp")]
+pub use sctp::SctpTransport;
 
 /// Represents the transport type/protocol
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,6 +27,9 @@ pub enum TransportType {
     Tls,
     Ws,
     Wss,
+    /// SCTP transport (RFC 4168)
+    #[cfg(feature = "sctp")]
+    Sctp,
 }
 
 impl fmt::Display for TransportType {
@@ -33,6 +40,8 @@ impl fmt::Display for TransportType {
             TransportType::Tls => write!(f, "TLS"),
             TransportType::Ws => write!(f, "WS"),
             TransportType::Wss => write!(f, "WSS"),
+            #[cfg(feature = "sctp")]
+            TransportType::Sctp => write!(f, "SCTP"),
         }
     }
 }
@@ -120,7 +129,13 @@ pub trait Transport: Send + Sync + fmt::Debug {
         // Default implementation
         false
     }
-    
+
+    /// Check if SCTP transport is supported (RFC 4168)
+    fn supports_sctp(&self) -> bool {
+        // Default implementation
+        false
+    }
+
     /// Check if a specific transport type is supported
     fn supports_transport(&self, transport_type: TransportType) -> bool {
         match transport_type {
@@ -129,6 +144,8 @@ pub trait Transport: Send + Sync + fmt::Debug {
             TransportType::Tls => self.supports_tls(),
             TransportType::Ws => self.supports_ws(),
             TransportType::Wss => self.supports_wss(),
+            #[cfg(feature = "sctp")]
+            TransportType::Sctp => self.supports_sctp(),
         }
     }
     
