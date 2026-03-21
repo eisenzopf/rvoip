@@ -27,10 +27,14 @@
 use bytes::Bytes;
 use tracing::debug;
 use webrtc_srtp::context::Context as WebrtcSrtpContext;
+use webrtc_srtp::option::{srtp_replay_protection, srtcp_replay_protection};
 use webrtc_srtp::protection_profile::ProtectionProfile;
 
 use crate::dtls::adapter::{SrtpKeyMaterial, to_srtp_protection_profile};
 use crate::error::Error;
+
+/// Default replay protection window size (128 packets).
+const REPLAY_WINDOW_SIZE: usize = 128;
 
 /// Production-grade SRTP context backed by `webrtc-srtp`.
 ///
@@ -55,11 +59,23 @@ impl SrtpContextAdapter {
         remote_salt: &[u8],
         profile: ProtectionProfile,
     ) -> Result<Self, Error> {
-        let encrypt_context = WebrtcSrtpContext::new(local_key, local_salt, profile, None, None)
-            .map_err(|e| Error::SrtpError(format!("Failed to create SRTP encrypt context: {e}")))?;
+        let encrypt_context = WebrtcSrtpContext::new(
+            local_key,
+            local_salt,
+            profile,
+            Some(srtp_replay_protection(REPLAY_WINDOW_SIZE)),
+            Some(srtcp_replay_protection(REPLAY_WINDOW_SIZE)),
+        )
+        .map_err(|e| Error::SrtpError(format!("Failed to create SRTP encrypt context: {e}")))?;
 
-        let decrypt_context = WebrtcSrtpContext::new(remote_key, remote_salt, profile, None, None)
-            .map_err(|e| Error::SrtpError(format!("Failed to create SRTP decrypt context: {e}")))?;
+        let decrypt_context = WebrtcSrtpContext::new(
+            remote_key,
+            remote_salt,
+            profile,
+            Some(srtp_replay_protection(REPLAY_WINDOW_SIZE)),
+            Some(srtcp_replay_protection(REPLAY_WINDOW_SIZE)),
+        )
+        .map_err(|e| Error::SrtpError(format!("Failed to create SRTP decrypt context: {e}")))?;
 
         debug!(
             profile = ?profile,

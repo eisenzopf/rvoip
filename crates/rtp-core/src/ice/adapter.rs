@@ -80,7 +80,7 @@ fn map_candidate_type_to_webrtc(ct: CandidateType) -> WCandidateType {
 }
 
 /// Convert a `dyn Candidate` into our [`IceCandidate`] type.
-fn candidate_to_ice_candidate(c: &dyn Candidate, ufrag: &str) -> IceCandidate {
+fn candidate_to_ice_candidate(c: &dyn Candidate, ufrag: &str) -> Result<IceCandidate, Error> {
     let component = if c.component() == 2 {
         ComponentId::Rtcp
     } else {
@@ -90,25 +90,46 @@ fn candidate_to_ice_candidate(c: &dyn Candidate, ufrag: &str) -> IceCandidate {
     // Parse address + port from the candidate
     let addr_str = c.address();
     let port = c.port();
-    let ip: std::net::IpAddr = addr_str.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    let ip: std::net::IpAddr = addr_str.parse().map_err(|e| {
+        Error::IceError(format!("Failed to parse candidate address '{addr_str}': {e}"))
+    })?;
     let address = SocketAddr::new(ip, port);
 
+    // Determine transport from the candidate's network type
+    let network_type = c.network_type();
+    let transport = if network_type.is_tcp() {
+        "tcp".to_string()
+    } else {
+        // UDP is the default and most common transport for ICE
+        "udp".to_string()
+    };
+
     // Related address
-    let related_address = c.related_address().map(|ra| {
-        let ra_ip: std::net::IpAddr = ra.address.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-        SocketAddr::new(ra_ip, ra.port as u16)
+    let related_address = c.related_address().and_then(|ra| {
+        let ra_ip: std::net::IpAddr = match ra.address.parse() {
+            Ok(ip) => ip,
+            Err(e) => {
+                warn!(
+                    address = %ra.address,
+                    error = %e,
+                    "Failed to parse related address, skipping"
+                );
+                return None;
+            }
+        };
+        Some(SocketAddr::new(ra_ip, ra.port as u16))
     });
 
-    IceCandidate {
+    Ok(IceCandidate {
         foundation: c.foundation(),
         component,
-        transport: "udp".to_string(),
+        transport,
         priority: c.priority(),
         address,
         candidate_type: map_candidate_type(c.candidate_type()),
         related_address,
         ufrag: ufrag.to_string(),
-    }
+    })
 }
 
 /// Build STUN/TURN [`IceUrl`] values from socket addresses and optional TURN configs.
@@ -369,8 +390,20 @@ impl IceAgentAdapter {
                 let ufrag = ufrag.clone();
                 // Extract candidate data synchronously before the async block
                 // to avoid lifetime issues with the borrowed references.
-                let local_ic = candidate_to_ice_candidate(local.as_ref(), &ufrag);
-                let remote_ic = candidate_to_ice_candidate(remote.as_ref(), &ufrag);
+                let local_ic = match candidate_to_ice_candidate(local.as_ref(), &ufrag) {
+                    Ok(ic) => ic,
+                    Err(e) => {
+                        warn!(error = %e, "failed to convert local candidate");
+                        return Box::pin(async {});
+                    }
+                };
+                let remote_ic = match candidate_to_ice_candidate(remote.as_ref(), &ufrag) {
+                    Ok(ic) => ic,
+                    Err(e) => {
+                        warn!(error = %e, "failed to convert remote candidate");
+                        return Box::pin(async {});
+                    }
+                };
                 Box::pin(async move {
                     info!(
                         local = %local_ic.address,
@@ -464,10 +497,16 @@ impl IceAgentAdapter {
                 Box::pin(async move {
                     match c {
                         Some(candidate) => {
-                            let ic = candidate_to_ice_candidate(candidate.as_ref(), &ufrag);
-                            debug!(candidate = %ic, "gathered candidate (webrtc-ice)");
-                            let mut guard = candidates_ref.lock().await;
-                            guard.push(ic);
+                            match candidate_to_ice_candidate(candidate.as_ref(), &ufrag) {
+                                Ok(ic) => {
+                                    debug!(candidate = %ic, "gathered candidate (webrtc-ice)");
+                                    let mut guard = candidates_ref.lock().await;
+                                    guard.push(ic);
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "failed to convert gathered candidate, skipping");
+                                }
+                            }
                         }
                         None => {
                             // Gathering complete

@@ -36,8 +36,11 @@
 //! ```
 
 pub mod types;
+#[allow(deprecated)]
 pub mod gather;
+#[allow(deprecated)]
 pub mod checklist;
+#[allow(deprecated)]
 pub mod agent;
 pub mod adapter;
 

@@ -26,8 +26,11 @@
 //! # }
 //! ```
 
+#[allow(deprecated)]
 pub mod message;
+#[allow(deprecated)]
 pub mod client;
+#[allow(deprecated)]
 pub mod credentials;
 
 pub use client::{TurnClient, TurnAllocation};
