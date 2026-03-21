@@ -42,8 +42,8 @@ use rvoip_media_core::codec::mapping::CodecMapper;
 // DTLS role re-export for callers
 use rvoip_rtp_core::dtls::DtlsRole;
 
-// ICE types for NAT traversal
-use rvoip_rtp_core::ice::{IceAgent, IceRole, IceCandidate, IceConnectionState, CandidateType, ComponentId};
+// ICE types for NAT traversal — using the production webrtc-ice adapter
+use rvoip_rtp_core::ice::{IceAgentAdapter, IceRole, IceCandidate, IceConnectionState, CandidateType, ComponentId};
 
 /// Main media manager for session-core using real media-core components
 pub struct MediaManager {
@@ -90,7 +90,7 @@ pub struct MediaManager {
 
     /// Per-session ICE agents for NAT traversal.
     /// Created during `create_media_session` when ICE is enabled.
-    pub ice_agents: Arc<RwLock<HashMap<SessionId, IceAgent>>>,
+    pub ice_agents: Arc<RwLock<HashMap<SessionId, IceAgentAdapter>>>,
 }
 
 /// Configuration for zero-copy RTP processing per session
@@ -568,7 +568,7 @@ impl MediaManager {
         if self.media_config.ice.enabled {
             let local_port = session_info.local_rtp_port.unwrap_or(0);
             let local_addr = SocketAddr::new(self.local_bind_addr.ip(), local_port);
-            let mut agent = IceAgent::new(IceRole::Controlling);
+            let mut agent = IceAgentAdapter::new(IceRole::Controlling);
 
             let stun_servers = &self.media_config.ice.stun_servers;
             let turn_configs = &self.media_config.ice.turn_servers;
@@ -675,7 +675,7 @@ impl MediaManager {
         {
             let mut agents = self.ice_agents.write().await;
             if let Some(mut agent) = agents.remove(session_id) {
-                agent.close();
+                agent.close().await;
             }
         }
 
@@ -997,8 +997,8 @@ impl MediaManager {
             agent.add_remote_candidates(remote_candidates);
         }
 
-        // Start connectivity checks
-        if let Err(e) = agent.start_checks() {
+        // Start connectivity checks (webrtc-ice handles the check loop internally)
+        if let Err(e) = agent.start_checks().await {
             tracing::warn!(
                 session = %session_id,
                 error = %e,
@@ -1007,42 +1007,11 @@ impl MediaManager {
             return Ok(());
         }
 
-        // Drive connectivity checks synchronously for up to the initial
-        // set of waiting pairs.  In a full implementation this would run
-        // on a background task with actual network I/O; here we log what
-        // would happen and check for a selected pair from triggered checks
-        // already completed (e.g., remote-initiated checks).
-        let mut checks_performed = 0u32;
-        while let Some(idx) = agent.next_check() {
-            match agent.check_pair(idx) {
-                Ok((_request_bytes, remote_addr)) => {
-                    tracing::debug!(
-                        session = %session_id,
-                        pair_idx = idx,
-                        remote = %remote_addr,
-                        "ICE connectivity check prepared"
-                    );
-                    checks_performed += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session = %session_id,
-                        error = %e,
-                        "ICE check_pair failed"
-                    );
-                    break;
-                }
-            }
-            // Limit to avoid infinite loops in degenerate cases
-            if checks_performed >= 64 {
-                break;
-            }
-        }
-
-        // If the agent already has a selected pair (e.g., from a
-        // triggered check that succeeded), update the media session's
-        // remote address.
-        if let Some(pair) = agent.selected_pair() {
+        // webrtc-ice drives connectivity checks internally via dial/accept.
+        // Check if a selected pair is already available (e.g., from a
+        // triggered check that succeeded). The on_selected_candidate_pair_change
+        // callback will update the selected pair asynchronously as checks complete.
+        if let Some(pair) = agent.selected_pair().await {
             let selected_remote = pair.remote.address;
             tracing::info!(
                 session = %session_id,
@@ -1147,14 +1116,17 @@ impl MediaManager {
     /// Get the ICE connection state for a session, if ICE is active.
     pub async fn get_ice_state(&self, session_id: &SessionId) -> Option<IceConnectionState> {
         let agents = self.ice_agents.read().await;
-        agents.get(session_id).map(|a| a.state())
+        match agents.get(session_id) {
+            Some(a) => Some(a.state_sync()),
+            None => None,
+        }
     }
 
     /// Get the selected ICE candidate pair for a session.
     pub async fn get_ice_selected_pair(&self, session_id: &SessionId) -> Option<(SocketAddr, SocketAddr)> {
         let agents = self.ice_agents.read().await;
         agents.get(session_id).and_then(|a| {
-            a.selected_pair().map(|p| (p.local.address, p.remote.address))
+            a.selected_pair_sync().map(|p| (p.local.address, p.remote.address))
         })
     }
 
