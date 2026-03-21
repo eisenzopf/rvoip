@@ -537,25 +537,37 @@ rvoip is organized into 17 crates, each with specific responsibilities in the Vo
 | **Call Hold/Resume** | ✅ Complete | Full hold/resume in client-core and sip-client |
 | **Call Transfer** | ✅ Complete | Blind + attended transfer |
 | **DTMF Support** | ✅ Complete | SIP INFO + RFC 4733 RTP events (dual mode) |
-| **Conference Mixing** | 🔶 Partial | Mixer exists, session integration TODO |
+| **Conference Mixing** | ✅ Complete | AudioMixer + session integration + SDP |
 | **Call Center Operations** | ✅ Complete | Agent management, queuing, routing, bridging |
 | **Media Quality Monitoring** | ✅ Complete | Real-time MOS scoring |
-| **B2BUA Operations** | 🚧 In Progress | Back-to-back user agent |
+| **B2BUA Operations** | ✅ Complete | Dual-leg management, SDP rewrite, header manipulation |
 
 
 
 ## 🧪 Testing & Quality
 
-### Comprehensive Test Coverage
-- **Unit Tests**: 2,500+ tests across all crates
-- **Integration Tests**: End-to-end call flows with SIPp
-- **RFC Compliance**: Torture tests based on RFC 4475
-- **Performance Tests**: Benchmarks for critical paths
+### 4-Level Test Architecture
+
+| Level | Scope | Command |
+|-------|-------|---------|
+| **L1 Unit** | Per-crate isolated tests | `./scripts/test_all.sh unit` |
+| **L2 Adapter** | Production library adapter roundtrips | `./scripts/test_all.sh adapter` |
+| **L3 Integration** | Cross-crate module integration | `./scripts/test_all.sh integration` |
+| **L4 End-to-End** | Complete call paths with audio | `./scripts/test_all.sh e2e` |
+
+### Test Coverage
+- **2,500+ unit tests** across 14 crates
+- **Cross-crate integration tests** in dedicated `integration-tests` crate
+- **Adapter roundtrip tests** for all 7 production library migrations (ICE, SCTP, RTP, RTCP, SRTP, DTLS, STUN)
+- **E2E call tests** with G.711 audio verification, DTMF, hold/resume, encryption
+- **RFC compliance** torture tests based on RFC 4475
+- **Zero `unwrap()`** in production code, zero compiler warnings
 
 ### Quality Assurance
-- **Memory Management**: Comprehensive resource cleanup
-- **Error Recovery**: Graceful degradation and failover
-- **CI**: Automated build and test across the workspace
+- **Production library adapters**: ICE, SCTP, SRTP, DTLS, STUN, RTP/RTCP backed by webrtc-rs (3M+ downloads)
+- **Audio DSP**: Optional Google WebRTC AudioProcessing Module via `webrtc-apm` feature
+- **Graceful shutdown**: Broadcast signal with timeout for all spawned tasks
+- **Structured logging**: All `println` replaced with `tracing` macros
 
 ## 📋 Development Status
 
@@ -570,21 +582,20 @@ Core crates are **beta quality**. The architecture is stable and APIs are stabil
 - **sip-transport**: UDP, TCP, TLS, WebSocket (WS + WSS) all complete
 - **client-core**: High-level client framework
 - **call-engine**: Call center orchestration
-- **codec-core**: G.711 complete, Opus partial
+- **codec-core**: G.711, G.722, G.729A (pure Rust), Opus (feature-gated)
 - **audio-core**: Core audio DSP
 
 ### 🚧 Known Gaps
-- **SIP-over-SCTP**: Only DTLS-SCTP data channels implemented, not SIP transport over SCTP (RFC 4168)
 - **Video codecs**: No H.264/VP8/VP9 encoding (audio-only currently)
 - **SIP-over-SCTP**: Only DTLS-SCTP data channels, not SIP transport (RFC 4168)
 
 ### 🔮 Roadmap
-- **Full Opus codec support**: Complete Opus encoder/decoder integration
-- **Video codec support**: H.264, VP8 for video calling
+- **Video codec support**: H.264, VP8, VP9 for video calling
 - **SIP-over-SCTP**: RFC 4168 multi-streaming SIP transport
-- **WebRTC Gateway**: Full WebRTC interoperability
-- **Mobile SDKs**: iOS and Android bindings
+- **WebRTC Gateway**: Full browser-to-SIP interoperability
+- **Mobile SDKs**: iOS and Android bindings via FFI
 - **Clustering/HA**: High availability and horizontal scaling
+- **REST/GraphQL API**: Management and monitoring interfaces
 
 ## 🏢 Enterprise Deployment
 
