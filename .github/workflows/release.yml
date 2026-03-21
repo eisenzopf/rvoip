@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: linux-arm64
+            use_cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            suffix: macos-amd64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            suffix: macos-arm64
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux' && !matrix.use_cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release --workspace --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: "!matrix.use_cross"
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../rvoip-${{ matrix.suffix }}.tar.gz *.so *.dylib *.a 2>/dev/null || true
+          cd ../../..
+          sha256sum rvoip-${{ matrix.suffix }}.tar.gz > rvoip-${{ matrix.suffix }}.tar.gz.sha256 2>/dev/null || shasum -a 256 rvoip-${{ matrix.suffix }}.tar.gz > rvoip-${{ matrix.suffix }}.tar.gz.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rvoip-${{ matrix.suffix }}
+          path: rvoip-${{ matrix.suffix }}.*
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: rvoip ${{ steps.tag.outputs.tag }}
+          files: artifacts/*
+          body: |
+            ## rvoip ${{ steps.tag.outputs.tag }}
+
+            Pure Rust SIP/VoIP stack.
+
+            | Platform | Architecture | File |
+            |----------|-------------|------|
+            | Linux | x86_64 | `rvoip-linux-amd64.tar.gz` |
+            | Linux | ARM64 | `rvoip-linux-arm64.tar.gz` |
+            | macOS | Intel | `rvoip-macos-amd64.tar.gz` |
+            | macOS | Apple Silicon | `rvoip-macos-arm64.tar.gz` |

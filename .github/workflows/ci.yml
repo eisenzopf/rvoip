@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust_changed: ${{ steps.filter.outputs.rust }}
+      docs_changed: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**/*.rs'
+              - 'crates/**/Cargo.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+            docs:
+              - '**/*.md'
+              - 'docs/**'
+
+  lint:
+    name: Lint (Format + Clippy)
+    needs: [changes]
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Test
+    needs: [changes, lint]
+    if: needs.changes.outputs.rust_changed == 'true' && needs.lint.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit tests (all crates)
+        run: cargo test --workspace --lib
+      - name: Integration tests
+        run: cargo test --workspace --test '*'
+
+  build:
+    name: Build
+    needs: [changes]
+    if: needs.changes.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Build workspace
+        run: cargo build --workspace
+      - name: Check zero warnings
+        run: cargo check --workspace 2>&1 | grep -c "warning" | xargs test 0 -eq
+
+  docs-only:
+    name: Docs-Only Fast Path
+    needs: [changes]
+    if: needs.changes.outputs.rust_changed != 'true' && needs.changes.outputs.docs_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Docs-only change. Rust CI skipped."
+
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs: [changes, lint, test, build, docs-only]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          if [ "${{ needs.changes.outputs.rust_changed }}" != "true" ]; then
+            echo "No Rust changes. Pass."
+            exit 0
+          fi
+          if [ "${{ needs.lint.result }}" != "success" ] || \
+             [ "${{ needs.test.result }}" != "success" ] || \
+             [ "${{ needs.build.result }}" != "success" ]; then
+            echo "CI failed."
+            exit 1
+          fi
+          echo "All checks passed."
