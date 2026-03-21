@@ -12,25 +12,23 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use tokio::net::UdpSocket;
-use tokio::sync::Mutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info};
 
-use rvoip_rtp_core::dtls::{
-    DtlsConfig, DtlsConnection, DtlsRole, DtlsVersion,
-    crypto::verify::Certificate,
-    transport::udp::UdpTransport,
-    srtp::extractor::DtlsSrtpContext,
+use rvoip_rtp_core::dtls::adapter::{
+    DtlsAdapterConfig, DtlsConnectionAdapter,
+    DtlsRole as AdapterDtlsRole, SrtpKeyMaterial,
 };
-use rvoip_rtp_core::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
+use rvoip_rtp_core::dtls::DtlsRole;
+use rvoip_rtp_core::srtp::adapter::SrtpContextAdapter;
 
 use super::MediaError;
 
 /// DTLS-SRTP bridge that handles the handshake and provides
 /// encrypt/decrypt for the media pipeline.
 pub struct SrtpMediaBridge {
-    /// SRTP context (encrypt outbound, decrypt inbound) -- initialised
+    /// SRTP context adapter (encrypt outbound, decrypt inbound) -- initialised
     /// after the DTLS handshake completes.
-    srtp_ctx: Option<SrtpContext>,
+    srtp_ctx: Option<SrtpContextAdapter>,
 
     /// Whether SRTP is required (derived from SDP `a=fingerprint` / RTP/SAVP).
     srtp_required: bool,
@@ -41,8 +39,8 @@ pub struct SrtpMediaBridge {
     /// Remote certificate fingerprint for verification (from SDP `a=fingerprint`).
     remote_fingerprint: Option<String>,
 
-    /// Local DTLS connection -- kept alive for potential rekeying.
-    dtls_connection: Option<DtlsConnection>,
+    /// Local DTLS connection adapter -- kept alive for potential rekeying.
+    dtls_connection: Option<DtlsConnectionAdapter>,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,61 +84,64 @@ impl SrtpMediaBridge {
             return Ok(());
         }
 
+        let adapter_role: AdapterDtlsRole = self.dtls_role.into();
+
         info!(
-            role = ?self.dtls_role,
+            role = ?adapter_role,
             remote = %remote_addr,
-            "Starting DTLS handshake for SRTP key exchange"
+            "Starting DTLS handshake for SRTP key exchange (adapter)"
         );
 
-        // ---- build DTLS configuration ----
-        let config = DtlsConfig {
-            role: self.dtls_role,
-            version: DtlsVersion::Dtls12,
-            mtu: 1200,
-            max_retransmissions: 5,
-            srtp_profiles: vec![SRTP_AES128_CM_SHA1_80],
-        };
-
-        let mut conn = DtlsConnection::new(config);
-
-        // Create and attach a UDP transport wrapper for the DTLS stack.
-        let transport = UdpTransport::new(socket.clone(), 1200)
+        // ---- build adapter ----
+        let mut adapter = DtlsConnectionAdapter::new(adapter_role)
             .await
             .map_err(|e| MediaError::Configuration {
-                message: format!("Failed to create DTLS UDP transport: {e}"),
+                message: format!("Failed to create DTLS adapter: {e}"),
             })?;
-        conn.set_transport(Arc::new(Mutex::new(transport)));
+
+        // Connect the UDP socket to the remote address so that
+        // webrtc-dtls can use it as a Conn.
+        let connected_socket = tokio::net::UdpSocket::bind("0.0.0.0:0")
+            .await
+            .map_err(|e| MediaError::Configuration {
+                message: format!("Failed to bind UDP socket for DTLS: {e}"),
+            })?;
+        connected_socket.connect(remote_addr).await.map_err(|e| {
+            MediaError::Configuration {
+                message: format!("Failed to connect UDP socket to {remote_addr}: {e}"),
+            }
+        })?;
+
+        let conn: Arc<dyn webrtc_util_dtls::Conn + Send + Sync> =
+            Arc::new(connected_socket);
+
+        let config = DtlsAdapterConfig::default();
 
         // ---- run the handshake ----
-        conn.start_handshake(remote_addr)
-            .await
-            .map_err(|e| MediaError::Configuration {
-                message: format!("DTLS handshake start failed: {e}"),
-            })?;
-
-        conn.wait_handshake()
+        adapter
+            .handshake(conn, &config)
             .await
             .map_err(|e| MediaError::Configuration {
                 message: format!("DTLS handshake failed: {e}"),
             })?;
 
-        info!("DTLS handshake completed successfully");
+        info!("DTLS handshake completed successfully (adapter)");
 
         // ---- verify remote fingerprint ----
         if let Some(expected_fp) = &self.remote_fingerprint {
-            self.verify_remote_fingerprint(&mut conn, expected_fp)?;
+            verify_remote_fingerprint_adapter(&adapter, expected_fp).await?;
         }
 
         // ---- extract SRTP keying material ----
-        let dtls_srtp_ctx = conn.extract_srtp_keys().map_err(|e| {
+        let keys = adapter.get_srtp_keys().await.map_err(|e| {
             MediaError::Configuration {
-                message: format!("Failed to extract SRTP keys from DTLS: {e}"),
+                message: format!("Failed to extract SRTP keys from DTLS adapter: {e}"),
             }
         })?;
 
-        self.install_srtp_keys(&dtls_srtp_ctx)?;
+        self.install_srtp_keys_adapter(&keys)?;
 
-        self.dtls_connection = Some(conn);
+        self.dtls_connection = Some(adapter);
         Ok(())
     }
 
@@ -162,27 +163,13 @@ impl SrtpMediaBridge {
             }
         };
 
-        // Parse the raw bytes into an RtpPacket so that the SRTP layer
-        // can access header fields for encryption.
-        let rtp = rvoip_rtp_core::RtpPacket::parse(packet).map_err(|e| {
-            MediaError::SdpProcessing {
-                message: format!("Failed to parse outbound RTP for SRTP protect: {e}"),
-            }
-        })?;
-
-        let protected = ctx.protect(&rtp).map_err(|e| {
+        let protected = ctx.protect_rtp(packet).map_err(|e| {
             MediaError::SdpProcessing {
                 message: format!("SRTP protect failed: {e}"),
             }
         })?;
 
-        let serialized = protected.serialize().map_err(|e| {
-            MediaError::SdpProcessing {
-                message: format!("Failed to serialize protected RTP: {e}"),
-            }
-        })?;
-
-        Ok(serialized.to_vec())
+        Ok(protected.to_vec())
     }
 
     /// Decrypt an inbound SRTP packet.
@@ -202,19 +189,13 @@ impl SrtpMediaBridge {
             }
         };
 
-        let rtp = ctx.unprotect(packet).map_err(|e| {
+        let unprotected = ctx.unprotect_rtp(packet).map_err(|e| {
             MediaError::SdpProcessing {
                 message: format!("SRTP unprotect failed: {e}"),
             }
         })?;
 
-        let serialized = rtp.serialize().map_err(|e| {
-            MediaError::SdpProcessing {
-                message: format!("Failed to serialize unprotected RTP: {e}"),
-            }
-        })?;
-
-        Ok(serialized.to_vec())
+        Ok(unprotected.to_vec())
     }
 
     /// Whether the SRTP context has been installed and is ready for
@@ -239,71 +220,90 @@ impl SrtpMediaBridge {
 // ---------------------------------------------------------------------------
 
 impl SrtpMediaBridge {
-    /// Verify the remote certificate's fingerprint against the SDP value.
-    fn verify_remote_fingerprint(
-        &self,
-        conn: &mut DtlsConnection,
-        expected: &str,
-    ) -> Result<(), MediaError> {
-        // The DtlsConnection should have stored the remote certificate during
-        // handshake.  Unfortunately the current API only exposes it through
-        // certificate methods that require parsing.  We do a best-effort check.
-        //
-        // The `expected` format is "sha-256 AA:BB:CC:..." -- split algorithm
-        // from hex fingerprint.
-        let (algorithm, hex_fp) = parse_fingerprint_attr(expected)?;
-
-        debug!(
-            algorithm = %algorithm,
-            fingerprint = %hex_fp,
-            "Verifying remote DTLS certificate fingerprint"
-        );
-
-        // For now log the verification intent.  Full verification requires
-        // the DtlsConnection to expose the remote certificate DER which is
-        // populated but not publicly accessible through a dedicated getter
-        // in the current API.  We record the expected fingerprint so an
-        // auditor can confirm the handshake's trust chain.
-        //
-        // TODO(security): Add a public `remote_certificate()` accessor to
-        // DtlsConnection and perform a byte-level fingerprint comparison.
-        info!(
-            "Remote fingerprint recorded for verification: algorithm={}, fingerprint={}",
-            algorithm, hex_fp
-        );
-        Ok(())
-    }
-
-    /// Turn `DtlsSrtpContext` (client+server keys) into an `SrtpContext`
-    /// with the correct local/remote assignment based on our DTLS role.
-    fn install_srtp_keys(&mut self, dtls_ctx: &DtlsSrtpContext) -> Result<(), MediaError> {
-        let is_client = self.dtls_role == DtlsRole::Client;
-
-        // For the *client*:
-        //   - outbound (protect) uses the client write key
-        //   - inbound  (unprotect) uses the server write key
-        // For the *server* it is reversed.
-        let (local_key, remote_key) = if is_client {
-            (&dtls_ctx.client_write_key, &dtls_ctx.server_write_key)
-        } else {
-            (&dtls_ctx.server_write_key, &dtls_ctx.client_write_key)
-        };
-
-        let srtp = SrtpContext::new_from_keys(
-            local_key.key().to_vec(),
-            remote_key.key().to_vec(),
-            local_key.salt().to_vec(),
-            remote_key.salt().to_vec(),
-            dtls_ctx.profile.clone(),
-        )
-        .map_err(|e| MediaError::Configuration {
-            message: format!("Failed to create SRTP context from DTLS keys: {e}"),
+    /// Turn `SrtpKeyMaterial` from the adapter into an `SrtpContextAdapter`.
+    fn install_srtp_keys_adapter(&mut self, keys: &SrtpKeyMaterial) -> Result<(), MediaError> {
+        let srtp = SrtpContextAdapter::from_key_material(keys).map_err(|e| {
+            MediaError::Configuration {
+                message: format!("Failed to create SRTP context from DTLS keys: {e}"),
+            }
         })?;
 
-        info!("SRTP context installed (role={:?})", self.dtls_role);
+        info!("SRTP context adapter installed (role={:?})", self.dtls_role);
         self.srtp_ctx = Some(srtp);
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// DTLS fingerprint verification
+// ---------------------------------------------------------------------------
+
+/// Verify the remote certificate's fingerprint against the SDP-advertised value.
+///
+/// This is called after the DTLS handshake completes. The webrtc-dtls crate
+/// already performs certificate verification during the handshake when
+/// `insecure_skip_verify` is false (our default). This function performs an
+/// additional SDP-level fingerprint cross-check as required by RFC 5763.
+async fn verify_remote_fingerprint_adapter(
+    adapter: &DtlsConnectionAdapter,
+    expected: &str,
+) -> Result<(), MediaError> {
+    let (algorithm, hex_fp) = parse_fingerprint_attr(expected)?;
+
+    debug!(
+        algorithm = %algorithm,
+        fingerprint = %hex_fp,
+        "Verifying remote DTLS certificate fingerprint (adapter)"
+    );
+
+    let dtls_conn = adapter.inner_conn().ok_or_else(|| MediaError::Configuration {
+        message: "DTLS connection not established -- cannot verify fingerprint".to_string(),
+    })?;
+
+    // Retrieve the connection state which contains the peer certificates.
+    let state = dtls_conn.connection_state().await;
+    let peer_certs = state.peer_certificates;
+
+    if peer_certs.is_empty() {
+        return Err(MediaError::Configuration {
+            message: "No remote certificate available for fingerprint verification".to_string(),
+        });
+    }
+
+    // Compute the SHA-256 fingerprint of the first peer certificate.
+    use sha2::{Sha256, Digest as _};
+    let der_bytes = &peer_certs[0];
+    let digest = Sha256::digest(der_bytes);
+    let actual_fp: String = digest
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":");
+
+    // Normalize for comparison: strip colons, lowercase.
+    let expected_normalized = hex_fp.replace(':', "").to_lowercase();
+    let actual_normalized = actual_fp.replace(':', "").to_lowercase();
+
+    if expected_normalized != actual_normalized {
+        error!(
+            expected = %hex_fp,
+            actual = %actual_fp,
+            "Remote DTLS certificate fingerprint MISMATCH"
+        );
+        return Err(MediaError::Configuration {
+            message: format!(
+                "Remote DTLS certificate fingerprint mismatch: expected {hex_fp}, got {actual_fp}"
+            ),
+        });
+    }
+
+    info!(
+        algorithm = %algorithm,
+        fingerprint = %actual_fp,
+        "Remote DTLS certificate fingerprint verified successfully"
+    );
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

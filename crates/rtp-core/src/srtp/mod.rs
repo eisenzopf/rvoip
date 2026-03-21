@@ -17,12 +17,18 @@ pub mod adapter;
 // ---------------------------------------------------------------------------
 // Legacy self-built implementation (deprecated -- prefer `adapter`)
 // ---------------------------------------------------------------------------
+#[deprecated(note = "Use srtp::adapter::SrtpContextAdapter instead")]
 pub mod crypto;
+#[deprecated(note = "Use srtp::adapter::SrtpContextAdapter instead")]
 pub mod key_derivation;
+#[deprecated(note = "Use srtp::adapter::SrtpContextAdapter instead")]
 pub mod auth;
 
+#[allow(deprecated)]
 pub use crypto::SrtpCryptoKey;
+#[allow(deprecated)]
 pub use auth::{SrtpAuthenticator, SrtpReplayProtection};
+#[allow(deprecated)]
 pub use key_derivation::{
     KeyDerivationLabel, SrtpKeyDerivationParams, KeyRotationFrequency,
     srtp_kdf, create_srtp_iv
@@ -137,6 +143,7 @@ pub const SRTP_AEAD_AES_256_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
 /// Maintains separate crypto contexts for inbound and outbound directions.
 /// When created via `new()`, both directions use the same key material.
 /// When created via `new_from_keys()`, outbound uses local keys and inbound uses remote keys.
+#[allow(deprecated)]
 pub struct SrtpContext {
     /// Whether encryption is enabled
     enabled: bool,
@@ -181,6 +188,7 @@ impl ProtectedRtpPacket {
     }
 }
 
+#[allow(deprecated)]
 impl SrtpContext {
     /// Create a new SRTP context
     ///
@@ -313,6 +321,7 @@ impl SrtpContext {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use bytes::Bytes;
@@ -334,4 +343,5 @@ mod tests {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod integration_tests; 

@@ -80,7 +80,14 @@ impl webrtc_util::conn::Conn for DtlsConnBridge {
             {
                 let mut dtls = self.dtls.lock().await;
                 if let Some(data) = dtls.read_application_data() {
-                    let len = data.len().min(buf.len());
+                    if data.len() > buf.len() {
+                        return Err(webrtc_util::Error::Other(format!(
+                            "DTLS application data ({} bytes) exceeds recv buffer ({} bytes)",
+                            data.len(),
+                            buf.len(),
+                        )));
+                    }
+                    let len = data.len();
                     buf[..len].copy_from_slice(&data[..len]);
                     return Ok(len);
                 }
@@ -101,12 +108,13 @@ impl webrtc_util::conn::Conn for DtlsConnBridge {
         buf: &mut [u8],
     ) -> webrtc_util::Result<(usize, SocketAddr)> {
         let n = self.recv(buf).await?;
-        // SCTP-over-DTLS is point-to-point; return a placeholder address.
-        let addr: SocketAddr = "0.0.0.0:0"
-            .parse()
-            .map_err(|e: std::net::AddrParseError| {
-                webrtc_util::Error::Other(e.to_string())
-            })?;
+        // SCTP-over-DTLS is point-to-point; return the DTLS peer's remote address
+        // if available, otherwise fall back to unspecified.
+        let addr = {
+            let dtls = self.dtls.lock().await;
+            dtls.remote_addr()
+                .unwrap_or_else(|| SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0))
+        };
         Ok((n, addr))
     }
 
@@ -132,17 +140,22 @@ impl webrtc_util::conn::Conn for DtlsConnBridge {
     }
 
     fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
-        // SCTP-over-DTLS does not expose a meaningful local socket address
-        // at this layer. Return a placeholder.
-        "0.0.0.0:0"
-            .parse()
-            .map_err(|e: std::net::AddrParseError| {
-                webrtc_util::Error::Other(e.to_string())
-            })
+        // The DTLS connection doesn't expose the underlying transport's local
+        // address through its public API. Return unspecified -- callers using
+        // SCTP-over-DTLS operate in a point-to-point mode where the local
+        // socket address is not meaningful at this layer.
+        Ok(SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            0,
+        ))
     }
 
     fn remote_addr(&self) -> Option<SocketAddr> {
-        None
+        // Return the actual DTLS peer address if available.
+        self.dtls
+            .try_lock()
+            .ok()
+            .and_then(|dtls| dtls.remote_addr())
     }
 
     async fn close(&self) -> webrtc_util::Result<()> {

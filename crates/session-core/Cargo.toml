@@ -30,6 +30,8 @@ rvoip-infra-common.workspace = true
 rvoip-registrar-core = { path = "../registrar-core" }
 # rtp-core needed for DTLS-SRTP integration (DTLS handshake + SRTP encrypt/decrypt)
 rvoip-rtp-core.workspace = true
+# webrtc-util 0.11 needed for Conn trait used by DtlsConnectionAdapter handshake
+webrtc-util-dtls = { package = "webrtc-util", version = "0.11.0", default-features = false, features = ["conn"] }
 
 # External dependencies from workspace
 tokio.workspace = true
