@@ -2,6 +2,11 @@
 //!
 //! This module implements state-of-the-art AEC using frequency-domain processing,
 //! multi-delay adaptive filtering, and advanced double-talk detection.
+//!
+//! **Deprecated:** For production use, prefer the `webrtc_apm` module (enable the
+//! `webrtc-apm` feature) which wraps Google's battle-tested WebRTC AudioProcessing
+//! Module. This self-built implementation is retained as a fallback for environments
+//! where the native C++ dependency cannot be compiled.
 
 use std::f32::consts::PI;
 use num_complex::Complex;

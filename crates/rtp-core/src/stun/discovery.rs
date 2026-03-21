@@ -11,7 +11,9 @@ use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
 
 use crate::Error;
-use super::client::{StunBindingResult, StunClient, StunClientConfig};
+#[allow(deprecated)]
+use super::client::{StunBindingResult, StunClientConfig};
+use super::adapter::StunClientAdapter;
 
 /// Well-known public STUN servers.
 pub const DEFAULT_STUN_SERVERS: &[&str] = &[
@@ -99,6 +101,7 @@ pub async fn discover_nat_type(stun_servers: &[&str]) -> Result<NatInfo, Error> 
 
     debug!(local = %local_addr, "starting NAT discovery");
 
+    #[allow(deprecated)]
     let config = StunClientConfig {
         timeout: Duration::from_secs(3),
         initial_rto: Duration::from_millis(500),
@@ -117,9 +120,9 @@ pub async fn discover_nat_type(stun_servers: &[&str]) -> Result<NatInfo, Error> 
             }
         };
 
-        let client = StunClient::with_config(server_addr, config.clone());
+        let adapter = StunClientAdapter::with_config(server_addr, config.clone());
 
-        match client.binding_request(&socket).await {
+        match adapter.binding_request(&socket).await {
             Ok(result) => {
                 debug!(
                     server = server_str,
@@ -169,6 +172,7 @@ pub async fn get_public_address(local_addr: SocketAddr) -> Result<SocketAddr, Er
         Error::StunError(format!("failed to bind to {local_addr}: {e}"))
     })?;
 
+    #[allow(deprecated)]
     let config = StunClientConfig {
         timeout: Duration::from_secs(3),
         initial_rto: Duration::from_millis(500),
@@ -185,9 +189,9 @@ pub async fn get_public_address(local_addr: SocketAddr) -> Result<SocketAddr, Er
             }
         };
 
-        let client = StunClient::with_config(server_addr, config.clone());
+        let adapter = StunClientAdapter::with_config(server_addr, config.clone());
 
-        match client.binding_request(&socket).await {
+        match adapter.binding_request(&socket).await {
             Ok(result) => {
                 info!(
                     public = %result.mapped_address,

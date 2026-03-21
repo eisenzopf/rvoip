@@ -2,6 +2,11 @@
 //!
 //! This module implements state-of-the-art VAD using spectral feature extraction,
 //! frequency-domain analysis, and ensemble detection methods.
+//!
+//! **Deprecated:** For production use, prefer the `webrtc_apm` module (enable the
+//! `webrtc-apm` feature) which wraps Google's battle-tested WebRTC AudioProcessing
+//! Module. This self-built implementation is retained as a fallback for environments
+//! where the native C++ dependency cannot be compiled.
 
 use rustfft::{FftPlanner, num_complex::Complex};
 use apodize::hanning_iter;

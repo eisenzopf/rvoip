@@ -1,7 +1,22 @@
 //! Secure RTP (SRTP) implementation
 //!
 //! This module provides encryption and authentication for RTP/RTCP packets.
+//!
+//! ## Production adapter (recommended)
+//!
+//! The [`adapter`] sub-module wraps the battle-tested `webrtc-srtp` 0.17
+//! crate (3.6M downloads) and should be preferred for all new code.
+//! The self-built modules (`crypto`, `key_derivation`, `auth`) are
+//! **deprecated** and retained only for backward compatibility.
 
+// ---------------------------------------------------------------------------
+// Production adapter backed by webrtc-srtp 0.17
+// ---------------------------------------------------------------------------
+pub mod adapter;
+
+// ---------------------------------------------------------------------------
+// Legacy self-built implementation (deprecated -- prefer `adapter`)
+// ---------------------------------------------------------------------------
 pub mod crypto;
 pub mod key_derivation;
 pub mod auth;
