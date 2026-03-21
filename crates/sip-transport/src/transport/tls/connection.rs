@@ -42,7 +42,7 @@ impl TlsConnection {
     pub async fn connect(
         addr: SocketAddr,
         tls_connector: &tokio_rustls::TlsConnector,
-        server_name: rustls::ServerName,
+        server_name: rustls_pki_types::ServerName<'static>,
     ) -> Result<Self> {
         let tcp_stream = tokio::net::TcpStream::connect(addr)
             .await

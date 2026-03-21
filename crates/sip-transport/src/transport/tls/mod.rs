@@ -22,7 +22,9 @@ mod tls_impl {
     use tokio::sync::mpsc;
     use tracing::{debug, error, info, trace, warn};
 
-    use rustls::{Certificate, PrivateKey, ServerConfig, ClientConfig};
+    use rustls::ServerConfig;
+    use rustls::ClientConfig;
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
     use tokio_rustls::{TlsAcceptor, TlsConnector};
 
     use rvoip_sip_core::Message;
@@ -51,43 +53,30 @@ mod tls_impl {
     }
 
     /// Loads PEM certificates from a file path.
-    fn load_certs(path: &str) -> Result<Vec<Certificate>> {
+    fn load_certs(path: &str) -> Result<Vec<CertificateDer<'static>>> {
         let file = fs::File::open(path)
             .map_err(|e| Error::TlsCertificateError(format!("Cannot open cert file {}: {}", path, e)))?;
         let mut reader = BufReader::new(file);
-        let certs = rustls_pemfile::certs(&mut reader)
+        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| Error::TlsCertificateError(format!("Failed to parse certs from {}: {}", path, e)))?;
-        Ok(certs.into_iter().map(Certificate).collect())
+        Ok(certs)
     }
 
     /// Loads a PEM private key from a file path.
     /// Tries PKCS8 first, then RSA keys.
-    fn load_private_key(path: &str) -> Result<PrivateKey> {
+    fn load_private_key(path: &str) -> Result<PrivateKeyDer<'static>> {
         let file = fs::File::open(path)
             .map_err(|e| Error::TlsCertificateError(format!("Cannot open key file {}: {}", path, e)))?;
         let mut reader = BufReader::new(file);
 
-        // Try PKCS8 keys first
-        let mut keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
-            .map_err(|e| Error::TlsCertificateError(format!("Failed to parse PKCS8 keys from {}: {}", path, e)))?;
-
-        if !keys.is_empty() {
-            return Ok(PrivateKey(keys.remove(0)));
+        // Use rustls_pemfile::private_key which tries all key formats
+        match rustls_pemfile::private_key(&mut reader)
+            .map_err(|e| Error::TlsCertificateError(format!("Failed to parse private key from {}: {}", path, e)))?
+        {
+            Some(key) => Ok(key),
+            None => Err(Error::TlsCertificateError(format!("No private key found in {}", path))),
         }
-
-        // Re-read file for RSA keys
-        let file = fs::File::open(path)
-            .map_err(|e| Error::TlsCertificateError(format!("Cannot re-open key file {}: {}", path, e)))?;
-        let mut reader = BufReader::new(file);
-
-        let mut rsa_keys = rustls_pemfile::rsa_private_keys(&mut reader)
-            .map_err(|e| Error::TlsCertificateError(format!("Failed to parse RSA keys from {}: {}", path, e)))?;
-
-        if !rsa_keys.is_empty() {
-            return Ok(PrivateKey(rsa_keys.remove(0)));
-        }
-
-        Err(Error::TlsCertificateError(format!("No private key found in {}", path)))
     }
 
     impl TlsTransport {
@@ -117,9 +106,8 @@ mod tls_impl {
 
             // Build server TLS config
             let server_config = ServerConfig::builder()
-                .with_safe_defaults()
                 .with_no_client_auth()
-                .with_single_cert(certs.clone(), key.clone())
+                .with_single_cert(certs.clone(), key.clone_key())
                 .map_err(|e| Error::TlsCertificateError(format!("Invalid server TLS config: {}", e)))?;
 
             let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
@@ -129,13 +117,12 @@ mod tls_impl {
             let mut root_store = rustls::RootCertStore::empty();
             // Add the server's own cert so it can talk to peers using the same cert
             for cert in &certs {
-                let _ = root_store.add(cert);
+                let _ = root_store.add(cert.clone());
             }
 
             let client_config = ClientConfig::builder()
-                .with_safe_defaults()
                 .with_root_certificates(root_store)
-                .with_single_cert(certs, key)
+                .with_client_auth_cert(certs, key)
                 .map_err(|e| Error::TlsCertificateError(format!("Invalid client TLS config: {}", e)))?;
 
             let tls_connector = TlsConnector::from(Arc::new(client_config));
@@ -272,7 +259,7 @@ mod tls_impl {
         /// Connects to a remote address using TLS
         async fn connect_to(&self, addr: SocketAddr) -> Result<Arc<TlsConnection>> {
             // Build a ServerName from the IP address (use DNS name in production)
-            let server_name = rustls::ServerName::IpAddress(addr.ip());
+            let server_name = ServerName::IpAddress(addr.ip().into());
 
             debug!("Creating new TLS connection to {}", addr);
             let connection = TlsConnection::connect(

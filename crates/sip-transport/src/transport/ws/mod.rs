@@ -23,6 +23,8 @@ use tokio_tungstenite::client_async;
 use tokio_tungstenite::tungstenite::handshake::client::Request as WsRequest;
 #[cfg(all(feature = "ws", feature = "tls"))]
 use tokio_rustls::TlsConnector;
+#[cfg(all(feature = "ws", feature = "tls"))]
+use rustls_pki_types::ServerName;
 
 use rvoip_sip_core::Message;
 use crate::error::{Error, Result};
@@ -263,14 +265,13 @@ impl WebSocketTransport {
                 // certs will be rejected unless the verifier is overridden.
 
                 let tls_config = rustls::ClientConfig::builder()
-                    .with_safe_defaults()
                     .with_root_certificates(root_store)
                     .with_no_client_auth();
 
                 let connector = TlsConnector::from(Arc::new(tls_config));
 
                 // Derive a ServerName from the IP address (use DNS name in production)
-                let server_name = rustls::ServerName::IpAddress(addr.ip());
+                let server_name = ServerName::IpAddress(addr.ip().into());
 
                 let tls_stream = connector
                     .connect(server_name, tcp_stream)
