@@ -21,6 +21,8 @@ pub use transport::udp::UdpTransport;
 pub use transport::tcp::TcpTransport;
 pub use transport::tls::TlsTransport;
 pub use transport::ws::WebSocketTransport;
+#[cfg(feature = "sctp")]
+pub use transport::sctp::SctpTransport;
 
 // Simplified helper functions
 /// Bind a UDP transport to the specified address
@@ -43,4 +45,6 @@ pub mod prelude {
         manager::TransportManager,
         events::TransportEventAdapter,
     };
+    #[cfg(feature = "sctp")]
+    pub use crate::SctpTransport;
 } 

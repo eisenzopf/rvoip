@@ -26,3 +26,6 @@ serial_test = { workspace = true }
 uuid = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+
+[features]
+sctp = ["rvoip-sip-transport/sctp"]
