@@ -522,7 +522,7 @@ impl DtlsConnection {
                                                     tracing::debug!("Updated cipher state, new epoch: {}, sequence number reset to 0", self.epoch);
                                                 },
                                                 super::record::ContentType::Alert => {
-                                                    tracing::warn!("Received Alert (not implemented yet)");
+                                                    tracing::warn!("Received Alert during handshake (pre-completion)");
                                                 },
                                                 _ => {
                                                     tracing::debug!("Ignoring record type: {:?}", record.header.content_type);
@@ -836,10 +836,77 @@ impl DtlsConnection {
         Ok(())
     }
     
-    /// Process an alert record
+    /// Process an alert record (RFC 5246 section 7.2).
+    ///
+    /// An alert message is exactly 2 bytes: level (1=warning, 2=fatal) and
+    /// description (0-255).
     async fn process_alert_record(&mut self, data: &[u8]) -> Result<()> {
-        // This would parse and handle alerts
-        Err(crate::error::Error::NotImplemented("Alert record processing not yet implemented".to_string()))
+        if data.len() < 2 {
+            return Err(crate::error::Error::InvalidPacket(
+                format!("Alert record too short: {} bytes (need 2)", data.len()),
+            ));
+        }
+
+        let level = data[0];
+        let description = data[1];
+
+        let level_str = match level {
+            1 => "warning",
+            2 => "fatal",
+            _ => "unknown",
+        };
+
+        let desc_str = match description {
+            0 => "close_notify",
+            10 => "unexpected_message",
+            20 => "bad_record_mac",
+            21 => "decryption_failed",
+            22 => "record_overflow",
+            30 => "decompression_failure",
+            40 => "handshake_failure",
+            42 => "bad_certificate",
+            43 => "unsupported_certificate",
+            44 => "certificate_revoked",
+            45 => "certificate_expired",
+            46 => "certificate_unknown",
+            47 => "illegal_parameter",
+            48 => "unknown_ca",
+            49 => "access_denied",
+            50 => "decode_error",
+            51 => "decrypt_error",
+            70 => "protocol_version",
+            71 => "insufficient_security",
+            80 => "internal_error",
+            90 => "user_canceled",
+            100 => "no_renegotiation",
+            110 => "unsupported_extension",
+            _ => "unknown",
+        };
+
+        tracing::warn!(
+            level = level_str,
+            description = desc_str,
+            level_code = level,
+            description_code = description,
+            "Received DTLS alert"
+        );
+
+        // close_notify is a graceful shutdown
+        if description == 0 {
+            self.state = ConnectionState::Closing;
+            return Ok(());
+        }
+
+        // Fatal alerts terminate the connection
+        if level == 2 {
+            self.state = ConnectionState::Failed;
+            return Err(crate::error::Error::DtlsAlertReceived(
+                format!("Fatal alert: {} ({})", desc_str, description),
+            ));
+        }
+
+        // Warning alerts are logged but do not terminate the connection
+        Ok(())
     }
     
     /// Process an application data record

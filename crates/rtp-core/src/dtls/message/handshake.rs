@@ -259,11 +259,54 @@ impl HandshakeMessage {
                 let serialized = msg.serialize()?;
                 buf.extend_from_slice(&serialized);
             }
-            // Add other message types as needed
-            _ => {
-                return Err(crate::error::Error::NotImplemented(
-                    format!("Serialization for {:?} not yet implemented", self.message_type())
-                ));
+            Self::Certificate(msg) => {
+                // RFC 5246 section 7.4.2: certificate list with 3-byte total
+                // length prefix, each certificate preceded by 3-byte length.
+                let mut certs_buf = BytesMut::new();
+                for cert in &msg.certificates {
+                    let len = cert.len();
+                    certs_buf.put_u8((len >> 16) as u8);
+                    certs_buf.put_u8((len >> 8) as u8);
+                    certs_buf.put_u8(len as u8);
+                    certs_buf.extend_from_slice(cert);
+                }
+                let total = certs_buf.len();
+                buf.put_u8((total >> 16) as u8);
+                buf.put_u8((total >> 8) as u8);
+                buf.put_u8(total as u8);
+                buf.extend_from_slice(&certs_buf);
+            }
+            Self::CertificateRequest(msg) => {
+                // Certificate types length + types
+                buf.put_u8(msg.certificate_types.len() as u8);
+                for ct in &msg.certificate_types {
+                    buf.put_u8(*ct);
+                }
+                // Signature algorithms length (2 bytes) + algorithms (2 bytes each)
+                let sig_len = (msg.signature_algorithms.len() * 2) as u16;
+                buf.put_u16(sig_len);
+                for sa in &msg.signature_algorithms {
+                    buf.put_u16(*sa);
+                }
+                // Distinguished names length (2 bytes) + names
+                let mut names_buf = BytesMut::new();
+                for name in &msg.ca_names {
+                    names_buf.put_u16(name.len() as u16);
+                    names_buf.extend_from_slice(name);
+                }
+                buf.put_u16(names_buf.len() as u16);
+                buf.extend_from_slice(&names_buf);
+            }
+            Self::ServerHelloDone(_) => {
+                // ServerHelloDone has no body (RFC 5246 section 7.4.5)
+            }
+            Self::CertificateVerify(msg) => {
+                // Signature algorithm (2 bytes, TLS 1.2+) + signature length (2 bytes) + signature
+                if let Some(alg) = msg.algorithm {
+                    buf.put_u16(alg);
+                }
+                buf.put_u16(msg.signature.len() as u16);
+                buf.extend_from_slice(&msg.signature);
             }
         }
         
@@ -297,10 +340,103 @@ impl HandshakeMessage {
                 let finished = Finished::parse(data)?;
                 Ok(Self::Finished(finished))
             }
-            // Add other message types as needed
+            HandshakeType::Certificate => {
+                // RFC 5246 section 7.4.2: 3-byte total length, then each cert
+                // has a 3-byte length prefix.
+                if data.len() < 3 {
+                    return Err(crate::error::Error::PacketTooShort);
+                }
+                let total_len = ((data[0] as usize) << 16)
+                    | ((data[1] as usize) << 8)
+                    | (data[2] as usize);
+                let mut offset = 3;
+                let end = 3 + total_len;
+                if data.len() < end {
+                    return Err(crate::error::Error::PacketTooShort);
+                }
+                let mut certificates = Vec::new();
+                while offset + 3 <= end {
+                    let cert_len = ((data[offset] as usize) << 16)
+                        | ((data[offset + 1] as usize) << 8)
+                        | (data[offset + 2] as usize);
+                    offset += 3;
+                    if offset + cert_len > end {
+                        return Err(crate::error::Error::PacketTooShort);
+                    }
+                    certificates.push(Bytes::copy_from_slice(&data[offset..offset + cert_len]));
+                    offset += cert_len;
+                }
+                Ok(Self::Certificate(Certificate { certificates }))
+            }
+            HandshakeType::CertificateRequest => {
+                if data.is_empty() {
+                    return Err(crate::error::Error::PacketTooShort);
+                }
+                let mut cursor = Cursor::new(data);
+                // Certificate types
+                let types_len = cursor.get_u8() as usize;
+                if data.len() < 1 + types_len + 2 {
+                    return Err(crate::error::Error::PacketTooShort);
+                }
+                let mut certificate_types = Vec::with_capacity(types_len);
+                for _ in 0..types_len {
+                    certificate_types.push(cursor.get_u8());
+                }
+                // Signature algorithms
+                let sig_len = cursor.get_u16() as usize;
+                let mut signature_algorithms = Vec::with_capacity(sig_len / 2);
+                let mut read = 0;
+                while read + 2 <= sig_len {
+                    signature_algorithms.push(cursor.get_u16());
+                    read += 2;
+                }
+                // Distinguished names
+                let mut ca_names = Vec::new();
+                if cursor.position() + 2 <= data.len() as u64 {
+                    let names_len = cursor.get_u16() as usize;
+                    let names_end = cursor.position() as usize + names_len;
+                    while (cursor.position() as usize) + 2 <= names_end {
+                        let name_len = cursor.get_u16() as usize;
+                        if cursor.position() as usize + name_len > names_end {
+                            break;
+                        }
+                        let mut name = vec![0u8; name_len];
+                        cursor.copy_to_slice(&mut name);
+                        ca_names.push(Bytes::from(name));
+                    }
+                }
+                Ok(Self::CertificateRequest(CertificateRequest {
+                    certificate_types,
+                    signature_algorithms,
+                    ca_names,
+                }))
+            }
+            HandshakeType::ServerHelloDone => {
+                // ServerHelloDone has an empty body
+                Ok(Self::ServerHelloDone(ServerHelloDone {}))
+            }
+            HandshakeType::CertificateVerify => {
+                if data.len() < 4 {
+                    return Err(crate::error::Error::PacketTooShort);
+                }
+                let mut cursor = Cursor::new(data);
+                let algorithm = Some(cursor.get_u16());
+                let sig_len = cursor.get_u16() as usize;
+                if data.len() < 4 + sig_len {
+                    return Err(crate::error::Error::PacketTooShort);
+                }
+                let mut sig = vec![0u8; sig_len];
+                cursor.copy_to_slice(&mut sig);
+                Ok(Self::CertificateVerify(CertificateVerify {
+                    algorithm,
+                    signature: Bytes::from(sig),
+                }))
+            }
             _ => {
-                Err(crate::error::Error::NotImplemented(
-                    format!("Parsing for {:?} not yet implemented", msg_type)
+                // Skip unknown/unsupported handshake types gracefully
+                tracing::warn!("Unsupported handshake type: {:?} ({} bytes payload)", msg_type, data.len());
+                Err(crate::error::Error::UnsupportedFeature(
+                    format!("Handshake type {:?} is not supported", msg_type)
                 ))
             }
         }

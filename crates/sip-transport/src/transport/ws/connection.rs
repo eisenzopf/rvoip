@@ -33,6 +33,8 @@ pub struct WebSocketConnection {
     ws_writer: Mutex<SplitSink<WebSocketStream<WsStream>, WsMessage>>,
     /// The peer's address
     peer_addr: SocketAddr,
+    /// The local address (if known)
+    local_addr: Option<SocketAddr>,
     /// Whether the connection is closed
     closed: AtomicBool,
     /// Whether this is a secure WebSocket connection
@@ -46,13 +48,33 @@ impl WebSocketConnection {
     #[cfg(feature = "ws")]
     pub fn from_writer(
         ws_writer: SplitSink<WebSocketStream<WsStream>, WsMessage>,
-        peer_addr: SocketAddr, 
+        peer_addr: SocketAddr,
         secure: bool,
         subprotocol: String,
     ) -> Self {
         Self {
             ws_writer: Mutex::new(ws_writer),
             peer_addr,
+            local_addr: None,
+            closed: AtomicBool::new(false),
+            secure,
+            subprotocol,
+        }
+    }
+
+    /// Creates a WebSocket connection from an existing WebSocket stream with a known local address
+    #[cfg(feature = "ws")]
+    pub fn from_writer_with_local_addr(
+        ws_writer: SplitSink<WebSocketStream<WsStream>, WsMessage>,
+        peer_addr: SocketAddr,
+        local_addr: SocketAddr,
+        secure: bool,
+        subprotocol: String,
+    ) -> Self {
+        Self {
+            ws_writer: Mutex::new(ws_writer),
+            peer_addr,
+            local_addr: Some(local_addr),
             closed: AtomicBool::new(false),
             secure,
             subprotocol,
@@ -66,9 +88,9 @@ impl WebSocketConnection {
     
     /// Returns the local address of the connection
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        // WebSocket connections don't directly expose the local address
-        // Would need to be tracked separately when the connection is created
-        Err(Error::NotImplemented("Getting local address from WebSocket connection".into()))
+        self.local_addr.ok_or_else(|| Error::NotImplemented(
+            "Local address not available for this WebSocket connection".into(),
+        ))
     }
     
     /// Returns whether this is a secure connection
@@ -209,12 +231,13 @@ impl WebSocketConnection {
     /// Creates a WebSocket connection from an existing WebSocket stream
     pub fn from_writer(
         _writer: (),
-        peer_addr: SocketAddr, 
+        peer_addr: SocketAddr,
         secure: bool,
         subprotocol: String,
     ) -> Self {
         Self {
             peer_addr,
+            local_addr: None,
             closed: AtomicBool::new(false),
             secure,
             subprotocol,
@@ -255,16 +278,18 @@ mod tests {
     #[cfg(feature = "ws")]
     struct TestWebSocketConnection {
         peer_addr: SocketAddr,
+        local_addr: Option<SocketAddr>,
         closed: AtomicBool,
         secure: bool,
         subprotocol: String,
     }
-    
+
     #[cfg(feature = "ws")]
     impl TestWebSocketConnection {
         fn new(addr: SocketAddr, secure: bool, subprotocol: String) -> Self {
             Self {
                 peer_addr: addr,
+                local_addr: None,
                 closed: AtomicBool::new(false),
                 secure,
                 subprotocol,
@@ -292,7 +317,9 @@ mod tests {
         }
         
         fn local_addr(&self) -> Result<SocketAddr> {
-            Err(Error::NotImplemented("Getting local address from WebSocket connection".into()))
+            self.local_addr.ok_or_else(|| Error::NotImplemented(
+                "Local address not available for this WebSocket connection".into(),
+            ))
         }
         
         fn process_ws_message(&self, ws_message: WsMessage) -> Result<Option<Message>> {

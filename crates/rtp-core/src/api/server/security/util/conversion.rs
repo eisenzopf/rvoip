@@ -98,19 +98,26 @@ pub fn security_context_to_string(
 }
 
 /// Convert API SrtpProfile array to internal SrtpCryptoSuite array
-pub fn convert_srtp_profiles(profiles: &[SrtpProfile]) -> Vec<crate::srtp::SrtpCryptoSuite> {
-    // This function will be fully implemented in Phase 6
-    todo!("Implement convert_srtp_profiles in Phase 6")
+pub fn convert_srtp_profiles(profiles: &[SrtpProfile]) -> Vec<SrtpCryptoSuite> {
+    profiles.iter().map(|p| match p {
+        SrtpProfile::AesCm128HmacSha1_80 => crate::srtp::SRTP_AES128_CM_SHA1_80,
+        SrtpProfile::AesCm128HmacSha1_32 => crate::srtp::SRTP_AES128_CM_SHA1_32,
+        SrtpProfile::AesGcm128 => crate::srtp::SRTP_AEAD_AES_128_GCM,
+        SrtpProfile::AesGcm256 => crate::srtp::SRTP_AEAD_AES_256_GCM,
+    }).collect()
 }
 
 /// Convert SrtpProfile to string
 pub fn srtp_profile_to_string(profile: SrtpProfile) -> String {
-    // This function will be fully implemented in Phase 6
-    todo!("Implement srtp_profile_to_string in Phase 6")
+    match profile {
+        SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80".to_string(),
+        SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32".to_string(),
+        SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM".to_string(),
+        SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM".to_string(),
+    }
 }
 
 /// Get crypto suites as strings
 pub fn get_crypto_suite_strings(profiles: &[SrtpProfile]) -> Vec<String> {
-    // This function will be fully implemented in Phase 6
-    todo!("Implement get_crypto_suite_strings in Phase 6")
+    profiles.iter().map(|p| srtp_profile_to_string(*p)).collect()
 } 

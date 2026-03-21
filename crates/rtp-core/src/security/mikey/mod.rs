@@ -142,6 +142,10 @@ pub struct Mikey {
     generated_tek: Option<Vec<u8>>,
     /// Generated salt for PKE mode
     generated_salt: Option<Vec<u8>>,
+    /// DH ephemeral private key (ECDH with P-256, RFC 3830 §4.2)
+    dh_private_key: Option<p256::ecdh::EphemeralSecret>,
+    /// Our DH public key bytes (SEC1 uncompressed encoding)
+    dh_public_key: Option<Vec<u8>>,
 }
 
 impl Mikey {
@@ -157,6 +161,8 @@ impl Mikey {
             srtp_suite: None,
             generated_tek: None,
             generated_salt: None,
+            dh_private_key: None,
+            dh_public_key: None,
         }
     }
     
@@ -738,6 +744,213 @@ impl Mikey {
         
         Ok(())
     }
+
+    // ─── MIKEY-DH Mode (RFC 3830 §4.2, using ECDH with P-256) ────────────
+
+    /// Create the DH initial message (I_MESSAGE for DH mode)
+    ///
+    /// Generates an ephemeral ECDH keypair (P-256), includes the public key
+    /// in the MIKEY message, and transitions to WaitingForResponse.
+    fn create_initial_message_dh(&mut self) -> Result<Vec<u8>, Error> {
+        if self.role != MikeyRole::Initiator {
+            return Err(Error::InvalidState("Only initiator can create DH initial message".into()));
+        }
+
+        // Generate ephemeral ECDH keypair
+        let secret = p256::ecdh::EphemeralSecret::random(&mut OsRng);
+        let public_key = p256::EncodedPoint::from(secret.public_key());
+        let pub_bytes = public_key.as_bytes().to_vec();
+        self.dh_public_key = Some(pub_bytes.clone());
+        self.dh_private_key = Some(secret);
+
+        // Generate random nonce for initiator
+        let mut rand_i = vec![0u8; 16];
+        OsRng.fill_bytes(&mut rand_i);
+        self.rand_i = Some(rand_i.clone());
+
+        // Build MIKEY message
+        let mut message = MikeyMessage::new(MikeyMessageType::InitiatorMessage);
+
+        let common_header = CommonHeader {
+            version: 1,
+            data_type: 2, // DH I_MESSAGE
+            next_payload: PayloadType::KeyData as u8,
+            v_flag: false,
+            prf_func: 1,
+            csp_id: 0,
+            cs_count: 1,
+            cs_id_map_type: 0,
+        };
+        message.add_common_header(common_header);
+
+        // Timestamp
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        message.add_timestamp(timestamp);
+
+        // Add our DH public key as a PublicKeyPayload
+        let pk_payload = PublicKeyPayload {
+            key_algorithm: PublicKeyAlgorithm::EcdsaP256,
+            key_data: pub_bytes,
+            key_params: None,
+        };
+        message.add_public_key(pk_payload);
+
+        // Add random nonce
+        message.add_rand(rand_i);
+
+        // Security policy
+        let security_policy = SecurityPolicyPayload {
+            policy_no: 0,
+            policy_type: 0,
+            policy_param: vec![
+                0x00, 0x01, 0x00, 0x01, // AES-CM-128
+                0x00, 0x02, 0x00, 0x01, // HMAC-SHA1-80
+            ],
+        };
+        message.add_security_policy(security_policy);
+
+        self.state = MikeyState::WaitingForResponse;
+
+        Ok(message.to_bytes())
+    }
+
+    /// Process a DH response message (initiator side)
+    ///
+    /// Extracts the peer's DH public key, computes the shared secret,
+    /// derives SRTP key material, and completes the exchange.
+    fn process_response_message_dh(&mut self, message_data: &[u8]) -> Result<(), Error> {
+        if self.role != MikeyRole::Initiator {
+            return Err(Error::InvalidState("Only initiator can process DH response".into()));
+        }
+
+        let message = MikeyMessage::parse(message_data)
+            .map_err(|_| Error::ParseError("Failed to parse MIKEY DH response".into()))?;
+
+        if message.message_type != MikeyMessageType::ResponderMessage {
+            return Err(Error::InvalidMessage("Expected DH R_MESSAGE".into()));
+        }
+
+        // Extract peer DH public key
+        let peer_pk = message.get_public_key()
+            .ok_or_else(|| Error::InvalidMessage("DH public key missing in response".into()))?;
+
+        // Compute ECDH shared secret
+        let (tek, salt) = self.compute_dh_shared_secret(&peer_pk.key_data)?;
+
+        self.srtp_key = Some(SrtpCryptoKey::new(tek, salt));
+        self.srtp_suite = Some(self.config.srtp_profile.clone());
+        self.state = MikeyState::Completed;
+
+        Ok(())
+    }
+
+    /// Process a DH initial message (responder side)
+    ///
+    /// Generates our own ephemeral ECDH keypair, computes the shared secret
+    /// from the initiator's public key, and returns a response message.
+    fn process_initial_message_dh(&mut self, message_data: &[u8]) -> Result<Vec<u8>, Error> {
+        if self.role != MikeyRole::Responder {
+            return Err(Error::InvalidState("Only responder can process DH initial message".into()));
+        }
+
+        let message = MikeyMessage::parse(message_data)
+            .map_err(|_| Error::ParseError("Failed to parse MIKEY DH initial message".into()))?;
+
+        if message.message_type != MikeyMessageType::InitiatorMessage {
+            return Err(Error::InvalidMessage("Expected DH I_MESSAGE".into()));
+        }
+
+        // Extract initiator's DH public key
+        let peer_pk = message.get_public_key()
+            .ok_or_else(|| Error::InvalidMessage("DH public key missing in initial message".into()))?;
+
+        // Generate our ephemeral keypair
+        let secret = p256::ecdh::EphemeralSecret::random(&mut OsRng);
+        let public_key = p256::EncodedPoint::from(secret.public_key());
+        let pub_bytes = public_key.as_bytes().to_vec();
+        self.dh_public_key = Some(pub_bytes.clone());
+        self.dh_private_key = Some(secret);
+
+        // Compute shared secret and derive SRTP keys
+        let (tek, salt) = self.compute_dh_shared_secret(&peer_pk.key_data)?;
+
+        self.srtp_key = Some(SrtpCryptoKey::new(tek, salt));
+        self.srtp_suite = Some(self.config.srtp_profile.clone());
+
+        // Build response message with our public key
+        let mut response = MikeyMessage::new(MikeyMessageType::ResponderMessage);
+
+        let common_header = CommonHeader {
+            version: 1,
+            data_type: 3, // DH R_MESSAGE
+            next_payload: PayloadType::KeyData as u8,
+            v_flag: false,
+            prf_func: 1,
+            csp_id: 0,
+            cs_count: 1,
+            cs_id_map_type: 0,
+        };
+        response.add_common_header(common_header);
+
+        // Random nonce
+        let mut rand_r = vec![0u8; 16];
+        OsRng.fill_bytes(&mut rand_r);
+        self.rand_r = Some(rand_r.clone());
+        response.add_rand(rand_r);
+
+        // Timestamp echo
+        if let Some(ts) = message.get_timestamp() {
+            response.add_timestamp(*ts);
+        }
+
+        // Our DH public key
+        let pk_payload = PublicKeyPayload {
+            key_algorithm: PublicKeyAlgorithm::EcdsaP256,
+            key_data: pub_bytes,
+            key_params: None,
+        };
+        response.add_public_key(pk_payload);
+
+        self.state = MikeyState::Completed;
+
+        Ok(response.to_bytes())
+    }
+
+    /// Compute the ECDH shared secret and derive SRTP key material (TEK + salt)
+    fn compute_dh_shared_secret(&mut self, peer_public_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Error> {
+        // Take ownership of our private key (consumed by diffie_hellman)
+        let our_secret = self.dh_private_key.take()
+            .ok_or_else(|| Error::CryptoError("DH private key not available".into()))?;
+
+        // Decode the peer's public key from SEC1 encoding
+        let peer_public = p256::PublicKey::from_sec1_bytes(peer_public_bytes)
+            .map_err(|_| Error::CryptoError("Invalid peer DH public key".into()))?;
+
+        // Perform ECDH key agreement
+        let shared_secret = our_secret.diffie_hellman(&peer_public);
+
+        // Derive TEK + salt from the shared secret using HKDF-like construction:
+        // TEK = first 16 bytes of HMAC-SHA256(shared_secret, "MIKEY-DH-TEK")
+        // Salt = first 14 bytes of HMAC-SHA256(shared_secret, "MIKEY-DH-SALT")
+        let ss_bytes = shared_secret.raw_secret_bytes();
+
+        let mut tek_mac = Hmac::<Sha256>::new_from_slice(ss_bytes)
+            .map_err(|_| Error::CryptoError("Failed to create HMAC for TEK derivation".into()))?;
+        tek_mac.update(b"MIKEY-DH-TEK");
+        let tek_hash = tek_mac.finalize().into_bytes();
+        let tek = tek_hash[..16].to_vec();
+
+        let mut salt_mac = Hmac::<Sha256>::new_from_slice(ss_bytes)
+            .map_err(|_| Error::CryptoError("Failed to create HMAC for salt derivation".into()))?;
+        salt_mac.update(b"MIKEY-DH-SALT");
+        let salt_hash = salt_mac.finalize().into_bytes();
+        let salt = salt_hash[..14].to_vec();
+
+        Ok((tek, salt))
+    }
 }
 
 impl SecurityKeyExchange for Mikey {
@@ -753,7 +966,7 @@ impl SecurityKeyExchange for Mikey {
                         let _ = self.create_initial_message_pke()?;
                     },
                     MikeyKeyExchangeMethod::Dh => {
-                        return Err(Error::NotImplemented("MIKEY-DH not yet implemented".into()));
+                        let _ = self.create_initial_message_dh()?;
                     },
                 }
                 Ok(())
@@ -761,7 +974,7 @@ impl SecurityKeyExchange for Mikey {
             MikeyRole::Responder => Ok(()),
         }
     }
-    
+
     fn process_message(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, Error> {
         match (self.role, &self.state, self.config.method) {
             // PSK Mode
@@ -775,7 +988,7 @@ impl SecurityKeyExchange for Mikey {
                 let response = self.process_initial_message(message)?;
                 Ok(Some(response))
             },
-            
+
             // PKE Mode
             (MikeyRole::Initiator, MikeyState::WaitingForResponse, MikeyKeyExchangeMethod::Pk) => {
                 // Initiator processes PKE response message
@@ -787,12 +1000,19 @@ impl SecurityKeyExchange for Mikey {
                 let response = self.process_initial_message_pke(message)?;
                 Ok(Some(response))
             },
-            
-            // DH Mode (not implemented)
-            (_, _, MikeyKeyExchangeMethod::Dh) => {
-                Err(Error::NotImplemented("MIKEY-DH not yet implemented".into()))
+
+            // DH Mode
+            (MikeyRole::Initiator, MikeyState::WaitingForResponse, MikeyKeyExchangeMethod::Dh) => {
+                // Initiator processes DH response
+                self.process_response_message_dh(message)?;
+                Ok(None)
             },
-            
+            (MikeyRole::Responder, MikeyState::Initial, MikeyKeyExchangeMethod::Dh) => {
+                // Responder processes DH initial message and creates response
+                let response = self.process_initial_message_dh(message)?;
+                Ok(Some(response))
+            },
+
             _ => Err(Error::InvalidState("Invalid state for message processing".into())),
         }
     }
