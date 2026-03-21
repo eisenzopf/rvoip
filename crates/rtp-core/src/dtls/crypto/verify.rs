@@ -460,24 +460,29 @@ impl FingerprintVerifier {
 
 /// Generate a self-signed certificate for testing
 pub fn generate_self_signed_certificate() -> Result<Certificate> {
-    use rcgen::{Certificate as RcGenCertificate, CertificateParams, PKCS_ECDSA_P256_SHA256};
-    
+    use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
+
     // Create certificate parameters
-    let mut params = CertificateParams::new(vec!["localhost".to_string()]);
-    params.alg = &PKCS_ECDSA_P256_SHA256;
-    
-    // Generate the certificate
-    let cert = RcGenCertificate::from_params(params)
+    let params = CertificateParams::new(vec!["localhost".to_string()])
+        .map_err(|e| crate::error::Error::CertificateValidationError(
+            format!("Failed to create certificate params: {}", e)
+        ))?;
+
+    // Generate a key pair
+    let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
+        .map_err(|e| crate::error::Error::CertificateValidationError(
+            format!("Failed to generate key pair: {}", e)
+        ))?;
+
+    // Generate the self-signed certificate
+    let cert = params.self_signed(&key_pair)
         .map_err(|e| crate::error::Error::CertificateValidationError(
             format!("Failed to generate certificate: {}", e)
         ))?;
-    
+
     // Get the DER-encoded certificate
-    let der = cert.serialize_der()
-        .map_err(|e| crate::error::Error::CertificateValidationError(
-            format!("Failed to serialize certificate: {}", e)
-        ))?;
-    
+    let der = cert.der().to_vec();
+
     // Create a Certificate from the DER data
     Ok(Certificate::new(Bytes::from(der)))
 }

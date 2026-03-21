@@ -115,7 +115,7 @@ impl WebSocketConnection {
         
         // In WebSocket, we send the raw SIP message as text content
         // RFC 7118 section 7: SIP WebSocket Client and Server Examples
-        let ws_message = WsMessage::Text(String::from_utf8_lossy(&message_bytes).to_string());
+        let ws_message = WsMessage::Text(String::from_utf8_lossy(&message_bytes).to_string().into());
         
         // Acquire lock on the writer
         let mut writer = self.ws_writer.lock().await;

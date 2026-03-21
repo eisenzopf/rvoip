@@ -6,7 +6,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-use rcgen::{Certificate, CertificateParams, PKCS_ECDSA_P256_SHA256};
+use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
 use rvoip_rtp_core::dtls::crypto::verify::generate_self_signed_certificate;
 
 #[tokio::main]
@@ -16,45 +16,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Generate server certificate using rcgen directly
     println!("Generating server certificate...");
-    let mut params = CertificateParams::new(vec!["localhost".to_string()]);
-    params.alg = &PKCS_ECDSA_P256_SHA256;
+    let mut params = CertificateParams::new(vec!["localhost".to_string()])?;
     params.distinguished_name.push(rcgen::DnType::OrganizationName, "RVOIP Test Server");
     params.distinguished_name.push(rcgen::DnType::CommonName, "server.rvoip.test");
-    
-    let server_cert = Certificate::from_params(params)?;
-    
+
+    let server_key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+    let server_cert = params.self_signed(&server_key_pair)?;
+
     // Save server certificate and private key
     let server_cert_path = "server-cert.pem";
     let server_key_path = "server-key.pem";
-    
+
     // Save PEM files
     let mut cert_file = File::create(server_cert_path)?;
-    cert_file.write_all(server_cert.serialize_pem()?.as_bytes())?;
-    
+    cert_file.write_all(server_cert.pem().as_bytes())?;
+
     let mut key_file = File::create(server_key_path)?;
-    key_file.write_all(server_cert.serialize_private_key_pem().as_bytes())?;
-    
+    key_file.write_all(server_key_pair.serialize_pem().as_bytes())?;
+
     println!("Saved server certificate to {} and private key to {}", server_cert_path, server_key_path);
-    
+
     // Generate client certificate using rcgen
     println!("Generating client certificate...");
-    let mut params = CertificateParams::new(vec!["localhost".to_string()]);
-    params.alg = &PKCS_ECDSA_P256_SHA256;
+    let mut params = CertificateParams::new(vec!["localhost".to_string()])?;
     params.distinguished_name.push(rcgen::DnType::OrganizationName, "RVOIP Test Client");
     params.distinguished_name.push(rcgen::DnType::CommonName, "client.rvoip.test");
-    
-    let client_cert = Certificate::from_params(params)?;
-    
+
+    let client_key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+    let client_cert = params.self_signed(&client_key_pair)?;
+
     // Save client certificate and private key
     let client_cert_path = "client-cert.pem";
     let client_key_path = "client-key.pem";
-    
+
     // Save PEM files
     let mut cert_file = File::create(client_cert_path)?;
-    cert_file.write_all(client_cert.serialize_pem()?.as_bytes())?;
-    
+    cert_file.write_all(client_cert.pem().as_bytes())?;
+
     let mut key_file = File::create(client_key_path)?;
-    key_file.write_all(client_cert.serialize_private_key_pem().as_bytes())?;
+    key_file.write_all(client_key_pair.serialize_pem().as_bytes())?;
     
     println!("Saved client certificate to {} and private key to {}", client_cert_path, client_key_path);
     

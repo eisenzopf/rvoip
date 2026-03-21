@@ -33,44 +33,30 @@ pub struct WebSocketListener {
 
 /// Loads PEM certificates from a file path.
 #[cfg(feature = "tls")]
-fn load_certs(path: &str) -> Result<Vec<rustls::Certificate>> {
+fn load_certs(path: &str) -> Result<Vec<rustls_pki_types::CertificateDer<'static>>> {
     let file = std::fs::File::open(path)
         .map_err(|e| Error::TlsCertificateError(format!("Cannot open cert file {}: {}", path, e)))?;
     let mut reader = std::io::BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs: Vec<rustls_pki_types::CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::TlsCertificateError(format!("Failed to parse certs from {}: {}", path, e)))?;
-    Ok(certs.into_iter().map(rustls::Certificate).collect())
+    Ok(certs)
 }
 
 /// Loads a PEM private key from a file path.
-/// Tries PKCS8 first, then RSA keys.
+/// Tries all key formats via rustls_pemfile::private_key.
 #[cfg(feature = "tls")]
-fn load_private_key(path: &str) -> Result<rustls::PrivateKey> {
+fn load_private_key(path: &str) -> Result<rustls_pki_types::PrivateKeyDer<'static>> {
     let file = std::fs::File::open(path)
         .map_err(|e| Error::TlsCertificateError(format!("Cannot open key file {}: {}", path, e)))?;
     let mut reader = std::io::BufReader::new(file);
 
-    // Try PKCS8 keys first
-    let mut keys = rustls_pemfile::pkcs8_private_keys(&mut reader)
-        .map_err(|e| Error::TlsCertificateError(format!("Failed to parse PKCS8 keys from {}: {}", path, e)))?;
-
-    if !keys.is_empty() {
-        return Ok(rustls::PrivateKey(keys.remove(0)));
+    match rustls_pemfile::private_key(&mut reader)
+        .map_err(|e| Error::TlsCertificateError(format!("Failed to parse private key from {}: {}", path, e)))?
+    {
+        Some(key) => Ok(key),
+        None => Err(Error::TlsCertificateError(format!("No private key found in {}", path))),
     }
-
-    // Re-read file for RSA keys
-    let file = std::fs::File::open(path)
-        .map_err(|e| Error::TlsCertificateError(format!("Cannot re-open key file {}: {}", path, e)))?;
-    let mut reader = std::io::BufReader::new(file);
-
-    let mut rsa_keys = rustls_pemfile::rsa_private_keys(&mut reader)
-        .map_err(|e| Error::TlsCertificateError(format!("Failed to parse RSA keys from {}: {}", path, e)))?;
-
-    if !rsa_keys.is_empty() {
-        return Ok(rustls::PrivateKey(rsa_keys.remove(0)));
-    }
-
-    Err(Error::TlsCertificateError(format!("No private key found in {}", path)))
 }
 
 impl WebSocketListener {
@@ -95,7 +81,6 @@ impl WebSocketListener {
             let private_key = load_private_key(key)?;
 
             let server_config = rustls::ServerConfig::builder()
-                .with_safe_defaults()
                 .with_no_client_auth()
                 .with_single_cert(certs, private_key)
                 .map_err(|e| Error::TlsCertificateError(format!("Invalid TLS config for WSS: {}", e)))?;

@@ -4,7 +4,8 @@
 //! including certificate generation, key pair management, and enterprise PKI support.
 
 use crate::Error;
-use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_RSA_SHA256};
+use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_RSA_SHA256};
+use rustls_pki_types::PrivatePkcs8KeyDer;
 use rsa::{RsaPrivateKey, RsaPublicKey, pkcs8::EncodePrivateKey, pkcs1::EncodeRsaPublicKey};
 use rand::rngs::OsRng;
 use std::time::{Duration, SystemTime};
@@ -119,7 +120,7 @@ pub fn generate_key_pair_and_certificate(config: CertificateConfig) -> Result<Mi
     
     // Create certificate parameters
     let mut params = CertificateParams::default();
-    
+
     // Set distinguished name
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, config.common_name);
@@ -129,26 +130,22 @@ pub fn generate_key_pair_and_certificate(config: CertificateConfig) -> Result<Mi
     dn.push(DnType::StateOrProvinceName, config.state);
     dn.push(DnType::LocalityName, config.locality);
     params.distinguished_name = dn;
-    
+
     // Set validity period (convert SystemTime to OffsetDateTime)
     params.not_before = OffsetDateTime::from(SystemTime::now());
     params.not_after = OffsetDateTime::from(SystemTime::now() + config.validity_duration);
-    
-    // Set algorithm
-    params.alg = &PKCS_RSA_SHA256;
-    
-    // Use the generated key pair
-    let key_pair = KeyPair::from_der(&private_key_der.as_bytes())
+
+    // Use the generated key pair with RSA-SHA256 algorithm
+    let pkcs8_der = PrivatePkcs8KeyDer::from(private_key_der.as_bytes().to_vec());
+    let key_pair = KeyPair::from_pkcs8_der_and_sign_algo(&pkcs8_der, &PKCS_RSA_SHA256)
         .map_err(|_| Error::CryptoError("Failed to create KeyPair from private key".into()))?;
-    params.key_pair = Some(key_pair);
-    
-    // Generate certificate
-    let cert = Certificate::from_params(params)
+
+    // Generate self-signed certificate
+    let cert = params.self_signed(&key_pair)
         .map_err(|_| Error::CryptoError("Failed to generate certificate".into()))?;
-    
-    let certificate_der = cert.serialize_der()
-        .map_err(|_| Error::CryptoError("Failed to serialize certificate".into()))?;
-    
+
+    let certificate_der = cert.der().to_vec();
+
     Ok(MikeyKeyPair {
         private_key: private_key_der.as_bytes().to_vec(),
         public_key: public_key_der.as_bytes().to_vec(),
@@ -174,7 +171,7 @@ pub fn generate_ca_certificate(config: CertificateConfig) -> Result<MikeyKeyPair
     
     // Create CA certificate parameters
     let mut params = CertificateParams::default();
-    
+
     // Set distinguished name for CA
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, format!("{} CA", config.common_name));
@@ -184,28 +181,24 @@ pub fn generate_ca_certificate(config: CertificateConfig) -> Result<MikeyKeyPair
     dn.push(DnType::StateOrProvinceName, config.state);
     dn.push(DnType::LocalityName, config.locality);
     params.distinguished_name = dn;
-    
+
     // Set validity period (CA typically has longer validity)
     params.not_before = OffsetDateTime::from(SystemTime::now());
     params.not_after = OffsetDateTime::from(SystemTime::now() + config.validity_duration * 2);
-    
+
     // Make it a CA certificate
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    
-    // Set algorithm
-    params.alg = &PKCS_RSA_SHA256;
-    
-    // Use the generated key pair
-    let key_pair = KeyPair::from_der(&private_key_der.as_bytes())
+
+    // Use the generated key pair with RSA-SHA256 algorithm
+    let pkcs8_der = PrivatePkcs8KeyDer::from(private_key_der.as_bytes().to_vec());
+    let key_pair = KeyPair::from_pkcs8_der_and_sign_algo(&pkcs8_der, &PKCS_RSA_SHA256)
         .map_err(|_| Error::CryptoError("Failed to create KeyPair from CA private key".into()))?;
-    params.key_pair = Some(key_pair);
-    
+
     // Generate CA certificate
-    let cert = Certificate::from_params(params)
+    let cert = params.self_signed(&key_pair)
         .map_err(|_| Error::CryptoError("Failed to generate CA certificate".into()))?;
-    
-    let certificate_der = cert.serialize_der()
-        .map_err(|_| Error::CryptoError("Failed to serialize CA certificate".into()))?;
+
+    let certificate_der = cert.der().to_vec();
     
     Ok(MikeyKeyPair {
         private_key: private_key_der.as_bytes().to_vec(),
@@ -238,7 +231,7 @@ pub fn sign_certificate_with_ca(
     
     // Create subject certificate parameters
     let mut params = CertificateParams::default();
-    
+
     // Set distinguished name
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, subject_config.common_name);
@@ -248,27 +241,23 @@ pub fn sign_certificate_with_ca(
     dn.push(DnType::StateOrProvinceName, subject_config.state);
     dn.push(DnType::LocalityName, subject_config.locality);
     params.distinguished_name = dn;
-    
+
     // Set validity period
     params.not_before = OffsetDateTime::from(SystemTime::now());
     params.not_after = OffsetDateTime::from(SystemTime::now() + subject_config.validity_duration);
-    
-    // Set algorithm
-    params.alg = &PKCS_RSA_SHA256;
-    
-    // Use the generated key pair
-    let key_pair = KeyPair::from_der(&private_key_der.as_bytes())
+
+    // Use the generated key pair with RSA-SHA256 algorithm
+    let pkcs8_der = PrivatePkcs8KeyDer::from(private_key_der.as_bytes().to_vec());
+    let key_pair = KeyPair::from_pkcs8_der_and_sign_algo(&pkcs8_der, &PKCS_RSA_SHA256)
         .map_err(|_| Error::CryptoError("Failed to create KeyPair from subject private key".into()))?;
-    params.key_pair = Some(key_pair);
-    
+
     // Note: rcgen doesn't support proper CA signing in the current version
     // For testing purposes, we'll create a self-signed cert and simulate CA signing
     // by modifying the issuer info in the test validation
-    let cert = Certificate::from_params(params)
+    let cert = params.self_signed(&key_pair)
         .map_err(|_| Error::CryptoError("Failed to generate subject certificate".into()))?;
-    
-    let certificate_der = cert.serialize_der()
-        .map_err(|_| Error::CryptoError("Failed to serialize subject certificate".into()))?;
+
+    let certificate_der = cert.der().to_vec();
     
     Ok(MikeyKeyPair {
         private_key: private_key_der.as_bytes().to_vec(),
