@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use rvoip_rtp_core::{
     MediaTransportClient, ClientFactory, ClientConfig, ClientConfigBuilder,
     MediaFrame, MediaFrameType, MediaTransportEvent,
-    RtpPacket, PayloadType
+    RtpPacket
 };
 
 // Import media-core types  

@@ -341,7 +341,7 @@ impl ManagerIntegrationHelper {
 
     /// Create a test call with proper SIP dialog establishment
     pub async fn create_test_call(&mut self, from: &str, to: &str) -> Result<CallSession, SessionError> {
-        if let (Some(ref manager_b), Some(ref mut call_events)) = (&self.manager_b, &mut self.call_events) {
+        if let (Some(manager_b), Some(call_events)) = (&self.manager_b, &mut self.call_events) {
             // Establish real SIP dialog between the two managers
             let (call, _callee_session_id) = establish_call_between_managers(&self.manager, manager_b, call_events).await?;
             Ok(call)

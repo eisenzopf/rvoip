@@ -321,27 +321,23 @@ mod tests {
     
     #[tokio::test]
     async fn test_media_adapter_creation() {
-        let coordinator = Arc::new(
-            rvoip_infra_common::events::global_coordinator()
-                .await
-                .expect("Failed to create coordinator")
-        );
-        
+        let coordinator = rvoip_infra_common::events::global_coordinator()
+            .await
+            .clone();
+
         let adapter = MediaEventAdapter::new(coordinator)
             .await
             .expect("Failed to create adapter");
-        
+
         assert!(!adapter.is_running().await);
     }
-    
+
     #[tokio::test]
     async fn test_media_adapter_start_stop() {
-        let coordinator = Arc::new(
-            rvoip_infra_common::events::global_coordinator()
-                .await
-                .expect("Failed to create coordinator")
-        );
-        
+        let coordinator = rvoip_infra_common::events::global_coordinator()
+            .await
+            .clone();
+
         let adapter = MediaEventAdapter::new(coordinator)
             .await
             .expect("Failed to create adapter");

@@ -269,29 +269,31 @@ mod codec_performance {
 
     #[test]
     fn test_codec_property_access_performance() {
+        use rvoip_audio_core::codec::CodecType;
+
         let codecs = vec![
-            AudioCodec::G711U,
-            AudioCodec::G711A,
-            AudioCodec::G722,
-            AudioCodec::Opus,
-            AudioCodec::PCM,
+            CodecType::G711Pcmu,
+            CodecType::G711Pcma,
+            CodecType::G722,
+            CodecType::Opus,
+            CodecType::G729,
         ];
-        
+
         let start = Instant::now();
-        
+
         // Access codec properties many times
         for _ in 0..10000 {
             for codec in &codecs {
-                let _name = codec.name();
+                let _name = codec.sdp_name();
                 let _payload_type = codec.payload_type();
-                let _sample_rate = codec.typical_sample_rate();
-                let _supports_vbr = codec.supports_vbr();
+                let _sample_rate = codec.default_sample_rate();
+                let _bitrate = codec.default_bitrate();
             }
         }
-        
+
         let duration = start.elapsed();
         println!("Accessed codec properties 200000 times in {:?}", duration);
-        
+
         // Codec property access should be very fast
         assert!(duration < Duration::from_millis(100));
     }

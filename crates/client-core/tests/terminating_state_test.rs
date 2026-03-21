@@ -147,6 +147,7 @@ mod event_handling_tests {
             to: "sip:bob@example.com".to_string(),
             state: rvoip_session_core::api::types::CallState::Terminated,
             started_at: Some(std::time::Instant::now()),
+            sip_call_id: None,
         };
         
         handler.on_call_ended(session, "Remote hangup").await;

@@ -8,6 +8,7 @@
 //! 4. SRTCP protect/unprotect roundtrip
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rvoip_rtp_core::dtls::adapter::{
     DtlsAdapterConfig, DtlsConnectionAdapter, DtlsRole, SrtpKeyMaterial,
@@ -118,6 +119,7 @@ async fn dtls_handshake_loopback() -> Result<(SrtpKeyMaterial, SrtpKeyMaterial),
 
 #[tokio::test]
 async fn test_dtls_handshake_srtp_key_extraction() -> Result<(), rvoip_rtp_core::Error> {
+    tokio::time::timeout(Duration::from_secs(15), async {
     let (client_keys, server_keys) = dtls_handshake_loopback().await?;
 
     // The client's local (tx) key must equal the server's remote (rx) key —
@@ -154,6 +156,7 @@ async fn test_dtls_handshake_srtp_key_extraction() -> Result<(), rvoip_rtp_core:
     );
 
     Ok(())
+    }).await.map_err(|_| rvoip_rtp_core::Error::IoError("Test timed out".to_string()))?
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +165,7 @@ async fn test_dtls_handshake_srtp_key_extraction() -> Result<(), rvoip_rtp_core:
 
 #[tokio::test]
 async fn test_srtp_encrypt_decrypt_roundtrip() -> Result<(), rvoip_rtp_core::Error> {
+    tokio::time::timeout(Duration::from_secs(15), async {
     // Use fixed known keys (AES-128-CM-HMAC-SHA1-80: 16-byte key, 14-byte salt).
     let key_a: Vec<u8> = (0..16).collect();
     let salt_a: Vec<u8> = (16..30).collect();
@@ -200,14 +204,16 @@ async fn test_srtp_encrypt_decrypt_roundtrip() -> Result<(), rvoip_rtp_core::Err
     );
 
     Ok(())
+    }).await.map_err(|_| rvoip_rtp_core::Error::IoError("Test timed out".to_string()))?
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Full pipeline — DTLS handshake -> SRTP -> RTP packet over UDP
+// Test 3: Full pipeline -- DTLS handshake -> SRTP -> RTP packet over UDP
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn test_full_pipeline_dtls_srtp_rtp() -> Result<(), rvoip_rtp_core::Error> {
+    tokio::time::timeout(Duration::from_secs(15), async {
     use tokio::net::UdpSocket;
 
     // --- Step 1: DTLS handshake ---
@@ -255,6 +261,7 @@ async fn test_full_pipeline_dtls_srtp_rtp() -> Result<(), rvoip_rtp_core::Error>
     );
 
     Ok(())
+    }).await.map_err(|_| rvoip_rtp_core::Error::IoError("Test timed out".to_string()))?
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +270,7 @@ async fn test_full_pipeline_dtls_srtp_rtp() -> Result<(), rvoip_rtp_core::Error>
 
 #[tokio::test]
 async fn test_srtcp_protect_unprotect_roundtrip() -> Result<(), rvoip_rtp_core::Error> {
+    tokio::time::timeout(Duration::from_secs(15), async {
     let key_a: Vec<u8> = (0..16).collect();
     let salt_a: Vec<u8> = (16..30).collect();
     let key_b: Vec<u8> = (32..48).collect();
@@ -299,4 +307,5 @@ async fn test_srtcp_protect_unprotect_roundtrip() -> Result<(), rvoip_rtp_core::
     );
 
     Ok(())
+    }).await.map_err(|_| rvoip_rtp_core::Error::IoError("Test timed out".to_string()))?
 }

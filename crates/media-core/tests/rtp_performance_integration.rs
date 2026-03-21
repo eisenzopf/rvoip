@@ -14,7 +14,8 @@ use rvoip_media_core::performance::{
 
 // Import rtp-core types
 use rvoip_rtp_core::prelude::*;
-use rvoip_rtp_core::{RtpPacket, RtpHeader, MediaFrame, MediaFrameType, G711UPayloadFormat};
+use rvoip_rtp_core::{RtpPacket, RtpHeader, MediaFrame, MediaFrameType};
+use rvoip_media_core::rtp_processing::payload::G711UPayloadFormat;
 
 use std::sync::Arc;
 use std::time::Instant;

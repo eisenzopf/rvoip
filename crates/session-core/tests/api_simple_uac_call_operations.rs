@@ -80,7 +80,7 @@ async fn test_mute_unmute() {
     println!("✓ Call initiated: {}", call.id());
     
     // Get audio channels
-    let (tx, _rx) = call.audio_channels().await;
+    let (tx, _rx) = call.audio_channels().expect("Failed to get audio channels");
     
     // Send audio while muting/unmuting
     let tx_clone = tx.clone();
@@ -293,7 +293,7 @@ async fn test_packet_loss_reporting() {
     assert!(loss1 >= 0.0 && loss1 <= 1.0);
     
     // Send some audio
-    let (tx, _rx) = call.audio_channels().await;
+    let (tx, _rx) = call.audio_channels().expect("Failed to get audio channels");
     for i in 0..10 {
         let frame = AudioFrame::new(vec![i as i16; 160], 8000, 1, 0);
         tx.send(frame).await.expect("Failed to send frame");

@@ -1,22 +1,16 @@
-#[cfg(feature = "client-integration")]
+// All code in this file requires the client-integration feature
+#![cfg(feature = "client-integration")]
+
 use std::sync::Arc;
-#[cfg(feature = "client-integration")]
 use std::time::Duration;
-#[cfg(feature = "client-integration")]
 use std::collections::HashMap;
-#[cfg(feature = "client-integration")]
 use tokio::time::timeout;
-#[cfg(feature = "client-integration")]
 use uuid::Uuid;
-#[cfg(feature = "client-integration")]
 use std::fs::File;
-#[cfg(feature = "client-integration")]
 use std::io::Write;
-#[cfg(feature = "client-integration")]
 use std::path::Path;
 
 // Import client-core for SIP client functionality
-#[cfg(feature = "client-integration")]
 use rvoip_client_core::{
     ClientBuilder, ClientManager, ClientEvent,
     call::{CallId, CallState, CallDirection},
@@ -24,7 +18,6 @@ use rvoip_client_core::{
 };
 
 // Import audio-core for audio processing
-#[cfg(feature = "client-integration")]
 use rvoip_audio_core::{
     AudioFrame, AudioFormat, AudioDevice, AudioDeviceManager,
     codec::{CodecType, AudioCodecTrait, CodecConfig, CodecFactory},
@@ -34,15 +27,11 @@ use rvoip_audio_core::{
 };
 
 // Import external dependencies
-#[cfg(feature = "client-integration")]
 use tokio::sync::{broadcast, mpsc, Mutex};
-#[cfg(feature = "client-integration")]
 use tracing::{info, debug, warn, error};
-#[cfg(feature = "client-integration")]
 use chrono::Utc;
 
 // Import MP3 decoder for reading audio files
-#[cfg(feature = "client-integration")]
 use minimp3::{Decoder, Frame, Error as Mp3Error};
 
 /// Test configuration for peer-to-peer audio transmission

@@ -756,6 +756,7 @@ mod tests {
             "bob-tag",
             "dialog",
             Some(notification_body.to_string()),
+            Some("active".to_string()),
             6,
             local_addr,
             None
