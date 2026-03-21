@@ -1,7 +1,9 @@
 use bytes::{Bytes, BytesMut, Buf, BufMut};
 use std::collections::HashMap;
 use std::sync::Arc;
-use aes::{Aes128, cipher::{KeyIvInit, StreamCipher, generic_array::GenericArray}};
+use aes::{Aes128, Aes256, cipher::{KeyIvInit, StreamCipher, generic_array::GenericArray}};
+use aes_gcm::{Aes128Gcm, Aes256Gcm, aead::{Aead, KeyInit, Payload}};
+use aes_gcm::Nonce as GcmNonce;
 use ctr::Ctr64BE;
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
@@ -139,20 +141,6 @@ struct SrtpSessionKeys {
 impl SrtpCrypto {
     /// Create a new SRTP crypto context
     pub fn new(suite: SrtpCryptoSuite, master_key: SrtpCryptoKey) -> Result<Self> {
-        // Reject unimplemented AEAD-GCM profiles that currently use placeholder primitives.
-        // These suites advertise AesCm + Null auth which is NOT real AEAD-GCM and would
-        // silently provide the wrong security properties.
-        if suite.encryption == SrtpEncryptionAlgorithm::AesCm
-            && suite.authentication == SrtpAuthenticationAlgorithm::Null
-            && suite.tag_length == 16
-        {
-            return Err(Error::NotImplemented(
-                "AEAD_AES_GCM SRTP profiles are not yet implemented; \
-                 use SRTP_AES128_CM_SHA1_80 or SRTP_AES128_CM_SHA1_32 instead"
-                    .to_string(),
-            ));
-        }
-
         // Validate key length
         if master_key.key().len() != suite.key_length {
             return Err(Error::SrtpError(format!(
@@ -198,12 +186,17 @@ impl SrtpCrypto {
         let rtp_auth_key = super::srtp_kdf(&self.master_key, &rtp_auth_params, 20)?;
         
         // Derive RTP salt
+        // RFC 7714: AEAD-GCM uses 12-byte salt; classic SRTP uses 14-byte salt
+        let rtp_salt_len = match self.suite.encryption {
+            SrtpEncryptionAlgorithm::AeadAes128Gcm | SrtpEncryptionAlgorithm::AeadAes256Gcm => 12,
+            _ => 14,
+        };
         let rtp_salt_params = super::SrtpKeyDerivationParams {
             label: super::KeyDerivationLabel::RtpSalt,
             key_derivation_rate: 0,
             index: 0,
         };
-        let rtp_salt = super::srtp_kdf(&self.master_key, &rtp_salt_params, 14)?;
+        let rtp_salt = super::srtp_kdf(&self.master_key, &rtp_salt_params, rtp_salt_len)?;
         
         // Derive RTCP encryption key
         let rtcp_enc_params = super::SrtpKeyDerivationParams {
@@ -222,12 +215,16 @@ impl SrtpCrypto {
         let rtcp_auth_key = super::srtp_kdf(&self.master_key, &rtcp_auth_params, 20)?;
         
         // Derive RTCP salt
+        let rtcp_salt_len = match self.suite.encryption {
+            SrtpEncryptionAlgorithm::AeadAes128Gcm | SrtpEncryptionAlgorithm::AeadAes256Gcm => 12,
+            _ => 14,
+        };
         let rtcp_salt_params = super::SrtpKeyDerivationParams {
             label: super::KeyDerivationLabel::RtcpSalt,
             key_derivation_rate: 0,
             index: 0,
         };
-        let rtcp_salt = super::srtp_kdf(&self.master_key, &rtcp_salt_params, 14)?;
+        let rtcp_salt = super::srtp_kdf(&self.master_key, &rtcp_salt_params, rtcp_salt_len)?;
         
         // Store the derived keys
         let session_keys = SrtpSessionKeys {
@@ -243,6 +240,14 @@ impl SrtpCrypto {
         Ok(())
     }
     
+    /// Returns true if this context uses an AEAD-GCM cipher suite.
+    fn is_aead_gcm(&self) -> bool {
+        matches!(
+            self.suite.encryption,
+            SrtpEncryptionAlgorithm::AeadAes128Gcm | SrtpEncryptionAlgorithm::AeadAes256Gcm
+        )
+    }
+
     /// Update per-SSRC ROC state for an outgoing packet and return
     /// (roc, packet_index).  The sender always uses the current ROC
     /// because the sender controls its own sequence numbering.
@@ -374,7 +379,30 @@ impl SrtpCrypto {
         let session_keys = self.session_keys.as_ref()
             .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
 
-        // Extract header
+        // AEAD-GCM path (RFC 7714)
+        if self.is_aead_gcm() {
+            let header = packet.header.clone();
+            let iv = build_gcm_iv(&session_keys.rtp_salt, ssrc, packet_index)?;
+
+            // AAD = the serialized RTP header (everything before the payload)
+            let full_serialized = packet.serialize()?;
+            let header_len = packet.header.size();
+            let aad = &full_serialized[..header_len];
+
+            let ciphertext_with_tag = aead_gcm_encrypt(
+                &session_keys.rtp_enc_key,
+                &iv,
+                aad,
+                &packet.payload,
+            )?;
+
+            // The GCM tag is appended to the ciphertext by the AEAD cipher.
+            // For SRTP AEAD-GCM the tag is part of the payload, not a separate field.
+            let encrypted_packet = RtpPacket::new(header, Bytes::from(ciphertext_with_tag));
+            return Ok((encrypted_packet, None));
+        }
+
+        // Classic (AES-CM) path
         let header = packet.header.clone();
 
         // Create an IV using salt and packet info
@@ -444,6 +472,47 @@ impl SrtpCrypto {
             return RtpPacket::parse(data);
         }
 
+        // We need to peek at the header to get SSRC + sequence for ROC estimation.
+        // RTP header minimum 12 bytes.
+        if data.len() < 12 {
+            return Err(Error::SrtpError("Packet too short for RTP header".to_string()));
+        }
+        let seq = u16::from_be_bytes([data[2], data[3]]);
+        let ssrc = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+
+        // Tentatively estimate ROC and check replay window (no state mutation)
+        let (roc, packet_index) = self.estimate_recv_roc(ssrc, seq)?;
+
+        // AEAD-GCM path (RFC 7714)
+        if self.is_aead_gcm() {
+            let session_keys = self.session_keys.as_ref()
+                .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
+
+            let iv = build_gcm_iv(&session_keys.rtp_salt, ssrc, packet_index)?;
+
+            // Parse the packet to find the header/payload boundary.
+            // We parse the full wire data (including the GCM tag that is appended
+            // to the payload) so that RtpPacket gives us the correct header size.
+            let tmp_packet = RtpPacket::parse(data)?;
+            let header_len = data.len() - tmp_packet.payload.len();
+            let header_bytes = &data[..header_len];
+            let ciphertext_with_tag = &data[header_len..];
+
+            let plaintext = aead_gcm_decrypt(
+                &session_keys.rtp_enc_key,
+                &iv,
+                header_bytes,
+                ciphertext_with_tag,
+            )?;
+
+            // Authentication succeeded — commit state
+            self.commit_recv_state(ssrc, seq, roc, packet_index);
+
+            let decrypted_packet = RtpPacket::new(tmp_packet.header, Bytes::from(plaintext));
+            return Ok(decrypted_packet);
+        }
+
+        // Classic path
         // Get session keys
         let session_keys = self.session_keys.as_ref()
             .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
@@ -467,18 +536,6 @@ impl SrtpCrypto {
         } else {
             (data, &[][..])
         };
-
-        // We need to peek at the header to get SSRC + sequence for ROC estimation.
-        // RTP header: V(2) P(1) X(1) CC(4) M(1) PT(7) SEQ(16) => first 4 bytes,
-        // then timestamp(32), then SSRC(32).  Minimum 12 bytes.
-        if packet_data.len() < 12 {
-            return Err(Error::SrtpError("Packet too short for RTP header".to_string()));
-        }
-        let seq = u16::from_be_bytes([packet_data[2], packet_data[3]]);
-        let ssrc = u32::from_be_bytes([packet_data[8], packet_data[9], packet_data[10], packet_data[11]]);
-
-        // Tentatively estimate ROC and check replay window (no state mutation)
-        let (roc, packet_index) = self.estimate_recv_roc(ssrc, seq)?;
 
         let session_keys = self.session_keys.as_ref()
             .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
@@ -576,6 +633,36 @@ impl SrtpCrypto {
             return Err(Error::SrtpError("RTCP packet too short".to_string()));
         }
 
+        // AEAD-GCM path for RTCP (RFC 7714 Section 9)
+        if self.is_aead_gcm() {
+            let header = &data[0..8];
+            let payload = &data[8..];
+
+            let iv = build_gcm_iv(&session_keys.rtcp_salt, ssrc, srtcp_index as u64)?;
+
+            // AAD for SRTCP = RTCP header (8 bytes) || SRTCP index with E=1
+            let e_index = 0x80000000u32 | srtcp_index;
+            let mut aad = Vec::with_capacity(header.len() + 4);
+            aad.extend_from_slice(header);
+            aad.extend_from_slice(&e_index.to_be_bytes());
+
+            let ciphertext_with_tag = aead_gcm_encrypt(
+                &session_keys.rtcp_enc_key,
+                &iv,
+                &aad,
+                payload,
+            )?;
+
+            // Output: header || ciphertext+tag || E+SRTCP_index
+            let mut result = BytesMut::with_capacity(header.len() + ciphertext_with_tag.len() + 4);
+            result.extend_from_slice(header);
+            result.extend_from_slice(&ciphertext_with_tag);
+            result.put_u32(e_index);
+
+            return Ok((result.freeze(), None));
+        }
+
+        // Classic path
         // Extract header (first 8 bytes) and payload
         let header = &data[0..8];
         let payload = &data[8..];
@@ -646,6 +733,64 @@ impl SrtpCrypto {
             return Ok(Bytes::copy_from_slice(data));
         }
 
+        // AEAD-GCM path for RTCP (RFC 7714 Section 9)
+        if self.is_aead_gcm() {
+            // Layout: header(8) || ciphertext+tag || E+index(4)
+            // Minimum: 8 + 16 (tag alone) + 4 = 28
+            if data.len() < 28 {
+                return Err(Error::SrtpError(format!("SRTCP-GCM packet too short: {} bytes", data.len())));
+            }
+
+            // E+index is the last 4 bytes
+            let index_pos = data.len() - 4;
+            let index_value = u32::from_be_bytes([
+                data[index_pos], data[index_pos + 1], data[index_pos + 2], data[index_pos + 3],
+            ]);
+            let e_flag = (index_value & 0x80000000) != 0;
+            let srtcp_index = index_value & 0x7FFFFFFF;
+
+            // Replay protection
+            if !self.srtcp_replay.check(srtcp_index as u64)
+                .map_err(|e| Error::SrtpError(format!("SRTCP replay check failed: {}", e)))?
+            {
+                return Err(Error::SrtpError("SRTCP packet rejected by replay protection".to_string()));
+            }
+
+            if !e_flag {
+                // Not encrypted — strip the index word
+                let mut result = BytesMut::with_capacity(index_pos);
+                result.extend_from_slice(&data[0..index_pos]);
+                return Ok(result.freeze());
+            }
+
+            let ssrc = Self::extract_rtcp_ssrc(data)?;
+            let session_keys = self.session_keys.as_ref()
+                .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
+
+            let header = &data[0..8];
+            let ciphertext_with_tag = &data[8..index_pos];
+
+            let iv = build_gcm_iv(&session_keys.rtcp_salt, ssrc, srtcp_index as u64)?;
+
+            // AAD = RTCP header || E+SRTCP_index
+            let mut aad = Vec::with_capacity(header.len() + 4);
+            aad.extend_from_slice(header);
+            aad.extend_from_slice(&index_value.to_be_bytes());
+
+            let plaintext = aead_gcm_decrypt(
+                &session_keys.rtcp_enc_key,
+                &iv,
+                &aad,
+                ciphertext_with_tag,
+            )?;
+
+            let mut result = BytesMut::with_capacity(header.len() + plaintext.len());
+            result.extend_from_slice(header);
+            result.extend_from_slice(&plaintext);
+            return Ok(result.freeze());
+        }
+
+        // Classic path
         // Check packet minimum length (header + index + auth tag)
         let min_len = 8 + 4 + (if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
             self.suite.tag_length
@@ -767,10 +912,91 @@ fn aes_cm_decrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<()> {
     aes_cm_encrypt(data, key, iv)
 }
 
+/// Build a 12-byte IV/nonce for AEAD-GCM SRTP (RFC 7714 Section 8.1).
+///
+/// IV = salt XOR (0x0000 || SSRC || packet_index)
+///
+/// The packet_index is 48 bits: (ROC << 16) | SEQ for RTP,
+/// or simply the SRTCP index for RTCP.
+fn build_gcm_iv(salt: &[u8], ssrc: u32, packet_index: u64) -> Result<[u8; 12]> {
+    if salt.len() < 12 {
+        return Err(Error::SrtpError(format!(
+            "GCM salt must be at least 12 bytes, got {}", salt.len()
+        )));
+    }
+
+    // Build the 12-byte value: 0x0000 || SSRC(4) || packet_index(6 bytes = 48 bits)
+    let mut iv = [0u8; 12];
+    // bytes 0..1 = 0x0000
+    // bytes 2..6 = SSRC
+    iv[2] = (ssrc >> 24) as u8;
+    iv[3] = (ssrc >> 16) as u8;
+    iv[4] = (ssrc >> 8) as u8;
+    iv[5] = ssrc as u8;
+    // bytes 6..12 = packet_index (48-bit, big-endian)
+    let idx_bytes = packet_index.to_be_bytes(); // 8 bytes; we want the lower 6
+    iv[6..12].copy_from_slice(&idx_bytes[2..8]);
+
+    // XOR with salt
+    for i in 0..12 {
+        iv[i] ^= salt[i];
+    }
+
+    Ok(iv)
+}
+
+/// AEAD-GCM encrypt: supports both AES-128-GCM and AES-256-GCM based on key length.
+fn aead_gcm_encrypt(key: &[u8], iv: &[u8; 12], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let nonce = GcmNonce::from_slice(iv);
+    let payload = Payload { msg: plaintext, aad };
+
+    match key.len() {
+        16 => {
+            let cipher = Aes128Gcm::new_from_slice(key)
+                .map_err(|e| Error::SrtpError(format!("AES-128-GCM key error: {}", e)))?;
+            cipher.encrypt(nonce, payload)
+                .map_err(|e| Error::SrtpError(format!("AES-128-GCM encrypt failed: {}", e)))
+        }
+        32 => {
+            let cipher = Aes256Gcm::new_from_slice(key)
+                .map_err(|e| Error::SrtpError(format!("AES-256-GCM key error: {}", e)))?;
+            cipher.encrypt(nonce, payload)
+                .map_err(|e| Error::SrtpError(format!("AES-256-GCM encrypt failed: {}", e)))
+        }
+        other => Err(Error::SrtpError(format!(
+            "Unsupported GCM key length: {} (expected 16 or 32)", other
+        ))),
+    }
+}
+
+/// AEAD-GCM decrypt: supports both AES-128-GCM and AES-256-GCM based on key length.
+fn aead_gcm_decrypt(key: &[u8], iv: &[u8; 12], aad: &[u8], ciphertext_with_tag: &[u8]) -> Result<Vec<u8>> {
+    let nonce = GcmNonce::from_slice(iv);
+    let payload = Payload { msg: ciphertext_with_tag, aad };
+
+    match key.len() {
+        16 => {
+            let cipher = Aes128Gcm::new_from_slice(key)
+                .map_err(|e| Error::SrtpError(format!("AES-128-GCM key error: {}", e)))?;
+            cipher.decrypt(nonce, payload)
+                .map_err(|e| Error::SrtpError(format!("AES-128-GCM decrypt/auth failed: {}", e)))
+        }
+        32 => {
+            let cipher = Aes256Gcm::new_from_slice(key)
+                .map_err(|e| Error::SrtpError(format!("AES-256-GCM key error: {}", e)))?;
+            cipher.decrypt(nonce, payload)
+                .map_err(|e| Error::SrtpError(format!("AES-256-GCM decrypt/auth failed: {}", e)))
+        }
+        other => Err(Error::SrtpError(format!(
+            "Unsupported GCM key length: {} (expected 16 or 32)", other
+        ))),
+    }
+}
+
 /// HMAC-SHA1 authentication for SRTP
 fn hmac_sha1(data: &[u8], key: &[u8], tag_length: usize) -> Result<Vec<u8>> {
     // Create a new HMAC-SHA1 instance
-    let mut mac = HmacSha1::new_from_slice(key)
+    let mut mac = <HmacSha1 as hmac::Mac>::new_from_slice(key)
         .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
     
     // Update with data
@@ -1119,6 +1345,133 @@ mod tests {
         // Replaying the same packet should fail
         let d2 = dec_crypto.decrypt_rtp(&wire);
         assert!(d2.is_err(), "Replayed packet should be rejected");
+    }
+
+    #[test]
+    fn test_aead_aes_128_gcm_rtp_roundtrip() {
+        let master_key = vec![
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        ];
+        let master_salt = vec![0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                               0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D];
+
+        let srtp_key = SrtpCryptoKey::new(master_key, master_salt);
+        let mut enc_crypto = SrtpCrypto::new(super::super::SRTP_AEAD_AES_128_GCM, srtp_key.clone()).unwrap();
+        let mut dec_crypto = SrtpCrypto::new(super::super::SRTP_AEAD_AES_128_GCM, srtp_key).unwrap();
+
+        let header = crate::packet::RtpHeader::new(96, 1000, 12345, 0xabcdef01);
+        let payload = Bytes::from_static(b"Hello SRTP AEAD-GCM! This is a test of AES-128-GCM encryption.");
+        let packet = RtpPacket::new(header, payload.clone());
+
+        // Encrypt
+        let (encrypted_packet, auth_tag) = enc_crypto.encrypt_rtp(&packet).unwrap();
+
+        // AEAD-GCM should not return a separate auth tag (it is embedded in the payload)
+        assert!(auth_tag.is_none());
+
+        // Payload should be different (encrypted + 16-byte tag appended)
+        assert_ne!(encrypted_packet.payload, payload);
+        assert_eq!(encrypted_packet.payload.len(), payload.len() + 16);
+
+        // Header should be unchanged
+        assert_eq!(encrypted_packet.header.ssrc, packet.header.ssrc);
+        assert_eq!(encrypted_packet.header.sequence_number, packet.header.sequence_number);
+
+        // Serialize and decrypt
+        let wire = encrypted_packet.serialize().unwrap();
+        let decrypted = dec_crypto.decrypt_rtp(&wire).unwrap();
+
+        assert_eq!(decrypted.payload, payload);
+        assert_eq!(decrypted.header.ssrc, packet.header.ssrc);
+        assert_eq!(decrypted.header.sequence_number, packet.header.sequence_number);
+    }
+
+    #[test]
+    fn test_aead_aes_256_gcm_rtp_roundtrip() {
+        let master_key = vec![
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+            0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+        ];
+        let master_salt = vec![0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27,
+                               0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D];
+
+        let srtp_key = SrtpCryptoKey::new(master_key, master_salt);
+        let mut enc_crypto = SrtpCrypto::new(super::super::SRTP_AEAD_AES_256_GCM, srtp_key.clone()).unwrap();
+        let mut dec_crypto = SrtpCrypto::new(super::super::SRTP_AEAD_AES_256_GCM, srtp_key).unwrap();
+
+        let header = crate::packet::RtpHeader::new(111, 500, 99999, 0xdeadbeef);
+        let payload = Bytes::from_static(b"AES-256-GCM test payload for SRTP encryption roundtrip.");
+        let packet = RtpPacket::new(header, payload.clone());
+
+        let (encrypted_packet, auth_tag) = enc_crypto.encrypt_rtp(&packet).unwrap();
+        assert!(auth_tag.is_none());
+        assert_ne!(encrypted_packet.payload, payload);
+        assert_eq!(encrypted_packet.payload.len(), payload.len() + 16);
+
+        let wire = encrypted_packet.serialize().unwrap();
+        let decrypted = dec_crypto.decrypt_rtp(&wire).unwrap();
+
+        assert_eq!(decrypted.payload, payload);
+        assert_eq!(decrypted.header.ssrc, packet.header.ssrc);
+    }
+
+    #[test]
+    fn test_aead_gcm_tamper_detection() {
+        let master_key = vec![
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        ];
+        let master_salt = vec![0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                               0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D];
+
+        let srtp_key = SrtpCryptoKey::new(master_key, master_salt);
+        let mut enc_crypto = SrtpCrypto::new(super::super::SRTP_AEAD_AES_128_GCM, srtp_key.clone()).unwrap();
+
+        let header = crate::packet::RtpHeader::new(96, 42, 12345, 0xdeadbeef);
+        let packet = RtpPacket::new(header, Bytes::from_static(b"tamper test"));
+
+        let (encrypted_packet, _) = enc_crypto.encrypt_rtp(&packet).unwrap();
+        let mut wire = encrypted_packet.serialize().unwrap().to_vec();
+
+        // Tamper with a payload byte
+        let mid = wire.len() / 2;
+        wire[mid] ^= 0xFF;
+
+        let mut dec_crypto = SrtpCrypto::new(super::super::SRTP_AEAD_AES_128_GCM, srtp_key).unwrap();
+        let result = dec_crypto.decrypt_rtp(&wire);
+        assert!(result.is_err(), "Tampered GCM packet should fail authentication");
+    }
+
+    #[test]
+    fn test_aead_gcm_srtcp_roundtrip() {
+        let master_key = vec![
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+            0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F,
+        ];
+        let master_salt = vec![0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                               0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D];
+
+        let srtp_key = SrtpCryptoKey::new(master_key, master_salt);
+        let mut enc_crypto = SrtpCrypto::new(super::super::SRTP_AEAD_AES_128_GCM, srtp_key.clone()).unwrap();
+        let mut dec_crypto = SrtpCrypto::new(super::super::SRTP_AEAD_AES_128_GCM, srtp_key).unwrap();
+
+        // Minimal RTCP-like packet (>8 bytes)
+        let rtcp_data = vec![
+            0x80, 0xC8, 0x00, 0x06,
+            0xDE, 0xAD, 0xBE, 0xEF,
+            0x00, 0x00, 0x00, 0x00,
+            0x01, 0x02, 0x03, 0x04,
+        ];
+
+        let (encrypted, auth_tag) = enc_crypto.encrypt_rtcp(&rtcp_data).unwrap();
+        // AEAD-GCM: no separate auth tag
+        assert!(auth_tag.is_none());
+
+        let decrypted = dec_crypto.decrypt_rtcp(&encrypted).unwrap();
+        assert_eq!(decrypted.as_ref(), &rtcp_data[..]);
     }
 
     #[test]

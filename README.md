@@ -450,13 +450,13 @@ rvoip is organized into 17 crates, each with specific responsibilities in the Vo
 | **REGISTER** | ✅ Complete | RFC 3261 | User registration | Contact management, expiration handling |
 | **OPTIONS** | ✅ Complete | RFC 3261 | Capability discovery | Method advertisement, feature negotiation |
 | **UPDATE** | ✅ Complete | RFC 3311 | Session modification | Mid-session updates, SDP negotiation |
-| **SUBSCRIBE** | 🔶 Partial | RFC 6665 | Event notification subscription | Incoming works, callbacks connected |
-| **NOTIFY** | 🔶 Partial | RFC 6665 | Event notifications | Receive works, callbacks connected |
-| **MESSAGE** | 🔶 Partial | RFC 3428 | Instant messaging | Outbound only, inbound not dispatched |
+| **SUBSCRIBE** | ✅ Complete | RFC 6665 | Event notification subscription | Full subscribe/notify lifecycle with callbacks |
+| **NOTIFY** | ✅ Complete | RFC 6665 | Event notifications | Send + receive with presence integration |
+| **MESSAGE** | ✅ Complete | RFC 3428 | Instant messaging | Inbound dispatch + outbound builder |
 | **INFO** | ✅ Complete | RFC 6086 | Mid-session information | DTMF + trickle ICE support |
 | **REFER** | ✅ Complete | RFC 3515 | Call transfer initiation | Blind + attended transfer |
-| **PRACK** | 🚧 In Progress | RFC 3262 | Provisional response acknowledgment | Parsed only, no dialog-core handler |
-| **PUBLISH** | 🚧 In Progress | RFC 3903 | Event state publication | No dialog-core handler, presence API is TODO |
+| **PRACK** | ✅ Complete | RFC 3262 | Provisional response acknowledgment | Full handler with 200 OK response |
+| **PUBLISH** | ✅ Complete | RFC 3903 | Event state publication | Full handler for event state publication |
 
 ### 🔐 Authentication & Security
 
@@ -534,11 +534,11 @@ rvoip is organized into 17 crates, each with specific responsibilities in the Vo
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| **Call Hold/Resume** | 🔶 Partial | client-core works, sip-client not wired |
+| **Call Hold/Resume** | ✅ Complete | Full hold/resume in client-core and sip-client |
 | **Call Transfer** | ✅ Complete | Blind + attended transfer |
 | **DTMF Support** | ✅ Complete | SIP INFO + RFC 4733 RTP events (dual mode) |
 | **Conference Mixing** | 🔶 Partial | Mixer exists, session integration TODO |
-| **Call Center Operations** | 🔶 Partial | ~70% complete, agent management and queuing working |
+| **Call Center Operations** | ✅ Complete | Agent management, queuing, routing, bridging |
 | **Media Quality Monitoring** | ✅ Complete | Real-time MOS scoring |
 | **B2BUA Operations** | 🚧 In Progress | Back-to-back user agent |
 
@@ -569,16 +569,18 @@ Core crates are **beta quality**. The architecture is stable and APIs are stabil
 - **rtp-core**: RTP/RTCP with DTLS-SRTP, ICE, STUN, TURN
 - **sip-transport**: UDP, TCP, TLS, WebSocket (WS + WSS) all complete
 - **client-core**: High-level client framework
-- **call-engine**: Call center orchestration (~70% complete)
+- **call-engine**: Call center orchestration
 - **codec-core**: G.711 complete, Opus partial
 - **audio-core**: Core audio DSP
 
 ### 🚧 Known Gaps
-- **Opus codec**: Partial implementation behind feature gate
-- **SIP-over-SCTP**: DTLS-SCTP data channels work, but SIP-over-SCTP (RFC 4168) not implemented
-- **SRTP AEAD GCM**: AES-CM works, AEAD GCM cipher suite not yet implemented
-- **Conference integration**: Audio mixer exists but session-level integration is TODO
-- **Call Hold in sip-client**: Works in client-core but not wired through sip-client
+- **SRTP AEAD-GCM**: AES-128-GCM / AES-256-GCM constants defined but crypto returns NotImplemented
+- **ZRTP**: Simplified implementation, not full RFC 6189
+- **MIKEY-PKE**: Framework only, RSA crypto placeholder
+- **Conference integration**: Types/events and mixer exist, but not integrated into session-core media pipeline
+- **B2BUA**: SimpleB2BUA framework exists, intermediary-core partial
+- **Opus codec**: Stub only, no actual encoding/decoding
+- **SIP-over-SCTP**: Only DTLS-SCTP data channels, not SIP transport (RFC 4168)
 
 ### 🔮 Roadmap
 - **Full Opus codec support**: Complete Opus encoder/decoder integration

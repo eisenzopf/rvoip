@@ -105,12 +105,20 @@ fn convert_profile_to_suite(profile: SrtpProtectionProfile) -> Result<SrtpCrypto
             })
         }
         SrtpProtectionProfile::AeadAes128Gcm => {
-            // This would require adding an AEAD encryption algorithm to the SRTP module
-            Err(crate::error::Error::UnsupportedFeature("AEAD GCM crypto suite not yet supported".to_string()))
+            Ok(SrtpCryptoSuite {
+                encryption: SrtpEncryptionAlgorithm::AeadAes128Gcm,
+                authentication: SrtpAuthenticationAlgorithm::Null,
+                key_length: 16, // 128 bits
+                tag_length: 16, // 128 bits GCM tag
+            })
         }
         SrtpProtectionProfile::AeadAes256Gcm => {
-            // This would require adding an AEAD encryption algorithm to the SRTP module
-            Err(crate::error::Error::UnsupportedFeature("AEAD GCM crypto suite not yet supported".to_string()))
+            Ok(SrtpCryptoSuite {
+                encryption: SrtpEncryptionAlgorithm::AeadAes256Gcm,
+                authentication: SrtpAuthenticationAlgorithm::Null,
+                key_length: 32, // 256 bits
+                tag_length: 16, // 128 bits GCM tag
+            })
         }
         SrtpProtectionProfile::Unknown(_) => {
             Err(crate::error::Error::UnsupportedFeature("Unknown SRTP protection profile".to_string()))

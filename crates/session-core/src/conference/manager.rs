@@ -1,7 +1,8 @@
 //! Conference Manager
 //!
 //! High-level manager that coordinates all conference operations.
-//! TODO: Full implementation needed
+//! Provides full lifecycle management for conferences: create, join, leave,
+//! update, terminate, and SDP generation.
 
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -72,7 +73,6 @@ impl ConferenceManager {
         handlers.len()
     }
 
-    // TODO: Implement full ConferenceApi functionality
 }
 
 #[async_trait]

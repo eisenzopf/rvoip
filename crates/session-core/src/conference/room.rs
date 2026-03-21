@@ -210,28 +210,85 @@ impl ConferenceRoom {
         self.created_at.elapsed()
     }
 
-    /// Initialize media mixing for active participants
-    /// TODO: Integrate with media-core for actual audio mixing
-    pub fn initialize_media_mixing(&self) -> Result<()> {
-        if !self.config.audio_mixing_enabled {
-            return Ok(());
+    /// Create a `ConferenceMixingConfig` matching this room's settings.
+    ///
+    /// The returned config can be passed to
+    /// `MediaSessionController::enable_conference_mixing` (from media-core) to
+    /// set up the `AudioMixer` that performs N-1 audio mixing for all
+    /// participants.
+    pub fn create_mixing_config(&self) -> rvoip_media_core::types::conference::ConferenceMixingConfig {
+        rvoip_media_core::types::conference::ConferenceMixingConfig {
+            max_participants: self.config.max_participants,
+            output_sample_rate: self.config.audio_sample_rate,
+            output_channels: self.config.audio_channels,
+            output_samples_per_frame: (self.config.audio_sample_rate / 50) as u32, // 20ms frames
+            enable_voice_activity_mixing: true,
+            enable_automatic_gain_control: true,
+            enable_noise_reduction: false,
+            enable_simd_optimization: true,
+            max_concurrent_mixes: 5,
+            mixing_quality: rvoip_media_core::types::conference::MixingQuality::Balanced,
+            overflow_protection: true,
         }
-
-        // Placeholder for media-core integration
-        // This would set up audio bridges between participants
-        Ok(())
     }
 
-    /// Generate basic conference SDP template
-    /// TODO: Integrate with proper SDP generation from session-core
-    pub fn generate_base_sdp(&self, local_ip: std::net::IpAddr) -> String {
+    /// Initialize media mixing for active participants.
+    ///
+    /// Validates that mixing is enabled and that the room is in the correct
+    /// state.  The caller should use the returned `ConferenceMixingConfig` to
+    /// create an `AudioMixer` through media-core and then feed each
+    /// participant's RTP audio into it.
+    pub fn initialize_media_mixing(&mut self) -> Result<rvoip_media_core::types::conference::ConferenceMixingConfig> {
+        if !self.config.audio_mixing_enabled {
+            return Err(crate::errors::SessionError::invalid_state(
+                "Audio mixing is not enabled for this conference"
+            ));
+        }
+
+        // Transition to Active if still in Creating state
+        if self.state == ConferenceState::Creating {
+            self.set_state(ConferenceState::Active)?;
+        }
+
+        Ok(self.create_mixing_config())
+    }
+
+    /// Generate a complete conference SDP suitable for SIP signaling.
+    ///
+    /// The SDP includes an audio media line with common telephony codecs
+    /// (PCMU, PCMA, telephone-event) and conference-specific attributes when
+    /// mixing is enabled.
+    pub fn generate_base_sdp(&self, local_ip: std::net::IpAddr, media_port: u16) -> String {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mixing_attr = if self.config.audio_mixing_enabled {
+            "a=conf:audio-mixing\r\n"
+        } else {
+            ""
+        };
+
         format!(
             "v=0\r\n\
+             o=conference_{} {} {} IN IP4 {}\r\n\
              s=Conference Room {}\r\n\
              c=IN IP4 {}\r\n\
-             t=0 0\r\n",
+             t=0 0\r\n\
+             m=audio {} RTP/AVP 0 8 101\r\n\
+             a=sendrecv\r\n\
+             a=rtpmap:0 PCMU/8000\r\n\
+             a=rtpmap:8 PCMA/8000\r\n\
+             a=rtpmap:101 telephone-event/8000\r\n\
+             a=fmtp:101 0-15\r\n\
+             a=ptime:20\r\n\
+             {}",
+            self.id, timestamp, timestamp, local_ip,
             self.id,
-            local_ip
+            local_ip,
+            media_port,
+            mixing_attr,
         )
     }
 } 

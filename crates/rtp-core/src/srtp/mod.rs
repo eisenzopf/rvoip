@@ -18,10 +18,16 @@ pub use key_derivation::{
 pub enum SrtpEncryptionAlgorithm {
     /// AES Counter Mode (Default in SRTP)
     AesCm,
-    
+
     /// AES in f8-mode (Customized for SRTP)
     AesF8,
-    
+
+    /// AEAD AES-128-GCM (RFC 7714)
+    AeadAes128Gcm,
+
+    /// AEAD AES-256-GCM (RFC 7714)
+    AeadAes256Gcm,
+
     /// Null encryption (for debugging/testing only)
     Null,
 }
@@ -89,26 +95,24 @@ pub const SRTP_NULL_NULL: SrtpCryptoSuite = SrtpCryptoSuite {
 
 /// AEAD AES-128 GCM (RFC 7714)
 ///
-/// **NOT YET IMPLEMENTED.** These constants exist for profile negotiation only.
-/// Attempting to create an `SrtpContext` with these profiles will return an error.
-/// The encryption/authentication fields are placeholders and do NOT provide real
-/// AEAD-GCM security.
+/// Uses AES-128-GCM for combined encryption and authentication.
+/// No separate authentication algorithm is needed (AEAD).
+/// Tag length is 16 bytes (128 bits).
 pub const SRTP_AEAD_AES_128_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
-    encryption: SrtpEncryptionAlgorithm::AesCm, // Placeholder — not real GCM
-    authentication: SrtpAuthenticationAlgorithm::Null, // Placeholder — not real AEAD
+    encryption: SrtpEncryptionAlgorithm::AeadAes128Gcm,
+    authentication: SrtpAuthenticationAlgorithm::Null, // AEAD handles auth internally
     key_length: 16, // 128 bits
     tag_length: 16, // 128 bits for GCM
 };
 
 /// AEAD AES-256 GCM (RFC 7714)
 ///
-/// **NOT YET IMPLEMENTED.** These constants exist for profile negotiation only.
-/// Attempting to create an `SrtpContext` with these profiles will return an error.
-/// The encryption/authentication fields are placeholders and do NOT provide real
-/// AEAD-GCM security.
+/// Uses AES-256-GCM for combined encryption and authentication.
+/// No separate authentication algorithm is needed (AEAD).
+/// Tag length is 16 bytes (128 bits).
 pub const SRTP_AEAD_AES_256_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
-    encryption: SrtpEncryptionAlgorithm::AesCm, // Placeholder — not real GCM
-    authentication: SrtpAuthenticationAlgorithm::Null, // Placeholder — not real AEAD
+    encryption: SrtpEncryptionAlgorithm::AeadAes256Gcm,
+    authentication: SrtpAuthenticationAlgorithm::Null, // AEAD handles auth internally
     key_length: 32, // 256 bits
     tag_length: 16, // 128 bits for GCM
 };
