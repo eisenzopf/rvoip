@@ -1,159 +1,99 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# rvoip Test Suite Runner
+# Usage: ./scripts/test_all.sh [level]
+#   Levels: unit | adapter | integration | e2e | all (default: all)
+#   Examples:
+#     ./scripts/test_all.sh          # Run everything
+#     ./scripts/test_all.sh unit     # Unit tests only (fastest)
+#     ./scripts/test_all.sh adapter  # Adapter roundtrip tests
+#     ./scripts/test_all.sh e2e      # End-to-end tests
 
-# RVOIP Comprehensive Test Runner
-# This script ensures ALL tests are run across all crates in the workspace
+set -uo pipefail
 
-# DO NOT exit on error - we want to run all tests and report failures at the end
-# set -e  # Exit on error
+LEVEL="${1:-all}"
+FAILED=0
+PASSED=0
+SKIPPED=0
+ERRORS=()
 
-# Colors for output
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+G='\033[0;32m'; Y='\033[1;33m'; R='\033[0;31m'; B='\033[0;34m'; N='\033[0m'
 
-# Track failures
-FAILED_TESTS=()
-TOTAL_TESTS=0
-PASSED_TESTS=0
-
-echo -e "${GREEN}================================================${NC}"
-echo -e "${GREEN}    RVOIP Comprehensive Test Runner${NC}"
-echo -e "${GREEN}================================================${NC}"
-echo ""
-
-# Function to run a test command and report results
-run_test() {
-    local test_name=$1
-    local test_cmd=$2
-    
-    echo -e "${YELLOW}Running $test_name...${NC}"
-    
-    TOTAL_TESTS=$((TOTAL_TESTS + 1))
-    
-    # Create a temporary file to capture output while still showing it
-    local temp_output=$(mktemp)
-    
-    # Run the test command, showing output in real-time AND capturing it
-    if eval "$test_cmd" 2>&1 | tee "$temp_output"; then
-        echo -e "${GREEN}✓ $test_name passed${NC}"
-        PASSED_TESTS=$((PASSED_TESTS + 1))
+run() {
+    local name="$1"; shift
+    printf "${B}[TEST]${N} %-50s " "$name"
+    if output=$("$@" 2>&1); then
+        result=$(echo "$output" | grep "^test result:" | tail -1)
+        printf "${G}PASS${N}  %s\n" "$result"
+        ((PASSED++))
     else
-        echo -e "${RED}✗ $test_name failed${NC}"
-        
-        # Extract specific failed test names from captured output
-        local failed_test_names
-        failed_test_names=$(grep -E "test .* \.\.\. FAILED" "$temp_output" | sed 's/test \(.*\) \.\.\. FAILED/\1/' | head -10)
-        
-        if [ -n "$failed_test_names" ]; then
-            # Add each specific failed test to the array
-            while IFS= read -r line; do
-                if [ -n "$line" ]; then
-                    FAILED_TESTS+=("$test_name: $line")
-                fi
-            done <<< "$failed_test_names"
-        else
-            # Fallback if we can't parse specific test names
-            FAILED_TESTS+=("$test_name")
-        fi
+        printf "${R}FAIL${N}\n"
+        ERRORS+=("$name")
+        ((FAILED++))
     fi
-    
-    # Clean up temporary file
-    rm -f "$temp_output"
-    echo ""
 }
 
-# List of all crates to test
-CRATES=(
-    "rvoip-audio-core"
-    "rvoip-call-engine"
-    "rvoip-client-core"
-    "rvoip-codec-core"
-    "rvoip-dialog-core"
-    "rvoip-infra-common"
-    "rvoip-media-core"
-    "rvoip-rtp-core"
-    "rvoip"
-    "rvoip-session-core"
-    "rvoip-sip-client"
-    "rvoip-sip-core"
-    "rvoip-sip-transport"
-    "rvoip-transaction-core"
-)
+skip() {
+    printf "${B}[SKIP]${N} %-50s ${Y}skipped${N}\n" "$1"
+    ((SKIPPED++))
+}
 
-# Optional: Clean build artifacts (comment out for faster runs)
-# echo -e "${YELLOW}Cleaning previous build artifacts...${NC}"
-# cargo clean
-# echo ""
+CRATES=(sip-core sip-transport dialog-core rtp-core media-core
+        session-core client-core call-engine codec-core
+        infra-common audio-core sip-client registrar-core)
 
-# Test each crate individually
-echo -e "${BLUE}=== Testing Individual Crates ===${NC}"
 echo ""
+echo -e "${B}rvoip Test Suite${N} (level: $LEVEL)"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-for crate in "${CRATES[@]}"; do
-    echo -e "${BLUE}--- Testing $crate ---${NC}"
-    
-    # Run unit tests (lib.rs)
-    if cargo test -p "$crate" --lib --no-fail-fast 2>&1 | grep -q "Running unittests"; then
-        run_test "$crate unit tests" "cargo test -p $crate --lib --no-fail-fast"
-    else
-        echo -e "${YELLOW}No unit tests in $crate${NC}"
-        echo ""
-    fi
-    
-    # Run integration tests
-    if [ -d "crates/${crate#rvoip-}/tests" ]; then
-        run_test "$crate integration tests" "cargo test -p $crate --test '*' --no-fail-fast"
-    else
-        echo -e "${YELLOW}No integration tests in $crate${NC}"
-        echo ""
-    fi
-    
-    # Run doc tests
-    run_test "$crate doc tests" "cargo test -p $crate --doc --no-fail-fast"
-    
-    echo -e "${BLUE}--- Finished $crate ---${NC}"
-    echo ""
-done
-
-# Also run workspace-wide tests to catch any examples or benchmarks
-echo -e "${BLUE}=== Running Workspace-Wide Tests ===${NC}"
-echo ""
-
-# Summary
-echo ""
-echo -e "${BLUE}================================================${NC}"
-echo -e "${BLUE}           Test Run Complete${NC}"
-echo -e "${BLUE}================================================${NC}"
-echo ""
-
-# Show results
-echo -e "${YELLOW}Test Results Summary:${NC}"
-echo "Total tests run: $TOTAL_TESTS"
-echo "Passed: ${GREEN}$PASSED_TESTS${NC}"
-echo "Failed: ${RED}${#FAILED_TESTS[@]}${NC}"
-echo ""
-
-if [ ${#FAILED_TESTS[@]} -eq 0 ]; then
-    echo -e "${GREEN}✨ All tests passed successfully! 🎉${NC}"
-    echo ""
-    echo -e "${GREEN}Test suite completed successfully${NC}"
-    exit 0
-else
-    echo -e "${RED}================================================${NC}"
-    echo -e "${RED}           FAILED TESTS SUMMARY${NC}"
-    echo -e "${RED}================================================${NC}"
-    echo ""
-    echo -e "${RED}❌ The following ${#FAILED_TESTS[@]} test(s) failed:${NC}"
-    echo ""
-    for i in "${!FAILED_TESTS[@]}"; do
-        echo -e "  ${RED}$((i+1)). ${FAILED_TESTS[i]}${NC}"
+# ── Level 1: Unit Tests ──
+if [[ "$LEVEL" == "unit" || "$LEVEL" == "all" ]]; then
+    echo -e "\n${Y}Level 1: Unit Tests${N}"
+    for crate in "${CRATES[@]}"; do
+        run "unit/$crate" cargo test -p "rvoip-$crate" --lib --no-fail-fast -q
     done
+fi
+
+# ── Level 2: Adapter Roundtrip Tests ──
+if [[ "$LEVEL" == "adapter" || "$LEVEL" == "all" ]]; then
+    echo -e "\n${Y}Level 2: Adapter Roundtrip Tests${N}"
+    run "adapter/rtp-packet"  cargo test -p rvoip-rtp-core --lib -q -- packet::adapter
+    run "adapter/ice"         cargo test -p rvoip-rtp-core --lib -q -- ice::adapter
+    run "adapter/sctp"        cargo test -p rvoip-rtp-core --lib -q -- sctp::adapter
+    run "adapter/srtp"        cargo test -p rvoip-rtp-core --lib -q -- srtp::adapter
+    run "adapter/dtls"        cargo test -p rvoip-rtp-core --lib -q -- dtls::adapter
+    run "adapter/stun"        cargo test -p rvoip-rtp-core --lib -q -- stun::adapter
+fi
+
+# ── Level 3: Cross-Module Integration Tests ──
+if [[ "$LEVEL" == "integration" || "$LEVEL" == "all" ]]; then
+    echo -e "\n${Y}Level 3: Cross-Module Integration Tests${N}"
+    run "integration/dtls-srtp"        cargo test -p rvoip-rtp-core --test dtls_srtp_integration -q
+    run "integration/dialog-transport" cargo test -p rvoip-integration-tests --test dialog_transport_integration -q
+    run "integration/session-media"    cargo test -p rvoip-integration-tests --test session_media_integration -q
+    run "integration/ice-sdp"          cargo test -p rvoip-session-core --test ice_sdp_integration -q
+fi
+
+# ── Level 4: End-to-End Tests ──
+if [[ "$LEVEL" == "e2e" || "$LEVEL" == "all" ]]; then
+    echo -e "\n${Y}Level 4: End-to-End Tests${N}"
+    run "e2e/call-with-audio"   cargo test -p rvoip-session-core --test e2e_call_with_audio -q
+    run "e2e/encrypted-call"    cargo test -p rvoip-session-core --test e2e_encrypted_call -q
+    run "e2e/register-and-call" cargo test -p rvoip-session-core --test e2e_register_and_call -q
+    run "e2e/transport"         cargo test -p rvoip-sip-transport --test transport_tests -q
+    run "e2e/call-center"       cargo test -p rvoip-call-engine --test call_center_tests -q
+    run "e2e/b2bua-bridge"      cargo test -p rvoip-call-engine --test b2bua_bridge_test -q
+fi
+
+# ── Summary ──
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+printf "Results: ${G}%d passed${N}, ${R}%d failed${N}, ${Y}%d skipped${N}\n" "$PASSED" "$FAILED" "$SKIPPED"
+
+if [[ $FAILED -gt 0 ]]; then
+    echo -e "\n${R}Failed tests:${N}"
+    for e in "${ERRORS[@]}"; do echo -e "  ${R}x${N} $e"; done
     echo ""
-    echo -e "${RED}================================================${NC}"
-    echo ""
-    echo -e "${RED}Test suite failed with ${#FAILED_TESTS[@]} failure(s)${NC}"
-    echo -e "${YELLOW}Please review the output above to identify and fix the failing tests.${NC}"
     exit 1
-fi 
+else
+    echo -e "${G}All tests passed.${N}"
+fi
