@@ -1,6 +1,19 @@
 [advisories]
 version = 2
-ignore = []
+ignore = [
+    # RUSTSEC-2023-0071: rsa Marvin Attack (PKCS#1 v1.5 timing sidechannel)
+    # Impact on rvoip: NONE — we only use RSA-OAEP and RSA-PSS, never PKCS#1 v1.5 decrypt.
+    # Tracking: https://github.com/RustCrypto/RSA/issues/390
+    "RUSTSEC-2023-0071",
+    # RUSTSEC-2019-0036: failure crate type confusion (transitive via webrtc-audio-processing)
+    # Impact: only reachable if webrtc-apm feature is enabled (optional, not default)
+    "RUSTSEC-2019-0036",
+    # Unmaintained transitive deps from webrtc-rs ecosystem — not our direct deps
+    "RUSTSEC-2025-0052",  # async-std discontinued (transitive via webrtc-*)
+    "RUSTSEC-2025-0141",  # bincode unmaintained (transitive via webrtc-*)
+    "RUSTSEC-2024-0436",  # paste unmaintained (transitive)
+    "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained (transitive via sqlx)
+]
 
 [licenses]
 version = 2
@@ -17,7 +30,18 @@ allow = [
     "OpenSSL",
     "CC0-1.0",
     "MPL-2.0",
+    "CDLA-Permissive-2.0",
 ]
+
+[[licenses.clarify]]
+name = "rvoip-integration-tests"
+expression = "MIT OR Apache-2.0"
+license-files = []
+
+[[licenses.clarify]]
+name = "rvoip-registrar-core"
+expression = "MIT OR Apache-2.0"
+license-files = []
 
 [bans]
 multiple-versions = "warn"
