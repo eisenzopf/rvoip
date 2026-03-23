@@ -78,6 +78,8 @@ tempfile = "3.14"
 reqwest = { version = "0.12", features = ["json"] }
 serde_json = "1.0"
 futures = "0.3"
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
 
 [[example]]
 name = "basic_usage"
@@ -127,6 +129,10 @@ path = "tests/security_input_validation_tests.rs"
 [[test]]
 name = "security_rate_limiting_tests"
 path = "tests/security_rate_limiting_tests.rs"
+
+[[test]]
+name = "rest_api_integration"
+path = "tests/rest_api_integration.rs"
 
 [lints]
 workspace = true

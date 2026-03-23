@@ -29,5 +29,12 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 
+[dev-dependencies]
+rcgen = { workspace = true }
+tempfile = "3.14"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+
 [features]
 sctp = ["rvoip-sip-transport/sctp"]
+ws = ["rvoip-sip-transport/ws"]
+tls = ["rvoip-sip-transport/tls"]
