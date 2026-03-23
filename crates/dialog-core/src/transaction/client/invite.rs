@@ -265,7 +265,9 @@ impl ClientInviteLogic {
             error!(id=%tx_id, error=%e, "Failed to send initial request from Calling state");
             common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
             // If send fails, command a transition to Terminated
-            let _ = command_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Terminated)).await;
+            if let Err(e) = command_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Terminated)).await {
+                tracing::debug!("Failed to send TransitionTo command (channel closed): {e}");
+            }
             return Err(Error::transport_error(e, "Failed to send initial request"));
         }
         drop(request_guard); // Release lock
@@ -500,7 +502,9 @@ impl ClientInviteLogic {
                     debug!(id=%tx_id, "Received retransmission of error response in Completed state, resending ACK");
                     
                     // Just best effort for retransmissions; don't fail the transaction on ACK error
-                    let _ = self.create_and_send_ack_for_response(data, &response).await;
+                    if let Err(e) = self.create_and_send_ack_for_response(data, &response).await {
+                        tracing::debug!("Failed to resend ACK for retransmitted error response: {e}");
+                    }
                 }
                 // Stay in Completed state
                 return Ok(None);

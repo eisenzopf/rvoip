@@ -15,7 +15,7 @@ use super::{registry::SessionRegistry, events::SessionEventProcessor, cleanup::C
 
 // High-level integration with dialog and media modules (parallel abstraction levels)
 use crate::dialog::{DialogManager, SessionDialogCoordinator, DialogBuilder};
-use crate::media::{MediaManager, SessionMediaCoordinator}; // TODO: Add MediaManager when implemented
+use crate::media::{MediaManager, SessionMediaCoordinator};
 use rvoip_dialog_core::events::SessionCoordinationEvent;
 
 /// Main SessionManager that coordinates all session operations

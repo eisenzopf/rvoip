@@ -267,20 +267,24 @@ impl UasServer {
         // Reject all pending calls
         let pending = self.pending_calls.write().await.drain(..).collect::<Vec<_>>();
         for call in pending {
-            let _ = SessionControl::reject_incoming_call(
+            if let Err(e) = SessionControl::reject_incoming_call(
                 &self.coordinator,
                 &call,
                 "Server shutting down",
-            ).await;
+            ).await {
+                tracing::warn!("Failed to reject incoming call during shutdown: {e}");
+            }
         }
         
         // Terminate all active calls
         let calls = self.active_calls.read().await.clone();
         for (session_id, _) in calls {
-            let _ = SessionControl::terminate_session(
+            if let Err(e) = SessionControl::terminate_session(
                 &self.coordinator,
                 &session_id,
-            ).await;
+            ).await {
+                tracing::warn!("Failed to terminate session {} during shutdown: {e}", session_id);
+            }
         }
         
         // Clear collections

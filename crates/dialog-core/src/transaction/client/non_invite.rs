@@ -276,7 +276,9 @@ impl ClientNonInviteLogic {
             error!(id=%tx_id, error=%e, "Failed to send initial request from Trying state");
             common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
             // If send fails, command a transition to Terminated
-            let _ = command_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Terminated)).await;
+            if let Err(e) = command_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Terminated)).await {
+                tracing::debug!("Failed to send TransitionTo command (channel closed): {e}");
+            }
             return Err(Error::transport_error(e, "Failed to send initial request"));
         }
         drop(request_guard); // Release lock

@@ -251,10 +251,14 @@ impl AudioCodec for OpusCodec {
         #[cfg(feature = "opus")]
         {
             if let Some(encoder) = &mut self.encoder {
-                let _ = encoder.reset_state();
+                if let Err(e) = encoder.reset_state() {
+                    warn!("Failed to reset Opus encoder state: {}", e);
+                }
             }
             if let Some(decoder) = &mut self.decoder {
-                let _ = decoder.reset_state();
+                if let Err(e) = decoder.reset_state() {
+                    warn!("Failed to reset Opus decoder state: {}", e);
+                }
             }
         }
         debug!("Opus codec reset");

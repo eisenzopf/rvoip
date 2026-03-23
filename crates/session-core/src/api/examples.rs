@@ -117,7 +117,9 @@ pub async fn example_conference() -> Result<()> {
     
     // End all calls
     for call in calls {
-        let _ = session_mgr.terminate_session(&call.id).await;
+        if let Err(e) = session_mgr.terminate_session(&call.id).await {
+            tracing::warn!("Failed to terminate session {}: {e}", call.id);
+        }
     }
     
     Ok(())
@@ -257,7 +259,9 @@ impl QueueHandler {
             
             // Notify if channel is set
             if let Some(tx) = self.notify.lock().await.as_ref() {
-                let _ = tx.send(call);
+                if let Err(e) = tx.send(call) {
+                    tracing::debug!("Failed to send incoming call notification (receiver dropped): {e}");
+                }
             }
         }
     }

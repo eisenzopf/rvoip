@@ -140,6 +140,22 @@ impl SessionError {
         SessionError::Other(msg.to_string())
     }
 
+    /// Check if this error represents an SRTP security failure
+    /// (e.g., SRTP negotiated but setup failed, security downgrade prevented).
+    pub fn is_srtp_security_failure(&self) -> bool {
+        match self {
+            SessionError::MediaIntegration { message } => {
+                message.contains("SRTP security downgrade")
+                    || message.contains("SRTP setup failed")
+            }
+            SessionError::MediaError(msg) => {
+                msg.contains("SRTP security downgrade")
+                    || msg.contains("SRTP setup failed")
+            }
+            _ => false,
+        }
+    }
+
     pub fn invalid_uri(msg: &str) -> Self {
         SessionError::InvalidUri(msg.to_string())
     }

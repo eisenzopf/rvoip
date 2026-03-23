@@ -244,7 +244,9 @@ pub async fn broadcast_frame(
     
     // Wait for all sends to complete
     for task in send_tasks {
-        let _ = task.await;
+        if let Err(e) = task.await {
+            tracing::warn!("Broadcast send task panicked: {e}");
+        }
     }
     
     Ok(())

@@ -163,7 +163,9 @@ impl ConferenceCoordinator {
             if let Ok(participants) = self.conference_manager.list_participants(&conference_id).await {
                 if participants.iter().any(|p| &p.session_id == session_id) {
                     // Remove from conference
-                    let _ = self.conference_manager.leave_conference(&conference_id, session_id).await;
+                    if let Err(e) = self.conference_manager.leave_conference(&conference_id, session_id).await {
+                        tracing::warn!("Failed to remove session {} from conference {}: {e}", session_id, conference_id);
+                    }
                 }
             }
         }

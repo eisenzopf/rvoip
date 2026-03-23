@@ -31,7 +31,6 @@ bytes.workspace = true
 
 # Crate-specific dependencies not in workspace
 tracing-subscriber = "0.3"   # Logging initialization
-once_cell = { workspace = true }           # Lazy static initialization for lookup tables
 
 # Media codecs (optional)
 opus = { version = "0.3", optional = true }

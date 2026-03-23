@@ -246,7 +246,7 @@ impl RtpSession {
             let mut rng = rand::thread_rng();
             rng.r#gen::<u32>()
         });
-        
+
         // Create transport config - respect provided ports!
         let transport_config = RtpTransportConfig {
             local_rtp_addr: config.local_addr,
@@ -257,29 +257,58 @@ impl RtpSession {
             // Don't allocate a new port - use the one provided in config
             use_port_allocator: false,
         };
-        
+
         // Create UDP transport
         let transport = Arc::new(UdpRtpTransport::new(transport_config).await?);
-        
+
+        Self::init_with_transport(config, transport, ssrc).await
+    }
+
+    /// Create an RtpSession with an externally provided transport.
+    ///
+    /// This is used when the caller needs to wrap the transport layer,
+    /// e.g., with SecurityRtpTransport for SRTP encryption.
+    /// The caller is responsible for creating and configuring the transport.
+    pub async fn with_transport(
+        config: RtpSessionConfig,
+        transport: Arc<dyn RtpTransport>,
+    ) -> Result<Self> {
+        // Generate SSRC if not provided
+        let ssrc = config.ssrc.unwrap_or_else(|| {
+            let mut rng = rand::thread_rng();
+            rng.r#gen::<u32>()
+        });
+
+        Self::init_with_transport(config, transport, ssrc).await
+    }
+
+    /// Shared initialization logic for both `new()` and `with_transport()`.
+    ///
+    /// Sets up channels, scheduler, RTCP generator, and starts send/receive tasks.
+    async fn init_with_transport(
+        config: RtpSessionConfig,
+        transport: Arc<dyn RtpTransport>,
+        ssrc: RtpSsrc,
+    ) -> Result<Self> {
         // Create channels for internal communication
         // Increased capacity to handle longer sessions without dropping packets
         let (sender_tx, sender_rx) = mpsc::channel(1000);
         let (receiver_tx, receiver_rx) = mpsc::channel(1000);
         let (event_tx, _) = broadcast::channel(1000);
-        
+
         // Create scheduler if needed
         let scheduler = Some(RtpScheduler::new(
             config.clock_rate,
             rand::thread_rng().r#gen::<u16>(), // Random starting sequence
             rand::thread_rng().r#gen::<u32>(), // Random starting timestamp
         ));
-        
+
         // Create RTCP report generator
         let hostname = hostname::get().unwrap_or_else(|_| "unknown".into());
         let hostname_str = hostname.to_string_lossy();
         let cname = format!("{}@{}", std::env::var("USER").unwrap_or_else(|_| "user".to_string()), hostname_str);
         let rtcp_generator = crate::stats::reports::RtcpReportGenerator::new(ssrc, cname);
-        
+
         let mut session = Self {
             config,
             ssrc,
@@ -298,10 +327,10 @@ impl RtpSession {
             rtcp_task: None,
             bandwidth_bps: 64000, // Default bandwidth: 64 kbps
         };
-        
+
         // Start the session
         session.start(sender_rx, receiver_tx).await?;
-        
+
         Ok(session)
     }
     
@@ -397,7 +426,9 @@ impl RtpSession {
                     error!("Failed to send RTP packet: {}", e);
                     
                     // Broadcast error event
-                    let _ = event_tx_send.send(RtpSessionEvent::Error(e));
+                    if let Err(e) = event_tx_send.send(RtpSessionEvent::Error(e)) {
+                        tracing::warn!("Failed to broadcast RTP send error event: {e}");
+                    }
                     continue;
                 }
                 
@@ -434,10 +465,12 @@ impl RtpSession {
                                         let source_ssrc = bye.sources[0];
                                         
                                         // Broadcast BYE event
-                                        let _ = event_tx_recv.send(RtpSessionEvent::Bye {
+                                        if let Err(e) = event_tx_recv.send(RtpSessionEvent::Bye {
                                             ssrc: source_ssrc,
                                             reason: bye.reason,
-                                        });
+                                        }) {
+                                            tracing::debug!("Failed to broadcast RTCP BYE event (no receivers): {e}");
+                                        }
                                         
                                         info!("Received RTCP BYE from SSRC={:08x}", source_ssrc);
                                     }
@@ -473,14 +506,16 @@ impl RtpSession {
                                     }
                                     
                                     // Emit SR event for external processing
-                                    let _ = event_tx_recv.send(RtpSessionEvent::RtcpSenderReport { 
+                                    if let Err(e) = event_tx_recv.send(RtpSessionEvent::RtcpSenderReport {
                                         ssrc: report_ssrc,
                                         ntp_timestamp: sr.ntp_timestamp,
                                         rtp_timestamp: sr.rtp_timestamp,
                                         packet_count: sr.sender_packet_count,
                                         octet_count: sr.sender_octet_count,
                                         report_blocks: sr.report_blocks,
-                                    });
+                                    }) {
+                                        tracing::debug!("Failed to broadcast RTCP SR event (no receivers): {e}");
+                                    }
                                 },
                                 crate::packet::rtcp::RtcpPacket::ReceiverReport(rr) => {
                                     // Process receiver report
@@ -508,10 +543,12 @@ impl RtpSession {
                                     }
                                     
                                     // Emit RR event for external processing
-                                    let _ = event_tx_recv.send(RtpSessionEvent::RtcpReceiverReport { 
+                                    if let Err(e) = event_tx_recv.send(RtpSessionEvent::RtcpReceiverReport {
                                         ssrc: report_ssrc,
                                         report_blocks: rr.report_blocks,
-                                    });
+                                    }) {
+                                        tracing::debug!("Failed to broadcast RTCP RR event (no receivers): {e}");
+                                    }
                                 },
                                 // Handle other RTCP packet types as needed
                                 _ => {
@@ -575,9 +612,11 @@ impl RtpSession {
                         
                         // If this is a new stream, emit the NewStreamDetected event
                         if is_new_stream {
-                            let _ = event_tx_recv.send(RtpSessionEvent::NewStreamDetected {
+                            if let Err(e) = event_tx_recv.send(RtpSessionEvent::NewStreamDetected {
                                 ssrc: packet_ssrc,
-                            });
+                            }) {
+                                tracing::debug!("Failed to broadcast NewStreamDetected event (no receivers): {e}");
+                            }
                         }
                         
                         // Forward the packet
@@ -587,12 +626,16 @@ impl RtpSession {
                             }
                             
                             // Broadcast packet received event
-                            let _ = event_tx_recv.send(RtpSessionEvent::PacketReceived(output));
+                            if let Err(e) = event_tx_recv.send(RtpSessionEvent::PacketReceived(output)) {
+                                tracing::debug!("Failed to broadcast PacketReceived event (no receivers): {e}");
+                            }
                         }
                     }
                     Ok(crate::traits::RtpEvent::Error(e)) => {
                         error!("Transport error: {}", e);
-                        let _ = event_tx_recv.send(RtpSessionEvent::Error(e));
+                        if let Err(e) = event_tx_recv.send(RtpSessionEvent::Error(e)) {
+                            tracing::warn!("Failed to broadcast transport error event: {e}");
+                        }
                     }
                     Err(e) => {
                         debug!("Transport event channel error: {}", e);
@@ -670,14 +713,16 @@ impl RtpSession {
                             
                             // Emit SR event
                             if let Some(sr) = compound.get_sr() {
-                                let _ = event_tx.send(RtpSessionEvent::RtcpSenderReport {
+                                if let Err(e) = event_tx.send(RtpSessionEvent::RtcpSenderReport {
                                     ssrc,
                                     ntp_timestamp: sr.ntp_timestamp,
                                     rtp_timestamp: sr.rtp_timestamp,
                                     packet_count: sr.sender_packet_count,
                                     octet_count: sr.sender_octet_count,
                                     report_blocks: sr.report_blocks.clone(),
-                                });
+                                }) {
+                                    tracing::debug!("Failed to broadcast RTCP SR sent event (no receivers): {e}");
+                                }
                             }
                         }
                     }
@@ -856,7 +901,9 @@ impl RtpSession {
         }
         
         // Close the transport
-        let _ = self.transport.close().await;
+        if let Err(e) = self.transport.close().await {
+            tracing::debug!("Failed to close RTP transport during session shutdown: {e}");
+        }
         
         self.active = false;
         info!("Closed RTP session with SSRC={:08x}", self.ssrc);
@@ -964,9 +1011,11 @@ impl RtpSession {
         
         // Emit the new stream event
         debug!("Emitting NewStreamDetected event for SSRC={:08x}", ssrc);
-        let _ = self.event_tx.send(RtpSessionEvent::NewStreamDetected {
+        if let Err(e) = self.event_tx.send(RtpSessionEvent::NewStreamDetected {
             ssrc,
-        });
+        }) {
+            tracing::debug!("Failed to broadcast NewStreamDetected event (no receivers): {e}");
+        }
         
         true
     }

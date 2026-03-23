@@ -335,7 +335,9 @@ impl SimpleUasServer {
         // Terminate all active sessions
         let sessions = SessionControl::list_active_sessions(&self.coordinator).await?;
         for session_id in sessions {
-            let _ = SessionControl::terminate_session(&self.coordinator, &session_id).await;
+            if let Err(e) = SessionControl::terminate_session(&self.coordinator, &session_id).await {
+                tracing::warn!("Failed to terminate session {} during shutdown: {e}", session_id);
+            }
         }
         
         Ok(())

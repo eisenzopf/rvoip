@@ -370,9 +370,13 @@ impl MediaAdapter {
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
         if let Some(dialog_id) = self.session_to_dialog.remove(session_id) {
             if self.audio_receivers.contains_key(session_id) {
-                let _ = self.controller.remove_audio_frame_callback(&dialog_id.1).await;
+                if let Err(e) = self.controller.remove_audio_frame_callback(&dialog_id.1).await {
+                    tracing::warn!("Failed to remove audio frame callback for dialog {}: {e}", dialog_id.1);
+                }
             }
-            let _ = self.controller.stop_media(&dialog_id.1).await;
+            if let Err(e) = self.controller.stop_media(&dialog_id.1).await {
+                tracing::warn!("Failed to stop media for dialog {}: {e}", dialog_id.1);
+            }
             self.dialog_to_session.remove(&dialog_id.1);
         }
         self.media_sessions.remove(session_id);

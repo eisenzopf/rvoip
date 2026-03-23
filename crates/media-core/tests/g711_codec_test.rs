@@ -184,8 +184,8 @@ fn test_g711_codec_pcma() {
 fn test_g711_codec_properties() {
     println!("🎵 Testing G.711 codec properties");
     
-    let mut pcmu_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1).unwrap();
-    let mut pcma_codec = G711Codec::new(G711Variant::ALaw, 8000, 1).unwrap();
+    let mut pcmu_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1);
+    let mut pcma_codec = G711Codec::new(G711Variant::ALaw, 8000, 1);
     
     // Test codec properties
     let pcmu_info = pcmu_codec.get_info();
@@ -249,8 +249,8 @@ fn test_g711_edge_cases() {
 fn test_g711_compare_variants() {
     println!("🎵 Comparing G.711 μ-law vs A-law");
     
-    let mut pcmu_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1).unwrap();
-    let mut pcma_codec = G711Codec::new(G711Variant::ALaw, 8000, 1).unwrap();
+    let mut pcmu_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1);
+    let mut pcma_codec = G711Codec::new(G711Variant::ALaw, 8000, 1);
     
     // Create identical test signal
     let num_samples = 160;

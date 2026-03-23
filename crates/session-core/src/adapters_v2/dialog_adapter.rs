@@ -296,7 +296,9 @@ impl DialogAdapter {
                     session_id: session_id.0.clone(),
                 }
             );
-            let _ = self.global_coordinator.publish(Arc::new(event)).await;
+            if let Err(e) = self.global_coordinator.publish(Arc::new(event)).await {
+                tracing::warn!("Failed to publish cross-crate event: {e}");
+            }
         } else if response.status_code() >= 400 {
             let event = RvoipCrossCrateEvent::DialogToSession(
                 rvoip_infra_common::events::cross_crate::DialogToSessionEvent::RegistrationFailed {
@@ -304,7 +306,9 @@ impl DialogAdapter {
                     status_code: response.status_code(),
                 }
             );
-            let _ = self.global_coordinator.publish(Arc::new(event)).await;
+            if let Err(e) = self.global_coordinator.publish(Arc::new(event)).await {
+                tracing::warn!("Failed to publish cross-crate event: {e}");
+            }
         }
 
         Ok(())
@@ -344,7 +348,9 @@ impl DialogAdapter {
                     session_id: session_id.0.clone(),
                 }
             );
-            let _ = self.global_coordinator.publish(Arc::new(event)).await;
+            if let Err(e) = self.global_coordinator.publish(Arc::new(event)).await {
+                tracing::warn!("Failed to publish cross-crate event: {e}");
+            }
         } else if response.status_code() >= 400 {
             let event = RvoipCrossCrateEvent::DialogToSession(
                 rvoip_infra_common::events::cross_crate::DialogToSessionEvent::SubscriptionFailed {
@@ -352,7 +358,9 @@ impl DialogAdapter {
                     status_code: response.status_code(),
                 }
             );
-            let _ = self.global_coordinator.publish(Arc::new(event)).await;
+            if let Err(e) = self.global_coordinator.publish(Arc::new(event)).await {
+                tracing::warn!("Failed to publish cross-crate event: {e}");
+            }
         }
 
         Ok(())
@@ -432,7 +440,9 @@ impl DialogAdapter {
                         session_id: session_id.0.clone(),
                     }
                 );
-                let _ = self.global_coordinator.publish(Arc::new(event)).await;
+                if let Err(e) = self.global_coordinator.publish(Arc::new(event)).await {
+                tracing::warn!("Failed to publish cross-crate event: {e}");
+            }
             } else if response.status_code() >= 400 {
                 let event = RvoipCrossCrateEvent::DialogToSession(
                     rvoip_infra_common::events::cross_crate::DialogToSessionEvent::MessageFailed {
@@ -440,7 +450,9 @@ impl DialogAdapter {
                         status_code: response.status_code(),
                     }
                 );
-                let _ = self.global_coordinator.publish(Arc::new(event)).await;
+                if let Err(e) = self.global_coordinator.publish(Arc::new(event)).await {
+                tracing::warn!("Failed to publish cross-crate event: {e}");
+            }
             }
         }
         tracing::info!("MESSAGE sent successfully for session {}", session_id.0);

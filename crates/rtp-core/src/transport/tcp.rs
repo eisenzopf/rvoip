@@ -227,7 +227,9 @@ impl RtpTransport for TcpRtpTransport {
         // Shut down the TCP stream if present
         let mut stream_guard = self.stream.lock().await;
         if let Some(ref mut stream) = *stream_guard {
-            let _ = stream.shutdown().await;
+            if let Err(e) = stream.shutdown().await {
+                tracing::debug!("Failed to shutdown TCP stream during close: {e}");
+            }
         }
         *stream_guard = None;
 

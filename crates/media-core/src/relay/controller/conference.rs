@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 use crate::types::{DialogId, AudioFrame};
@@ -50,7 +50,9 @@ impl MediaSessionController {
                 .map_err(|e| Error::config(format!("Failed to get participants: {}", e)))?;
             
             for participant_id in participants {
-                let _ = mixer.remove_audio_stream(&participant_id).await;
+                if let Err(e) = mixer.remove_audio_stream(&participant_id).await {
+                    warn!("Failed to remove audio stream for participant {}: {}", participant_id, e);
+                }
             }
         }
         

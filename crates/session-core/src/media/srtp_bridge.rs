@@ -78,10 +78,10 @@ impl SrtpMediaBridge {
         &mut self,
         socket: Arc<UdpSocket>,
         remote_addr: SocketAddr,
-    ) -> Result<(), MediaError> {
+    ) -> Result<Option<SrtpKeyMaterial>, MediaError> {
         if !self.srtp_required {
             debug!("SRTP not required -- skipping DTLS handshake");
-            return Ok(());
+            return Ok(None);
         }
 
         let adapter_role: AdapterDtlsRole = self.dtls_role.into();
@@ -142,7 +142,7 @@ impl SrtpMediaBridge {
         self.install_srtp_keys_adapter(&keys)?;
 
         self.dtls_connection = Some(adapter);
-        Ok(())
+        Ok(Some(keys))
     }
 
     /// Encrypt an outbound RTP packet.

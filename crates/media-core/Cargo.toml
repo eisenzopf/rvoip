@@ -57,7 +57,6 @@ rand = "0.8"
 
 # Missing dependencies needed for compilation
 uuid = { workspace = true, features = ["v4"] }
-once_cell = { workspace = true }           # Lazy static initialization for G.711 lookup tables
 parking_lot = { workspace = true }        # Non-poisoning synchronization primitives
 num_cpus = "1.0"             # Used for default worker thread configuration
 

@@ -9,7 +9,7 @@ use std::str::FromStr;
 use tokio::sync::{RwLock, Mutex};
 use async_trait::async_trait;
 use anyhow::{Result, anyhow};
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info, warn};
 use dashmap::DashMap;
 
 use rvoip_sip_core::prelude::*;
@@ -379,7 +379,7 @@ impl RegistrarIntegration {
         
         // Send NOTIFY through the outbound channel
         if let Err(e) = self.outbound_tx.send(notify) {
-            error!("Failed to send NOTIFY through outbound channel: {}", e);
+            debug!("Failed to send NOTIFY through outbound channel: {e}");
             return Err(anyhow!("Failed to send NOTIFY: outbound channel closed"));
         }
         debug!("NOTIFY queued for subscription call_id={}", call_id);
@@ -469,7 +469,7 @@ impl RegistrarIntegration {
             
             // Send final NOTIFY through the outbound channel
             if let Err(e) = self.outbound_tx.send(notify) {
-                error!("Failed to send final NOTIFY through outbound channel: {}", e);
+                debug!("Failed to send final NOTIFY through outbound channel: {e}");
                 return Err(anyhow!("Failed to send final NOTIFY: outbound channel closed"));
             }
             debug!("Final NOTIFY (terminated) queued for subscription call_id={}", call_id);

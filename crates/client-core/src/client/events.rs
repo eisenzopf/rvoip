@@ -985,10 +985,12 @@ impl CallHandler for ClientCallHandler {
         
         // Broadcast event
         if let Some(event_tx) = &self.event_tx {
-            let _ = event_tx.send(crate::events::ClientEvent::IncomingCall { 
+            if let Err(e) = event_tx.send(crate::events::ClientEvent::IncomingCall {
                 info: incoming_call_info.clone(),
                 priority: crate::events::EventPriority::High,
-            });
+            }) {
+                tracing::warn!("Failed to broadcast incoming call event (no receivers): {}", e);
+            }
         }
         
         // Forward to client event handler
@@ -1127,27 +1129,31 @@ impl CallHandler for ClientCallHandler {
                 
                 // Broadcast event
                 if let Some(event_tx) = &self.event_tx {
-                    let _ = event_tx.send(crate::events::ClientEvent::CallStateChanged { 
+                    if let Err(e) = event_tx.send(crate::events::ClientEvent::CallStateChanged {
                         info: status_info.clone(),
                         priority: crate::events::EventPriority::Normal,
-                    });
+                    }) {
+                        tracing::debug!("Call state change event receiver dropped: {}", e);
+                    }
                 }
-                
+
                 // Forward to client event handler
                 if let Some(handler) = self.client_event_handler.read().await.as_ref() {
                     handler.on_call_state_changed(status_info).await;
                 }
             }
-            
+
             // IMPORTANT: When transitioning to Terminating, send cleanup confirmation
             // This tells session-core that client-core has completed its cleanup
             if matches!(new_state, CallState::Terminating) {
                 if let Some(session_event_tx) = self.session_event_tx.read().await.as_ref() {
                     use rvoip_session_core::manager::events::SessionEvent;
-                    let _ = session_event_tx.send(SessionEvent::CleanupConfirmation {
+                    if let Err(e) = session_event_tx.send(SessionEvent::CleanupConfirmation {
                         session_id: session_id.clone(),
                         layer: "Client".to_string(),
-                    }).await;
+                    }).await {
+                        tracing::warn!("Failed to send cleanup confirmation for session {}: {}", session_id, e);
+                    }
                     tracing::debug!("Sent cleanup confirmation for session {} from client-core (Terminating state)", session_id);
                 }
             }
@@ -1198,10 +1204,12 @@ impl CallHandler for ClientCallHandler {
             
             // Broadcast event
             if let Some(event_tx) = &self.event_tx {
-                let _ = event_tx.send(crate::events::ClientEvent::CallStateChanged { 
+                if let Err(e) = event_tx.send(crate::events::ClientEvent::CallStateChanged {
                     info: status_info.clone(),
                     priority: crate::events::EventPriority::Normal,
-                });
+                }) {
+                    tracing::debug!("Call state change event receiver dropped: {}", e);
+                }
             }
             
             // Forward to client event handler
@@ -1338,20 +1346,24 @@ impl CallHandler for ClientCallHandler {
             
             // Broadcast event
             if let Some(event_tx) = &self.event_tx {
-                let _ = event_tx.send(crate::events::ClientEvent::CallStateChanged { 
+                if let Err(e) = event_tx.send(crate::events::ClientEvent::CallStateChanged {
                     info: status_info.clone(),
                     priority: crate::events::EventPriority::High,
-                });
+                }) {
+                    tracing::debug!("Call established event receiver dropped: {}", e);
+                }
             }
-            
+
             // Forward to client event handler
             if let Some(handler) = self.client_event_handler.read().await.as_ref() {
                 handler.on_call_state_changed(status_info).await;
             }
-            
+
             // Notify about call establishment for audio setup
             if let Some(tx) = &self.call_established_tx {
-                let _ = tx.send(call_id);
+                if let Err(e) = tx.send(call_id) {
+                    tracing::warn!("Failed to send call established notification: {}", e);
+                }
             }
             
             tracing::info!("Call {} established with SDP exchange", call_id);

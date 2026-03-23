@@ -1,7 +1,7 @@
 [package]
 name = "rvoip-intermediary-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 authors = ["RVoIP Contributors"]
 description = "Core library for building SIP intermediaries (proxies, B2BUAs, SBCs, gateways)"
 license = "MIT OR Apache-2.0"

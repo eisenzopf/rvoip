@@ -80,6 +80,9 @@ pub enum MediaError {
 
     #[error("ICE error: {message}")]
     Ice { message: String },
+
+    #[error("SRTP security downgrade: {message}")]
+    SrtpSecurityDowngrade { message: String },
 }
 
 impl MediaError {

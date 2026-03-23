@@ -214,10 +214,12 @@ impl MediaSessionController {
                 };
                 
                 // Send statistics update event
-                let _ = event_tx.send(MediaSessionEvent::StatisticsUpdated {
+                if let Err(e) = event_tx.send(MediaSessionEvent::StatisticsUpdated {
                     dialog_id: dialog_id_clone.clone(),
                     stats: media_stats,
-                });
+                }) {
+                    debug!("Media event receiver dropped (statistics updated): {}", e);
+                }
                 
                 // Check for quality degradation
                 if packet_loss_percent > 5.0 || stats.jitter_ms > 50.0 {
@@ -231,11 +233,13 @@ impl MediaSessionController {
                         
                         warn!("⚠️ Quality degradation detected for {}: {}", dialog_id_clone, reason);
                         
-                        let _ = event_tx.send(MediaSessionEvent::QualityDegraded {
+                        if let Err(e) = event_tx.send(MediaSessionEvent::QualityDegraded {
                             dialog_id: dialog_id_clone.clone(),
                             metrics: quality_metrics,
                             reason,
-                        });
+                        }) {
+                            warn!("Failed to send quality degradation event (receiver dropped): {}", e);
+                        }
                         
                         last_quality_alert = Instant::now();
                     }

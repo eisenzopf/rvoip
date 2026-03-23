@@ -680,13 +680,16 @@ impl SessionCoordinator {
                 if event == "rfc_compliant_media_creation_uas" {
                     if let Some(negotiated) = self.get_negotiated_config(&session_id).await {
                         tracing::info!("📢 Publishing MediaFlowEstablished for UAS {} in media creation handler", session_id);
-                        let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
+                        if let Err(e) = self.publish_event(SessionEvent::MediaFlowEstablished {
                             session_id: session_id.clone(),
                             local_addr: negotiated.local_addr.to_string(),
                             remote_addr: negotiated.remote_addr.to_string(),
                             direction: crate::manager::events::MediaFlowDirection::Both,
-                        }).await;
-                        tracing::info!("✅ MediaFlowEstablished published for UAS {} from media creation handler", session_id);
+                        }).await {
+                            tracing::warn!("Failed to publish MediaFlowEstablished for UAS {} from media creation handler: {e}", session_id);
+                        } else {
+                            tracing::info!("MediaFlowEstablished published for UAS {} from media creation handler", session_id);
+                        }
                     } else {
                         tracing::warn!("⚠️ No negotiated config found for UAS {} in media creation handler", session_id);
                     }
@@ -714,7 +717,7 @@ impl SessionCoordinator {
                             }).await;
                             
                             if let Err(e) = publish_result {
-                                tracing::error!("Failed to publish StateChanged event: {:?}", e);
+                                tracing::warn!("Failed to publish StateChanged event: {e}");
                             } else {
                                 tracing::debug!("✅ Successfully published StateChanged for session {}", session_id);
                             }
@@ -737,13 +740,16 @@ impl SessionCoordinator {
                                 // Get negotiated config if available
                                 if let Some(negotiated) = self.get_negotiated_config(&session_id).await {
                                     tracing::info!("📢 Publishing MediaFlowEstablished for UAS {} after media creation", session_id);
-                                    let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
+                                    if let Err(e) = self.publish_event(SessionEvent::MediaFlowEstablished {
                                         session_id: session_id.clone(),
                                         local_addr: negotiated.local_addr.to_string(),
                                         remote_addr: negotiated.remote_addr.to_string(),
                                         direction: crate::manager::events::MediaFlowDirection::Both,
-                                    }).await;
-                                    tracing::info!("✅ MediaFlowEstablished published for UAS {}", session_id);
+                                    }).await {
+                                        tracing::warn!("Failed to publish MediaFlowEstablished for UAS {} after media creation: {e}", session_id);
+                                    } else {
+                                        tracing::info!("MediaFlowEstablished published for UAS {}", session_id);
+                                    }
                                 } else {
                                     tracing::warn!("No negotiated config found for UAS {} - cannot publish MediaFlowEstablished", session_id);
                                 }
@@ -856,7 +862,7 @@ impl SessionCoordinator {
                                                 direction: crate::manager::events::MediaFlowDirection::Both,
                                             }).await;
                                             if let Err(e) = result {
-                                                tracing::error!("Failed to publish MediaFlowEstablished event: {:?}", e);
+                                                tracing::warn!("Failed to publish MediaFlowEstablished event: {e}");
                                             } else {
                                                 tracing::info!("✅ MediaFlowEstablished event published for UAC {}", session_id);
                                             }
@@ -867,6 +873,14 @@ impl SessionCoordinator {
                                 }
                                 Err(e) => {
                                     tracing::error!("SDP negotiation failed: {}", e);
+                                    // If this is an SRTP security downgrade, terminate the session
+                                    // to prevent continuing in an insecure state
+                                    if e.is_srtp_security_failure() {
+                                        tracing::error!("Terminating session {} due to SRTP security failure", session_id);
+                                        if let Err(term_err) = self.terminate_session(&session_id).await {
+                                            tracing::error!("Failed to terminate session after SRTP failure: {}", term_err);
+                                        }
+                                    }
                                 }
                             }
                         } else {
@@ -918,12 +932,14 @@ impl SessionCoordinator {
                             
                             // Emit MediaNegotiated event manually since we're not calling negotiate_sdp_as_uac
                             // Extract addresses from SDP (simplified - in production would parse properly)
-                            let _ = self.publish_event(SessionEvent::MediaNegotiated {
+                            if let Err(e) = self.publish_event(SessionEvent::MediaNegotiated {
                                 session_id: session_id.clone(),
                                 local_addr: std::net::SocketAddr::from(([0, 0, 0, 0], 0)), // Would be parsed from SDP
                                 remote_addr: std::net::SocketAddr::from(([0, 0, 0, 0], 0)), // Would be parsed from SDP
                                 codec: "PCMU".to_string(), // Would be determined from negotiation
-                            }).await;
+                            }).await {
+                                tracing::warn!("Failed to publish MediaNegotiated event: {e}");
+                            }
                             
                             // Check if conditions are now met for Bob's session
                             self.check_and_trigger_call_established(&session_id).await;
@@ -1049,7 +1065,7 @@ impl SessionCoordinator {
                                         direction: crate::manager::events::MediaFlowDirection::Both,
                                     }).await;
                                     if let Err(e) = result {
-                                        tracing::error!("Failed to publish MediaFlowEstablished event: {:?}", e);
+                                        tracing::warn!("Failed to publish MediaFlowEstablished event: {e}");
                                     } else {
                                         tracing::info!("✅ MediaFlowEstablished event published for UAS {}", session_id);
                                     }
@@ -1059,14 +1075,22 @@ impl SessionCoordinator {
                             }
                             
                             // Send event with the generated answer
-                            let _ = self.publish_event(SessionEvent::SdpEvent {
+                            if let Err(e) = self.publish_event(SessionEvent::SdpEvent {
                                 session_id,
                                 event_type: "generated_sdp_answer".to_string(),
                                 sdp: our_answer,
-                            }).await;
+                            }).await {
+                                tracing::warn!("Failed to publish generated SDP answer event: {e}");
+                            }
                         }
                         Err(e) => {
                             tracing::error!("SDP negotiation as UAS failed: {}", e);
+                            if e.is_srtp_security_failure() {
+                                tracing::error!("Terminating session {} due to SRTP security failure", session_id);
+                                if let Err(term_err) = self.terminate_session(&session_id).await {
+                                    tracing::error!("Failed to terminate session after SRTP failure: {}", term_err);
+                                }
+                            }
                         }
                     }
                 }
@@ -1081,6 +1105,12 @@ impl SessionCoordinator {
                         }
                         Err(e) => {
                             tracing::error!("SDP negotiation as UAC failed: {}", e);
+                            if e.is_srtp_security_failure() {
+                                tracing::error!("Terminating session {} due to SRTP security failure", session_id);
+                                if let Err(term_err) = self.terminate_session(&session_id).await {
+                                    tracing::error!("Failed to terminate session after SRTP failure: {}", term_err);
+                                }
+                            }
                         }
                     }
                 }

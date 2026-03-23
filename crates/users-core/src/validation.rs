@@ -2,15 +2,15 @@
 
 use validator::{Validate, ValidationError};
 use regex::Regex;
-use once_cell::sync::Lazy;
+use std::sync::LazyLock;
 use std::collections::HashSet;
 
 // Regex patterns for validation
-static USERNAME_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[a-zA-Z0-9_.-]{3,32}$").unwrap());
-static EMAIL_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").unwrap());
+static USERNAME_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9_.-]{3,32}$").expect("BUG: invalid USERNAME_REGEX"));
+static EMAIL_REGEX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[^\s@]+@[^\s@]+\.[^\s@]+$").expect("BUG: invalid EMAIL_REGEX"));
 
 // Common passwords list (top 100 for demo - in production, use larger list)
-static COMMON_PASSWORDS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+static COMMON_PASSWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     vec![
         "password", "123456", "password123", "admin", "letmein", "welcome", "monkey",
         "dragon", "baseball", "iloveyou", "trustno1", "1234567", "sunshine", "master",

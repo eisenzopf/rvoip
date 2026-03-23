@@ -19,20 +19,20 @@ pub struct G711Codec {
 }
 
 impl G711Codec {
-    pub fn new(variant: G711Variant, sample_rate: u32, channels: u16) -> Result<Self> {
-        Ok(Self {
+    pub fn new(variant: G711Variant, sample_rate: u32, channels: u16) -> Self {
+        Self {
             inner: CodecCoreG711::new(variant),
             variant,
             sample_rate,
             channels,
-        })
+        }
     }
-    
-    pub fn mu_law(sample_rate: u32, channels: u16) -> Result<Self> {
+
+    pub fn mu_law(sample_rate: u32, channels: u16) -> Self {
         Self::new(G711Variant::MuLaw, sample_rate, channels)
     }
-    
-    pub fn a_law(sample_rate: u32, channels: u16) -> Result<Self> {
+
+    pub fn a_law(sample_rate: u32, channels: u16) -> Self {
         Self::new(G711Variant::ALaw, sample_rate, channels)
     }
 
@@ -127,8 +127,8 @@ mod tests {
     #[test]
     fn test_codec_core_g711_compatibility() {
         // Test that codec-core G.711 produces expected output
-        let mut codec = G711Codec::mu_law(8000, 1).unwrap();
-        
+        let mut codec = G711Codec::mu_law(8000, 1);
+
         // Test standard patterns
         let test_patterns = vec![
             vec![0i16; 160],          // Silence
@@ -149,8 +149,8 @@ mod tests {
     #[test]
     fn test_g711_features() {
         // Test specific G.711 features
-        let mut mu_codec = G711Codec::mu_law(8000, 1).unwrap();
-        let mut a_codec = G711Codec::a_law(8000, 1).unwrap();
+        let mut mu_codec = G711Codec::mu_law(8000, 1);
+        let mut a_codec = G711Codec::a_law(8000, 1);
         
         // Test maximum values
         let max_samples = vec![i16::MAX; 160];
@@ -176,8 +176,8 @@ mod tests {
     
     #[test]
     fn test_error_context() {
-        let mut codec = G711Codec::mu_law(8000, 1).unwrap();
-        
+        let mut codec = G711Codec::mu_law(8000, 1);
+
         // Test that errors contain proper context
         let result = codec.decode(&[]);
         assert!(result.is_err());
@@ -188,8 +188,8 @@ mod tests {
     
     #[test]
     fn test_zero_copy_methods() {
-        let mut codec = G711Codec::mu_law(8000, 1).unwrap();
-        
+        let mut codec = G711Codec::mu_law(8000, 1);
+
         let samples = vec![1000i16; 160];
         let mut encoded = vec![0u8; 160];
         
@@ -205,14 +205,14 @@ mod tests {
     
     #[test]
     fn test_codec_info() {
-        let mu_codec = G711Codec::mu_law(8000, 1).unwrap();
+        let mu_codec = G711Codec::mu_law(8000, 1);
         let info = mu_codec.get_info();
         assert_eq!(info.name, "G.711 μ-law");
         assert_eq!(info.sample_rate, 8000);
         assert_eq!(info.channels, 1);
         assert_eq!(info.bitrate, 64000); // 8000 * 8 * 1
         
-        let a_codec = G711Codec::a_law(16000, 2).unwrap();
+        let a_codec = G711Codec::a_law(16000, 2);
         let info = a_codec.get_info();
         assert_eq!(info.name, "G.711 A-law");
         assert_eq!(info.sample_rate, 16000);

@@ -223,8 +223,10 @@ impl SessionCoordinator {
     pub(crate) async fn emit_bridge_event(&self, event: BridgeEvent) {
         let subscribers = self.bridge_event_subscribers.read().await;
         for subscriber in subscribers.iter() {
-            // Ignore send errors (subscriber may have dropped)
-            let _ = subscriber.send(event.clone());
+            // Subscriber may have dropped during shutdown
+            if let Err(e) = subscriber.send(event.clone()) {
+                tracing::debug!("Failed to send bridge event to subscriber (receiver dropped): {e}");
+            }
         }
     }
 } 

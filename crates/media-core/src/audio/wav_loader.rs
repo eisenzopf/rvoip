@@ -80,8 +80,7 @@ pub fn wav_to_ulaw(wav: &WavAudio) -> Result<Vec<u8>> {
     };
     
     // Create G.711 codec
-    let mut codec = G711Codec::mu_law(8000, 1)
-        .map_err(|e| Error::config(format!("Failed to create G.711 codec: {}", e)))?;
+    let mut codec = G711Codec::mu_law(8000, 1);
     
     // Encode to µ-law
     let audio_frame = AudioFrame {

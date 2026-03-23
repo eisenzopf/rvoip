@@ -405,7 +405,9 @@ impl SessionCoordinator {
         
         // Step 4: Signal all spawned tasks to stop via broadcast, then wait
         tracing::debug!("SHUTDOWN: Sending broadcast shutdown signal to spawned tasks");
-        let _ = self.shutdown_tx.send(());
+        if let Err(e) = self.shutdown_tx.send(()) {
+            tracing::debug!("Failed to send shutdown signal (receivers may have dropped): {e}");
+        }
 
         let mut event_loop_handle = self.event_loop_handle.lock().await;
         if let Some(handle) = event_loop_handle.take() {
@@ -529,10 +531,12 @@ impl SessionCoordinator {
                 if let Some(_negotiated) = self.negotiated_configs.read().await.get(session_id) {
                     tracing::info!("SDP already negotiated for {}, publishing MediaSessionReady", session_id);
                     let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
-                    let _ = self.publish_event(SessionEvent::MediaSessionReady {
+                    if let Err(e) = self.publish_event(SessionEvent::MediaSessionReady {
                         session_id: session_id.clone(),
                         dialog_id,
-                    }).await;
+                    }).await {
+                        tracing::warn!("Failed to publish MediaSessionReady event: {e}");
+                    }
                 } else {
                     // For outbound calls with upfront SDP, negotiation happens later but we should still
                     // mark media as ready since the media session now exists
@@ -540,10 +544,12 @@ impl SessionCoordinator {
                         if session.local_sdp.is_some() {
                             tracing::info!("Outbound call with upfront SDP, publishing MediaSessionReady for {}", session_id);
                             let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
-                            let _ = self.publish_event(SessionEvent::MediaSessionReady {
+                            if let Err(e) = self.publish_event(SessionEvent::MediaSessionReady {
                                 session_id: session_id.clone(),
                                 dialog_id,
-                            }).await;
+                            }).await {
+                                tracing::warn!("Failed to publish MediaSessionReady event for upfront SDP: {e}");
+                            }
                         } else {
                             tracing::debug!("No negotiated config yet for {}, MediaSessionReady will be published after SDP negotiation", session_id);
                         }
@@ -598,25 +604,46 @@ impl SessionCoordinator {
         // This inspects the answer for a=fingerprint / RTP/SAVP and, when
         // present, creates an SRTP bridge, retrieves the RTP socket, and
         // drives the DTLS handshake.  Plain RTP sessions are unaffected.
+        //
+        // RFC 5764: if SRTP was negotiated in SDP but setup fails, we MUST
+        // NOT silently fall back to plain RTP — that would be a security
+        // downgrade.
         if let Err(e) = self.media_manager.initiate_srtp_for_session(
             session_id,
             their_answer,
             negotiated.remote_addr,
         ).await {
+            let (srtp_negotiated, _, _) =
+                crate::media::srtp_bridge::extract_dtls_params_from_sdp(their_answer);
+            if srtp_negotiated {
+                tracing::error!(
+                    session = %session_id,
+                    error = %e,
+                    "DTLS-SRTP setup failed for UAC and SRTP was negotiated in SDP \
+                     -- refusing plaintext fallback (RFC 5764)"
+                );
+                return Err(SessionError::MediaError(format!(
+                    "SRTP security downgrade prevented for session {}: {}",
+                    session_id, e
+                )));
+            }
             tracing::warn!(
                 session = %session_id,
                 error = %e,
-                "DTLS-SRTP setup failed for UAC -- falling back to plain RTP"
+                "DTLS-SRTP setup encountered an error for UAC (SRTP was not \
+                 negotiated, plain RTP is acceptable)"
             );
         }
 
         // Emit MediaNegotiated event
-        let _ = self.publish_event(SessionEvent::MediaNegotiated {
+        if let Err(e) = self.publish_event(SessionEvent::MediaNegotiated {
             session_id: session_id.clone(),
             local_addr: negotiated.local_addr,
             remote_addr: negotiated.remote_addr,
             codec: negotiated.codec.clone(),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish MediaNegotiated event for UAC: {e}");
+        }
 
         // Only emit MediaSessionReady if media session already exists
         // For upfront SDP cases, the media session doesn't exist yet and MediaSessionReady
@@ -625,31 +652,37 @@ impl SessionCoordinator {
             tracing::info!("Media session exists for UAC {}, has remote SDP: {}",
                 session_id, media_info.remote_sdp.is_some());
             let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
-            let _ = self.publish_event(SessionEvent::MediaSessionReady {
+            if let Err(e) = self.publish_event(SessionEvent::MediaSessionReady {
                 session_id: session_id.clone(),
                 dialog_id,
-            }).await;
+            }).await {
+                tracing::warn!("Failed to publish MediaSessionReady event for UAC: {e}");
+            }
 
             // CRITICAL: Also publish MediaFlowEstablished for UAC
             // This ensures both UAC and UAS publish the event when media is ready
             tracing::info!("Publishing MediaFlowEstablished event for UAC session {} after SDP negotiation", session_id);
-            let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
+            if let Err(e) = self.publish_event(SessionEvent::MediaFlowEstablished {
                 session_id: session_id.clone(),
                 local_addr: negotiated.local_addr.to_string(),
                 remote_addr: negotiated.remote_addr.to_string(),
                 direction: crate::manager::events::MediaFlowDirection::Both,
-            }).await;
+            }).await {
+                tracing::warn!("Failed to publish MediaFlowEstablished event for UAC: {e}");
+            }
             tracing::info!("MediaFlowEstablished event published for UAC {}", session_id);
         } else {
             tracing::warn!("Media session doesn't exist yet for UAC {} (upfront SDP), deferring MediaSessionReady to start_media_session", session_id);
             // For UAC, we should still publish MediaFlowEstablished since SDP is negotiated
             tracing::info!("Publishing MediaFlowEstablished event for UAC {} even though media session doesn't exist yet", session_id);
-            let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
+            if let Err(e) = self.publish_event(SessionEvent::MediaFlowEstablished {
                 session_id: session_id.clone(),
                 local_addr: negotiated.local_addr.to_string(),
                 remote_addr: negotiated.remote_addr.to_string(),
                 direction: crate::manager::events::MediaFlowDirection::Both,
-            }).await;
+            }).await {
+                tracing::warn!("Failed to publish deferred MediaFlowEstablished event for UAC: {e}");
+            }
             tracing::info!("MediaFlowEstablished event published for UAC {}", session_id);
         }
 
@@ -674,25 +707,46 @@ impl SessionCoordinator {
         // Initiate DTLS-SRTP if the remote SDP (their offer) indicates
         // secure media.  For UAS the remote_role from the offer is typically
         // "actpass" so we become the DTLS client.
+        //
+        // RFC 5764: if SRTP was negotiated in SDP but setup fails, we MUST
+        // NOT silently fall back to plain RTP — that would be a security
+        // downgrade.
         if let Err(e) = self.media_manager.initiate_srtp_for_session(
             session_id,
             their_offer,
             negotiated.remote_addr,
         ).await {
+            let (srtp_negotiated, _, _) =
+                crate::media::srtp_bridge::extract_dtls_params_from_sdp(their_offer);
+            if srtp_negotiated {
+                tracing::error!(
+                    session = %session_id,
+                    error = %e,
+                    "DTLS-SRTP setup failed for UAS and SRTP was negotiated in SDP \
+                     -- refusing plaintext fallback (RFC 5764)"
+                );
+                return Err(SessionError::MediaError(format!(
+                    "SRTP security downgrade prevented for session {}: {}",
+                    session_id, e
+                )));
+            }
             tracing::warn!(
                 session = %session_id,
                 error = %e,
-                "DTLS-SRTP setup failed for UAS -- falling back to plain RTP"
+                "DTLS-SRTP setup encountered an error for UAS (SRTP was not \
+                 negotiated, plain RTP is acceptable)"
             );
         }
 
         // Emit MediaNegotiated event
-        let _ = self.publish_event(SessionEvent::MediaNegotiated {
+        if let Err(e) = self.publish_event(SessionEvent::MediaNegotiated {
             session_id: session_id.clone(),
             local_addr: negotiated.local_addr,
             remote_addr: negotiated.remote_addr,
             codec: negotiated.codec.clone(),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish MediaNegotiated event for UAS: {e}");
+        }
 
         // Only emit MediaSessionReady if media session already exists
         // For upfront SDP cases, the media session doesn't exist yet and MediaSessionReady
@@ -701,34 +755,40 @@ impl SessionCoordinator {
             tracing::info!("Media session exists for UAS {}, has remote SDP: {}",
                 session_id, media_info.remote_sdp.is_some());
             let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
-            let _ = self.publish_event(SessionEvent::MediaSessionReady {
+            if let Err(e) = self.publish_event(SessionEvent::MediaSessionReady {
                 session_id: session_id.clone(),
                 dialog_id,
-            }).await;
+            }).await {
+                tracing::warn!("Failed to publish MediaSessionReady event for UAS: {e}");
+            }
 
             // CRITICAL: Also publish MediaFlowEstablished for UAS
             // This is needed because when accept_incoming_call directly calls
             // negotiate_sdp_as_uas, it doesn't go through the SdpNegotiationRequested
             // event handler that would normally publish this event
             tracing::info!("Publishing MediaFlowEstablished event for UAS session {} after SDP negotiation", session_id);
-            let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
+            if let Err(e) = self.publish_event(SessionEvent::MediaFlowEstablished {
                 session_id: session_id.clone(),
                 local_addr: negotiated.local_addr.to_string(),
                 remote_addr: negotiated.remote_addr.to_string(),
                 direction: crate::manager::events::MediaFlowDirection::Both,
-            }).await;
+            }).await {
+                tracing::warn!("Failed to publish MediaFlowEstablished event for UAS: {e}");
+            }
             tracing::info!("MediaFlowEstablished event published for UAS {}", session_id);
         } else {
             tracing::warn!("Media session doesn't exist yet for UAS {} (upfront SDP), deferring MediaSessionReady to start_media_session", session_id);
             // For UAS, we should still publish MediaFlowEstablished since SDP is negotiated
             // The media session will be created when the call transitions to Active
             tracing::info!("Publishing MediaFlowEstablished event for UAS {} even though media session doesn't exist yet", session_id);
-            let _ = self.publish_event(SessionEvent::MediaFlowEstablished {
+            if let Err(e) = self.publish_event(SessionEvent::MediaFlowEstablished {
                 session_id: session_id.clone(),
                 local_addr: negotiated.local_addr.to_string(),
                 remote_addr: negotiated.remote_addr.to_string(),
                 direction: crate::manager::events::MediaFlowDirection::Both,
-            }).await;
+            }).await {
+                tracing::warn!("Failed to publish deferred MediaFlowEstablished event for UAS: {e}");
+            }
             tracing::info!("MediaFlowEstablished event published for UAS {}", session_id);
         }
 

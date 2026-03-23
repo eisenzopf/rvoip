@@ -260,6 +260,8 @@ impl AudioTransmitter {
                 };
                 
                 // Send RTP packet (only if not in pass-through mode)
+                // SRTP is handled transparently by SecurityRtpTransport when configured.
+                // The RtpSession encrypts outbound packets at the transport layer.
                 if !matches!(audio_samples.as_slice(), [0x7F, ..] if audio_samples.iter().all(|&x| x == 0x7F)) {
                     let current_timestamp = {
                         let mut ts = timestamp.lock().await;

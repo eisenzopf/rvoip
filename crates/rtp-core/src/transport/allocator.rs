@@ -561,7 +561,7 @@ impl GlobalPortAllocator {
     /// This must be called BEFORE the first call to instance() to take effect
     pub async fn configure(start_port: u16, end_port: u16) -> Result<()> {
         // Create the static Mutex if it doesn't exist
-        static INSTANCE: once_cell::sync::OnceCell<Mutex<Option<Arc<PortAllocator>>>> = once_cell::sync::OnceCell::new();
+        static INSTANCE: std::sync::OnceLock<Mutex<Option<Arc<PortAllocator>>>> = std::sync::OnceLock::new();
         let static_mutex = INSTANCE.get_or_init(|| Mutex::new(None));
         
         // Lock the mutex and check if allocator already exists
@@ -603,7 +603,7 @@ impl GlobalPortAllocator {
     /// Get the global port allocator instance
     pub async fn instance() -> Arc<PortAllocator> {
         // Create the static Mutex if it doesn't exist
-        static INSTANCE: once_cell::sync::OnceCell<Mutex<Option<Arc<PortAllocator>>>> = once_cell::sync::OnceCell::new();
+        static INSTANCE: std::sync::OnceLock<Mutex<Option<Arc<PortAllocator>>>> = std::sync::OnceLock::new();
         let static_mutex = INSTANCE.get_or_init(|| Mutex::new(None));
         
         // Lock the mutex and get/create the allocator

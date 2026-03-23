@@ -340,11 +340,13 @@ impl SubscriptionManager {
         
         // Emit subscription created event for session-core to handle
         // Session-core is responsible for generating and sending initial NOTIFY
-        let _ = self.event_tx.send(DialogEvent::SubscriptionCreated {
+        if let Err(e) = self.event_tx.send(DialogEvent::SubscriptionCreated {
             dialog_id: dialog_id.clone(),
             event_package,
             expires: Duration::from_secs(adjusted_expires as u64),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to send SubscriptionCreated event: {e}");
+        }
         
         Ok((response, Some(dialog_id)))
     }
@@ -390,7 +392,7 @@ impl SubscriptionManager {
                 dialog.subscription_state = Some(new_state.clone());
                 
                 // Emit NOTIFY received event
-                let _ = self.event_tx.send(DialogEvent::NotifyReceived {
+                if let Err(e) = self.event_tx.send(DialogEvent::NotifyReceived {
                     dialog_id: dialog_id.clone(),
                     state: new_state.clone(),
                     body: if !request.body().is_empty() {
@@ -398,7 +400,9 @@ impl SubscriptionManager {
                     } else {
                         None
                     },
-                }).await;
+                }).await {
+                    tracing::warn!("Failed to send NotifyReceived event: {e}");
+                }
                 
                 // If subscription is terminated, clean up
                 if new_state.is_terminated() {
@@ -453,7 +457,9 @@ impl SubscriptionManager {
         
         let handle = tokio::spawn(async move {
             tokio::time::sleep(refresh_time).await;
-            let _ = command_tx.send(SubscriptionCommand::RefreshSubscription(dialog_id_clone)).await;
+            if let Err(e) = command_tx.send(SubscriptionCommand::RefreshSubscription(dialog_id_clone)).await {
+                tracing::debug!("Failed to send subscription refresh command (channel closed): {e}");
+            }
         });
         
         self.refresh_timers.insert(dialog_id, handle);
@@ -540,10 +546,12 @@ impl SubscriptionManager {
             dialog.subscription_state = Some(SubscriptionState::Terminated { reason: reason.clone() });
             
             // Emit event for session-core to send termination NOTIFY
-            let _ = self.event_tx.send(DialogEvent::SubscriptionTerminated {
+            if let Err(e) = self.event_tx.send(DialogEvent::SubscriptionTerminated {
                 dialog_id: dialog_id.clone(),
                 reason: reason.map(|r| r.to_string()),
-            }).await;
+            }).await {
+                tracing::warn!("Failed to send SubscriptionTerminated event: {e}");
+            }
             
             drop(dialog); // Release lock before cleanup
             
