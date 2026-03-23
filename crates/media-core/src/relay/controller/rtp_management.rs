@@ -37,15 +37,19 @@ impl MediaSessionController {
     }
     
     /// Send RTP packet for a dialog
+    ///
+    // SRTP is handled transparently by SecurityRtpTransport when configured.
+    // The RtpSession is constructed with a SecurityRtpTransport that encrypts
+    // outbound packets and decrypts inbound packets at the transport layer.
     pub async fn send_rtp_packet(&self, dialog_id: &DialogId, payload: Vec<u8>, timestamp: u32) -> Result<()> {
         let rtp_session = self.get_rtp_session(dialog_id).await
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-        
+
         let mut session = rtp_session.lock().await;
         let payload_len = payload.len();
         session.send_packet(timestamp, Bytes::from(payload), false).await
             .map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
-        
+
         info!("📤 Sent RTP packet for dialog: {} (timestamp: {}, payload: {} bytes)", dialog_id, timestamp, payload_len);
         Ok(())
     }
@@ -380,7 +384,7 @@ impl MediaSessionController {
             8 => {
                 // PCMA encoding - create temporary codec
                 use crate::codec::audio::G711Codec;
-                let mut codec = G711Codec::a_law(8000, 1)?;
+                let mut codec = G711Codec::a_law(8000, 1);
                 codec.encode(&audio_frame)?
             },
             _ => {
@@ -412,6 +416,9 @@ impl MediaSessionController {
     /// * `event`     - The DTMF digit to send.
     /// * `duration_ms` - How long the key-press lasts, in milliseconds.
     /// * `payload_type` - The negotiated telephone-event payload type (commonly 101).
+    //
+    // SRTP is handled transparently by SecurityRtpTransport when configured.
+    // DTMF packets are encrypted at the transport layer just like audio packets.
     pub async fn send_dtmf_rtp(
         &self,
         dialog_id: &DialogId,

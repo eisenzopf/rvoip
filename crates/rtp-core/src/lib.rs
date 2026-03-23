@@ -132,6 +132,10 @@ pub use session::{RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSessionStats
 
 // Re-export transport types
 pub use transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
+pub use transport::SecurityRtpTransport;
+
+// Re-export SRTP types
+pub use srtp::{SrtpContext, SrtpCryptoSuite, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm};
 
 // Re-export traits for media-core integration
 pub use traits::{MediaTransport, RtpEvent};

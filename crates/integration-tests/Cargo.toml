@@ -18,7 +18,9 @@ rvoip-client-core = { workspace = true }
 rvoip-call-engine = { workspace = true }
 rvoip-infra-common = { workspace = true }
 rvoip-codec-core = { workspace = true }
+rvoip-registrar-core = { workspace = true }
 tokio = { workspace = true }
+chrono = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

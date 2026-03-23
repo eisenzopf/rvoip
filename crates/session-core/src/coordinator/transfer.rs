@@ -161,10 +161,12 @@ impl TransferHandler {
         }
         
         // Emit transfer progress - Trying
-        let _ = self.event_processor.publish_event(SessionEvent::TransferProgress {
+        if let Err(e) = self.event_processor.publish_event(SessionEvent::TransferProgress {
             session_id: session_id.clone(),
             status: SessionTransferStatus::Trying,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish transfer Trying progress event: {e}");
+        }
         
         // Initiate new call to transfer target
         debug!("TRANSFER: About to initiate transfer call from session {} to {}", session_id, target_uri);
@@ -412,18 +414,22 @@ impl TransferHandler {
                             if current_state != last_state {
                                 tracing::info!("TRANSFER MONITOR: Transfer call {} is now ACTIVE! Transfer successful!", new_session_id);
                                 // Transfer succeeded - send 200 OK NOTIFY
-                                let _ = handler.send_transfer_notify(
+                                if let Err(e) = handler.send_transfer_notify(
                                     &dialog_id,
                                     &event_id,
                                     "SIP/2.0 200 OK\r\n",
                                     true, // terminate subscription
-                                ).await;
-                                
+                                ).await {
+                                    tracing::warn!("Failed to send transfer success NOTIFY: {e}");
+                                }
+
                                 // Emit transfer progress - Success
-                                let _ = handler.event_processor.publish_event(SessionEvent::TransferProgress {
+                                if let Err(e) = handler.event_processor.publish_event(SessionEvent::TransferProgress {
                                     session_id: original_session_id.clone(),
                                     status: SessionTransferStatus::Success,
-                                }).await;
+                                }).await {
+                                    tracing::warn!("Failed to publish transfer Success progress event: {e}");
+                                }
                                 
                                 // Terminate original call properly (this will send BYE)
                                 // We need to get the dialog ID for the original session
@@ -453,12 +459,14 @@ impl TransferHandler {
                             // Only send NOTIFY if this is a state change
                             if current_state != last_state {
                                 // Transfer failed - send error NOTIFY
-                                let _ = handler.send_transfer_notify(
+                                if let Err(e) = handler.send_transfer_notify(
                                     &dialog_id,
                                     &event_id,
                                     "SIP/2.0 487 Request Terminated\r\n",
                                     true, // terminate subscription
-                                ).await;
+                                ).await {
+                                    tracing::warn!("Failed to send transfer failure NOTIFY: {e}");
+                                }
                                 error!("Transfer failed: {}", reason);
                                 
                                 // Clean up subscription
@@ -471,13 +479,15 @@ impl TransferHandler {
                             // Only send NOTIFY if this is a state change
                             if current_state != last_state {
                                 // Call ended before connecting
-                                let _ = handler.send_transfer_notify(
+                                if let Err(e) = handler.send_transfer_notify(
                                     &dialog_id,
                                     &event_id,
                                     "SIP/2.0 487 Request Terminated\r\n",
                                     true,
-                                ).await;
-                                
+                                ).await {
+                                    tracing::warn!("Failed to send transfer terminated NOTIFY: {e}");
+                                }
+
                                 // Clean up subscription
                                 handler.remove_subscription(&event_id).await;
                             }
@@ -488,18 +498,22 @@ impl TransferHandler {
                             // Send notifications only if state changed
                             if current_state != last_state {
                                 // Send 180 Ringing NOTIFY
-                                let _ = handler.send_transfer_notify(
+                                if let Err(e) = handler.send_transfer_notify(
                                     &dialog_id,
                                     &event_id,
                                     "SIP/2.0 180 Ringing\r\n",
                                     false,
-                                ).await;
-                                
+                                ).await {
+                                    tracing::warn!("Failed to send transfer ringing NOTIFY: {e}");
+                                }
+
                                 // Emit transfer progress - Ringing
-                                let _ = handler.event_processor.publish_event(SessionEvent::TransferProgress {
+                                if let Err(e) = handler.event_processor.publish_event(SessionEvent::TransferProgress {
                                     session_id: original_session_id.clone(),
                                     status: SessionTransferStatus::Ringing,
-                                }).await;
+                                }).await {
+                                    tracing::warn!("Failed to publish transfer Ringing progress event: {e}");
+                                }
                             }
                         }
                         _ => {
@@ -513,12 +527,14 @@ impl TransferHandler {
                 
                 if attempt_count >= max_attempts {
                     // Timeout - send error NOTIFY
-                    let _ = handler.send_transfer_notify(
+                    if let Err(e) = handler.send_transfer_notify(
                         &dialog_id,
                         &event_id,
                         "SIP/2.0 408 Request Timeout\r\n",
                         true,
-                    ).await;
+                    ).await {
+                        tracing::warn!("Failed to send transfer timeout NOTIFY: {e}");
+                    }
                     error!("Transfer timed out");
                     
                     // Clean up subscription
@@ -630,10 +646,12 @@ impl TransferHandler {
         info!("Attended transfer REFER sent successfully");
 
         // Emit transfer progress event
-        let _ = self.event_processor.publish_event(SessionEvent::TransferProgress {
+        if let Err(e) = self.event_processor.publish_event(SessionEvent::TransferProgress {
             session_id: session_a_b.clone(),
             status: SessionTransferStatus::Trying,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish attended transfer Trying progress event: {e}");
+        }
 
         // Spawn monitor to track REFER progress via NOTIFYs and clean up sessions
         self.spawn_attended_transfer_monitor(
@@ -680,10 +698,12 @@ impl TransferHandler {
         }
 
         // Emit transfer progress - Trying
-        let _ = self.event_processor.publish_event(SessionEvent::TransferProgress {
+        if let Err(e) = self.event_processor.publish_event(SessionEvent::TransferProgress {
             session_id: session_id.clone(),
             status: SessionTransferStatus::Trying,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish transfer Trying progress event: {e}");
+        }
 
         // Initiate the replacement call to the target with Replaces header
         // The Replaces value is passed so the INVITE includes the Replaces header
@@ -787,12 +807,14 @@ impl TransferHandler {
         self.session_to_dialog.insert(new_session_id.clone(), dialog_id.clone());
 
         // Publish SessionCreated event
-        let _ = self.event_processor.publish_event(SessionEvent::SessionCreated {
+        if let Err(e) = self.event_processor.publish_event(SessionEvent::SessionCreated {
             session_id: new_session_id.clone(),
             from: new_session.from.clone(),
             to: new_session.to.clone(),
             call_state: CallState::Initiating,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish SessionCreated event for attended transfer: {e}");
+        }
 
         info!("Attended transfer call setup: session {} -> dialog {}", new_session_id, dialog_id);
         Ok(new_session_id)
@@ -856,10 +878,12 @@ impl TransferHandler {
                     }
 
                     // Emit transfer completion
-                    let _ = handler.event_processor.publish_event(SessionEvent::TransferProgress {
+                    if let Err(e) = handler.event_processor.publish_event(SessionEvent::TransferProgress {
                         session_id: session_a_b.clone(),
                         status: SessionTransferStatus::Success,
-                    }).await;
+                    }).await {
+                        tracing::warn!("Failed to publish attended transfer Success progress event: {e}");
+                    }
 
                     tracing::info!("ATTENDED TRANSFER MONITOR: Both sessions terminated, transfer complete");
                     break;

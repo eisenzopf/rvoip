@@ -75,7 +75,9 @@ impl TransferCoordinator {
 
         if options.send_notify {
             if let Some(ref transferor_id) = options.transferor_session_id {
-                let _ = self.notify_handler.notify_trying(transferor_id).await;
+                if let Err(e) = self.notify_handler.notify_trying(transferor_id).await {
+                    tracing::warn!("Failed to send transfer trying notification: {e}");
+                }
             }
         }
 
@@ -93,14 +95,18 @@ impl TransferCoordinator {
                 Ok(true) => {
                     if options.send_notify {
                         if let Some(ref transferor_id) = options.transferor_session_id {
-                            let _ = self.notify_handler.notify_success(transferor_id).await;
+                            if let Err(e) = self.notify_handler.notify_success(transferor_id).await {
+                                tracing::warn!("Failed to send transfer success notification: {e}");
+                            }
                         }
                     }
                 }
                 Ok(false) => {
                     if options.send_notify {
                         if let Some(ref transferor_id) = options.transferor_session_id {
-                            let _ = self.notify_handler.notify_failure(transferor_id, 408, "Request Timeout").await;
+                            if let Err(e) = self.notify_handler.notify_failure(transferor_id, 408, "Request Timeout").await {
+                                tracing::warn!("Failed to send transfer timeout notification: {e}");
+                            }
                         }
                     }
                     return Ok(TransferResult::failure(new_session_id, "Call establishment timeout".to_string(), Some(408)));
@@ -108,7 +114,9 @@ impl TransferCoordinator {
                 Err(e) => {
                     if options.send_notify {
                         if let Some(ref transferor_id) = options.transferor_session_id {
-                            let _ = self.notify_handler.notify_failure(transferor_id, 500, &e).await;
+                            if let Err(e2) = self.notify_handler.notify_failure(transferor_id, 500, &e).await {
+                                tracing::warn!("Failed to send transfer failure notification: {e2}");
+                            }
                         }
                     }
                     return Ok(TransferResult::failure(new_session_id, e, Some(500)));
@@ -117,7 +125,9 @@ impl TransferCoordinator {
         } else {
             if options.send_notify {
                 if let Some(ref transferor_id) = options.transferor_session_id {
-                    let _ = self.notify_handler.notify_success(transferor_id).await;
+                    if let Err(e) = self.notify_handler.notify_success(transferor_id).await {
+                        tracing::warn!("Failed to send transfer success notification: {e}");
+                    }
                 }
             }
         }

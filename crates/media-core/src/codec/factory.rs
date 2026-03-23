@@ -22,8 +22,8 @@ impl CodecFactory {
         let channels = channels.unwrap_or(1);
         
         match payload_type {
-            0 => Ok(Box::new(G711Codec::mu_law(sample_rate, channels)?)),
-            8 => Ok(Box::new(G711Codec::a_law(sample_rate, channels)?)),
+            0 => Ok(Box::new(G711Codec::mu_law(sample_rate, channels))),
+            8 => Ok(Box::new(G711Codec::a_law(sample_rate, channels))),
             _ => Err(Error::unsupported_payload_type(payload_type)),
         }
     }

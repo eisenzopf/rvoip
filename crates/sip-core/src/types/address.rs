@@ -769,19 +769,6 @@ impl Address {
             .collect();
     }
 
-    // Helper to construct from parser output
-    // This helper seems unused now that parsers directly construct Address
-    /* pub fn from_parsed(
-        display_name_bytes: Option<Vec<u8>>,
-        uri: Uri,
-        params: Vec<Param>
-    ) -> Result<Self> {
-        let display_name = display_name_bytes
-            .map(|bytes| String::from_utf8(bytes)) // TODO: Handle potential quoting/unescaping
-            .transpose()?;
-        // Conversion of params is lossy here, params are now part of Address directly
-        Ok(Address { display_name, uri, params })
-    } */
 }
 
 impl FromStr for Address {

@@ -2,10 +2,7 @@
 // To = ( "To" / "t" ) HCOLON ( name-addr / addr-spec ) *( SEMI to-param )
 // to-param = tag-param / generic-param
 
-// TODO: Future improvements needed:
-// 1. ✅ COMPLETED: Enhanced display-name parser to properly handle unquoted display names with multiple tokens
-//    separated by whitespace (RFC 3261 Section 25.1 compliance implemented)
-// 2. Add more comprehensive parameter validation for semantic constraints beyond syntax
+// TODO(parser): Add more comprehensive parameter validation for semantic constraints beyond syntax
 //    (e.g., validate tag values format constraints if any exist in the RFC)
 
 use nom::{

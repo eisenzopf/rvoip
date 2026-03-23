@@ -34,7 +34,6 @@ base64 = { workspace = true }
 log = "0.4"
 futures = "0.3.30"
 hostname = "0.3"
-once_cell = { workspace = true }
 parking_lot = "0.12.1"
 # Cryptographic dependencies for DTLS
 hmac = "0.12.1"

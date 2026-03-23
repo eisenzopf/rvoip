@@ -560,11 +560,13 @@ impl SessionControl for Arc<SessionCoordinator> {
         self.registry.update_session_state(session_id, CallState::OnHold).await?;
         
         // Emit state change event
-        let _ = self.publish_event(SessionEvent::StateChanged {
+        if let Err(e) = self.publish_event(SessionEvent::StateChanged {
             session_id: session_id.clone(),
             old_state: CallState::Active,
             new_state: CallState::OnHold,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish hold state change event: {e}");
+        }
         
         Ok(())
     }
@@ -601,11 +603,13 @@ impl SessionControl for Arc<SessionCoordinator> {
         self.registry.update_session_state(session_id, CallState::Active).await?;
         
         // Emit state change event
-        let _ = self.publish_event(SessionEvent::StateChanged {
+        if let Err(e) = self.publish_event(SessionEvent::StateChanged {
             session_id: session_id.clone(),
             old_state: CallState::OnHold,
             new_state: CallState::Active,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish resume state change event: {e}");
+        }
         
         Ok(())
     }
@@ -643,11 +647,13 @@ impl SessionControl for Arc<SessionCoordinator> {
         self.registry.update_session_state(session_id, CallState::Transferring).await?;
         
         // Emit state change event
-        let _ = self.publish_event(SessionEvent::StateChanged {
+        if let Err(e) = self.publish_event(SessionEvent::StateChanged {
             session_id: session_id.clone(),
             old_state: CallState::Active, // Assume it was active before transfer
             new_state: CallState::Transferring,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish transfer state change event: {e}");
+        }
         
         Ok(())
     }
@@ -683,11 +689,13 @@ impl SessionControl for Arc<SessionCoordinator> {
             })?;
         
         // Send SDP event
-        let _ = self.publish_event(SessionEvent::SdpEvent {
+        if let Err(e) = self.publish_event(SessionEvent::SdpEvent {
             session_id: session_id.clone(),
             event_type: "media_update".to_string(),
             sdp: sdp.to_string(),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish SDP media update event: {e}");
+        }
         
         Ok(())
     }
@@ -772,10 +780,12 @@ impl SessionControl for Arc<SessionCoordinator> {
             })?;
         
         // Send media event
-        let _ = self.publish_event(SessionEvent::MediaEvent {
+        if let Err(e) = self.publish_event(SessionEvent::MediaEvent {
             session_id: session_id.clone(),
             event: format!("audio_muted={}", muted),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish audio mute event: {e}");
+        }
         
         Ok(())
     }
@@ -793,10 +803,12 @@ impl SessionControl for Arc<SessionCoordinator> {
         }
         
         // Send media event (actual video implementation would require SDP renegotiation)
-        let _ = self.publish_event(SessionEvent::MediaEvent {
+        if let Err(e) = self.publish_event(SessionEvent::MediaEvent {
             session_id: session_id.clone(),
             event: format!("video_enabled={}", enabled),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish video enabled event: {e}");
+        }
         
         tracing::info!("Video {} for session {} (requires SDP renegotiation)", 
                       if enabled { "enabled" } else { "disabled" }, session_id);
@@ -979,11 +991,13 @@ impl SessionControl for Arc<SessionCoordinator> {
         // event is handled, ensuring it happens after the SimpleCall subscribes to events
         
         // Emit state change event
-        let _ = self.publish_event(SessionEvent::StateChanged {
+        if let Err(e) = self.publish_event(SessionEvent::StateChanged {
             session_id: call.id.clone(),
             old_state: CallState::Ringing,
             new_state: CallState::Active,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish call accepted state change event: {e}");
+        }
         
         // Get the updated session
         // Note: on_call_established will be called by the coordinator when all conditions are met:
@@ -1026,11 +1040,13 @@ impl SessionControl for Arc<SessionCoordinator> {
             self.registry.update_session_state(&call.id, CallState::Failed(reason.to_string())).await?;
             
             // Emit state change event
-            let _ = self.publish_event(SessionEvent::StateChanged {
+            if let Err(e) = self.publish_event(SessionEvent::StateChanged {
                 session_id: call.id.clone(),
                 old_state,
                 new_state: CallState::Failed(reason.to_string()),
-            }).await;
+            }).await {
+                tracing::warn!("Failed to publish call rejection state change event: {e}");
+            }
         }
         
         Ok(())

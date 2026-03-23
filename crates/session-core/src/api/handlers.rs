@@ -733,7 +733,9 @@ impl QueueHandler {
         
         // Notify if there's a listener
         if let Some(sender) = self.notify.lock().as_ref() {
-            let _ = sender.send(call);
+            if let Err(e) = sender.send(call) {
+                tracing::debug!("Failed to send incoming call notification (receiver dropped): {e}");
+            }
         }
     }
 }

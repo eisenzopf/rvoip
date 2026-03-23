@@ -180,7 +180,9 @@ impl UacClient {
         // Terminate all active calls
         let calls = self.active_calls.read().await;
         for call in calls.values() {
-            let _ = call.hangup().await;
+            if let Err(e) = call.hangup().await {
+                tracing::warn!("Failed to hangup call during shutdown: {e}");
+            }
         }
         drop(calls);
         

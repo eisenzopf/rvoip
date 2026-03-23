@@ -257,7 +257,7 @@ impl super::manager::ClientManager {
         self.call_info.insert(call_id, call_info.clone());
         
         // Emit call created event
-        let _ = self.event_tx.send(crate::events::ClientEvent::CallStateChanged {
+        if let Err(e) = self.event_tx.send(crate::events::ClientEvent::CallStateChanged {
             info: crate::events::CallStatusInfo {
                 call_id,
                 new_state: crate::call::CallState::Initiating,
@@ -266,7 +266,9 @@ impl super::manager::ClientManager {
                 timestamp: Utc::now(),
             },
             priority: crate::events::EventPriority::Normal,
-        });
+        }) {
+            tracing::debug!("Call state change event receiver dropped: {}", e);
+        }
         
         // Update stats
         let mut stats = self.stats.lock().await;
@@ -640,7 +642,7 @@ impl super::manager::ClientManager {
             call_info.metadata.insert("hangup_reason".to_string(), "user_hangup".to_string());
             
             // Emit state change event
-            let _ = self.event_tx.send(crate::events::ClientEvent::CallStateChanged {
+            if let Err(e) = self.event_tx.send(crate::events::ClientEvent::CallStateChanged {
                 info: crate::events::CallStatusInfo {
                     call_id: *call_id,
                     new_state: crate::call::CallState::Terminated,
@@ -649,7 +651,9 @@ impl super::manager::ClientManager {
                     timestamp: Utc::now(),
                 },
                 priority: crate::events::EventPriority::Normal,
-            });
+            }) {
+                tracing::debug!("Call state change event receiver dropped: {}", e);
+            }
         }
         
         // Clean up audio setup state if it exists

@@ -56,7 +56,7 @@ use crate::types::SampleRate;
 
 use rvoip_rtp_core::{RtpSession, RtpSessionConfig};
 use rvoip_rtp_core::session::{RtpSessionStats, RtpStreamStats};
-use rvoip_rtp_core::transport::{GlobalPortAllocator, PortAllocator, PortAllocatorConfig, AllocationStrategy};
+use rvoip_rtp_core::transport::{GlobalPortAllocator, PortAllocator, PortAllocatorConfig, AllocationStrategy, RtpTransport};
 use rvoip_rtp_core as rtp_core;
 use rvoip_rtp_core::{RtpPacket, RtpHeader};
 
@@ -174,15 +174,15 @@ impl MediaSessionController {
         
         // Create G.711 codec for zero-copy processing
         let g711_codec = Arc::new(tokio::sync::Mutex::new(
-            G711Codec::mu_law(8000, 1).expect("Failed to create G.711 codec")
+            G711Codec::mu_law(8000, 1)
         ));
-        
+
         // Create SIMD processor
         let simd_processor = SimdProcessor::new();
-        
+
         // Create codec mapper
         let codec_mapper = Arc::new(CodecMapper::new());
-        
+
         // Create RTP bridge with its dependencies
         let (integration_event_tx, _integration_event_rx) = mpsc::unbounded_channel();
         let codec_detector = Arc::new(CodecDetector::new(codec_mapper.clone()));
@@ -194,7 +194,7 @@ impl MediaSessionController {
             codec_detector,
             fallback_manager,
         ));
-        
+
         Self {
             relay: None,
             sessions: RwLock::new(HashMap::new()),
@@ -256,7 +256,9 @@ impl MediaSessionController {
     /// Emit a media event through both channel and event hub
     async fn emit_event(&self, event: MediaSessionEvent) {
         // Send to channel (legacy)
-        let _ = self.event_tx.send(event.clone());
+        if let Err(e) = self.event_tx.send(event.clone()) {
+            debug!("Media event receiver dropped (legacy channel): {}", e);
+        }
         
         // Send to event hub (new global bus)
         if let Some(hub) = self.event_hub.read().await.as_ref() {
@@ -370,12 +372,12 @@ impl MediaSessionController {
         
         // Create G.711 codec for zero-copy processing
         let g711_codec = Arc::new(tokio::sync::Mutex::new(
-            G711Codec::mu_law(8000, 1).expect("Failed to create G.711 codec")
+            G711Codec::mu_law(8000, 1)
         ));
-        
+
         // Create SIMD processor
         let simd_processor = SimdProcessor::new();
-        
+
         // Create codec mapper
         let codec_mapper = Arc::new(CodecMapper::new());
         
@@ -482,10 +484,85 @@ impl MediaSessionController {
         // Create actual RTP session
         let rtp_session = RtpSession::new(rtp_config).await
             .map_err(|e| Error::config(format!("Failed to create RTP session: {}", e)))?;
-        
+
+        self.finalize_media_session(dialog_id, config, rtp_session, local_rtp_addr, payload_type, clock_rate).await
+    }
+
+    /// Start media with an externally provided RTP transport.
+    ///
+    /// Used by session-core when SecurityRtpTransport is needed for SRTP.
+    /// The caller creates and configures the transport (e.g., wrapping
+    /// UdpRtpTransport with SecurityRtpTransport), and this method
+    /// creates the RTP session using that transport.
+    pub async fn start_media_with_transport(
+        &self,
+        dialog_id: DialogId,
+        config: MediaConfig,
+        transport: Arc<dyn RtpTransport>,
+    ) -> Result<()> {
+        info!("Starting media session with external transport for dialog: {}", dialog_id);
+
+        // Check if media session already exists for this dialog
+        {
+            let sessions = self.sessions.read().await;
+            if sessions.contains_key(&dialog_id) {
+                return Err(Error::config(format!("Media session already exists for dialog: {}", dialog_id)));
+            }
+        }
+
+        // Get local address from the provided transport
+        let local_rtp_addr = transport.local_rtp_addr()
+            .map_err(|e| Error::config(format!("Failed to get local RTP address from transport: {}", e)))?;
+
+        // Determine payload type from preferred codec
+        let payload_type = config.preferred_codec
+            .as_ref()
+            .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
+            .unwrap_or(0); // Default to PCMU
+
+        // Determine clock rate based on codec
+        let clock_rate = config.preferred_codec
+            .as_ref()
+            .map(|codec| self.codec_mapper.get_clock_rate(codec))
+            .unwrap_or(8000);
+
+        // Create RTP session configuration
+        let rtp_config = RtpSessionConfig {
+            local_addr: local_rtp_addr,
+            remote_addr: config.remote_addr,
+            ssrc: Some(rand::random()),
+            payload_type,
+            clock_rate,
+            jitter_buffer_size: Some(500),
+            max_packet_age_ms: Some(1000),
+            enable_jitter_buffer: false,
+        };
+
+        // Create RTP session with externally provided transport
+        let rtp_session = RtpSession::with_transport(rtp_config, transport).await
+            .map_err(|e| Error::config(format!("Failed to create RTP session with transport: {}", e)))?;
+
+        self.finalize_media_session(dialog_id, config, rtp_session, local_rtp_addr, payload_type, clock_rate).await
+    }
+
+    /// Shared finalization logic for media session creation.
+    ///
+    /// Subscribes to RTP events, wraps the session, stores state, and spawns
+    /// the event handler. Used by both `start_media()` and `start_media_with_transport()`.
+    async fn finalize_media_session(
+        &self,
+        dialog_id: DialogId,
+        config: MediaConfig,
+        rtp_session: RtpSession,
+        local_rtp_addr: SocketAddr,
+        payload_type: u8,
+        clock_rate: u32,
+    ) -> Result<()> {
+        let rtp_port = local_rtp_addr.port();
+
         // Subscribe to RTP session events before wrapping
         let rtp_events = rtp_session.subscribe();
-        
+
         // Wrap RTP session
         let rtp_wrapper = RtpSessionWrapper {
             session: Arc::new(tokio::sync::Mutex::new(rtp_session)),
@@ -496,7 +573,7 @@ impl MediaSessionController {
             transmission_enabled: true,  // Enable transmission by default
             is_muted: false,
         };
-        
+
         // Create media session info
         let session_info = MediaSessionInfo {
             dialog_id: dialog_id.clone(),
@@ -515,26 +592,28 @@ impl MediaSessionController {
             let mut sessions = self.sessions.write().await;
             sessions.insert(dialog_id.clone(), session_info);
         }
-        
+
         {
             let mut rtp_sessions = self.rtp_sessions.write().await;
             rtp_sessions.insert(dialog_id.clone(), rtp_wrapper);
         }
 
         // Send event
-        let _ = self.event_tx.send(MediaSessionEvent::SessionCreated {
+        if let Err(e) = self.event_tx.send(MediaSessionEvent::SessionCreated {
             dialog_id: dialog_id.clone(),
             session_id: dialog_id.clone(),
-        });
+        }) {
+            debug!("Media event receiver dropped (session created): {}", e);
+        }
 
         // Spawn task to handle RTP events for this session
         self.spawn_rtp_event_handler(dialog_id.clone(), rtp_events, payload_type);
 
-        info!("✅ Created media session with REAL RTP session: {} (port: {}, codec: {}, PT: {}, clock: {}Hz)", 
-              dialog_id, 
-              rtp_port, 
-              config.preferred_codec.as_deref().unwrap_or("PCMU"), 
-              payload_type, 
+        info!("Created media session with RTP session: {} (port: {}, codec: {}, PT: {}, clock: {}Hz)",
+              dialog_id,
+              rtp_port,
+              config.preferred_codec.as_deref().unwrap_or("PCMU"),
+              payload_type,
               clock_rate);
         Ok(())
     }
@@ -556,7 +635,9 @@ impl MediaSessionController {
             if let Some(rtp_wrapper) = rtp_sessions.remove(dialog_id) {
                 // Close the RTP session
                 let mut rtp_session = rtp_wrapper.session.lock().await;
-                let _ = rtp_session.close().await;
+                if let Err(e) = rtp_session.close().await {
+                    warn!("Failed to close RTP session for dialog {}: {}", dialog_id, e);
+                }
                 info!("✅ Stopped RTP session for dialog: {}", dialog_id);
             }
         }
@@ -564,7 +645,9 @@ impl MediaSessionController {
         // Clean up relay if exists
         if let Some((session_a, session_b)) = &session_info.relay_session_ids {
             if let Some(relay) = &self.relay {
-                let _ = relay.remove_session_pair(session_a, session_b).await;
+                if let Err(e) = relay.remove_session_pair(session_a, session_b).await {
+                    warn!("Failed to remove relay session pair ({} <-> {}): {}", session_a, session_b, e);
+                }
             }
         }
 
@@ -601,10 +684,12 @@ impl MediaSessionController {
         }
 
         // Send event
-        let _ = self.event_tx.send(MediaSessionEvent::SessionDestroyed {
+        if let Err(e) = self.event_tx.send(MediaSessionEvent::SessionDestroyed {
             dialog_id: dialog_id.clone(),
             session_id: dialog_id.clone(),
-        });
+        }) {
+            debug!("Media event receiver dropped (session destroyed): {}", e);
+        }
 
         Ok(())
     }
@@ -642,10 +727,12 @@ impl MediaSessionController {
                     updates_made = true;
                     
                     // Emit remote address update event
-                    let _ = self.event_tx.send(MediaSessionEvent::RemoteAddressUpdated {
+                    if let Err(e) = self.event_tx.send(MediaSessionEvent::RemoteAddressUpdated {
                         dialog_id: dialog_id.clone(),
                         remote_addr,
-                    });
+                    }) {
+                        debug!("Media event receiver dropped (remote address updated): {}", e);
+                    }
                 }
             }
             
@@ -706,13 +793,15 @@ impl MediaSessionController {
                       old_clock_rate, new_clock_rate);
                 
                 // Emit codec change event
-                let _ = self.event_tx.send(MediaSessionEvent::CodecChanged {
+                if let Err(e) = self.event_tx.send(MediaSessionEvent::CodecChanged {
                     dialog_id: dialog_id.clone(),
                     old_codec: old_codec.clone(),
                     new_codec: config.preferred_codec.clone(),
                     new_payload_type,
                     new_clock_rate,
-                });
+                }) {
+                    debug!("Media event receiver dropped (codec changed): {}", e);
+                }
             }
             
             if updates_made {
@@ -792,8 +881,8 @@ impl MediaSessionController {
         let codec_mapper = self.codec_mapper.clone();
         
         // Create G.711 codecs outside the loop for efficiency
-        let mut g711_ulaw = G711Codec::mu_law(8000, 1).expect("Failed to create μ-law codec");
-        let mut g711_alaw = G711Codec::a_law(8000, 1).expect("Failed to create A-law codec");
+        let mut g711_ulaw = G711Codec::mu_law(8000, 1);
+        let mut g711_alaw = G711Codec::a_law(8000, 1);
         
         tokio::spawn(async move {
             info!("🎧 Started RTP event handler for dialog: {}", dialog_id);
@@ -804,8 +893,8 @@ impl MediaSessionController {
                         match event {
                             rtp_core::session::RtpSessionEvent::PacketReceived(packet) => {
                                 // Count RTP packets for debugging
-                                static RTP_COUNTERS: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, u64>>> =
-                                    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+                                static RTP_COUNTERS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<String, u64>>> =
+                                    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
                                 let rtp_count = {
                                     let mut counters = RTP_COUNTERS.lock();
@@ -853,8 +942,8 @@ impl MediaSessionController {
                                 let callbacks = audio_frame_callbacks.read().await;
                                 if let Some(sender) = callbacks.get(&dialog_id) {
                                     // Count frames for debugging
-                                    static FRAME_COUNTERS: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashMap<String, u64>>> =
-                                        once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+                                    static FRAME_COUNTERS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<String, u64>>> =
+                                        std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 
                                     let frame_count = {
                                         let mut counters = FRAME_COUNTERS.lock();
@@ -880,8 +969,8 @@ impl MediaSessionController {
                                     }
                                 } else {
                                     // Log only once per dialog to avoid spam
-                                    static LOGGED_MISSING: once_cell::sync::Lazy<parking_lot::Mutex<std::collections::HashSet<String>>> =
-                                        once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+                                    static LOGGED_MISSING: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+                                        std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
 
                                     let mut logged = LOGGED_MISSING.lock();
                                     if !logged.contains(dialog_id.as_str()) {

@@ -542,10 +542,12 @@ impl ServerInviteLogic {
                 debug!(id=%tx_id, "Received ACK in Completed state");
                 
                 // Notify TU about ACK
-                let _ = data.events_tx.send(TransactionEvent::AckReceived {
+                if let Err(e) = data.events_tx.send(TransactionEvent::AckReceived {
                     transaction_id: tx_id.clone(),
                     request: request.clone(),
-                }).await;
+                }).await {
+                    tracing::warn!("Failed to send AckReceived event: {e}");
+                }
                 
                 // Transition to Confirmed state
                 Ok(Some(TransactionState::Confirmed))
@@ -581,10 +583,12 @@ impl ServerInviteLogic {
                 debug!(id=%tx_id, "Received CANCEL in Proceeding state");
                 
                 // Notify TU about CANCEL
-                let _ = data.events_tx.send(TransactionEvent::CancelReceived {
+                if let Err(e) = data.events_tx.send(TransactionEvent::CancelReceived {
                     transaction_id: tx_id.clone(),
                     cancel_request: request.clone(),
-                }).await;
+                }).await {
+                    tracing::warn!("Failed to send CancelReceived event: {e}");
+                }
                 
                 // No state transition needed for CANCEL
                 Ok(None)

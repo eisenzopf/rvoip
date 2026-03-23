@@ -373,7 +373,9 @@ pub(crate) fn spawn_refresh_task(
                         "Refreshing registration"
                     );
 
-                    let _ = state_tx.send(RegistrationState::Refreshing);
+                    if let Err(e) = state_tx.send(RegistrationState::Refreshing) {
+                        tracing::debug!("Failed to send registration state update (receiver dropped): {e}");
+                    }
 
                     match send_register_with_auth(&coordinator, &config, config.expires).await {
                         Ok(new_handle) => {
@@ -386,7 +388,9 @@ pub(crate) fn spawn_refresh_task(
                             }
                             consecutive_failures = 0;
                             *reg_ref.handle.write().await = Some(new_handle);
-                            let _ = state_tx.send(RegistrationState::Active);
+                            if let Err(e) = state_tx.send(RegistrationState::Active) {
+                                tracing::debug!("Failed to send registration Active state (receiver dropped): {e}");
+                            }
                         }
                         Err(e) => {
                             consecutive_failures += 1;
@@ -406,9 +410,11 @@ pub(crate) fn spawn_refresh_task(
                                     "Registration permanently failed after {} consecutive refresh failures",
                                     consecutive_failures
                                 );
-                                let _ = state_tx.send(RegistrationState::Failed(
+                                if let Err(e2) = state_tx.send(RegistrationState::Failed(
                                     format!("Refresh failed {} consecutive times: {}", consecutive_failures, e)
-                                ));
+                                )) {
+                                    tracing::debug!("Failed to send registration Failed state (receiver dropped): {e2}");
+                                }
                                 break;
                             }
 
@@ -416,7 +422,9 @@ pub(crate) fn spawn_refresh_task(
                             let backoff_secs = (1u64 << (consecutive_failures - 1)).min(MAX_BACKOFF_SECS);
                             let backoff = Duration::from_secs(backoff_secs);
 
-                            let _ = state_tx.send(RegistrationState::Refreshing);
+                            if let Err(e2) = state_tx.send(RegistrationState::Refreshing) {
+                                tracing::debug!("Failed to send registration Refreshing state (receiver dropped): {e2}");
+                            }
 
                             tracing::info!(
                                 registrar = %config.registrar_uri,
@@ -449,7 +457,9 @@ pub(crate) fn spawn_refresh_task(
                                     );
                                     consecutive_failures = 0;
                                     *reg_ref.handle.write().await = Some(new_handle);
-                                    let _ = state_tx.send(RegistrationState::Active);
+                                    if let Err(e) = state_tx.send(RegistrationState::Active) {
+                                        tracing::debug!("Failed to send registration Active state (receiver dropped): {e}");
+                                    }
                                 }
                                 Err(retry_err) => {
                                     tracing::warn!(
@@ -458,7 +468,9 @@ pub(crate) fn spawn_refresh_task(
                                         attempt = consecutive_failures,
                                         "Registration refresh retry also failed, will try again at next interval"
                                     );
-                                    let _ = state_tx.send(RegistrationState::Expired);
+                                    if let Err(e2) = state_tx.send(RegistrationState::Expired) {
+                                        tracing::debug!("Failed to send registration Expired state (receiver dropped): {e2}");
+                                    }
                                     // Continue the loop; next iteration will sleep for refresh_interval
                                     // then try again, incrementing consecutive_failures if it fails
                                 }
@@ -483,7 +495,9 @@ pub(crate) fn spawn_refresh_task(
 /// Stop the refresh task for a managed registration
 pub(crate) async fn stop_refresh_task(registration: &ManagedRegistration) {
     if let Some(tx) = registration.shutdown_tx.write().await.take() {
-        let _ = tx.send(true);
+        if let Err(e) = tx.send(true) {
+            tracing::debug!("Failed to send shutdown signal for registration refresh (receiver dropped): {e}");
+        }
     }
 }
 
@@ -493,12 +507,16 @@ pub(crate) async fn register_managed(
     config: RegistrationConfig,
 ) -> Result<Arc<ManagedRegistration>> {
     let registration = Arc::new(ManagedRegistration::new(config.clone()));
-    let _ = registration.state_tx.send(RegistrationState::Registering);
+    if let Err(e) = registration.state_tx.send(RegistrationState::Registering) {
+        tracing::debug!("Failed to send registration Registering state (receiver dropped): {e}");
+    }
 
     match send_register_with_auth(coordinator, &config, config.expires).await {
         Ok(handle) => {
             *registration.handle.write().await = Some(handle);
-            let _ = registration.state_tx.send(RegistrationState::Active);
+            if let Err(e) = registration.state_tx.send(RegistrationState::Active) {
+                tracing::debug!("Failed to send registration Active state (receiver dropped): {e}");
+            }
 
             // Start refresh task
             spawn_refresh_task(coordinator.clone(), registration.clone());
@@ -506,7 +524,9 @@ pub(crate) async fn register_managed(
             Ok(registration)
         }
         Err(e) => {
-            let _ = registration.state_tx.send(RegistrationState::Failed(e.to_string()));
+            if let Err(e2) = registration.state_tx.send(RegistrationState::Failed(e.to_string())) {
+                tracing::debug!("Failed to send registration Failed state (receiver dropped): {e2}");
+            }
             Err(e)
         }
     }
@@ -519,7 +539,9 @@ pub(crate) async fn unregister_managed(
 ) -> Result<()> {
     // Stop refresh task first
     stop_refresh_task(registration).await;
-    let _ = registration.state_tx.send(RegistrationState::Unregistering);
+    if let Err(e) = registration.state_tx.send(RegistrationState::Unregistering) {
+        tracing::debug!("Failed to send registration Unregistering state (receiver dropped): {e}");
+    }
 
     // Send REGISTER with Expires: 0
     let unregister_config = registration.config.clone();
@@ -530,7 +552,9 @@ pub(crate) async fn unregister_managed(
                 "Unregistered successfully"
             );
             *registration.handle.write().await = None;
-            let _ = registration.state_tx.send(RegistrationState::Unregistered);
+            if let Err(e) = registration.state_tx.send(RegistrationState::Unregistered) {
+                tracing::debug!("Failed to send registration Unregistered state (receiver dropped): {e}");
+            }
             Ok(())
         }
         Err(e) => {
@@ -541,7 +565,9 @@ pub(crate) async fn unregister_managed(
             );
             // Even if unregister fails, mark as unregistered since we stopped refresh
             *registration.handle.write().await = None;
-            let _ = registration.state_tx.send(RegistrationState::Unregistered);
+            if let Err(e) = registration.state_tx.send(RegistrationState::Unregistered) {
+                tracing::debug!("Failed to send registration Unregistered state (receiver dropped): {e}");
+            }
             Ok(())
         }
     }

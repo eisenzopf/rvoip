@@ -182,7 +182,7 @@ impl PooledMediaBuffer {
 
     /// Get a reference to the buffer data
     pub fn as_ref(&self) -> &BytesMut {
-        static EMPTY: once_cell::sync::Lazy<BytesMut> = once_cell::sync::Lazy::new(BytesMut::new);
+        static EMPTY: std::sync::LazyLock<BytesMut> = std::sync::LazyLock::new(BytesMut::new);
         self.buffer.as_ref().unwrap_or(&EMPTY)
     }
 

@@ -135,11 +135,13 @@ impl PacketForwarder {
         }
         
         // Emit event
-        let _ = self.event_tx.send(RelayEvent::PacketRelayed {
+        if let Err(e) = self.event_tx.send(RelayEvent::PacketRelayed {
             from_session: self.session_a_id.clone(),
             to_session: self.session_b_id.clone(),
             packet_size: packet.payload.len(),
-        });
+        }) {
+            debug!("Relay event receiver dropped (packet relayed A->B): {}", e);
+        }
         
         debug!("Forwarded packet {} -> {} ({} bytes)", 
                self.session_a_id, self.session_b_id, packet.payload.len());
@@ -178,11 +180,13 @@ impl PacketForwarder {
         }
         
         // Emit event
-        let _ = self.event_tx.send(RelayEvent::PacketRelayed {
+        if let Err(e) = self.event_tx.send(RelayEvent::PacketRelayed {
             from_session: self.session_b_id.clone(),
             to_session: self.session_a_id.clone(),
             packet_size: packet.payload.len(),
-        });
+        }) {
+            debug!("Relay event receiver dropped (packet relayed B->A): {}", e);
+        }
         
         debug!("Forwarded packet {} -> {} ({} bytes)", 
                self.session_b_id, self.session_a_id, packet.payload.len());
@@ -198,11 +202,13 @@ impl PacketForwarder {
         self.update_stats_dropped().await;
         
         // Emit error event
-        let _ = self.event_tx.send(RelayEvent::RelayError {
+        if let Err(e) = self.event_tx.send(RelayEvent::RelayError {
             from_session: from_session.to_string(),
             to_session: to_session.to_string(),
             error: error.to_string(),
-        });
+        }) {
+            warn!("Failed to send relay error event (receiver dropped): {}", e);
+        }
     }
     
     /// Generate a new SSRC value

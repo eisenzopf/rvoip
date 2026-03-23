@@ -310,7 +310,9 @@ impl AudioMixer {
     async fn send_event(&self, event: ConferenceMixingEvent) {
         let event_sender = self.event_sender.lock().await; {
             if let Some(sender) = event_sender.as_ref() {
-                let _ = sender.send(event);
+                if let Err(e) = sender.send(event) {
+                    tracing::debug!("Conference mixing event receiver dropped: {}", e);
+                }
             }
         }
     }

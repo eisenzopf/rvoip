@@ -554,18 +554,24 @@ impl DtlsConnection {
             // Start the handshake if we're a client
             if role == DtlsRole::Client {
                 if let Err(e) = handler.start_handshake().await {
-                    let _ = handshake_complete_tx.send(Err(e)).await;
+                    if let Err(send_err) = handshake_complete_tx.send(Err(e)).await {
+                        tracing::warn!("Failed to send handshake error result (receiver dropped): {send_err}");
+                    }
                     return;
                 }
             }
-            
+
             // Process the handshake
             match handler.process_handshake().await {
                 Ok(result) => {
-                    let _ = handshake_complete_tx.send(Ok(result)).await;
+                    if let Err(e) = handshake_complete_tx.send(Ok(result)).await {
+                        tracing::warn!("Failed to send handshake success result (receiver dropped): {e}");
+                    }
                 },
                 Err(e) => {
-                    let _ = handshake_complete_tx.send(Err(e)).await;
+                    if let Err(send_err) = handshake_complete_tx.send(Err(e)).await {
+                        tracing::warn!("Failed to send handshake error result (receiver dropped): {send_err}");
+                    }
                 }
             }
         };
@@ -780,7 +786,9 @@ impl DtlsConnection {
                                 .map(|c| c.der().clone()),
                         };
 
-                        let _ = tx.send(Ok(result)).await;
+                        if let Err(e) = tx.send(Ok(result)).await {
+                            tracing::warn!("Failed to send handshake completion result (receiver dropped): {e}");
+                        }
                     }
 
                     tracing::info!("Handshake completed successfully!");

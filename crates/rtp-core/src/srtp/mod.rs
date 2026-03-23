@@ -234,6 +234,36 @@ impl SrtpContext {
         })
     }
     
+    /// Create a new SRTP context from DTLS key material.
+    ///
+    /// Converts the `SrtpKeyMaterial` (produced by the DTLS handshake) into
+    /// a legacy `SrtpContext` for use with `SecurityRtpTransport`.
+    pub fn from_dtls_key_material(
+        keys: &crate::dtls::adapter::SrtpKeyMaterial,
+    ) -> Result<Self, crate::Error> {
+        use webrtc_dtls::extension::extension_use_srtp::SrtpProtectionProfile;
+
+        let profile = match keys.profile {
+            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80 => SRTP_AES128_CM_SHA1_80,
+            SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32 => SRTP_AES128_CM_SHA1_32,
+            SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm => SRTP_AEAD_AES_128_GCM,
+            SrtpProtectionProfile::Srtp_Aead_Aes_256_Gcm => SRTP_AEAD_AES_256_GCM,
+            other => {
+                return Err(crate::Error::SrtpError(format!(
+                    "Unsupported SRTP protection profile from DTLS: {other:?}"
+                )));
+            }
+        };
+
+        Self::new_from_keys(
+            keys.local_key.clone(),
+            keys.remote_key.clone(),
+            keys.local_salt.clone(),
+            keys.remote_salt.clone(),
+            profile,
+        )
+    }
+
     /// Enable or disable SRTP
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;

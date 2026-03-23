@@ -185,7 +185,9 @@ impl TrackedTaskManager {
             
             // Clean up
             active_count.fetch_sub(1, Ordering::Relaxed);
-            let _ = completion_tx.send(task_id);
+            if let Err(e) = completion_tx.send(task_id) {
+                tracing::debug!("Failed to send task completion notification (receiver dropped): {e}");
+            }
             
             // Remove from tracked tasks
             let mut tasks_guard = tasks.lock().await;

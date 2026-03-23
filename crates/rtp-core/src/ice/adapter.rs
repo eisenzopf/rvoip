@@ -511,7 +511,9 @@ impl IceAgentAdapter {
                         None => {
                             // Gathering complete
                             debug!("candidate gathering complete (webrtc-ice)");
-                            let _ = done_tx.send(()).await;
+                            if let Err(e) = done_tx.send(()).await {
+                                tracing::debug!("Failed to send gathering-complete signal (receiver dropped): {e}");
+                            }
                         }
                     }
                 })
@@ -524,11 +526,13 @@ impl IceAgentAdapter {
         })?;
 
         // Wait for gathering to finish (None sentinel) with a timeout
-        let _ = tokio::time::timeout(
+        if let Err(e) = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             done_rx.recv(),
         )
-        .await;
+        .await {
+            tracing::warn!("ICE candidate gathering timed out after 10s: {e}");
+        }
 
         // Collect results
         let gathered = {
