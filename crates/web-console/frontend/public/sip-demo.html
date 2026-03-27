@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>rvoip SIP 通话 Demo</title>
+<style>
+  :root {
+    --bg: #0a0c10;
+    --card: #13161d;
+    --border: #1e2230;
+    --text: #e8eaf0;
+    --muted: #555a6e;
+    --green: #00e68a;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --amber: #f59e0b;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text);
+    min-height: 100vh; padding: 20px;
+  }
+  h1 { text-align: center; margin-bottom: 8px; font-size: 24px; }
+  .subtitle { text-align: center; color: var(--muted); font-size: 13px; margin-bottom: 24px; }
+  .hint { text-align: center; color: var(--amber); font-size: 12px; margin-bottom: 16px; padding: 8px; background: #f59e0b15; border-radius: 8px; max-width: 600px; margin: 0 auto 24px; }
+
+  .phone {
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    max-width: 380px; margin: 0 auto; padding: 24px; position: relative;
+  }
+
+  .status-bar {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 20px;
+    padding-bottom: 12px; border-bottom: 1px solid var(--border);
+  }
+  .status-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--muted); flex-shrink: 0;
+  }
+  .status-dot.registered { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .status-dot.calling { background: var(--amber); animation: pulse 1s infinite; }
+  .status-dot.in-call { background: var(--blue); box-shadow: 0 0 8px var(--blue); }
+  .status-dot.ringing { background: var(--amber); animation: pulse 0.5s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+  .status-text { font-size: 13px; color: var(--muted); flex: 1; }
+  .status-ext { font-family: monospace; font-size: 14px; font-weight: 600; }
+
+  .section { margin-bottom: 16px; }
+  .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 8px; }
+
+  .form-row { display: flex; gap: 8px; margin-bottom: 8px; }
+  input, select {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; color: var(--text); font-size: 13px; outline: none;
+  }
+  input:focus { border-color: var(--blue); }
+
+  .btn {
+    padding: 8px 16px; border: none; border-radius: 8px; font-size: 13px;
+    cursor: pointer; font-weight: 500; transition: all 0.15s;
+  }
+  .btn-green { background: var(--green); color: #000; }
+  .btn-green:hover { filter: brightness(1.1); }
+  .btn-red { background: var(--red); color: #fff; }
+  .btn-red:hover { filter: brightness(1.1); }
+  .btn-blue { background: var(--blue); color: #fff; }
+  .btn-blue:hover { filter: brightness(1.1); }
+  .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn-outline:hover { border-color: var(--muted); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-full { width: 100%; }
+
+  .dial-pad {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0;
+  }
+  .dial-btn {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; font-size: 20px; color: var(--text); cursor: pointer;
+    text-align: center; transition: all 0.1s;
+  }
+  .dial-btn:hover { background: var(--border); }
+  .dial-btn:active { transform: scale(0.95); }
+  .dial-btn .sub { display: block; font-size: 9px; color: var(--muted); letter-spacing: 2px; }
+
+  .call-display {
+    text-align: center; padding: 24px 0;
+  }
+  .call-display .remote { font-size: 28px; font-weight: 600; margin-bottom: 8px; }
+  .call-display .timer { font-family: monospace; font-size: 18px; color: var(--muted); }
+  .call-display .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+
+  .call-actions {
+    display: flex; gap: 12px; justify-content: center; margin-top: 16px;
+  }
+  .call-actions .btn { width: 56px; height: 56px; border-radius: 50%; font-size: 20px; display: flex; align-items: center; justify-content: center; }
+
+  .incoming {
+    background: linear-gradient(135deg, #00e68a22, #3b82f622);
+    border: 1px solid var(--green); border-radius: 12px; padding: 16px;
+    text-align: center; margin-bottom: 16px; animation: ring 1s infinite;
+  }
+  @keyframes ring { 0%,100% { transform: scale(1); } 50% { transform: scale(1.02); } }
+  .incoming .from { font-size: 18px; font-weight: 600; margin: 8px 0; }
+  .incoming .actions { display: flex; gap: 12px; justify-content: center; margin-top: 12px; }
+
+  .log {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px; max-height: 150px; overflow-y: auto; font-family: monospace;
+    font-size: 11px; color: var(--muted); margin-top: 16px;
+  }
+  .log .entry { padding: 2px 0; }
+  .log .entry.error { color: var(--red); }
+  .log .entry.success { color: var(--green); }
+  .log .entry.info { color: var(--blue); }
+
+  audio { display: none; }
+</style>
+</head>
+<body>
+
+<h1>📞 rvoip SIP 通话 Demo</h1>
+<p class="subtitle">打开两个浏览器标签，分别注册不同分机号，互相拨打测试</p>
+<div class="hint">
+  💡 使用方法: 标签1 注册分机 1001 → 标签2 注册分机 1002 → 从 1001 拨打 1002 → 1002 接听
+</div>
+
+<div class="phone">
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-text" id="statusText">未注册</span>
+    <span class="status-ext" id="statusExt"></span>
+  </div>
+
+  <!-- Registration -->
+  <div class="section" id="regSection">
+    <div class="section-title">SIP 注册</div>
+    <div class="form-row">
+      <input id="server" value="ws://127.0.0.1:8080" placeholder="WebSocket Server">
+    </div>
+    <div class="form-row">
+      <input id="domain" value="call-center.local" placeholder="SIP Domain">
+    </div>
+    <div class="form-row">
+      <input id="extension" placeholder="分机号 (如 1001)" autofocus>
+      <button class="btn btn-green" id="regBtn" onclick="register()">注册</button>
+    </div>
+  </div>
+
+  <!-- Incoming Call -->
+  <div class="incoming" id="incomingPanel" style="display:none;">
+    <div class="label">📞 来电</div>
+    <div class="from" id="incomingFrom"></div>
+    <div class="actions">
+      <button class="btn btn-green" onclick="answer()">✓ 接听</button>
+      <button class="btn btn-red" onclick="reject()">✗ 拒接</button>
+    </div>
+  </div>
+
+  <!-- Dial Pad (shown when registered, not in call) -->
+  <div id="dialSection" style="display:none;">
+    <div class="section-title">拨号</div>
+    <div class="form-row">
+      <input id="target" placeholder="输入对方分机号..." style="font-size:18px; text-align:center; letter-spacing:2px;">
+    </div>
+    <div class="dial-pad">
+      <div class="dial-btn" onclick="dial('1')">1<span class="sub">&nbsp;</span></div>
+      <div class="dial-btn" onclick="dial('2')">2<span class="sub">ABC</span></div>
+      <div class="dial-btn" onclick="dial('3')">3<span class="sub">DEF</span></div>
+      <div class="dial-btn" onclick="dial('4')">4<span class="sub">GHI</span></div>
+      <div class="dial-btn" onclick="dial('5')">5<span class="sub">JKL</span></div>
+      <div class="dial-btn" onclick="dial('6')">6<span class="sub">MNO</span></div>
+      <div class="dial-btn" onclick="dial('7')">7<span class="sub">PQRS</span></div>
+      <div class="dial-btn" onclick="dial('8')">8<span class="sub">TUV</span></div>
+      <div class="dial-btn" onclick="dial('9')">9<span class="sub">WXYZ</span></div>
+      <div class="dial-btn" onclick="dial('*')">*</div>
+      <div class="dial-btn" onclick="dial('0')">0<span class="sub">+</span></div>
+      <div class="dial-btn" onclick="dial('#')">#</div>
+    </div>
+    <div class="form-row">
+      <button class="btn btn-green btn-full" onclick="makeCall()" id="callBtn">📞 拨打</button>
+      <button class="btn btn-outline" onclick="clearDial()">⌫</button>
+    </div>
+  </div>
+
+  <!-- In-Call Display -->
+  <div id="callSection" style="display:none;">
+    <div class="call-display">
+      <div class="label" id="callLabel">通话中</div>
+      <div class="remote" id="callRemote">1002</div>
+      <div class="timer" id="callTimer">00:00</div>
+    </div>
+    <div class="call-actions">
+      <button class="btn btn-outline" id="muteBtn" onclick="toggleMute()" title="静音">🔇</button>
+      <button class="btn btn-outline" id="holdBtn" onclick="toggleHold()" title="保持">⏸</button>
+      <button class="btn btn-red" onclick="hangup()" title="挂断" style="width:64px;height:64px;font-size:24px;">📵</button>
+    </div>
+  </div>
+
+  <!-- Unregister -->
+  <div id="unregSection" style="display:none; margin-top: 12px;">
+    <button class="btn btn-outline btn-full" onclick="unregister()">注销</button>
+  </div>
+
+  <!-- Log -->
+  <div class="log" id="log"></div>
+</div>
+
+<audio id="remoteAudio" autoplay></audio>
+<audio id="ringTone" loop>
+  <!-- Simple ring tone using Web Audio API instead -->
+</audio>
+
+<script type="module">
+import { UserAgent, Registerer, Inviter, RegistererState, SessionState } from 'https://esm.sh/sip.js@0.21.2';
+
+let ua = null;
+let registerer = null;
+let currentSession = null;
+let callTimer = null;
+let callSeconds = 0;
+let isMuted = false;
+let isHeld = false;
+let ringContext = null;
+let ringOsc = null;
+
+const $ = id => document.getElementById(id);
+
+function log(msg, type = '') {
+  const el = $('log');
+  const time = new Date().toLocaleTimeString();
+  el.innerHTML += `<div class="entry ${type}">[${time}] ${msg}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function setState(state, extra = '') {
+  const dot = $('statusDot');
+  const text = $('statusText');
+  dot.className = 'status-dot ' + state;
+  const labels = {
+    '': '未注册', registered: '已注册 ● 在线', calling: '呼叫中...',
+    ringing: '来电振铃', 'in-call': '通话中'
+  };
+  text.textContent = (labels[state] || state) + (extra ? ' — ' + extra : '');
+}
+
+function showSection(section) {
+  ['regSection', 'dialSection', 'callSection', 'incomingPanel', 'unregSection'].forEach(id => {
+    $(id).style.display = 'none';
+  });
+  if (section === 'register') {
+    $('regSection').style.display = 'block';
+  } else if (section === 'dial') {
+    $('dialSection').style.display = 'block';
+    $('unregSection').style.display = 'block';
+  } else if (section === 'call') {
+    $('callSection').style.display = 'block';
+  } else if (section === 'incoming') {
+    $('incomingPanel').style.display = 'block';
+    $('dialSection').style.display = 'block';
+    $('unregSection').style.display = 'block';
+  }
+}
+
+function startRing() {
+  try {
+    ringContext = new AudioContext();
+    ringOsc = ringContext.createOscillator();
+    const gain = ringContext.createGain();
+    ringOsc.connect(gain);
+    gain.connect(ringContext.destination);
+    ringOsc.frequency.value = 440;
+    gain.gain.value = 0.1;
+    ringOsc.start();
+    // Ring pattern
+    const now = ringContext.currentTime;
+    for (let i = 0; i < 20; i++) {
+      gain.gain.setValueAtTime(0.1, now + i * 2);
+      gain.gain.setValueAtTime(0, now + i * 2 + 0.8);
+    }
+  } catch {}
+}
+
+function stopRing() {
+  try { if (ringOsc) ringOsc.stop(); } catch {}
+  try { if (ringContext) ringContext.close(); } catch {}
+  ringOsc = null; ringContext = null;
+}
+
+function startTimer() {
+  callSeconds = 0;
+  $('callTimer').textContent = '00:00';
+  callTimer = setInterval(() => {
+    callSeconds++;
+    const m = String(Math.floor(callSeconds / 60)).padStart(2, '0');
+    const s = String(callSeconds % 60).padStart(2, '0');
+    $('callTimer').textContent = `${m}:${s}`;
+  }, 1000);
+}
+
+function stopTimer() {
+  if (callTimer) clearInterval(callTimer);
+  callTimer = null;
+}
+
+function setupSessionListeners(session, direction) {
+  session.stateChange.addListener((state) => {
+    log(`会话状态: ${state}`, 'info');
+
+    if (state === SessionState.Established) {
+      stopRing();
+      setState('in-call');
+      showSection('call');
+      startTimer();
+      $('callLabel').textContent = direction === 'outgoing' ? '呼出通话' : '来电通话';
+      log('通话已建立', 'success');
+
+      // Setup remote audio
+      const remoteStream = new MediaStream();
+      const pc = session.sessionDescriptionHandler?.peerConnection;
+      if (pc) {
+        pc.getReceivers().forEach(receiver => {
+          if (receiver.track) remoteStream.addTrack(receiver.track);
+        });
+        $('remoteAudio').srcObject = remoteStream;
+      }
+    }
+
+    if (state === SessionState.Terminated) {
+      stopRing();
+      stopTimer();
+      currentSession = null;
+      isMuted = false;
+      isHeld = false;
+      $('muteBtn').textContent = '🔇';
+      $('holdBtn').textContent = '⏸';
+      setState('registered');
+      showSection('dial');
+      log('通话结束', 'info');
+    }
+  });
+}
+
+// ---- Public API ----
+
+window.register = async function() {
+  const server = $('server').value;
+  const domain = $('domain').value;
+  const ext = $('extension').value;
+
+  if (!ext) { log('请输入分机号', 'error'); return; }
+
+  log(`正在注册 sip:${ext}@${domain} → ${server}...`);
+
+  try {
+    const uri = UserAgent.makeURI(`sip:${ext}@${domain}`);
+    if (!uri) { log('URI 格式错误', 'error'); return; }
+
+    ua = new UserAgent({
+      uri,
+      transportOptions: { server },
+      authorizationUsername: ext,
+      authorizationPassword: '',
+      delegate: {
+        onInvite: (invitation) => {
+          currentSession = invitation;
+          const caller = invitation.remoteIdentity?.uri?.user || '未知';
+          log(`来电: ${caller}`, 'info');
+          $('incomingFrom').textContent = caller;
+          setState('ringing', `来自 ${caller}`);
+          showSection('incoming');
+          startRing();
+          setupSessionListeners(invitation, 'incoming');
+        }
+      }
+    });
+
+    await ua.start();
+    log('UserAgent 已启动', 'success');
+
+    registerer = new Registerer(ua);
+
+    registerer.stateChange.addListener((state) => {
+      log(`Registerer state: ${state}`, 'info');
+      if (state === RegistererState.Registered) {
+        log(`注册成功: ${ext}`, 'success');
+      } else if (state === RegistererState.Unregistered) {
+        log('已注销', 'info');
+        setState('');
+        $('statusExt').textContent = '';
+        showSection('register');
+      }
+    });
+
+    // Show dial pad immediately after UA starts (don't wait for server 200 OK)
+    // The SIP server may not respond to REGISTER but calls can still work peer-to-peer
+    setState('registered');
+    $('statusExt').textContent = `Ext: ${ext}`;
+    showSection('dial');
+    log(`已就绪: ${ext} — 可以拨打电话`, 'success');
+
+    // Attempt registration (best effort)
+    try {
+      await registerer.register();
+    } catch (regErr) {
+      log(`REGISTER 请求: ${regErr.message || '已发送'}`, 'info');
+    }
+  } catch (e) {
+    log(`注册失败: ${e.message}`, 'error');
+  }
+};
+
+window.unregister = async function() {
+  try {
+    if (registerer) await registerer.unregister();
+    if (ua) await ua.stop();
+    ua = null; registerer = null;
+  } catch (e) {
+    log(`注销失败: ${e.message}`, 'error');
+  }
+};
+
+window.dial = function(digit) {
+  const input = $('target');
+  input.value += digit;
+};
+
+window.clearDial = function() {
+  const input = $('target');
+  input.value = input.value.slice(0, -1);
+};
+
+window.makeCall = async function() {
+  const target = $('target').value;
+  if (!target || !ua) return;
+
+  const domain = $('domain').value;
+  log(`拨打 ${target}...`);
+  setState('calling', target);
+
+  try {
+    const targetUri = UserAgent.makeURI(`sip:${target}@${domain}`);
+    if (!targetUri) { log('目标 URI 无效', 'error'); return; }
+
+    const inviter = new Inviter(ua, targetUri);
+    currentSession = inviter;
+    $('callRemote').textContent = target;
+    $('callLabel').textContent = '呼叫中...';
+    showSection('call');
+    startRing();
+
+    setupSessionListeners(inviter, 'outgoing');
+    await inviter.invite();
+  } catch (e) {
+    log(`拨打失败: ${e.message}`, 'error');
+    stopRing();
+    setState('registered');
+    showSection('dial');
+  }
+};
+
+window.answer = async function() {
+  if (!currentSession) return;
+  try {
+    stopRing();
+    log('接听来电...');
+    await currentSession.accept();
+  } catch (e) {
+    log(`接听失败: ${e.message}`, 'error');
+  }
+};
+
+window.reject = async function() {
+  if (!currentSession) return;
+  try {
+    stopRing();
+    await currentSession.reject();
+    currentSession = null;
+    setState('registered');
+    showSection('dial');
+    log('已拒接', 'info');
+  } catch (e) {
+    log(`拒接失败: ${e.message}`, 'error');
+  }
+};
+
+window.hangup = async function() {
+  if (!currentSession) return;
+  try {
+    const state = currentSession.state;
+    if (state === SessionState.Established) {
+      await currentSession.bye();
+    } else if (state === SessionState.Establishing || state === SessionState.Initial) {
+      await currentSession.cancel();
+    }
+  } catch (e) {
+    log(`挂断操作: ${e.message}`, 'info');
+  }
+  stopTimer();
+  stopRing();
+  currentSession = null;
+  setState('registered');
+  showSection('dial');
+};
+
+window.toggleMute = function() {
+  if (!currentSession) return;
+  isMuted = !isMuted;
+  const pc = currentSession.sessionDescriptionHandler?.peerConnection;
+  if (pc) {
+    pc.getSenders().forEach(sender => {
+      if (sender.track && sender.track.kind === 'audio') {
+        sender.track.enabled = !isMuted;
+      }
+    });
+  }
+  $('muteBtn').textContent = isMuted ? '🔊' : '🔇';
+  log(isMuted ? '已静音' : '取消静音', 'info');
+};
+
+window.toggleHold = function() {
+  if (!currentSession) return;
+  isHeld = !isHeld;
+  const pc = currentSession.sessionDescriptionHandler?.peerConnection;
+  if (pc) {
+    pc.getSenders().forEach(sender => {
+      if (sender.track) sender.track.enabled = !isHeld;
+    });
+    pc.getReceivers().forEach(receiver => {
+      if (receiver.track) receiver.track.enabled = !isHeld;
+    });
+  }
+  $('holdBtn').textContent = isHeld ? '▶' : '⏸';
+  log(isHeld ? '通话保持' : '恢复通话', 'info');
+};
+
+// Auto-suggest extension based on URL param
+const params = new URLSearchParams(location.search);
+if (params.get('ext')) {
+  $('extension').value = params.get('ext');
+}
+if (params.get('server')) {
+  $('server').value = params.get('server');
+}
+
+showSection('register');
+log('rvoip SIP Demo 就绪', 'success');
+</script>
+
+</body>
+</html>
