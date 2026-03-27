@@ -478,7 +478,53 @@ impl ClientBuilder {
         self.config.domain = Some(domain.into());
         self
     }
-    
+
+    /// Use WebSocket (WS) transport for SIP signaling instead of UDP
+    ///
+    /// Enables SIP over WebSocket as defined in RFC 7118.
+    /// The local SIP address is still used for the WebSocket listener bind address.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_client_core::ClientBuilder;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let client = ClientBuilder::new()
+    ///     .local_address("127.0.0.1:8080".parse().unwrap())
+    ///     .with_websocket()
+    ///     .build()
+    ///     .await.unwrap();
+    /// # })
+    /// ```
+    pub fn with_websocket(mut self) -> Self {
+        self.config.websocket = Some(false);
+        self
+    }
+
+    /// Use Secure WebSocket (WSS) transport for SIP signaling instead of UDP
+    ///
+    /// Enables SIP over Secure WebSocket with TLS as defined in RFC 7118.
+    /// Certificate validation is enforced.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_client_core::ClientBuilder;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let client = ClientBuilder::new()
+    ///     .local_address("127.0.0.1:8443".parse().unwrap())
+    ///     .with_secure_websocket()
+    ///     .build()
+    ///     .await.unwrap();
+    /// # })
+    /// ```
+    pub fn with_secure_websocket(mut self) -> Self {
+        self.config.websocket = Some(true);
+        self
+    }
+
     /// Set preferred audio codecs in priority order
     /// 
     /// Configures the list of preferred audio codecs for media negotiation.
@@ -1136,11 +1182,11 @@ impl ClientBuilder {
     /// shutdown methods before dropping.
     pub async fn build(mut self) -> ClientResult<Arc<ClientManager>> {
         // If media address has default IP (127.0.0.1), update to match SIP IP but keep port
-        let default_media_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let default_media_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
         if self.config.local_media_addr.ip() == default_media_addr.ip() {
             let sip_ip = self.config.local_sip_addr.ip();
             let media_port = self.config.local_media_addr.port(); // Keep existing port (0 = auto)
-            self.config.local_media_addr = format!("{}:{}", sip_ip, media_port).parse().unwrap();
+            self.config.local_media_addr = std::net::SocketAddr::new(sip_ip, media_port);
         }
         ClientManager::new(self.config).await
     }

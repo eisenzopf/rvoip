@@ -127,17 +127,25 @@ pub fn create_update_request(
     }
     
     // Check that this is an in-dialog request (To header must have a tag)
-    if dialog_request.to().unwrap().tag().is_none() {
+    // Safety: we already checked to().is_none() above, so these are guaranteed to be Some
+    let to = dialog_request.to()
+        .ok_or_else(|| Error::Other("Cannot create UPDATE - missing To header".to_string()))?;
+    if to.tag().is_none() {
         return Err(Error::Other("Cannot create UPDATE - not an in-dialog request (To tag missing)".to_string()));
     }
-    
+    let to = to.clone();
+
     // Get dialog identifiers from the request
-    let call_id = dialog_request.call_id().unwrap().clone();
-    let to = dialog_request.to().unwrap().clone();
-    let from = dialog_request.from().unwrap().clone();
-    
+    let call_id = dialog_request.call_id()
+        .ok_or_else(|| Error::Other("Cannot create UPDATE - missing Call-ID header".to_string()))?
+        .clone();
+    let from = dialog_request.from()
+        .ok_or_else(|| Error::Other("Cannot create UPDATE - missing From header".to_string()))?
+        .clone();
+
     // Get CSeq and increment it
-    let old_cseq = dialog_request.cseq().unwrap();
+    let old_cseq = dialog_request.cseq()
+        .ok_or_else(|| Error::Other("Cannot create UPDATE - missing CSeq header".to_string()))?;
     let new_cseq_num = old_cseq.sequence() + 1;
     
     // Create a new UPDATE request
@@ -275,7 +283,7 @@ pub fn validate_update_request(request: &Request) -> Result<()> {
         None => return Err(Error::Other("UPDATE request missing To header".to_string())),
         Some(to) => {
             let to_tag = to.tag();
-            if to_tag.is_none() || to_tag.unwrap().is_empty() {
+            if to_tag.is_none() || to_tag.is_some_and(|t| t.is_empty()) {
                 return Err(Error::Other("UPDATE request To header missing tag (must be in-dialog)".to_string()));
             }
         }

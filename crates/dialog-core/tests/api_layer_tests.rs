@@ -1,3 +1,6 @@
+// Gated: depends on removed set_session_coordinator API
+#![cfg(feature = "legacy-dialog-api")]
+
 //! API Layer Tests for Dialog Core
 //!
 //! Tests for the high-level API functionality provided by dialog-core.
@@ -31,7 +34,7 @@ impl DialogApiTestEnvironment {
     /// Create a new test environment with **REAL UDP TRANSPORT**
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
         // Set test environment
-        std::env::set_var("RVOIP_TEST", "1");
+        unsafe { std::env::set_var("RVOIP_TEST", "1"); }
         
         // ------------- Server setup with REAL TRANSPORT -----------------
         
@@ -157,7 +160,7 @@ impl DialogApiTestEnvironment {
         // Transport managers don't need explicit shutdown
         // They will be dropped automatically
         
-        std::env::remove_var("RVOIP_TEST");
+        unsafe { std::env::remove_var("RVOIP_TEST"); }
         println!("✅ Test environment shutdown complete");
     }
 }

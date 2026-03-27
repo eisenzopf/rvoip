@@ -244,11 +244,11 @@ impl ReplyTo {
     /// let header = "<sip:support@example.com>;dept=sales;urgent";
     /// let reply_to = ReplyTo::from_str(header).unwrap();
     ///
-    /// assert_eq!(reply_to.get_param("dept"), Some(Some("sales")));
+    /// assert_eq!(reply_to.get_param("dept"), Some(Some("sales".to_string())));
     /// assert_eq!(reply_to.get_param("urgent"), Some(None));
     /// assert_eq!(reply_to.get_param("unknown"), None);
     /// ```
-    pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
+    pub fn get_param(&self, key: &str) -> Option<Option<String>> {
         self.0.get_param(key)
     }
     
@@ -572,7 +572,7 @@ impl FromStr for ReplyTo {
     /// let header = "\"Support\" <sip:support@example.com>;dept=sales";
     /// let reply_to = ReplyTo::from_str(header).unwrap();
     /// assert_eq!(reply_to.address().display_name(), Some("Support"));
-    /// assert_eq!(reply_to.get_param("dept").flatten(), Some("sales"));
+    /// assert_eq!(reply_to.get_param("dept").flatten(), Some("sales".to_string()));
     /// ```
     fn from_str(s: &str) -> Result<Self> {
         // Use all_consuming to ensure entire input is parsed
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(reply_to.uri().scheme, Scheme::Sip);
         assert_eq!(reply_to.params().len(), 1);
         assert!(reply_to.has_param("dept"));
-        assert_eq!(reply_to.get_param("dept"), Some(Some("billing")));
+        assert_eq!(reply_to.get_param("dept"), Some(Some("billing".to_string())));
     }
     
     #[test]
@@ -681,7 +681,7 @@ mod tests {
         let reply_to = ReplyTo::new(addr);
         
         assert!(reply_to.has_param("dept"));
-        assert_eq!(reply_to.get_param("dept"), Some(Some("sales")));
+        assert_eq!(reply_to.get_param("dept"), Some(Some("sales".to_string())));
     }
     
     #[test]
@@ -735,7 +735,7 @@ mod tests {
         let reply_to = ReplyTo::from_str(s).unwrap();
         
         assert!(reply_to.has_param("note"));
-        assert_eq!(reply_to.get_param("note"), Some(Some("Call us at 24/7 service")));
+        assert_eq!(reply_to.get_param("note"), Some(Some("Call us at 24/7 service".to_string())));
     }
     
     #[test]
@@ -752,7 +752,7 @@ mod tests {
         
         // Header parameters
         assert!(reply_to.has_param("priority"));
-        assert_eq!(reply_to.get_param("priority"), Some(Some("high")));
+        assert_eq!(reply_to.get_param("priority"), Some(Some("high".to_string())));
     }
     
     #[test]

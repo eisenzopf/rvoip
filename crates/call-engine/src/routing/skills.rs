@@ -680,7 +680,7 @@ impl SkillMatcher {
         }
         
         // Sort by match score (highest first)
-        matches.sort_by(|a, b| b.match_score.partial_cmp(&a.match_score).unwrap());
+        matches.sort_by(|a, b| b.match_score.partial_cmp(&a.match_score).unwrap_or(std::cmp::Ordering::Equal));
         
         // Truncate to max results
         matches.truncate(max_results);

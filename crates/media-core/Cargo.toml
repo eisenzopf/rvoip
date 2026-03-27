@@ -31,7 +31,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # State management
-dashmap = "5.5"
+dashmap = { workspace = true }
 
 # Async support
 async-trait = "0.1"
@@ -39,7 +39,7 @@ tokio.workspace = true
 anyhow.workspace = true
 
 # Error handling
-thiserror = "1.0"
+thiserror = { workspace = true }
 async-std = "1.0"
 
 # Bytes handling
@@ -56,8 +56,8 @@ serde_json = "1.0"
 rand = "0.8"
 
 # Missing dependencies needed for compilation
-uuid = { version = "1.0", features = ["v4"] }
-once_cell = "1.19"           # Lazy static initialization for G.711 lookup tables
+uuid = { workspace = true, features = ["v4"] }
+parking_lot = { workspace = true }        # Non-poisoning synchronization primitives
 num_cpus = "1.0"             # Used for default worker thread configuration
 
 # Advanced signal processing
@@ -68,7 +68,10 @@ biquad = "0.4"               # Used in AGC v2 for digital filters
 
 # Media codecs (optional)
 opus = { version = "0.3", optional = true }
-# g729 = { version = "0.3", optional = true }  # Commented out due to missing dependency
+# G.729A is now implemented as pure Rust in g729_engine.rs — no external dependency needed
+
+# WebRTC Audio Processing Module (optional, requires CMake + C++ compiler)
+webrtc-audio-processing = { version = "0.4", optional = true }
 
 # WAV file support
 hound = "3.5"
@@ -78,8 +81,9 @@ default = ["pcmu", "pcma"]
 pcmu = []
 pcma = []
 g722 = []
-# g729 = ["dep:g729"]  # Commented out due to missing dependency
+# g729 is now pure Rust — no feature gate needed
 opus = ["dep:opus"]
+webrtc-apm = ["dep:webrtc-audio-processing"]
 all-codecs = ["pcmu", "pcma", "g722", "opus"]  # removed g729 due to missing dependency
 
 [dev-dependencies]

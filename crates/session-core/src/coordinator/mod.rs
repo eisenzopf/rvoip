@@ -10,6 +10,7 @@ mod session_ops;
 mod bridge_ops;
 mod sip_client;
 mod server_manager;
+pub mod registration;
 pub mod transfer;
 pub mod registry;
 pub mod registrar_integration;

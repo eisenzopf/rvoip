@@ -18,6 +18,7 @@ use crate::parser::common_params::{generic_param};
 use crate::parser::common::comma_separated_list1;
 use crate::parser::ParseResult;
 use crate::parser::whitespace::sws;
+use tracing;
 
 use crate::types::uri::Uri;
 use crate::types::uri::{Scheme, Host};
@@ -66,19 +67,17 @@ fn enclosed_uri(input: &[u8]) -> ParseResult<String> {
             }
             
             // Additional basic validation - check for scheme
-            let scheme_end = trimmed.find(':');
-            if scheme_end.is_none() {
-                return Err(CrateError::ParseError("URI missing scheme".to_string()));
-            }
-            
+            let colon_pos = trimmed.find(':')
+                .ok_or_else(|| CrateError::ParseError("URI missing scheme".to_string()))?;
+
             // Verify scheme starts with a letter and contains valid characters
-            let scheme = &trimmed[0..scheme_end.unwrap()];
-            if scheme.is_empty() || !scheme.chars().next().unwrap().is_ascii_alphabetic() {
+            let scheme = &trimmed[0..colon_pos];
+            if scheme.is_empty() || !scheme.chars().next().unwrap_or('\0').is_ascii_alphabetic() {
                 return Err(CrateError::ParseError(format!("Invalid scheme: {}", scheme)));
             }
-            
+
             // Check that there's something after the colon
-            if scheme_end.unwrap() + 1 >= trimmed.len() {
+            if colon_pos + 1 >= trimmed.len() {
                 return Err(CrateError::ParseError("Missing URI content after scheme".to_string()));
             }
             
@@ -206,7 +205,7 @@ fn create_safe_uri(uri_str: &str) -> Result<Uri, CrateError> {
         Err(e) => {
             // If nom parsing fails, create a custom URI to preserve the string
             // but log the error. This mimics the previous behavior somewhat.
-            eprintln!("Error-Info: Failed to parse URI '{}' with nom parser: {:?}. Storing as raw.", uri_str, e);
+            tracing::warn!(uri = uri_str, error = ?e, "Error-Info: Failed to parse URI with nom parser, storing as raw");
             Ok(Uri::custom(uri_str.to_string()))
         }
     }

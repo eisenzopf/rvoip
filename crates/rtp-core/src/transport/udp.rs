@@ -74,7 +74,7 @@ impl UdpRtpTransport {
             // Generate a session ID if not provided
             let session_id = config.session_id.clone().unwrap_or_else(|| {
                 use rand::Rng;
-                let random_suffix: u32 = rand::thread_rng().gen();
+                let random_suffix: u32 = rand::thread_rng().r#gen();
                 format!("rtp-session-{}", random_suffix)
             });
 
@@ -234,9 +234,14 @@ impl UdpRtpTransport {
                                 }
                             } else {
                                 // Still send the event but ignore errors if no one is listening
-                                let _ = event_tx.send(event);
+                                if let Err(e) = event_tx.send(event) {
+                                    tracing::debug!("No receivers for RTCP event: {e}");
+                                }
                             }
                         } else {
+                            // SRTP is handled transparently by SecurityRtpTransport when configured.
+                            // When SRTP is active, callers use SecurityRtpTransport instead of
+                            // UdpTransport directly; decryption occurs at the transport layer.
                             // Try to parse as RTP
                             match RtpPacket::parse(&buffer[0..size]) {
                                 Ok(packet) => {
@@ -267,7 +272,9 @@ impl UdpRtpTransport {
                                         }
                                     } else {
                                         // Still send the event but ignore errors if no one is listening
-                                        let _ = event_tx.send(event);
+                                        if let Err(e) = event_tx.send(event) {
+                                            tracing::debug!("No receivers for RTP event: {e}");
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -313,7 +320,9 @@ impl UdpRtpTransport {
                                             warn!("Failed to send fallback MediaReceived event: {}", e);
                                         }
                                     } else {
-                                        let _ = event_tx.send(event);
+                                        if let Err(e) = event_tx.send(event) {
+                                            tracing::debug!("No receivers for fallback MediaReceived event: {e}");
+                                        }
                                     }
                                 }
                             }
@@ -321,11 +330,13 @@ impl UdpRtpTransport {
                     }
                     Err(e) => {
                         error!("Error receiving packet: {}", e);
-                        
+
                         // Send error event
                         let err_event = RtpEvent::Error(Error::Transport(format!("Socket error: {}", e)));
                         if event_tx.receiver_count() > 0 {
-                            let _ = event_tx.send(err_event);
+                            if let Err(e) = event_tx.send(err_event) {
+                                tracing::warn!("Failed to send socket error event: {e}");
+                            }
                         }
                         
                         // Short delay before retrying
@@ -371,16 +382,20 @@ impl UdpRtpTransport {
                                 }
                             } else {
                                 // Still send the event but ignore errors if no one is listening
-                                let _ = event_tx.send(event);
+                                if let Err(e) = event_tx.send(event) {
+                                    tracing::debug!("No receivers for RTCP event: {e}");
+                                }
                             }
                         }
                         Err(e) => {
                             error!("Error receiving RTCP packet: {}", e);
-                            
+
                             // Send error event
                             let err_event = RtpEvent::Error(Error::Transport(format!("RTCP socket error: {}", e)));
                             if event_tx.receiver_count() > 0 {
-                                let _ = event_tx.send(err_event);
+                                if let Err(e) = event_tx.send(err_event) {
+                                    tracing::warn!("Failed to send RTCP socket error event: {e}");
+                                }
                             }
                             
                             // Short delay before retrying

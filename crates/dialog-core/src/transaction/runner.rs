@@ -130,10 +130,12 @@ where
                 if let Err(e) = AtomicTransactionState::validate_transition(logic.kind(), current_state, requested_new_state) {
                     tracing::trace!("Invalid state transition: {:?} -> {:?}, error: {}", current_state, requested_new_state, e);
                     error!(id=%tx_id_clone, error=%e, "Invalid state transition: {:?} -> {:?}", current_state, requested_new_state);
-                    let _ = data.get_tu_event_sender().send(TransactionEvent::Error {
+                    if let Err(send_err) = data.get_tu_event_sender().send(TransactionEvent::Error {
                         transaction_id: Some(tx_id_clone.clone()),
                         error: e.to_string(),
-                    }).await;
+                    }).await {
+                        tracing::warn!("Failed to send transaction Error event: {send_err}");
+                    }
                     continue;
                 }
 
@@ -396,11 +398,12 @@ where
             transaction_id: data.as_ref_key().clone(),
         });
         
-        let _ = tokio::time::timeout(
+        if let Err(e) = tokio::time::timeout(
             std::time::Duration::from_millis(50),
             send_future
-        ).await;
-        // Don't log errors here as it's expected during shutdown
+        ).await {
+            tracing::debug!("Timed out sending termination event during shutdown: {e}");
+        }
     }
 }
 

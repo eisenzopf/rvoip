@@ -130,33 +130,55 @@ impl EventCoordinatorConfig {
     }
     
     /// Load configuration from environment variables
+    ///
+    /// Supported variables:
+    /// - `RVOIP_DISTRIBUTED`: Set to enable distributed mode
+    /// - `RVOIP_NATS_SERVERS`: Comma-separated NATS server URLs
+    /// - `RVOIP_SERVICE_NAME`: Service name for this instance
+    /// - `RVOIP_SERVICE_ENDPOINTS`: JSON map of service name to endpoint
     pub fn from_env() -> Result<Self, ConfigError> {
         // Check if distributed mode is enabled
         if std::env::var("RVOIP_DISTRIBUTED").is_ok() {
-            // TODO: Load distributed config from env vars
-            return Err(ConfigError::NotImplemented(
-                "Distributed mode configuration from environment not yet implemented".into()
-            ));
+            let service_name = std::env::var("RVOIP_SERVICE_NAME")
+                .unwrap_or_else(|_| "rvoip-distributed".to_string());
+
+            let nats_servers: Vec<String> = std::env::var("RVOIP_NATS_SERVERS")
+                .unwrap_or_else(|_| "nats://localhost:4222".to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+
+            let endpoints: std::collections::HashMap<String, String> =
+                std::env::var("RVOIP_SERVICE_ENDPOINTS")
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default();
+
+            return Ok(Self::distributed_nats(service_name, nats_servers, endpoints));
         }
-        
+
         // Default to monolithic
         Ok(Self::monolithic())
     }
-    
+
     /// Load configuration from a file
+    ///
+    /// Currently supports JSON configuration files. The file must contain
+    /// a valid `EventCoordinatorConfig` serialized as JSON.
     pub fn from_file(path: &str) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)
             .map_err(|e| ConfigError::Io(e.to_string()))?;
-            
-        // Try JSON first
+
         if path.ends_with(".json") {
             serde_json::from_str(&contents)
                 .map_err(|e| ConfigError::Parse(e.to_string()))
         } else {
-            // Assume YAML/TOML
-            Err(ConfigError::NotImplemented(
-                "Only JSON configuration files are currently supported".into()
-            ))
+            // For non-JSON files, attempt JSON parsing as a fallback since
+            // the content format may not match the extension
+            serde_json::from_str(&contents)
+                .map_err(|e| ConfigError::Parse(
+                    format!("Failed to parse configuration (only JSON is currently supported): {}", e)
+                ))
         }
     }
 }

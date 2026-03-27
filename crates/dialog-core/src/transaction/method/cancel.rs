@@ -139,9 +139,9 @@ pub fn create_cancel_request(invite_request: &Request, local_addr: &SocketAddr) 
         .seq;
     
     // Debug the original INVITE Via headers
-    println!("Original INVITE Via headers count: {}", invite_request.via_headers().len());
+    tracing::debug!("Original INVITE Via headers count: {}", invite_request.via_headers().len());
     for (i, via) in invite_request.via_headers().iter().enumerate() {
-        println!("  Via[{}]: {}", i, via);
+        tracing::trace!("  Via[{}]: {}", i, via);
     }
     
     // Create a Request object from scratch with no headers at all
@@ -193,14 +193,14 @@ pub fn create_cancel_request(invite_request: &Request, local_addr: &SocketAddr) 
     cancel_request = cancel_request.with_header(TypedHeader::Via(via));
     
     // Debug the CANCEL request Via headers
-    println!("CANCEL request Via headers count: {}", cancel_request.via_headers().len());
+    tracing::debug!("CANCEL request Via headers count: {}", cancel_request.via_headers().len());
     for (i, via) in cancel_request.via_headers().iter().enumerate() {
-        println!("  Via[{}]: {}", i, via);
+        tracing::trace!("  Via[{}]: {}", i, via);
     }
-    
+
     // Double-check for multiple Via headers
     if cancel_request.via_headers().len() > 1 {
-        println!("WARNING: CANCEL request has {} Via headers, removing duplicates", cancel_request.via_headers().len());
+        tracing::warn!("CANCEL request has {} Via headers, removing duplicates", cancel_request.via_headers().len());
         let first_via = cancel_request.first_via()
             .ok_or_else(|| Error::Other("Missing Via header in CANCEL request after creation".to_string()))?
             .clone();
@@ -209,9 +209,9 @@ pub fn create_cancel_request(invite_request: &Request, local_addr: &SocketAddr) 
         cancel_request.headers.retain(|h| !matches!(h, TypedHeader::Via(_)));
         cancel_request = cancel_request.with_header(TypedHeader::Via(first_via));
         
-        println!("After cleanup - CANCEL request Via headers count: {}", cancel_request.via_headers().len());
+        tracing::debug!("After cleanup - CANCEL request Via headers count: {}", cancel_request.via_headers().len());
         for (i, via) in cancel_request.via_headers().iter().enumerate() {
-            println!("  Via[{}]: {}", i, via);
+            tracing::trace!("  Via[{}]: {}", i, via);
         }
     }
     
@@ -477,16 +477,16 @@ pub fn validate_cancel_request(request: &Request) -> Result<()> {
     }
     
     // Debug the Via headers
-    println!("Validating CANCEL request Via headers:");
-    println!("  Via headers count: {}", request.via_headers().len());
+    tracing::debug!("Validating CANCEL request Via headers:");
+    tracing::debug!("  Via headers count: {}", request.via_headers().len());
     for (i, via) in request.via_headers().iter().enumerate() {
-        println!("  Via[{}]: {}", i, via);
+        tracing::trace!("  Via[{}]: {}", i, via);
     }
-    
-    // Print all headers for more detailed debugging
-    println!("All headers in CANCEL request:");
+
+    // Log all headers for more detailed debugging
+    tracing::trace!("All headers in CANCEL request:");
     for (i, header) in request.headers.iter().enumerate() {
-        println!("  Header[{}]: {}", i, header);
+        tracing::trace!("  Header[{}]: {}", i, header);
     }
     
     // Check that there is exactly one Via header

@@ -79,6 +79,10 @@ pub mod api;
 pub mod security;
 pub mod feedback;
 pub mod events;
+pub mod stun;
+pub mod turn;
+pub mod ice;
+pub mod sctp;
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;
@@ -119,11 +123,19 @@ pub use packet::extension::{
     uris::VIDEO_CONTENT_TYPE
 };
 
+// Re-export webrtc-rs adapter types for interoperability
+pub use packet::adapter::{WebrtcRtpPacket, WebrtcRtpHeader, WebrtcRtpExtension};
+pub use packet::adapter::rtcp_adapter;
+
 // Re-export session types
 pub use session::{RtpSession, RtpSessionConfig, RtpSessionEvent, RtpSessionStats, RtpStream, RtpStreamStats};
 
 // Re-export transport types
 pub use transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
+pub use transport::SecurityRtpTransport;
+
+// Re-export SRTP types
+pub use srtp::{SrtpContext, SrtpCryptoSuite, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm};
 
 // Re-export traits for media-core integration
 pub use traits::{MediaTransport, RtpEvent};

@@ -91,8 +91,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Create additional SSRCs for simulating multiple streams
     let mut rng = rand::thread_rng();
-    let alt_ssrc1: RtpSsrc = rng.gen();
-    let alt_ssrc2: RtpSsrc = rng.gen();
+    let alt_ssrc1: RtpSsrc = rng.r#gen();
+    let alt_ssrc2: RtpSsrc = rng.r#gen();
     info!("Additional SSRCs: {:08x}, {:08x}", alt_ssrc1, alt_ssrc2);
     
     // Pre-create streams for the SSRCs in the receiver to ensure they're tracked

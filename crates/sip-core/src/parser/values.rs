@@ -60,9 +60,11 @@ fn zero_qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
     
     // Handle just "0"
     if input.len() == 1 {
-        return Ok((&input[1..], NotNan::new(0.0).unwrap()));
+        let zero = NotNan::new(0.0)
+            .map_err(|_| nom::Err::Error(nom::error::Error::new(input, ErrorKind::Verify)))?;
+        return Ok((&input[1..], zero));
     }
-    
+
     // Handle "0." followed by 0-3 digits
     if input.len() >= 2 && input[1] == b'.' {
         // Count how many digits follow the decimal point
@@ -94,7 +96,9 @@ fn zero_qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
     }
     
     // If we get here, it's "0" followed by something other than "."
-    Ok((&input[1..], NotNan::new(0.0).unwrap()))
+    let zero = NotNan::new(0.0)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, ErrorKind::Verify)))?;
+    Ok((&input[1..], zero))
 }
 
 // Parse the "1" [ "." 0*3("0") ] form
@@ -105,7 +109,9 @@ fn one_qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
     
     // Handle just "1"
     if input.len() == 1 {
-        return Ok((&input[1..], NotNan::new(1.0).unwrap()));
+        let one = NotNan::new(1.0)
+            .map_err(|_| nom::Err::Error(nom::error::Error::new(input, ErrorKind::Verify)))?;
+        return Ok((&input[1..], one));
     }
     
     // Handle "1." followed by 0-3 zeros
@@ -126,7 +132,9 @@ fn one_qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
         
         // Ensure we don't have too many zeros
         if zero_count <= 3 {
-            return Ok((&input[end_pos..], NotNan::new(1.0).unwrap()));
+            let one = NotNan::new(1.0)
+                .map_err(|_| nom::Err::Error(nom::error::Error::new(input, ErrorKind::Verify)))?;
+            return Ok((&input[end_pos..], one));
         } else {
             // Too many zeros
             return Err(nom::Err::Error(nom::error::Error::new(input, ErrorKind::TooLarge)));
@@ -134,7 +142,9 @@ fn one_qvalue(input: &[u8]) -> ParseResult<NotNan<f32>> {
     }
     
     // If we get here, it's "1" followed by something other than "."
-    Ok((&input[1..], NotNan::new(1.0).unwrap()))
+    let one = NotNan::new(1.0)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, ErrorKind::Verify)))?;
+    Ok((&input[1..], one))
 }
 
 // TEXT-UTF8-TRIM = 1*TEXT-UTF8char *(*LWS TEXT-UTF8char)

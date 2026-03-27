@@ -45,7 +45,7 @@ pub async fn start_test_server() -> anyhow::Result<TestServer> {
     // Create temporary directory for database
     let temp_dir = TempDir::new()?;
     let db_path = temp_dir.path().join("test_users.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     // Configure with aggressive rate limits for testing
     let config = UsersConfig {
@@ -109,8 +109,9 @@ pub async fn start_test_server() -> anyhow::Result<TestServer> {
         login_attempts_per_hour: 3,        // Only 3 attempts before lockout
         lockout_duration: Duration::from_secs(2), // 2 seconds for quick testing
         cleanup_interval: Duration::from_secs(60),
+        trusted_proxies: Vec::new(),
     };
-    
+
     // Create API state with custom rate limiter
     let rate_limiter = EnhancedRateLimiter::new(rate_limit_config);
     let api_state = ApiState {

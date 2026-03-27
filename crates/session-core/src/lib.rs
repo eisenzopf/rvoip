@@ -107,12 +107,36 @@ pub mod coordinator;
 pub mod events;        // NEW - High-performance federated event system
 pub mod auth;          // NEW - OAuth 2.0 authentication
 
+#[cfg(feature = "state-table")]
+pub mod state_table;
+#[cfg(feature = "state-table")]
+pub mod state_machine;
+
+// V2 modules (merged from session-core-v2, gated behind state-table feature)
+#[cfg(feature = "state-table")]
+pub mod errors_v2;
+#[cfg(feature = "state-table")]
+pub mod types_v2;
+#[cfg(feature = "state-table")]
+pub mod session_registry_v2;
+#[cfg(feature = "state-table")]
+pub mod session_store_v2;
+#[cfg(feature = "state-table")]
+pub mod adapters_v2;
+#[cfg(feature = "state-table")]
+pub mod transfer_v2;
+#[cfg(feature = "state-table")]
+pub mod api_v2;
+
 // Core error types
 pub mod errors;
 pub use errors::{SessionError, Result};
 
 // Re-export the main API for convenience
 pub use api::*;
+
+// Re-export dialog-core auth traits so callers don't need to depend on dialog-core directly.
+pub use rvoip_dialog_core::auth::{AuthProvider, AuthResult, ProxyRouter, ProxyAction};
 
 // Re-export SessionManager for direct access
 // pub use manager::SessionManager; // Using coordinator directly

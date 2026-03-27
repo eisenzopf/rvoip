@@ -190,10 +190,10 @@ impl Record {
     
     /// Parse a DTLS record from bytes
     pub fn parse(data: &[u8]) -> Result<(Self, usize)> {
-        println!("Parsing DTLS record, data length: {}", data.len());
-        
+        tracing::trace!(data_len = data.len(), "Parsing DTLS record");
+
         if data.len() < 13 {
-            println!("Record too short: {} bytes", data.len());
+            tracing::trace!(data_len = data.len(), "Record too short");
             return Err(crate::error::Error::PacketTooShort);
         }
         
@@ -201,17 +201,17 @@ impl Record {
         
         // Content type (1 byte)
         let content_type = ContentType::from(cursor.get_u8());
-        println!("Content type: {:?}", content_type);
+        tracing::trace!(content_type = ?content_type, "Parsed content type");
         
         // Protocol version (2 bytes)
         let version_raw = cursor.get_u16();
-        println!("Version raw: 0x{:04x}", version_raw);
+        tracing::trace!(version_raw = format_args!("0x{:04x}", version_raw), "Parsed version");
         
         let version = match version_raw {
             0xFEFF => DtlsVersion::Dtls10,
             0xFEFD => DtlsVersion::Dtls12,
             _ => {
-                println!("Invalid DTLS version: {:#x}", version_raw);
+                tracing::trace!(version_raw = format_args!("{:#x}", version_raw), "Invalid DTLS version");
                 return Err(crate::error::Error::InvalidProtocolVersion(
                     format!("Invalid DTLS version: {:#x}", version_raw)
                 ));
@@ -220,21 +220,21 @@ impl Record {
         
         // Epoch (2 bytes)
         let epoch = cursor.get_u16();
-        println!("Epoch: {}", epoch);
+        tracing::trace!(epoch, "Parsed epoch");
         
         // Sequence number (6 bytes)
         let seq_high = cursor.get_u16() as u64;
         let seq_low = cursor.get_u32() as u64;
         let sequence_number = (seq_high << 32) | seq_low;
-        println!("Sequence number: {}", sequence_number);
+        tracing::trace!(sequence_number, "Parsed sequence number");
         
         // Length (2 bytes)
         let length = cursor.get_u16() as usize;
-        println!("Record length: {}", length);
+        tracing::trace!(record_length = length, "Parsed record length");
         
         // Check that we have enough data
         if data.len() < 13 + length {
-            println!("Record data too short: {} bytes, need {}", data.len(), 13 + length);
+            tracing::trace!(have = data.len(), need = 13 + length, "Record data too short");
             return Err(crate::error::Error::PacketTooShort);
         }
         
@@ -258,30 +258,28 @@ impl Record {
             data: record_data,
         };
         
-        println!("Successfully parsed DTLS record: type={:?}, epoch={}, seq={}, len={}",
-                content_type, epoch, sequence_number, length);
+        tracing::trace!(content_type = ?content_type, epoch, sequence_number, length, "Successfully parsed DTLS record");
         
         Ok((record, 13 + length))
     }
     
     /// Parse multiple DTLS records from bytes
     pub fn parse_multiple(data: &[u8]) -> Result<Vec<Self>> {
-        println!("Parsing multiple DTLS records from {} bytes", data.len());
-        println!("First 20 bytes: {:?}", &data[..std::cmp::min(20, data.len())]);
+        tracing::trace!(data_len = data.len(), "Parsing multiple DTLS records [raw bytes REDACTED]");
         
         let mut records = Vec::new();
         let mut offset = 0;
         
         while offset < data.len() {
-            println!("Parsing record at offset {}", offset);
+            tracing::trace!(offset, "Parsing record at offset");
             match Self::parse(&data[offset..]) {
                 Ok((record, size)) => {
-                    println!("Successfully parsed record, size: {}", size);
+                    tracing::trace!(size, "Successfully parsed record");
                     records.push(record);
                     offset += size;
                 }
                 Err(e) => {
-                    println!("Error parsing record: {:?}", e);
+                    tracing::trace!(error = ?e, "Error parsing record");
                     if records.is_empty() {
                         // Only return error if we couldn't parse any records
                         return Err(e);
@@ -293,7 +291,7 @@ impl Record {
             }
         }
         
-        println!("Parsed {} DTLS records", records.len());
+        tracing::trace!(count = records.len(), "Parsed DTLS records");
         Ok(records)
     }
 } 

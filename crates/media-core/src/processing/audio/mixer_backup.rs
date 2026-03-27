@@ -311,7 +311,9 @@ impl AudioMixer {
     fn send_event(&self, event: ConferenceMixingEvent) {
         if let Ok(event_sender) = self.event_sender.lock() {
             if let Some(sender) = event_sender.as_ref() {
-                let _ = sender.send(event);
+                if let Err(e) = sender.send(event) {
+                    tracing::debug!("Conference mixing event receiver dropped: {}", e);
+                }
             }
         }
     }

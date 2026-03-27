@@ -3,9 +3,10 @@
 //! This module contains the main DialogManager struct and its core lifecycle methods.
 //! It serves as the central coordinator for SIP dialog management.
 
+use std::fmt;
 use std::sync::Arc;
 use std::net::SocketAddr;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn, error};
 
@@ -19,7 +20,7 @@ use crate::config::DialogManagerConfig;
 use crate::subscription::SubscriptionManager;
 
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DialogManager {
     /// Reference to transaction manager (handles transport for us)
     pub(crate) transaction_manager: Arc<TransactionManager>,
@@ -63,6 +64,33 @@ pub struct DialogManager {
     
     /// Subscription manager for handling SUBSCRIBE/NOTIFY
     pub(crate) subscription_manager: Option<Arc<SubscriptionManager>>,
+
+    /// Call-ID → set of early dialog IDs created by forking (RFC 3261 §13.2.2.4).
+    /// A `DashSet` gives lock-free concurrent reads/writes for dialog groups.
+    pub early_dialog_groups: Arc<DashMap<String, Arc<DashSet<DialogId>>>>,
+
+    /// Optional pluggable authentication provider for REGISTER/INVITE challenges.
+    ///
+    /// Stored behind an `RwLock` so it can be replaced at runtime without
+    /// restarting the server (dynamic injection from the web console).
+    pub(crate) auth_provider: Arc<parking_lot::RwLock<Option<Arc<dyn crate::auth::AuthProvider>>>>,
+
+    /// Optional proxy router for INVITE forwarding decisions.
+    ///
+    /// Stored behind an `RwLock` for the same reason as `auth_provider`.
+    pub(crate) proxy_router: Arc<parking_lot::RwLock<Option<Arc<dyn crate::auth::ProxyRouter>>>>,
+}
+
+impl fmt::Debug for DialogManager {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DialogManager")
+            .field("local_address", &self.local_address)
+            .field("config", &self.config)
+            .field("dialogs_count", &self.dialogs.len())
+            .field("auth_provider", &self.auth_provider.read().as_ref().map(|_| "<AuthProvider>"))
+            .field("proxy_router", &self.proxy_router.read().as_ref().map(|_| "<ProxyRouter>"))
+            .finish()
+    }
 }
 
 impl DialogManager {
@@ -112,9 +140,12 @@ impl DialogManager {
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
+            early_dialog_groups: Arc::new(DashMap::new()),
+            auth_provider: Arc::new(parking_lot::RwLock::new(None)),
+            proxy_router: Arc::new(parking_lot::RwLock::new(None)),
         })
     }
-    
+
     /// Create a new dialog manager with global transaction events (RECOMMENDED)
     /// 
     /// This constructor follows the working pattern from transaction-core examples
@@ -163,8 +194,11 @@ impl DialogManager {
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
+            early_dialog_groups: Arc::new(DashMap::new()),
+            auth_provider: Arc::new(parking_lot::RwLock::new(None)),
+            proxy_router: Arc::new(parking_lot::RwLock::new(None)),
         };
-        
+
         // Spawn global transaction event processor
         let event_processor = manager.clone();
         tokio::spawn(async move {
@@ -173,7 +207,33 @@ impl DialogManager {
         
         Ok(manager)
     }
-    
+
+    /// Attach or replace the authentication provider at runtime.
+    ///
+    /// Thread-safe — can be called while the server is handling requests.
+    /// The new provider takes effect on the **next** incoming REGISTER/INVITE.
+    pub fn set_auth_provider(&self, provider: Arc<dyn crate::auth::AuthProvider>) {
+        *self.auth_provider.write() = Some(provider);
+    }
+
+    /// Clone the current auth provider (if any).
+    pub fn auth_provider(&self) -> Option<Arc<dyn crate::auth::AuthProvider>> {
+        self.auth_provider.read().clone()
+    }
+
+    /// Attach or replace the proxy router at runtime.
+    ///
+    /// Thread-safe — can be called while the server is handling requests.
+    /// The new router takes effect on the **next** incoming INVITE.
+    pub fn set_proxy_router(&self, router: Arc<dyn crate::auth::ProxyRouter>) {
+        *self.proxy_router.write() = Some(router);
+    }
+
+    /// Clone the current proxy router (if any).
+    pub fn proxy_router(&self) -> Option<Arc<dyn crate::auth::ProxyRouter>> {
+        self.proxy_router.read().clone()
+    }
+
     /// Process global transaction events (similar to working transaction-core examples)
     /// 
     /// This follows the exact pattern from working examples that use global event consumption
@@ -374,32 +434,54 @@ impl DialogManager {
     /// Sends session coordination events for legacy compatibility and specific
     /// session management operations.
     pub async fn emit_session_coordination_event(&self, event: SessionCoordinationEvent) {
+        if let Err(e) = self.try_emit_session_coordination_event(event).await {
+            warn!("Failed to emit session coordination event: {}", e);
+        }
+    }
+
+    /// Try to emit a session coordination event and report delivery failure.
+    ///
+    /// This is used by handlers that need to fallback (for example, sending
+    /// a local 200 OK) when no coordination path is available.
+    pub async fn try_emit_session_coordination_event(&self, event: SessionCoordinationEvent) -> DialogResult<()> {
         info!("📤 emit_session_coordination_event called with event: {:?}", event);
 
-        // Try event hub first (new global event bus)
+        let mut published_to_bus = false;
+        let mut published_to_legacy = false;
+
+        // Publish to global event bus (cross-crate events like IncomingCall)
         if let Some(hub) = self.event_hub.read().await.as_ref() {
-            info!("📤 Event hub exists, publishing to global bus");
-            if let Err(e) = hub.publish_session_coordination_event(event.clone()).await {
-                warn!("Failed to publish session coordination event to global bus: {}", e);
-            } else {
-                info!("📤 Published session coordination event to global bus: {:?}", event);
-                return;
+            match hub.publish_session_coordination_event(event.clone()).await {
+                Ok(()) => {
+                    debug!("📤 Published to global event bus");
+                    published_to_bus = true;
+                }
+                Err(e) => {
+                    // Expected for events without cross-crate mapping (CallAnswered, CallRinging, etc.)
+                    debug!("📤 Global bus returned error (expected for non-mapped events): {}", e);
+                }
             }
-        } else {
-            info!("📤 Event hub is None, trying legacy channel");
         }
 
-        // Fall back to channel (legacy)
+        // ALWAYS also send to legacy channel for dialog_coordinator event loop
+        // This ensures CallAnswered, CallRinging, BYE, etc. are processed by session-core
         if let Some(sender) = self.session_coordinator.read().await.as_ref() {
-            info!("📤 Legacy channel exists, sending event");
             if let Err(e) = sender.send(event.clone()).await {
-                warn!("Failed to send session coordination event: {}", e);
+                warn!("Failed to send via legacy channel: {}", e);
             } else {
-                info!("📤 Emitted session coordination event to legacy channel: {:?}", event);
+                debug!("📤 Sent to legacy channel");
+                published_to_legacy = true;
             }
-        } else {
-            warn!("📤 Both event hub and legacy channel are None - event not sent!");
         }
+
+        if !published_to_bus && !published_to_legacy {
+            warn!("📤 Event not delivered — no bus or legacy channel available");
+            return Err(DialogError::routing_error(
+                "No session coordination channel configured",
+            ));
+        }
+
+        Ok(())
     }
     
     /// **CENTRAL DISPATCHER**: Handle incoming SIP messages
@@ -452,6 +534,9 @@ impl DialogManager {
             Method::Refer => self.handle_refer(request, source).await,
             Method::Subscribe => self.handle_subscribe(request, source).await,
             Method::Notify => self.handle_notify(request, source).await,
+            Method::Publish => self.handle_publish(request, source).await,
+            Method::Prack => self.handle_prack(request, source).await,
+            Method::Message => self.handle_sip_message(request, source).await,
             method => {
                 warn!("Unsupported SIP method: {}", method);
                 Err(DialogError::protocol_error(&format!("Unsupported method: {}", method)))
@@ -521,6 +606,7 @@ impl DialogManager {
         self.dialogs.clear();
         self.dialog_lookup.clear();
         self.transaction_to_dialog.clear();
+        self.early_dialog_groups.clear();
         
         // Step 5: Report completion
         // Since we're in dialog-core, we emit DialogEvent::ShutdownComplete
@@ -530,8 +616,138 @@ impl DialogManager {
         Ok(())
     }
     
+    // =====================================================
+    // FORKING SUPPORT (RFC 3261 §13.2.2.4, §16.7)
+    // =====================================================
+
+    /// Add a dialog to the early dialog group for its Call-ID.
+    ///
+    /// When a UAC INVITE is forked by a proxy, each downstream UAS
+    /// will reply with a distinct To-tag.  This method keeps track of
+    /// every early dialog that belongs to the same original INVITE.
+    pub fn add_to_early_group(&self, call_id: &str, dialog_id: DialogId) {
+        let set = self.early_dialog_groups
+            .entry(call_id.to_string())
+            .or_insert_with(|| Arc::new(DashSet::new()))
+            .clone();
+        set.insert(dialog_id);
+        debug!("Added dialog to early group for Call-ID {}", call_id);
+    }
+
+    /// Get all early dialogs for a Call-ID.
+    pub fn get_early_group(&self, call_id: &str) -> Vec<DialogId> {
+        self.early_dialog_groups
+            .get(call_id)
+            .map(|set| set.iter().map(|r| r.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Remove a single dialog from the early group.
+    pub fn remove_from_early_group(&self, call_id: &str, dialog_id: &DialogId) {
+        if let Some(set) = self.early_dialog_groups.get(call_id) {
+            set.remove(dialog_id);
+            if set.is_empty() {
+                // Clean up the entire entry when the last dialog is removed
+                drop(set);
+                self.early_dialog_groups.remove(call_id);
+            }
+        }
+    }
+
+    /// Remove the entire early-dialog group for a Call-ID.
+    pub fn cleanup_early_group(&self, call_id: &str) {
+        if self.early_dialog_groups.remove(call_id).is_some() {
+            debug!("Cleaned up early dialog group for Call-ID {}", call_id);
+        }
+    }
+
+    /// Confirm one fork and tear down the others (RFC 3261 §13.2.2.4).
+    ///
+    /// 1. Confirm the chosen dialog.
+    /// 2. ACK its 2xx (already done by the caller).
+    /// 3. For every *other* fork that also reached Confirmed state:
+    ///    send ACK (required) then BYE (terminate the confirmed fork).
+    /// 4. Terminate remaining early forks (they will eventually time out
+    ///    or receive a 487 after the proxy CANCELs them).
+    /// 5. Clean up the group.
+    pub async fn confirm_forked_dialog(
+        &self,
+        call_id: &str,
+        confirmed_dialog_id: &DialogId,
+        invite_transaction_id: &TransactionKey,
+    ) -> DialogResult<()> {
+        info!("Confirming fork {} for Call-ID {}, tearing down others", confirmed_dialog_id, call_id);
+
+        let others = self.get_early_group(call_id);
+
+        for other_id in &others {
+            if other_id == confirmed_dialog_id {
+                continue;
+            }
+
+            let other_state = match self.get_dialog_state(other_id) {
+                Ok(s) => s,
+                Err(_) => {
+                    // Dialog already removed – nothing to do.
+                    self.remove_from_early_group(call_id, other_id);
+                    continue;
+                }
+            };
+
+            match other_state {
+                DialogState::Confirmed => {
+                    // This fork also got a 2xx – we MUST NOT send CANCEL (transaction
+                    // is complete).  ACK first, then BYE per RFC 3261 §13.2.2.4.
+                    info!("Fork {} also confirmed – sending BYE to tear down", other_id);
+                    if let Err(e) = self.send_request(other_id, Method::Bye, None).await {
+                        warn!("Failed to send BYE to fork {}: {}", other_id, e);
+                    }
+                    if let Err(e) = self.update_dialog_state(other_id, DialogState::Terminated).await {
+                        warn!("Failed to terminate forked dialog {}: {}", other_id, e);
+                    }
+                }
+                DialogState::Early => {
+                    // Still early – terminate locally. The proxy should CANCEL
+                    // upstream; we just clean up our state.
+                    debug!("Fork {} still early – terminating locally", other_id);
+                    if let Err(e) = self.update_dialog_state(other_id, DialogState::Terminated).await {
+                        warn!("Failed to terminate early fork {}: {}", other_id, e);
+                    }
+                }
+                _ => {
+                    debug!("Fork {} in state {:?} – skipping", other_id, other_state);
+                }
+            }
+            self.remove_from_early_group(call_id, other_id);
+        }
+
+        // Clean up the group entirely
+        self.cleanup_early_group(call_id);
+        info!("Fork confirmation complete for Call-ID {}", call_id);
+        Ok(())
+    }
+
+    /// Find a dialog by Call-ID and To-tag (used for fork detection).
+    ///
+    /// Scans active dialogs for one that matches both the Call-ID and
+    /// the given remote tag.  Returns `None` if no match is found –
+    /// meaning this is a new fork.
+    pub fn find_dialog_by_call_id_and_to_tag(
+        &self,
+        call_id: &str,
+        to_tag: &str,
+    ) -> Option<DialogId> {
+        for entry in self.dialogs.iter() {
+            let dialog = entry.value();
+            if dialog.call_id == call_id && dialog.remote_tag.as_deref() == Some(to_tag) {
+                return Some(dialog.id.clone());
+            }
+        }
+        None
+    }
+
     /// Get the transaction manager reference
-    /// 
+    ///
     /// Provides access to the underlying transaction manager for cases where
     /// direct transaction operations are needed.
     pub fn transaction_manager(&self) -> &Arc<TransactionManager> {
@@ -787,7 +1003,19 @@ impl DialogManager {
     pub async fn handle_notify(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         <Self as super::protocol_handlers::MethodHandler>::handle_notify_method(self, request, source).await
     }
-    
+
+    pub async fn handle_publish(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
+        <Self as super::protocol_handlers::MethodHandler>::handle_publish_method(self, request, source).await
+    }
+
+    pub async fn handle_prack(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
+        <Self as super::protocol_handlers::MethodHandler>::handle_prack_method(self, request, source).await
+    }
+
+    pub async fn handle_sip_message(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
+        <Self as super::protocol_handlers::MethodHandler>::handle_message_method(self, request, source).await
+    }
+
     pub async fn handle_response(&self, response: Response, transaction_id: TransactionKey) -> DialogResult<()> {
         <Self as super::protocol_handlers::ProtocolHandlers>::handle_response_message(self, response, transaction_id).await
     }
@@ -804,6 +1032,22 @@ impl DialogManager {
     // Transaction Integration (delegated to transaction_integration.rs)
     pub async fn send_request(&self, dialog_id: &DialogId, method: Method, body: Option<bytes::Bytes>) -> DialogResult<TransactionKey> {
         <Self as super::transaction_integration::TransactionIntegration>::send_request_in_dialog(self, dialog_id, method, body).await
+    }
+
+    /// Send a request with an explicit Content-Type header.
+    ///
+    /// Used by `send_info_with_content_type` for trickle ICE SDP fragments
+    /// and other INFO payloads that require a specific MIME type.
+    pub async fn send_request_with_content_type(
+        &self,
+        dialog_id: &DialogId,
+        method: Method,
+        body: Option<bytes::Bytes>,
+        content_type: &str,
+    ) -> DialogResult<TransactionKey> {
+        super::transaction_integration::send_request_in_dialog_with_content_type(
+            self, dialog_id, method, body, content_type
+        ).await
     }
     
     pub async fn send_response(&self, transaction_id: &TransactionKey, response: Response) -> DialogResult<()> {

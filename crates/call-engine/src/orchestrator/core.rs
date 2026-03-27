@@ -241,7 +241,11 @@ impl CallCenterEngine {
         
         // Initialize the database manager
         let db_manager = if let Some(path) = db_path.as_ref() {
-            match DatabaseManager::new(path).await {
+            match DatabaseManager::with_pool_options(
+                path,
+                config.database.max_connections,
+                config.database.query_timeout,
+            ).await {
                 Ok(mgr) => {
                     info!("✅ Initialized database at: {}", path);
                     Some(Arc::new(mgr))
@@ -255,31 +259,15 @@ impl CallCenterEngine {
             None
         };
         
-        // First, create a placeholder engine that will be updated
-        let placeholder_engine = Arc::new(Self {
-            config: config.clone(),
-            db_manager: db_manager.clone(),
-            session_coordinator: None,
-            queue_manager: Arc::new(RwLock::new(QueueManager::new())),
-            bridge_events: None,
-            active_calls: Arc::new(DashMap::new()),
-            routing_stats: Arc::new(RwLock::new(RoutingStats::default())),
-            agent_registry: Arc::new(Mutex::new(AgentRegistry::new())),
-            sip_registrar: Arc::new(Mutex::new(SipRegistrar::new())),
-            active_queue_monitors: Arc::new(DashSet::new()),
-            session_to_dialog: Arc::new(DashMap::new()),
-            pending_assignments: Arc::new(DashMap::new()),
-        });
-        
-        // Create CallHandler with weak reference to placeholder
+        // Create CallHandler with uninitialized engine reference (set after Arc creation)
         let handler = Arc::new(CallCenterCallHandler {
-            engine: Arc::downgrade(&placeholder_engine),
+            engine: std::sync::OnceLock::new(),
         });
         
         // Create session coordinator with our CallHandler
         // CRITICAL: Configure both SIP address and media bind address to use the configured IP
         let sip_uri = format!("sip:call-center@{}", config.general.local_ip);
-        let session_coordinator = SessionManagerBuilder::new()
+        let mut builder = SessionManagerBuilder::new()
             .with_sip_port(config.general.local_signaling_addr.port())
             .with_local_address(sip_uri)  // Use configured IP for SIP URIs
             .with_local_bind_addr(config.general.local_signaling_addr)  // Use configured IP for binding
@@ -287,16 +275,24 @@ impl CallCenterEngine {
                 config.general.local_media_addr.port(),
                 config.general.local_media_addr.port() + 1000
             )
-            .with_handler(handler.clone())
+            .with_handler(handler.clone());
+
+        // Enable dual-transport (UDP + WebSocket) when requested.
+        // UDP serves traditional SIP devices; WebSocket (port 8080) serves browser softphones.
+        if config.general.enable_websocket {
+            info!("Enabling dual transport: UDP on {} + WebSocket on :8080",
+                config.general.local_signaling_addr);
+            builder = builder.with_udp_and_websocket();
+        }
+
+        let session_coordinator = builder
             .build()
             .await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to create session coordinator: {}", e)))?;
         
         info!("✅ SessionCoordinator created with CallCenterCallHandler");
         
-        // Drop the placeholder and create the real engine with coordinator
-        drop(placeholder_engine);
-        
+        // Create the real engine with the session coordinator
         let engine = Arc::new(Self {
             config,
             db_manager,
@@ -312,16 +308,13 @@ impl CallCenterEngine {
             pending_assignments: Arc::new(DashMap::new()),
         });
         
-        // CRITICAL FIX: Update the handler's weak reference to point to the real engine
-        // Since handler is Arc, we need to get a mutable reference
-        // We'll use unsafe to cast away the Arc's immutability for this one-time update
-        unsafe {
-            let handler_ptr = Arc::as_ptr(&handler) as *mut CallCenterCallHandler;
-            (*handler_ptr).engine = Arc::downgrade(&engine);
-        }
-        
+        // Initialize the handler's engine reference now that the real Arc exists.
+        // OnceLock guarantees this is set exactly once, avoiding unsafe mutation.
+        handler.engine.set(Arc::downgrade(&engine))
+            .map_err(|_| CallCenterError::orchestration("CallCenterCallHandler engine OnceLock already initialized"))?;
+
         info!("✅ Call center engine initialized with session-core integration");
-        
+
         Ok(engine)
     }
     
@@ -426,10 +419,38 @@ impl CallCenterEngine {
     /// - Advanced session configuration
     /// - Direct bridge management
     /// - Low-level SIP debugging
-    pub fn session_manager(&self) -> &Arc<SessionCoordinator> {
-        self.session_coordinator.as_ref().unwrap()
+    pub fn session_manager(&self) -> CallCenterResult<&Arc<SessionCoordinator>> {
+        self.session_coordinator.as_ref()
+            .ok_or_else(|| CallCenterError::orchestration("Session coordinator not initialized"))
     }
-    
+
+    /// Dynamically inject or replace the SIP digest-auth provider.
+    ///
+    /// Call this at any time — including while the server is running — to start
+    /// challenging REGISTER / INVITE requests with 401/407.  Pass a DB-backed
+    /// implementation so that credentials added via the web console take effect
+    /// immediately on the next incoming request.
+    pub fn set_auth_provider(
+        &self,
+        provider: std::sync::Arc<dyn rvoip_session_core::AuthProvider>,
+    ) -> CallCenterResult<()> {
+        self.session_manager()?.set_auth_provider(provider);
+        Ok(())
+    }
+
+    /// Dynamically inject or replace the INVITE proxy-routing policy.
+    ///
+    /// Call this at any time to start routing (or re-routing) incoming INVITEs
+    /// to SIP trunks.  Pass a DB-backed implementation so that trunk edits via
+    /// the web console are reflected immediately.
+    pub fn set_proxy_router(
+        &self,
+        router: std::sync::Arc<dyn rvoip_session_core::ProxyRouter>,
+    ) -> CallCenterResult<()> {
+        self.session_manager()?.set_proxy_router(router);
+        Ok(())
+    }
+
     /// Get call center configuration
     ///
     /// Returns a reference to the current call center configuration.
@@ -528,8 +549,8 @@ impl CallCenterEngine {
     pub async fn start_event_monitoring(self: Arc<Self>) -> CallCenterResult<()> {
         info!("Starting session event monitoring for REGISTER and other events");
         
-        let session_manager = self.session_manager();
-        
+        let session_manager = self.session_manager()?;
+
         // Subscribe to session events
         let mut event_subscriber = session_manager.event_processor.subscribe().await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to subscribe to events: {}", e)))?;
@@ -671,12 +692,32 @@ impl CallCenterEngine {
     /// * `session_id` - The session ID generating the DTMF
     /// * `digit` - The DTMF digit pressed ('0'-'9', '*', '#')
     pub async fn process_dtmf_input(
-        &self, 
-        session_id: &SessionId, 
-        digit: char
+        &self,
+        session_id: &SessionId,
+        digit: char,
     ) -> CallCenterResult<()> {
-        // TODO: Implement DTMF handling for IVR
         info!("DTMF '{}' received for session {}", digit, session_id);
+
+        // Record the digit on the active call (if tracked) so upper layers
+        // (IVR, transfer triggers, etc.) can inspect the accumulated buffer.
+        if let Some(mut call_info) = self.active_calls.get_mut(session_id) {
+            call_info
+                .metadata
+                .entry("dtmf_buffer".to_string())
+                .or_default()
+                .push(digit);
+            debug!(
+                "DTMF buffer for session {}: {}",
+                session_id,
+                call_info.metadata.get("dtmf_buffer").map(String::as_str).unwrap_or("")
+            );
+        } else {
+            debug!(
+                "DTMF '{}' received for session {} but no active call tracked",
+                digit, session_id
+            );
+        }
+
         Ok(())
     }
     
@@ -865,14 +906,18 @@ impl CallCenterEngine {
                         error!("Failed to assign call to agent: {}", e);
                         // Re-queue the call if assignment fails
                         queue_manager = self.queue_manager.write().await;
-                        let _ = queue_manager.enqueue_call(&queue_id, queued_call);
+                        if let Err(e) = queue_manager.enqueue_call(&queue_id, queued_call) {
+                            tracing::warn!("Failed to re-queue call after assignment failure in queue {}: {}", queue_id, e);
+                        }
                     } else {
                         // Successfully assigned, get the lock again for the next iteration
                         queue_manager = self.queue_manager.write().await;
                     }
                 } else {
                     // No available agents, put the call back in the queue
-                    let _ = queue_manager.enqueue_call(&queue_id, queued_call);
+                    if let Err(e) = queue_manager.enqueue_call(&queue_id, queued_call) {
+                        tracing::warn!("Failed to re-queue call when no agents available in queue {}: {}", queue_id, e);
+                    }
                     break; // Stop processing this queue
                 }
             }

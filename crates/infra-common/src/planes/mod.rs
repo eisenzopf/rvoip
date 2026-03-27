@@ -239,24 +239,49 @@ impl PlaneFactory {
     }
     
     async fn create_local_plane(plane_type: PlaneType) -> Result<Arc<dyn FederatedPlane>> {
-        // This will be implemented by the actual plane implementations
-        // in their respective crates (dialog-core, media-core, etc.)
-        todo!("Implement local plane creation")
+        // Local planes are created by the concrete crate implementations
+        // (dialog-core, media-core, etc.) and registered with the PlaneFactory.
+        // This factory method serves as the dispatch point for creating plane
+        // instances based on the plane type.
+        anyhow::bail!(
+            "Local plane creation for {:?} requires a registered plane provider. \
+             Use the concrete crate's plane builder instead.",
+            plane_type
+        )
     }
-    
+
     async fn create_remote_proxy(
         plane_type: PlaneType,
         endpoints: Vec<String>,
     ) -> Result<Arc<dyn FederatedPlane>> {
-        // Create a proxy that communicates with remote plane
-        todo!("Implement remote proxy creation")
+        // Remote proxies forward plane operations over the network to a
+        // remote service instance. This requires a transport layer (gRPC/NATS)
+        // to be configured.
+        if endpoints.is_empty() {
+            anyhow::bail!(
+                "Remote proxy for {:?} requires at least one endpoint",
+                plane_type
+            );
+        }
+
+        anyhow::bail!(
+            "Remote proxy creation for {:?} requires a configured network transport. \
+             Distributed deployment is not yet available.",
+            plane_type
+        )
     }
-    
+
     async fn create_hybrid_plane(
         plane_type: PlaneType,
         config: PlaneConfig,
     ) -> Result<Arc<dyn FederatedPlane>> {
-        // Create hybrid plane with both local and remote components
-        todo!("Implement hybrid plane creation")
+        // Hybrid planes combine a local instance with a remote proxy for
+        // overflow or failover scenarios.
+        anyhow::bail!(
+            "Hybrid plane creation for {:?} is not yet supported. \
+             Use Local or Remote plane configurations instead. Config: {:?}",
+            plane_type,
+            config
+        )
     }
 }

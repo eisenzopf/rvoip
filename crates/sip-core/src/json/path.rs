@@ -3,6 +3,7 @@ use crate::json::{SipJsonResult, SipJsonError};
 use std::str::FromStr;
 use std::rc::Rc;
 use std::cell::RefCell;
+use tracing;
 /// # Path-based Access to SIP Values
 ///
 /// This module provides functions and types for accessing SIP message data via dot-notation
@@ -159,8 +160,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
         Err(_) => return None, // Invalid path syntax
     };
     
-    // Debug print
-    println!("Parsed path: {:?} from '{}'", segments, path);
+    tracing::trace!(path, ?segments, "Parsed path segments");
     
     // Unwrap request/response if needed
     let mut current = root_value;
@@ -213,7 +213,9 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                                 &cap_name
                             };
                             
-                            matching_headers.push(obj.get(actual_key).unwrap());
+                            if let Some(val) = obj.get(actual_key) {
+                                matching_headers.push(val);
+                            }
                         }
                     }
                 }
@@ -222,7 +224,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                 if !matching_headers.is_empty() {
                     if let Some(idx) = header_index {
                         let idx_usize = if idx < 0 {
-                            matching_headers.len().checked_sub(idx.unsigned_abs().try_into().unwrap())
+                            idx.unsigned_abs().try_into().ok().and_then(|abs: usize| matching_headers.len().checked_sub(abs))
                         } else {
                             Some(idx as usize)
                         };
@@ -263,8 +265,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
     while segment_idx < segments.len() {
         let segment = &segments[segment_idx];
         
-        // Debug print
-        println!("Processing segment {:?} at index {}, current value: {:?}", segment, segment_idx, current);
+        tracing::trace!(?segment, segment_idx, ?current, "Processing path segment");
         
         match segment {
             PathSegment::Field(field_name) => {
@@ -274,7 +275,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                         current = value;
                     } else {
                         // Field not found
-                        println!("Field '{}' not found in object", field_name);
+                        tracing::trace!(field_name, "Field not found in object");
                         return None;
                     }
                 } else if let SipValue::Array(arr) = current {
@@ -292,12 +293,12 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                                     if let Some(value) = find_field_case_insensitive(obj, field_name) {
                                         current = value;
                                     } else {
-                                        println!("Field '{}' not found in array element", field_name);
+                                        tracing::trace!(field_name, "Field not found in array element");
                                         return None; // Field not found
                                     }
                                 } else {
                                     // Field access on non-object
-                                    println!("Cannot access field '{}' on non-object array element", field_name);
+                                    tracing::trace!(field_name, "Cannot access field on non-object array element");
                                     return None;
                                 }
                             }
@@ -310,22 +311,22 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                                 if let Some(value) = find_field_case_insensitive(obj, field_name) {
                                     current = value;
                                 } else {
-                                    println!("Field '{}' not found in array element", field_name);
+                                    tracing::trace!(field_name, "Field not found in array element");
                                     return None; // Field not found
                                 }
                             } else {
                                 // Field access on non-object
-                                println!("Cannot access field '{}' on non-object array element", field_name);
+                                tracing::trace!(field_name, "Cannot access field on non-object array element");
                                 return None;
                             }
                         }
                     } else {
-                        println!("Cannot access field '{}' on empty array", field_name);
+                        tracing::trace!(field_name, "Cannot access field on empty array");
                         return None; // Empty array
                     }
                 } else {
                     // Cannot access field on non-object/non-array
-                    println!("Cannot access field '{}' on non-object, non-array value: {:?}", field_name, current);
+                    tracing::trace!(field_name, ?current, "Cannot access field on non-object, non-array value");
                     return None;
                 }
             },
@@ -342,15 +343,15 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
                         if let Some(value) = arr.get(index) {
                             current = value;
                         } else {
-                            println!("Index {} out of bounds for array of length {}", index, arr.len());
+                            tracing::trace!(index, array_len = arr.len(), "Index out of bounds for array");
                             return None; // Index out of bounds
                         }
                     } else {
-                        println!("Invalid negative index: {}", idx);
+                        tracing::trace!(idx, "Invalid negative index");
                         return None; // Invalid negative index
                     }
                 } else {
-                    println!("Cannot index non-array value: {:?}", current);
+                    tracing::trace!(?current, "Cannot index non-array value");
                     return None; // Cannot index non-array
                 }
             }
@@ -396,8 +397,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
         }
     }
     
-    // Debug print the result
-    println!("Final value for path '{}': {:?}", path, current);
+    tracing::trace!(path, ?current, "Final value for path");
     
     Some(current)
 }

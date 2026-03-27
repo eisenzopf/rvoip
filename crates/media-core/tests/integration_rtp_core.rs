@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use rvoip_rtp_core::{
     MediaTransportClient, ClientFactory, ClientConfig, ClientConfigBuilder,
     MediaFrame, MediaFrameType, MediaTransportEvent,
-    RtpPacket, PayloadType
+    RtpPacket
 };
 
 // Import media-core types  
@@ -117,8 +117,7 @@ async fn test_codec_compatibility_with_rtp() {
     // Test that our codec implementations work with rtp-core payload formats
     
     // Test G.711 PCMU compatibility
-    let mut g711_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1)
-        .expect("Failed to create G.711 codec");
+    let mut g711_codec = G711Codec::new(G711Variant::MuLaw, 8000, 1);
     
     // Create test audio frame
     let test_samples: Vec<i16> = (0..80).map(|i| (i * 100) as i16).collect();

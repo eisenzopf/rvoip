@@ -217,13 +217,13 @@ async fn test_audio_channel_errors() {
     println!("✓ Call initiated: {}", call.id());
     
     // Get audio channels
-    let (tx, mut rx) = call.audio_channels().await;
+    let (tx, mut rx) = call.audio_channels().expect("Failed to get audio channels");
     println!("✓ Got audio channels");
     
     // Try to get channels again - this should panic or fail
     // Note: This is commented out because it would panic
     // let result = std::panic::catch_unwind(|| {
-    //     call.audio_channels().await
+    //     call.audio_channels().expect("Failed to get audio channels")
     // });
     // assert!(result.is_err(), "Should panic when getting channels twice");
     

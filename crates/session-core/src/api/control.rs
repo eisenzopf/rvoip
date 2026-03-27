@@ -539,17 +539,17 @@ impl SessionControl for Arc<SessionCoordinator> {
         
         // Start music-on-hold or mute audio
         if let Err(e) = self.start_music_on_hold(session_id).await {
-            println!("🎵 Failed to start music-on-hold for {}, falling back to mute: {}", session_id, e);
+            tracing::warn!("Failed to start music-on-hold for {}, falling back to mute: {}", session_id, e);
             // Fallback to muting if MoH fails
-            println!("🔇 Attempting to mute audio for session: {}", session_id);
+            tracing::debug!("Attempting to mute audio for session: {}", session_id);
             self.media_manager.set_audio_muted(session_id, true).await
                 .map_err(|e| {
-                    println!("❌ MUTE FAILED for {}: {}", session_id, e);
-                    SessionError::MediaIntegration { 
-                        message: format!("Failed to mute audio for hold: {}", e) 
+                    tracing::error!("MUTE FAILED for {}: {}", session_id, e);
+                    SessionError::MediaIntegration {
+                        message: format!("Failed to mute audio for hold: {}", e)
                     }
                 })?;
-            println!("✅ Audio muted successfully for {}", session_id);
+            tracing::info!("Audio muted successfully for {}", session_id);
         }
         
         // Use dialog manager to send hold request with proper SDP
@@ -560,11 +560,13 @@ impl SessionControl for Arc<SessionCoordinator> {
         self.registry.update_session_state(session_id, CallState::OnHold).await?;
         
         // Emit state change event
-        let _ = self.publish_event(SessionEvent::StateChanged {
+        if let Err(e) = self.publish_event(SessionEvent::StateChanged {
             session_id: session_id.clone(),
             old_state: CallState::Active,
             new_state: CallState::OnHold,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish hold state change event: {e}");
+        }
         
         Ok(())
     }
@@ -601,25 +603,27 @@ impl SessionControl for Arc<SessionCoordinator> {
         self.registry.update_session_state(session_id, CallState::Active).await?;
         
         // Emit state change event
-        let _ = self.publish_event(SessionEvent::StateChanged {
+        if let Err(e) = self.publish_event(SessionEvent::StateChanged {
             session_id: session_id.clone(),
             old_state: CallState::OnHold,
             new_state: CallState::Active,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish resume state change event: {e}");
+        }
         
         Ok(())
     }
     
     async fn transfer_session(&self, session_id: &SessionId, target: &str) -> Result<()> {
-        println!("🎯 API: transfer_session called for {} to {}", session_id, target);
-        
+        tracing::debug!("API: transfer_session called for {} to {}", session_id, target);
+
         // Check if session exists
-        println!("🎯 API: About to call get_session");
+        tracing::debug!("API: About to call get_session");
         let session = self.get_session(session_id).await?
             .ok_or_else(|| SessionError::session_not_found(&session_id.0))?;
-        println!("🎯 API: get_session returned");
-        
-        println!("🎯 API: Session found, state: {:?}", session.state());
+        tracing::debug!("API: get_session returned");
+
+        tracing::debug!("API: Session found, state: {:?}", session.state());
         
         // Only transfer if session is active or on hold
         if !matches!(session.state(), CallState::Active | CallState::OnHold) {
@@ -628,26 +632,28 @@ impl SessionControl for Arc<SessionCoordinator> {
             ));
         }
         
-        println!("🎯 API: Calling dialog_manager.transfer_session");
-        
+        tracing::debug!("API: Calling dialog_manager.transfer_session");
+
         // Use dialog manager to send transfer request
         self.dialog_manager.transfer_session(session_id, target).await
             .map_err(|e| {
-                println!("❌ API: dialog_manager.transfer_session failed: {}", e);
+                tracing::error!("API: dialog_manager.transfer_session failed: {}", e);
                 SessionError::internal(&format!("Failed to transfer session: {}", e))
             })?;
-        
-        println!("✅ API: dialog_manager.transfer_session succeeded");
+
+        tracing::info!("API: dialog_manager.transfer_session succeeded");
         
         // Update session state
         self.registry.update_session_state(session_id, CallState::Transferring).await?;
         
         // Emit state change event
-        let _ = self.publish_event(SessionEvent::StateChanged {
+        if let Err(e) = self.publish_event(SessionEvent::StateChanged {
             session_id: session_id.clone(),
             old_state: CallState::Active, // Assume it was active before transfer
             new_state: CallState::Transferring,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish transfer state change event: {e}");
+        }
         
         Ok(())
     }
@@ -683,11 +689,13 @@ impl SessionControl for Arc<SessionCoordinator> {
             })?;
         
         // Send SDP event
-        let _ = self.publish_event(SessionEvent::SdpEvent {
+        if let Err(e) = self.publish_event(SessionEvent::SdpEvent {
             session_id: session_id.clone(),
             event_type: "media_update".to_string(),
             sdp: sdp.to_string(),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish SDP media update event: {e}");
+        }
         
         Ok(())
     }
@@ -772,10 +780,12 @@ impl SessionControl for Arc<SessionCoordinator> {
             })?;
         
         // Send media event
-        let _ = self.publish_event(SessionEvent::MediaEvent {
+        if let Err(e) = self.publish_event(SessionEvent::MediaEvent {
             session_id: session_id.clone(),
             event: format!("audio_muted={}", muted),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish audio mute event: {e}");
+        }
         
         Ok(())
     }
@@ -793,10 +803,12 @@ impl SessionControl for Arc<SessionCoordinator> {
         }
         
         // Send media event (actual video implementation would require SDP renegotiation)
-        let _ = self.publish_event(SessionEvent::MediaEvent {
+        if let Err(e) = self.publish_event(SessionEvent::MediaEvent {
             session_id: session_id.clone(),
             event: format!("video_enabled={}", enabled),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish video enabled event: {e}");
+        }
         
         tracing::info!("Video {} for session {} (requires SDP renegotiation)", 
                       if enabled { "enabled" } else { "disabled" }, session_id);
@@ -942,11 +954,11 @@ impl SessionControl for Arc<SessionCoordinator> {
         };
         
         // If we have SDP in the offer and no answer provided, generate one
-        let final_sdp_answer = if call.sdp.is_some() && sdp_answer.is_none() {
+        let final_sdp_answer = if let (Some(sdp_offer), None) = (call.sdp.as_ref(), sdp_answer.as_ref()) {
             tracing::info!("Generating SDP answer for call {} because no answer was provided", call.id);
             // Use the public generate_sdp_answer function which calls negotiate_sdp_as_uas
             // This ensures the MediaNegotiated event is published and negotiated config is stored
-            match generate_sdp_answer(self, &call.id, call.sdp.as_ref().unwrap()).await {
+            match generate_sdp_answer(self, &call.id, sdp_offer).await {
                 Ok(answer) => {
                     tracing::info!("Generated SDP answer for call {}", call.id);
                     Some(answer)
@@ -979,11 +991,13 @@ impl SessionControl for Arc<SessionCoordinator> {
         // event is handled, ensuring it happens after the SimpleCall subscribes to events
         
         // Emit state change event
-        let _ = self.publish_event(SessionEvent::StateChanged {
+        if let Err(e) = self.publish_event(SessionEvent::StateChanged {
             session_id: call.id.clone(),
             old_state: CallState::Ringing,
             new_state: CallState::Active,
-        }).await;
+        }).await {
+            tracing::warn!("Failed to publish call accepted state change event: {e}");
+        }
         
         // Get the updated session
         // Note: on_call_established will be called by the coordinator when all conditions are met:
@@ -1026,11 +1040,13 @@ impl SessionControl for Arc<SessionCoordinator> {
             self.registry.update_session_state(&call.id, CallState::Failed(reason.to_string())).await?;
             
             // Emit state change event
-            let _ = self.publish_event(SessionEvent::StateChanged {
+            if let Err(e) = self.publish_event(SessionEvent::StateChanged {
                 session_id: call.id.clone(),
                 old_state,
                 new_state: CallState::Failed(reason.to_string()),
-            }).await;
+            }).await {
+                tracing::warn!("Failed to publish call rejection state change event: {e}");
+            }
         }
         
         Ok(())

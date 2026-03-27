@@ -59,9 +59,7 @@ impl SessionCoordinator for DialogManager {
     }
     
     async fn notify_session_layer(&self, event: SessionCoordinationEvent) -> DialogResult<()> {
-        // Use the emit_session_coordination_event method which properly uses GlobalEventCoordinator
-        self.emit_session_coordination_event(event).await;
-        Ok(())
+        self.try_emit_session_coordination_event(event).await
     }
 }
 

@@ -592,8 +592,8 @@ impl RoutingPolicies {
         Self {
             time_rules: TimeBasedRules {
                 business_hours: BusinessHours {
-                    start_time: NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
-                    end_time: NaiveTime::from_hms_opt(17, 0, 0).unwrap(),
+                    start_time: NaiveTime::from_hms_opt(9, 0, 0).unwrap_or_default(),
+                    end_time: NaiveTime::from_hms_opt(17, 0, 0).unwrap_or_default(),
                     business_days: vec![
                         "monday".to_string(),
                         "tuesday".to_string(),

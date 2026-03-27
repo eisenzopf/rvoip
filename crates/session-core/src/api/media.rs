@@ -649,15 +649,17 @@ impl MediaControl for Arc<SessionCoordinator> {
         // Publish AudioStreamStarted event
         if let Some(event_processor) = self.event_processor() {
             let config = crate::api::types::AudioStreamConfig::default();
-            let _ = event_processor.publish_audio_stream_started(
+            if let Err(e) = event_processor.publish_audio_stream_started(
                 session_id.clone(),
                 config,
                 format!("stream-{}", session_id),
                 crate::manager::events::MediaFlowDirection::Both,
-            ).await;
+            ).await {
+                tracing::warn!("Failed to publish AudioStreamStarted event: {e}");
+            }
         }
-        
-        tracing::info!("🎧 Created audio frame subscriber for session {}", session_id);
+
+        tracing::info!("Created audio frame subscriber for session {}", session_id);
         Ok(subscriber)
     }
     
@@ -713,11 +715,13 @@ impl MediaControl for Arc<SessionCoordinator> {
                 enable_agc: true,
                 enable_vad: true,
             };
-            let _ = event_processor.publish_audio_frame_requested(
+            if let Err(e) = event_processor.publish_audio_frame_requested(
                 session_id.clone(),
                 config,
                 Some(format!("stream-{}", session_id)),
-            ).await;
+            ).await {
+                tracing::warn!("Failed to publish AudioFrameRequested event: {e}");
+            }
         }
         Ok(())
     }
@@ -771,12 +775,14 @@ impl MediaControl for Arc<SessionCoordinator> {
         // Publish AudioStreamConfigChanged event
         if let Some(event_processor) = self.event_processor() {
             let old_config = crate::api::types::AudioStreamConfig::default();
-            let _ = event_processor.publish_audio_stream_config_changed(
+            if let Err(e) = event_processor.publish_audio_stream_config_changed(
                 session_id.clone(),
                 old_config,
                 config.clone(),
                 Some(format!("stream-{}", session_id)),
-            ).await;
+            ).await {
+                tracing::warn!("Failed to publish AudioStreamConfigChanged event: {e}");
+            }
         }
         
         tracing::info!("📊 Set audio stream config for session {}: {}Hz, {} channels, codec: {}", 
@@ -800,12 +806,14 @@ impl MediaControl for Arc<SessionCoordinator> {
         // Publish AudioStreamStarted event
         if let Some(event_processor) = self.event_processor() {
             let config = crate::api::types::AudioStreamConfig::default();
-            let _ = event_processor.publish_audio_stream_started(
+            if let Err(e) = event_processor.publish_audio_stream_started(
                 session_id.clone(),
                 config,
                 format!("stream-{}", session_id),
                 crate::manager::events::MediaFlowDirection::Both,
-            ).await;
+            ).await {
+                tracing::warn!("Failed to publish AudioStreamStarted event for streaming: {e}");
+            }
         }
         
         tracing::info!("🎵 Started audio stream for session {}", session_id);
@@ -827,11 +835,13 @@ impl MediaControl for Arc<SessionCoordinator> {
         
         // Publish AudioStreamStopped event
         if let Some(event_processor) = self.event_processor() {
-            let _ = event_processor.publish_audio_stream_stopped(
+            if let Err(e) = event_processor.publish_audio_stream_stopped(
                 session_id.clone(),
                 format!("stream-{}", session_id),
                 "User requested stop".to_string(),
-            ).await;
+            ).await {
+                tracing::warn!("Failed to publish AudioStreamStopped event: {e}");
+            }
         }
         
         tracing::info!("🛑 Stopped audio stream for session {}", session_id);
@@ -1285,13 +1295,15 @@ impl MediaControl for Arc<SessionCoordinator> {
                             
                             // Publish media quality event
                             if let Some(event_processor) = coordinator.event_processor() {
-                                let _ = event_processor.publish_media_quality(
+                                if let Err(e) = event_processor.publish_media_quality(
                                     session_id.clone(),
                                     quality.mos_score,
                                     quality.packet_loss_rate,
                                     quality.jitter_ms,
                                     quality.round_trip_ms,
-                                ).await;
+                                ).await {
+                                    tracing::debug!("Failed to publish media quality event: {e}");
+                                }
                             }
                         }
                     }

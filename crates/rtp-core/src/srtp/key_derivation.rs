@@ -2,7 +2,7 @@ use crate::error::Error;
 use crate::Result;
 use crate::packet::RtpPacket;
 use super::crypto::SrtpCryptoKey;
-use aes::{Aes128, cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray}};
+use aes::{Aes128, Aes256, cipher::{BlockEncrypt, KeyInit, generic_array::GenericArray}};
 
 /// SRTP key derivation parameters
 /// Based on RFC 3711 Section 4.3
@@ -54,50 +54,74 @@ pub fn srtp_kdf(
     // Create the IV for key derivation according to RFC 3711 Section 4.3.1
     let mut iv = Vec::with_capacity(16);
     
-    // Copy the salt and pad with zeros if necessary
-    if master_key.salt().len() < 14 {
+    // Copy the salt and pad with zeros if necessary.
+    // Classic SRTP uses 14-byte salts; AEAD-GCM uses 12-byte salts.
+    let salt = master_key.salt();
+    if salt.len() < 12 {
         return Err(Error::SrtpError(format!(
-            "Salt too short: expected at least 14 bytes, got {}", 
-            master_key.salt().len()
+            "Salt too short: expected at least 12 bytes, got {}",
+            salt.len()
         )));
     }
-    
-    // Copy the salt (first 14 bytes)
-    iv.extend_from_slice(&master_key.salt()[0..14]);
-    
-    // Add the label byte
+
+    // Build a 16-byte IV from the salt.  If the salt is shorter than
+    // 14 bytes (e.g. 12 for GCM) we zero-pad on the right before
+    // placing the label.
+    let salt_len = salt.len().min(14);
+    iv.extend_from_slice(&salt[..salt_len]);
+    // Pad to 14 bytes if salt was shorter
+    for _ in salt_len..14 {
+        iv.push(0x00);
+    }
+
+    // Add the label byte (same placement as original code)
     iv.push(0x00);
     iv.push(params.label as u8);
-    
+
     // Determine number of blocks needed
     let num_blocks = (output_len + 15) / 16;
-    
+
     // Create buffer for key material
     let mut key_material = Vec::with_capacity(num_blocks * 16);
-    
-    // Create AES cipher from master key
-    let cipher = Aes128::new_from_slice(master_key.key())
-        .map_err(|e| Error::SrtpError(format!("Failed to create AES cipher: {}", e)))?;
-    
-    // Generate key material
-    for i in 0..num_blocks {
-        // Update the IV with the index
-        iv[14] = ((i >> 8) & 0xFF) as u8;
-        iv[15] = (i & 0xFF) as u8;
-        
-        // Convert to block
-        let mut block = GenericArray::clone_from_slice(&iv);
-        
-        // Encrypt the block
-        cipher.encrypt_block(&mut block);
-        
-        // Add to key material
-        key_material.extend_from_slice(&block);
+
+    // Select AES-128 or AES-256 based on master key length.
+    // RFC 3711 uses AES-128 for the PRF; RFC 7714 Section 8
+    // specifies AES-256 when the master key is 256 bits.
+    let key_bytes = master_key.key();
+
+    match key_bytes.len() {
+        16 => {
+            let cipher = Aes128::new_from_slice(key_bytes)
+                .map_err(|e| Error::SrtpError(format!("Failed to create AES-128 cipher: {}", e)))?;
+            for i in 0..num_blocks {
+                iv[14] = ((i >> 8) & 0xFF) as u8;
+                iv[15] = (i & 0xFF) as u8;
+                let mut block = GenericArray::clone_from_slice(&iv);
+                cipher.encrypt_block(&mut block);
+                key_material.extend_from_slice(&block);
+            }
+        }
+        32 => {
+            let cipher = Aes256::new_from_slice(key_bytes)
+                .map_err(|e| Error::SrtpError(format!("Failed to create AES-256 cipher: {}", e)))?;
+            for i in 0..num_blocks {
+                iv[14] = ((i >> 8) & 0xFF) as u8;
+                iv[15] = (i & 0xFF) as u8;
+                let mut block = GenericArray::clone_from_slice(&iv);
+                cipher.encrypt_block(&mut block);
+                key_material.extend_from_slice(&block);
+            }
+        }
+        other => {
+            return Err(Error::SrtpError(format!(
+                "Unsupported master key length for KDF: {} (expected 16 or 32)", other
+            )));
+        }
     }
-    
+
     // Truncate to the requested size
     key_material.truncate(output_len);
-    
+
     Ok(key_material)
 }
 

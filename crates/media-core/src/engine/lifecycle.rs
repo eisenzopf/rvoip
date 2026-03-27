@@ -164,7 +164,9 @@ impl LifecycleManager {
         
         // Send shutdown signal if available
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
-            let _ = tx.send(());
+            if tx.send(()).is_err() {
+                debug!("Shutdown receiver already dropped during force shutdown");
+            }
         }
     }
     

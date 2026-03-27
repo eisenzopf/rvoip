@@ -348,7 +348,10 @@ impl AudioStreamManager {
             return Ok(());
         }
         
-        let reference_ts = managed_stream.sync_state.reference_timestamp.unwrap();
+        let reference_ts = match managed_stream.sync_state.reference_timestamp {
+            Some(ts) => ts,
+            None => return Ok(()),
+        };
         let expected_ts = reference_ts.wrapping_add(managed_stream.sync_state.timestamp_offset);
         let drift = (frame.timestamp as i64) - (expected_ts as i64);
         

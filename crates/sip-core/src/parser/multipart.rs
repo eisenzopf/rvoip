@@ -30,6 +30,13 @@ use crate::parser::quoted::{quoted_string};
 use crate::parser::separators::{comma, semi, equal};
 use crate::parser::common_chars::{take_till_crlf};
 
+/// Maximum number of parts in a multipart body
+const MAX_MULTIPART_PARTS: usize = 32;
+/// Maximum size of a single part body (1 MB)
+const MAX_PART_SIZE: usize = 1024 * 1024;
+/// Maximum number of headers per MIME part
+const MAX_HEADERS_PER_PART: usize = 50;
+
 /// Parses headers for a MIME part until a blank line (CRLF) is encountered.
 /// Handles line folding according to RFC 822.
 fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
@@ -116,6 +123,9 @@ fn parse_part_headers(input: &[u8]) -> IResult<&[u8], Vec<Header>> {
                 let parsed_value = HeaderValue::Raw(value_bytes_trimmed.to_vec());
                 headers.push(Header::new(name, parsed_value));
                 current_value.clear();
+                if headers.len() > MAX_HEADERS_PER_PART {
+                    return Err(nom::Err::Failure(NomError::new(remaining, ErrorKind::TooLarge)));
+                }
             }
             
             // Try to parse a new header line
@@ -484,6 +494,9 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
             // Found a boundary immediately - this means we have an empty part
             let mut empty_part = MimePart::new();
             body.add_part(empty_part);
+            if body.parts.len() > MAX_MULTIPART_PARTS {
+                return Err(nom::Err::Failure(NomError::new(current_input, ErrorKind::TooLarge)));
+            }
             
             // Parse the boundary 
             if let Ok((input, is_end)) = parse_boundary_delimiter(current_input, boundary) {
@@ -525,13 +538,19 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                         
                         // Store raw content in the part
                         let trimmed_content = trim_trailing_newlines(content);
+                        if trimmed_content.len() > MAX_PART_SIZE {
+                            return Err(nom::Err::Failure(NomError::new(current_input, ErrorKind::TooLarge)));
+                        }
                         part.raw_content = Bytes::copy_from_slice(trimmed_content);
-                        
+
                         // Parse the content based on Content-Type header
                         part.parsed_content = parse_part_content(&part.headers, &part.raw_content);
-                        
+
                         // Add the part to the body
                         body.add_part(part);
+                        if body.parts.len() > MAX_MULTIPART_PARTS {
+                            return Err(nom::Err::Failure(NomError::new(current_input, ErrorKind::TooLarge)));
+                        }
 
                         // Advance to the boundary position
                         current_input = &current_input[pos..];
@@ -587,9 +606,15 @@ fn multipart_parser<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a [u8], Mu
                         // This is technically an error according to RFC 2046, but we're being lenient
                         if !current_input.is_empty() {
                             let trimmed_content = trim_trailing_newlines(current_input);
+                            if trimmed_content.len() > MAX_PART_SIZE {
+                                return Err(nom::Err::Failure(NomError::new(current_input, ErrorKind::TooLarge)));
+                            }
                             part.raw_content = Bytes::copy_from_slice(trimmed_content);
                             part.parsed_content = parse_part_content(&part.headers, &part.raw_content);
-        body.add_part(part);
+                            body.add_part(part);
+                            if body.parts.len() > MAX_MULTIPART_PARTS {
+                                return Err(nom::Err::Failure(NomError::new(current_input, ErrorKind::TooLarge)));
+                            }
                         }
                         
                         // We've consumed all input

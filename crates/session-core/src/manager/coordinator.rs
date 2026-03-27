@@ -4,7 +4,7 @@
 //! Handles session lifecycle events and ensures proper synchronization.
 
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use uuid::Uuid;
 
 use crate::api::types::{SessionId, CallState};
@@ -19,19 +19,19 @@ use super::registry::SessionRegistry;
 pub struct SessionCoordinator {
     /// Media coordinator for handling media sessions
     media_coordinator: Arc<SessionMediaCoordinator>,
-    
+
     /// Dialog coordinator for handling SIP signaling
     dialog_coordinator: Arc<SessionDialogCoordinator>,
-    
-    /// Channel for receiving session events
-    session_events_rx: Option<mpsc::Receiver<SessionEvent>>,
-    
+
+    /// Channel for receiving session events (wrapped in Mutex for safe one-time take)
+    session_events_rx: Mutex<Option<mpsc::Receiver<SessionEvent>>>,
+
     /// Channel for sending session events (for internal coordination)
     session_events_tx: mpsc::Sender<SessionEvent>,
-    
+
     /// Handler for call events
     handler: Option<Arc<dyn CallHandler>>,
-    
+
     /// Session registry for looking up sessions
     registry: Arc<SessionRegistry>,
 }
@@ -49,7 +49,7 @@ impl SessionCoordinator {
         Self {
             media_coordinator,
             dialog_coordinator,
-            session_events_rx: Some(session_events_rx),
+            session_events_rx: Mutex::new(Some(session_events_rx)),
             session_events_tx,
             handler,
             registry,
@@ -61,16 +61,9 @@ impl SessionCoordinator {
         // Clone the Arc for the async block
         let coordinator = self.clone();
         
-        // Take the receiver - this is why we need ownership
-        let mut session_events_rx = {
-            // We need to get mutable access to take the receiver
-            // This is safe because this method is only called once during initialization
-            let self_ptr = Arc::as_ptr(&self) as *mut Self;
-            unsafe {
-                (*self_ptr).session_events_rx.take()
-                    .ok_or_else(|| SessionError::internal("Session events receiver already taken"))?
-            }
-        };
+        // Take the receiver through the Mutex, ensuring safe one-time access
+        let mut session_events_rx = self.session_events_rx.lock().await.take()
+            .ok_or_else(|| SessionError::internal("Session events receiver already taken"))?;
         
         tracing::info!("Starting session coordination loop");
         

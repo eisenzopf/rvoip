@@ -25,10 +25,11 @@ rvoip-session-core.workspace = true
 
 # Database - Modern async approach with sqlx
 # Replace rusqlite/r2d2 with sqlx for true async support
-sqlx = { version = "0.7", features = [
-    "runtime-tokio-rustls",
-    "sqlite", 
-    "chrono", 
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "chrono",
     "uuid",
     "migrate",
     "macros"
@@ -59,7 +60,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # Collections
-dashmap = "5.5"
+dashmap = { workspace = true }
 parking_lot = "0.12"
 
 # For examples

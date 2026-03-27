@@ -8,12 +8,11 @@ use tempfile::TempDir;
 /// Helper to create a test database
 async fn create_test_db() -> (SqliteUserStore, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    
-    let store = SqliteUserStore::new(&db_url).await
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip";
+
+    let store = SqliteUserStore::new(db_url).await
         .expect("Failed to create test database");
-    
+
     (store, temp_dir)
 }
 

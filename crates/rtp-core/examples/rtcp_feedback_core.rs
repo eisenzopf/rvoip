@@ -106,15 +106,22 @@ async fn demonstrate_feedback_generators() -> Result<()> {
     info!("  FIR enabled: {}, interval: {}ms", config.enable_fir, config.fir_interval_ms);
     info!("  REMB enabled: {}, max rate: {} pps", config.enable_remb, config.max_feedback_rate);
 
-    // Test different generators
-    let generators = [
+    // Test different generators (these now return Result since implementations moved to media-core)
+    let generator_results: Vec<(&str, std::result::Result<Box<dyn FeedbackGenerator>, _>)> = vec![
         ("Loss Generator", FeedbackGeneratorFactory::create_loss_generator()),
         ("Congestion Generator", FeedbackGeneratorFactory::create_congestion_generator()),
         ("Quality Generator", FeedbackGeneratorFactory::create_quality_generator()),
         ("Comprehensive Generator", FeedbackGeneratorFactory::create_comprehensive_generator()),
     ];
 
-    for (name, mut generator) in generators {
+    for (name, generator_result) in generator_results {
+        let mut generator = match generator_result {
+            Ok(g) => g,
+            Err(e) => {
+                info!("\n{}: Not available - {} (use media-core implementation)", name, e);
+                continue;
+            }
+        };
         info!("\nTesting {}:", name);
 
         // Simulate statistics updates

@@ -511,7 +511,7 @@ pub use compatibility::{
     helpers as compatibility_helpers,
 };
 pub use handlers::CallHandler;
-pub use builder::{SessionManagerBuilder, SessionManagerConfig, MediaConfig};
+pub use builder::{SessionManagerBuilder, SessionManagerConfig, MediaConfig, SipTransportType};
 pub use control::SessionControl;
 pub use media::MediaControl;
 pub use client::{SipClient, RegistrationHandle, SipResponse, SubscriptionHandle};

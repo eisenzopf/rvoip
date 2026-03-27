@@ -87,11 +87,13 @@ impl TlsTransport {
         };
         
         // Start listening
+        let event_tx = transport.event_tx.clone()
+            .ok_or_else(|| Error::InvalidState("event_tx not initialized".to_string()))?;
         tokio::spawn(Self::listen(
-            local_addr, 
+            local_addr,
             transport.acceptor.clone(),
             transport.connections.clone(),
-            transport.event_tx.clone().unwrap(),
+            event_tx,
         ));
         
         Ok((transport, rx))
@@ -259,9 +261,99 @@ impl TlsTransport {
                 return Ok(());
             }
         }
-        
-        // Connect to remote (not implemented yet)
-        Err(Error::NotImplemented("TLS client connection not implemented yet".to_string()))
+
+        // Build a client TLS config that accepts any server certificate.
+        // Production deployments should supply a proper root store.
+        let client_config = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+            .with_no_client_auth();
+
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+
+        // Connect TCP
+        let tcp_stream = tokio::net::TcpStream::connect(remote_addr)
+            .await
+            .map_err(|e| Error::IoError(e.to_string()))?;
+
+        // Derive a ServerName from the IP address
+        let server_name = rustls::ServerName::IpAddress(remote_addr.ip());
+
+        // Perform the TLS handshake
+        let tls_stream = connector
+            .connect(server_name, tcp_stream)
+            .await
+            .map_err(|e| Error::TlsError(format!("TLS client handshake with {} failed: {}", remote_addr, e)))?;
+
+        debug!("TLS client connection to {} established", remote_addr);
+
+        // Create a channel for writing data
+        let (tx, mut rx) = mpsc::channel::<Bytes>(100);
+
+        // Store the connection
+        {
+            let mut connections_guard = self.connections.lock().await;
+            connections_guard.push((remote_addr, tx));
+        }
+
+        // Spawn read/write tasks for this connection
+        let local_addr = self.local_addr;
+        let connections = self.connections.clone();
+        let event_tx = self.event_tx.clone();
+
+        let (mut reader, mut writer) = tokio::io::split(tls_stream);
+
+        // Spawn writer
+        tokio::spawn(async move {
+            while let Some(data) = rx.recv().await {
+                if let Err(e) = writer.write_all(&data).await {
+                    error!("Failed to write to TLS client stream: {}", e);
+                    break;
+                }
+            }
+        });
+
+        // Spawn reader
+        tokio::spawn(async move {
+            let mut buffer = vec![0u8; 8192];
+            loop {
+                match reader.read(&mut buffer).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let data_clone = buffer[..n].to_vec();
+                        let result = tokio::task::block_in_place(|| {
+                            rvoip_sip_core::parse_message(&data_clone)
+                        });
+
+                        match result {
+                            Ok(msg) => {
+                                if let Some(ref tx) = event_tx {
+                                    let _ = tx.send(TransportEvent::MessageReceived {
+                                        message: msg,
+                                        source: remote_addr,
+                                        destination: local_addr,
+                                    }).await;
+                                }
+                            },
+                            Err(e) => {
+                                error!("Failed to parse SIP message from TLS client: {}", e);
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        error!("Failed to read from TLS client stream: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            // Clean up connection
+            let mut connections_guard = connections.lock().await;
+            connections_guard.retain(|(addr, _)| *addr != remote_addr);
+            debug!("TLS client connection to {} closed", remote_addr);
+        });
+
+        Ok(())
     }
 }
 

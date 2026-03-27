@@ -158,17 +158,12 @@ impl MediaSync {
         let from_stream = self.streams.get(&from_ssrc)?;
         let to_stream = self.streams.get(&to_ssrc)?;
         
-        // Check if we have the necessary mapping data
-        if from_stream.last_ntp.is_none() || from_stream.last_rtp.is_none() ||
-           to_stream.last_ntp.is_none() || to_stream.last_rtp.is_none() {
-            return None;
-        }
-        
-        // Unwrap values (safe due to checks above)
-        let from_ntp = from_stream.last_ntp.unwrap();
-        let from_rtp_ref = from_stream.last_rtp.unwrap();
-        let to_ntp = to_stream.last_ntp.unwrap();
-        let to_rtp_ref = to_stream.last_rtp.unwrap();
+        // Get the necessary mapping data
+        // Ensure both streams have NTP data available (needed for valid conversion)
+        let _ = from_stream.last_ntp?;
+        let from_rtp_ref = from_stream.last_rtp?;
+        let _ = to_stream.last_ntp?;
+        let to_rtp_ref = to_stream.last_rtp?;
         
         // Calculate time difference in source RTP clock ticks
         let rtp_diff = rtp_ts.wrapping_sub(from_rtp_ref) as i64;
@@ -191,15 +186,10 @@ impl MediaSync {
         // Get sync data for the stream
         let stream = self.streams.get(&ssrc)?;
         
-        // Check if we have the necessary mapping data
-        if stream.last_ntp.is_none() || stream.last_rtp.is_none() {
-            return None;
-        }
-        
-        // Unwrap values (safe due to checks above)
-        let ntp_ref = stream.last_ntp.unwrap();
-        let rtp_ref = stream.last_rtp.unwrap();
-        
+        // Get the necessary mapping data
+        let ntp_ref = stream.last_ntp?;
+        let rtp_ref = stream.last_rtp?;
+
         // Calculate time difference in RTP clock ticks
         let rtp_diff = rtp_ts.wrapping_sub(rtp_ref) as i64;
         
@@ -228,15 +218,10 @@ impl MediaSync {
         // Get sync data for the stream
         let stream = self.streams.get(&ssrc)?;
         
-        // Check if we have the necessary mapping data
-        if stream.last_ntp.is_none() || stream.last_rtp.is_none() {
-            return None;
-        }
-        
-        // Unwrap values (safe due to checks above)
-        let ntp_ref = stream.last_ntp.unwrap();
-        let rtp_ref = stream.last_rtp.unwrap();
-        
+        // Get the necessary mapping data
+        let ntp_ref = stream.last_ntp?;
+        let rtp_ref = stream.last_rtp?;
+
         // Calculate time difference in seconds
         let ntp_ref_value = ntp_ref.to_u64();
         let ntp_value = ntp.to_u64();

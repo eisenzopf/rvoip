@@ -198,10 +198,13 @@ impl Host {
     /// # Returns
     /// A new Host instance with the Address variant
     ///
-    /// # Panics
-    /// Panics if the input string is not a valid IPv4 address
-    pub fn ipv4(ip: impl Into<String>) -> Self {
-        Host::Address(IpAddr::V4(Ipv4Addr::from_str(ip.into().as_str()).unwrap()))
+    /// # Errors
+    /// Returns an error if the input string is not a valid IPv4 address
+    pub fn ipv4(ip: impl Into<String>) -> Result<Self> {
+        let s = ip.into();
+        let addr = Ipv4Addr::from_str(s.as_str())
+            .map_err(|e| Error::InvalidUri(format!("Invalid IPv4 address '{}': {}", s, e)))?;
+        Ok(Host::Address(IpAddr::V4(addr)))
     }
 
     /// Create a new host from an IPv6 address
@@ -212,10 +215,13 @@ impl Host {
     /// # Returns
     /// A new Host instance with the Address variant
     ///
-    /// # Panics
-    /// Panics if the input string is not a valid IPv6 address
-    pub fn ipv6(ip: impl Into<String>) -> Self {
-        Host::Address(IpAddr::V6(Ipv6Addr::from_str(ip.into().as_str()).unwrap()))
+    /// # Errors
+    /// Returns an error if the input string is not a valid IPv6 address
+    pub fn ipv6(ip: impl Into<String>) -> Result<Self> {
+        let s = ip.into();
+        let addr = Ipv6Addr::from_str(s.as_str())
+            .map_err(|e| Error::InvalidUri(format!("Invalid IPv6 address '{}': {}", s, e)))?;
+        Ok(Host::Address(IpAddr::V6(addr)))
     }
 
     /// Get the host as a string slice (only works for domain names).
@@ -415,11 +421,11 @@ impl Uri {
     /// ```
     /// use rvoip_sip_core::prelude::*;
     ///
-    /// let uri = Uri::sip_ipv4("192.168.1.1");
+    /// let uri = Uri::sip_ipv4("192.168.1.1").unwrap();
     /// assert_eq!(uri.to_string(), "sip:192.168.1.1");
     /// ```
-    pub fn sip_ipv4(host: impl Into<String>) -> Self {
-        Self::new(Scheme::Sip, Host::ipv4(host))
+    pub fn sip_ipv4(host: impl Into<String>) -> Result<Self> {
+        Ok(Self::new(Scheme::Sip, Host::ipv4(host)?))
     }
 
     /// Create a new SIP URI with an IPv6 host
@@ -435,11 +441,11 @@ impl Uri {
     /// ```
     /// use rvoip_sip_core::prelude::*;
     ///
-    /// let uri = Uri::sip_ipv6("2001:db8::1");
+    /// let uri = Uri::sip_ipv6("2001:db8::1").unwrap();
     /// assert_eq!(uri.to_string(), "sip:[2001:db8::1]");
     /// ```
-    pub fn sip_ipv6(host: impl Into<String>) -> Self {
-        Self::new(Scheme::Sip, Host::ipv6(host))
+    pub fn sip_ipv6(host: impl Into<String>) -> Result<Self> {
+        Ok(Self::new(Scheme::Sip, Host::ipv6(host)?))
     }
 
     /// Create a new SIPS URI

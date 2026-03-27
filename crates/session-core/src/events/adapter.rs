@@ -215,13 +215,22 @@ impl SessionEventAdapter {
         match event {
             RvoipCrossCrateEvent::DialogToSession(dialog_event) => {
                 match dialog_event {
-                    DialogToSessionEvent::IncomingCall { session_id, from, to, .. } => {
-                        use crate::api::types::{CallState, SessionId};
-                        Some(SessionEvent::SessionCreated {
+                    DialogToSessionEvent::IncomingCall { session_id, from, to, sdp_offer, headers, .. } => {
+                        use crate::api::types::SessionId;
+
+                        let dialog_id = headers.get("X-Dialog-Id")
+                            .or_else(|| headers.get("x-dialog-id"))
+                            .and_then(|v| uuid::Uuid::parse_str(v).ok())
+                            .map(rvoip_dialog_core::DialogId)
+                            .unwrap_or_else(|| rvoip_dialog_core::DialogId(uuid::Uuid::new_v4()));
+
+                        Some(SessionEvent::IncomingCall {
                             session_id: SessionId(session_id.clone()),
+                            dialog_id,
                             from: from.clone(),
                             to: to.clone(),
-                            call_state: CallState::Ringing,
+                            sdp: sdp_offer.clone(),
+                            headers: headers.clone(),
                         })
                     }
                     
@@ -289,34 +298,30 @@ mod tests {
     
     #[tokio::test]
     async fn test_adapter_creation() {
-        let coordinator = Arc::new(
-            rvoip_infra_common::events::global_coordinator()
-                .await
-                .expect("Failed to create coordinator")
-        );
-        
+        let coordinator = rvoip_infra_common::events::global_coordinator()
+            .await
+            .clone();
+
         let adapter = SessionEventAdapter::new(coordinator)
             .await
             .expect("Failed to create adapter");
-        
+
         assert!(!adapter.is_running().await);
     }
-    
+
     #[tokio::test]
     async fn test_adapter_start_stop() {
-        let coordinator = Arc::new(
-            rvoip_infra_common::events::global_coordinator()
-                .await
-                .expect("Failed to create coordinator")
-        );
-        
+        let coordinator = rvoip_infra_common::events::global_coordinator()
+            .await
+            .clone();
+
         let adapter = SessionEventAdapter::new(coordinator)
             .await
             .expect("Failed to create adapter");
-        
+
         adapter.start().await.expect("Failed to start adapter");
         assert!(adapter.is_running().await);
-        
+
         adapter.stop().await.expect("Failed to stop adapter");
         assert!(!adapter.is_running().await);
     }

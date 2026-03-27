@@ -265,12 +265,12 @@ impl ReferredBy {
     /// let referred_by = ReferredBy::from_str(header).unwrap();
     ///
     /// // Verify we can get the cid parameter
-    /// assert_eq!(referred_by.get_param("cid"), Some(Some("12345@example.com")));
+    /// assert_eq!(referred_by.get_param("cid"), Some(Some("12345@example.com".to_string())));
     ///
     /// // Non-existent parameter
     /// assert_eq!(referred_by.get_param("unknown"), None);
     /// ```
-    pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
+    pub fn get_param(&self, key: &str) -> Option<Option<String>> {
         self.0.get_param(key)
     }
 
@@ -295,9 +295,9 @@ impl ReferredBy {
     /// let referred_by = ReferredBy::from_str(header).unwrap();
     ///
     /// // Get the cid parameter
-    /// assert_eq!(referred_by.cid(), Some("12345@example.com"));
+    /// assert_eq!(referred_by.cid(), Some("12345@example.com".to_string()));
     /// ```
-    pub fn cid(&self) -> Option<&str> {
+    pub fn cid(&self) -> Option<String> {
         // Extract the cid parameter value
         self.get_param("cid").and_then(|opt_val| opt_val)
     }
@@ -328,7 +328,7 @@ impl ReferredBy {
     ///
     /// // Add a cid parameter
     /// let referred_by_with_cid = referred_by.with_cid("12345@example.com");
-    /// assert_eq!(referred_by_with_cid.cid(), Some("12345@example.com"));
+    /// assert_eq!(referred_by_with_cid.cid(), Some("12345@example.com".to_string()));
     /// ```
     pub fn with_cid(self, cid_value: &str) -> Self {
         // Create a new Address with the same properties as the original
@@ -456,7 +456,7 @@ impl FromStr for ReferredBy {
     ///
     /// // Parse with cid parameter
     /// let referred_by = ReferredBy::from_str("<sip:carol@example.com>;cid=12345@example.com").unwrap();
-    /// assert_eq!(referred_by.get_param("cid"), Some(Some("12345@example.com")));
+    /// assert_eq!(referred_by.get_param("cid"), Some(Some("12345@example.com".to_string())));
     ///
     /// // Invalid input
     /// let result = ReferredBy::from_str("invalid-input");
@@ -581,7 +581,7 @@ mod tests {
         // The parameter should be in the Address params
         assert_eq!(referred_by.params().len(), 1);
         assert!(referred_by.has_param("tag"));
-        assert_eq!(referred_by.get_param("tag"), Some(Some("1234")));
+        assert_eq!(referred_by.get_param("tag"), Some(Some("1234".to_string())));
     }
 
     #[test]

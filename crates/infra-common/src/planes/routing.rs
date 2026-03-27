@@ -179,7 +179,7 @@ impl PlaneRouter {
         target: PlaneType,
         priority: EventPriority,
     ) -> Result<()> {
-        if let Some(plane) = self.planes.get(&target) {
+        match self.planes.get(&target) { Some(plane) => {
             // In distributed mode, this would use network transport
             // In monolithic mode, this is just a direct call
             match priority {
@@ -192,9 +192,9 @@ impl PlaneRouter {
                     self.queue_for_plane(target, event).await?;
                 }
             }
-        } else {
+        } _ => {
             anyhow::bail!("Target plane {:?} not registered", target);
-        }
+        }}
         Ok(())
     }
     

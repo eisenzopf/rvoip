@@ -3,7 +3,8 @@
 //! This module provides efficient memory pooling to reduce allocations
 //! during real-time audio processing operations.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::time::Instant;
 use tracing::{debug, warn};
@@ -83,14 +84,12 @@ impl PooledAudioFrame {
         self.frame.samples()
     }
     
-    /// Get a mutable reference to the samples for zero-copy processing
+    /// Get a mutable reference to the samples for zero-copy processing.
+    ///
+    /// Uses copy-on-write semantics: if the underlying buffer is uniquely owned
+    /// the data is mutated in place; otherwise a private copy is made first.
     pub fn samples_mut(&mut self) -> &mut [i16] {
-        // For zero-copy processing, we need mutable access to the underlying samples
-        // This is safe because PooledAudioFrame has exclusive access during processing
-        unsafe {
-            let samples_ptr = self.frame.samples().as_ptr() as *mut i16;
-            std::slice::from_raw_parts_mut(samples_ptr, self.frame.samples().len())
-        }
+        self.frame.buffer.samples_mut()
     }
     
     /// Get frame metadata
@@ -211,8 +210,8 @@ impl AudioFramePool {
     
     /// Get a frame from the pool (reuse existing or allocate new)
     pub fn get_frame(self: &Arc<Self>) -> PooledAudioFrame {
-        let mut pool = self.pool.lock().unwrap();
-        let mut stats = self.stats.lock().unwrap();
+        let mut pool = self.pool.lock();
+        let mut stats = self.stats.lock();
         
         if let Some(mut frame) = pool.pop_front() {
             // Reuse existing frame from pool
@@ -271,18 +270,18 @@ impl AudioFramePool {
             let samples = vec![0i16; total_samples];
             let frame = ZeroCopyAudioFrame::new(samples, sample_rate, channels, 0);
             
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock();
             stats.pool_misses += 1;
             stats.allocated_count += 1;
-            
+
             PooledAudioFrame::new(frame, self.clone())
         }
     }
     
     /// Return a frame to the pool
     fn return_frame(&self, frame: ZeroCopyAudioFrame) {
-        let mut pool = self.pool.lock().unwrap();
-        let mut stats = self.stats.lock().unwrap();
+        let mut pool = self.pool.lock();
+        let mut stats = self.stats.lock();
         
         // Only return to pool if it matches config and pool isn't full
         if frame.sample_rate == self.config.sample_rate
@@ -300,16 +299,16 @@ impl AudioFramePool {
     
     /// Get current pool statistics
     pub fn get_stats(&self) -> PoolStats {
-        let pool = self.pool.lock().unwrap();
-        let mut stats = self.stats.lock().unwrap();
+        let pool = self.pool.lock();
+        let mut stats = self.stats.lock();
         stats.pool_size = pool.len();
         stats.clone()
     }
     
     /// Clear the pool and reset statistics
     pub fn clear(&self) {
-        let mut pool = self.pool.lock().unwrap();
-        let mut stats = self.stats.lock().unwrap();
+        let mut pool = self.pool.lock();
+        let mut stats = self.stats.lock();
         
         pool.clear();
         *stats = PoolStats {
@@ -329,7 +328,7 @@ impl AudioFramePool {
     
     /// Pre-warm the pool with additional frames
     pub fn prewarm(&self, additional_frames: usize) {
-        let mut pool = self.pool.lock().unwrap();
+        let mut pool = self.pool.lock();
         
         for _ in 0..additional_frames {
             let samples = vec![0i16; self.config.samples_per_frame * self.config.channels as usize];
@@ -342,7 +341,7 @@ impl AudioFramePool {
             pool.push_back(frame);
         }
         
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock();
         stats.pool_size = pool.len();
         stats.max_pool_size = stats.max_pool_size.max(pool.len());
     }
@@ -377,14 +376,14 @@ impl RtpBufferPool {
         
         // Pre-allocate initial buffers
         {
-            let mut buffers = pool.buffers.lock().unwrap();
+            let mut buffers = pool.buffers.lock();
             for _ in 0..initial_count {
                 let mut buffer = Vec::with_capacity(buffer_size);
                 buffer.resize(buffer_size, 0);
                 buffers.push_back(buffer);
             }
-            
-            let mut stats = pool.stats.lock().unwrap();
+
+            let mut stats = pool.stats.lock();
             stats.total_allocated = initial_count;
             stats.available = initial_count;
         }
@@ -398,8 +397,8 @@ impl RtpBufferPool {
     /// Get a buffer from the pool
     pub fn get_buffer(self: &Arc<Self>) -> PooledRtpBuffer {
         let buffer = {
-            let mut buffers = self.buffers.lock().unwrap();
-            let mut stats = self.stats.lock().unwrap();
+            let mut buffers = self.buffers.lock();
+            let mut stats = self.stats.lock();
             
             if let Some(mut buffer) = buffers.pop_front() {
                 // Reuse existing buffer
@@ -434,8 +433,8 @@ impl RtpBufferPool {
     
     /// Return a buffer to the pool
     fn return_buffer(&self, buffer: Vec<u8>) {
-        let mut buffers = self.buffers.lock().unwrap();
-        let mut stats = self.stats.lock().unwrap();
+        let mut buffers = self.buffers.lock();
+        let mut stats = self.stats.lock();
         
         if buffers.len() < self.initial_count && buffer.capacity() == self.buffer_size {
             buffers.push_back(buffer);
@@ -448,13 +447,13 @@ impl RtpBufferPool {
     
     /// Get pool statistics
     pub fn get_stats(&self) -> PoolStats {
-        let stats = self.stats.lock().unwrap();
+        let stats = self.stats.lock();
         stats.clone()
     }
-    
+
     /// Reset pool statistics
     pub fn reset_stats(&self) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock();
         *stats = PoolStats::new();
     }
 }
@@ -462,18 +461,23 @@ impl RtpBufferPool {
 impl PooledRtpBuffer {
     /// Get mutable slice for writing encoded data
     pub fn as_mut(&mut self) -> &mut [u8] {
-        self.buffer.as_mut().unwrap()
+        match self.buffer.as_mut() {
+            Some(buf) => buf.as_mut_slice(),
+            None => &mut [],
+        }
     }
-    
+
     /// Get slice for reading encoded data
     pub fn as_slice(&self) -> &[u8] {
-        self.buffer.as_ref().unwrap()
+        self.buffer.as_ref().map(|b| b.as_slice()).unwrap_or(&[])
     }
-    
+
     /// Create a Bytes slice from the first `len` bytes
     pub fn slice(&self, len: usize) -> bytes::Bytes {
-        let buffer = self.buffer.as_ref().unwrap();
-        bytes::Bytes::copy_from_slice(&buffer[..len.min(buffer.len())])
+        match self.buffer.as_ref() {
+            Some(buffer) => bytes::Bytes::copy_from_slice(&buffer[..len.min(buffer.len())]),
+            None => bytes::Bytes::new(),
+        }
     }
     
     /// Get the capacity of this buffer
@@ -499,15 +503,15 @@ impl Drop for PooledRtpBuffer {
 
 impl std::ops::Deref for PooledRtpBuffer {
     type Target = [u8];
-    
+
     fn deref(&self) -> &Self::Target {
-        self.buffer.as_ref().unwrap()
+        self.buffer.as_ref().map(|b| b.as_slice()).unwrap_or(&[])
     }
 }
 
 impl std::ops::DerefMut for PooledRtpBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.buffer.as_mut().unwrap()
+        self.buffer.as_mut().map(|b| b.as_mut_slice()).unwrap_or(&mut [])
     }
 }
 

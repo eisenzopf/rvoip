@@ -2,7 +2,8 @@ use crate::errors::types::{Error, Result};
 use crate::config::provider::{ConfigProvider, ConfigSource};
 use crate::events::bus::EventBus;
 use std::fmt::Debug;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use parking_lot::RwLock;
 use std::any::Any;
 use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use std::time::Duration;
@@ -90,14 +91,14 @@ impl<T: DeserializeOwned + Send + Sync + Clone + Debug + 'static> DynamicConfig<
     
     /// Get a clone of the current configuration
     pub fn get_config(&self) -> T {
-        self.config.read().unwrap().clone()
+        self.config.read().clone()
     }
     
     /// Update the configuration
     pub fn update(&self, new_config: T) -> Result<()> {
-        let mut config = self.config.write().unwrap();
+        let mut config = self.config.write();
         *config = new_config;
-        *self.last_update.write().unwrap() = std::time::SystemTime::now()
+        *self.last_update.write() = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
@@ -168,7 +169,7 @@ impl<T: DeserializeOwned + Send + Sync + Clone + Debug + Serialize + 'static> Co
     }
     
     fn get<U: DeserializeOwned>(&self, _key: &str) -> Result<U> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read();
         let value = serde_json::to_value(&*config)
             .map_err(|e| Error::Config(format!("Failed to serialize config: {}", e)))?;
             
@@ -177,7 +178,7 @@ impl<T: DeserializeOwned + Send + Sync + Clone + Debug + Serialize + 'static> Co
     }
     
     fn get_raw(&self, _key: &str) -> Result<Box<dyn Any>> {
-        let config = self.config.read().unwrap().clone();
+        let config = self.config.read().clone();
         Ok(Box::new(config))
     }
     

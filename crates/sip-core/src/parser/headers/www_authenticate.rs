@@ -45,49 +45,59 @@ pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<Vec<Challenge>> {
         (w[0] == b'\n' && (w[1] == b' ' || w[1] == b'\t'))
     );
     
-    let processed_input: &[u8] = if has_line_folding {
-        // If line folding is present, pre-process the input to unfold it
+    if has_line_folding {
+        // Parse from the owned unfolded buffer. Since the Challenge values are
+        // all owned types, we only need the buffer to live through parsing.
+        // We return an empty slice of the *original* input because the unfolded
+        // buffer is local and we cannot return references into it.
         let unfolded = unfold_lws(input);
-        
-        // This is a bit of a hack, but we need to store the unfolded bytes somewhere
-        // so they survive for the duration of this function
-        let bytes_box = Box::new(unfolded);
-        let bytes_ref = Box::leak(bytes_box);
-        
-        bytes_ref.as_slice()
+        match parse_challenges_from_input(&unfolded) {
+            Ok((_, challenges)) => {
+                // Point rest at end of original input (fully consumed)
+                let rest = &input[input.len()..];
+                Ok((rest, challenges))
+            }
+            Err(_) => {
+                // Map error to reference original input since unfolded is local
+                Err(Err::Error(make_error(input, ErrorKind::TakeWhile1)))
+            }
+        }
     } else {
-        // No line folding, use input directly
-        input
-    };
-    
+        // No line folding — parse directly from the borrowed input
+        parse_challenges_from_input(input)
+    }
+}
+
+/// Core challenge parsing logic.
+fn parse_challenges_from_input(input: &[u8]) -> ParseResult<Vec<Challenge>> {
     // Trim any leading whitespace
-    let (mut input, _) = opt(take_while(|c| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n'))(processed_input)?;
-    
+    let (input, _) = opt(take_while(|c| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n'))(input)?;
+
     // Parse the first challenge
     match challenge(input) {
         Ok((mut rest, first_challenge)) => {
             // Store the challenges in a vector
             let mut challenges = vec![first_challenge];
-            
+
             // While there's more input and it starts with a comma, parse additional challenges
             while !rest.is_empty() {
                 // Skip any whitespace
                 let (r, _) = opt(take_while(|c| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n'))(rest)?;
-                
+
                 // If there's no more content or it doesn't start with a comma, we're done
                 if r.is_empty() || r[0] != b',' {
                     rest = r;
                     break;
                 }
-                
+
                 // Skip the comma and any whitespace
                 let (r, _) = preceded(comma, opt(take_while(|c| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n')))(r)?;
-                
+
                 // If there's no more content after the comma and whitespace, that's an error
                 if r.is_empty() {
                     return Err(Err::Error(make_error(r, ErrorKind::Tag)));
                 }
-                
+
                 // Parse the next challenge
                 match challenge(r) {
                     Ok((r, next_challenge)) => {
@@ -100,7 +110,7 @@ pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<Vec<Challenge>> {
                     }
                 }
             }
-            
+
             // Trim any trailing whitespace
             if !rest.is_empty() {
                 let is_only_whitespace = rest.iter().all(|&c| c == b' ' || c == b'\t' || c == b'\r' || c == b'\n');
@@ -108,7 +118,7 @@ pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<Vec<Challenge>> {
                     rest = &[];
                 }
             }
-            
+
             Ok((rest, challenges))
         },
         Err(e) => Err(e)

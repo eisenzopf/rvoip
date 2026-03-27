@@ -313,10 +313,12 @@ impl MediaRelay {
         }
         
         // Emit event
-        let _ = self.event_tx.send(RelayEvent::SessionPairCreated {
+        if let Err(e) = self.event_tx.send(RelayEvent::SessionPairCreated {
             session_a: config.session_a_id.clone(),
             session_b: config.session_b_id.clone(),
-        });
+        }) {
+            debug!("Relay event receiver dropped (session pair created): {}", e);
+        }
         
         // Start packet forwarding tasks (placeholder for now)
         self.start_forwarding_tasks(&config).await?;
@@ -342,10 +344,12 @@ impl MediaRelay {
         }
         
         // Emit event
-        let _ = self.event_tx.send(RelayEvent::SessionPairDestroyed {
+        if let Err(e) = self.event_tx.send(RelayEvent::SessionPairDestroyed {
             session_a: session_a_id.to_string(),
             session_b: session_b_id.to_string(),
-        });
+        }) {
+            debug!("Relay event receiver dropped (session pair destroyed): {}", e);
+        }
         
         Ok(())
     }

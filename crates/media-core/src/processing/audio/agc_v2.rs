@@ -2,6 +2,11 @@
 //!
 //! This module implements state-of-the-art AGC using multi-band processing,
 //! look-ahead limiting, and perceptual loudness models.
+//!
+//! **Deprecated:** For production use, prefer the `webrtc_apm` module (enable the
+//! `webrtc-apm` feature) which wraps Google's battle-tested WebRTC AudioProcessing
+//! Module. This self-built implementation is retained as a fallback for environments
+//! where the native C++ dependency cannot be compiled.
 
 use tracing::{debug, trace};
 use crate::error::{Result, AudioProcessingError};
@@ -107,6 +112,11 @@ impl AdvancedAutomaticGainControl {
                config.num_bands, config.target_lufs);
         
         // Validate configuration
+        if config.num_bands < 1 {
+            return Err(AudioProcessingError::InvalidFormat {
+                details: "num_bands must be >= 1".to_string(),
+            }.into());
+        }
         if config.crossover_frequencies.len() != config.num_bands - 1 {
             return Err(AudioProcessingError::InvalidFormat {
                 details: "Crossover frequencies must be num_bands - 1".to_string(),

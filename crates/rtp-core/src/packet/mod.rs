@@ -3,16 +3,26 @@
 //! This module provides structures for handling RTP packets as defined in RFC 3550.
 //! It includes implementations for RTP headers, packet parsing and serialization.
 
+#[deprecated(note = "Use packet::adapter::WebrtcRtpPacket instead")]
 pub mod rtp;
+#[deprecated(note = "Use packet::adapter::WebrtcRtpHeader instead")]
 pub mod header;
 pub mod rtcp;
 pub mod extension;
+pub mod adapter;
 
+#[allow(deprecated)]
 pub use rtp::*;
+#[allow(deprecated)]
 pub use header::*;
 pub use extension::*;
 
+// Re-export webrtc-rs adapter types for convenient access
+pub use adapter::{WebrtcRtpPacket, WebrtcRtpHeader, WebrtcRtpExtension};
+pub use adapter::rtcp_adapter;
+
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use bytes::Bytes;

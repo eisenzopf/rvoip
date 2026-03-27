@@ -470,14 +470,16 @@ impl CallCenterEngine {
         info!("🎤 Creating conference with {} participants", session_ids.len());
         
         // **REAL**: Create bridge using session-core API
-        let bridge_id = self.session_coordinator.as_ref().unwrap()
+        let coordinator = self.session_coordinator.as_ref()
+            .ok_or_else(|| CallCenterError::orchestration("Session coordinator not initialized"))?;
+        let bridge_id = coordinator
             .create_bridge()
             .await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to create conference bridge: {}", e)))?;
-        
+
         // **REAL**: Add all sessions to the bridge
         for session_id in session_ids {
-            self.session_coordinator.as_ref().unwrap()
+            coordinator
                 .add_session_to_bridge(&bridge_id, session_id)
                 .await
                 .map_err(|e| CallCenterError::orchestration(&format!("Failed to add session {} to conference: {}", session_id, e)))?;
@@ -538,7 +540,8 @@ impl CallCenterEngine {
     
     /// Get real-time bridge information for monitoring
     pub async fn get_bridge_info(&self, bridge_id: &BridgeId) -> CallCenterResult<BridgeInfo> {
-        self.session_coordinator.as_ref().unwrap()
+        self.session_coordinator.as_ref()
+            .ok_or_else(|| CallCenterError::orchestration("Session coordinator not initialized"))?
             .get_bridge_info(bridge_id)
             .await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to get bridge info: {}", e)))?
@@ -547,7 +550,13 @@ impl CallCenterEngine {
     
     /// List all active bridges for dashboard
     pub async fn list_active_bridges(&self) -> Vec<BridgeInfo> {
-        self.session_coordinator.as_ref().unwrap().list_bridges().await
+        match self.session_coordinator.as_ref() {
+            Some(coordinator) => coordinator.list_bridges().await,
+            None => {
+                warn!("Session coordinator not initialized, returning empty bridge list");
+                Vec::new()
+            }
+        }
     }
     
     /// Subscribe to bridge events for real-time monitoring
@@ -555,7 +564,9 @@ impl CallCenterEngine {
         info!("👁️ Starting bridge event monitoring");
         
         // **REAL**: Subscribe to session-core bridge events
-        let event_receiver = self.session_coordinator.as_ref().unwrap()
+        let coordinator = self.session_coordinator.as_ref()
+            .ok_or_else(|| CallCenterError::orchestration("Session coordinator not initialized"))?;
+        let event_receiver = coordinator
             .subscribe_to_bridge_events().await;
         self.bridge_events = Some(event_receiver);
         

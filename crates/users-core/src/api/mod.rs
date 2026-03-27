@@ -12,7 +12,8 @@ use axum::{
     middleware::{self, Next},
 };
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tower_http::cors::CorsLayer;
@@ -282,24 +283,34 @@ async fn login(
 ) -> Result<Json<LoginResponse>, AppError> {
     // Track authentication attempt
     {
-        let mut metrics = state.metrics.lock().unwrap();
+        let mut metrics = state.metrics.lock();
         metrics.authentication_attempts += 1;
     }
-    
-    // Check if account is locked due to failed attempts
+
+    // Check if account is locked BEFORE expensive Argon2 hashing (DoS prevention)
+    use self::rate_limit::{handle_login_rate_limit, RateLimitError};
+    if let Err(e) = state.rate_limiter.is_account_locked(&req.username).await {
+        return match e {
+            RateLimitError::AccountLocked(duration) => {
+                Err(AppError::AccountLocked(duration.as_secs()))
+            }
+            _ => Err(AppError::InvalidCredentials),
+        };
+    }
+
+    // Lockout check passed — now run Argon2 password verification
     let auth_result = state.auth_service
         .authenticate_password(&req.username, &req.password)
         .await;
-    
-    // Handle rate limiting for login attempts
-    use self::rate_limit::{handle_login_rate_limit, RateLimitError};
+
+    // Handle rate limiting for login attempts (record success/failure)
     let rate_limit_result = handle_login_rate_limit(
         &state.rate_limiter,
         &req.username,
         auth_result.as_ref().map(|_| ()).map_err(|_| ())
     ).await;
-    
-    // Check rate limit first
+
+    // Check rate limit result
     if let Err(e) = rate_limit_result {
         return match e {
             RateLimitError::AccountLocked(duration) => {
@@ -308,13 +319,13 @@ async fn login(
             _ => Err(AppError::InvalidCredentials),
         };
     }
-    
+
     // Now handle the authentication result
     let auth_result = auth_result?;
     
     // Track successful authentication
     {
-        let mut metrics = state.metrics.lock().unwrap();
+        let mut metrics = state.metrics.lock();
         metrics.authentication_successes += 1;
         metrics.tokens_issued += 2; // Access + refresh token
     }
@@ -388,9 +399,13 @@ async fn create_user(
 
 async fn list_users(
     State(state): State<ApiState>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Query(filter): Query<UserFilter>,
 ) -> Result<Json<Vec<UserResponse>>, AppError> {
+    // Only admins can list all users
+    if !auth.is_admin() {
+        return Err(AppError::Forbidden);
+    }
     let users = state.auth_service
         .user_store()
         .list_users(filter)
@@ -452,7 +467,14 @@ async fn update_user(
     if auth.user_id != id && !auth.is_admin() {
         return Err(AppError::Forbidden);
     }
-    
+
+    // Non-admin users must not be able to escalate their own privileges
+    let mut req = req;
+    if !auth.is_admin() {
+        req.roles = None;
+        req.active = None;
+    }
+
     let user = state.auth_service
         .user_store()
         .update_user(&id, req)
@@ -545,7 +567,11 @@ async fn create_api_key(
     if auth.user_id != user_id && !auth.is_admin() {
         return Err(AppError::Forbidden);
     }
-    
+
+    // Always use the path parameter user_id to prevent IDOR via body manipulation
+    let mut req = req;
+    req.user_id = user_id;
+
     let (key_info, raw_key) = state.auth_service
         .api_key_store()
         .create_api_key(req)
@@ -553,7 +579,7 @@ async fn create_api_key(
     
     // Track API key creation
     {
-        let mut metrics = state.metrics.lock().unwrap();
+        let mut metrics = state.metrics.lock();
         metrics.total_api_keys += 1;
     }
     
@@ -623,7 +649,7 @@ async fn revoke_api_key(
     
     // Track API key revocation
     {
-        let mut metrics = state.metrics.lock().unwrap();
+        let mut metrics = state.metrics.lock();
         if metrics.total_api_keys > 0 {
             metrics.total_api_keys -= 1;
         }
@@ -645,7 +671,7 @@ async fn health_check() -> Json<serde_json::Value> {
 async fn metrics(State(state): State<ApiState>) -> Result<Json<serde_json::Value>, AppError> {
     // Get metrics from the state and clone the values we need
     let (auth_attempts, auth_successes, tokens_issued, api_requests, total_api_keys, start_time) = {
-        let metrics = state.metrics.lock().unwrap();
+        let metrics = state.metrics.lock();
         (
             metrics.authentication_attempts,
             metrics.authentication_successes,
@@ -803,23 +829,43 @@ where
         {
             if let Some(token) = auth_header.strip_prefix("Bearer ") {
                 let api_state = ApiState::from_ref(state);
-                
+                let jwt_config = &api_state.auth_service.jwt_issuer().config;
+
                 // Get public key and validate
                 let public_key = api_state.auth_service
                     .jwt_issuer()
                     .public_key_pem()
                     .map_err(|e| AppError::Internal(e.into()))?;
-                
+
                 let decoding_key = DecodingKey::from_rsa_pem(public_key.as_bytes())
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid public key: {}", e)))?;
-                
-                let mut validation = Validation::new(Algorithm::RS256);
-                validation.set_issuer(&["https://users.rvoip.local"]);
-                validation.set_audience(&["rvoip-api", "rvoip-sip"]);
+
+                // Use algorithm/issuer/audience from JwtConfig instead of hardcoded values
+                let algorithm = match jwt_config.algorithm.as_str() {
+                    "RS256" => Algorithm::RS256,
+                    "HS256" => Algorithm::HS256,
+                    _ => return Err(AppError::Internal(anyhow::anyhow!("Unsupported JWT algorithm: {}", jwt_config.algorithm))),
+                };
+                let mut validation = Validation::new(algorithm);
+                validation.set_issuer(&[&jwt_config.issuer]);
+                let audience_refs: Vec<&str> = jwt_config.audience.iter().map(|s| s.as_str()).collect();
+                validation.set_audience(&audience_refs);
                 
                 let token_data = decode::<crate::UserClaims>(token, &decoding_key, &validation)
                     .map_err(|_| AppError::Forbidden)?;
-                
+
+                // Verify the user is still active (prevents deactivated accounts from using valid tokens)
+                let user = api_state.auth_service
+                    .user_store()
+                    .get_user(&token_data.claims.sub)
+                    .await
+                    .map_err(|_| AppError::Forbidden)?
+                    .ok_or(AppError::Forbidden)?;
+
+                if !user.active {
+                    return Err(AppError::Forbidden);
+                }
+
                 return Ok(AuthContext {
                     user_id: token_data.claims.sub,
                     username: token_data.claims.username,
@@ -844,14 +890,18 @@ where
                 .map_err(|_| AppError::Forbidden)?
                 .ok_or(AppError::Forbidden)?;
             
-            // Get the user to construct AuthContext
+            // Get the user to construct AuthContext and verify active status
             let user = api_state.auth_service
                 .user_store()
                 .get_user(&api_key_info.user_id)
                 .await
                 .map_err(|_| AppError::Forbidden)?
                 .ok_or(AppError::Forbidden)?;
-            
+
+            if !user.active {
+                return Err(AppError::Forbidden);
+            }
+
             return Ok(AuthContext {
                 user_id: user.id,
                 username: user.username,

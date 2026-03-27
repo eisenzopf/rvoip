@@ -122,7 +122,30 @@ pub trait SipClient: Send + Sync {
         contact_uri: &str,
         expires: u32,
     ) -> Result<RegistrationHandle>;
-    
+
+    /// Send a REGISTER request with authentication credentials
+    ///
+    /// Like `register()`, but includes credentials for 401/407 challenge-response.
+    /// If the registrar responds with 401 Unauthorized or 407 Proxy Authentication Required,
+    /// this method will automatically compute the digest response and retry.
+    ///
+    /// # Arguments
+    /// * `registrar_uri` - The registrar server URI
+    /// * `from_uri` - The AOR being registered
+    /// * `contact_uri` - Where to reach this endpoint
+    /// * `expires` - Registration duration in seconds (0 to unregister)
+    /// * `username` - Authentication username
+    /// * `password` - Authentication password
+    async fn register_with_credentials(
+        &self,
+        registrar_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        expires: u32,
+        username: &str,
+        password: &str,
+    ) -> Result<RegistrationHandle>;
+
     /// Send an OPTIONS request (keepalive/capability query)
     /// 
     /// OPTIONS is used to query the capabilities of a SIP endpoint or
@@ -270,8 +293,31 @@ pub mod unified {
         ).await
     }
     
+    /// Send a REGISTER request with authentication credentials
+    ///
+    /// See [`SipClient::register_with_credentials`] for details.
+    pub async fn register_with_credentials(
+        coordinator: &Arc<SessionCoordinator>,
+        registrar_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        expires: u32,
+        username: &str,
+        password: &str,
+    ) -> Result<RegistrationHandle> {
+        <Arc<SessionCoordinator> as SipClient>::register_with_credentials(
+            coordinator,
+            registrar_uri,
+            from_uri,
+            contact_uri,
+            expires,
+            username,
+            password,
+        ).await
+    }
+
     /// Send an OPTIONS request for keepalive or capability query
-    /// 
+    ///
     /// See [`SipClient::send_options`] for details.
     pub async fn send_options(
         coordinator: &Arc<SessionCoordinator>,

@@ -12,7 +12,13 @@ pub type Result<T> = std::result::Result<T, SessionError>;
 pub enum SessionError {
     /// Invalid session state for the requested operation
     InvalidState(String),
-    
+
+    /// Invalid state transition (from state-table model)
+    InvalidTransition(String),
+
+    /// SDP negotiation failed
+    SDPNegotiationFailed(String),
+
     /// Session not found
     SessionNotFound(String),
     
@@ -60,6 +66,8 @@ impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SessionError::InvalidState(msg) => write!(f, "Invalid state: {}", msg),
+            SessionError::InvalidTransition(msg) => write!(f, "Invalid state transition: {}", msg),
+            SessionError::SDPNegotiationFailed(msg) => write!(f, "SDP negotiation failed: {}", msg),
             SessionError::SessionNotFound(msg) => write!(f, "Session not found: {}", msg),
             SessionError::MediaError(msg) => write!(f, "Media error: {}", msg),
             SessionError::MediaIntegration { message } => write!(f, "Media integration error: {}", message),
@@ -130,6 +138,22 @@ impl SessionError {
 
     pub fn internal(msg: &str) -> Self {
         SessionError::Other(msg.to_string())
+    }
+
+    /// Check if this error represents an SRTP security failure
+    /// (e.g., SRTP negotiated but setup failed, security downgrade prevented).
+    pub fn is_srtp_security_failure(&self) -> bool {
+        match self {
+            SessionError::MediaIntegration { message } => {
+                message.contains("SRTP security downgrade")
+                    || message.contains("SRTP setup failed")
+            }
+            SessionError::MediaError(msg) => {
+                msg.contains("SRTP security downgrade")
+                    || msg.contains("SRTP setup failed")
+            }
+            _ => false,
+        }
     }
 
     pub fn invalid_uri(msg: &str) -> Self {

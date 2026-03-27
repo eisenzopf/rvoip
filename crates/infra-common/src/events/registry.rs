@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing;
 
 // Static event registry to properly track types implementing StaticEvent
-static STATIC_EVENT_REGISTRY: once_cell::sync::Lazy<dashmap::DashSet<TypeId>> = 
-    once_cell::sync::Lazy::new(|| dashmap::DashSet::new());
+static STATIC_EVENT_REGISTRY: std::sync::LazyLock<dashmap::DashSet<TypeId>> =
+    std::sync::LazyLock::new(|| dashmap::DashSet::new());
 
 /// Register a type as a StaticEvent in the registry
 pub fn register_static_event<T: 'static + StaticEvent>() {
@@ -155,7 +155,7 @@ impl TypeRegistry {
             // This is safer than transmute as we know the type matches by TypeId
             let any_sender = sender.as_any();
             let typed_sender = any_sender.downcast_ref::<TypedBroadcastSender<E>>()
-                .expect("Type mismatch in registry");
+                .expect("BUG: Type mismatch in registry - TypeId key does not match stored type");
             typed_sender.clone()
         })
     }
@@ -168,7 +168,7 @@ impl TypeRegistry {
         if let Some(sender) = self.senders.get(&key) {
             let any_sender = sender.as_any();
             let typed_sender = any_sender.downcast_ref::<TypedBroadcastSender<E>>()
-                .expect("Type mismatch in registry");
+                .expect("BUG: Type mismatch in registry - TypeId key does not match stored type");
             return typed_sender.clone();
         }
         
@@ -218,8 +218,8 @@ impl TypeRegistry {
 /// Global type registry singleton
 pub struct GlobalTypeRegistry;
 
-// Use OnceCell instead of lazy_static
-static GLOBAL_REGISTRY: once_cell::sync::OnceCell<TypeRegistry> = once_cell::sync::OnceCell::new();
+// Use OnceLock instead of lazy_static
+static GLOBAL_REGISTRY: std::sync::OnceLock<TypeRegistry> = std::sync::OnceLock::new();
 
 impl GlobalTypeRegistry {
     /// Default channel capacity optimized for high throughput

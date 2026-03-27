@@ -46,6 +46,8 @@ pub use response_builders::{
     create_ok_response_with_dialog_info,
     create_ringing_response_with_tag,
     create_ringing_response_with_dialog_info,
+    fix_via_nat,
+    create_response_with_nat,
 };
 
 // Transaction helpers
@@ -68,7 +70,7 @@ mod tests {
 
     #[test]
     fn test_create_response() {
-        let request = create_test_request(Method::Invite);
+        let request = create_test_request(Method::Invite).unwrap();
         let response = create_response(&request, StatusCode::Ok);
 
         // Check status code
@@ -123,7 +125,7 @@ mod tests {
 
     #[test]
     fn test_create_response_with_to_tag() {
-        let request = create_test_request(Method::Invite);
+        let request = create_test_request(Method::Invite).unwrap();
         let mut response = create_response(&request, StatusCode::Ok);
 
         // Add a tag to the To header
@@ -160,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_create_trying_response() {
-        let request = create_test_request(Method::Invite);
+        let request = create_test_request(Method::Invite).unwrap();
         let response = create_response(&request, StatusCode::Trying);
         assert_eq!(response.status(), StatusCode::Trying);
         
@@ -173,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_create_ringing_response() {
-        let request = create_test_request(Method::Invite);
+        let request = create_test_request(Method::Invite).unwrap();
         let response = create_response(&request, StatusCode::Ringing);
         assert_eq!(response.status(), StatusCode::Ringing);
         
@@ -186,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_create_ok_response() {
-        let request = create_test_request(Method::Invite);
+        let request = create_test_request(Method::Invite).unwrap();
         let response = create_response(&request, StatusCode::Ok);
         assert_eq!(response.status(), StatusCode::Ok);
         

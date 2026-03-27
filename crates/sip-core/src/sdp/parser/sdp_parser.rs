@@ -66,6 +66,13 @@ use super::line_parser::parse_sdp_line;
 use super::media_parser::parse_media_description_line;
 use super::time_parser::{parse_time_description_line, parse_repeat_time_line};
 
+/// Maximum size of SDP content in bytes
+pub const MAX_SDP_SIZE: usize = 16384; // 16 KB
+/// Maximum number of lines in an SDP message
+pub const MAX_SDP_LINES: usize = 500;
+/// Maximum number of media sections in an SDP message
+pub const MAX_MEDIA_SECTIONS: usize = 32;
+
 /// Parses the entire SDP content from bytes into an SdpSession struct.
 ///
 /// This is the main entry point for parsing SDP content. It handles the complete
@@ -116,14 +123,26 @@ use super::time_parser::{parse_time_description_line, parse_repeat_time_line};
 /// assert_eq!(media.port, 49170);
 /// ```
 pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
+    // Enforce maximum SDP size to prevent DoS
+    if content.len() > MAX_SDP_SIZE {
+        return Err(Error::SdpParsingError(
+            format!("SDP content size {} exceeds maximum allowed size {}", content.len(), MAX_SDP_SIZE)
+        ));
+    }
+
     // Convert bytes to string first
     let sdp_str = match str::from_utf8(content) {
         Ok(s) => s,
         Err(_) => return Err(Error::SdpParsingError("SDP content is not valid UTF-8".to_string())),
     };
-    
-    // Split the content into lines
+
+    // Split the content into lines and enforce line count limit
     let lines: Vec<&str> = sdp_str.lines().collect();
+    if lines.len() > MAX_SDP_LINES {
+        return Err(Error::SdpParsingError(
+            format!("SDP line count {} exceeds maximum allowed {}", lines.len(), MAX_SDP_LINES)
+        ));
+    }
     
     // Define the state for tracking the current parsing section
     #[derive(PartialEq)]
@@ -340,7 +359,10 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                     return Err(Error::SdpParsingError("r= line found before any t= line".to_string()));
                 }
                 
-                let last_timing = session.time_descriptions.last_mut().unwrap();
+                let last_timing = match session.time_descriptions.last_mut() {
+                    Some(t) => t,
+                    None => return Err(Error::SdpParsingError("r= line found before any t= line".to_string())),
+                };
                 let repeat_time = parse_repeat_time_line(value)?;
                 last_timing.repeat_times.push(repeat_time);
             },
@@ -385,7 +407,14 @@ pub fn parse_sdp(content: &Bytes) -> Result<SdpSession> {
                 if let Some(md) = current_media_description.take() {
                     session.media_descriptions.push(md);
                 }
-                
+
+                // Enforce media section count limit to prevent DoS
+                if session.media_descriptions.len() >= MAX_MEDIA_SECTIONS {
+                    return Err(Error::SdpParsingError(
+                        format!("Media section count exceeds maximum allowed {}", MAX_MEDIA_SECTIONS)
+                    ));
+                }
+
                 // Start a new media section
                 current_media_description = Some(parse_media_description_line(value)?);
                 parse_section = SdpParseSection::MediaDescription;

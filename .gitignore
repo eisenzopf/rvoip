@@ -122,4 +122,18 @@ tests/rustdoc-gui/src/**.lock
 flake.lock
 /default.nix
 
-# Before adding new lines, see the comment at the top.crates/codec-core/src/codecs/g729a-new/target/
+# Before adding new lines, see the comment at the top.
+
+# Generated codec build artifacts
+crates/codec-core/src/codecs/g729a-new/target/
+
+# Local secret overrides (NEVER commit these — see docs/audit/007-commit-audit.md)
+.env.local
+.env.production
+.env.staging
+docker-compose.override.yml
+Containerfile.local
+secrets/
+
+# Debug output
+output.log

@@ -29,7 +29,7 @@ pub async fn example_basic_call() -> Result<()> {
         None
     ).await?;
     
-    println!("Call initiated: {}", call.id);
+    tracing::info!("Call initiated: {}", call.id);
     
     // Wait for some time...
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
@@ -51,14 +51,14 @@ pub async fn example_with_handler() -> Result<()> {
     #[async_trait::async_trait]
     impl CallHandler for MyHandler {
         async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-            println!("Incoming call from: {}", call.from);
+            tracing::info!("Incoming call from: {}", call.from);
             
             // Auto-accept all calls
             CallDecision::Accept(None)
         }
         
         async fn on_call_ended(&self, call: CallSession, reason: &str) {
-            println!("Call {} ended: {}", call.id, reason);
+            tracing::info!("Call {} ended: {}", call.id, reason);
         }
     }
     
@@ -103,11 +103,11 @@ pub async fn example_conference() -> Result<()> {
             None
         ).await {
             Ok(call) => {
-                println!("Added participant: {}", participant);
+                tracing::info!("Added participant: {}", participant);
                 calls.push(call);
             }
             Err(e) => {
-                eprintln!("Failed to add participant {}: {}", participant, e);
+                tracing::error!("Failed to add participant {}: {}", participant, e);
             }
         }
     }
@@ -117,7 +117,9 @@ pub async fn example_conference() -> Result<()> {
     
     // End all calls
     for call in calls {
-        let _ = session_mgr.terminate_session(&call.id).await;
+        if let Err(e) = session_mgr.terminate_session(&call.id).await {
+            tracing::warn!("Failed to terminate session {}: {e}", call.id);
+        }
     }
     
     Ok(())
@@ -147,23 +149,23 @@ pub async fn example_media_control() -> Result<()> {
     
     // Mute audio
     session_mgr.set_audio_muted(&call.id, true).await?;
-    println!("Audio muted");
+    tracing::info!("Audio muted");
     
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     
     // Unmute audio
     session_mgr.set_audio_muted(&call.id, false).await?;
-    println!("Audio unmuted");
+    tracing::info!("Audio unmuted");
     
     // Put call on hold
     session_mgr.hold_session(&call.id).await?;
-    println!("Call on hold");
+    tracing::info!("Call on hold");
     
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     
     // Resume call
     session_mgr.resume_session(&call.id).await?;
-    println!("Call resumed");
+    tracing::info!("Call resumed");
     
     // End the call
     session_mgr.terminate_session(&call.id).await?;
@@ -212,7 +214,7 @@ pub async fn example_sdp_negotiation() -> Result<()> {
         Some(sdp_offer)
     ).await?;
     
-    println!("Call with custom SDP: {}", call.id);
+    tracing::info!("Call with custom SDP: {}", call.id);
     
     Ok(())
 }
@@ -224,12 +226,12 @@ pub struct AutoAnswerHandler;
 #[async_trait::async_trait]
 impl CallHandler for AutoAnswerHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-        println!("Auto-answering call from: {}", call.from);
+        tracing::info!("Auto-answering call from: {}", call.from);
         CallDecision::Accept(None)
     }
     
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
-        println!("Call {} ended: {}", call.id, reason);
+        tracing::info!("Call {} ended: {}", call.id, reason);
     }
 }
 
@@ -257,7 +259,9 @@ impl QueueHandler {
             
             // Notify if channel is set
             if let Some(tx) = self.notify.lock().await.as_ref() {
-                let _ = tx.send(call);
+                if let Err(e) = tx.send(call) {
+                    tracing::debug!("Failed to send incoming call notification (receiver dropped): {e}");
+                }
             }
         }
     }

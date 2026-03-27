@@ -2,19 +2,45 @@
 //!
 //! This module provides a DTLS 1.2 implementation for use with SRTP key exchange.
 //! It follows RFC 6347 (DTLS) and RFC 5764 (DTLS-SRTP) specifications.
+//!
+//! ## Production adapter (recommended)
+//!
+//! The [`adapter`] sub-module wraps the battle-tested `webrtc-dtls` 0.12 crate
+//! (3.4M downloads) and should be preferred for all new code. The self-built
+//! modules (`connection`, `handshake`, `record`, etc.) are **deprecated** and
+//! retained only for backward compatibility.
 
+// ---------------------------------------------------------------------------
+// Production adapter backed by webrtc-dtls 0.12
+// ---------------------------------------------------------------------------
+pub mod adapter;
+
+// ---------------------------------------------------------------------------
+// Legacy self-built implementation (deprecated -- prefer `adapter`)
+// ---------------------------------------------------------------------------
+#[deprecated(note = "Use dtls::adapter::DtlsConnectionAdapter instead")]
 pub mod connection;
+#[deprecated(note = "Use dtls::adapter::DtlsConnectionAdapter instead")]
 pub mod handshake;
+#[deprecated(note = "Use dtls::adapter::DtlsConnectionAdapter instead")]
 pub mod record;
+#[deprecated(note = "Use dtls::adapter::DtlsConnectionAdapter instead")]
 pub mod alert;
+#[deprecated(note = "Use dtls::adapter::DtlsConnectionAdapter instead")]
 pub mod crypto;
+#[deprecated(note = "Use dtls::adapter::DtlsConnectionAdapter instead")]
 pub mod message;
+#[deprecated(note = "Use dtls::adapter::DtlsConnectionAdapter instead")]
 pub mod transport;
+#[deprecated(note = "Use dtls::adapter::DtlsConnectionAdapter and srtp::adapter::SrtpContextAdapter instead")]
 pub mod srtp;
 
-// Re-export key public API types
+// Re-export key public API types (legacy)
+#[allow(deprecated)]
 pub use connection::DtlsConnection;
+#[allow(deprecated)]
 pub use srtp::extractor::DtlsSrtpContext;
+#[allow(deprecated)]
 pub use crypto::keys::DtlsKeyingMaterial;
 
 /// DTLS protocol version
@@ -81,6 +107,7 @@ pub type Result<T> = std::result::Result<T, crate::error::Error>;
 ///
 /// # Returns
 /// A new DTLS connection
+#[allow(deprecated)]
 pub async fn create_connection(config: DtlsConfig) -> Result<DtlsConnection> {
-    unimplemented!("DTLS implementation is not yet complete")
+    Ok(DtlsConnection::new(config))
 } 

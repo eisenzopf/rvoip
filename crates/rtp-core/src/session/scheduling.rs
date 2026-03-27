@@ -1,4 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -115,16 +116,15 @@ impl RtpScheduler {
         let next_send_time = start + Duration::from_millis(next_interval);
         
         // Add to queue
-        if let Ok(mut queue) = self.packet_queue.lock() {
+        {
+            let mut queue = self.packet_queue.lock();
             queue.push((packet, next_send_time));
             self.packets_scheduled += 1;
-            debug!("Scheduled packet with seq={}, ts={} for {:?}", 
+            debug!("Scheduled packet with seq={}, ts={} for {:?}",
                    self.sequence.wrapping_sub(1), self.timestamp.wrapping_sub(self.timestamp_increment),
                    next_send_time);
-            Ok(())
-        } else {
-            Err(Error::SessionError("Failed to lock packet queue".to_string()))
         }
+        Ok(())
     }
     
     /// Start the scheduler
@@ -142,7 +142,8 @@ impl RtpScheduler {
         
         // Clone necessary data for the task
         let queue = self.packet_queue.clone();
-        let sender = self.sender.clone().unwrap();
+        let sender = self.sender.clone()
+            .ok_or_else(|| Error::SessionError("No sender channel configured".to_string()))?;
         let interval = self.interval;
         
         // Start a task to send packets at their scheduled times
@@ -157,7 +158,8 @@ impl RtpScheduler {
                 let mut packets_to_send = Vec::new();
                 
                 // Extract packets that are due to be sent
-                if let Ok(mut queue) = queue.lock() {
+                {
+                    let mut queue = queue.lock();
                     let mut i = 0;
                     while i < queue.len() {
                         if queue[i].1 <= now {
@@ -205,11 +207,7 @@ impl RtpScheduler {
     
     /// Get the number of packets currently in the queue
     pub fn queue_size(&self) -> usize {
-        if let Ok(queue) = self.packet_queue.lock() {
-            queue.len()
-        } else {
-            0
-        }
+        self.packet_queue.lock().len()
     }
     
     /// Get the current sequence number (the next one to be used)

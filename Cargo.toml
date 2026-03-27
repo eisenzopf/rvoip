@@ -9,8 +9,6 @@ members = [
     "crates/rtp-core",
     "crates/media-core",
     "crates/session-core",
-    "crates/session-core-v2",
-    "crates/session-core-v3",
     "crates/call-engine",
     "crates/client-core",
     "crates/codec-core",
@@ -19,6 +17,13 @@ members = [
     "crates/rvoip",
     "crates/infra-common",
     "crates/registrar-core", "crates/users-core",
+    "crates/intermediary-core",
+    "crates/auth-core",
+    "crates/ai-copilot",
+    "crates/web-console",
+    "crates/mcp-server",
+    "crates/cli",
+    "crates/integration-tests",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,
@@ -44,23 +49,23 @@ default-members = [
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
 [workspace.package]
 version = "0.1.26"  # 🎯 SINGLE VERSION TO MANAGE!
-edition = "2021"
+edition = "2024"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/eisenzopf/rvoip"
-repository = "https://github.com/eisenzopf/rvoip"
+homepage = "https://github.com/openprx/rvoip"
+repository = "https://github.com/openprx/rvoip"
 documentation = "https://docs.rs/rvoip"
 authors = ["RVOIP AUTHORS"]
-rust-version = "1.70"  # Minimum supported Rust version
+rust-version = "1.85"  # Minimum for Edition 2024
 categories = ["network-programming", "multimedia", "web-programming"]
 keywords = ["sip", "voip", "rtp", "communication", "telephony"]
 
 # Silence all Rust warnings
 [workspace.lints.rust]
 warnings = "allow"
-unused_imports = "allow"
-unused_variables = "allow"
+unused_imports = "warn"
+unused_variables = "warn"
 unused_mut = "allow"
-dead_code = "allow"
+dead_code = "warn"
 unused_comparisons = "allow"
 elided_named_lifetimes = "allow"
 ambiguous_glob_reexports = "allow"
@@ -138,6 +143,11 @@ rvoip-audio-core = { path = "crates/audio-core", version = "0.1.26" }
 rvoip-sip-client = { path = "crates/sip-client", version = "0.1.26", features = ["simple-api"] }
 rvoip = { path = "crates/rvoip", version = "0.1.26" }
 rvoip-infra-common = { path = "crates/infra-common", version = "0.1.26" }
+rvoip-registrar-core = { path = "crates/registrar-core", version = "0.1.26" }
+rvoip-ai-copilot = { path = "crates/ai-copilot", version = "0.1.26" }
+rvoip-web-console = { path = "crates/web-console", version = "0.1.26" }
+rvoip-mcp-server = { path = "crates/mcp-server", version = "0.1.26" }
+rvoip-cli = { path = "crates/cli", version = "0.1.26" }
 
 # External dependencies
 tokio = { version = "1.36", features = ["full"] }
@@ -178,8 +188,8 @@ aes = "0.8"
 md-5 = "0.10"
 ring = "0.17"
 rcgen = "0.12"
-x509-parser = "0.15"
-webpki-roots = "0.25"
+x509-parser = "0.16"
+webpki-roots = "0.26"
 serial_test = "3.1"
 fastrand = "2.0"
 tracing-appender = "0.2"

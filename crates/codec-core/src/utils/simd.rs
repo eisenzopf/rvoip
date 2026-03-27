@@ -74,12 +74,19 @@ pub fn encode_mulaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
     
     let mut chunks = samples.chunks_exact(8);
     let mut out_idx = 0;
-    
+
+    // SAFETY: SSE2 support was verified above via `get_simd_support().sse2`.
+    // `chunks_exact(8)` guarantees each chunk has exactly 8 i16 values (16 bytes),
+    // which is the size of an __m128i register. `_mm_loadu_si128` performs an
+    // unaligned load so no alignment requirement on the source pointer.
+    // `_mm_extract_epi16` indices 0..7 are valid for a 128-bit register holding
+    // 8 x i16. Output bounds are safe because out_idx advances in step with input
+    // chunks and the caller must ensure `output.len() >= samples.len()`.
     unsafe {
         for chunk in chunks.by_ref() {
             // Load 8 samples at once
             let samples_vec = _mm_loadu_si128(chunk.as_ptr() as *const __m128i);
-            
+
             // Process each sample - need to unroll or use different approach
             // _mm_extract_epi16 requires compile-time constant, so we unroll
             output[out_idx] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 0) as i16);
@@ -93,7 +100,7 @@ pub fn encode_mulaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
             out_idx += 8;
         }
     }
-    
+
     // Handle remainder
     for &sample in chunks.remainder() {
         output[out_idx] = linear_to_mulaw_scalar(sample);
@@ -130,12 +137,17 @@ pub fn encode_alaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
     
     let mut chunks = samples.chunks_exact(8);
     let mut out_idx = 0;
-    
+
+    // SAFETY: SSE2 support was verified above via `get_simd_support().sse2`.
+    // `chunks_exact(8)` guarantees each chunk has exactly 8 i16 values (16 bytes),
+    // matching the __m128i register size. `_mm_loadu_si128` handles unaligned reads.
+    // `_mm_extract_epi16` indices 0..7 are valid for 8 x i16 in a 128-bit register.
+    // Output bounds are safe because out_idx advances in step with input chunks.
     unsafe {
         for chunk in chunks.by_ref() {
             // Load 8 samples at once
             let samples_vec = _mm_loadu_si128(chunk.as_ptr() as *const __m128i);
-            
+
             // Process each sample - need to unroll or use different approach
             // _mm_extract_epi16 requires compile-time constant, so we unroll
             output[out_idx] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 0) as i16);

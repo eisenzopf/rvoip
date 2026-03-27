@@ -492,15 +492,27 @@ mod tests {
                             c=IN IP4 127.0.0.1\r\n\
                             t=0 0\r\n".to_string();
         
-        for i in 0..100 {
+        for i in 0..32 {
             many_media.push_str(&format!("m=audio {} RTP/AVP 0\r\n", 10000 + i));
         }
-        
+
         let result = SdpSession::from_str(&many_media);
         assert!(result.is_ok(), "Parser should accept SDP with many media sections: {:?}", result.err());
-        
+
         let session = result.unwrap();
-        assert_eq!(session.media_descriptions.len(), 100);
+        assert_eq!(session.media_descriptions.len(), 32);
+
+        // Verify that exceeding MAX_MEDIA_SECTIONS (32) is rejected
+        let mut too_many_media = "v=0\r\n\
+                            o=- 123 456 IN IP4 127.0.0.1\r\n\
+                            s=Too Many Media\r\n\
+                            c=IN IP4 127.0.0.1\r\n\
+                            t=0 0\r\n".to_string();
+        for i in 0..33 {
+            too_many_media.push_str(&format!("m=audio {} RTP/AVP 0\r\n", 20000 + i));
+        }
+        let result = SdpSession::from_str(&too_many_media);
+        assert!(result.is_err(), "Parser should reject SDP with >32 media sections");
     }
 
     /// Test parsing SDP with unusual line endings

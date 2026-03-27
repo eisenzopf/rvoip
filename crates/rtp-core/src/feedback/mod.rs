@@ -299,33 +299,222 @@ pub trait FeedbackGenerator {
     fn name(&self) -> &'static str;
 }
 
-/// Factory for creating feedback generators
-/// NOTE: Feedback generator implementations have been moved to media-core.
-/// Use media_core::rtp_processing::rtcp for actual generators.
+/// Factory for creating feedback generators.
+///
+/// Feedback generator implementations have been moved to `media-core`.
+/// Use `media_core::rtp_processing::rtcp` for full-featured generators.
+/// The factory methods here provide basic inline implementations that do
+/// not depend on media-core, suitable for simple use cases.
+#[deprecated(note = "Use media_core::rtp_processing::rtcp generators for full implementations")]
 pub struct FeedbackGeneratorFactory;
 
 impl FeedbackGeneratorFactory {
-    /// Create a loss-based feedback generator
-    pub fn create_loss_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::LossFeedbackGenerator")
+    /// Create a loss-based feedback generator.
+    ///
+    /// Returns a basic generator that emits PLI when packet loss is detected.
+    /// For production use, prefer `media_core::rtp_processing::rtcp::LossFeedbackGenerator`.
+    pub fn create_loss_generator() -> crate::Result<Box<dyn FeedbackGenerator>> {
+        Ok(Box::new(BasicLossFeedbackGenerator))
     }
-    
-    /// Create a congestion-based feedback generator
-    pub fn create_congestion_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::CongestionFeedbackGenerator")
+
+    /// Create a congestion-based feedback generator.
+    ///
+    /// Returns a basic generator that emits REMB based on congestion state.
+    /// For production use, prefer `media_core::rtp_processing::rtcp::CongestionFeedbackGenerator`.
+    pub fn create_congestion_generator() -> crate::Result<Box<dyn FeedbackGenerator>> {
+        Ok(Box::new(BasicCongestionFeedbackGenerator { estimated_bps: 1_000_000 }))
     }
-    
-    /// Create a quality-based feedback generator
-    pub fn create_quality_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::QualityFeedbackGenerator")
+
+    /// Create a quality-based feedback generator.
+    ///
+    /// Returns a basic generator that emits FIR on severe quality degradation.
+    /// For production use, prefer `media_core::rtp_processing::rtcp::QualityFeedbackGenerator`.
+    pub fn create_quality_generator() -> crate::Result<Box<dyn FeedbackGenerator>> {
+        Ok(Box::new(BasicQualityFeedbackGenerator { fir_seq: 0 }))
     }
-    
-    /// Create a comprehensive feedback generator (combines all strategies)
-    pub fn create_comprehensive_generator() -> Box<dyn FeedbackGenerator> {
-        // Implementation moved to media-core
-        panic!("Feedback generators moved to media-core. Use media_core::rtp_processing::rtcp::ComprehensiveFeedbackGenerator")
+
+    /// Create a comprehensive feedback generator (combines loss + congestion + quality).
+    ///
+    /// For production use, prefer `media_core::rtp_processing::rtcp::ComprehensiveFeedbackGenerator`.
+    pub fn create_comprehensive_generator() -> crate::Result<Box<dyn FeedbackGenerator>> {
+        Ok(Box::new(BasicComprehensiveFeedbackGenerator {
+            fir_seq: 0,
+            estimated_bps: 1_000_000,
+        }))
+    }
+}
+
+/// Basic loss-based feedback generator that emits PLI on packet loss.
+struct BasicLossFeedbackGenerator;
+
+impl FeedbackGenerator for BasicLossFeedbackGenerator {
+    fn generate_feedback(&self, context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision> {
+        if !config.enable_pli {
+            return Ok(FeedbackDecision::None);
+        }
+        if !context.can_send_feedback(config.pli_interval_ms) {
+            return Ok(FeedbackDecision::None);
+        }
+        // Emit PLI when congestion indicates loss
+        match context.congestion_state {
+            CongestionState::Moderate | CongestionState::Severe | CongestionState::Critical => {
+                Ok(FeedbackDecision::Pli {
+                    priority: FeedbackPriority::High,
+                    reason: QualityDegradation::PacketLoss { rate: 5, consecutive: 1 },
+                })
+            }
+            _ => Ok(FeedbackDecision::None),
+        }
+    }
+
+    fn update_statistics(&mut self, _stats: &crate::api::common::stats::StreamStats) {
+        // Basic impl: no internal state to update
+    }
+
+    fn name(&self) -> &'static str {
+        "BasicLossFeedbackGenerator"
+    }
+}
+
+/// Basic congestion-based feedback generator that emits REMB.
+struct BasicCongestionFeedbackGenerator {
+    estimated_bps: u32,
+}
+
+impl FeedbackGenerator for BasicCongestionFeedbackGenerator {
+    fn generate_feedback(&self, context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision> {
+        if !config.enable_remb {
+            return Ok(FeedbackDecision::None);
+        }
+        // Adjust bitrate recommendation based on congestion state
+        let bitrate = match context.congestion_state {
+            CongestionState::None => self.estimated_bps,
+            CongestionState::Light => self.estimated_bps * 80 / 100,
+            CongestionState::Moderate => self.estimated_bps * 50 / 100,
+            CongestionState::Severe => self.estimated_bps * 25 / 100,
+            CongestionState::Critical => self.estimated_bps * 10 / 100,
+        };
+        if bitrate < self.estimated_bps {
+            Ok(FeedbackDecision::Remb {
+                bitrate_bps: bitrate,
+                confidence: 0.5,
+            })
+        } else {
+            Ok(FeedbackDecision::None)
+        }
+    }
+
+    fn update_statistics(&mut self, stats: &crate::api::common::stats::StreamStats) {
+        // Use the stream bitrate as an estimate if available
+        if stats.bitrate_bps > 0 {
+            self.estimated_bps = stats.bitrate_bps as u32;
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "BasicCongestionFeedbackGenerator"
+    }
+}
+
+/// Basic quality-based feedback generator that emits FIR.
+struct BasicQualityFeedbackGenerator {
+    fir_seq: u8,
+}
+
+impl FeedbackGenerator for BasicQualityFeedbackGenerator {
+    fn generate_feedback(&self, context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision> {
+        if !config.enable_fir {
+            return Ok(FeedbackDecision::None);
+        }
+        if !context.can_send_feedback(config.fir_interval_ms) {
+            return Ok(FeedbackDecision::None);
+        }
+        match context.congestion_state {
+            CongestionState::Severe | CongestionState::Critical => {
+                Ok(FeedbackDecision::Fir {
+                    priority: FeedbackPriority::Critical,
+                    sequence_number: self.fir_seq,
+                })
+            }
+            _ => Ok(FeedbackDecision::None),
+        }
+    }
+
+    fn update_statistics(&mut self, _stats: &crate::api::common::stats::StreamStats) {
+        self.fir_seq = self.fir_seq.wrapping_add(1);
+    }
+
+    fn name(&self) -> &'static str {
+        "BasicQualityFeedbackGenerator"
+    }
+}
+
+/// Comprehensive feedback generator combining loss, congestion, and quality strategies.
+struct BasicComprehensiveFeedbackGenerator {
+    fir_seq: u8,
+    estimated_bps: u32,
+}
+
+impl FeedbackGenerator for BasicComprehensiveFeedbackGenerator {
+    fn generate_feedback(&self, context: &FeedbackContext, config: &FeedbackConfig) -> Result<FeedbackDecision> {
+        let mut decisions = Vec::new();
+
+        // Loss-based: PLI
+        if config.enable_pli && context.can_send_feedback(config.pli_interval_ms) {
+            if matches!(context.congestion_state,
+                CongestionState::Moderate | CongestionState::Severe | CongestionState::Critical)
+            {
+                decisions.push(FeedbackDecision::Pli {
+                    priority: FeedbackPriority::High,
+                    reason: QualityDegradation::PacketLoss { rate: 5, consecutive: 1 },
+                });
+            }
+        }
+
+        // Quality-based: FIR
+        if config.enable_fir && context.can_send_feedback(config.fir_interval_ms) {
+            if matches!(context.congestion_state,
+                CongestionState::Severe | CongestionState::Critical)
+            {
+                decisions.push(FeedbackDecision::Fir {
+                    priority: FeedbackPriority::Critical,
+                    sequence_number: self.fir_seq,
+                });
+            }
+        }
+
+        // Congestion-based: REMB
+        if config.enable_remb {
+            let bitrate = match context.congestion_state {
+                CongestionState::None => self.estimated_bps,
+                CongestionState::Light => self.estimated_bps * 80 / 100,
+                CongestionState::Moderate => self.estimated_bps * 50 / 100,
+                CongestionState::Severe => self.estimated_bps * 25 / 100,
+                CongestionState::Critical => self.estimated_bps * 10 / 100,
+            };
+            if bitrate < self.estimated_bps {
+                decisions.push(FeedbackDecision::Remb {
+                    bitrate_bps: bitrate,
+                    confidence: 0.5,
+                });
+            }
+        }
+
+        match decisions.len() {
+            0 => Ok(FeedbackDecision::None),
+            1 => Ok(decisions.into_iter().next().unwrap_or(FeedbackDecision::None)),
+            _ => Ok(FeedbackDecision::Multiple(decisions)),
+        }
+    }
+
+    fn update_statistics(&mut self, stats: &crate::api::common::stats::StreamStats) {
+        self.fir_seq = self.fir_seq.wrapping_add(1);
+        if stats.bitrate_bps > 0 {
+            self.estimated_bps = stats.bitrate_bps as u32;
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "BasicComprehensiveFeedbackGenerator"
     }
 } 

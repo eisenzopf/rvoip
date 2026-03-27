@@ -78,7 +78,9 @@ pub trait ConferenceApiExt: ConferenceApi {
         let participants = self.list_participants(conference_id).await?;
         for participant in participants {
             if participant.status == ParticipantStatus::Active {
-                let _ = self.update_participant_status(conference_id, &participant.session_id, ParticipantStatus::Muted).await;
+                if let Err(e) = self.update_participant_status(conference_id, &participant.session_id, ParticipantStatus::Muted).await {
+                    tracing::warn!("Failed to mute participant {}: {e}", participant.session_id);
+                }
             }
         }
         Ok(())
@@ -89,7 +91,9 @@ pub trait ConferenceApiExt: ConferenceApi {
         let participants = self.list_participants(conference_id).await?;
         for participant in participants {
             if participant.status == ParticipantStatus::Muted {
-                let _ = self.update_participant_status(conference_id, &participant.session_id, ParticipantStatus::Active).await;
+                if let Err(e) = self.update_participant_status(conference_id, &participant.session_id, ParticipantStatus::Active).await {
+                    tracing::warn!("Failed to unmute participant {}: {e}", participant.session_id);
+                }
             }
         }
         Ok(())

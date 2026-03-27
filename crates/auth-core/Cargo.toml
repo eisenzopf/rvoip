@@ -1,14 +1,14 @@
 [package]
 name = "rvoip-auth-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 authors = ["RVoIP Contributors"]
 description = "OAuth2 and token-based authentication for RVoIP services"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Async runtime
-tokio = { version = "1.40", features = ["full"] }
+tokio = { workspace = true, features = ["full"] }
 async-trait = "0.1"
 
 # HTTP client for OAuth2 flows
@@ -28,7 +28,7 @@ oauth2 = "4.4"
 url = "2.5"
 
 # Error handling
-thiserror = "1.0"
+thiserror = { workspace = true }
 anyhow = "1.0"
 
 # Caching
@@ -36,7 +36,7 @@ moka = { version = "0.12", features = ["future"] }
 
 # Cryptography
 ring = "0.17"
-base64 = "0.22"
+base64 = { workspace = true }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }

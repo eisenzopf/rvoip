@@ -3,7 +3,7 @@
 //! User management and authentication service for RVoIP.
 //! 
 //! This crate provides:
-//! - User storage and management in SQLite
+//! - User storage and management in PostgreSQL
 //! - Password authentication with Argon2
 //! - JWT token issuance for internal users
 //! - API key management

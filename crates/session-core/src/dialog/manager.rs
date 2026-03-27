@@ -75,7 +75,7 @@ impl DialogManager {
     ) -> DialogResult<()> {
         // Send NOTIFY through dialog-core
         self.dialog_api
-            .send_notify(dialog_id, event, body)
+            .send_notify(dialog_id, event, body, Some(subscription_state))
             .await
             .map_err(|e| DialogError::DialogCore {
                 source: Box::new(e),
@@ -208,8 +208,27 @@ impl DialogManager {
         Ok(())
     }
     
+    /// Reject an incoming session's INVITE with a SIP error response
+    ///
+    /// Sends a final error response (e.g., 404/480/486/603) to the incoming INVITE.
+    /// Per RFC 3261 §13.3.1, this is how a UAS rejects a call.
+    pub async fn reject_incoming_session(
+        &self,
+        session_id: &SessionId,
+        status_code: rvoip_sip_core::StatusCode,
+        reason: Option<String>,
+    ) -> DialogResult<()> {
+        let dialog_id = self.get_dialog_id_for_session(session_id)?;
+        self.dialog_api
+            .reject_dialog(&dialog_id, status_code, reason)
+            .await
+            .map_err(|e| DialogError::SipProcessing {
+                message: format!("Failed to reject dialog {}: {}", dialog_id, e),
+            })
+    }
+
     /// Terminate a session
-    /// 
+    ///
     /// This method is state-aware:
     /// - For sessions in Early state (no final response to INVITE), sends CANCEL
     /// - For sessions in Active/Established state, sends BYE
@@ -427,7 +446,33 @@ impl DialogManager {
         Ok(())
     }
     
-    /// Update media for a session (send re-INVITE with new SDP)
+    /// Send an INFO request with a specific Content-Type.
+    ///
+    /// Used for trickle ICE (`application/trickle-ice-sdpfrag`) and other
+    /// typed INFO payloads.
+    pub async fn send_info_with_content_type(
+        &self,
+        dialog_id: &DialogId,
+        body: String,
+        content_type: &str,
+    ) -> DialogResult<()> {
+        let _tx_key = self
+            .dialog_api
+            .send_info_with_content_type(dialog_id, body, content_type)
+            .await
+            .map_err(|e| DialogError::DialogCore {
+                source: Box::new(e),
+            })?;
+
+        tracing::debug!(
+            "Sent INFO with Content-Type '{}' for dialog {}",
+            content_type,
+            dialog_id
+        );
+        Ok(())
+    }
+
+    /// Update media for a session (send re-INVOKE with new SDP)
     pub async fn update_media(&self, session_id: &SessionId, sdp: &str) -> DialogResult<()> {
         let dialog_id = self.get_dialog_id_for_session(session_id)?;
         
@@ -486,6 +531,20 @@ impl DialogManager {
     /// Get access to the underlying dialog API for shutdown coordination
     pub fn dialog_api(&self) -> &Arc<UnifiedDialogApi> {
         &self.dialog_api
+    }
+
+    /// Set the authentication provider for SIP Digest auth (RFC 3261 §22).
+    ///
+    /// Takes effect immediately for all subsequent requests — no restart required.
+    pub fn set_auth_provider(&self, provider: std::sync::Arc<dyn rvoip_dialog_core::auth::AuthProvider>) {
+        self.dialog_api.set_auth_provider(provider);
+    }
+
+    /// Set the proxy router for INVITE forwarding decisions.
+    ///
+    /// Takes effect immediately for all subsequent requests — no restart required.
+    pub fn set_proxy_router(&self, router: std::sync::Arc<dyn rvoip_dialog_core::auth::ProxyRouter>) {
+        self.dialog_api.set_proxy_router(router);
     }
     
     /// Get dialog statistics

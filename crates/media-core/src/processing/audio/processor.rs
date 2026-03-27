@@ -25,6 +25,10 @@ use super::vad_v2::{AdvancedVoiceActivityDetector, AdvancedVadConfig, AdvancedVa
 use super::agc_v2::{AdvancedAutomaticGainControl, AdvancedAgcConfig, AdvancedAgcResult};
 use super::aec_v2::{AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAecResult};
 
+// WebRTC APM processor (production-quality, optional)
+#[cfg(feature = "webrtc-apm")]
+use super::webrtc_apm::{WebRtcAudioProcessor, WebRtcApmConfig, WebRtcApmResult};
+
 /// Configuration for audio processing
 #[derive(Debug, Clone)]
 pub struct AudioProcessingConfig {
@@ -57,6 +61,15 @@ pub struct AudioProcessingConfig {
     /// Advanced AEC configuration
     pub advanced_aec_config: AdvancedAecConfig,
     
+    // WebRTC APM option (requires "webrtc-apm" feature)
+    /// When true and the "webrtc-apm" feature is enabled, use Google's WebRTC
+    /// AudioProcessing Module instead of the self-built v2 processors.
+    /// This replaces AEC, AGC, NS, and VAD with a single production-quality engine.
+    pub use_webrtc_apm: bool,
+    /// WebRTC APM configuration (only used when `use_webrtc_apm` is true).
+    #[cfg(feature = "webrtc-apm")]
+    pub webrtc_apm_config: WebRtcApmConfig,
+
     // NEW: Performance optimization options
     /// Enable SIMD optimizations for audio operations
     pub enable_simd_optimizations: bool,
@@ -87,6 +100,11 @@ impl Default for AudioProcessingConfig {
             use_advanced_aec: false,  // Disabled until far-end reference implemented
             advanced_aec_config: AdvancedAecConfig::default(),
             
+            // WebRTC APM: enabled by default when feature is available
+            use_webrtc_apm: cfg!(feature = "webrtc-apm"),
+            #[cfg(feature = "webrtc-apm")]
+            webrtc_apm_config: WebRtcApmConfig::default(),
+
             // NEW: Default performance settings
             enable_simd_optimizations: true,
             use_zero_copy_frames: true,
@@ -111,6 +129,9 @@ pub struct AudioProcessingResult {
     pub advanced_agc_result: Option<AdvancedAgcResult>,
     /// Advanced AEC result (v2)
     pub advanced_aec_result: Option<AdvancedAecResult>,
+    /// WebRTC APM result (when "webrtc-apm" feature is enabled)
+    #[cfg(feature = "webrtc-apm")]
+    pub webrtc_apm_result: Option<WebRtcApmResult>,
     /// Processing metrics
     pub metrics: AudioProcessingMetrics,
 }
@@ -150,7 +171,11 @@ pub struct AudioProcessor {
     advanced_agc: Option<Arc<RwLock<AdvancedAutomaticGainControl>>>,
     /// Advanced acoustic echo canceller (v2)
     advanced_aec: Option<Arc<RwLock<AdvancedAcousticEchoCanceller>>>,
-    
+
+    // WebRTC APM processor (production-quality, replaces v2 when enabled)
+    #[cfg(feature = "webrtc-apm")]
+    webrtc_apm: Option<Arc<RwLock<WebRtcAudioProcessor>>>,
+
     // NEW: Performance components
     /// Frame pool for efficient audio frame allocation
     frame_pool: Arc<AudioFramePool>,
@@ -265,7 +290,28 @@ impl AudioProcessor {
         } else {
             None
         };
-        
+
+        // Initialize WebRTC APM if feature is enabled and configured
+        #[cfg(feature = "webrtc-apm")]
+        let webrtc_apm = if config.use_webrtc_apm {
+            match WebRtcAudioProcessor::new(config.webrtc_apm_config.clone()) {
+                Ok(processor) => {
+                    debug!("WebRTC APM initialized successfully");
+                    Some(Arc::new(RwLock::new(processor)))
+                }
+                Err(e) => {
+                    warn!("Failed to initialize WebRTC APM, falling back to v2 processors: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        #[cfg(feature = "webrtc-apm")]
+        debug!("AudioProcessor created with processors: VAD v1={}, VAD v2={}, AGC v1={}, AGC v2={}, AEC v2={}, WebRTC APM={}",
+               vad.is_some(), advanced_vad.is_some(), agc.is_some(), advanced_agc.is_some(), advanced_aec.is_some(), webrtc_apm.is_some());
+        #[cfg(not(feature = "webrtc-apm"))]
         debug!("AudioProcessor created with processors: VAD v1={}, VAD v2={}, AGC v1={}, AGC v2={}, AEC v2={}",
                vad.is_some(), advanced_vad.is_some(), agc.is_some(), advanced_agc.is_some(), advanced_aec.is_some());
         
@@ -274,10 +320,13 @@ impl AudioProcessor {
             // V1 processors
             vad,
             agc,
-            // V2 processors  
+            // V2 processors
             advanced_vad,
             advanced_agc,
             advanced_aec,
+            // WebRTC APM
+            #[cfg(feature = "webrtc-apm")]
+            webrtc_apm,
             // Performance components
             frame_pool,
             simd_processor,
@@ -332,6 +381,8 @@ impl AudioProcessor {
             advanced_vad_result: None,
             advanced_agc_result: None,
             advanced_aec_result: None,
+            #[cfg(feature = "webrtc-apm")]
+            webrtc_apm_result: None,
             metrics: AudioProcessingMetrics {
                 processing_time_us: processing_time.as_micros() as u64,
                 frame_modified,
@@ -342,7 +393,7 @@ impl AudioProcessor {
             },
         })
     }
-    
+
     /// Process capture audio with advanced v2 processors and performance optimizations
     pub async fn process_capture_audio_v2(&self, input: &AudioFrame) -> Result<AudioProcessingResult> {
         let start_time = std::time::Instant::now();
@@ -384,47 +435,79 @@ impl AudioProcessor {
             input.clone()
         };
         
-        // Step 2: Advanced Echo Cancellation (AEC v2) - if enabled with far-end reference
-        if let Some(aec) = &self.advanced_aec {
-            // TODO: AEC requires far-end reference signal
-            // For now, skip AEC processing until far-end reference is available
-            debug!("AEC v2 enabled but far-end reference not available, skipping");
-        }
-        
-        // Step 3: Advanced Automatic Gain Control (AGC v2) - multi-band processing
-        if let Some(agc) = &self.advanced_agc {
-            let mut agc_processor = agc.write().await;
-            let result = agc_processor.process_frame(&processed_frame)?;
-            
-            // Apply processed samples
-            // TODO: Update AGC v2 to modify frame in-place for efficiency
-            advanced_agc_result = Some(result);
+        // WebRTC APM path: single processor replaces AEC + AGC + NS + VAD
+        #[cfg(feature = "webrtc-apm")]
+        let mut webrtc_apm_result = None;
+        #[cfg(feature = "webrtc-apm")]
+        let mut used_webrtc_apm = false;
+
+        #[cfg(feature = "webrtc-apm")]
+        if let Some(apm) = &self.webrtc_apm {
+            let mut apm_processor = apm.write().await;
+            let result = apm_processor.process_capture(&mut processed_frame.samples)?;
             frame_modified = true;
-        } else if let Some(agc) = &self.agc {
-            // Fallback to v1 AGC
-            let mut agc_processor = agc.write().await;
-            let result = agc_processor.process_frame(&processed_frame)?;
-            
-            // Apply the gain to the samples
-            if self.config.enable_simd_optimizations {
-                self.simd_processor.apply_gain(&input.samples, result.applied_gain, &mut processed_frame.samples);
-                simd_used = true;
-            } else {
-                agc_processor.apply_gain(&mut processed_frame.samples, result.applied_gain);
+            used_webrtc_apm = true;
+
+            // Map WebRTC APM VAD result to the v1 VadResult for backward compatibility
+            vad_result = Some(super::vad::VadResult {
+                is_voice: result.has_voice,
+                energy_level: 0.0,
+                zero_crossing_rate: 0.0,
+                confidence: result.speech_probability,
+            });
+
+            webrtc_apm_result = Some(result);
+        }
+
+        // Fallback: use self-built processors when WebRTC APM is not active
+        #[cfg(feature = "webrtc-apm")]
+        let skip_legacy = used_webrtc_apm;
+        #[cfg(not(feature = "webrtc-apm"))]
+        let skip_legacy = false;
+
+        if !skip_legacy {
+            // Step 2: Advanced Echo Cancellation (AEC v2) - if enabled with far-end reference
+            if let Some(_aec) = &self.advanced_aec {
+                // TODO: AEC requires far-end reference signal
+                // For now, skip AEC processing until far-end reference is available
+                debug!("AEC v2 enabled but far-end reference not available, skipping");
             }
-            agc_result = Some(result);
-            frame_modified = true;
-        }
-        
-        // Step 4: Advanced Voice Activity Detection (VAD v2) - spectral analysis
-        if let Some(vad) = &self.advanced_vad {
-            let mut vad_detector = vad.write().await;
-            let result = vad_detector.analyze_frame(&processed_frame)?;
-            advanced_vad_result = Some(result);
-        } else if let Some(vad) = &self.vad {
-            // Fallback to v1 VAD
-            let mut vad_detector = vad.write().await;
-            vad_result = Some(vad_detector.analyze_frame(&processed_frame)?);
+
+            // Step 3: Advanced Automatic Gain Control (AGC v2) - multi-band processing
+            if let Some(agc) = &self.advanced_agc {
+                let mut agc_processor = agc.write().await;
+                let result = agc_processor.process_frame(&processed_frame)?;
+
+                // Apply processed samples
+                // TODO: Update AGC v2 to modify frame in-place for efficiency
+                advanced_agc_result = Some(result);
+                frame_modified = true;
+            } else if let Some(agc) = &self.agc {
+                // Fallback to v1 AGC
+                let mut agc_processor = agc.write().await;
+                let result = agc_processor.process_frame(&processed_frame)?;
+
+                // Apply the gain to the samples
+                if self.config.enable_simd_optimizations {
+                    self.simd_processor.apply_gain(&input.samples, result.applied_gain, &mut processed_frame.samples);
+                    simd_used = true;
+                } else {
+                    agc_processor.apply_gain(&mut processed_frame.samples, result.applied_gain);
+                }
+                agc_result = Some(result);
+                frame_modified = true;
+            }
+
+            // Step 4: Advanced Voice Activity Detection (VAD v2) - spectral analysis
+            if let Some(vad) = &self.advanced_vad {
+                let mut vad_detector = vad.write().await;
+                let result = vad_detector.analyze_frame(&processed_frame)?;
+                advanced_vad_result = Some(result);
+            } else if let Some(vad) = &self.vad {
+                // Fallback to v1 VAD
+                let mut vad_detector = vad.write().await;
+                vad_result = Some(vad_detector.analyze_frame(&processed_frame)?);
+            }
         }
         
         let processing_time = start_time.elapsed();
@@ -453,6 +536,8 @@ impl AudioProcessor {
             advanced_vad_result,
             advanced_agc_result,
             advanced_aec_result,
+            #[cfg(feature = "webrtc-apm")]
+            webrtc_apm_result,
             metrics: AudioProcessingMetrics {
                 processing_time_us: processing_time.as_micros() as u64,
                 frame_modified,
@@ -463,7 +548,7 @@ impl AudioProcessor {
             },
         })
     }
-    
+
     /// Process playback audio (to speaker/output)
     pub async fn process_playback_audio(&self, input: &AudioFrame) -> Result<AudioProcessingResult> {
         let start_time = std::time::Instant::now();
@@ -501,6 +586,8 @@ impl AudioProcessor {
             advanced_vad_result: None,
             advanced_agc_result: None,
             advanced_aec_result: None,
+            #[cfg(feature = "webrtc-apm")]
+            webrtc_apm_result: None,
             metrics: AudioProcessingMetrics {
                 processing_time_us: processing_time.as_micros() as u64,
                 frame_modified,
@@ -551,7 +638,17 @@ impl AudioProcessor {
     
     /// Check if advanced processors are enabled
     pub fn are_advanced_processors_enabled(&self) -> bool {
+        #[cfg(feature = "webrtc-apm")]
+        if self.webrtc_apm.is_some() {
+            return true;
+        }
         self.advanced_vad.is_some() || self.advanced_agc.is_some() || self.advanced_aec.is_some()
+    }
+
+    /// Check if the WebRTC APM is active
+    #[cfg(feature = "webrtc-apm")]
+    pub fn is_webrtc_apm_enabled(&self) -> bool {
+        self.webrtc_apm.is_some()
     }
     
     /// Validate audio frame parameters
@@ -662,14 +759,16 @@ impl AudioProcessor {
 
 impl std::fmt::Debug for AudioProcessor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AudioProcessor")
-            .field("config", &self.config)
+        let mut s = f.debug_struct("AudioProcessor");
+        s.field("config", &self.config)
             .field("vad_enabled", &self.vad.is_some())
             .field("agc_enabled", &self.agc.is_some())
             .field("advanced_vad_enabled", &self.advanced_vad.is_some())
             .field("advanced_agc_enabled", &self.advanced_agc.is_some())
-            .field("advanced_aec_enabled", &self.advanced_aec.is_some())
-            .field("simd_available", &self.simd_processor.is_simd_available())
+            .field("advanced_aec_enabled", &self.advanced_aec.is_some());
+        #[cfg(feature = "webrtc-apm")]
+        s.field("webrtc_apm_enabled", &self.webrtc_apm.is_some());
+        s.field("simd_available", &self.simd_processor.is_simd_available())
             .finish()
     }
 } 

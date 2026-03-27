@@ -44,6 +44,7 @@ use super::message::handshake::{
 };
 use super::message::extension::{Extension, UseSrtpExtension, SrtpProtectionProfile};
 use super::{DtlsVersion, DtlsRole, Result};
+use crate::error::Error;
 use super::crypto::cipher::CipherSuiteId;
 use super::crypto::keys::{calculate_master_secret, generate_ecdhe_pre_master_secret};
 
@@ -227,8 +228,7 @@ impl HandshakeState {
             return;
         }
         
-        println!("Adding message to handshake buffer: {:?}, length: {}, from_client: {}", 
-                message_type, data.len(), is_from_client);
+        tracing::trace!(msg_type = ?message_type, len = data.len(), from_client = is_from_client, "Adding message to handshake buffer");
         
         // Construct a handshake header for this message
         let header = super::message::handshake::HandshakeHeader::new(
@@ -260,30 +260,14 @@ impl HandshakeState {
             self.handshake_messages.extend_from_slice(&self.client_handshake_messages);
             self.handshake_messages.extend_from_slice(&self.server_handshake_messages);
             
-            println!("Added message to handshake buffers. Combined size: {}, Client size: {}, Server size: {}", 
-                    self.handshake_messages.len(),
-                    self.client_handshake_messages.len(),
-                    self.server_handshake_messages.len());
+            tracing::trace!(
+                combined_size = self.handshake_messages.len(),
+                client_size = self.client_handshake_messages.len(),
+                server_size = self.server_handshake_messages.len(),
+                "Updated handshake buffers"
+            );
             
-            // Debug: dump first few bytes of each buffer
-            if cfg!(debug_assertions) {
-                let client_prefix = if !self.client_handshake_messages.is_empty() {
-                    let end = std::cmp::min(self.client_handshake_messages.len(), 16);
-                    format!("{:02X?}", &self.client_handshake_messages[..end])
-                } else {
-                    "[]".to_string()
-                };
-                
-                let server_prefix = if !self.server_handshake_messages.is_empty() {
-                    let end = std::cmp::min(self.server_handshake_messages.len(), 16);
-                    format!("{:02X?}", &self.server_handshake_messages[..end])
-                } else {
-                    "[]".to_string()
-                };
-                
-                println!("  - Client buffer prefix: {}", client_prefix);
-                println!("  - Server buffer prefix: {}", server_prefix);
-            }
+            // Buffer byte contents intentionally not logged to avoid leaking handshake secrets
         }
     }
     
@@ -298,14 +282,12 @@ impl HandshakeState {
         // which has been carefully constructed in transcript order
         let verify_buffer = &self.handshake_messages;
         
-        println!("Generating Finished message verify data:");
-        println!("  - Client messages size: {}", self.client_handshake_messages.len());
-        println!("  - Server messages size: {}", self.server_handshake_messages.len());
-        println!("  - Total verify buffer size: {}", verify_buffer.len());
-        println!("  - Verify buffer first bytes: {:02X?}", &verify_buffer[..std::cmp::min(verify_buffer.len(), 32)]);
-        
-        // Print detailed debug information
-        self.debug_verify_data();
+        tracing::debug!(
+            client_msgs_size = self.client_handshake_messages.len(),
+            server_msgs_size = self.server_handshake_messages.len(),
+            verify_buffer_size = verify_buffer.len(),
+            "Generating Finished message verify data [transcript bytes REDACTED]"
+        );
         
         // Calculate the verify data
         let verify_data = super::crypto::keys::calculate_verify_data(
@@ -315,7 +297,7 @@ impl HandshakeState {
             super::crypto::cipher::HashAlgorithm::Sha256, // Using SHA-256 for TLS 1.2
         )?;
         
-        println!("  - Generated verify data: {:02X?}", verify_data);
+        tracing::debug!(verify_data_len = verify_data.len(), "Generated verify data [REDACTED]");
         
         // Create and return the Finished message
         Ok(super::message::handshake::Finished::new(verify_data))
@@ -332,15 +314,13 @@ impl HandshakeState {
         let verify_buffer = &self.handshake_messages;
         
         // Print verification information for debugging
-        println!("Verifying Finished message:");
-        println!("  - Client messages size: {}", self.client_handshake_messages.len());
-        println!("  - Server messages size: {}", self.server_handshake_messages.len());
-        println!("  - Total verify buffer size: {}", verify_buffer.len());
-        println!("  - Verifying message from: {}", if self.role == DtlsRole::Client { "server" } else { "client" });
-        println!("  - Verify buffer first bytes: {:02X?}", &verify_buffer[..std::cmp::min(verify_buffer.len(), 32)]);
-        
-        // Print detailed debug information
-        self.debug_verify_data();
+        tracing::debug!(
+            client_msgs_size = self.client_handshake_messages.len(),
+            server_msgs_size = self.server_handshake_messages.len(),
+            verify_buffer_size = verify_buffer.len(),
+            verifying_from = if self.role == DtlsRole::Client { "server" } else { "client" },
+            "Verifying Finished message [transcript bytes REDACTED]"
+        );
         
         // Calculate the expected verify data
         let expected_verify_data = super::crypto::keys::calculate_verify_data(
@@ -351,22 +331,23 @@ impl HandshakeState {
             super::crypto::cipher::HashAlgorithm::Sha256, // Using SHA-256 for TLS 1.2
         )?;
         
-        println!("  - Expected verify data length: {}", expected_verify_data.len());
-        println!("  - Received verify data length: {}", finished.verify_data.len());
+        tracing::debug!(
+            expected_len = expected_verify_data.len(),
+            received_len = finished.verify_data.len(),
+            "Comparing verify data [REDACTED]"
+        );
         
         // Compare the verify data
         let result = expected_verify_data == finished.verify_data;
         
         if !result {
-            println!("WARNING: Finished message verification failed!");
-            println!("  - Expected: {:?}", expected_verify_data);
-            println!("  - Received: {:?}", finished.verify_data);
+            tracing::warn!("Finished message verification failed [verify data REDACTED]");
             
             return Err(crate::error::Error::DtlsHandshakeError(
                 "Finished message verification failed".to_string()
             ));
         } else {
-            println!("  - Finished message verification succeeded!");
+            tracing::debug!("Finished message verification succeeded");
         }
         
         Ok(result)
@@ -423,9 +404,7 @@ impl HandshakeState {
                         // Generate a new ClientHello with the cookie
                         let client_hello = self.generate_client_hello()?;
                         
-                        // Print client random for debugging
-                        println!("Client sending second ClientHello with random (first 8 bytes): {:02X?}", 
-                                 &client_hello.random[..8]);
+                        tracing::debug!("Client sending second ClientHello with cookie [random REDACTED]");
                         
                         // Clear the handshake buffers and add the new ClientHello
                         // This is because in DTLS, the handshake hash only starts from
@@ -482,7 +461,7 @@ impl HandshakeState {
             HandshakeStep::ReceivedServerHello => {
                 match message {
                     HandshakeMessage::ServerKeyExchange(server_key_exchange) => {
-                        println!("Client received ServerKeyExchange message");
+                        tracing::debug!("Client received ServerKeyExchange message");
                         
                         // Store server's public key
                         self.remote_ecdhe_public_key = Some(server_key_exchange.public_key.clone());
@@ -515,9 +494,7 @@ impl HandshakeState {
                                 // Store pre-master secret
                                 self.pre_master_secret = Some(pre_master_secret.to_vec());
                                 
-                                // Print first bytes of pre-master secret for debugging
-                                println!("Client pre-master secret first bytes: {:02X?}", 
-                                        &pre_master_secret[..std::cmp::min(pre_master_secret.len(), 8)]);
+                                tracing::debug!(len = pre_master_secret.len(), "Client pre-master secret derived [REDACTED]");
                                 
                                 // Calculate master secret
                                 if let (Some(client_random), Some(server_random)) = (&self.client_random, &self.server_random) {
@@ -531,9 +508,7 @@ impl HandshakeState {
                                     // Store master secret
                                     self.master_secret = Some(master_secret.to_vec());
                                     
-                                    // Print first bytes of master secret for debugging
-                                    println!("Client master secret first bytes: {:02X?}", 
-                                           &master_secret[..std::cmp::min(master_secret.len(), 8)]);
+                                    tracing::debug!(len = master_secret.len(), "Client master secret derived [REDACTED]");
                                 }
                             }
                         }
@@ -578,7 +553,7 @@ impl HandshakeState {
                             ));
                         }
                         
-                        println!("Successfully verified server Finished message");
+                        tracing::debug!("Successfully verified server Finished message");
                         
                         // Generate our own Finished message
                         let client_finished = self.generate_finished_message()?;
@@ -622,9 +597,7 @@ impl HandshakeState {
                         // Save client random
                         self.client_random = Some(client_hello.random);
                         
-                        // Print client random for debugging
-                        println!("Server received ClientHello with random (first 8 bytes): {:02X?}", 
-                                 &client_hello.random[..8]);
+                        tracing::debug!("Server received ClientHello [random REDACTED]");
                         
                         // Check for cookie
                         if client_hello.cookie.is_empty() {
@@ -660,9 +633,7 @@ impl HandshakeState {
                             // (In a real implementation, we'd verify the cookie)
                             
                             // This is the second ClientHello with cookie that we'll use for verification
-                            // Print client random again for confirmation
-                            println!("Server received ClientHello WITH COOKIE, random (first 8 bytes): {:02X?}", 
-                                     &client_hello.random[..8]);
+                            tracing::debug!("Server received ClientHello with cookie [random REDACTED]");
                             
                             // Generate a session ID
                             let mut rng = rand::thread_rng();
@@ -721,8 +692,8 @@ impl HandshakeState {
                             let server_hello = ServerHello::new(
                                 self.version,
                                 session_id,
-                                self.cipher_suite.unwrap(),
-                                self.compression_method.unwrap(),
+                                self.cipher_suite.ok_or_else(|| Error::DtlsHandshakeError("No cipher suite selected".to_string()))?,
+                                self.compression_method.ok_or_else(|| Error::DtlsHandshakeError("No compression method selected".to_string()))?,
                                 extensions,
                             );
                             
@@ -845,8 +816,8 @@ impl HandshakeState {
                         let server_hello = ServerHello::new(
                             self.version,
                             session_id,
-                            self.cipher_suite.unwrap(),
-                            self.compression_method.unwrap(),
+                            self.cipher_suite.ok_or_else(|| Error::DtlsHandshakeError("No cipher suite selected".to_string()))?,
+                            self.compression_method.ok_or_else(|| Error::DtlsHandshakeError("No compression method selected".to_string()))?,
                             extensions,
                         );
                         
@@ -897,7 +868,7 @@ impl HandshakeState {
             HandshakeStep::SentServerHello => {
                 match message {
                     HandshakeMessage::ClientKeyExchange(client_key_exchange) => {
-                        println!("Server received ClientKeyExchange, length: {}", client_key_exchange.exchange_data.len());
+                        tracing::debug!(exchange_data_len = client_key_exchange.exchange_data.len(), "Server received ClientKeyExchange");
                         
                         // Store client's public key
                         self.remote_ecdhe_public_key = Some(client_key_exchange.exchange_data.clone());
@@ -917,9 +888,7 @@ impl HandshakeState {
                                 // Store pre-master secret
                                 self.pre_master_secret = Some(pre_master_secret.to_vec());
                                 
-                                // Print first bytes of pre-master secret for debugging
-                                println!("Server pre-master secret first bytes: {:02X?}", 
-                                        &pre_master_secret[..std::cmp::min(pre_master_secret.len(), 8)]);
+                                tracing::debug!(len = pre_master_secret.len(), "Server pre-master secret derived [REDACTED]");
                                 
                                 // Calculate master secret
                                 if let (Some(client_random), Some(server_random)) = (&self.client_random, &self.server_random) {
@@ -933,9 +902,7 @@ impl HandshakeState {
                                     // Store master secret
                                     self.master_secret = Some(master_secret.to_vec());
                                     
-                                    // Print first bytes of master secret for debugging
-                                    println!("Server master secret first bytes: {:02X?}", 
-                                           &master_secret[..std::cmp::min(master_secret.len(), 8)]);
+                                    tracing::debug!(len = master_secret.len(), "Server master secret derived [REDACTED]");
                                 }
                             }
                         }
@@ -966,7 +933,7 @@ impl HandshakeState {
                             ));
                         }
                         
-                        println!("Successfully verified client Finished message");
+                        tracing::debug!("Successfully verified client Finished message");
                         
                         // Generate our own Finished message
                         let server_finished = self.generate_finished_message()?;
@@ -1052,13 +1019,11 @@ impl HandshakeState {
         if let Some(existing_random) = self.client_random {
             // Copy over the existing random to ensure consistency
             client_hello.random.copy_from_slice(&existing_random);
-            println!("Reusing existing client random (first 8 bytes): {:02X?}", 
-                     &client_hello.random[..8]);
+            tracing::trace!("Reusing existing client random [REDACTED]");
         } else {
             // Save the client random
             self.client_random = Some(client_hello.random);
-            println!("Generated new client random (first 8 bytes): {:02X?}", 
-                     &client_hello.random[..8]);
+            tracing::trace!("Generated new client random [REDACTED]");
         }
         
         Ok(client_hello)
@@ -1068,7 +1033,7 @@ impl HandshakeState {
     pub fn start(&mut self) -> Result<Vec<HandshakeMessage>> {
         match self.role {
             DtlsRole::Client => {
-                println!("Starting handshake as CLIENT");
+                tracing::debug!("Starting handshake as CLIENT");
                 // Generate ClientHello
                 let client_hello = self.generate_client_hello()?;
                 
@@ -1083,7 +1048,7 @@ impl HandshakeState {
                 Ok(vec![HandshakeMessage::ClientHello(client_hello)])
             }
             DtlsRole::Server => {
-                println!("Starting handshake as SERVER");
+                tracing::debug!("Starting handshake as SERVER");
                 // Server waits for ClientHello
                 self.step = HandshakeStep::Start;
                 Ok(Vec::new())
@@ -1131,9 +1096,24 @@ impl HandshakeState {
         self.server_random.as_ref()
     }
     
+    /// Get the negotiated cipher suite identifier
+    pub fn cipher_suite(&self) -> Option<u16> {
+        self.cipher_suite
+    }
+
     /// Get the negotiated SRTP profile
     pub fn srtp_profile(&self) -> Option<u16> {
         self.srtp_profile
+    }
+
+    /// Get the server certificate data (DER-encoded), if received during handshake
+    pub fn server_certificate(&self) -> Option<&[u8]> {
+        self.server_certificate.as_deref()
+    }
+
+    /// Get the client certificate data (DER-encoded), if received during handshake
+    pub fn client_certificate(&self) -> Option<&[u8]> {
+        self.client_certificate.as_deref()
     }
 
     /// Get the cookie if any (debug helper)
@@ -1157,8 +1137,7 @@ impl HandshakeState {
     /// the same verification data.
     pub fn force_verification_buffer(&mut self, buffer: Vec<u8>) -> Result<()> {
         // Store the buffer to be used for verification
-        println!("Forcing verification buffer, length: {}", buffer.len());
-        println!("Buffer first bytes: {:02X?}", &buffer[..std::cmp::min(buffer.len(), 32)]);
+        tracing::debug!(buffer_len = buffer.len(), "Forcing verification buffer [contents REDACTED]");
         
         // Replace the combined handshake_messages buffer
         self.handshake_messages = buffer;
@@ -1166,88 +1145,18 @@ impl HandshakeState {
         Ok(())
     }
 
-    /// Print a debug comparison of handshake messages for verification
+    /// Log non-secret handshake state metadata for debugging.
+    /// Never logs key material, verify data, or raw transcript bytes.
     pub fn debug_verify_data(&self) {
-        // Log which messages we have
-        println!("*** DEBUG HANDSHAKE STATE ***");
-        println!("Role: {:?}", self.role);
-        println!("Step: {:?}", self.step);
-        println!("Client messages length: {} bytes", self.client_handshake_messages.len());
-        println!("Server messages length: {} bytes", self.server_handshake_messages.len());
-        println!("Combined messages length: {} bytes", self.handshake_messages.len());
-        
-        // Analyze client messages
-        println!("Client messages:");
-        if !self.client_handshake_messages.is_empty() {
-            let mut pos = 0;
-            while pos < self.client_handshake_messages.len() {
-                if pos + 12 <= self.client_handshake_messages.len() {
-                    if let Ok((header, header_size)) = super::message::handshake::HandshakeHeader::parse(&self.client_handshake_messages[pos..]) {
-                        println!("  - Type: {:?}, Length: {}, Offset: {}", header.msg_type, header.fragment_length, pos);
-                        pos += header_size + header.fragment_length as usize;
-                    } else {
-                        println!("  - Failed to parse header at offset {}", pos);
-                        break;
-                    }
-                } else {
-                    println!("  - Incomplete message at offset {}", pos);
-                    break;
-                }
-            }
-        } else {
-            println!("  - No client messages");
-        }
-        
-        // Analyze server messages
-        println!("Server messages:");
-        if !self.server_handshake_messages.is_empty() {
-            let mut pos = 0;
-            while pos < self.server_handshake_messages.len() {
-                if pos + 12 <= self.server_handshake_messages.len() {
-                    if let Ok((header, header_size)) = super::message::handshake::HandshakeHeader::parse(&self.server_handshake_messages[pos..]) {
-                        println!("  - Type: {:?}, Length: {}, Offset: {}", header.msg_type, header.fragment_length, pos);
-                        pos += header_size + header.fragment_length as usize;
-                    } else {
-                        println!("  - Failed to parse header at offset {}", pos);
-                        break;
-                    }
-                } else {
-                    println!("  - Incomplete message at offset {}", pos);
-                    break;
-                }
-            }
-        } else {
-            println!("  - No server messages");
-        }
-        
-        // Compare hash values for debugging
-        if let Some(master_secret) = &self.master_secret {
-            // Hash for client Finished
-            let client_verify = super::crypto::keys::calculate_verify_data(
-                master_secret,
-                &self.handshake_messages,
-                true, // is client
-                super::crypto::cipher::HashAlgorithm::Sha256,
-            );
-            
-            // Hash for server Finished
-            let server_verify = super::crypto::keys::calculate_verify_data(
-                master_secret,
-                &self.handshake_messages,
-                false, // is server
-                super::crypto::cipher::HashAlgorithm::Sha256,
-            );
-            
-            if let Ok(client_data) = client_verify {
-                println!("Expected client verify data: {:02X?}", client_data);
-            }
-            
-            if let Ok(server_data) = server_verify {
-                println!("Expected server verify data: {:02X?}", server_data);
-            }
-        }
-        
-        println!("****************************");
+        tracing::debug!(
+            role = ?self.role,
+            step = ?self.step,
+            client_msgs_len = self.client_handshake_messages.len(),
+            server_msgs_len = self.server_handshake_messages.len(),
+            combined_msgs_len = self.handshake_messages.len(),
+            has_master_secret = self.master_secret.is_some(),
+            "Handshake state [key material and transcript bytes REDACTED]"
+        );
     }
 
     /// Synchronize handshake state between client and server
@@ -1271,10 +1180,12 @@ impl HandshakeState {
         self.handshake_messages.extend_from_slice(&self.client_handshake_messages);
         self.handshake_messages.extend_from_slice(&self.server_handshake_messages);
         
-        println!("Synchronized handshake verification data:");
-        println!("  - Client messages: {} bytes", self.client_handshake_messages.len());
-        println!("  - Server messages: {} bytes", self.server_handshake_messages.len());
-        println!("  - Combined buffer: {} bytes", self.handshake_messages.len());
+        tracing::debug!(
+            client_msgs_len = self.client_handshake_messages.len(),
+            server_msgs_len = self.server_handshake_messages.len(),
+            combined_len = self.handshake_messages.len(),
+            "Synchronized handshake verification data"
+        );
         
         self.debug_verify_data();
         

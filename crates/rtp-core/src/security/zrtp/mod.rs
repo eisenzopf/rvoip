@@ -366,11 +366,16 @@ impl Zrtp {
         commit.set_zid(&self.zid);
         
         // Set selected algorithms
-        commit.set_cipher(self.selected_cipher.unwrap());
-        commit.set_hash(self.selected_hash.unwrap());
-        commit.set_auth_tag(self.selected_auth_tag.unwrap());
-        commit.set_key_agreement(self.selected_key_agreement.unwrap());
-        commit.set_sas_type(self.selected_sas_type.unwrap());
+        commit.set_cipher(self.selected_cipher
+            .ok_or_else(|| Error::NegotiationFailed("No cipher selected".into()))?);
+        commit.set_hash(self.selected_hash
+            .ok_or_else(|| Error::NegotiationFailed("No hash selected".into()))?);
+        commit.set_auth_tag(self.selected_auth_tag
+            .ok_or_else(|| Error::NegotiationFailed("No auth tag selected".into()))?);
+        commit.set_key_agreement(self.selected_key_agreement
+            .ok_or_else(|| Error::NegotiationFailed("No key agreement selected".into()))?);
+        commit.set_sas_type(self.selected_sas_type
+            .ok_or_else(|| Error::NegotiationFailed("No SAS type selected".into()))?);
         
         // Generate DH key pair based on selected key agreement
         if self.selected_key_agreement == Some(ZrtpKeyAgreement::EC25) {
@@ -394,11 +399,16 @@ impl Zrtp {
         }
         
         // Extract selected algorithms
-        self.selected_cipher = Some(packet.cipher().unwrap());
-        self.selected_hash = Some(packet.hash().unwrap());
-        self.selected_auth_tag = Some(packet.auth_tag().unwrap());
-        self.selected_key_agreement = Some(packet.key_agreement().unwrap());
-        self.selected_sas_type = Some(packet.sas_type().unwrap());
+        self.selected_cipher = Some(packet.cipher().ok_or_else(||
+            Error::InvalidMessage("Missing cipher in Commit message".into()))?);
+        self.selected_hash = Some(packet.hash().ok_or_else(||
+            Error::InvalidMessage("Missing hash algorithm in Commit message".into()))?);
+        self.selected_auth_tag = Some(packet.auth_tag().ok_or_else(||
+            Error::InvalidMessage("Missing auth tag in Commit message".into()))?);
+        self.selected_key_agreement = Some(packet.key_agreement().ok_or_else(||
+            Error::InvalidMessage("Missing key agreement in Commit message".into()))?);
+        self.selected_sas_type = Some(packet.sas_type().ok_or_else(||
+            Error::InvalidMessage("Missing SAS type in Commit message".into()))?);
         
         // Generate DH key pair based on selected key agreement
         if self.selected_key_agreement == Some(ZrtpKeyAgreement::EC25) {
@@ -703,7 +713,9 @@ impl Zrtp {
                 
                 for _ in 0..4 {
                     let index = (value & 0x1F) as usize;
-                    sas.insert(0, charset.chars().nth(index).unwrap());
+                    let ch = charset.chars().nth(index)
+                        .ok_or_else(|| Error::CryptoError(format!("SAS character index {} out of range", index)))?;
+                    sas.insert(0, ch);
                     value >>= 5;
                 }
                 

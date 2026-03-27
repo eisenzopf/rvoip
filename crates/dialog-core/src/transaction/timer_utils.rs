@@ -84,10 +84,14 @@ pub async fn start_timer_with_transition(
         debug!(id=%tx_id_clone, timer=%timer_name_clone, "Timer fired with transition to {:?}", state);
         
         // First send the timer event
-        let _ = cmd_tx_clone.send(InternalTransactionCommand::Timer(timer_name_clone.clone())).await;
-        
+        if let Err(e) = cmd_tx_clone.send(InternalTransactionCommand::Timer(timer_name_clone.clone())).await {
+            tracing::debug!("Failed to send Timer command (channel closed): {e}");
+        }
+
         // Then send the transition command
-        let _ = cmd_tx_clone.send(InternalTransactionCommand::TransitionTo(state)).await;
+        if let Err(e) = cmd_tx_clone.send(InternalTransactionCommand::TransitionTo(state)).await {
+            tracing::debug!("Failed to send TransitionTo command (channel closed): {e}");
+        }
     });
     
     trace!(id=%tx_id, timer=%timer_name, interval=?interval, target_state=?target_state, "Started timer with transition");

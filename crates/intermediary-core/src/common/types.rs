@@ -1,7 +1,6 @@
 //! Common types used throughout the intermediary-core library
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Unique identifier for an intermediary session
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

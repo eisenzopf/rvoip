@@ -243,7 +243,7 @@ impl PresenceCoordinator {
             watcher,
             presentity: presentity.clone(),
             event_package,
-            expires_at: Utc::now() + chrono::Duration::from_std(expires).unwrap(),
+            expires_at: Utc::now() + chrono::Duration::from_std(expires).unwrap_or(chrono::Duration::zero()),
             state: SubscriptionState::Pending,
         };
         

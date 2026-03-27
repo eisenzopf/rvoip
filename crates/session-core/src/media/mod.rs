@@ -18,6 +18,7 @@ pub mod bridge;
 pub mod stats;
 pub mod rtp_encoder;
 pub mod sdp_utils;
+pub mod srtp_bridge;
 
 // Re-exports for convenience
 pub use manager::MediaManager;
@@ -32,6 +33,7 @@ pub use sdp_utils::{
     parse_media_directions,
     validate_hold_response,
 };
+pub use srtp_bridge::SrtpMediaBridge;
 
 /// Media integration result type
 pub type MediaResult<T> = Result<T, MediaError>;
@@ -69,6 +71,18 @@ pub enum MediaError {
     
     #[error("RTP processing fallback failed: {message}")]
     RtpProcessingFallback { message: String },
+
+    #[error("SRTP error: {message}")]
+    Srtp { message: String },
+
+    #[error("DTLS handshake error: {message}")]
+    DtlsHandshake { message: String },
+
+    #[error("ICE error: {message}")]
+    Ice { message: String },
+
+    #[error("SRTP security downgrade: {message}")]
+    SrtpSecurityDowngrade { message: String },
 }
 
 impl MediaError {

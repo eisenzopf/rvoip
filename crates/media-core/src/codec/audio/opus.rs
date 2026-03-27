@@ -181,7 +181,9 @@ impl AudioCodec for OpusCodec {
                 }.into());
             }
             
-            let encoder = self.encoder.as_mut().unwrap();
+            let encoder = self.encoder.as_mut().ok_or_else(|| CodecError::InitializationFailed {
+                reason: "Opus encoder not initialized after ensure_encoder".to_string(),
+            })?;
             let mut output = vec![0u8; 4000]; // Max Opus packet size
             
             let encoded_size = encoder.encode(&audio_frame.samples, &mut output)
@@ -207,7 +209,9 @@ impl AudioCodec for OpusCodec {
         {
             self.ensure_decoder()?;
             
-            let decoder = self.decoder.as_mut().unwrap();
+            let decoder = self.decoder.as_mut().ok_or_else(|| CodecError::InitializationFailed {
+                reason: "Opus decoder not initialized after ensure_decoder".to_string(),
+            })?;
             let mut output = vec![0i16; self.frame_size];
             
             let decoded_samples = decoder.decode(encoded_data, &mut output, false)
@@ -247,10 +251,14 @@ impl AudioCodec for OpusCodec {
         #[cfg(feature = "opus")]
         {
             if let Some(encoder) = &mut self.encoder {
-                let _ = encoder.reset_state();
+                if let Err(e) = encoder.reset_state() {
+                    warn!("Failed to reset Opus encoder state: {}", e);
+                }
             }
             if let Some(decoder) = &mut self.decoder {
-                let _ = decoder.reset_state();
+                if let Err(e) = decoder.reset_state() {
+                    warn!("Failed to reset Opus decoder state: {}", e);
+                }
             }
         }
         debug!("Opus codec reset");

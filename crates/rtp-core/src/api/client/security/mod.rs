@@ -76,50 +76,52 @@ pub(crate) fn convert_to_dtls_profile(profile: SrtpProfile) -> crate::dtls::mess
 }
 
 /// Create a DtlsConfig from API ClientSecurityConfig
-pub(crate) fn create_dtls_config(config: &ClientSecurityConfig) -> DtlsConfig {
+pub(crate) fn create_dtls_config(config: &ClientSecurityConfig) -> Result<DtlsConfig, SecurityError> {
     // Verify that SRTP profiles are specified
     if config.srtp_profiles.is_empty() {
-        panic!("No SRTP profiles specified in client security config");
+        return Err(SecurityError::Configuration("No SRTP profiles specified in client security config".to_string()));
     }
 
     // Convert our API profiles to DTLS profiles
     let dtls_profiles: Vec<crate::dtls::message::extension::SrtpProtectionProfile> = config.srtp_profiles.iter()
         .map(|p| convert_to_dtls_profile(*p))
         .collect();
-    
+
     // Create DTLS config with client role
     let mut dtls_config = DtlsConfig::default();
     dtls_config.role = DtlsRole::Client;
-    
+
     // We need to convert the SrtpProtectionProfile values to SrtpCryptoSuite values
-    let crypto_suites: Vec<crate::srtp::SrtpCryptoSuite> = dtls_profiles.iter()
-        .map(|profile| match profile {
-            &crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_80 => 
+    let mut crypto_suites: Vec<crate::srtp::SrtpCryptoSuite> = Vec::new();
+    for profile in &dtls_profiles {
+        let suite = match profile {
+            &crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_80 =>
                 crate::srtp::SRTP_AES128_CM_SHA1_80,
-            &crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_32 => 
+            &crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_32 =>
                 crate::srtp::SRTP_AES128_CM_SHA1_32,
-            &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes128Gcm => 
+            &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes128Gcm =>
                 crate::srtp::SRTP_AEAD_AES_128_GCM,
-            &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes256Gcm => 
+            &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes256Gcm =>
                 crate::srtp::SRTP_AEAD_AES_256_GCM,
-            &crate::dtls::message::extension::SrtpProtectionProfile::Unknown(_) => 
-                panic!("Unknown SRTP protection profile specified"), // Don't silently default
-        })
-        .collect();
-    
+            &crate::dtls::message::extension::SrtpProtectionProfile::Unknown(id) =>
+                return Err(SecurityError::Configuration(format!("Unknown SRTP protection profile: {}", id))),
+        };
+        crypto_suites.push(suite);
+    }
+
     // Never use a default - if no crypto suites were mapped, that's an error
     if crypto_suites.is_empty() {
-        panic!("Failed to map any SRTP profiles to crypto suites");
+        return Err(SecurityError::Configuration("Failed to map any SRTP profiles to crypto suites".to_string()));
     }
-    
+
     // Set the mapped crypto suites
     dtls_config.srtp_profiles = crypto_suites;
-    
+
     // Set appropriate mtu and timeout values
     dtls_config.mtu = 1200;
     dtls_config.max_retransmissions = 5;
-    
-    dtls_config
+
+    Ok(dtls_config)
 }
 
 /// Client security context interface

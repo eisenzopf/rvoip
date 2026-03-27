@@ -17,11 +17,11 @@
 //! - Supports SDP offer/answer model for media changes
 //! - Generates appropriate responses (200 OK, 4xx/5xx errors)
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use rvoip_sip_core::{Request, StatusCode};
 use crate::transaction::utils::response_builders;
-use crate::dialog::DialogId;
+use crate::dialog::{DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
 use crate::manager::{DialogManager, SessionCoordinator, SourceExtractor};
@@ -54,15 +54,16 @@ impl UpdateHandler for DialogManager {
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for UPDATE: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
-            
+            let mut response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            response_builders::fix_via_nat(&mut response, source);
+
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to UPDATE: {}", e),
                 })?;
-            
+
             debug!("UPDATE processed with 481 response (no dialog found)");
             Ok(())
         }
@@ -74,7 +75,33 @@ impl DialogManager {
     /// Process UPDATE within a dialog
     pub async fn process_update_in_dialog(&self, request: Request, dialog_id: DialogId) -> DialogResult<()> {
         debug!("Processing UPDATE for dialog {}", dialog_id);
-        
+
+        // Verify dialog is in Confirmed or Early state (RFC 3311)
+        {
+            let dialog = self.get_dialog(&dialog_id)?;
+            if !matches!(dialog.state, DialogState::Confirmed | DialogState::Early) {
+                warn!("UPDATE received for dialog {} in {:?} state, rejecting with 481", dialog_id, dialog.state);
+                let source = SourceExtractor::extract_from_request(&request);
+                let server_transaction = self.transaction_manager
+                    .create_server_transaction(request.clone(), source)
+                    .await
+                    .map_err(|e| DialogError::TransactionError {
+                        message: format!("Failed to create server transaction for UPDATE rejection: {}", e),
+                    })?;
+                let transaction_id = server_transaction.id().clone();
+                let mut response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+                response_builders::fix_via_nat(&mut response, source);
+                self.transaction_manager.send_response(&transaction_id, response).await
+                    .map_err(|e| DialogError::TransactionError {
+                        message: format!("Failed to send 481 response to UPDATE: {}", e),
+                    })?;
+                return Err(DialogError::InvalidState {
+                    expected: "Confirmed or Early".to_string(),
+                    actual: format!("{:?}", dialog.state),
+                });
+            }
+        }
+
         // Update dialog sequence number
         {
             let mut dialog = self.get_dialog_mut(&dialog_id)?;

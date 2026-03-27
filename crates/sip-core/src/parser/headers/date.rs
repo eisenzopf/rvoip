@@ -171,7 +171,9 @@ pub fn sip_date(input: &[u8]) -> ParseResult<DateTime<FixedOffset>> {
     };
     
     let naive_datetime = NaiveDateTime::new(naive_date, naive_time);
-    let datetime = DateTime::<FixedOffset>::from_utc(naive_datetime, FixedOffset::east_opt(0).unwrap());
+    let utc_offset = FixedOffset::east_opt(0)
+        .ok_or_else(|| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Verify)))?;
+    let datetime = DateTime::<FixedOffset>::from_utc(naive_datetime, utc_offset);
     
     Ok((remaining, datetime))
 }

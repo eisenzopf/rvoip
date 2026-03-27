@@ -113,7 +113,9 @@ fn parse_time_with_unit_nom(input: &str) -> IResult<&str, u64> {
     
     // Parse numeric part followed by unit
     let (input, numeric_part) = digit1(input)?;
-    let num_value = numeric_part.parse::<u64>().unwrap();
+    let num_value = numeric_part.parse::<u64>().map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(numeric_part, nom::error::ErrorKind::Digit))
+    })?;
     
     // Get the unit (single character)
     let (input, unit) = recognize(take_while1(|c: char| 

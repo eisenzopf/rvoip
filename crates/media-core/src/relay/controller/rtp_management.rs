@@ -37,15 +37,19 @@ impl MediaSessionController {
     }
     
     /// Send RTP packet for a dialog
+    ///
+    // SRTP is handled transparently by SecurityRtpTransport when configured.
+    // The RtpSession is constructed with a SecurityRtpTransport that encrypts
+    // outbound packets and decrypts inbound packets at the transport layer.
     pub async fn send_rtp_packet(&self, dialog_id: &DialogId, payload: Vec<u8>, timestamp: u32) -> Result<()> {
         let rtp_session = self.get_rtp_session(dialog_id).await
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-        
+
         let mut session = rtp_session.lock().await;
         let payload_len = payload.len();
         session.send_packet(timestamp, Bytes::from(payload), false).await
             .map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
-        
+
         info!("📤 Sent RTP packet for dialog: {} (timestamp: {}, payload: {} bytes)", dialog_id, timestamp, payload_len);
         Ok(())
     }
@@ -380,7 +384,7 @@ impl MediaSessionController {
             8 => {
                 // PCMA encoding - create temporary codec
                 use crate::codec::audio::G711Codec;
-                let mut codec = G711Codec::a_law(8000, 1)?;
+                let mut codec = G711Codec::a_law(8000, 1);
                 codec.encode(&audio_frame)?
             },
             _ => {
@@ -394,8 +398,72 @@ impl MediaSessionController {
         info!("📡 About to send RTP packet for dialog: {} with {} bytes payload", dialog_id, encoded_payload.len());
         self.send_rtp_packet(dialog_id, encoded_payload, timestamp).await?;
         
-        info!("✅ Encoded and sent audio frame for dialog: {} (codec PT: {}, timestamp: {})", 
+        info!("✅ Encoded and sent audio frame for dialog: {} (codec PT: {}, timestamp: {})",
                dialog_id, codec_payload_type, timestamp);
+        Ok(())
+    }
+
+    /// Send a DTMF digit via RFC 4733 RTP telephone-event packets.
+    ///
+    /// Generates the full packet sequence for a single key-press and transmits
+    /// each packet with the negotiated telephone-event payload type.  All
+    /// packets share the same RTP timestamp (the start of the event); only the
+    /// duration field and sequence numbers increment per RFC 4733.
+    ///
+    /// # Arguments
+    ///
+    /// * `dialog_id` - The dialog/session to send the DTMF event on.
+    /// * `event`     - The DTMF digit to send.
+    /// * `duration_ms` - How long the key-press lasts, in milliseconds.
+    /// * `payload_type` - The negotiated telephone-event payload type (commonly 101).
+    //
+    // SRTP is handled transparently by SecurityRtpTransport when configured.
+    // DTMF packets are encrypted at the transport layer just like audio packets.
+    pub async fn send_dtmf_rtp(
+        &self,
+        dialog_id: &DialogId,
+        event: crate::dtmf::DtmfEvent,
+        duration_ms: u32,
+        payload_type: u8,
+    ) -> Result<()> {
+        info!(
+            "Sending RFC 4733 DTMF '{}' for dialog {} (PT={}, {}ms)",
+            event, dialog_id, payload_type, duration_ms
+        );
+
+        let rtp_session = self.get_rtp_session(dialog_id).await
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
+        let packets = crate::dtmf::generate_dtmf_rtp_packets(
+            event,
+            duration_ms,
+            crate::dtmf::TELEPHONE_EVENT_CLOCK_RATE,
+        );
+
+        // The RTP timestamp for all packets of one event is the same — the
+        // timestamp at which the event started.  We pick the "next" timestamp
+        // from the RTP session by reading the current sequence state.
+        let base_timestamp: u32 = {
+            let session = rtp_session.lock().await;
+            // Use the session's last timestamp + a small gap as the event start
+            session.last_timestamp().wrapping_add(160)
+        };
+
+        for dtmf_pkt in &packets {
+            let payload = crate::dtmf::encode_dtmf_packet(dtmf_pkt);
+            let mut session = rtp_session.lock().await;
+            session
+                .send_packet_with_pt(base_timestamp, Bytes::copy_from_slice(&payload), dtmf_pkt.end_of_event, payload_type)
+                .await
+                .map_err(|e| Error::config(format!("Failed to send DTMF RTP packet: {}", e)))?;
+        }
+
+        info!(
+            "Sent {} RFC 4733 packets for DTMF '{}' on dialog {}",
+            packets.len(),
+            event,
+            dialog_id
+        );
         Ok(())
     }
 } 

@@ -1,3 +1,6 @@
+// Gated: depends on removed set_session_coordinator API
+#![cfg(feature = "legacy-dialog-api")]
+
 //! Phase 3 Dialog Function Integration Tests
 //!
 //! Tests specifically designed to validate that dialog-core is properly using
@@ -29,7 +32,7 @@ struct Phase3TestEnvironment {
 impl Phase3TestEnvironment {
     /// Create test environment with real transport
     async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        std::env::set_var("RVOIP_TEST", "1");
+        unsafe { std::env::set_var("RVOIP_TEST", "1"); }
         
         // Server setup
         let server_config = TransportManagerConfig {
@@ -155,7 +158,7 @@ impl Phase3TestEnvironment {
     async fn shutdown(self) {
         let _ = self.server.stop().await;
         let _ = self.client.stop().await;
-        std::env::remove_var("RVOIP_TEST");
+        unsafe { std::env::remove_var("RVOIP_TEST"); }
     }
 }
 

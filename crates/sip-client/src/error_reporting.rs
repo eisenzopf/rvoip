@@ -153,8 +153,8 @@ impl ErrorReporter {
                     error_string: error.to_string(),
                     description: "Operation not allowed in current state".to_string(),
                     actions,
-                    technical_details: if expected.is_some() && actual.is_some() {
-                        Some(format!("Expected: {}, Actual: {}", expected.unwrap(), actual.unwrap()))
+                    technical_details: if let (Some(exp), Some(act)) = (&expected, &actual) {
+                        Some(format!("Expected: {}, Actual: {}", exp, act))
                     } else {
                         Some(message.clone())
                     },
@@ -212,27 +212,27 @@ impl ErrorReporter {
         let mut message = String::new();
         
         // Header
-        writeln!(&mut message, "❌ {}", context.description).unwrap();
-        writeln!(&mut message).unwrap();
+        let _ = writeln!(&mut message, "❌ {}", context.description);
+        let _ = writeln!(&mut message);
         
         // Suggested actions
         if !context.actions.is_empty() {
-            writeln!(&mut message, "💡 What you can do:").unwrap();
+            let _ = writeln!(&mut message, "💡 What you can do:");
             for (i, action) in context.actions.iter().enumerate() {
-                writeln!(&mut message, "   {}. {}", i + 1, action).unwrap();
+                let _ = writeln!(&mut message, "   {}. {}", i + 1, action);
             }
-            writeln!(&mut message).unwrap();
+            let _ = writeln!(&mut message);
         }
         
         // Error code for support
-        writeln!(&mut message, "📋 Error code: {}", context.error_code).unwrap();
+        let _ = writeln!(&mut message, "📋 Error code: {}", context.error_code);
         
         // Technical details (if in debug mode)
         if cfg!(debug_assertions) {
             if let Some(details) = &context.technical_details {
-                writeln!(&mut message).unwrap();
-                writeln!(&mut message, "🔧 Technical details:").unwrap();
-                writeln!(&mut message, "   {}", details).unwrap();
+                let _ = writeln!(&mut message);
+                let _ = writeln!(&mut message, "🔧 Technical details:");
+                let _ = writeln!(&mut message, "   {}", details);
             }
         }
         

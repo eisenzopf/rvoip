@@ -15,7 +15,7 @@ use super::{registry::SessionRegistry, events::SessionEventProcessor, cleanup::C
 
 // High-level integration with dialog and media modules (parallel abstraction levels)
 use crate::dialog::{DialogManager, SessionDialogCoordinator, DialogBuilder};
-use crate::media::{MediaManager, SessionMediaCoordinator}; // TODO: Add MediaManager when implemented
+use crate::media::{MediaManager, SessionMediaCoordinator};
 use rvoip_dialog_core::events::SessionCoordinationEvent;
 
 /// Main SessionManager that coordinates all session operations
@@ -245,12 +245,21 @@ impl SessionManager {
             to: call.to.clone(),
             call_state: call.state.clone(),
         }).await?;
-        
+
         // Create SIP INVITE and dialog using DialogManager (high-level delegation)
-        let _dialog_handle = self.dialog_manager
+        let _dialog_handle = match self.dialog_manager
             .create_outgoing_call(session_id.clone(), from, to, sdp, sip_call_id)
             .await
-            .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to create call via dialog manager: {}", e)))?;
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                // Rollback: unregister the session since dialog creation failed
+                if let Err(unreg_err) = self.registry.unregister_session(&session_id).await {
+                    tracing::warn!("Failed to rollback session registration for {}: {}", session_id, unreg_err);
+                }
+                return Err(crate::errors::SessionError::internal(&format!("Failed to create call via dialog manager: {}", e)));
+            }
+        };
         tracing::info!("Created outgoing call: {} -> {}", from, to);
         Ok(call)
     }

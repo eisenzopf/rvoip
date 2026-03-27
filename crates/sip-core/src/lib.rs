@@ -202,6 +202,7 @@ pub mod types;
 pub mod builder;
 pub mod parser;
 pub mod macros;
+pub mod auth;
 pub mod validation;
 #[cfg(feature = "sdp")]
 pub mod sdp;

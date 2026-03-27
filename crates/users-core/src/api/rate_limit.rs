@@ -10,7 +10,7 @@ use axum::{
     http::{Request, StatusCode, header},
     extract::{State, ConnectInfo},
 };
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 #[derive(Clone)]
 pub struct EnhancedRateLimiter {
@@ -30,6 +30,10 @@ pub struct RateLimitConfig {
     pub login_attempts_per_hour: usize,
     pub lockout_duration: Duration,
     pub cleanup_interval: Duration,
+    /// IP addresses of trusted reverse proxies. Only trust X-Real-IP / X-Forwarded-For
+    /// headers when the direct peer connection originates from one of these addresses.
+    /// If empty, proxy headers are never trusted and the socket peer IP is always used.
+    pub trusted_proxies: Vec<IpAddr>,
 }
 
 impl Default for RateLimitConfig {
@@ -40,6 +44,7 @@ impl Default for RateLimitConfig {
             login_attempts_per_hour: 5,
             lockout_duration: Duration::from_secs(900), // 15 minutes
             cleanup_interval: Duration::from_secs(300), // 5 minutes
+            trusted_proxies: Vec::new(), // No proxies trusted by default
         }
     }
 }
@@ -81,6 +86,21 @@ impl EnhancedRateLimiter {
         }
     }
     
+    /// Check if an account is currently locked without recording a new attempt.
+    /// Use this to short-circuit expensive operations (e.g. Argon2) for locked accounts.
+    pub async fn is_account_locked(&self, username: &str) -> Result<(), RateLimitError> {
+        let failed_logins = self.failed_logins.read().await;
+        if let Some(info) = failed_logins.get(username) {
+            if let Some(locked_until) = info.locked_until {
+                let now = Instant::now();
+                if now < locked_until {
+                    return Err(RateLimitError::AccountLocked(locked_until - now));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn record_failed_login(&self, username: &str) -> Result<(), RateLimitError> {
         let mut failed_logins = self.failed_logins.write().await;
         let now = Instant::now();
@@ -240,13 +260,20 @@ pub async fn rate_limit_middleware(
         .and_then(|value| value.to_str().ok())
     {
         if let Some(token) = auth_header.strip_prefix("Bearer ") {
-            // Try to decode the JWT to get the user ID
+            // Try to decode the JWT to get the user ID, using JwtConfig for algorithm/issuer/audience
+            let jwt_config = &state.auth_service.jwt_issuer().config;
             if let Ok(public_key) = state.auth_service.jwt_issuer().public_key_pem() {
                 if let Ok(decoding_key) = DecodingKey::from_rsa_pem(public_key.as_bytes()) {
-                    let mut validation = Validation::new(Algorithm::RS256);
-                    validation.set_issuer(&["https://users.rvoip.local"]);
-                    validation.set_audience(&["rvoip-api", "rvoip-sip"]);
-                    
+                    let algorithm = match jwt_config.algorithm.as_str() {
+                        "RS256" => Algorithm::RS256,
+                        "HS256" => Algorithm::HS256,
+                        _ => Algorithm::RS256, // fallback for rate-limit best-effort decode
+                    };
+                    let mut validation = Validation::new(algorithm);
+                    validation.set_issuer(&[&jwt_config.issuer]);
+                    let audience_refs: Vec<&str> = jwt_config.audience.iter().map(|s| s.as_str()).collect();
+                    validation.set_audience(&audience_refs);
+
                     if let Ok(token_data) = decode::<UserClaims>(token, &decoding_key, &validation) {
                         user_id = Some(token_data.claims.sub);
                     }
@@ -259,18 +286,31 @@ pub async fn rate_limit_middleware(
     let identifier = if let Some(uid) = user_id {
         RateLimitIdentifier::User(uid)
     } else {
-        // Get real IP from connection info
-        let ip = connect_info
-            .map(|ci| ci.0.ip().to_string())
-            .or_else(|| {
-                // Fallback to X-Forwarded-For if behind proxy (but be careful!)
-                request.headers()
-                    .get("x-real-ip")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-        
+        // Get client IP, only trusting proxy headers when peer is a trusted proxy
+        let peer_ip = connect_info.map(|ci| ci.0.ip());
+        let is_trusted_proxy = peer_ip
+            .map(|ip| state.rate_limiter.config.trusted_proxies.contains(&ip))
+            .unwrap_or(false);
+
+        let ip = if is_trusted_proxy {
+            // Peer is a trusted proxy — use X-Real-IP or first entry in X-Forwarded-For
+            request.headers()
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    request.headers()
+                        .get("x-forwarded-for")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|s| s.split(',').next())
+                        .map(|s| s.trim().to_string())
+                })
+                .unwrap_or_else(|| peer_ip.map(|ip| ip.to_string()).unwrap_or_else(|| "unknown".to_string()))
+        } else {
+            // Peer is NOT a trusted proxy — always use socket peer IP
+            peer_ip.map(|ip| ip.to_string()).unwrap_or_else(|| "unknown".to_string())
+        };
+
         RateLimitIdentifier::Ip(ip)
     };
     

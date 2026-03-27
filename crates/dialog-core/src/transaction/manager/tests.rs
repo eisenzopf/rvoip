@@ -312,7 +312,8 @@ mod tests {
     #[tokio::test]
     async fn test_create_ack_for_2xx() -> Result<()> {
         // Set test environment variable
-        std::env::set_var("RVOIP_TEST", "1");
+        // SAFETY: Only called in serial tests, no concurrent env access
+        unsafe { std::env::set_var("RVOIP_TEST", "1"); }
         
         // Setup mock transport
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
@@ -404,7 +405,8 @@ mod tests {
         manager.shutdown().await;
         
         // Reset environment variable
-        std::env::remove_var("RVOIP_TEST");
+        // SAFETY: Only called in serial tests, no concurrent env access
+        unsafe { std::env::remove_var("RVOIP_TEST"); }
         
         Ok(())
     }
@@ -434,7 +436,7 @@ mod tests {
         // Create a HashMap to store the transaction
         let mut transactions = HashMap::new();
         let tx_id = transaction.id().clone();
-        transactions.insert(tx_id.clone(), Box::new(transaction) as Box<dyn ClientTransaction + Send>);
+        transactions.insert(tx_id.clone(), Arc::new(transaction) as Arc<dyn ClientTransaction + Send + Sync>);
         
         // Wrap in a Mutex
         let transactions = Mutex::new(transactions);
@@ -1014,7 +1016,8 @@ mod tests {
     #[tokio::test]
     async fn test_transaction_management() -> Result<()> {
         // Set test environment variable
-        std::env::set_var("RVOIP_TEST", "1");
+        // SAFETY: Only called in serial tests, no concurrent env access
+        unsafe { std::env::set_var("RVOIP_TEST", "1"); }
     
         // Setup mock transport
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
@@ -1098,7 +1101,8 @@ mod tests {
         manager.shutdown().await;
         
         // Reset environment variable
-        std::env::remove_var("RVOIP_TEST");
+        // SAFETY: Only called in serial tests, no concurrent env access
+        unsafe { std::env::remove_var("RVOIP_TEST"); }
         
         Ok(())
     }
@@ -1107,7 +1111,8 @@ mod tests {
     #[tokio::test]
     async fn test_retry_request() -> Result<()> {
         // Set test environment variable
-        std::env::set_var("RVOIP_TEST", "1");
+        // SAFETY: Only called in serial tests, no concurrent env access
+        unsafe { std::env::set_var("RVOIP_TEST", "1"); }
         
         // Setup mock transport
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
@@ -1157,7 +1162,8 @@ mod tests {
         manager.shutdown().await;
         
         // Reset environment variable
-        std::env::remove_var("RVOIP_TEST");
+        // SAFETY: Only called in serial tests, no concurrent env access
+        unsafe { std::env::remove_var("RVOIP_TEST"); }
         
         Ok(())
     }

@@ -494,7 +494,7 @@ impl CallCenterEngine {
         
         // Use SessionControl trait to create outgoing call for agent registration
         let session = SessionControl::create_outgoing_call(
-            self.session_manager(),
+            self.session_manager()?,
             &agent.sip_uri,  // From: agent's SIP URI
             &self.config.general.registrar_uri(),  // To: local registrar
             None  // No SDP for registration

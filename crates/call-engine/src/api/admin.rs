@@ -810,11 +810,7 @@ pub enum HealthStatus {
     Critical,
 }
 
-impl Default for AdminApi {
-    fn default() -> Self {
-        panic!("AdminApi requires an engine instance")
-    }
-}
+// AdminApi intentionally does not implement Default — it requires an engine instance via AdminApi::new().
 
 /// Call center statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]

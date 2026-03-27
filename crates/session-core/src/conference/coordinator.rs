@@ -4,9 +4,9 @@
 //! Bridges session-core and conference functionality.
 
 use std::sync::Arc;
-use crate::api::types::SessionId;
+use crate::api::types::{SessionId, CallState};
 use crate::coordinator::SessionCoordinator;
-use crate::errors::Result;
+use crate::errors::{Result, SessionError};
 use super::types::*;
 use super::manager::ConferenceManager;
 use super::api::ConferenceApi;
@@ -37,9 +37,21 @@ impl ConferenceCoordinator {
         conference_id: &ConferenceId,
         session_id: &SessionId,
     ) -> Result<ParticipantInfo> {
-        // TODO: Validate session exists in session manager
-        // For now, assume session is valid
-        
+        // Validate session exists in session coordinator's registry
+        let session = self.session_coordinator.registry
+            .get_session(session_id).await?
+            .ok_or_else(|| SessionError::session_not_found(session_id.as_str()))?;
+
+        // Verify session is in a valid state for joining a conference
+        match session.call_session.state {
+            CallState::Active => {}
+            other => {
+                return Err(SessionError::invalid_state(
+                    &format!("Session {} is in state {:?}, must be Active to join conference", session_id, other)
+                ));
+            }
+        }
+
         // Add to conference
         self.conference_manager.join_conference(conference_id, session_id).await
     }
@@ -55,14 +67,42 @@ impl ConferenceCoordinator {
 
     /// Get session information for generating conference SDP
     pub async fn get_session_info(&self, session_id: &SessionId) -> Result<SessionInfo> {
-        // Get session details from session manager
-        // TODO: Implement proper session info retrieval from SessionManager
+        // Retrieve full session from the coordinator's registry
+        let session = self.session_coordinator.registry
+            .get_session(session_id).await?
+            .ok_or_else(|| SessionError::session_not_found(session_id.as_str()))?;
+
+        // Extract media port from the media manager if available
+        let media_info = self.session_coordinator.media_manager
+            .get_media_info(session_id).await
+            .ok()
+            .flatten();
+
+        let media_port = media_info.as_ref()
+            .and_then(|info| info.local_rtp_port);
+
+        // Build SIP URI from the session's call data
+        let sip_uri = if session.call_session.from.is_empty() {
+            format!("sip:participant_{}@conference.local", session_id.as_str())
+        } else {
+            session.call_session.from.clone()
+        };
+
+        // Extract codec from negotiated media if available
+        let negotiated = self.session_coordinator.get_negotiated_config(session_id).await;
+        let remote_addr = negotiated.as_ref().map(|n| n.remote_addr);
+        let codec_preferences = if let Some(ref neg) = negotiated {
+            vec![neg.codec.clone()]
+        } else {
+            vec!["PCMU/8000".to_string(), "PCMA/8000".to_string()]
+        };
+
         Ok(SessionInfo {
             session_id: session_id.clone(),
-            sip_uri: format!("sip:participant_{}@conference.local", session_id.as_str()),
-            remote_addr: None,
-            media_port: None,
-            codec_preferences: vec!["PCMU/8000".to_string(), "PCMA/8000".to_string()],
+            sip_uri,
+            remote_addr,
+            media_port,
+            codec_preferences,
         })
     }
 
@@ -75,10 +115,6 @@ impl ConferenceCoordinator {
     ) -> Result<String> {
         // Get conference configuration
         let config = self.conference_manager.get_conference_config(conference_id).await?;
-        
-        // Get participant count for session naming
-        let participants = self.conference_manager.list_participants(conference_id).await?;
-        let participant_count = participants.len();
 
         // Generate conference SDP using current timestamp
         let timestamp = std::time::SystemTime::now()
@@ -86,8 +122,8 @@ impl ConferenceCoordinator {
             .unwrap_or_default()
             .as_secs();
 
-        // Get local IP from SessionManager's MediaManager configuration
-        let local_ip = self.session_manager.get_local_bind_addr().ip();
+        // Get local IP from the session coordinator's config
+        let local_ip = self.session_coordinator.config.local_bind_addr.ip();
 
         Ok(format!(
             "v=0\r\n\
@@ -121,13 +157,15 @@ impl ConferenceCoordinator {
     pub async fn handle_session_termination(&self, session_id: &SessionId) -> Result<()> {
         // Find all conferences this session belongs to
         let conferences = self.conference_manager.list_conferences().await?;
-        
+
         for conference_id in conferences {
             // Check if this session is in this conference
             if let Ok(participants) = self.conference_manager.list_participants(&conference_id).await {
                 if participants.iter().any(|p| &p.session_id == session_id) {
                     // Remove from conference
-                    let _ = self.conference_manager.leave_conference(&conference_id, session_id).await;
+                    if let Err(e) = self.conference_manager.leave_conference(&conference_id, session_id).await {
+                        tracing::warn!("Failed to remove session {} from conference {}: {e}", session_id, conference_id);
+                    }
                 }
             }
         }
@@ -139,7 +177,7 @@ impl ConferenceCoordinator {
     pub async fn get_session_conferences(&self, session_id: &SessionId) -> Result<Vec<ConferenceId>> {
         let mut session_conferences = Vec::new();
         let conferences = self.conference_manager.list_conferences().await?;
-        
+
         for conference_id in conferences {
             if let Ok(participants) = self.conference_manager.list_participants(&conference_id).await {
                 if participants.iter().any(|p| &p.session_id == session_id) {

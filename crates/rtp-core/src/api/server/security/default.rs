@@ -209,14 +209,14 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
     async fn remove_client(&self, addr: SocketAddr) -> Result<(), SecurityError> {
         let mut clients = self.clients.write().await;
         
-        if let Some(client) = clients.remove(&addr) {
+        match clients.remove(&addr) { Some(client) => {
             // Close the client security context
             client.close().await?;
             Ok(())
-        } else {
+        } _ => {
             // Client not found, nothing to do
             Ok(())
-        }
+        }}
     }
     
     async fn on_client_secure(&self, callback: Box<dyn Fn(Arc<dyn ClientSecurityContext + Send + Sync>) + Send + Sync>) -> Result<(), SecurityError> {

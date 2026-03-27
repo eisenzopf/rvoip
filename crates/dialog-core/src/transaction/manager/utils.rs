@@ -272,7 +272,7 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
 /// # Returns
 /// * `Result<Request>` - The original request or an error
 pub async fn get_transaction_request(
-    transactions: &Mutex<HashMap<TransactionKey, Box<dyn ClientTransaction + Send>>>,
+    transactions: &Mutex<HashMap<TransactionKey, Arc<dyn ClientTransaction + Send + Sync>>>,
     tx_id: &TransactionKey
 ) -> Result<Request> {
     let transactions_lock = transactions.lock().await;

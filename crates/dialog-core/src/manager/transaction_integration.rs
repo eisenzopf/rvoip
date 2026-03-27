@@ -71,9 +71,20 @@ impl TransactionIntegration for DialogManager {
         // Get destination and dialog context
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
-            
-            let destination = dialog.get_remote_target_address().await
-                .ok_or_else(|| crate::errors::DialogError::routing_error("No remote target address available"))?;
+
+            // Try REGISTER-learned route first (for WS peers like SIP.js),
+            // then fall back to DNS resolution of the remote target URI.
+            let registered_route = self.transaction_manager
+                .resolve_registered_route(&dialog.remote_uri)
+                .await;
+
+            let destination = if let Some(addr) = registered_route {
+                debug!("Using REGISTER-learned route {} for {} request (pre-resolution)", addr, method);
+                addr
+            } else {
+                dialog.get_remote_target_address().await
+                    .ok_or_else(|| crate::errors::DialogError::routing_error("No remote target address available"))?
+            };
             
             // Convert body to String if provided
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
@@ -138,6 +149,12 @@ impl TransactionIntegration for DialogManager {
                             // Initial INVITE: No remote tag yet, creating new dialog
                             use crate::transaction::client::builders::InviteBuilder;
                             
+                            // RFC 3261 §8.1.1.8: INVITE MUST contain Contact header
+                            let contact_user = template.local_uri.user
+                                .as_deref()
+                                .unwrap_or("user");
+                            let contact_uri = format!("sip:{}@{}", contact_user, self.local_address);
+
                             let mut invite_builder = InviteBuilder::new()
                                 .from_detailed(
                                     Some("User"), // Display name
@@ -145,14 +162,15 @@ impl TransactionIntegration for DialogManager {
                                     Some(&local_tag)
                                 )
                                 .to_detailed(
-                                    Some("User"), // Display name  
+                                    Some("User"), // Display name
                                     template.remote_uri.to_string(),
                                     None // No remote tag for initial INVITE
                                 )
                                 .call_id(&template.call_id)
                                 .cseq(template.cseq_number)
                                 .request_uri(template.target_uri.to_string())
-                                .local_address(self.local_address);
+                                .local_address(self.local_address)
+                                .contact(contact_uri);
                             
                             // Add route set if present
                             for route in &template.route_set {
@@ -344,6 +362,17 @@ impl TransactionIntegration for DialogManager {
             (destination, request)
         };
         
+        // Try REGISTER-learned route first (for WS peers), then fall back to dialog route
+        let destination = if let Some(addr) = self.transaction_manager
+            .resolve_registered_route(request.uri())
+            .await
+        {
+            debug!("Using REGISTER-learned route {} for {} request", addr, method);
+            addr
+        } else {
+            destination
+        };
+
         // Use transaction-core helpers to create appropriate transaction
         let transaction_id = if method == Method::Invite {
             self.transaction_manager
@@ -514,45 +543,105 @@ impl DialogManager {
     }
     
     /// Handle successful responses from transactions
+    ///
+    /// Includes RFC 3261 §13.2.2.4 fork handling: when a 2xx arrives with a
+    /// To-tag that differs from any known dialog, a new confirmed dialog is
+    /// created, an ACK is sent, and the other forks are torn down.
     async fn handle_transaction_success_response(
         &self,
         dialog_id: &DialogId,
         transaction_id: &TransactionKey,
         response: Response,
     ) -> DialogResult<()> {
-        info!("Transaction {} received success response {} {} for dialog {}", 
+        info!("Transaction {} received success response {} {} for dialog {}",
               transaction_id, response.status_code(), response.reason_phrase(), dialog_id);
-        
+
+        // ── Fork detection for 2xx (RFC 3261 §13.2.2.4) ──
+        // Each 2xx to a forked INVITE MUST be ACKed.  We pick the first one to
+        // confirm the call and BYE the rest.
+        let effective_dialog_id = if transaction_id.method() == &rvoip_sip_core::Method::Invite {
+            if let Some(to_tag) = response.to().and_then(|t| t.tag()) {
+                let to_tag = to_tag.to_string();
+                let call_id = self.get_dialog(dialog_id)
+                    .map(|d| d.call_id.clone())
+                    .unwrap_or_default();
+
+                if let Some(existing) = self.find_dialog_by_call_id_and_to_tag(&call_id, &to_tag) {
+                    existing
+                } else {
+                    // Check if the original dialog already has a remote tag set
+                    let original_remote_tag = self.get_dialog(dialog_id)
+                        .ok()
+                        .and_then(|d| d.remote_tag.clone());
+
+                    if original_remote_tag.is_none() || original_remote_tag.as_deref() == Some(&to_tag) {
+                        // First 2xx or same tag – use original dialog
+                        dialog_id.clone()
+                    } else {
+                        // Different To-tag on 2xx → this is a confirmed fork
+                        info!("Forked 2xx detected for Call-ID {} – new To-tag {}", call_id, to_tag);
+                        let original = self.get_dialog(dialog_id)?;
+                        let mut forked = crate::dialog::Dialog::new_early(
+                            call_id.clone(),
+                            original.local_uri.clone(),
+                            original.remote_uri.clone(),
+                            original.local_tag.clone(),
+                            Some(to_tag.clone()),
+                            original.is_initiator,
+                        );
+                        // Immediately mark as confirmed since this is a 2xx
+                        forked.state = crate::dialog::DialogState::Confirmed;
+                        let forked_id = forked.id.clone();
+                        self.store_dialog(forked).await?;
+                        self.add_to_early_group(&call_id, forked_id.clone());
+
+                        // Notify session layer about the fork
+                        self.emit_session_coordination_event(SessionCoordinationEvent::ForkedResponse {
+                            call_id: call_id.clone(),
+                            dialog_id: forked_id.clone(),
+                            status_code: response.status_code(),
+                        }).await;
+
+                        forked_id
+                    }
+                }
+            } else {
+                dialog_id.clone()
+            }
+        } else {
+            dialog_id.clone()
+        };
+
         // Update dialog state based on successful response
         let dialog_state_changed = {
-            let mut dialog = self.get_dialog_mut(dialog_id)?;
+            let mut dialog = self.get_dialog_mut(&effective_dialog_id)?;
             let old_state = dialog.state.clone();
-            
+
             // Update dialog with response information (remote tag, etc.)
             if let Some(to_header) = response.to() {
                 if let Some(to_tag) = to_header.tag() {
-                    info!("Updating remote tag for dialog {} to: {}", dialog_id, to_tag);
+                    info!("Updating remote tag for dialog {} to: {}", effective_dialog_id, to_tag);
                     dialog.set_remote_tag(to_tag.to_string());
                 } else {
-                    warn!("200 OK response has no To tag for dialog {}", dialog_id);
+                    warn!("200 OK response has no To tag for dialog {}", effective_dialog_id);
                 }
             } else {
-                warn!("200 OK response has no To header for dialog {}", dialog_id);
+                warn!("200 OK response has no To header for dialog {}", effective_dialog_id);
             }
-            
+
             // Update dialog state based on response status and current state
             let state_changed = match response.status_code() {
                 200 => {
                     if dialog.state == crate::dialog::DialogState::Early {
                         dialog.state = crate::dialog::DialogState::Confirmed;
-                        
+
                         // CRITICAL FIX: Update dialog lookup now that we have both tags
                         if let Some(tuple) = dialog.dialog_id_tuple() {
                             let key = crate::manager::utils::DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
-                            self.dialog_lookup.insert(key, dialog_id.clone());
-                            info!("Updated dialog lookup for confirmed dialog {}", dialog_id);
+                            self.dialog_lookup.insert(key, effective_dialog_id.clone());
+                            info!("Updated dialog lookup for confirmed dialog {}", effective_dialog_id);
                         }
-                        
+
                         true
                     } else {
                         false
@@ -560,36 +649,37 @@ impl DialogManager {
                 },
                 _ => false
             };
-            
+
             if state_changed {
                 Some((old_state, dialog.state.clone()))
             } else {
                 None
             }
         };
-        
+
         // Emit dialog events for session-core
         if let Some((old_state, new_state)) = dialog_state_changed {
             self.emit_dialog_event(DialogEvent::StateChanged {
-                dialog_id: dialog_id.clone(),
+                dialog_id: effective_dialog_id.clone(),
                 old_state,
                 new_state,
             }).await;
         }
-        
+
         // Emit session coordination events for session-core
         self.emit_session_coordination_event(SessionCoordinationEvent::ResponseReceived {
-            dialog_id: dialog_id.clone(),
+            dialog_id: effective_dialog_id.clone(),
             response: response.clone(),
             transaction_id: transaction_id.clone(),
         }).await;
-        
+
         // Handle specific successful response types
         match response.status_code() {
             200 => {
                 // Check if this is a 200 OK to INVITE - need to send ACK
+                // RFC 3261 §13.2.2.4: MUST ACK every 2xx received (including forks)
                 if transaction_id.method() == &rvoip_sip_core::Method::Invite {
-                    info!("✅ Received 200 OK to INVITE, sending automatic ACK for dialog {}", dialog_id);
+                    info!("Received 200 OK to INVITE, sending automatic ACK for dialog {}", effective_dialog_id);
 
                     // Send ACK using transaction-core's send_ack_for_2xx method
                     match self.transaction_manager.send_ack_for_2xx(transaction_id, &response).await {
@@ -604,7 +694,7 @@ impl DialogManager {
                             };
 
                             self.emit_session_coordination_event(SessionCoordinationEvent::AckSent {
-                                dialog_id: dialog_id.clone(),
+                                dialog_id: effective_dialog_id.clone(),
                                 transaction_id: transaction_id.clone(),
                                 negotiated_sdp,
                             }).await;
@@ -613,15 +703,25 @@ impl DialogManager {
                             warn!("Failed to send automatic ACK for 200 OK to INVITE: {}", e);
                         }
                     }
+
+                    // Fork cleanup: confirm this dialog and tear down others
+                    let call_id = self.get_dialog(&effective_dialog_id)
+                        .map(|d| d.call_id.clone())
+                        .unwrap_or_default();
+                    if !self.get_early_group(&call_id).is_empty() {
+                        if let Err(e) = self.confirm_forked_dialog(&call_id, &effective_dialog_id, transaction_id).await {
+                            warn!("Failed to clean up forks for Call-ID {}: {}", call_id, e);
+                        }
+                    }
                 }
-                
+
                 // Check if this is a 200 OK to BYE - dialog is terminating
                 if transaction_id.method() == &rvoip_sip_core::Method::Bye {
-                    info!("✅ Received 200 OK to BYE, dialog {} is terminating", dialog_id);
-                    
+                    info!("Received 200 OK to BYE, dialog {} is terminating", effective_dialog_id);
+
                     // Emit CallTerminating event to notify session-core
                     self.emit_session_coordination_event(SessionCoordinationEvent::CallTerminating {
-                        dialog_id: dialog_id.clone(),
+                        dialog_id: effective_dialog_id.clone(),
                         reason: "BYE completed successfully".to_string(),
                     }).await;
                 }
@@ -630,13 +730,13 @@ impl DialogManager {
                 if !response.body().is_empty() {
                     let sdp = String::from_utf8_lossy(response.body()).to_string();
                     self.emit_session_coordination_event(SessionCoordinationEvent::CallAnswered {
-                        dialog_id: dialog_id.clone(),
+                        dialog_id: effective_dialog_id.clone(),
                         session_answer: sdp,
                     }).await;
                 }
             },
             _ => {
-                debug!("Other successful response {} for dialog {}", response.status_code(), dialog_id);
+                debug!("Other successful response {} for dialog {}", response.status_code(), effective_dialog_id);
             }
         }
 
@@ -722,86 +822,119 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         response: Response,
     ) -> DialogResult<()> {
-        debug!("Transaction {} received provisional response {} {} for dialog {}", 
+        debug!("Transaction {} received provisional response {} {} for dialog {}",
                transaction_id, response.status_code(), response.reason_phrase(), dialog_id);
-        
-        // Update dialog state for early dialogs
-        let dialog_created = {
-            let mut dialog = self.get_dialog_mut(dialog_id)?;
-            let old_state = dialog.state.clone();
-            
-            // For provisional responses with to-tag, create early dialog
-            if let Some(to_header) = response.to() {
-                if let Some(to_tag) = to_header.tag() {
-                    if dialog.remote_tag.is_none() {
-                        dialog.set_remote_tag(to_tag.to_string());
-                        if dialog.state == crate::dialog::DialogState::Initial {
-                            dialog.state = crate::dialog::DialogState::Early;
-                            Some((old_state, dialog.state.clone()))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+
+        // ── Fork detection (RFC 3261 §13.2.2.4) ──
+        // When a proxy forks an INVITE the UAC may receive 1xx/2xx responses
+        // with *different* To-tags.  Each unique To-tag represents a separate
+        // fork and requires its own early dialog.
+        let effective_dialog_id = if let Some(to_tag) = response.to().and_then(|t| t.tag()) {
+            let to_tag = to_tag.to_string();
+            let call_id = self.get_dialog(dialog_id)
+                .map(|d| d.call_id.clone())
+                .unwrap_or_default();
+
+            // Check if we already have a dialog with this exact To-tag
+            if let Some(existing) = self.find_dialog_by_call_id_and_to_tag(&call_id, &to_tag) {
+                // Existing fork – reuse that dialog
+                existing
             } else {
-                None
+                // Is this the very first To-tag for the *original* dialog?
+                let original_has_remote_tag = self.get_dialog(dialog_id)
+                    .map(|d| d.remote_tag.is_some())
+                    .unwrap_or(false);
+
+                if !original_has_remote_tag {
+                    // First response – just set the remote tag on the original dialog
+                    if let Ok(mut d) = self.get_dialog_mut(dialog_id) {
+                        d.set_remote_tag(to_tag.clone());
+                        if d.state == crate::dialog::DialogState::Initial {
+                            let old = d.state.clone();
+                            d.state = crate::dialog::DialogState::Early;
+                            drop(d);
+                            self.emit_dialog_event(DialogEvent::StateChanged {
+                                dialog_id: dialog_id.clone(),
+                                old_state: old,
+                                new_state: crate::dialog::DialogState::Early,
+                            }).await;
+                        }
+                    }
+                    self.add_to_early_group(&call_id, dialog_id.clone());
+                    dialog_id.clone()
+                } else {
+                    // Different To-tag → new fork!
+                    info!("Fork detected for Call-ID {} – new To-tag {}", call_id, to_tag);
+                    let original = self.get_dialog(dialog_id)?;
+                    let forked = crate::dialog::Dialog::new_early(
+                        call_id.clone(),
+                        original.local_uri.clone(),
+                        original.remote_uri.clone(),
+                        original.local_tag.clone(),
+                        Some(to_tag.clone()),
+                        original.is_initiator,
+                    );
+                    let forked_id = forked.id.clone();
+                    self.store_dialog(forked).await?;
+                    self.transaction_to_dialog.insert(transaction_id.clone(), forked_id.clone());
+                    self.add_to_early_group(&call_id, forked_id.clone());
+
+                    // Notify session layer about the fork
+                    self.emit_session_coordination_event(SessionCoordinationEvent::ForkedResponse {
+                        call_id: call_id.clone(),
+                        dialog_id: forked_id.clone(),
+                        status_code: response.status_code(),
+                    }).await;
+
+                    forked_id
+                }
             }
+        } else {
+            // No To-tag in provisional – update original dialog
+            dialog_id.clone()
         };
-        
-        // Emit dialog state change if early dialog was created
-        if let Some((old_state, new_state)) = dialog_created {
-            self.emit_dialog_event(DialogEvent::StateChanged {
-                dialog_id: dialog_id.clone(),
-                old_state,
-                new_state,
-            }).await;
-        }
-        
+
         // Handle specific provisional responses and emit session coordination events
         match response.status_code() {
             180 => {
-                info!("Call ringing for dialog {}", dialog_id);
-                
+                info!("Call ringing for dialog {}", effective_dialog_id);
+
                 self.emit_session_coordination_event(SessionCoordinationEvent::CallRinging {
-                    dialog_id: dialog_id.clone(),
+                    dialog_id: effective_dialog_id,
                 }).await;
             },
-            
+
             183 => {
-                info!("Session progress for dialog {}", dialog_id);
-                
+                info!("Session progress for dialog {}", effective_dialog_id);
+
                 // Check for early media (SDP in 183)
                 if !response.body().is_empty() {
                     let sdp = String::from_utf8_lossy(response.body()).to_string();
                     self.emit_session_coordination_event(SessionCoordinationEvent::EarlyMedia {
-                        dialog_id: dialog_id.clone(),
+                        dialog_id: effective_dialog_id,
                         sdp,
                     }).await;
                 } else {
                     self.emit_session_coordination_event(SessionCoordinationEvent::CallProgress {
-                        dialog_id: dialog_id.clone(),
+                        dialog_id: effective_dialog_id,
                         status_code: response.status_code(),
                         reason_phrase: response.reason_phrase().to_string(),
                     }).await;
                 }
             },
-            
+
             _ => {
-                debug!("Other provisional response {} for dialog {}", response.status_code(), dialog_id);
-                
+                debug!("Other provisional response {} for dialog {}", response.status_code(), effective_dialog_id);
+
                 // Emit general call progress event
                 self.emit_session_coordination_event(SessionCoordinationEvent::CallProgress {
-                    dialog_id: dialog_id.clone(),
+                    dialog_id: effective_dialog_id,
                     status_code: response.status_code(),
                     reason_phrase: response.reason_phrase().to_string(),
                 }).await;
             }
         }
-        
+
         Ok(())
     }
     
@@ -994,7 +1127,127 @@ impl DialogManager {
         if orphaned_count > 0 {
             debug!("Cleaned up {} orphaned transaction mappings", orphaned_count);
         }
-        
+
         orphaned_count
     }
-} 
+}
+
+/// Send an INFO request within a dialog with an explicit Content-Type.
+///
+/// This is a standalone function because the generic `TransactionIntegration`
+/// trait does not accept a content-type parameter. Used for trickle ICE
+/// SDP fragments (`application/trickle-ice-sdpfrag`) and other typed
+/// INFO payloads.
+pub async fn send_request_in_dialog_with_content_type(
+    manager: &DialogManager,
+    dialog_id: &DialogId,
+    method: Method,
+    body: Option<bytes::Bytes>,
+    content_type: &str,
+) -> DialogResult<TransactionKey> {
+    debug!(
+        "Sending {} with Content-Type '{}' for dialog {}",
+        method, content_type, dialog_id
+    );
+
+    let content_type_owned = content_type.to_string();
+
+    let (destination, request) = {
+        let mut dialog = manager.get_dialog_mut(dialog_id)?;
+
+        let destination = dialog
+            .get_remote_target_address()
+            .await
+            .ok_or_else(|| {
+                crate::errors::DialogError::routing_error("No remote target address available")
+            })?;
+
+        let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
+
+        let template = dialog.create_request_template(method.clone());
+
+        let local_tag = match &template.local_tag {
+            Some(tag) if !tag.is_empty() => tag.clone(),
+            _ => {
+                let new_tag = dialog.generate_local_tag();
+                dialog.local_tag = Some(new_tag.clone());
+                new_tag
+            }
+        };
+
+        let remote_tag = match (&template.remote_tag, dialog.state.clone()) {
+            (Some(tag), _) if !tag.is_empty() => tag.clone(),
+            (_, crate::dialog::DialogState::Confirmed) => {
+                return Err(crate::errors::DialogError::protocol_error(
+                    &format!(
+                        "{} request in confirmed dialog missing remote tag",
+                        method
+                    ),
+                ));
+            }
+            _ => {
+                return Err(crate::errors::DialogError::protocol_error(
+                    &format!(
+                        "{} request requires remote tag in established dialog",
+                        method
+                    ),
+                ));
+            }
+        };
+
+        let content = body_string.unwrap_or_default();
+
+        let request = dialog_quick::info_for_dialog(
+            &template.call_id,
+            &template.local_uri.to_string(),
+            &local_tag,
+            &template.remote_uri.to_string(),
+            &remote_tag,
+            &content,
+            Some(content_type_owned),
+            template.cseq_number,
+            manager.local_address,
+            if template.route_set.is_empty() {
+                None
+            } else {
+                Some(template.route_set.clone())
+            },
+        )
+        .map_err(|e| crate::errors::DialogError::InternalError {
+            message: format!(
+                "Failed to build {} request with content-type: {}",
+                method, e
+            ),
+            context: None,
+        })?;
+
+        (destination, request)
+    };
+
+    let transaction_id = manager
+        .transaction_manager
+        .create_non_invite_client_transaction(request, destination)
+        .await
+        .map_err(|e| crate::errors::DialogError::TransactionError {
+            message: format!("Failed to create {} transaction: {}", method, e),
+        })?;
+
+    manager
+        .transaction_to_dialog
+        .insert(transaction_id.clone(), dialog_id.clone());
+
+    manager
+        .transaction_manager
+        .send_request(&transaction_id)
+        .await
+        .map_err(|e| crate::errors::DialogError::TransactionError {
+            message: format!("Failed to send request: {}", e),
+        })?;
+
+    debug!(
+        "Sent {} with Content-Type '{}' for dialog {} (transaction: {})",
+        method, content_type, dialog_id, transaction_id
+    );
+
+    Ok(transaction_id)
+}

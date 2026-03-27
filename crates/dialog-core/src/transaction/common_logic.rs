@@ -58,11 +58,13 @@ pub async fn send_state_changed_event(
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
     debug!(id=%tx_id, "State transition: {:?} -> {:?}", previous_state, new_state);
-    let _ = events_tx.send(TransactionEvent::StateChanged {
+    if let Err(e) = events_tx.send(TransactionEvent::StateChanged {
         transaction_id: tx_id.clone(),
         previous_state,
         new_state,
-    }).await;
+    }).await {
+        tracing::debug!("Failed to send StateChanged event (receiver dropped): {e}");
+    }
 }
 
 /// Send a transaction terminated event to the Transaction User (TU).
@@ -84,9 +86,11 @@ pub async fn send_transaction_terminated_event(
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
     debug!(id=%tx_id, "Transaction terminated");
-    let _ = events_tx.send(TransactionEvent::TransactionTerminated {
+    if let Err(e) = events_tx.send(TransactionEvent::TransactionTerminated {
         transaction_id: tx_id.clone(),
-    }).await;
+    }).await {
+        tracing::debug!("Failed to send TransactionTerminated event (receiver dropped): {e}");
+    }
 }
 
 /// Send a timer triggered event to the Transaction User (TU).
@@ -110,10 +114,12 @@ pub async fn send_timer_triggered_event(
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
     trace!(id=%tx_id, timer=%timer_name, "Timer triggered event");
-    let _ = events_tx.send(TransactionEvent::TimerTriggered {
+    if let Err(e) = events_tx.send(TransactionEvent::TimerTriggered {
         transaction_id: tx_id.clone(),
         timer: timer_name.to_string(),
-    }).await;
+    }).await {
+        tracing::debug!("Failed to send TimerTriggered event (receiver dropped): {e}");
+    }
 }
 
 /// Send a transaction timeout event to the Transaction User (TU).
@@ -136,9 +142,11 @@ pub async fn send_transaction_timeout_event(
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
     debug!(id=%tx_id, "Transaction timed out");
-    let _ = events_tx.send(TransactionEvent::TransactionTimeout {
+    if let Err(e) = events_tx.send(TransactionEvent::TransactionTimeout {
         transaction_id: tx_id.clone(),
-    }).await;
+    }).await {
+        tracing::warn!("Failed to send TransactionTimeout event: {e}");
+    }
 }
 
 /// Send a provisional response event to the Transaction User (TU).
@@ -162,10 +170,12 @@ pub async fn send_provisional_response_event(
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
     trace!(id=%tx_id, status=%response.status(), "Sending provisional response event");
-    let _ = events_tx.send(TransactionEvent::ProvisionalResponse {
+    if let Err(e) = events_tx.send(TransactionEvent::ProvisionalResponse {
         transaction_id: tx_id.clone(),
         response,
-    }).await;
+    }).await {
+        tracing::debug!("Failed to send ProvisionalResponse event (receiver dropped): {e}");
+    }
 }
 
 /// Send a success response event to the Transaction User (TU).
@@ -191,12 +201,14 @@ pub async fn send_success_response_event(
     remote_addr: SocketAddr,
 ) {
     debug!(id=%tx_id, status=%response.status(), "Sending success response event");
-    let _ = events_tx.send(TransactionEvent::SuccessResponse {
+    if let Err(e) = events_tx.send(TransactionEvent::SuccessResponse {
         transaction_id: tx_id.clone(),
         response: response.clone(),
         need_ack: tx_id.method() == &Method::Invite, // Need ACK if this is an INVITE transaction
         source: remote_addr,
-    }).await;
+    }).await {
+        tracing::warn!("Failed to send SuccessResponse event: {e}");
+    }
 }
 
 /// Send a failure response event to the Transaction User (TU).
@@ -221,10 +233,12 @@ pub async fn send_failure_response_event(
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
     debug!(id=%tx_id, status=%response.status(), "Sending failure response event");
-    let _ = events_tx.send(TransactionEvent::FailureResponse {
+    if let Err(e) = events_tx.send(TransactionEvent::FailureResponse {
         transaction_id: tx_id.clone(),
         response,
-    }).await;
+    }).await {
+        tracing::warn!("Failed to send FailureResponse event: {e}");
+    }
 }
 
 /// Send a transport error event to the Transaction User (TU).
@@ -246,9 +260,11 @@ pub async fn send_transport_error_event(
     events_tx: &mpsc::Sender<TransactionEvent>,
 ) {
     debug!(id=%tx_id, "Sending transport error event");
-    let _ = events_tx.send(TransactionEvent::TransportError {
+    if let Err(e) = events_tx.send(TransactionEvent::TransportError {
         transaction_id: tx_id.clone(),
-    }).await;
+    }).await {
+        tracing::warn!("Failed to send TransportError event: {e}");
+    }
 }
 
 /// Handle response based on its status code and the current transaction state.
@@ -448,11 +464,13 @@ pub async fn handle_response_for_client_transaction(
                         // Move to the Proceeding state 
                         // and deliver the response to the transaction user
                         debug!(id=%tx_id, "Received 1xx response in {:?} state", state);
-                        let _ = events_tx.send(TransactionEvent::ProvisionalResponse {
+                        if let Err(e) = events_tx.send(TransactionEvent::ProvisionalResponse {
                             transaction_id: tx_id.clone(),
                             response,
-                        }).await;
-                        
+                        }).await {
+                            tracing::debug!("Failed to send ProvisionalResponse event (receiver dropped): {e}");
+                        }
+
                         return Ok(TransactionState::Proceeding);
                     } else if status_code.is_success() {
                         // 2xx response
@@ -473,11 +491,13 @@ pub async fn handle_response_for_client_transaction(
                         // Move to the Completed state 
                         // and deliver the response to the transaction user
                         debug!(id=%tx_id, "Received failure response in {:?} state", state);
-                        let _ = events_tx.send(TransactionEvent::FailureResponse {
+                        if let Err(e) = events_tx.send(TransactionEvent::FailureResponse {
                             transaction_id: tx_id.clone(),
                             response,
-                        }).await;
-                        
+                        }).await {
+                            tracing::warn!("Failed to send FailureResponse event: {e}");
+                        }
+
                         return Ok(TransactionState::Completed);
                     }
                 },
@@ -495,11 +515,13 @@ pub async fn handle_response_for_client_transaction(
                         // Move to the Proceeding state 
                         // and deliver the response to the transaction user
                         debug!(id=%tx_id, "Received 1xx response in {:?} state", state);
-                        let _ = events_tx.send(TransactionEvent::ProvisionalResponse {
+                        if let Err(e) = events_tx.send(TransactionEvent::ProvisionalResponse {
                             transaction_id: tx_id.clone(),
                             response,
-                        }).await;
-                        
+                        }).await {
+                            tracing::debug!("Failed to send ProvisionalResponse event (receiver dropped): {e}");
+                        }
+
                         return Ok(TransactionState::Proceeding);
                     } else {
                         // Final response
@@ -514,10 +536,12 @@ pub async fn handle_response_for_client_transaction(
                                 remote_addr
                             ).await;
                         } else {
-                            let _ = events_tx.send(TransactionEvent::FailureResponse {
+                            if let Err(e) = events_tx.send(TransactionEvent::FailureResponse {
                                 transaction_id: tx_id.clone(),
                                 response,
-                            }).await;
+                            }).await {
+                                tracing::warn!("Failed to send FailureResponse event: {e}");
+                            }
                         }
                         
                         return Ok(TransactionState::Completed);

@@ -44,7 +44,7 @@ pub fn extract_uri(header_value: &str) -> Option<Uri> {
         // This might include parameters like ;tag in the raw string
         // If it's a sip URI, parse out just the URI part without parameters
         if header_value.contains(';') && uri.scheme().to_string().starts_with("sip") {
-            let uri_part = header_value.split(';').next().unwrap();
+            let uri_part = header_value.split(';').next().unwrap_or(header_value);
             if let Ok(clean_uri) = Uri::from_str(uri_part) {
                 return Some(clean_uri);
             }
@@ -53,9 +53,9 @@ pub fn extract_uri(header_value: &str) -> Option<Uri> {
     }
     
     // Handle URIs in angle brackets
-    if header_value.contains('<') && header_value.contains('>') {
-        let start = header_value.find('<').unwrap() + 1;
-        let end = header_value.find('>').unwrap();
+    if let (Some(start_idx), Some(end_idx)) = (header_value.find('<'), header_value.find('>')) {
+        let start = start_idx + 1;
+        let end = end_idx;
         if start < end {
             let uri_str = &header_value[start..end];
             if let Ok(uri) = Uri::from_str(uri_str) {

@@ -7,7 +7,7 @@ use tempfile::TempDir;
 async fn setup_test_auth_service() -> (AuthenticationService, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let config = UsersConfig {
         database_url: db_url,

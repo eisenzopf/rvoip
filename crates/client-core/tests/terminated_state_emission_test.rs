@@ -94,6 +94,7 @@ async fn test_on_call_ended_emits_terminated_state() {
         to: "sip:alice@example.com".to_string(),
         state: rvoip_session_core::api::types::CallState::Terminated, // This is the key - should be Terminated
         started_at: Some(std::time::Instant::now()),
+        sip_call_id: Some("test-call".to_string()),
     };
     
     // Call on_call_ended with the Terminated session
@@ -187,6 +188,7 @@ async fn test_on_call_ended_with_terminating_state_bug() {
         to: "sip:alice@example.com".to_string(),
         state: rvoip_session_core::api::types::CallState::Terminating, // BUG: Wrong state!
         started_at: Some(std::time::Instant::now()),
+        sip_call_id: Some("bug-call".to_string()),
     };
     
     // Call on_call_ended with the wrong (Terminating) state

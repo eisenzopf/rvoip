@@ -53,7 +53,7 @@ pub fn create_request_from_dialog_template(
     local_address: std::net::SocketAddr,
     body: Option<String>,
     content_type: Option<String>,
-) -> Request {
+) -> std::result::Result<Request, String> {
     // Create a basic request using the deprecated Dialog::create_request as a fallback
     // This is a temporary solution until proper transaction-core builders are available
     let mut request = Request::new(template.method.clone(), template.target_uri.clone());
@@ -87,23 +87,18 @@ pub fn create_request_from_dialog_template(
     // Via header with local address and new branch
     let via = Via::new(
         "SIP",
-        "2.0", 
+        "2.0",
         "UDP",
         &local_address.ip().to_string(),
         Some(local_address.port()),
         vec![Param::branch(&generate_branch())]
-    ).unwrap_or_else(|e| {
+    ).or_else(|e| {
         // Log the error for debugging
         tracing::error!("Failed to create Via header with local address {}: {}", local_address, e);
-        
+
         // Try a simpler fallback without branch parameter
         Via::new("SIP", "2.0", "UDP", &local_address.ip().to_string(), Some(local_address.port()), vec![])
-            .unwrap_or_else(|e2| {
-                // Log the second error and panic - we should never reach this point
-                tracing::error!("Critical error: Failed to create Via header even without branch parameter: {}", e2);
-                panic!("Unable to create Via header with local address {}", local_address);
-            })
-    });
+    }).map_err(|e| format!("Unable to create Via header with local address {}: {}", local_address, e))?;
     request.headers.push(TypedHeader::Via(via));
     
     // Max-Forwards
@@ -152,5 +147,5 @@ pub fn create_request_from_dialog_template(
         request.headers.push(TypedHeader::ContentLength(ContentLength::new(0)));
     }
     
-    request
+    Ok(request)
 } 

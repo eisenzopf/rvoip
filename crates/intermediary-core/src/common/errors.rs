@@ -23,7 +23,7 @@ pub enum IntermediaryError {
     ConfigError(String),
 
     #[error("Session core error: {0}")]
-    SessionCoreError(#[from] rvoip_session_core_v2::errors::SessionError),
+    SessionCoreError(#[from] rvoip_session_core::errors_v2::SessionError),
 
     #[error("Other error: {0}")]
     Other(String),

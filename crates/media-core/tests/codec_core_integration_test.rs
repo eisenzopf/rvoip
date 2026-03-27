@@ -37,8 +37,8 @@ fn test_codec_factory_with_custom_params() {
 
 #[test]
 fn test_g711_encoding_decoding() {
-    let mut mu_codec = G711Codec::mu_law(8000, 1).unwrap();
-    let mut a_codec = G711Codec::a_law(8000, 1).unwrap();
+    let mut mu_codec = G711Codec::mu_law(8000, 1);
+    let mut a_codec = G711Codec::a_law(8000, 1);
     
     // Test various sample patterns
     let test_patterns = vec![
@@ -74,7 +74,7 @@ fn test_g711_encoding_decoding() {
 
 #[test]
 fn test_zero_copy_methods() {
-    let mut codec = G711Codec::mu_law(8000, 1).unwrap();
+    let mut codec = G711Codec::mu_law(8000, 1);
     
     // Test zero-copy encoding
     let samples = vec![500i16; 160];
@@ -96,7 +96,7 @@ fn test_zero_copy_methods() {
 
 #[test]
 fn test_error_handling() {
-    let mut codec = G711Codec::mu_law(8000, 1).unwrap();
+    let mut codec = G711Codec::mu_law(8000, 1);
     
     // Test empty decode - codec-core may handle this gracefully
     let result = codec.decode(&[]);
@@ -119,7 +119,7 @@ fn test_error_handling() {
 
 #[test]
 fn test_codec_reset() {
-    let mut codec = G711Codec::mu_law(8000, 1).unwrap();
+    let mut codec = G711Codec::mu_law(8000, 1);
     
     // Encode some data
     let frame = AudioFrame::new(vec![1000i16; 160], 8000, 1, 0);

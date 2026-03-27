@@ -85,6 +85,98 @@ impl SubscriptionManager {
         manager
     }
     
+    /// Start the command processing loop.
+    ///
+    /// This must be called after creating the manager to ensure that
+    /// subscription commands (refresh, terminate) are actually processed.
+    /// Returns a `JoinHandle` that the caller should keep alive.
+    pub fn start_command_loop(&self) -> JoinHandle<()> {
+        let command_rx = self.command_rx.clone();
+        let dialogs = self.dialogs.clone();
+        let refresh_timers = self.refresh_timers.clone();
+        let event_tx = self.event_tx.clone();
+        let command_tx = self.command_tx.clone();
+
+        tokio::spawn(async move {
+            // Take the receiver out of the Option (only one task can own it)
+            let mut rx = {
+                let mut guard = command_rx.write().await;
+                match guard.take() {
+                    Some(rx) => rx,
+                    None => {
+                        warn!("Subscription command receiver already taken; command loop cannot start");
+                        return;
+                    }
+                }
+            };
+
+            info!("Subscription command processing loop started");
+
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    SubscriptionCommand::RefreshSubscription(dialog_id) => {
+                        debug!("Processing RefreshSubscription for {}", dialog_id);
+
+                        // Check if the subscription is still active
+                        let is_active = dialogs.get(&dialog_id)
+                            .map(|d| matches!(
+                                &d.subscription_state,
+                                Some(SubscriptionState::Active { .. }) | Some(SubscriptionState::Pending)
+                            ))
+                            .unwrap_or(false);
+
+                        if !is_active {
+                            debug!("Subscription {} no longer active, skipping refresh", dialog_id);
+                            continue;
+                        }
+
+                        // Get current expires from the dialog
+                        let current_expires = dialogs.get(&dialog_id)
+                            .and_then(|d| match &d.subscription_state {
+                                Some(SubscriptionState::Active { remaining_duration, .. }) => Some(*remaining_duration),
+                                _ => None,
+                            })
+                            .unwrap_or(Duration::from_secs(3600));
+
+                        // Emit a refresh event for session-core to send a re-SUBSCRIBE
+                        if let Err(e) = event_tx.send(DialogEvent::SubscriptionRefreshNeeded {
+                            dialog_id: dialog_id.clone(),
+                            current_expires,
+                        }).await {
+                            warn!("Failed to send SubscriptionRefreshNeeded event for {}: {}", dialog_id, e);
+                        }
+                    }
+                    SubscriptionCommand::TerminateSubscription(dialog_id, reason) => {
+                        info!("Processing TerminateSubscription for {} (reason: {:?})", dialog_id, reason);
+
+                        // Update the dialog state
+                        if let Some(mut dialog) = dialogs.get_mut(&dialog_id) {
+                            dialog.subscription_state = Some(SubscriptionState::Terminated {
+                                reason: reason.clone(),
+                            });
+                            dialog.state = DialogState::Terminated;
+                        }
+
+                        // Cancel refresh timer
+                        if let Some((_key, handle)) = refresh_timers.remove(&dialog_id) {
+                            handle.abort();
+                        }
+
+                        // Emit termination event for session-core to send NOTIFY with Expires: 0
+                        if let Err(e) = event_tx.send(DialogEvent::SubscriptionTerminated {
+                            dialog_id: dialog_id.clone(),
+                            reason: reason.map(|r| r.to_string()),
+                        }).await {
+                            warn!("Failed to send SubscriptionTerminated event for {}: {}", dialog_id, e);
+                        }
+                    }
+                }
+            }
+
+            info!("Subscription command processing loop exited");
+        })
+    }
+
     /// Register default event packages
     fn register_default_packages(&mut self) {
         use super::event_package::{PresencePackage, DialogPackage, MessageSummaryPackage, ReferPackage};
@@ -248,11 +340,13 @@ impl SubscriptionManager {
         
         // Emit subscription created event for session-core to handle
         // Session-core is responsible for generating and sending initial NOTIFY
-        let _ = self.event_tx.send(DialogEvent::SubscriptionCreated {
+        if let Err(e) = self.event_tx.send(DialogEvent::SubscriptionCreated {
             dialog_id: dialog_id.clone(),
             event_package,
             expires: Duration::from_secs(adjusted_expires as u64),
-        }).await;
+        }).await {
+            tracing::warn!("Failed to send SubscriptionCreated event: {e}");
+        }
         
         Ok((response, Some(dialog_id)))
     }
@@ -298,7 +392,7 @@ impl SubscriptionManager {
                 dialog.subscription_state = Some(new_state.clone());
                 
                 // Emit NOTIFY received event
-                let _ = self.event_tx.send(DialogEvent::NotifyReceived {
+                if let Err(e) = self.event_tx.send(DialogEvent::NotifyReceived {
                     dialog_id: dialog_id.clone(),
                     state: new_state.clone(),
                     body: if !request.body().is_empty() {
@@ -306,7 +400,9 @@ impl SubscriptionManager {
                     } else {
                         None
                     },
-                }).await;
+                }).await {
+                    tracing::warn!("Failed to send NotifyReceived event: {e}");
+                }
                 
                 // If subscription is terminated, clean up
                 if new_state.is_terminated() {
@@ -361,7 +457,9 @@ impl SubscriptionManager {
         
         let handle = tokio::spawn(async move {
             tokio::time::sleep(refresh_time).await;
-            let _ = command_tx.send(SubscriptionCommand::RefreshSubscription(dialog_id_clone)).await;
+            if let Err(e) = command_tx.send(SubscriptionCommand::RefreshSubscription(dialog_id_clone)).await {
+                tracing::debug!("Failed to send subscription refresh command (channel closed): {e}");
+            }
         });
         
         self.refresh_timers.insert(dialog_id, handle);
@@ -448,10 +546,12 @@ impl SubscriptionManager {
             dialog.subscription_state = Some(SubscriptionState::Terminated { reason: reason.clone() });
             
             // Emit event for session-core to send termination NOTIFY
-            let _ = self.event_tx.send(DialogEvent::SubscriptionTerminated {
+            if let Err(e) = self.event_tx.send(DialogEvent::SubscriptionTerminated {
                 dialog_id: dialog_id.clone(),
                 reason: reason.map(|r| r.to_string()),
-            }).await;
+            }).await {
+                tracing::warn!("Failed to send SubscriptionTerminated event: {e}");
+            }
             
             drop(dialog); // Release lock before cleanup
             

@@ -72,7 +72,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::Transport;
@@ -499,6 +499,23 @@ impl ServerInviteLogic {
                 // No state transition needed for INVITE retransmission
                 Ok(None)
             },
+            TransactionState::Completed => {
+                // RFC 3261 17.2.1: In Completed state, receiving INVITE retransmit
+                // must retransmit the final response
+                debug!(id=%tx_id, "Received INVITE retransmission in Completed state, retransmitting final response");
+
+                let last_response = data.last_response.lock().await;
+                if let Some(response) = &*last_response {
+                    if let Err(e) = data.transport.send_message(
+                        Message::Response(response.clone()),
+                        data.remote_addr
+                    ).await {
+                        error!(id=%tx_id, error=%e, "Failed to retransmit final response in Completed state");
+                    }
+                }
+
+                Ok(None)
+            },
             _ => {
                 // INVITE retransmissions in other states are ignored
                 trace!(id=%tx_id, state=?current_state, "Ignoring INVITE retransmission in state {:?}", current_state);
@@ -525,10 +542,12 @@ impl ServerInviteLogic {
                 debug!(id=%tx_id, "Received ACK in Completed state");
                 
                 // Notify TU about ACK
-                let _ = data.events_tx.send(TransactionEvent::AckReceived {
+                if let Err(e) = data.events_tx.send(TransactionEvent::AckReceived {
                     transaction_id: tx_id.clone(),
                     request: request.clone(),
-                }).await;
+                }).await {
+                    tracing::warn!("Failed to send AckReceived event: {e}");
+                }
                 
                 // Transition to Confirmed state
                 Ok(Some(TransactionState::Confirmed))
@@ -564,10 +583,12 @@ impl ServerInviteLogic {
                 debug!(id=%tx_id, "Received CANCEL in Proceeding state");
                 
                 // Notify TU about CANCEL
-                let _ = data.events_tx.send(TransactionEvent::CancelReceived {
+                if let Err(e) = data.events_tx.send(TransactionEvent::CancelReceived {
                     transaction_id: tx_id.clone(),
                     cancel_request: request.clone(),
-                }).await;
+                }).await {
+                    tracing::warn!("Failed to send CancelReceived event: {e}");
+                }
                 
                 // No state transition needed for CANCEL
                 Ok(None)
@@ -658,9 +679,13 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
             },
             TransactionState::Terminated => {
                 debug!(id=%tx_id, "Entered Terminated state, canceling all timers");
-                
+
                 // Cancel all timers
                 self.cancel_all_specific_timers(timer_handles);
+
+                // Unregister from timer manager when terminated
+                let timer_manager = self.timer_factory.timer_manager();
+                timer_utils::unregister_transaction(&timer_manager, tx_id).await;
             },
             _ => {
                 trace!(id=%tx_id, state=?new_state, "Entered state with no specific timer actions");
@@ -953,6 +978,14 @@ impl ServerTransaction for ServerInviteTransaction {
             }
             
             // Always send the response
+            if status == StatusCode::Ok {
+                info!(
+                    id = %data.id,
+                    remote_addr = %data.remote_addr,
+                    transport_type = ?data.transport.default_transport_type(),
+                    "Sending 200 OK response for INVITE server transaction"
+                );
+            }
             data.transport.send_message(Message::Response(response.clone()), data.remote_addr)
                 .await
                 .map_err(|e| Error::transport_error(e, "Failed to send response"))?;

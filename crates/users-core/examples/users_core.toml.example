@@ -2,11 +2,9 @@
 # Copy this to users_core.toml and adjust values as needed
 
 [users_core]
-# Database URL - supports SQLite, PostgreSQL, MySQL
-# SQLite: "sqlite://users.db?mode=rwc"
+# Database URL - PostgreSQL
 # PostgreSQL: "postgres://user:pass@localhost/users_db"
-# MySQL: "mysql://user:pass@localhost/users_db"
-database_url = "sqlite://users.db"
+database_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip"
 
 # REST API server binding address
 api_bind_address = "127.0.0.1:8081"

@@ -80,7 +80,7 @@ pub struct RtpTransportConfig {
 impl Default for RtpTransportConfig {
     fn default() -> Self {
         Self {
-            local_rtp_addr: "0.0.0.0:0".parse().unwrap(),
+            local_rtp_addr: "0.0.0.0:0".parse().expect("BUG: constant address literal must parse"),
             local_rtcp_addr: None,
             symmetric_rtp: true,
             rtcp_mux: true, // Enable by default as it's the modern approach

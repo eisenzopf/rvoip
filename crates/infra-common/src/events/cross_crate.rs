@@ -48,6 +48,8 @@ pub trait CrossCrateEvent: Send + Sync + std::fmt::Debug {
     fn source_plane(&self) -> PlaneType;
     fn target_plane(&self) -> PlaneType;
     fn priority(&self) -> EventPriority;
+    /// Downcast support for dynamic dispatch
+    fn as_any(&self) -> &dyn Any;
 }
 
 impl CrossCrateEvent for RvoipCrossCrateEvent {
@@ -101,6 +103,10 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::MediaToRtp(_) => EventPriority::Normal,
             RvoipCrossCrateEvent::RtpToMedia(_) => EventPriority::Normal,
         }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
@@ -837,12 +843,12 @@ mod tests {
             None,
         );
         
-        assert_eq!(event.event_type(), "session_to_dialog");
+        assert_eq!(CrossCrateEvent::event_type(&event), "session_to_dialog");
         assert_eq!(event.source_plane(), PlaneType::Signaling);
         assert_eq!(event.target_plane(), PlaneType::Signaling);
         assert_eq!(event.priority(), EventPriority::High);
     }
-    
+
     #[test]
     fn test_event_serialization() {
         let event = RvoipCrossCrateEvent::call_state_changed(
@@ -850,11 +856,11 @@ mod tests {
             CallState::Active,
             None,
         );
-        
+
         // Test that events can be serialized and deserialized
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: RvoipCrossCrateEvent = serde_json::from_str(&serialized).unwrap();
-        
-        assert_eq!(deserialized.event_type(), event.event_type());
+
+        assert_eq!(CrossCrateEvent::event_type(&deserialized), CrossCrateEvent::event_type(&event));
     }
 }

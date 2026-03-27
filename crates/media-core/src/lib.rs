@@ -56,6 +56,9 @@ pub mod buffer;      // New buffer module
 pub mod performance; // New performance optimization module
 pub mod rtp_processing; // NEW - RTP media processing (moved from rtp-core)
 
+// DTMF support (RFC 4733 telephone-event)
+pub mod dtmf;
+
 // Working modules from old implementation (to be refactored)
 pub mod codec;
 pub mod relay;

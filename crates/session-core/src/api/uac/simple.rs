@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
-use crate::api::builder::SessionManagerConfig;
+use crate::api::builder::{SessionManagerConfig, SipTransportType};
 use crate::api::common::{setup_audio_channels, parse_call_target, operations, Protocol};
 use crate::api::control::SessionControl;
 use crate::api::media::MediaControl;
@@ -69,6 +69,7 @@ impl std::future::IntoFuture for SimpleUacClientBuilder {
                 stun_server: None,
                 enable_sip_client: true,
                 media_config: Default::default(),
+                sip_transport: SipTransportType::Udp,
             };
             
             let coordinator = SessionCoordinator::new(config, None).await?;
@@ -255,10 +256,12 @@ impl SimpleCall {
     /// - rx: Receive audio from remote party
     /// 
     /// Note: This consumes the channels, can only be called once
-    pub fn audio_channels(&mut self) -> (mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>) {
-        let tx = self.audio_tx.take().expect("Audio channels already taken");
-        let rx = self.audio_rx.take().expect("Audio channels already taken");
-        (tx, rx)
+    pub fn audio_channels(&mut self) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
+        let tx = self.audio_tx.take()
+            .ok_or_else(|| SessionError::internal("Audio TX channel already taken or not available"))?;
+        let rx = self.audio_rx.take()
+            .ok_or_else(|| SessionError::internal("Audio RX channel already taken or not available"))?;
+        Ok((tx, rx))
     }
     
     /// Put the call on hold

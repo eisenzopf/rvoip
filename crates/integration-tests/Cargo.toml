@@ -1,0 +1,40 @@
+[package]
+name = "rvoip-integration-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+rvoip-sip-core = { workspace = true }
+rvoip-sip-transport = { workspace = true }
+rvoip-dialog-core = { workspace = true }
+rvoip-rtp-core = { workspace = true }
+rvoip-media-core = { workspace = true }
+rvoip-session-core = { workspace = true }
+rvoip-client-core = { workspace = true }
+rvoip-call-engine = { workspace = true }
+rvoip-infra-common = { workspace = true }
+rvoip-codec-core = { workspace = true }
+rvoip-registrar-core = { workspace = true }
+tokio = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serial_test = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+tempfile = "3.14"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+
+[features]
+sctp = ["rvoip-sip-transport/sctp"]
+ws = ["rvoip-sip-transport/ws"]
+tls = ["rvoip-sip-transport/tls"]

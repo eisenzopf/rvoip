@@ -31,6 +31,7 @@ use crate::error::{Error, Result};
 use crate::types::{Header, TypedHeader, HeaderName, HeaderValue};
 use std::str::FromStr;
 use crate::types::uri::Host;
+use tracing;
 
 /// Maximum length of a single line in a SIP message
 pub const MAX_LINE_LENGTH: usize = 4096;
@@ -38,6 +39,8 @@ pub const MAX_LINE_LENGTH: usize = 4096;
 pub const MAX_HEADER_COUNT: usize = 100;
 /// Maximum size of a SIP message body
 pub const MAX_BODY_SIZE: usize = 16 * 1024 * 1024; // 16 MB
+/// Maximum total size of a SIP message (headers + body)
+pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024; // 64 MB
 
 /// Mode for parsing SIP messages
 /// - Strict: Rejects messages that don't conform to RFC 3261 strictly
@@ -59,14 +62,33 @@ pub fn trim_bytes(bytes: &[u8]) -> &[u8] {
 /// Parses a block of header lines terminated by an empty line (CRLF).
 /// Uses the `message_header` parser for each line.
 /// Returns a Vec of raw Headers.
+/// Enforces MAX_HEADER_COUNT to prevent DoS via excessive headers.
 fn parse_header_block(input: &[u8]) -> ParseResult<Vec<Header>> {
-    // many_till parses 0 or more headers until the terminating CRLF
-    let (remaining_input, (headers, _terminator)) = many_till(
-        message_header, 
-        crlf // The CRLF that ends the header section
-    )(input)?;
-    
-    Ok((remaining_input, headers))
+    let mut remaining = input;
+    let mut headers = Vec::new();
+
+    loop {
+        // Check for the terminating empty line (CRLF)
+        if let Ok((rest, _)) = crlf(remaining) {
+            remaining = rest;
+            break;
+        }
+
+        // Enforce header count limit
+        if headers.len() >= MAX_HEADER_COUNT {
+            return Err(nom::Err::Failure(NomError::new(
+                remaining,
+                ErrorKind::TooLarge,
+            )));
+        }
+
+        // Parse the next header
+        let (rest, header) = message_header(remaining)?;
+        headers.push(header);
+        remaining = rest;
+    }
+
+    Ok((remaining, headers))
 }
 
 /// Parse a header value with support for line folding according to RFC 3261 Section 7.3.1.
@@ -82,7 +104,9 @@ pub fn header_value_better(input: &[u8]) -> ParseResult<&[u8]> {
     let mut i = 0;
     let len = input.len();
     let start = input;
-    
+    // Track length of current physical line for MAX_LINE_LENGTH enforcement
+    let mut current_line_len: usize = 0;
+
     while i + 1 < len {
         // Look for CRLF
         if input[i] == b'\r' && input[i + 1] == b'\n' {
@@ -90,10 +114,12 @@ pub fn header_value_better(input: &[u8]) -> ParseResult<&[u8]> {
             if i + 2 < len && (input[i + 2] == b' ' || input[i + 2] == b'\t') {
                 // This is a folded line, continue scanning
                 i += 2; // Skip the CR LF
-                
+                current_line_len = 0; // Reset line length for the folded continuation
+
                 // Skip all whitespace in this folded line
                 while i < len && (input[i] == b' ' || input[i] == b'\t') {
                     i += 1;
+                    current_line_len += 1;
                 }
             } else {
                 // This is a non-folded line ending, end of header value
@@ -102,9 +128,17 @@ pub fn header_value_better(input: &[u8]) -> ParseResult<&[u8]> {
         } else {
             // Regular character
             i += 1;
+            current_line_len += 1;
+            // Enforce per-line length limit
+            if current_line_len > MAX_LINE_LENGTH {
+                return Err(nom::Err::Failure(NomError::new(
+                    &input[i..],
+                    ErrorKind::TooLarge,
+                )));
+            }
         }
     }
-    
+
     // Return the span from start to the end of the value
     Ok((&input[i..], &start[..i]))
 }
@@ -155,7 +189,7 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
         match TypedHeader::try_from(header.clone()) {
             Ok(typed) => typed_headers.push(typed),
             Err(e) => {
-                eprintln!("Warning: Header parsing error (skipping): {}", e); 
+                tracing::warn!("Header parsing error (skipping): {}", e);
                 // Add a fallback for unparseable headers
                 typed_headers.push(TypedHeader::Other(header.name, header.value));
             }
@@ -163,9 +197,20 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
     }
 
     // 4. Get Content-Length - use the last one per RFC 3261 section 20.14
+    // In strict mode, reject multiple distinct Content-Length values
+    if mode == ParseMode::Strict && content_length_values.len() > 1 {
+        let distinct: std::collections::HashSet<usize> = content_length_values.iter().copied().collect();
+        if distinct.len() > 1 {
+            return Err(nom::Err::Failure(NomError::new(
+                rest,
+                ErrorKind::Verify,
+            )));
+        }
+    }
+
     // "If there are multiple Content-Length headers, use the last value"
     let content_length = if !content_length_values.is_empty() {
-        *content_length_values.last().unwrap()
+        *content_length_values.last().unwrap_or(&0)
     } else {
         // Fallback to typed header if no raw Content-Length found
         typed_headers.iter().find_map(|h| {
@@ -174,27 +219,39 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
             } else { None }
         }).unwrap_or(0)
     };
-    
+
+    // Enforce MAX_BODY_SIZE to prevent DoS via oversized Content-Length
+    if content_length > MAX_BODY_SIZE {
+        return Err(nom::Err::Failure(NomError::new(
+            rest,
+            ErrorKind::TooLarge,
+        )));
+    }
+
     // 5. Parse Body based on Content-Length
     if rest.len() < content_length {
         // In lenient mode, be more forgiving with incomplete bodies
         if mode == ParseMode::Lenient {
             let actual_length = rest.len();
-            eprintln!("Warning: Content-Length ({}) exceeds available body data ({}). Using available data.", 
-                    content_length, actual_length);
+            tracing::warn!(content_length, actual_length, "Content-Length exceeds available body data, using available data");
             let (final_rest, body_slice) = take(actual_length)(rest)?;
             let body = Bytes::copy_from_slice(body_slice);
             
             // Construct the message with what we have
             let message = if is_request {
-                let mut req = Request::new(method.unwrap(), uri.unwrap());
-                req.version = version.unwrap();
+                let m = method.ok_or_else(|| nom::Err::Failure(NomError::new(rest, ErrorKind::Verify)))?;
+                let u = uri.ok_or_else(|| nom::Err::Failure(NomError::new(rest, ErrorKind::Verify)))?;
+                let v = version.ok_or_else(|| nom::Err::Failure(NomError::new(rest, ErrorKind::Verify)))?;
+                let mut req = Request::new(m, u);
+                req.version = v;
                 req.set_headers(typed_headers);
                 if actual_length > 0 { req.body = body; }
                 Message::Request(req)
             } else {
-                let mut resp = Response::new(status_code.unwrap());
-                resp.version = version.unwrap();
+                let sc = status_code.ok_or_else(|| nom::Err::Failure(NomError::new(rest, ErrorKind::Verify)))?;
+                let v = version.ok_or_else(|| nom::Err::Failure(NomError::new(rest, ErrorKind::Verify)))?;
+                let mut resp = Response::new(sc);
+                resp.version = v;
                 if let Some(reason) = reason_phrase_opt {
                      resp = resp.with_reason(reason);
                 }
@@ -215,21 +272,25 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
 
     // In lenient mode, if there's extra data after consuming content_length bytes, discard it with a warning
     if mode == ParseMode::Lenient && !final_rest.is_empty() {
-        eprintln!("Warning: Message has {} extra bytes after Content-Length: {}. Ignoring excess data.", 
-                  final_rest.len(), content_length);
+        tracing::warn!(extra_bytes = final_rest.len(), content_length, "Message has extra bytes after Content-Length, ignoring excess data");
     }
 
     // 6. Construct Message
     let body = Bytes::copy_from_slice(body_slice);
     let message = if is_request {
-        let mut req = Request::new(method.unwrap(), uri.unwrap());
-        req.version = version.unwrap();
+        let m = method.ok_or_else(|| nom::Err::Failure(NomError::new(final_rest, ErrorKind::Verify)))?;
+        let u = uri.ok_or_else(|| nom::Err::Failure(NomError::new(final_rest, ErrorKind::Verify)))?;
+        let v = version.ok_or_else(|| nom::Err::Failure(NomError::new(final_rest, ErrorKind::Verify)))?;
+        let mut req = Request::new(m, u);
+        req.version = v;
         req.set_headers(typed_headers);
         if content_length > 0 { req.body = body; }
         Message::Request(req)
     } else {
-        let mut resp = Response::new(status_code.unwrap());
-        resp.version = version.unwrap();
+        let sc = status_code.ok_or_else(|| nom::Err::Failure(NomError::new(final_rest, ErrorKind::Verify)))?;
+        let v = version.ok_or_else(|| nom::Err::Failure(NomError::new(final_rest, ErrorKind::Verify)))?;
+        let mut resp = Response::new(sc);
+        resp.version = v;
         if let Some(reason) = reason_phrase_opt {
              resp = resp.with_reason(reason);
         }
@@ -248,13 +309,13 @@ pub fn parse_message(input: &[u8]) -> Result<Message> {
 
 /// Parse a SIP message from bytes with specific parsing mode
 pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message> {
-    // Add detailed debug logging to capture exact messages being parsed
-    /*eprintln!("=== PARSING SIP MESSAGE ===");
-    eprintln!("Input length: {} bytes", input.len());
-    eprintln!("Input as string: {:?}", String::from_utf8_lossy(input));
-    eprintln!("Input as hex: {:02x?}", input);
-    eprintln!("===========================");*/
-    
+    // Enforce total message size limit to prevent DoS
+    if input.len() > MAX_MESSAGE_SIZE {
+        return Err(Error::ParseError(
+            format!("Message size {} exceeds maximum allowed size {}", input.len(), MAX_MESSAGE_SIZE)
+        ));
+    }
+
     // In strict mode, use all_consuming to ensure the entire input is consumed
     // In lenient mode, don't use all_consuming to allow for excess input after valid message
     let parser_result = if mode == ParseMode::Strict {
@@ -275,27 +336,22 @@ pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message>
 
     match parser_result {
         Ok((_, message)) => {
-            /*eprintln!("=== PARSE SUCCESS ===");
-            eprintln!("Successfully parsed message");
-            eprintln!("=====================");*/
             Ok(message)
         },
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
             let offset = input.len() - e.input.len();
-            eprintln!("=== PARSE ERROR ===");
-            eprintln!("Error at offset: {}", offset);
-            eprintln!("Error code: {:?}", e.code);
-            eprintln!("Remaining input: {:?}", String::from_utf8_lossy(e.input));
-            eprintln!("Remaining input as hex: {:02x?}", e.input);
-            eprintln!("==================");
+            tracing::error!(
+                offset,
+                error_code = ?e.code,
+                remaining_input = %String::from_utf8_lossy(e.input),
+                "SIP message parse error"
+            );
             Err(Error::ParseError(
                 format!("Failed to parse message near offset {}: {:?}", offset, e.code)
             ))
         }
         Err(nom::Err::Incomplete(_)) => {
-            eprintln!("=== PARSE INCOMPLETE ===");
-            eprintln!("Incomplete message");
-            eprintln!("========================");
+            tracing::warn!("Incomplete SIP message received");
             Err(Error::ParseError(
                 "Incomplete message".to_string()
             ))
@@ -737,7 +793,7 @@ mod tests {
             println!("Parsing error: {:?}", e);
             
             // If it's a failure error, try to get more info
-            if let nom::Err::Failure(ref ne) = e {
+            if let nom::Err::Failure(ne) = e {
                 println!("Failure input: {:?}", String::from_utf8_lossy(ne.input));
                 println!("Failure code: {:?}", ne.code);
             }

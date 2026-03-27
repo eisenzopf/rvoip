@@ -179,6 +179,15 @@ pub struct GeneralConfig {
     /// Prevents hanging connections when call termination fails.
     pub bye_timeout_seconds: u64,
     
+    /// Enable WebSocket transport on port 8080 in addition to UDP on port 5060.
+    ///
+    /// When `true`, the SIP stack listens on **both** transports simultaneously:
+    /// - UDP on `local_signaling_addr.port()` (default 5060) — for traditional SIP devices
+    /// - WebSocket on port 8080 — for browser-based softphones (RFC 7118 / sip.js)
+    ///
+    /// Defaults to `false` (UDP only) to preserve backward compatibility.
+    pub enable_websocket: bool,
+
     /// BYE retry attempts
     ///
     /// Number of times to retry sending BYE requests when they fail or timeout.
@@ -744,14 +753,16 @@ impl Default for GeneralConfig {
             max_agents: 500,
             default_call_timeout: 300, // 5 minutes
             cleanup_interval: Duration::from_secs(60),
-            local_signaling_addr: "0.0.0.0:5060".parse().unwrap(),
-            local_media_addr: "0.0.0.0:10000".parse().unwrap(),
+            local_signaling_addr: SocketAddr::from(([0, 0, 0, 0], 5060)),
+            local_media_addr: SocketAddr::from(([0, 0, 0, 0], 10000)),
             user_agent: "rvoip-call-center/0.1.0".to_string(),
             domain: "call-center.local".to_string(),
             local_ip: "127.0.0.1".to_string(),  // Safe default for development
             registrar_domain: "call-center.local".to_string(),
             call_center_service: "call-center".to_string(),
             
+            enable_websocket: false,     // Opt-in; set true to also accept browser softphones on :8080
+
             // PHASE 0.24: BYE handling configuration with production-ready defaults
             bye_timeout_seconds: 15,     // Increased from 5s to 15s for better reliability
             bye_retry_attempts: 3,       // Allow 3 retry attempts for failed BYEs

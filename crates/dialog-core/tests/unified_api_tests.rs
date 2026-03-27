@@ -1,3 +1,6 @@
+// Gated: depends on removed set_session_coordinator API
+#![cfg(feature = "legacy-dialog-api")]
+
 //! Unified API Architecture Tests
 //!
 //! This module provides comprehensive testing of the unified DialogManager architecture

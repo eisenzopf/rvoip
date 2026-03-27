@@ -196,7 +196,7 @@ pub async fn handle_client_static(
     
     // Create RTP session config for this client - bind to 0.0.0.0:0 to let OS choose a port
     let session_config = RtpSessionConfig {
-        local_addr: "0.0.0.0:0".parse().unwrap(),
+        local_addr: "0.0.0.0:0".parse().expect("BUG: constant address literal must parse"),
         remote_addr: Some(addr),
         ssrc: Some(rand::random()),
         payload_type: 8, // Default payload type
@@ -332,7 +332,7 @@ pub async fn disconnect_client(
     // Remove client
     let mut clients_guard = clients.write().await;
     
-    if let Some(mut client) = clients_guard.remove(client_id) {
+    match clients_guard.remove(client_id) { Some(mut client) => {
         // Abort task
         if let Some(task) = client.task.take() {
             task.abort();
@@ -366,9 +366,9 @@ pub async fn disconnect_client(
         }
         
         Ok(())
-    } else {
+    } _ => {
         Err(MediaTransportError::Transport(format!("Client not found: {}", client_id)))
-    }
+    }}
 }
 
 /// Get client information

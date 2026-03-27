@@ -6,12 +6,13 @@ use bytes::{BytesMut, Buf};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::SinkExt;
 use futures_util::StreamExt;
-use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, trace, warn};
 
 #[cfg(feature = "ws")]
-use tokio_tungstenite::{tungstenite, WebSocketStream, MaybeTlsStream};
+use tokio_tungstenite::{tungstenite, WebSocketStream};
+#[cfg(feature = "ws")]
+use super::stream::WsStream;
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::protocol::{Message as WsMessage, Role};
 
@@ -29,9 +30,11 @@ const MAX_MESSAGE_SIZE: usize = 65535;
 pub struct WebSocketConnection {
     /// The WebSocket stream (writer half)
     #[cfg(feature = "ws")]
-    ws_writer: Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>>,
+    ws_writer: Mutex<SplitSink<WebSocketStream<WsStream>, WsMessage>>,
     /// The peer's address
     peer_addr: SocketAddr,
+    /// The local address (if known)
+    local_addr: Option<SocketAddr>,
     /// Whether the connection is closed
     closed: AtomicBool,
     /// Whether this is a secure WebSocket connection
@@ -44,14 +47,34 @@ impl WebSocketConnection {
     /// Creates a WebSocket connection from an existing WebSocket stream
     #[cfg(feature = "ws")]
     pub fn from_writer(
-        ws_writer: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>,
-        peer_addr: SocketAddr, 
+        ws_writer: SplitSink<WebSocketStream<WsStream>, WsMessage>,
+        peer_addr: SocketAddr,
         secure: bool,
         subprotocol: String,
     ) -> Self {
         Self {
             ws_writer: Mutex::new(ws_writer),
             peer_addr,
+            local_addr: None,
+            closed: AtomicBool::new(false),
+            secure,
+            subprotocol,
+        }
+    }
+
+    /// Creates a WebSocket connection from an existing WebSocket stream with a known local address
+    #[cfg(feature = "ws")]
+    pub fn from_writer_with_local_addr(
+        ws_writer: SplitSink<WebSocketStream<WsStream>, WsMessage>,
+        peer_addr: SocketAddr,
+        local_addr: SocketAddr,
+        secure: bool,
+        subprotocol: String,
+    ) -> Self {
+        Self {
+            ws_writer: Mutex::new(ws_writer),
+            peer_addr,
+            local_addr: Some(local_addr),
             closed: AtomicBool::new(false),
             secure,
             subprotocol,
@@ -65,9 +88,9 @@ impl WebSocketConnection {
     
     /// Returns the local address of the connection
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        // WebSocket connections don't directly expose the local address
-        // Would need to be tracked separately when the connection is created
-        Err(Error::NotImplemented("Getting local address from WebSocket connection".into()))
+        self.local_addr.ok_or_else(|| Error::NotImplemented(
+            "Local address not available for this WebSocket connection".into(),
+        ))
     }
     
     /// Returns whether this is a secure connection
@@ -92,7 +115,7 @@ impl WebSocketConnection {
         
         // In WebSocket, we send the raw SIP message as text content
         // RFC 7118 section 7: SIP WebSocket Client and Server Examples
-        let ws_message = WsMessage::Text(String::from_utf8_lossy(&message_bytes).to_string());
+        let ws_message = WsMessage::Text(String::from_utf8_lossy(&message_bytes).to_string().into());
         
         // Acquire lock on the writer
         let mut writer = self.ws_writer.lock().await;
@@ -208,12 +231,13 @@ impl WebSocketConnection {
     /// Creates a WebSocket connection from an existing WebSocket stream
     pub fn from_writer(
         _writer: (),
-        peer_addr: SocketAddr, 
+        peer_addr: SocketAddr,
         secure: bool,
         subprotocol: String,
     ) -> Self {
         Self {
             peer_addr,
+            local_addr: None,
             closed: AtomicBool::new(false),
             secure,
             subprotocol,
@@ -254,16 +278,18 @@ mod tests {
     #[cfg(feature = "ws")]
     struct TestWebSocketConnection {
         peer_addr: SocketAddr,
+        local_addr: Option<SocketAddr>,
         closed: AtomicBool,
         secure: bool,
         subprotocol: String,
     }
-    
+
     #[cfg(feature = "ws")]
     impl TestWebSocketConnection {
         fn new(addr: SocketAddr, secure: bool, subprotocol: String) -> Self {
             Self {
                 peer_addr: addr,
+                local_addr: None,
                 closed: AtomicBool::new(false),
                 secure,
                 subprotocol,
@@ -291,7 +317,9 @@ mod tests {
         }
         
         fn local_addr(&self) -> Result<SocketAddr> {
-            Err(Error::NotImplemented("Getting local address from WebSocket connection".into()))
+            self.local_addr.ok_or_else(|| Error::NotImplemented(
+                "Local address not available for this WebSocket connection".into(),
+            ))
         }
         
         fn process_ws_message(&self, ws_message: WsMessage) -> Result<Option<Message>> {
@@ -364,7 +392,7 @@ Contact: <sip:alice@127.0.0.1>\r\n\
 Content-Length: 0\r\n\
 \r\n";
         
-        let text_frame = WsMessage::Text(sip_text.to_string());
+        let text_frame = WsMessage::Text(sip_text.to_string().into());
         let result = connection.process_ws_message(text_frame).unwrap();
         
         assert!(result.is_some());
@@ -376,12 +404,12 @@ Content-Length: 0\r\n\
         }
         
         // Test processing a ping frame
-        let ping_frame = WsMessage::Ping(vec![1, 2, 3]);
+        let ping_frame = WsMessage::Ping(vec![1, 2, 3].into());
         let result = connection.process_ws_message(ping_frame).unwrap();
         assert!(result.is_none(), "Ping frame should not produce a SIP message");
         
         // Test processing a pong frame
-        let pong_frame = WsMessage::Pong(vec![1, 2, 3]);
+        let pong_frame = WsMessage::Pong(vec![1, 2, 3].into());
         let result = connection.process_ws_message(pong_frame).unwrap();
         assert!(result.is_none(), "Pong frame should not produce a SIP message");
         

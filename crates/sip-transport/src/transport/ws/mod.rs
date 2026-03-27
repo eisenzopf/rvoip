@@ -1,8 +1,10 @@
 mod connection;
 mod listener;
+mod stream;
 
 pub use connection::WebSocketConnection;
 pub use listener::WebSocketListener;
+pub use stream::WsStream;
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -12,6 +14,17 @@ use std::collections::HashMap;
 use tokio::sync::{mpsc, Mutex};
 use futures_util::StreamExt;
 use tracing::{debug, error, info, trace, warn};
+
+#[cfg(feature = "ws")]
+use tokio::net::TcpStream;
+#[cfg(feature = "ws")]
+use tokio_tungstenite::client_async;
+#[cfg(feature = "ws")]
+use tokio_tungstenite::tungstenite::handshake::client::Request as WsRequest;
+#[cfg(all(feature = "ws", feature = "tls"))]
+use tokio_rustls::TlsConnector;
+#[cfg(all(feature = "ws", feature = "tls"))]
+use rustls_pki_types::ServerName;
 
 use rvoip_sip_core::Message;
 use crate::error::{Error, Result};
@@ -35,6 +48,8 @@ struct WebSocketTransportInner {
     connections: Mutex<HashMap<SocketAddr, Arc<WebSocketConnection>>>,
     closed: AtomicBool,
     events_tx: mpsc::Sender<TransportEvent>,
+    /// Whether client connections should use TLS (wss://)
+    secure: bool,
 }
 
 impl WebSocketTransport {
@@ -64,6 +79,7 @@ impl WebSocketTransport {
                 connections: Mutex::new(HashMap::new()),
                 closed: AtomicBool::new(false),
                 events_tx: events_tx.clone(),
+                secure,
             }),
         };
 
@@ -127,7 +143,7 @@ impl WebSocketTransport {
     fn spawn_connection_reader(
         &self, 
         connection: Arc<WebSocketConnection>,
-        mut reader: futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
+        mut reader: futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<WsStream>>,
     ) {
         let transport = self.clone();
         let peer_addr = connection.peer_addr();
@@ -212,7 +228,10 @@ impl WebSocketTransport {
         });
     }
     
-    /// Connect to a remote WebSocket server
+    /// Connect to a remote WebSocket server.
+    ///
+    /// Establishes a TCP connection, optionally performs TLS handshake for wss://,
+    /// then upgrades to WebSocket with the `sip` subprotocol (RFC 7118).
     #[cfg(feature = "ws")]
     async fn connect_to(&self, addr: SocketAddr) -> Result<Arc<WebSocketConnection>> {
         // Check if we already have an open connection
@@ -224,9 +243,114 @@ impl WebSocketTransport {
                 }
             }
         }
-        
-        // Not implemented yet - we'll need to implement client-side WebSocket connection
-        Err(Error::NotImplemented("WebSocket client connections not yet implemented".into()))
+
+        let secure = self.inner.secure;
+        let scheme = if secure { "wss" } else { "ws" };
+
+        debug!("Connecting to {}://{}", scheme, addr);
+
+        // Establish TCP connection
+        let tcp_stream = TcpStream::connect(addr)
+            .await
+            .map_err(|e| Error::ConnectFailed(addr, e))?;
+
+        // Build the underlying stream: plain TCP or client-side TLS
+        let ws_stream: WsStream = if secure {
+            #[cfg(feature = "tls")]
+            {
+                // Build a TLS connector that accepts any certificate for now.
+                // In production a proper root store should be configured.
+                let mut root_store = rustls::RootCertStore::empty();
+                // Add webpki roots if available; an empty store means self-signed
+                // certs will be rejected unless the verifier is overridden.
+
+                let tls_config = rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_no_client_auth();
+
+                let connector = TlsConnector::from(Arc::new(tls_config));
+
+                // Derive a ServerName from the IP address (use DNS name in production)
+                let server_name = ServerName::IpAddress(addr.ip().into());
+
+                let tls_stream = connector
+                    .connect(server_name, tcp_stream)
+                    .await
+                    .map_err(|e| Error::TlsHandshakeFailed(
+                        format!("TLS handshake with {} failed: {}", addr, e),
+                    ))?;
+
+                debug!("TLS handshake completed with {} for client WSS", addr);
+                WsStream::TlsClient(tls_stream)
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                return Err(Error::NotImplemented(
+                    "WSS client connections require the 'tls' feature".into(),
+                ));
+            }
+        } else {
+            WsStream::Plain(tcp_stream)
+        };
+
+        // Build the WebSocket upgrade request with `sip` subprotocol (RFC 7118)
+        let ws_url = format!("{}://{}/", scheme, addr);
+        let request = WsRequest::builder()
+            .uri(&ws_url)
+            .header("Host", addr.to_string())
+            .header("Sec-WebSocket-Protocol", SIP_WS_SUBPROTOCOL)
+            .header("Upgrade", "websocket")
+            .header("Connection", "Upgrade")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+            )
+            .body(())
+            .map_err(|e| Error::WebSocketHandshakeFailed(
+                format!("Failed to build WS request for {}: {}", addr, e),
+            ))?;
+
+        // Perform WebSocket handshake
+        let (ws, _response) = client_async(request, ws_stream)
+            .await
+            .map_err(|e| {
+                error!("WebSocket handshake failed with {}: {}", addr, e);
+                Error::WebSocketHandshakeFailed(format!(
+                    "WebSocket handshake with {} failed: {}", addr, e
+                ))
+            })?;
+
+        debug!("WebSocket client handshake completed with {}", addr);
+
+        let subprotocol = if secure {
+            SIP_WSS_SUBPROTOCOL
+        } else {
+            SIP_WS_SUBPROTOCOL
+        }
+        .to_string();
+
+        // Split the stream for reading and writing
+        let (ws_writer, ws_reader) = ws.split();
+
+        let connection = Arc::new(WebSocketConnection::from_writer(
+            ws_writer,
+            addr,
+            secure,
+            subprotocol,
+        ));
+
+        // Store the connection
+        {
+            let mut connections = self.inner.connections.lock().await;
+            connections.insert(addr, connection.clone());
+        }
+
+        // Spawn a reader task for this client connection
+        self.spawn_connection_reader(connection.clone(), ws_reader);
+
+        info!("WebSocket client connected to {}://{}", scheme, addr);
+        Ok(connection)
     }
 }
 
@@ -323,32 +447,39 @@ mod tests {
     
     #[cfg(feature = "ws")]
     #[tokio::test]
-    async fn test_websocket_transport_secure_bind() {
-        // Test binding with secure WebSocket (WSS)
+    async fn test_websocket_transport_secure_bind_missing_certs() {
+        // Test that WSS bind fails gracefully when cert files don't exist
         let result = WebSocketTransport::bind(
             "127.0.0.1:0".parse().unwrap(),
             true,
-            Some("cert.pem"),
-            Some("key.pem"),
+            Some("nonexistent_cert.pem"),
+            Some("nonexistent_key.pem"),
             None,
         ).await;
-        
-        if cfg!(feature = "ws") {
-            let (transport, _rx) = result.unwrap();
-            let addr = transport.local_addr().unwrap();
-            assert!(addr.port() > 0);
-            
-            transport.close().await.unwrap();
-            assert!(transport.is_closed());
-        } else {
-            assert!(result.is_err());
-        }
+
+        // Should fail because cert files don't exist
+        assert!(result.is_err(), "WSS bind should fail with non-existent cert files");
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn test_websocket_transport_secure_bind_missing_paths() {
+        // Test that WSS bind fails when cert/key paths are not provided
+        let result = WebSocketTransport::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            true,
+            None,
+            None,
+            None,
+        ).await;
+
+        assert!(result.is_err(), "WSS bind should fail without cert/key paths");
     }
     
     #[cfg(feature = "ws")]
     #[tokio::test]
-    async fn test_websocket_transport_not_implemented_send() {
-        // Test sending to a non-existent connection (this should fail with NotImplemented)
+    async fn test_websocket_transport_connect_refused() {
+        // Test sending to an address where no WS server is listening
         let (transport, _rx) = WebSocketTransport::bind(
             "127.0.0.1:0".parse().unwrap(),
             false,
@@ -356,7 +487,7 @@ mod tests {
             None,
             None,
         ).await.unwrap();
-        
+
         // Create a test SIP message
         let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
             .unwrap()
@@ -365,16 +496,64 @@ mod tests {
             .call_id("call1@example.com")
             .cseq(1)
             .build();
-        
-        // Try to send the message (should fail since client connections aren't implemented yet)
-        let result = transport.send_message(request.into(), "127.0.0.1:5060".parse().unwrap()).await;
-        assert!(result.is_err());
-        
-        if let Err(e) = result {
-            assert!(matches!(e, Error::NotImplemented(_)));
-        }
-        
+
+        // Try to send the message — should fail because nothing is listening on 127.0.0.1:19999
+        let result = transport.send_message(request.into(), "127.0.0.1:19999".parse().unwrap()).await;
+        assert!(result.is_err(), "Send to non-listening address should fail");
+
         transport.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn test_websocket_client_server_roundtrip() {
+        // Bind a WS server
+        let (server_transport, mut server_rx) = WebSocketTransport::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        let server_addr = server_transport.local_addr().unwrap();
+
+        // Bind a WS client transport
+        let (client_transport, mut client_rx) = WebSocketTransport::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+        ).await.unwrap();
+
+        // Create a test SIP message
+        let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
+            .unwrap()
+            .from("alice", "sip:alice@example.com", Some("tag1"))
+            .to("bob", "sip:bob@example.com", None)
+            .call_id("roundtrip-test@example.com")
+            .cseq(1)
+            .build();
+
+        // Send from client to server
+        let send_result = client_transport.send_message(request.into(), server_addr).await;
+        assert!(send_result.is_ok(), "Client should connect and send: {:?}", send_result.err());
+
+        // Server should receive the message
+        let event = tokio::time::timeout(Duration::from_secs(3), server_rx.recv()).await;
+        assert!(event.is_ok(), "Server should receive message within timeout");
+
+        if let Ok(Some(TransportEvent::MessageReceived { message, .. })) = event {
+            if let Message::Request(req) = message {
+                assert_eq!(req.method(), Method::Register);
+            } else {
+                panic!("Expected a SIP request");
+            }
+        }
+
+        client_transport.close().await.unwrap();
+        server_transport.close().await.unwrap();
     }
     
     #[cfg(feature = "ws")]
@@ -418,5 +597,4 @@ mod tests {
         transport.close().await.unwrap();
     }
     
-    // Tests for client connection support would go here once implemented
 } 

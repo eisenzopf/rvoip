@@ -8,7 +8,11 @@ use tokio::sync::{Mutex, mpsc};
 use bytes::Bytes;
 
 use super::{DtlsConfig, DtlsRole, Result};
-use super::crypto::keys::DtlsKeyingMaterial;
+use crate::error::Error;
+use super::crypto::cipher::{
+    AeadImpl, BlockCipherImpl, CipherSuiteId, CipherType, Encryptor, Decryptor, MacAlgorithm,
+};
+use super::crypto::keys::{DtlsKeyingMaterial, derive_key_material};
 use super::crypto::verify::Certificate;
 use super::handshake::HandshakeState;
 use super::srtp::extractor::{DtlsSrtpContext, extract_srtp_keys_from_dtls};
@@ -43,51 +47,69 @@ pub enum ConnectionState {
 pub struct DtlsConnection {
     /// Connection configuration
     config: DtlsConfig,
-    
+
     /// Current connection state
     state: ConnectionState,
-    
+
     /// Handshake state machine
     handshake: Option<HandshakeState>,
-    
+
     /// Transport for sending/receiving DTLS packets
     transport: Option<Arc<Mutex<UdpTransport>>>,
-    
+
     /// Remote address for the connection
     remote_addr: Option<SocketAddr>,
-    
+
     /// Keying material derived from the handshake
     keying_material: Option<DtlsKeyingMaterial>,
-    
+
     /// Negotiated SRTP profile
     srtp_profile: Option<SrtpProtectionProfile>,
-    
+
     /// Local certificate
     local_cert: Option<Certificate>,
-    
+
     /// Remote certificate
     remote_cert: Option<Certificate>,
-    
+
     /// Handshake completion receiver
     handshake_complete_rx: Option<mpsc::Receiver<Result<ConnectionResult>>>,
-    
+
     /// Handshake completion sender
     handshake_complete_tx: Option<mpsc::Sender<Result<ConnectionResult>>>,
-    
-    /// Record sequence number
-    sequence_number: u64,
-    
-    /// Record epoch (for cipher state changes)
-    epoch: u16,
+
+    /// Write-side sequence number (reset to 0 on epoch change)
+    write_sequence_number: u64,
+
+    /// Write-side epoch (incremented when we send CCS)
+    write_epoch: u16,
+
+    /// Read-side sequence number (reset to 0 on epoch change)
+    read_sequence_number: u64,
+
+    /// Read-side epoch (incremented when we receive CCS)
+    read_epoch: u16,
+
+    /// Write cipher for encrypting outgoing records (activated after sending CCS)
+    write_cipher: Option<Box<dyn Encryptor + Send + Sync>>,
+
+    /// Read cipher for decrypting incoming records (activated after receiving CCS)
+    read_cipher: Option<Box<dyn Decryptor + Send + Sync>>,
+
+    /// Buffer for received application data (plaintext, already decrypted by process_packet)
+    app_data_rx: Vec<Vec<u8>>,
 }
 
 /// Result of the DTLS connection process
 struct ConnectionResult {
     /// Keying material derived from the handshake
     keying_material: Option<crate::dtls::crypto::keys::DtlsKeyingMaterial>,
-    
+
     /// Negotiated SRTP profile
     srtp_profile: Option<crate::dtls::message::extension::SrtpProtectionProfile>,
+
+    /// Remote certificate DER bytes (if received during handshake)
+    remote_certificate_der: Option<Bytes>,
 }
 
 impl DtlsConnection {
@@ -106,14 +128,24 @@ impl DtlsConnection {
             remote_cert: None,
             handshake_complete_rx: Some(handshake_complete_rx),
             handshake_complete_tx: Some(handshake_complete_tx),
-            sequence_number: 0,
-            epoch: 0,
+            write_sequence_number: 0,
+            write_epoch: 0,
+            read_sequence_number: 0,
+            read_epoch: 0,
+            write_cipher: None,
+            read_cipher: None,
+            app_data_rx: Vec::new(),
         }
     }
     
     /// Set the local certificate
     pub fn set_certificate(&mut self, cert: Certificate) {
         self.local_cert = Some(cert);
+    }
+
+    /// Set the remote certificate (populated during handshake)
+    pub fn set_remote_certificate(&mut self, cert: Certificate) {
+        self.remote_cert = Some(cert);
     }
     
     /// Start the DTLS handshake
@@ -146,9 +178,13 @@ impl DtlsConnection {
     async fn start_handshake_process(&mut self) -> Result<()> {
         // Clone values needed for the handshake task
         let role = self.config.role;
-        let transport = self.transport.as_ref().unwrap().clone();
-        let remote_addr = self.remote_addr.unwrap();
-        let handshake_complete_tx = self.handshake_complete_tx.take().unwrap();
+        let transport = self.transport.as_ref()
+            .ok_or_else(|| Error::InvalidState("No transport configured for DTLS connection".to_string()))?
+            .clone();
+        let remote_addr = self.remote_addr
+            .ok_or_else(|| Error::InvalidState("No remote address configured for DTLS connection".to_string()))?;
+        let handshake_complete_tx = self.handshake_complete_tx.take()
+            .ok_or_else(|| Error::InvalidState("Handshake completion channel already taken".to_string()))?;
         let srtp_profiles = self.config.srtp_profiles.clone();
         let local_cert = self.local_cert.clone();
         let version = self.config.version;
@@ -175,7 +211,7 @@ impl DtlsConnection {
                     // Serialize the record
                     let data = record.serialize()?;
                     
-                    println!("Sending DTLS record to {}: type={:?}, epoch={}, seq={}, len={}",
+                    tracing::debug!("Sending DTLS record to {}: type={:?}, epoch={}, seq={}, len={}",
                         self.remote_addr, record.header.content_type, record.header.epoch, 
                         record.header.sequence_number, record.header.length);
                     
@@ -209,7 +245,7 @@ impl DtlsConnection {
                     self.epoch = self.epoch.saturating_add(1);
                     self.sequence_number = 0;
                     
-                    println!("Sent ChangeCipherSpec, epoch incremented to {}", self.epoch);
+                    tracing::debug!("Sent ChangeCipherSpec, epoch incremented to {}", self.epoch);
                     
                     Ok(())
                 }
@@ -247,14 +283,14 @@ impl DtlsConnection {
                 
                 async fn complete_handshake(&mut self) -> Result<()> {
                     // Send ChangeCipherSpec message
-                    println!("Sending ChangeCipherSpec message");
+                    tracing::debug!("Sending ChangeCipherSpec message");
                     self.send_change_cipher_spec().await?;
                     
                     // Generate Finished message
                     let finished = match self.handshake.generate_finished_message() {
                         Ok(finished) => finished,
                         Err(e) => {
-                            println!("Failed to generate Finished message: {:?}", e);
+                            tracing::warn!("Failed to generate Finished message: {:?}", e);
                             return Err(e);
                         }
                     };
@@ -284,10 +320,10 @@ impl DtlsConnection {
                     );
                     
                     // Send the Finished message
-                    println!("Sending Finished message");
+                    tracing::debug!("Sending Finished message");
                     self.send_record(record).await?;
                     
-                    println!("Handshake completion messages sent");
+                    tracing::debug!("Handshake completion messages sent");
                     
                     Ok(())
                 }
@@ -335,7 +371,7 @@ impl DtlsConnection {
                                         let records = match super::record::Record::parse_multiple(&packet) {
                                             Ok(records) => records,
                                             Err(e) => {
-                                                println!("Failed to parse DTLS record: {:?}", e);
+                                                tracing::warn!("Failed to parse DTLS record: {:?}", e);
                                                 continue;
                                             }
                                         };
@@ -355,7 +391,7 @@ impl DtlsConnection {
                                                         let (header, header_len) = match super::message::handshake::HandshakeHeader::parse(&record.data[pos..]) {
                                                             Ok(result) => result,
                                                             Err(e) => {
-                                                                println!("Failed to parse handshake header: {:?}", e);
+                                                                tracing::warn!("Failed to parse handshake header: {:?}", e);
                                                                 break;
                                                             }
                                                         };
@@ -372,18 +408,18 @@ impl DtlsConnection {
                                                         let message = match super::message::handshake::HandshakeMessage::parse(header.msg_type, msg_data) {
                                                             Ok(msg) => msg,
                                                             Err(e) => {
-                                                                println!("Failed to parse handshake message: {:?}", e);
+                                                                tracing::warn!("Failed to parse handshake message: {:?}", e);
                                                                 break;
                                                             }
                                                         };
                                                         
                                                         // Process message
-                                                        println!("Processing handshake message: {:?}", message.message_type());
+                                                        tracing::debug!("Processing handshake message: {:?}", message.message_type());
                                                         let responses = match self.handshake.process_message(message) {
                                                             Ok(Some(responses)) => responses,
                                                             Ok(None) => vec![],
                                                             Err(e) => {
-                                                                println!("Error processing handshake message: {:?}", e);
+                                                                tracing::warn!("Error processing handshake message: {:?}", e);
                                                                 return Err(e);
                                                             }
                                                         };
@@ -433,10 +469,20 @@ impl DtlsConnection {
                                                                 None => None,
                                                             };
                                                             
+                                                            // Extract remote certificate if available
+                                                            let remote_certificate_der = if self.role == DtlsRole::Client {
+                                                                self.handshake.server_certificate()
+                                                                    .map(|der| Bytes::copy_from_slice(der))
+                                                            } else {
+                                                                self.handshake.client_certificate()
+                                                                    .map(|der| Bytes::copy_from_slice(der))
+                                                            };
+
                                                             // Return the result
                                                             return Ok(ConnectionResult {
                                                                 keying_material: Some(keying_material),
                                                                 srtp_profile,
+                                                                remote_certificate_der,
                                                             });
                                                         }
                                                         
@@ -458,11 +504,11 @@ impl DtlsConnection {
                                                 super::record::ContentType::ChangeCipherSpec => {
                                                     // Verify that the message is a single byte with value 1
                                                     if record.data.len() != 1 || record.data[0] != 1 {
-                                                        println!("Invalid ChangeCipherSpec message: expected [1], got {:?}", record.data);
+                                                        tracing::warn!("Invalid ChangeCipherSpec message: expected [1], got {:?}", record.data);
                                                         continue;
                                                     }
                                                     
-                                                    println!("Received ChangeCipherSpec");
+                                                    tracing::debug!("Received ChangeCipherSpec");
                                                     
                                                     // Notify the handshake state machine
                                                     self.handshake.set_change_cipher_spec_received(true);
@@ -473,13 +519,13 @@ impl DtlsConnection {
                                                     // Reset sequence number for the new epoch
                                                     self.sequence_number = 0;
                                                     
-                                                    println!("Updated cipher state, new epoch: {}, sequence number reset to 0", self.epoch);
+                                                    tracing::debug!("Updated cipher state, new epoch: {}, sequence number reset to 0", self.epoch);
                                                 },
                                                 super::record::ContentType::Alert => {
-                                                    println!("Received Alert (not implemented yet)");
+                                                    tracing::warn!("Received Alert during handshake (pre-completion)");
                                                 },
                                                 _ => {
-                                                    println!("Ignoring record type: {:?}", record.header.content_type);
+                                                    tracing::debug!("Ignoring record type: {:?}", record.header.content_type);
                                                 }
                                             }
                                         }
@@ -508,18 +554,24 @@ impl DtlsConnection {
             // Start the handshake if we're a client
             if role == DtlsRole::Client {
                 if let Err(e) = handler.start_handshake().await {
-                    let _ = handshake_complete_tx.send(Err(e)).await;
+                    if let Err(send_err) = handshake_complete_tx.send(Err(e)).await {
+                        tracing::warn!("Failed to send handshake error result (receiver dropped): {send_err}");
+                    }
                     return;
                 }
             }
-            
+
             // Process the handshake
             match handler.process_handshake().await {
                 Ok(result) => {
-                    let _ = handshake_complete_tx.send(Ok(result)).await;
+                    if let Err(e) = handshake_complete_tx.send(Ok(result)).await {
+                        tracing::warn!("Failed to send handshake success result (receiver dropped): {e}");
+                    }
                 },
                 Err(e) => {
-                    let _ = handshake_complete_tx.send(Err(e)).await;
+                    if let Err(send_err) = handshake_complete_tx.send(Err(e)).await {
+                        tracing::warn!("Failed to send handshake error result (receiver dropped): {send_err}");
+                    }
                 }
             }
         };
@@ -556,7 +608,12 @@ impl DtlsConnection {
                 // Store the keying material and SRTP profile
                 self.keying_material = result.keying_material;
                 self.srtp_profile = result.srtp_profile;
-                
+
+                // Populate remote certificate if received during handshake
+                if let Some(der) = result.remote_certificate_der {
+                    self.remote_cert = Some(Certificate::new(der));
+                }
+
                 // Update state
                 self.state = ConnectionState::Connected;
                 Ok(())
@@ -578,36 +635,72 @@ impl DtlsConnection {
     pub async fn process_packet(&mut self, data: &[u8]) -> Result<()> {
         // Parse the records from the packet
         let records = super::record::Record::parse_multiple(data)?;
-        
+
         // Process each record
         for record in records {
+            // If the read cipher is active and the record epoch indicates encryption,
+            // decrypt the record data before processing
+            let decrypted_data = if self.read_cipher.is_some()
+                && record.header.epoch > 0
+                && record.header.content_type != ContentType::ChangeCipherSpec
+            {
+                let cipher = self.read_cipher.as_ref().ok_or_else(|| {
+                    crate::error::Error::InvalidState("Read cipher not available".to_string())
+                })?;
+
+                // Build AAD matching what the sender used
+                let aad = build_aad(
+                    record.header.epoch,
+                    record.header.sequence_number,
+                    record.header.content_type as u8,
+                    record.header.version as u16,
+                    // For decryption, the AAD length field refers to the plaintext length.
+                    // However we don't know it yet; per RFC 6347, the AAD uses the
+                    // *compressed* (plaintext) length. For GCM the tag is 16 bytes.
+                    // We pass the ciphertext length minus the tag as the plaintext length.
+                    (record.data.len().saturating_sub(16)) as u16,
+                );
+
+                cipher.decrypt(
+                    &record.data,
+                    &aad,
+                    record.header.epoch,
+                    record.header.sequence_number,
+                )?
+            } else {
+                record.data.clone()
+            };
+
+            // Track the read sequence number
+            self.read_sequence_number = record.header.sequence_number.wrapping_add(1);
+
             match record.header.content_type {
-                super::record::ContentType::Handshake => {
-                    self.process_handshake_record(&record.data).await?;
+                ContentType::Handshake => {
+                    self.process_handshake_record(&decrypted_data).await?;
                 },
-                super::record::ContentType::ChangeCipherSpec => {
-                    self.process_change_cipher_spec_record(&record.data).await?;
+                ContentType::ChangeCipherSpec => {
+                    self.process_change_cipher_spec_record(&decrypted_data).await?;
                 },
-                super::record::ContentType::Alert => {
-                    self.process_alert_record(&record.data).await?;
+                ContentType::Alert => {
+                    self.process_alert_record(&decrypted_data).await?;
                 },
-                super::record::ContentType::ApplicationData => {
-                    self.process_application_data_record(&record.data).await?;
+                ContentType::ApplicationData => {
+                    self.process_application_data_record(&decrypted_data).await?;
                 },
                 _ => {
                     // Unknown record type
-                    println!("Ignoring unknown record type: {:?}", record.header.content_type);
+                    tracing::debug!("Ignoring unknown record type: {:?}", record.header.content_type);
                 }
             }
         }
-        
+
         Ok(())
     }
     
     /// Send handshake messages
     async fn send_handshake_messages(&mut self, messages: Vec<HandshakeMessage>) -> Result<()> {
         for message in messages {
-            println!("Sending handshake message: {:?}", message.message_type());
+            tracing::debug!("Sending handshake message: {:?}", message.message_type());
             self.send_handshake_message(message).await?;
         }
         Ok(())
@@ -630,7 +723,7 @@ impl DtlsConnection {
             // Parse handshake header
             let (header, header_size) = super::message::handshake::HandshakeHeader::parse(&data[offset..])?;
             
-            println!("Parsed handshake header: {:?}", header.msg_type);
+            tracing::debug!("Parsed handshake header: {:?}", header.msg_type);
             
             // Make sure we have enough data for the message
             if data.len() - offset - header_size < header.fragment_length as usize {
@@ -648,41 +741,57 @@ impl DtlsConnection {
             // Parse the message
             let message = super::message::handshake::HandshakeMessage::parse(header.msg_type, message_data)?;
             
-            println!("Successfully parsed handshake message: {:?}", header.msg_type);
+            tracing::debug!("Successfully parsed handshake message: {:?}", header.msg_type);
             
             // Process the message with the handshake state machine
             let mut response_messages = Vec::new();
             let mut handshake_complete = false;
             
             if let Some(handshake) = self.handshake.as_mut() {
-                println!("Processing handshake message, current state: {:?}", handshake.step());
+                tracing::debug!("Processing handshake message, current state: {:?}", handshake.step());
                 
                 // Process the message and get any response messages
-                if let Some(messages) = handshake.process_message(message)? {
+                match handshake.process_message(message)? { Some(messages) => {
                     response_messages = messages;
-                } else {
-                    println!("No response needed for this message");
-                }
+                } _ => {
+                    tracing::debug!("No response needed for this message");
+                }}
                 
                 // Check for completion
                 handshake_complete = handshake.step() == super::handshake::HandshakeStep::Complete;
                 
-                println!("Current handshake state: {:?}", handshake.step());
+                tracing::debug!("Current handshake state: {:?}", handshake.step());
                 
                 // Signal completion if needed
                 if handshake_complete {
+                    // Populate remote certificate from handshake state
+                    let remote_cert_der = if self.config.role == DtlsRole::Client {
+                        handshake.server_certificate()
+                            .map(|der| Bytes::copy_from_slice(der))
+                    } else {
+                        handshake.client_certificate()
+                            .map(|der| Bytes::copy_from_slice(der))
+                    };
+                    if let Some(der) = remote_cert_der {
+                        self.remote_cert = Some(Certificate::new(der));
+                    }
+
                     // Signal completion
                     if let Some(tx) = &self.handshake_complete_tx {
                         // Create a connection result with necessary information
                         let result = ConnectionResult {
                             keying_material: self.keying_material.clone(),
                             srtp_profile: self.srtp_profile.clone(),
+                            remote_certificate_der: self.remote_cert.as_ref()
+                                .map(|c| c.der().clone()),
                         };
-                        
-                        let _ = tx.send(Ok(result)).await;
+
+                        if let Err(e) = tx.send(Ok(result)).await {
+                            tracing::warn!("Failed to send handshake completion result (receiver dropped): {e}");
+                        }
                     }
-                    
-                    println!("Handshake completed successfully!");
+
+                    tracing::info!("Handshake completed successfully!");
                 }
             } else {
                 return Err(crate::error::Error::InvalidState(
@@ -710,49 +819,147 @@ impl DtlsConnection {
                 format!("Invalid ChangeCipherSpec message: expected [1], got {:?}", data)
             ));
         }
-        
-        println!("Received ChangeCipherSpec message");
-        
+
+        tracing::debug!("Received ChangeCipherSpec message");
+
         // Make sure we have a handshake state machine
-        if self.handshake.is_none() {
-            return Err(crate::error::Error::InvalidState(
+        let handshake = self.handshake.as_mut().ok_or_else(|| {
+            crate::error::Error::InvalidState(
                 "Cannot process ChangeCipherSpec: no handshake state machine".to_string()
-            ));
-        }
-        
+            )
+        })?;
+
         // Notify the handshake state machine
-        if let Some(handshake) = self.handshake.as_mut() {
-            handshake.set_change_cipher_spec_received(true);
-        }
-        
-        // Update handshake state to indicate that the cipher spec has changed
-        // This would be used to update encryption state in a full implementation
-        
-        // Increment epoch to indicate cipher state change
-        // In a full implementation, this would activate the negotiated ciphers
-        self.epoch = self.epoch.saturating_add(1);
-        
-        // Reset sequence number for the new epoch
-        self.sequence_number = 0;
-        
-        // TODO: In a full implementation, this would activate the cipher suite
-        // negotiated during the handshake and prepare for encrypted communication
-        
-        println!("Updated cipher state, new epoch: {}, sequence number reset to 0", self.epoch);
-        
+        handshake.set_change_cipher_spec_received(true);
+
+        // Activate the read cipher (decrypt incoming records from the peer)
+        self.read_cipher = Some(self.create_read_cipher()?);
+
+        // Increment read epoch and reset read sequence number
+        self.read_epoch = self.read_epoch.saturating_add(1);
+        self.read_sequence_number = 0;
+
+        tracing::debug!("Activated read cipher, new read epoch: {}, sequence number reset to 0", self.read_epoch);
+
         Ok(())
     }
     
-    /// Process an alert record
+    /// Process an alert record (RFC 5246 section 7.2).
+    ///
+    /// An alert message is exactly 2 bytes: level (1=warning, 2=fatal) and
+    /// description (0-255).
     async fn process_alert_record(&mut self, data: &[u8]) -> Result<()> {
-        // This would parse and handle alerts
-        Err(crate::error::Error::NotImplemented("Alert record processing not yet implemented".to_string()))
+        if data.len() < 2 {
+            return Err(crate::error::Error::InvalidPacket(
+                format!("Alert record too short: {} bytes (need 2)", data.len()),
+            ));
+        }
+
+        let level = data[0];
+        let description = data[1];
+
+        let level_str = match level {
+            1 => "warning",
+            2 => "fatal",
+            _ => "unknown",
+        };
+
+        let desc_str = match description {
+            0 => "close_notify",
+            10 => "unexpected_message",
+            20 => "bad_record_mac",
+            21 => "decryption_failed",
+            22 => "record_overflow",
+            30 => "decompression_failure",
+            40 => "handshake_failure",
+            42 => "bad_certificate",
+            43 => "unsupported_certificate",
+            44 => "certificate_revoked",
+            45 => "certificate_expired",
+            46 => "certificate_unknown",
+            47 => "illegal_parameter",
+            48 => "unknown_ca",
+            49 => "access_denied",
+            50 => "decode_error",
+            51 => "decrypt_error",
+            70 => "protocol_version",
+            71 => "insufficient_security",
+            80 => "internal_error",
+            90 => "user_canceled",
+            100 => "no_renegotiation",
+            110 => "unsupported_extension",
+            _ => "unknown",
+        };
+
+        tracing::warn!(
+            level = level_str,
+            description = desc_str,
+            level_code = level,
+            description_code = description,
+            "Received DTLS alert"
+        );
+
+        // close_notify is a graceful shutdown
+        if description == 0 {
+            self.state = ConnectionState::Closing;
+            return Ok(());
+        }
+
+        // Fatal alerts terminate the connection
+        if level == 2 {
+            self.state = ConnectionState::Failed;
+            return Err(crate::error::Error::DtlsAlertReceived(
+                format!("Fatal alert: {} ({})", desc_str, description),
+            ));
+        }
+
+        // Warning alerts are logged but do not terminate the connection
+        Ok(())
     }
     
     /// Process an application data record
+    ///
+    /// The data passed here has already been decrypted by `process_packet` when
+    /// the read cipher is active. We simply store the plaintext for the caller
+    /// to retrieve via `read_application_data`.
     async fn process_application_data_record(&mut self, data: &[u8]) -> Result<()> {
-        // This would handle application data (not used in DTLS-SRTP)
-        Err(crate::error::Error::NotImplemented("Application data record processing not yet implemented".to_string()))
+        tracing::debug!(len = data.len(), "Received application data record");
+        self.app_data_rx.push(data.to_vec());
+        Ok(())
+    }
+
+    /// Read the next received application data message, if any.
+    ///
+    /// Returns `None` when no buffered application data is available.
+    pub fn read_application_data(&mut self) -> Option<Vec<u8>> {
+        if self.app_data_rx.is_empty() {
+            None
+        } else {
+            Some(self.app_data_rx.remove(0))
+        }
+    }
+
+    /// Send application data over the DTLS connection.
+    ///
+    /// The plaintext will be encrypted with the current write cipher when one
+    /// is active (i.e. after the handshake completes and CCS has been sent).
+    pub async fn send_application_data(&mut self, data: &[u8]) -> Result<()> {
+        if self.state != ConnectionState::Connected {
+            return Err(crate::error::Error::InvalidState(
+                "Cannot send application data: connection is not established".to_string(),
+            ));
+        }
+
+        let record = Record::new(
+            ContentType::ApplicationData,
+            self.config.version,
+            self.write_epoch,
+            self.write_sequence_number,
+            Bytes::copy_from_slice(data),
+        );
+
+        // send_record handles encryption via write_cipher and increments write_sequence_number
+        self.send_record(record).await
     }
     
     /// Send a DTLS record
@@ -762,42 +969,42 @@ impl DtlsConnection {
             Some(t) => t,
             None => return Err(crate::error::Error::InvalidState("No transport available".to_string())),
         };
-        
+
         let remote_addr = match self.remote_addr {
             Some(addr) => addr,
             None => return Err(crate::error::Error::InvalidState("No remote address specified".to_string())),
         };
-        
+
         // When sending a handshake message, make sure to capture it for the handshake transcript
-        if record.header.content_type == super::record::ContentType::Handshake && 
+        if record.header.content_type == super::record::ContentType::Handshake &&
            self.handshake.is_some() {
             // For handshake messages, we need to parse and add them to the transcript
             // This is important for both client and server to have a consistent transcript
             if let Some(handshake) = &mut self.handshake {
                 // We're only sending our own messages
                 let is_from_client = handshake.role() == super::DtlsRole::Client;
-                
+
                 // Parse handshake messages from the record to get individual messages
                 let mut offset = 0;
                 while offset < record.data.len() {
                     if record.data.len() - offset < 12 {
                         break; // Not enough data for a header
                     }
-                    
+
                     if let Ok((header, header_size)) = super::message::handshake::HandshakeHeader::parse(&record.data[offset..]) {
                         // Skip HelloVerifyRequest or Finished (already handled in add_handshake_message)
-                        if header.msg_type != super::message::handshake::HandshakeType::HelloVerifyRequest && 
+                        if header.msg_type != super::message::handshake::HandshakeType::HelloVerifyRequest &&
                            header.msg_type != super::message::handshake::HandshakeType::Finished {
-                            
+
                             if record.data.len() - offset - header_size >= header.fragment_length as usize {
                                 let message_data = &record.data[offset + header_size..offset + header_size + header.fragment_length as usize];
-                                
+
                                 // Add to transcript
-                                println!("Adding outgoing message to handshake buffer: {:?}", header.msg_type);
+                                tracing::debug!("Adding outgoing message to handshake buffer: {:?}", header.msg_type);
                                 handshake.add_handshake_message(header.msg_type, message_data, is_from_client);
                             }
                         }
-                        
+
                         // Move to next message
                         offset += header_size + header.fragment_length as usize;
                     } else {
@@ -806,21 +1013,59 @@ impl DtlsConnection {
                 }
             }
         }
-        
+
+        // If the write cipher is active (epoch > 0) and this is not a CCS record, encrypt the data
+        let final_record = if self.write_cipher.is_some()
+            && record.header.epoch > 0
+            && record.header.content_type != ContentType::ChangeCipherSpec
+        {
+            let cipher = self.write_cipher.as_ref().ok_or_else(|| {
+                crate::error::Error::InvalidState("Write cipher not available".to_string())
+            })?;
+
+            // Build the additional authenticated data (AAD) per RFC 6347:
+            // epoch (2) + sequence_number (6) + content_type (1) + version (2) + length (2)
+            let aad = build_aad(
+                record.header.epoch,
+                record.header.sequence_number,
+                record.header.content_type as u8,
+                record.header.version as u16,
+                record.data.len() as u16,
+            );
+
+            let encrypted = cipher.encrypt(
+                &record.data,
+                &aad,
+                record.header.epoch,
+                record.header.sequence_number,
+            )?;
+
+            // Create a new record with the encrypted payload and updated length
+            Record::new(
+                record.header.content_type,
+                record.header.version,
+                record.header.epoch,
+                record.header.sequence_number,
+                encrypted,
+            )
+        } else {
+            record
+        };
+
         // Serialize the record
-        let data = record.serialize()?;
-        
-        println!("Sending DTLS record to {}: type={:?}, epoch={}, seq={}, len={}",
-            remote_addr, record.header.content_type, record.header.epoch, 
-            record.header.sequence_number, record.header.length);
-        
+        let data = final_record.serialize()?;
+
+        tracing::debug!("Sending DTLS record to {}: type={:?}, epoch={}, seq={}, len={}",
+            remote_addr, final_record.header.content_type, final_record.header.epoch,
+            final_record.header.sequence_number, final_record.header.length);
+
         // Send the data
         let transport_guard = transport.lock().await;
         transport_guard.send(&data, remote_addr).await?;
-        
-        // Increment sequence number
-        self.sequence_number += 1;
-        
+
+        // Increment write sequence number
+        self.write_sequence_number += 1;
+
         Ok(())
     }
     
@@ -828,7 +1073,140 @@ impl DtlsConnection {
     pub fn state(&self) -> ConnectionState {
         self.state
     }
-    
+
+    /// Resolve the negotiated cipher suite from the handshake state and derive
+    /// full keying material if it has not been derived yet.
+    fn ensure_keying_material(&mut self) -> Result<()> {
+        if self.keying_material.is_some() {
+            // Check if the key material already has write keys populated.
+            // The handshake completion path populates master_secret but may
+            // leave the individual write keys empty.
+            let km = self.keying_material.as_ref().ok_or_else(|| {
+                crate::error::Error::InvalidState("keying material disappeared".to_string())
+            })?;
+            if !km.client_write_key().is_empty() {
+                return Ok(());
+            }
+        }
+
+        let handshake = self.handshake.as_ref().ok_or_else(|| {
+            crate::error::Error::InvalidState(
+                "Cannot derive keying material: no handshake state".to_string()
+            )
+        })?;
+
+        let master_secret = handshake.master_secret().ok_or_else(|| {
+            crate::error::Error::InvalidState(
+                "Cannot derive keying material: no master secret".to_string()
+            )
+        })?;
+
+        let client_random = handshake.client_random().ok_or_else(|| {
+            crate::error::Error::InvalidState(
+                "Cannot derive keying material: no client random".to_string()
+            )
+        })?;
+
+        let server_random = handshake.server_random().ok_or_else(|| {
+            crate::error::Error::InvalidState(
+                "Cannot derive keying material: no server random".to_string()
+            )
+        })?;
+
+        let cipher_suite_id_raw = handshake.cipher_suite().ok_or_else(|| {
+            crate::error::Error::InvalidState(
+                "Cannot derive keying material: no cipher suite negotiated".to_string()
+            )
+        })?;
+
+        let cipher_suite_id = CipherSuiteId::try_from(cipher_suite_id_raw)?;
+        let cipher_type = cipher_suite_id.cipher();
+        let mac_algo = cipher_suite_id.mac();
+
+        let km = derive_key_material(
+            master_secret,
+            client_random,
+            server_random,
+            mac_algo,
+            cipher_type.key_size(),
+            cipher_type.iv_size(),
+        )?;
+
+        self.keying_material = Some(km);
+        Ok(())
+    }
+
+    /// Create the write cipher from the negotiated cipher suite and keying material.
+    ///
+    /// For a **client**, the write cipher uses the client write key/IV.
+    /// For a **server**, the write cipher uses the server write key/IV.
+    fn create_write_cipher(&mut self) -> Result<Box<dyn Encryptor + Send + Sync>> {
+        self.ensure_keying_material()?;
+
+        let km = self.keying_material.as_ref().ok_or_else(|| {
+            crate::error::Error::InvalidState("No keying material".to_string())
+        })?;
+
+        let handshake = self.handshake.as_ref().ok_or_else(|| {
+            crate::error::Error::InvalidState("No handshake state".to_string())
+        })?;
+        let cipher_suite_id = CipherSuiteId::try_from(
+            handshake.cipher_suite().ok_or_else(|| {
+                crate::error::Error::InvalidState("No cipher suite".to_string())
+            })?,
+        )?;
+        let cipher_type = cipher_suite_id.cipher();
+
+        let is_client = self.config.role == DtlsRole::Client;
+        let (key, iv, mac_key) = if is_client {
+            (km.client_write_key().clone(), km.client_write_iv().clone(), km.client_write_mac_key().clone())
+        } else {
+            (km.server_write_key().clone(), km.server_write_iv().clone(), km.server_write_mac_key().clone())
+        };
+
+        if cipher_type.is_gcm() {
+            Ok(Box::new(AeadImpl::new(key, iv, cipher_type)))
+        } else {
+            Ok(Box::new(BlockCipherImpl::new(key, iv, cipher_type, mac_key, cipher_suite_id.mac())))
+        }
+    }
+
+    /// Create the read cipher from the negotiated cipher suite and keying material.
+    ///
+    /// For a **client**, the read cipher uses the server write key/IV (the peer is the server).
+    /// For a **server**, the read cipher uses the client write key/IV (the peer is the client).
+    fn create_read_cipher(&mut self) -> Result<Box<dyn Decryptor + Send + Sync>> {
+        self.ensure_keying_material()?;
+
+        let km = self.keying_material.as_ref().ok_or_else(|| {
+            crate::error::Error::InvalidState("No keying material".to_string())
+        })?;
+
+        let handshake = self.handshake.as_ref().ok_or_else(|| {
+            crate::error::Error::InvalidState("No handshake state".to_string())
+        })?;
+        let cipher_suite_id = CipherSuiteId::try_from(
+            handshake.cipher_suite().ok_or_else(|| {
+                crate::error::Error::InvalidState("No cipher suite".to_string())
+            })?,
+        )?;
+        let cipher_type = cipher_suite_id.cipher();
+
+        let is_client = self.config.role == DtlsRole::Client;
+        // Read cipher uses the peer's write keys
+        let (key, iv, mac_key) = if is_client {
+            (km.server_write_key().clone(), km.server_write_iv().clone(), km.server_write_mac_key().clone())
+        } else {
+            (km.client_write_key().clone(), km.client_write_iv().clone(), km.client_write_mac_key().clone())
+        };
+
+        if cipher_type.is_gcm() {
+            Ok(Box::new(AeadImpl::new(key, iv, cipher_type)))
+        } else {
+            Ok(Box::new(BlockCipherImpl::new(key, iv, cipher_type, mac_key, cipher_suite_id.mac())))
+        }
+    }
+
     /// Close the DTLS connection
     pub async fn close(&mut self) -> Result<()> {
         self.state = ConnectionState::Closing;
@@ -860,9 +1238,11 @@ impl DtlsConnection {
             ));
         }
         
-        // Get the profile and keying material
-        let profile = self.srtp_profile.unwrap();
-        let keying_material = self.keying_material.as_ref().unwrap();
+        // Get the profile and keying material (safe after the None checks above)
+        let profile = self.srtp_profile
+            .ok_or_else(|| Error::InvalidState("SRTP profile not available".to_string()))?;
+        let keying_material = self.keying_material.as_ref()
+            .ok_or_else(|| Error::InvalidState("Keying material not available".to_string()))?;
         
         // Extract the keys
         extract_srtp_keys_from_dtls(
@@ -905,6 +1285,39 @@ impl DtlsConnection {
     /// Get the remote certificate
     pub fn remote_certificate(&self) -> Option<&Certificate> {
         self.remote_cert.as_ref()
+    }
+
+    /// Verify the remote certificate's fingerprint against an expected value.
+    ///
+    /// Returns `Ok(true)` if the fingerprint matches, `Ok(false)` if it does not match,
+    /// or an error if no remote certificate is available or fingerprint computation fails.
+    pub fn verify_remote_fingerprint(
+        &self,
+        expected_fingerprint: &str,
+        algorithm: &str,
+    ) -> Result<bool> {
+        let cert = self.remote_cert.as_ref().ok_or_else(|| {
+            crate::error::Error::CertificateValidationError(
+                "No remote certificate available for fingerprint verification".to_string()
+            )
+        })?;
+
+        let mut cert_clone = cert.clone();
+        let actual_fingerprint = cert_clone.fingerprint(algorithm)?;
+
+        // Normalize for comparison: remove colons and compare case-insensitively
+        let expected_normalized = expected_fingerprint.replace(':', "").to_lowercase();
+        let actual_normalized = actual_fingerprint.replace(':', "").to_lowercase();
+
+        let matches = expected_normalized == actual_normalized;
+        if !matches {
+            tracing::debug!(
+                "WARNING: Remote certificate fingerprint mismatch! Expected: {}, Actual: {}",
+                expected_fingerprint, actual_fingerprint
+            );
+        }
+
+        Ok(matches)
     }
     
     /// Check if the handshake has a cookie (debug helper)
@@ -956,7 +1369,7 @@ impl DtlsConnection {
             ));
         }
         
-        println!("Continuing handshake after HelloVerifyRequest");
+        tracing::debug!("Continuing handshake after HelloVerifyRequest");
         
         // Generate a new ClientHello with the cookie
         let client_hello = if let Some(handshake) = self.handshake.as_mut() {
@@ -967,12 +1380,12 @@ impl DtlsConnection {
             ));
         };
         
-        println!("Generated new ClientHello with cookie");
+        tracing::debug!("Generated new ClientHello with cookie");
         
         // Send the ClientHello message
         self.send_handshake_message(HandshakeMessage::ClientHello(client_hello)).await?;
         
-        println!("Sent ClientHello with cookie");
+        tracing::debug!("Sent ClientHello with cookie");
         
         Ok(())
     }
@@ -981,25 +1394,28 @@ impl DtlsConnection {
     async fn send_change_cipher_spec(&mut self) -> Result<()> {
         // Create data (a single byte with value 1)
         let data = Bytes::from_static(&[1]);
-        
-        // Create a ChangeCipherSpec record
+
+        // Create a ChangeCipherSpec record (sent in the current epoch, before activation)
         let record = super::record::Record::new(
             super::record::ContentType::ChangeCipherSpec,
             self.config.version,
-            self.epoch, 
-            self.sequence_number,
+            self.write_epoch,
+            self.write_sequence_number,
             data,
         );
-        
-        // Send the record
+
+        // Send the record (CCS itself is always plaintext)
         self.send_record(record).await?;
-        
-        // Update our state after sending
-        self.epoch = self.epoch.saturating_add(1);
-        self.sequence_number = 0;
-        
-        println!("Sent ChangeCipherSpec, epoch incremented to {}", self.epoch);
-        
+
+        // Activate the write cipher (encrypt outgoing records from now on)
+        self.write_cipher = Some(self.create_write_cipher()?);
+
+        // Increment write epoch and reset write sequence number
+        self.write_epoch = self.write_epoch.saturating_add(1);
+        self.write_sequence_number = 0;
+
+        tracing::debug!("Sent ChangeCipherSpec, activated write cipher, write epoch incremented to {}", self.write_epoch);
+
         Ok(())
     }
     
@@ -1034,7 +1450,7 @@ impl DtlsConnection {
                     let is_from_client = handshake.role() == super::DtlsRole::Client;
                     handshake.add_handshake_message(msg_type, &msg_data, is_from_client);
                     
-                    println!("Added outgoing message to verification buffer: {:?}", msg_type);
+                    tracing::debug!("Added outgoing message to verification buffer: {:?}", msg_type);
                 }
             }
         }
@@ -1047,35 +1463,32 @@ impl DtlsConnection {
         let header = super::message::handshake::HandshakeHeader::new(
             msg_type,
             msg_data.len() as u32,
-            self.sequence_number as u16, // message_seq
+            self.write_sequence_number as u16, // message_seq
             0, // fragment_offset
             msg_data.len() as u32, // fragment_length
         );
-        
+
         let header_data = header.serialize()?;
-        
+
         // Create a DTLS record
         let record = super::record::Record::new(
             super::record::ContentType::Handshake,
             self.config.version,
-            self.epoch, // epoch
-            self.sequence_number, // sequence_number
+            self.write_epoch,
+            self.write_sequence_number,
             Bytes::from(vec![header_data.freeze(), msg_data].concat()),
         );
-        
-        // Send the record
+
+        // Send the record (send_record increments write_sequence_number)
         self.send_record(record).await?;
-        
-        // Increment sequence number
-        self.sequence_number += 1;
-        
+
         Ok(())
     }
     
     /// Complete the handshake by sending ChangeCipherSpec and Finished messages
     pub async fn complete_handshake(&mut self) -> Result<()> {
         // Send ChangeCipherSpec message
-        println!("Sending ChangeCipherSpec message");
+        tracing::debug!("Sending ChangeCipherSpec message");
         self.send_change_cipher_spec().await?;
         
         // Wait a moment to ensure proper message ordering
@@ -1085,10 +1498,10 @@ impl DtlsConnection {
         let finished = self.generate_finished_message()?;
         
         // Send Finished message
-        println!("Sending Finished message");
+        tracing::debug!("Sending Finished message");
         self.send_handshake_message(HandshakeMessage::Finished(finished)).await?;
         
-        println!("Handshake completion messages sent");
+        tracing::debug!("Handshake completion messages sent");
         
         Ok(())
     }
@@ -1142,4 +1555,33 @@ impl DtlsConnection {
             Err(crate::error::Error::InvalidState("No handshake state available".to_string()))
         }
     }
-} 
+}
+
+/// Build the Additional Authenticated Data (AAD) for DTLS record encryption/decryption.
+///
+/// Per RFC 6347 Section 4.1.2.1 the AAD is composed of:
+///   epoch (2 bytes) || sequence_number (6 bytes) || content_type (1 byte) || version (2 bytes) || length (2 bytes)
+///
+/// `length` is the plaintext fragment length (before encryption).
+fn build_aad(epoch: u16, sequence_number: u64, content_type: u8, version: u16, length: u16) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(13);
+    // epoch (2 bytes)
+    aad.push((epoch >> 8) as u8);
+    aad.push(epoch as u8);
+    // sequence_number (6 bytes, 48-bit)
+    aad.push(((sequence_number >> 40) & 0xFF) as u8);
+    aad.push(((sequence_number >> 32) & 0xFF) as u8);
+    aad.push(((sequence_number >> 24) & 0xFF) as u8);
+    aad.push(((sequence_number >> 16) & 0xFF) as u8);
+    aad.push(((sequence_number >> 8) & 0xFF) as u8);
+    aad.push((sequence_number & 0xFF) as u8);
+    // content_type (1 byte)
+    aad.push(content_type);
+    // version (2 bytes)
+    aad.push((version >> 8) as u8);
+    aad.push(version as u8);
+    // length (2 bytes) — plaintext length
+    aad.push((length >> 8) as u8);
+    aad.push(length as u8);
+    aad
+}

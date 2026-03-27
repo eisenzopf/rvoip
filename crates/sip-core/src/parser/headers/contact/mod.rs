@@ -170,13 +170,13 @@ mod tests {
             
             // Check for the methods parameter
             let has_methods = params[0].address.params.iter().any(|p| {
-                matches!(p, Param::Other(ref name, Some(_)) if name == "methods")
+                matches!(p, Param::Other(name, Some(_)) if name == "methods")
             });
             assert!(has_methods, "Should have methods parameter");
             
             // Check for the unknown-param
             let has_unknown = params[0].address.params.iter().any(|p| {
-                matches!(p, Param::Other(ref name, Some(_)) if name == "unknown-param")
+                matches!(p, Param::Other(name, Some(_)) if name == "unknown-param")
             });
             assert!(has_unknown, "Should have unknown-param parameter");
         } else {
@@ -257,7 +257,7 @@ mod tests {
             
             // Check for +sip.instance parameter (generic)
             let has_sip_instance = params[0].address.params.iter().any(|p| {
-                matches!(p, Param::Other(ref name, Some(_)) if name == "+sip.instance")
+                matches!(p, Param::Other(name, Some(_)) if name == "+sip.instance")
             });
             assert!(has_sip_instance, "Should have +sip.instance parameter");
         } else {
@@ -280,7 +280,7 @@ mod tests {
             
             // Check transport parameter in URI
             let has_transport = params[0].address.uri.parameters.iter().any(|p| {
-                matches!(p, Param::Transport(ref t) if t == "tls")
+                matches!(p, Param::Transport(t) if t == "tls")
             });
             assert!(has_transport, "SIPS URI should have transport=tls parameter");
         } else {
@@ -304,7 +304,7 @@ mod tests {
             
             // Check transport parameter
             let has_transport = params[0].address.uri.parameters.iter().any(|p| {
-                matches!(p, Param::Transport(ref t) if t == "tcp")
+                matches!(p, Param::Transport(t) if t == "tcp")
             });
             assert!(has_transport, "URI should have transport=tcp parameter");
             

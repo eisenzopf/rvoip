@@ -69,7 +69,7 @@ fn parse_connection_address_nom<'a>(input: &'a str, addr_type: &'a str) -> IResu
         // Optional TTL - if we have a slash but not digits after, it's an error
         let (input, ttl) = if let Some(pos) = input.find('/') {
             let input_after_slash = &input[pos+1..];
-            if input_after_slash.is_empty() || !input_after_slash.chars().next().unwrap().is_ascii_digit() {
+            if !input_after_slash.as_bytes().first().map_or(false, |b| b.is_ascii_digit()) {
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Digit
@@ -85,7 +85,7 @@ fn parse_connection_address_nom<'a>(input: &'a str, addr_type: &'a str) -> IResu
         // Optional multicast count - if we have a slash but not digits after, it's an error
         let (input, count) = if let Some(pos) = input.find('/') {
             let input_after_slash = &input[pos+1..];
-            if input_after_slash.is_empty() || !input_after_slash.chars().next().unwrap().is_ascii_digit() {
+            if !input_after_slash.as_bytes().first().map_or(false, |b| b.is_ascii_digit()) {
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Digit
@@ -140,7 +140,7 @@ fn parse_connection_address_nom<'a>(input: &'a str, addr_type: &'a str) -> IResu
         // Optional multicast count - if we have a slash but not digits after, it's an error
         let (input, count) = if let Some(pos) = input.find('/') {
             let input_after_slash = &input[pos+1..];
-            if input_after_slash.is_empty() || !input_after_slash.chars().next().unwrap().is_ascii_digit() {
+            if !input_after_slash.as_bytes().first().map_or(false, |b| b.is_ascii_digit()) {
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Digit
@@ -364,17 +364,21 @@ fn validate_connection_data(conn_data: &ConnectionData) -> Result<()> {
         if is_valid_ipv4(addr) {
             // If TTL is provided, ensure it's a multicast address
             if conn_data.ttl.is_some() {
-                let ip = addr.parse::<Ipv4Addr>().unwrap(); // Safe because we validated above
+                let ip = addr.parse::<Ipv4Addr>().map_err(|_| {
+                    Error::SdpParsingError(format!("Invalid IPv4 address: {}", addr))
+                })?;
                 if !ip.is_multicast() {
                     return Err(Error::SdpParsingError(format!(
                         "TTL provided for non-multicast address: {}", addr
                     )));
                 }
             }
-            
+
             // If multicast count is provided, ensure it's a multicast address
             if conn_data.multicast_count.is_some() {
-                let ip = addr.parse::<Ipv4Addr>().unwrap(); // Safe because we validated above
+                let ip = addr.parse::<Ipv4Addr>().map_err(|_| {
+                    Error::SdpParsingError(format!("Invalid IPv4 address: {}", addr))
+                })?;
                 if !ip.is_multicast() {
                     return Err(Error::SdpParsingError(format!(
                         "Multicast count provided for non-multicast address: {}", addr
@@ -401,7 +405,9 @@ fn validate_connection_data(conn_data: &ConnectionData) -> Result<()> {
             
             // If multicast count is provided, ensure it's a multicast address
             if conn_data.multicast_count.is_some() {
-                let ip = addr.parse::<Ipv6Addr>().unwrap(); // Safe because we validated above
+                let ip = addr.parse::<Ipv6Addr>().map_err(|_| {
+                    Error::SdpParsingError(format!("Invalid IPv6 address: {}", addr))
+                })?;
                 if !ip.is_multicast() {
                     return Err(Error::SdpParsingError(format!(
                         "Multicast count provided for non-multicast address: {}", addr

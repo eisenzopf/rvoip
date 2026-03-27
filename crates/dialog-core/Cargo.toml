@@ -41,6 +41,7 @@ thiserror.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 rand.workspace = true
+parking_lot.workspace = true
 
 # Crate-specific dependencies not in workspace
 http = "0.2"
@@ -53,13 +54,16 @@ tokio-test = "0.4"
 tracing-subscriber = "0.3"
 
 [features]
-default = ["recovery", "events"]
+default = ["recovery", "events", "ws"]
 
 # Dialog recovery features
 recovery = []
 
-# Event system features  
+# Event system features
 events = []
+
+# WebSocket SIP transport (RFC 7118)
+ws = ["rvoip-sip-transport/ws"]
 
 # Testing features
 testing = []

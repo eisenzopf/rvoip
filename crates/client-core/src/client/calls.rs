@@ -173,7 +173,18 @@ impl super::manager::ClientManager {
                 message: "Client is not started. Call start() before making calls.".to_string()
             });
         }
-        
+
+        // Enforce max concurrent calls limit
+        let active_count = self.get_active_calls().await.len();
+        if active_count >= self.max_concurrent_calls {
+            return Err(ClientError::InternalError {
+                message: format!(
+                    "Maximum concurrent calls limit reached ({}/{})",
+                    active_count, self.max_concurrent_calls
+                ),
+            });
+        }
+
         // Create call via session-core with retry logic for network errors
         let prepared_call = retry_with_backoff(
             "prepare_outgoing_call",
@@ -246,7 +257,7 @@ impl super::manager::ClientManager {
         self.call_info.insert(call_id, call_info.clone());
         
         // Emit call created event
-        let _ = self.event_tx.send(crate::events::ClientEvent::CallStateChanged {
+        if let Err(e) = self.event_tx.send(crate::events::ClientEvent::CallStateChanged {
             info: crate::events::CallStatusInfo {
                 call_id,
                 new_state: crate::call::CallState::Initiating,
@@ -255,7 +266,9 @@ impl super::manager::ClientManager {
                 timestamp: Utc::now(),
             },
             priority: crate::events::EventPriority::Normal,
-        });
+        }) {
+            tracing::debug!("Call state change event receiver dropped: {}", e);
+        }
         
         // Update stats
         let mut stats = self.stats.lock().await;
@@ -629,7 +642,7 @@ impl super::manager::ClientManager {
             call_info.metadata.insert("hangup_reason".to_string(), "user_hangup".to_string());
             
             // Emit state change event
-            let _ = self.event_tx.send(crate::events::ClientEvent::CallStateChanged {
+            if let Err(e) = self.event_tx.send(crate::events::ClientEvent::CallStateChanged {
                 info: crate::events::CallStatusInfo {
                     call_id: *call_id,
                     new_state: crate::call::CallState::Terminated,
@@ -638,7 +651,9 @@ impl super::manager::ClientManager {
                     timestamp: Utc::now(),
                 },
                 priority: crate::events::EventPriority::Normal,
-            });
+            }) {
+                tracing::debug!("Call state change event receiver dropped: {}", e);
+            }
         }
         
         // Clean up audio setup state if it exists

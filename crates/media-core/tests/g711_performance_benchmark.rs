@@ -208,7 +208,7 @@ async fn test_g711_codec_api_performance() {
     println!("\n🎯 G.711 Codec API Performance Test");
     println!("====================================");
     
-    let mut codec = G711Codec::mu_law(8000, 1).unwrap();
+    let mut codec = G711Codec::mu_law(8000, 1);
     let frame_size = 160; // 20ms at 8kHz
     let iterations = 1000;
     
@@ -347,7 +347,7 @@ async fn test_g711_memory_efficiency() {
     let frame_size = 160;
     let iterations = 1000;
     
-    let mut codec = G711Codec::mu_law(8000, 1).unwrap();
+    let mut codec = G711Codec::mu_law(8000, 1);
     let test_samples = generate_test_audio(frame_size);
     let test_frame = AudioFrame::new(test_samples, 8000, 1, 0);
     

@@ -31,7 +31,9 @@ bytes.workspace = true
 
 # Crate-specific dependencies not in workspace
 tracing-subscriber = "0.3"   # Logging initialization
-once_cell = "1.19"           # Lazy static initialization for lookup tables
+
+# Media codecs (optional)
+opus = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # Testing
@@ -43,3 +45,4 @@ default = ["g711"]
 
 # Codec features
 g711 = []                    # G.711 μ-law/A-law codec (always available)
+opus = ["dep:opus"]          # Opus codec (requires libopus)

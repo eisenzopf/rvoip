@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use crate::api::control::SessionControl;
 use crate::api::media::MediaControl;
 use crate::api::types::{SessionId, CallState, IncomingCall, CallDecision};
-use crate::api::builder::SessionManagerConfig;
+use crate::api::builder::{SessionManagerConfig, SipTransportType};
 use crate::api::handlers::CallHandler;
 use crate::coordinator::SessionCoordinator;
 use crate::errors::Result;
@@ -45,7 +45,7 @@ impl UasServer {
         
         // Parse local address to get bind address
         let local_bind_addr: std::net::SocketAddr = config.local_addr.parse()
-            .unwrap_or_else(|_| "0.0.0.0:5060".parse().unwrap());
+            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 5060)));
         
         // Create SessionManagerConfig
         let manager_config = SessionManagerConfig {
@@ -58,8 +58,9 @@ impl UasServer {
             stun_server: None,
             enable_sip_client: false,
             media_config: Default::default(),
+            sip_transport: SipTransportType::Udp,
         };
-        
+
         // Create coordinator with the adapter
         let coordinator = SessionCoordinator::new(
             manager_config,
@@ -266,20 +267,24 @@ impl UasServer {
         // Reject all pending calls
         let pending = self.pending_calls.write().await.drain(..).collect::<Vec<_>>();
         for call in pending {
-            let _ = SessionControl::reject_incoming_call(
+            if let Err(e) = SessionControl::reject_incoming_call(
                 &self.coordinator,
                 &call,
                 "Server shutting down",
-            ).await;
+            ).await {
+                tracing::warn!("Failed to reject incoming call during shutdown: {e}");
+            }
         }
         
         // Terminate all active calls
         let calls = self.active_calls.read().await.clone();
         for (session_id, _) in calls {
-            let _ = SessionControl::terminate_session(
+            if let Err(e) = SessionControl::terminate_session(
                 &self.coordinator,
                 &session_id,
-            ).await;
+            ).await {
+                tracing::warn!("Failed to terminate session {} during shutdown: {e}", session_id);
+            }
         }
         
         // Clear collections
