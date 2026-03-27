@@ -127,13 +127,16 @@ flake.lock
 # Generated codec build artifacts
 crates/codec-core/src/codecs/g729a-new/target/
 
-# Local secret overrides (NEVER commit these — see docs/audit/007-commit-audit.md)
+# Local secret overrides
 .env.local
 .env.production
 .env.staging
 docker-compose.override.yml
 Containerfile.local
 secrets/
+
+# Internal docs — never commit (audit reports, dev plans, guides, architecture notes)
+docs/
 
 # Debug output
 output.log
