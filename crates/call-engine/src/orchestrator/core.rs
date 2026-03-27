@@ -267,7 +267,7 @@ impl CallCenterEngine {
         // Create session coordinator with our CallHandler
         // CRITICAL: Configure both SIP address and media bind address to use the configured IP
         let sip_uri = format!("sip:call-center@{}", config.general.local_ip);
-        let session_coordinator = SessionManagerBuilder::new()
+        let mut builder = SessionManagerBuilder::new()
             .with_sip_port(config.general.local_signaling_addr.port())
             .with_local_address(sip_uri)  // Use configured IP for SIP URIs
             .with_local_bind_addr(config.general.local_signaling_addr)  // Use configured IP for binding
@@ -275,7 +275,17 @@ impl CallCenterEngine {
                 config.general.local_media_addr.port(),
                 config.general.local_media_addr.port() + 1000
             )
-            .with_handler(handler.clone())
+            .with_handler(handler.clone());
+
+        // Enable dual-transport (UDP + WebSocket) when requested.
+        // UDP serves traditional SIP devices; WebSocket (port 8080) serves browser softphones.
+        if config.general.enable_websocket {
+            info!("Enabling dual transport: UDP on {} + WebSocket on :8080",
+                config.general.local_signaling_addr);
+            builder = builder.with_udp_and_websocket();
+        }
+
+        let session_coordinator = builder
             .build()
             .await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to create session coordinator: {}", e)))?;
@@ -413,7 +423,34 @@ impl CallCenterEngine {
         self.session_coordinator.as_ref()
             .ok_or_else(|| CallCenterError::orchestration("Session coordinator not initialized"))
     }
-    
+
+    /// Dynamically inject or replace the SIP digest-auth provider.
+    ///
+    /// Call this at any time — including while the server is running — to start
+    /// challenging REGISTER / INVITE requests with 401/407.  Pass a DB-backed
+    /// implementation so that credentials added via the web console take effect
+    /// immediately on the next incoming request.
+    pub fn set_auth_provider(
+        &self,
+        provider: std::sync::Arc<dyn rvoip_session_core::AuthProvider>,
+    ) -> CallCenterResult<()> {
+        self.session_manager()?.set_auth_provider(provider);
+        Ok(())
+    }
+
+    /// Dynamically inject or replace the INVITE proxy-routing policy.
+    ///
+    /// Call this at any time to start routing (or re-routing) incoming INVITEs
+    /// to SIP trunks.  Pass a DB-backed implementation so that trunk edits via
+    /// the web console are reflected immediately.
+    pub fn set_proxy_router(
+        &self,
+        router: std::sync::Arc<dyn rvoip_session_core::ProxyRouter>,
+    ) -> CallCenterResult<()> {
+        self.session_manager()?.set_proxy_router(router);
+        Ok(())
+    }
+
     /// Get call center configuration
     ///
     /// Returns a reference to the current call center configuration.

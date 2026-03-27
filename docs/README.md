@@ -14,7 +14,8 @@ docs/
 │   ├── session-api-design.md
 │   ├── session-api-guide.md
 │   ├── session-cookbook.md
-│   └── sip-core-developer-guide.md
+│   ├── sip-core-developer-guide.md
+│   └── sip-proxy-guide.md          — SIP proxy features: digest auth, NAT, Record-Route, forwarding
 │
 ├── audit/              Production readiness audit reports
 │   ├── 001-production-readiness-plan.md
@@ -22,7 +23,8 @@ docs/
 │   ├── 003-cross-audit-report.md
 │   ├── 004-implementation-plan-sctp-ice-turn-forking.md
 │   ├── 005-codex-plan-audit.md
-│   └── 006-test-plan.md
+│   ├── 006-test-plan.md
+│   └── 007-commit-audit.md         — Git commit security audit (secrets and sensitive file inventory)
 │
 └── rfcs/               (Future) RFC compliance notes
 ```

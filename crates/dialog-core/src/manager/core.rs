@@ -3,6 +3,7 @@
 //! This module contains the main DialogManager struct and its core lifecycle methods.
 //! It serves as the central coordinator for SIP dialog management.
 
+use std::fmt;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use dashmap::{DashMap, DashSet};
@@ -19,7 +20,7 @@ use crate::config::DialogManagerConfig;
 use crate::subscription::SubscriptionManager;
 
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DialogManager {
     /// Reference to transaction manager (handles transport for us)
     pub(crate) transaction_manager: Arc<TransactionManager>,
@@ -67,6 +68,29 @@ pub struct DialogManager {
     /// Call-ID → set of early dialog IDs created by forking (RFC 3261 §13.2.2.4).
     /// A `DashSet` gives lock-free concurrent reads/writes for dialog groups.
     pub early_dialog_groups: Arc<DashMap<String, Arc<DashSet<DialogId>>>>,
+
+    /// Optional pluggable authentication provider for REGISTER/INVITE challenges.
+    ///
+    /// Stored behind an `RwLock` so it can be replaced at runtime without
+    /// restarting the server (dynamic injection from the web console).
+    pub(crate) auth_provider: Arc<parking_lot::RwLock<Option<Arc<dyn crate::auth::AuthProvider>>>>,
+
+    /// Optional proxy router for INVITE forwarding decisions.
+    ///
+    /// Stored behind an `RwLock` for the same reason as `auth_provider`.
+    pub(crate) proxy_router: Arc<parking_lot::RwLock<Option<Arc<dyn crate::auth::ProxyRouter>>>>,
+}
+
+impl fmt::Debug for DialogManager {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DialogManager")
+            .field("local_address", &self.local_address)
+            .field("config", &self.config)
+            .field("dialogs_count", &self.dialogs.len())
+            .field("auth_provider", &self.auth_provider.read().as_ref().map(|_| "<AuthProvider>"))
+            .field("proxy_router", &self.proxy_router.read().as_ref().map(|_| "<ProxyRouter>"))
+            .finish()
+    }
 }
 
 impl DialogManager {
@@ -117,6 +141,8 @@ impl DialogManager {
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
             early_dialog_groups: Arc::new(DashMap::new()),
+            auth_provider: Arc::new(parking_lot::RwLock::new(None)),
+            proxy_router: Arc::new(parking_lot::RwLock::new(None)),
         })
     }
 
@@ -169,8 +195,10 @@ impl DialogManager {
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
             early_dialog_groups: Arc::new(DashMap::new()),
+            auth_provider: Arc::new(parking_lot::RwLock::new(None)),
+            proxy_router: Arc::new(parking_lot::RwLock::new(None)),
         };
-        
+
         // Spawn global transaction event processor
         let event_processor = manager.clone();
         tokio::spawn(async move {
@@ -179,7 +207,33 @@ impl DialogManager {
         
         Ok(manager)
     }
-    
+
+    /// Attach or replace the authentication provider at runtime.
+    ///
+    /// Thread-safe — can be called while the server is handling requests.
+    /// The new provider takes effect on the **next** incoming REGISTER/INVITE.
+    pub fn set_auth_provider(&self, provider: Arc<dyn crate::auth::AuthProvider>) {
+        *self.auth_provider.write() = Some(provider);
+    }
+
+    /// Clone the current auth provider (if any).
+    pub fn auth_provider(&self) -> Option<Arc<dyn crate::auth::AuthProvider>> {
+        self.auth_provider.read().clone()
+    }
+
+    /// Attach or replace the proxy router at runtime.
+    ///
+    /// Thread-safe — can be called while the server is handling requests.
+    /// The new router takes effect on the **next** incoming INVITE.
+    pub fn set_proxy_router(&self, router: Arc<dyn crate::auth::ProxyRouter>) {
+        *self.proxy_router.write() = Some(router);
+    }
+
+    /// Clone the current proxy router (if any).
+    pub fn proxy_router(&self) -> Option<Arc<dyn crate::auth::ProxyRouter>> {
+        self.proxy_router.read().clone()
+    }
+
     /// Process global transaction events (similar to working transaction-core examples)
     /// 
     /// This follows the exact pattern from working examples that use global event consumption
@@ -380,32 +434,54 @@ impl DialogManager {
     /// Sends session coordination events for legacy compatibility and specific
     /// session management operations.
     pub async fn emit_session_coordination_event(&self, event: SessionCoordinationEvent) {
+        if let Err(e) = self.try_emit_session_coordination_event(event).await {
+            warn!("Failed to emit session coordination event: {}", e);
+        }
+    }
+
+    /// Try to emit a session coordination event and report delivery failure.
+    ///
+    /// This is used by handlers that need to fallback (for example, sending
+    /// a local 200 OK) when no coordination path is available.
+    pub async fn try_emit_session_coordination_event(&self, event: SessionCoordinationEvent) -> DialogResult<()> {
         info!("📤 emit_session_coordination_event called with event: {:?}", event);
 
-        // Try event hub first (new global event bus)
+        let mut published_to_bus = false;
+        let mut published_to_legacy = false;
+
+        // Publish to global event bus (cross-crate events like IncomingCall)
         if let Some(hub) = self.event_hub.read().await.as_ref() {
-            info!("📤 Event hub exists, publishing to global bus");
-            if let Err(e) = hub.publish_session_coordination_event(event.clone()).await {
-                warn!("Failed to publish session coordination event to global bus: {}", e);
-            } else {
-                info!("📤 Published session coordination event to global bus: {:?}", event);
-                return;
+            match hub.publish_session_coordination_event(event.clone()).await {
+                Ok(()) => {
+                    debug!("📤 Published to global event bus");
+                    published_to_bus = true;
+                }
+                Err(e) => {
+                    // Expected for events without cross-crate mapping (CallAnswered, CallRinging, etc.)
+                    debug!("📤 Global bus returned error (expected for non-mapped events): {}", e);
+                }
             }
-        } else {
-            info!("📤 Event hub is None, trying legacy channel");
         }
 
-        // Fall back to channel (legacy)
+        // ALWAYS also send to legacy channel for dialog_coordinator event loop
+        // This ensures CallAnswered, CallRinging, BYE, etc. are processed by session-core
         if let Some(sender) = self.session_coordinator.read().await.as_ref() {
-            info!("📤 Legacy channel exists, sending event");
             if let Err(e) = sender.send(event.clone()).await {
-                warn!("Failed to send session coordination event: {}", e);
+                warn!("Failed to send via legacy channel: {}", e);
             } else {
-                info!("📤 Emitted session coordination event to legacy channel: {:?}", event);
+                debug!("📤 Sent to legacy channel");
+                published_to_legacy = true;
             }
-        } else {
-            warn!("📤 Both event hub and legacy channel are None - event not sent!");
         }
+
+        if !published_to_bus && !published_to_legacy {
+            warn!("📤 Event not delivered — no bus or legacy channel available");
+            return Err(DialogError::routing_error(
+                "No session coordination channel configured",
+            ));
+        }
+
+        Ok(())
     }
     
     /// **CENTRAL DISPATCHER**: Handle incoming SIP messages

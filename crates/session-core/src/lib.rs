@@ -135,6 +135,9 @@ pub use errors::{SessionError, Result};
 // Re-export the main API for convenience
 pub use api::*;
 
+// Re-export dialog-core auth traits so callers don't need to depend on dialog-core directly.
+pub use rvoip_dialog_core::auth::{AuthProvider, AuthResult, ProxyRouter, ProxyAction};
+
 // Re-export SessionManager for direct access
 // pub use manager::SessionManager; // Using coordinator directly
 

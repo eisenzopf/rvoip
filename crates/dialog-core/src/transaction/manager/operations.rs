@@ -1050,4 +1050,26 @@ impl TransactionManager {
         // For now, just return a clone of the default settings
         Some(self.timer_settings.clone())
     }
+
+    /// Forward a raw SIP request directly to a destination address.
+    ///
+    /// Used by the proxy forwarding path (Task 4.2) to relay an already-built
+    /// request without creating a transaction — the response relay is handled
+    /// externally.  The message is sent via the same transport that last
+    /// received traffic from `destination`, falling back to UDP.
+    pub async fn forward_request(&self, request: Request, destination: SocketAddr) -> Result<()> {
+        debug!(%destination, "Forwarding SIP request via transport");
+        // Prefer the transport manager (WS-aware) when available; otherwise
+        // fall back to the primary transport.
+        if let Some(ref tm) = self.transport_manager {
+            tm.send_message(rvoip_sip_core::Message::Request(request), destination)
+                .await
+                .map_err(|e| Error::Transport(format!("Failed to forward request: {}", e)))
+        } else {
+            self.transport
+                .send_message(rvoip_sip_core::Message::Request(request), destination)
+                .await
+                .map_err(|e| Error::Transport(format!("Failed to forward request: {}", e)))
+        }
+    }
 }

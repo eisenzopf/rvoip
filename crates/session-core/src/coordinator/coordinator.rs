@@ -104,6 +104,9 @@ pub struct SessionCoordinator {
 
     // Broadcast shutdown signal for spawned tasks
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
+
+    // B2BUA bridge: bidirectional session partner mapping (A-leg ↔ B-leg)
+    pub b2bua_partners: Arc<DashMap<SessionId, SessionId>>,
 }
 
 impl SessionCoordinator {
@@ -219,6 +222,7 @@ impl SessionCoordinator {
             session_readiness: Arc::new(RwLock::new(HashMap::new())),
             event_loop_handle: Arc::new(Mutex::new(None)),
             dialog_event_loop_handle: Arc::new(Mutex::new(None)),
+            b2bua_partners: Arc::new(DashMap::new()),
             shutdown_tx,
         });
 
@@ -488,6 +492,24 @@ impl SessionCoordinator {
     /// Get the bound address
     pub fn get_bound_address(&self) -> std::net::SocketAddr {
         self.dialog_manager.get_bound_address()
+    }
+
+    /// Dynamically replace the SIP authentication provider.
+    ///
+    /// The new provider takes effect on the **next** incoming REGISTER or INVITE —
+    /// no restart required.  Pass credentials stored in the database so that
+    /// changes made through the web console are picked up automatically.
+    pub fn set_auth_provider(&self, provider: std::sync::Arc<dyn rvoip_dialog_core::auth::AuthProvider>) {
+        self.dialog_manager.set_auth_provider(provider);
+    }
+
+    /// Dynamically replace the proxy routing policy.
+    ///
+    /// The new router takes effect on the **next** incoming INVITE.
+    /// Reads trunk / routing rules from the database, so web-console edits
+    /// are reflected immediately.
+    pub fn set_proxy_router(&self, router: std::sync::Arc<dyn rvoip_dialog_core::auth::ProxyRouter>) {
+        self.dialog_manager.set_proxy_router(router);
     }
     
     /// Get a reference to the dialog coordinator

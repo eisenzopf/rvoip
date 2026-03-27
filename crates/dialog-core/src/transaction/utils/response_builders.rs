@@ -4,6 +4,7 @@
 //! according to RFC 3261 specifications.
 
 use std::str::FromStr;
+use std::net::SocketAddr;
 use uuid::Uuid;
 use rvoip_sip_core::prelude::*;
 
@@ -27,7 +28,13 @@ pub fn create_response(request: &Request, status: StatusCode) -> Response {
     if let Some(header) = request.header(&HeaderName::CSeq) {
         builder = builder.header(header.clone());
     }
-    
+    // RFC 3261 §16.6 step 6: Copy Record-Route headers from request to response
+    // Proxies that inserted Record-Route into the request must see it reflected in responses
+    // so that UAs can build the correct route set for subsequent in-dialog requests.
+    if let Some(header) = request.header(&HeaderName::RecordRoute) {
+        builder = builder.header(header.clone());
+    }
+
     // Add Content-Length: 0
     builder = builder.header(TypedHeader::ContentLength(ContentLength::new(0)));
     
@@ -269,6 +276,78 @@ pub fn create_ringing_response_with_dialog_info(
     let contact_info = ContactParamInfo { address: contact_addr };
     let contact = Contact::new_params(vec![contact_info]);
     response.headers.push(TypedHeader::Contact(contact));
-    
+
     response
-} 
+}
+
+/// RFC 3261 §18.2.2 / RFC 3581: Fix Via header for NAT traversal.
+///
+/// Adds `received` and `rport` parameters to the topmost Via header
+/// when the actual packet source differs from the Via sent-by address.
+pub fn fix_via_nat(response: &mut Response, source: SocketAddr) {
+    for header in response.headers.iter_mut() {
+        if let TypedHeader::Via(via) = header {
+            if let Some(first) = via.0.first() {
+                let via_host_matches = match &first.sent_by_host {
+                    Host::Address(ip) => *ip == source.ip(),
+                    Host::Domain(_) => false,
+                };
+                let via_port = first.sent_by_port.unwrap_or(5060);
+
+                // RFC 3261 §18.2.2: Add received= if source IP differs
+                if !via_host_matches {
+                    via.set_received(source.ip());
+                }
+
+                // RFC 3581: Fill in rport with actual source port
+                if via.rport().is_some() || via_port != source.port() {
+                    via.set_rport(Some(source.port()));
+                }
+            }
+            break; // Only modify topmost Via
+        }
+    }
+}
+
+/// Create a response with Via NAT fix applied.
+pub fn create_response_with_nat(
+    request: &Request,
+    status: StatusCode,
+    source: SocketAddr,
+) -> Response {
+    let mut response = create_response(request, status);
+    fix_via_nat(&mut response, source);
+    response
+}
+
+/// Create a 401 Unauthorized response with WWW-Authenticate digest challenge.
+///
+/// RFC 3261 §22.1: UAS challenges with WWW-Authenticate.
+pub fn create_unauthorized_response(
+    request: &Request,
+    realm: &str,
+    nonce: &str,
+) -> Response {
+    let mut response = create_response(request, StatusCode::Unauthorized);
+    let challenge = WwwAuthenticate::new(realm, nonce)
+        .with_algorithm(Algorithm::Md5)
+        .with_qop(Qop::Auth);
+    response.headers.push(TypedHeader::WwwAuthenticate(challenge));
+    response
+}
+
+/// Create a 407 Proxy Authentication Required response.
+///
+/// RFC 3261 §22.2: Proxy challenges with Proxy-Authenticate.
+pub fn create_proxy_auth_response(
+    request: &Request,
+    realm: &str,
+    nonce: &str,
+) -> Response {
+    let mut response = create_response(request, StatusCode::ProxyAuthenticationRequired);
+    let challenge = ProxyAuthenticate::new(realm, nonce)
+        .with_algorithm(Algorithm::Md5)
+        .with_qop(Qop::Auth);
+    response.headers.push(TypedHeader::ProxyAuthenticate(challenge));
+    response
+}

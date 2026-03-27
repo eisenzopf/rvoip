@@ -53,7 +53,12 @@ impl RegisterHandler for DialogManager {
         
         let contact_uri = self.extract_contact_uri(&request).unwrap_or_else(|| from_uri.clone());
         let expires = self.extract_expires(&request);
-        
+
+        // Remember the registration route for INVITE forwarding
+        self.transaction_manager
+            .remember_registration_route(&from_uri, source, expires)
+            .await;
+
         // Create server transaction
         let server_transaction = self.transaction_manager
             .create_server_transaction(request.clone(), source)
@@ -63,28 +68,52 @@ impl RegisterHandler for DialogManager {
             })?;
         
         let transaction_id = server_transaction.id().clone();
-        
+
+        if let Some(auth) = self.auth_provider() {
+            match auth.check_request(&request, source).await {
+                crate::auth::AuthResult::Authenticated { username } => {
+                    debug!("REGISTER authenticated for user {}", username);
+                }
+                crate::auth::AuthResult::Challenge => {
+                    debug!("Sending 401 challenge for REGISTER from {}", source);
+                    let nonce = crate::auth::generate_nonce();
+                    let mut response = crate::transaction::utils::response_builders::create_unauthorized_response(
+                        &request, auth.realm(), &nonce,
+                    );
+                    crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
+                    self.transaction_manager.send_response(&transaction_id, response).await
+                        .map_err(|e| DialogError::TransactionError {
+                            message: format!("Failed to send 401 for REGISTER: {}", e),
+                        })?;
+                    return Ok(());
+                }
+                crate::auth::AuthResult::Skip => {
+                    debug!("Auth skipped for REGISTER from {}", source);
+                }
+            }
+        }
+
         // **NEW**: Check unified configuration for auto-response behavior
         // If the manager is configured for auto-REGISTER response, send immediate response
         // Otherwise, forward to session layer for application handling
         if self.should_auto_respond_to_register() {
             debug!("Auto-responding to REGISTER request (configured for auto-response)");
-            self.send_basic_register_response(&transaction_id, &request, expires).await?;
+            self.send_basic_register_response(&transaction_id, &request, expires, source).await?;
         } else {
             debug!("Forwarding REGISTER request to session layer (auto-response disabled)");
-            
+
             let event = SessionCoordinationEvent::RegistrationRequest {
                 transaction_id: transaction_id.clone(),
                 from_uri,
                 contact_uri,
                 expires,
             };
-            
+
             if let Err(e) = self.notify_session_layer(event).await {
                 debug!("Failed to notify session layer of REGISTER: {}, sending fallback response", e);
-                
+
                 // Fallback: send basic 200 OK response
-                self.send_basic_register_response(&transaction_id, &request, expires).await?;
+                self.send_basic_register_response(&transaction_id, &request, expires, source).await?;
             }
         }
         
@@ -122,20 +151,32 @@ impl DialogManager {
         transaction_id: &crate::transaction::TransactionKey,
         request: &Request,
         expires: u32,
+        source: std::net::SocketAddr,
     ) -> DialogResult<()> {
         use rvoip_sip_core::StatusCode;
-        
-        // Create basic 200 OK response for REGISTER
-        let response = crate::transaction::utils::response_builders::create_response(request, StatusCode::Ok);
-        
-        // TODO: Could add Contact header with the registered URI and expires
-        // For basic auto-response, just send 200 OK
-        
+
+        // Create 200 OK response for REGISTER with Contact + Expires headers
+        let mut response = crate::transaction::utils::response_builders::create_response(request, StatusCode::Ok);
+
+        // RFC 3261 §18.2.2 / RFC 3581: fix Via header for NAT traversal
+        crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
+
+        // Copy the Contact header from the request so SIP.js recognizes the registration
+        for h in &request.headers {
+            if matches!(h, rvoip_sip_core::TypedHeader::Contact(_)) {
+                response.headers.push(h.clone());
+            }
+        }
+        // Add Expires header
+        response.headers.push(rvoip_sip_core::TypedHeader::Expires(
+            rvoip_sip_core::types::expires::Expires(expires),
+        ));
+
         self.transaction_manager.send_response(transaction_id, response).await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send REGISTER response: {}", e),
             })?;
-        
+
         debug!("Sent basic REGISTER response with expires {}", expires);
         Ok(())
     }
