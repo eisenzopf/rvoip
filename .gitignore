@@ -126,6 +126,7 @@ flake.lock
 
 # Generated codec build artifacts
 crates/codec-core/src/codecs/g729a-new/target/
+**/target/
 
 # Local secret overrides
 .env.local
