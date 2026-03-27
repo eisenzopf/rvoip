@@ -67,6 +67,9 @@ pub struct TransportManager {
     transport_factory: Arc<TransportFactory>,
     /// Combined event channel
     event_tx: mpsc::Sender<TransportEvent>,
+    /// Remembers which transport last received traffic from a remote endpoint.
+    /// Used to route responses over the same transport (e.g. WS/WSS instead of UDP).
+    peer_transport_map: Arc<Mutex<HashMap<SocketAddr, Arc<dyn Transport>>>>,
     /// Flag indicating whether the manager is running
     running: Arc<Mutex<bool>>,
 }
@@ -86,6 +89,7 @@ impl TransportManager {
             udp_transport: None,
             transport_factory,
             event_tx,
+            peer_transport_map: Arc::new(Mutex::new(HashMap::new())),
             running: Arc::new(Mutex::new(false)),
         };
         
@@ -176,7 +180,10 @@ impl TransportManager {
             let addresses = if self.config.bind_addresses.is_empty() {
                 vec![SocketAddr::from(([0, 0, 0, 0], 8080))]
             } else {
-                self.config.bind_addresses.clone()
+                // WS needs a different port from UDP/TCP — use base port + 3020 (e.g. 5060 → 8080)
+                self.config.bind_addresses.iter().map(|addr| {
+                    SocketAddr::from((addr.ip(), 8080))
+                }).collect()
             };
             
             for addr in addresses {
@@ -337,6 +344,13 @@ impl TransportManager {
     
     /// Gets a transport appropriate for the given destination
     pub async fn get_transport_for_destination(&self, destination: SocketAddr) -> Option<Arc<dyn Transport>> {
+        // Prefer the transport that most recently received traffic from this peer.
+        // This is critical for connection-oriented transports like WS/WSS where
+        // replies must go out on the established connection.
+        if let Some(transport) = self.peer_transport_map.lock().await.get(&destination).cloned() {
+            return Some(transport);
+        }
+
         // For now, we just return the UDP transport
         // In the future, we'll add URI-based transport selection
         self.udp_transport.clone()
@@ -363,6 +377,13 @@ impl TransportManager {
             
             while let Some(event) = rx.recv().await {
                 trace!("Received event from {}: {:?}", transport_name, event);
+
+                // Track which transport delivered traffic for a given remote endpoint,
+                // so later replies to that endpoint use the same transport instance.
+                if let TransportEvent::MessageReceived { source, .. } = &event {
+                    let mut peer_transport_map = self.peer_transport_map.lock().await;
+                    peer_transport_map.insert(*source, transport.clone());
+                }
                 
                 // Forward the event to the main event channel
                 if let Err(e) = self.event_tx.send(event.clone()).await {

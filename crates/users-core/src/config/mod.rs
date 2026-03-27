@@ -59,7 +59,7 @@ impl UsersConfig {
 impl Default for UsersConfig {
     fn default() -> Self {
         Self {
-            database_url: "sqlite://users.db?mode=rwc".to_string(),
+            database_url: "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string(),
             jwt: crate::jwt::JwtConfig::default(),
             password: PasswordConfig::default(),
             api_bind_address: "127.0.0.1:8081".to_string(),

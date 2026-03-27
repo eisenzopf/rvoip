@@ -21,7 +21,7 @@ client = ["reqwest"]
 tokio = { workspace = true, features = ["full"] }
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "sqlite", "json", "chrono", "uuid"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "json", "chrono", "uuid"] }
 
 # Password hashing
 argon2 = "0.5"

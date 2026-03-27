@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
     // Use hardcoded configuration for demo simplicity
     // See users_core.toml for a complete example of configuration options
     let config = UsersConfig {
-        database_url: "sqlite://examples/rest_api_demo/demo.db?mode=rwc".to_string(),
+        database_url: "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string(),
         api_bind_address: "127.0.0.1:8082".to_string(), // Different port for demo
         ..Default::default()
     };

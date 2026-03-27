@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::{Mutex, mpsc};
 use tokio::time::timeout;
-use tracing::{debug, error, warn, trace};
+use tracing::{debug, error, info, warn, trace};
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::Transport;
@@ -23,6 +23,33 @@ use crate::transaction::server::TransactionExt as ServerTransactionExt;
 use super::TransactionManager;
 
 impl TransactionManager {
+    /// Send a SIP message using transport_manager routing (preferred) or fallback to default transport.
+    pub(crate) async fn send_with_routing(&self, message: Message, destination: SocketAddr) -> Result<()> {
+        if let Some(ref tm) = self.transport_manager {
+            if let Some(transport) = tm.get_transport_for_destination(destination).await {
+                debug!(
+                    destination = %destination,
+                    transport_type = ?transport.default_transport_type(),
+                    "Routing SIP message via peer-mapped transport"
+                );
+                return transport
+                    .send_message(message, destination)
+                    .await
+                    .map_err(|e| Error::transport_error(e, "Failed to send via mapped transport"));
+            }
+        }
+
+        debug!(
+            destination = %destination,
+            transport_type = ?self.transport.default_transport_type(),
+            "Routing SIP message via default transport (no peer mapping)"
+        );
+        self.transport
+            .send_message(message, destination)
+            .await
+            .map_err(|e| Error::transport_error(e, "Failed to send via default transport"))
+    }
+
     /// Retrieves the original request from a transaction.
     /// 
     /// In SIP protocol, each transaction begins with a request. According to RFC 3261, the transaction
@@ -797,22 +824,25 @@ impl TransactionManager {
         
         // Get the client transaction
         let client_txs = self.client_transactions.lock().await;
-        let tx = client_txs.get(tx_id)
+        let tx = client_txs
+            .get(tx_id)
             .ok_or_else(|| Error::transaction_not_found(tx_id.clone(), "retry_request - transaction not found"))?;
-        
+
+        // Clone the transaction reference so we can release the lock before awaiting.
+        let tx = tx.clone();
+        drop(client_txs);
+
         // Get a ClientTransaction reference
         if let Some(client_tx) = tx.as_client_transaction() {
             // Get the original request
-            let request = client_tx.original_request().await
+            let request = client_tx
+                .original_request()
+                .await
                 .ok_or_else(|| Error::Other("No original request available for retry".to_string()))?;
-            
+
             // Get the destination
             let destination = client_tx.remote_addr();
-            
-            // Send the request directly via the transport
-            let transport = self.transport.clone();
-            transport.send_message(Message::Request(request), destination).await
-                .map_err(|e| Error::transport_error(e, "Failed to retry request"))
+            self.send_with_routing(Message::Request(request), destination).await
         } else {
             Err(Error::Other("Failed to downcast to client transaction".to_string()))
         }
@@ -844,17 +874,57 @@ impl TransactionManager {
         if !tx_id.is_server() {
             return Err(Error::Other("Cannot process request for client transaction".to_string()));
         }
-        
+
         // Get the server transaction
         let server_txs = self.server_transactions.lock().await;
         let tx = server_txs.get(tx_id)
             .ok_or_else(|| Error::transaction_not_found(tx_id.clone(), "process_request - transaction not found"))?;
-        
+
         // Clone it so we can drop the lock before the async call
         let tx_clone = tx.clone();
         drop(server_txs);
-        
+
         // Process the request using the transaction's implementation
         tx_clone.process_request(request).await
+    }
+
+    /// Extract route keys from a SIP URI (both full URI and user-only)
+    fn aor_route_keys(uri: &rvoip_sip_core::Uri) -> Vec<String> {
+        let mut keys = Vec::new();
+        // User-only key (e.g., "user:1002")
+        if let Some(user) = uri.user.as_deref() {
+            keys.push(format!("user:{}", user.to_lowercase()));
+        }
+        // Full URI key (normalized, strip parameters)
+        let raw = uri.to_string().to_lowercase();
+        let no_params = raw.split(';').next().unwrap_or(&raw).to_string();
+        keys.push(no_params);
+        keys
+    }
+
+    /// Remember a registration route: maps AOR → peer socket address
+    pub async fn remember_registration_route(&self, aor: &rvoip_sip_core::Uri, remote_addr: SocketAddr, expires: u32) {
+        let keys = Self::aor_route_keys(aor);
+        let mut routes = self.aor_peer_routes.lock().await;
+        if expires == 0 {
+            for k in &keys { routes.remove(k); }
+            debug!("Removed registration route for {:?}", keys);
+        } else {
+            for k in &keys { routes.insert(k.clone(), remote_addr); }
+            info!("Learned registration route: {:?} -> {}", keys, remote_addr);
+        }
+    }
+
+    /// Look up a registered peer's socket address by target URI
+    pub async fn resolve_registered_route(&self, target: &rvoip_sip_core::Uri) -> Option<SocketAddr> {
+        let keys = Self::aor_route_keys(target);
+        let routes = self.aor_peer_routes.lock().await;
+        for k in &keys {
+            if let Some(addr) = routes.get(k) {
+                info!("Resolved registration route: {} -> {}", k, addr);
+                return Some(*addr);
+            }
+        }
+        None
     }
 } 

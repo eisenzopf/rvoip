@@ -571,10 +571,31 @@ impl CallCenterEngine {
     /// Process incoming call with sophisticated routing
     pub(super) async fn process_incoming_call(&self, call: IncomingCall) -> CallCenterResult<CallDecision> {
         let session_id = call.id.clone();
-        
-        info!("📞 Processing incoming call: {} from {} to {}", 
+
+        info!("📞 Processing incoming call: {} from {} to {}",
               session_id, call.from, call.to);
-        
+
+        // ── Direct extension routing ──
+        // If the target looks like a direct extension call (sip:NNNN@domain),
+        // forward it directly instead of queuing it for call-center routing.
+        // This enables peer-to-peer calls between registered extensions.
+        let target_user = call.to
+            .trim_start_matches('<')
+            .trim_start_matches("sip:")
+            .split('@')
+            .next()
+            .unwrap_or_default();
+
+        // Check if target is a numeric extension (not a queue name or service)
+        if !target_user.is_empty() && target_user.chars().all(|c| c.is_ascii_digit()) {
+            info!("📲 Direct extension call detected: {} → {}", call.from, target_user);
+            // Forward to the target's SIP URI — session-core will resolve via registrar
+            let target_uri = call.to.clone();
+            return Ok(CallDecision::Forward(target_uri));
+        }
+
+        // ── Call center routing (queues, agents, skills) ──
+
         // Check if we have any agents at all (not just available ones)
         let total_agents = if let Some(db_manager) = &self.db_manager {
             db_manager.count_total_agents().await.unwrap_or_default()

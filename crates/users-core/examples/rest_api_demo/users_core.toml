@@ -2,8 +2,8 @@
 # This file demonstrates all available configuration options
 
 [users_core]
-# Database location (SQLite for demo)
-database_url = "sqlite://demo.db?mode=rwc"
+# Database location (PostgreSQL)
+database_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip"
 
 # REST API binding address
 api_bind_address = "127.0.0.1:8082"

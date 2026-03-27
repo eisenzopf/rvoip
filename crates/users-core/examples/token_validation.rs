@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
 
     // Initialize users-core
     let config = UsersConfig {
-        database_url: "sqlite://token_validation.db?mode=rwc".to_string(),
+        database_url: "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string(),
         ..Default::default()
     };
     
@@ -124,9 +124,6 @@ async fn main() -> Result<()> {
         Err(e) => println!("   ✓ Tampered token rejected: {}", e),
     }
 
-    // Clean up
-    std::fs::remove_file("token_validation.db").ok();
-    
     println!("\n✨ Token validation example completed!");
     Ok(())
 }

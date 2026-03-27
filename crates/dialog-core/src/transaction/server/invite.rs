@@ -72,7 +72,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::Transport;
@@ -978,6 +978,14 @@ impl ServerTransaction for ServerInviteTransaction {
             }
             
             // Always send the response
+            if status == StatusCode::Ok {
+                info!(
+                    id = %data.id,
+                    remote_addr = %data.remote_addr,
+                    transport_type = ?data.transport.default_transport_type(),
+                    "Sending 200 OK response for INVITE server transaction"
+                );
+            }
             data.transport.send_message(Message::Response(response.clone()), data.remote_addr)
                 .await
                 .map_err(|e| Error::transport_error(e, "Failed to send response"))?;

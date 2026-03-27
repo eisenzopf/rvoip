@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
 
     // Initialize users-core
     let config = UsersConfig {
-        database_url: "sqlite://api_key_example.db?mode=rwc".to_string(),
+        database_url: "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string(),
         ..Default::default()
     };
     
@@ -199,9 +199,6 @@ async fn main() -> Result<()> {
     println!("   6. Monitor key usage");
     println!("   7. Revoke unused keys");
 
-    // Clean up
-    std::fs::remove_file("api_key_example.db").ok();
-    
     println!("\n✨ API key service example completed!");
     Ok(())
 }

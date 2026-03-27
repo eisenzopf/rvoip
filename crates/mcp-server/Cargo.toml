@@ -1,0 +1,34 @@
+[package]
+name = "rvoip-mcp-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP Server for rvoip call center — lets AI models manage the platform"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "rvoip-mcp-server"
+path = "src/main.rs"
+
+[dependencies]
+# Async
+tokio = { workspace = true, features = ["full"] }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# CLI args
+clap = { workspace = true, features = ["derive", "env"] }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Error handling
+anyhow = { workspace = true }

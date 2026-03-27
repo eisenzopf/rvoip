@@ -266,6 +266,10 @@ pub struct TransactionManager {
     timer_factory: TimerFactory,
     /// Broadcast shutdown signal for spawned tasks
     shutdown_tx: tokio::sync::broadcast::Sender<()>,
+    /// Optional TransportManager for peer→transport routing (WS/TCP responses)
+    transport_manager: Option<Arc<crate::transaction::transport::TransportManager>>,
+    /// REGISTER-learned route: AOR/user → last seen remote socket
+    aor_peer_routes: Arc<Mutex<HashMap<String, SocketAddr>>>,
 }
 
 // Define RFC3261 Branch magic cookie

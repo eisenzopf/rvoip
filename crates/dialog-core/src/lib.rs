@@ -120,6 +120,7 @@
 //! - **Clean API**: High-level `DialogClient` and `DialogServer` for easy integration
 
 // Core modules
+pub mod auth;
 pub mod errors;
 pub mod dialog;
 pub mod manager;

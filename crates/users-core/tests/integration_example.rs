@@ -12,7 +12,7 @@ async fn example_sip_register_flow() {
     // Setup users-core
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("users.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let config = UsersConfig {
         database_url: db_url,
@@ -104,7 +104,7 @@ async fn example_sip_register_flow() {
 async fn example_api_key_for_pbx_system() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("users.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let config = create_test_config(db_url);
     let auth_service = init(config).await.unwrap();
@@ -153,7 +153,7 @@ async fn example_api_key_for_pbx_system() {
 async fn example_multi_device_presence() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("users.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let config = create_test_config(db_url);
     let auth_service = init(config).await.unwrap();
@@ -207,7 +207,7 @@ async fn example_multi_device_presence() {
 async fn example_token_refresh_workflow() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("users.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let mut config = create_test_config(db_url);
     config.jwt.access_ttl_seconds = 5;  // Very short for testing

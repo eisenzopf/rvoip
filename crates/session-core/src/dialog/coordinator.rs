@@ -728,8 +728,8 @@ impl SessionDialogCoordinator {
         if let Some(session_id_ref) = self.dialog_to_session.get(&dialog_id) {
             let session_id = session_id_ref.value().clone();
             tracing::info!("Call answered for session {}: {} (awaiting ACK per RFC 3261)", session_id, dialog_id);
-            
-            // Store our local SDP answer (as UAS, we generated this answer)
+
+            // Store SDP answer
             if !session_answer.trim().is_empty() {
                 self.send_session_event(SessionEvent::SdpEvent {
                     session_id: session_id.clone(),
@@ -739,14 +739,12 @@ impl SessionDialogCoordinator {
                     tracing::error!("Failed to send local SDP event: {}", e);
                 });
             }
-            
-            // DON'T update to Active yet - wait for media creation after ACK!
-            tracing::info!("📞 Call answered for session {} - keeping in Initiating state until media ready", session_id);
-            
-            // RFC 3261: Media should only start after ACK is received, not after 200 OK
-            tracing::info!("🚫 RFC 3261: NOT creating media session yet - waiting for ACK");
+
+            // B2BUA bridge logic is handled in event_handler.rs via cross-crate
+            // CallEstablished event. This handler only does local session bookkeeping.
+            tracing::info!("Call answered for session {} — B2BUA forwarding handled by event_handler", session_id);
         }
-        
+
         Ok(())
     }
     
@@ -1339,6 +1337,18 @@ impl SessionDialogCoordinator {
     /// Get dialog ID for a session
     pub async fn get_dialog_id_for_session(&self, session_id: &SessionId) -> Option<DialogId> {
         self.session_to_dialog.get(session_id).map(|entry| entry.value().clone())
+    }
+
+    /// Register a dialog↔session mapping (used for cross-crate IncomingCall events)
+    pub async fn register_dialog_session_mapping(&self, dialog_id: DialogId, session_id: SessionId) {
+        tracing::debug!("Registering dialog↔session mapping: {} ↔ {}", dialog_id, session_id);
+        self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
+        self.session_to_dialog.insert(session_id, dialog_id);
+    }
+
+    /// Reverse lookup: find session_id from dialog_id
+    pub async fn get_dialog_id_for_session_reverse(&self, dialog_id: &DialogId) -> Option<SessionId> {
+        self.dialog_to_session.get(dialog_id).map(|r| r.value().clone())
     }
     
     /// Update session state and send event

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use password_hash::{rand_core::OsRng, SaltString};
-use sqlx::{SqlitePool, Row};
+use sqlx::{PgPool, Row};
 use crate::{Result, Error, User, UserStore, ApiKeyStore, JwtIssuer, CreateUserRequest};
 use crate::jwt::RefreshTokenClaims;
 use crate::config::PasswordConfig;
@@ -15,7 +15,7 @@ pub struct AuthenticationService {
     api_key_store: Arc<dyn ApiKeyStore>,
     password_config: PasswordConfig,
     argon2: Argon2<'static>,
-    pool: Option<SqlitePool>,  // For refresh token management
+    pool: Option<PgPool>,  // For refresh token management
 }
 
 /// Result of authentication
@@ -79,7 +79,7 @@ impl AuthenticationService {
     }
     
     /// Set the database pool for refresh token management
-    pub fn set_pool(&mut self, pool: SqlitePool) {
+    pub fn set_pool(&mut self, pool: PgPool) {
         self.pool = Some(pool);
     }
     
@@ -280,7 +280,7 @@ impl AuthenticationService {
     /// Revoke tokens for a user
     pub async fn revoke_tokens(&self, user_id: &str) -> Result<()> {
         if let Some(pool) = &self.pool {
-            sqlx::query("UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+            sqlx::query("UPDATE refresh_tokens SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL")
                 .bind(&chrono::Utc::now())
                 .bind(user_id)
                 .execute(pool)
@@ -321,7 +321,7 @@ impl AuthenticationService {
         
         // Update password in database
         if let Some(pool) = &self.pool {
-            sqlx::query("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
+            sqlx::query("UPDATE users SET password_hash = $1, updated_at = $2 WHERE id = $3")
                 .bind(&new_hash)
                 .bind(&chrono::Utc::now())
                 .bind(user_id)
@@ -337,7 +337,7 @@ impl AuthenticationService {
     
     async fn update_last_login(&self, user_id: &str) -> Result<()> {
         if let Some(pool) = &self.pool {
-            sqlx::query("UPDATE users SET last_login = ? WHERE id = ?")
+            sqlx::query("UPDATE users SET last_login = $1 WHERE id = $2")
                 .bind(&chrono::Utc::now())
                 .bind(user_id)
                 .execute(pool)
@@ -346,10 +346,10 @@ impl AuthenticationService {
         Ok(())
     }
     
-    async fn store_refresh_token(&self, pool: &SqlitePool, claims: &RefreshTokenClaims) -> Result<()> {
+    async fn store_refresh_token(&self, pool: &PgPool, claims: &RefreshTokenClaims) -> Result<()> {
         sqlx::query(
             "INSERT INTO refresh_tokens (jti, user_id, expires_at, created_at)
-             VALUES (?, ?, ?, ?)"
+             VALUES ($1, $2, $3, $4)"
         )
         .bind(&claims.jti)
         .bind(&claims.sub)
@@ -361,8 +361,8 @@ impl AuthenticationService {
         Ok(())
     }
     
-    async fn check_refresh_token_revoked(&self, pool: &SqlitePool, jti: &str) -> Result<()> {
-        let row = sqlx::query("SELECT revoked_at FROM refresh_tokens WHERE jti = ?")
+    async fn check_refresh_token_revoked(&self, pool: &PgPool, jti: &str) -> Result<()> {
+        let row = sqlx::query("SELECT revoked_at FROM refresh_tokens WHERE jti = $1")
             .bind(jti)
             .fetch_optional(pool)
             .await?;
