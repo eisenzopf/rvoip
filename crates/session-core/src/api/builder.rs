@@ -181,6 +181,11 @@ pub enum SipTransportType {
     Ws,
     /// Secure WebSocket transport (RFC 7118 over TLS)
     Wss,
+    /// UDP on the configured SIP port (default 5060) **and** WebSocket on port 8080.
+    ///
+    /// Use this for servers that must accept both traditional SIP clients (UDP/TCP)
+    /// and browser-based softphones (WebSocket / RFC 7118) simultaneously.
+    UdpAndWs,
 }
 
 /// Configuration for the SessionManager
@@ -479,6 +484,16 @@ impl SessionManagerBuilder {
     /// ```
     pub fn with_websocket(mut self) -> Self {
         self.config.sip_transport = SipTransportType::Ws;
+        self
+    }
+
+    /// Enable both UDP (port from `with_sip_port`, default 5060) **and** WebSocket
+    /// (port 8080) simultaneously.
+    ///
+    /// This is the recommended transport mode for production servers that serve
+    /// both traditional SIP devices (UDP) and browser softphones (WebSocket).
+    pub fn with_udp_and_websocket(mut self) -> Self {
+        self.config.sip_transport = SipTransportType::UdpAndWs;
         self
     }
 

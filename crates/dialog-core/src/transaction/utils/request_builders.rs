@@ -107,4 +107,81 @@ pub fn create_test_request(method: Method) -> Result<Request> {
         .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
         .header(TypedHeader::ContentLength(ContentLength::new(0)))
         .build())
+}
+
+/// Build a proxy-forwarded copy of an INVITE request (RFC 3261 §16.6).
+///
+/// Modifications applied:
+/// 1. Decrement Max-Forwards by 1.
+/// 2. Prepend a new Via header with the proxy's address and a fresh branch.
+/// 3. Prepend a Record-Route header with `lr` so the proxy stays in the path.
+/// 4. All other headers and the body are copied unchanged.
+///
+/// The caller is responsible for updating the Request-URI when the target
+/// differs from the original (pass `target_uri = original.uri().to_string()`
+/// to keep it the same).
+pub fn create_forwarded_request(
+    original: &Request,
+    proxy_host: &str,
+    proxy_port: u16,
+    transport: &str,
+    target_uri: &str,
+) -> Result<Request> {
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
+
+    let mut builder = SimpleRequestBuilder::new(original.method().clone(), target_uri)
+        .map_err(|e| Error::Other(format!("Failed to create forwarded request builder: {}", e)))?;
+
+    // Copy headers, adjusting Max-Forwards and skipping Via (we add ours below).
+    let mut found_max_forwards = false;
+    for header in &original.headers {
+        match header {
+            TypedHeader::Via(_) => {
+                // Keep original Via headers — our Via is prepended after the loop.
+                builder = builder.header(header.clone());
+            }
+            TypedHeader::MaxForwards(mf) => {
+                // RFC 3261 §16.6 step 3: decrement Max-Forwards.
+                let new_val = if mf.0 > 0 { mf.0 - 1 } else { 0 };
+                builder = builder.header(TypedHeader::MaxForwards(MaxForwards::new(new_val)));
+                found_max_forwards = true;
+            }
+            TypedHeader::ContentLength(_) => {
+                // Will be recalculated when body is set.
+            }
+            _ => {
+                builder = builder.header(header.clone());
+            }
+        }
+    }
+    if !found_max_forwards {
+        builder = builder.header(TypedHeader::MaxForwards(MaxForwards::new(69)));
+    }
+
+    // RFC 3261 §16.6 step 2: add our Via on top with a fresh branch.
+    let branch = format!("z9hG4bK-{}", Uuid::new_v4().simple());
+    builder = builder.via(
+        &format!("{}:{}", proxy_host, proxy_port),
+        transport,
+        Some(&branch),
+    );
+
+    // RFC 3261 §16.6 step 4: add Record-Route with lr (loose-routing).
+    // Build: <sip:proxy_host:proxy_port;lr>
+    let rr_uri = Uri::sip(proxy_host)
+        .with_port(proxy_port)
+        .with_parameter(Param::Lr);
+    let rr_addr = Address::new(rr_uri);
+    let rr_entry = RecordRouteEntry::new(rr_addr);
+    let rr = RecordRoute::new(vec![rr_entry]);
+    builder = builder.header(TypedHeader::RecordRoute(rr));
+
+    // Copy body.
+    if !original.body().is_empty() {
+        builder = builder.body(original.body().to_vec());
+    } else {
+        builder = builder.header(TypedHeader::ContentLength(ContentLength::new(0)));
+    }
+
+    Ok(builder.build())
 } 

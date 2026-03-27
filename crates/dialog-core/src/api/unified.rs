@@ -199,6 +199,24 @@ pub struct UnifiedDialogApi {
 }
 
 impl UnifiedDialogApi {
+    /// Attach a DialogEventHub backed by the global singleton event coordinator.
+    async fn attach_default_event_hub(
+        manager: &Arc<UnifiedDialogManager>,
+    ) -> ApiResult<()> {
+        let global_coordinator =
+            rvoip_infra_common::events::coordinator::global_coordinator().await.clone();
+
+        let event_hub = crate::events::DialogEventHub::new(
+            global_coordinator,
+            Arc::new(manager.as_ref().inner_manager().clone()),
+        )
+        .await
+        .map_err(|e| ApiError::internal(format!("Failed to create event hub: {}", e)))?;
+
+        manager.as_ref().inner_manager().set_event_hub(event_hub).await;
+        Ok(())
+    }
+
     /// Create a new unified dialog API
     ///
     /// # Arguments
@@ -248,6 +266,8 @@ impl UnifiedDialogApi {
             UnifiedDialogManager::new(transaction_manager, config.clone()).await
                 .map_err(ApiError::from)?
         );
+
+        Self::attach_default_event_hub(&manager).await?;
         
         Ok(Self {
             manager,
@@ -357,6 +377,8 @@ impl UnifiedDialogApi {
             UnifiedDialogManager::with_global_events(transaction_manager, transaction_events, config.clone()).await
                 .map_err(ApiError::from)?
         );
+
+        Self::attach_default_event_hub(&manager).await?;
         
         Ok(Self {
             manager,
@@ -389,7 +411,21 @@ impl UnifiedDialogApi {
     pub fn subscription_manager(&self) -> Option<&Arc<crate::subscription::SubscriptionManager>> {
         self.manager.subscription_manager()
     }
-    
+
+    /// Set the authentication provider for SIP Digest auth (RFC 3261 §22).
+    ///
+    /// Replaces any previously set provider at runtime — no restart required.
+    pub fn set_auth_provider(&self, provider: std::sync::Arc<dyn crate::auth::AuthProvider>) {
+        self.manager.inner_manager().set_auth_provider(provider);
+    }
+
+    /// Set the proxy router for INVITE forwarding decisions.
+    ///
+    /// Replaces any previously set router at runtime — no restart required.
+    pub fn set_proxy_router(&self, router: std::sync::Arc<dyn crate::auth::ProxyRouter>) {
+        self.manager.inner_manager().set_proxy_router(router);
+    }
+
     // ========================================
     // LIFECYCLE MANAGEMENT
     // ========================================
@@ -783,6 +819,30 @@ impl UnifiedDialogApi {
     // SIP METHOD HELPERS (ALL MODES)
     // ========================================
     
+    /// Reject an incoming dialog with a SIP error response (e.g., 404, 480, 486, 603)
+    ///
+    /// Finds the INVITE server transaction for the dialog and sends the error response.
+    /// Per RFC 3261 §13.3.1, UAS sends a final error response to reject an INVITE.
+    pub async fn reject_dialog(
+        &self,
+        dialog_id: &DialogId,
+        status_code: StatusCode,
+        reason: Option<String>,
+    ) -> ApiResult<()> {
+        use tracing::{info, warn};
+        info!("Rejecting dialog {} with {} {:?}", dialog_id, status_code, reason);
+
+        // Find the INVITE server transaction for this dialog
+        if let Some(tx_key) = self.manager.core().find_invite_transaction_for_dialog(dialog_id) {
+            self.manager.send_status_response(&tx_key, status_code, reason).await
+        } else {
+            warn!("No INVITE transaction found for dialog {} — cannot send reject response", dialog_id);
+            Err(ApiError::Dialog {
+                message: format!("No INVITE transaction for dialog {}", dialog_id),
+            })
+        }
+    }
+
     /// Send BYE request to terminate a dialog
     pub async fn send_bye(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
         self.manager.send_bye(dialog_id).await
@@ -1063,8 +1123,8 @@ impl UnifiedDialogApi {
         let bind_addr = config.local_address();
         let transport_config = TransportManagerConfig {
             enable_udp: true,
-            enable_tcp: false,
-            enable_ws: false,
+            enable_tcp: true,
+            enable_ws: true,
             enable_tls: false,
             bind_addresses: vec![bind_addr],
             ..Default::default()

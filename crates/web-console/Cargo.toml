@@ -1,0 +1,76 @@
+[package]
+name = "rvoip-web-console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "Web management console for the rvoip SIP/VoIP stack"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Internal crates
+rvoip-ai-copilot.workspace = true
+rvoip-call-engine.workspace = true
+rvoip-dialog-core.workspace = true
+rvoip-infra-common.workspace = true
+rvoip-sip-core.workspace = true
+rvoip-registrar-core.workspace = true
+
+async-trait.workspace = true
+
+# Authentication
+users-core = { path = "../users-core", version = "0.1.26" }
+jsonwebtoken = "9.3"
+
+# Web framework (latest)
+axum = { version = "0.8", features = ["json", "tokio", "macros", "ws"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower = { version = "0.5", features = ["util", "timeout"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "fs", "compression-gzip"] }
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Utilities
+uuid = { workspace = true, features = ["v4", "serde"] }
+chrono = { workspace = true, features = ["serde"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+
+# Static file embedding
+rust-embed = { version = "8", features = ["compression"] }
+mime_guess = "2"
+
+# TLS support (optional)
+axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
+
+[features]
+default = []
+tls = ["axum-server"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[example]]
+name = "web_console_server"
+path = "examples/server.rs"

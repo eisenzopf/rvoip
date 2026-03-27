@@ -179,6 +179,15 @@ pub struct GeneralConfig {
     /// Prevents hanging connections when call termination fails.
     pub bye_timeout_seconds: u64,
     
+    /// Enable WebSocket transport on port 8080 in addition to UDP on port 5060.
+    ///
+    /// When `true`, the SIP stack listens on **both** transports simultaneously:
+    /// - UDP on `local_signaling_addr.port()` (default 5060) — for traditional SIP devices
+    /// - WebSocket on port 8080 — for browser-based softphones (RFC 7118 / sip.js)
+    ///
+    /// Defaults to `false` (UDP only) to preserve backward compatibility.
+    pub enable_websocket: bool,
+
     /// BYE retry attempts
     ///
     /// Number of times to retry sending BYE requests when they fail or timeout.
@@ -752,6 +761,8 @@ impl Default for GeneralConfig {
             registrar_domain: "call-center.local".to_string(),
             call_center_service: "call-center".to_string(),
             
+            enable_websocket: false,     // Opt-in; set true to also accept browser softphones on :8080
+
             // PHASE 0.24: BYE handling configuration with production-ready defaults
             bye_timeout_seconds: 15,     // Increased from 5s to 15s for better reliability
             bye_retry_attempts: 3,       // Allow 3 retry attempts for failed BYEs

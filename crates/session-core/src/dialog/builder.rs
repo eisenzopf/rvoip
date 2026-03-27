@@ -87,6 +87,27 @@ impl DialogBuilder {
                         reason: format!("Failed to create dialog API with WebSocket transport: {}", e),
                     })?
             }
+            SipTransportType::UdpAndWs => {
+                // Dual-transport path: UDP on the configured SIP port AND WebSocket on 8080.
+                // TransportManager binds UDP at bind_addr.port() and WS at port 8080
+                // (see TransportManager::initialize — WS always uses port 8080).
+                let bind_addr = dialog_config.local_address();
+
+                let transport_config = rvoip_dialog_core::transaction::transport::TransportManagerConfig {
+                    enable_udp: true,
+                    enable_tcp: false,
+                    enable_ws: true,
+                    enable_tls: false,
+                    bind_addresses: vec![bind_addr],
+                    ..Default::default()
+                };
+
+                UnifiedDialogApi::create_with_transport_config(dialog_config, transport_config)
+                    .await
+                    .map_err(|e| DialogError::DialogCreation {
+                        reason: format!("Failed to create dialog API with UDP+WebSocket transport: {}", e),
+                    })?
+            }
         };
 
         Ok(Arc::new(api))

@@ -55,7 +55,29 @@ impl InviteHandler for DialogManager {
             })?;
         
         let transaction_id = server_transaction.id().clone();
-        
+
+        // INVITE uses 407 Proxy-Authenticate (not 401) per RFC 3261 §22.2
+        if let Some(auth) = self.auth_provider() {
+            match auth.check_request(&request, source).await {
+                crate::auth::AuthResult::Authenticated { username } => {
+                    debug!("INVITE authenticated for user {}", username);
+                }
+                crate::auth::AuthResult::Challenge => {
+                    debug!("Sending 407 challenge for INVITE from {}", source);
+                    let nonce = crate::auth::generate_nonce();
+                    let response = crate::transaction::utils::response_builders::create_proxy_auth_response(
+                        &request, auth.realm(), &nonce,
+                    );
+                    self.transaction_manager.send_response(&transaction_id, response).await
+                        .map_err(|e| DialogError::TransactionError {
+                            message: format!("Failed to send 407 for INVITE: {}", e),
+                        })?;
+                    return Ok(());
+                }
+                crate::auth::AuthResult::Skip => {}
+            }
+        }
+
         // Check if this is an initial INVITE or re-INVITE
         if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
             // This is a re-INVITE within existing dialog
@@ -78,7 +100,78 @@ impl DialogManager {
     ) -> DialogResult<()> {
         tracing::debug!("🔍 INVITE HANDLER: Processing initial INVITE request from {}", source);
         debug!("Processing initial INVITE request");
-        
+
+        // ── Proxy routing gate ────────────────────────────────────────────────
+        // If a ProxyRouter is configured, ask it whether to forward or reject
+        // the request before falling through to B2BUA / session-core handling.
+        if let Some(router) = self.proxy_router() {
+            match router.route_request(&request, source).await {
+                crate::auth::ProxyAction::Forward { destination } => {
+                    info!("Proxy-forwarding INVITE from {} to {}", source, destination);
+
+                    // RFC 3261 §16.4: reject if Max-Forwards == 0.
+                    let mf = request
+                        .typed_header::<rvoip_sip_core::types::max_forwards::MaxForwards>()
+                        .map(|m| m.0)
+                        .unwrap_or(70);
+                    if mf == 0 {
+                        let response = crate::transaction::utils::response_builders::create_response(
+                            &request,
+                            rvoip_sip_core::StatusCode::TooManyHops,
+                        );
+                        self.transaction_manager
+                            .send_response(&transaction_id, response)
+                            .await
+                            .map_err(|e| DialogError::TransactionError {
+                                message: format!("Failed to send 483 TooManyHops: {}", e),
+                            })?;
+                        return Ok(());
+                    }
+
+                    let local = self.local_address;
+                    let forwarded = crate::transaction::utils::request_builders::create_forwarded_request(
+                        &request,
+                        &local.ip().to_string(),
+                        local.port(),
+                        "UDP",
+                        &request.uri().to_string(),
+                    )
+                    .map_err(|e| DialogError::TransactionError {
+                        message: format!("Failed to build forwarded INVITE: {}", e),
+                    })?;
+
+                    self.transaction_manager
+                        .forward_request(forwarded, destination)
+                        .await
+                        .map_err(|e| DialogError::TransactionError {
+                            message: format!("Failed to forward INVITE to {}: {}", destination, e),
+                        })?;
+
+                    return Ok(());
+                }
+                crate::auth::ProxyAction::Reject { status, reason } => {
+                    info!("Proxy rejecting INVITE from {} with {} {}", source, status, reason);
+                    let status_code = rvoip_sip_core::StatusCode::from_u16(status)
+                        .unwrap_or(rvoip_sip_core::StatusCode::ServerInternalError);
+                    let response = crate::transaction::utils::response_builders::create_response(
+                        &request, status_code,
+                    );
+                    self.transaction_manager
+                        .send_response(&transaction_id, response)
+                        .await
+                        .map_err(|e| DialogError::TransactionError {
+                            message: format!("Failed to send proxy rejection: {}", e),
+                        })?;
+                    return Ok(());
+                }
+                crate::auth::ProxyAction::LocalB2BUA => {
+                    // Fall through to B2BUA / session-core handling below.
+                    debug!("ProxyRouter: LocalB2BUA — proceeding with normal INVITE handling");
+                }
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
         // Create early dialog
         let dialog_id = self.create_early_dialog_from_invite(&request).await?;
         tracing::debug!("🔍 INVITE HANDLER: Created early dialog {}", dialog_id);

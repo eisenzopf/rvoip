@@ -28,7 +28,7 @@ rvoip-session-core.workspace = true
 sqlx = { version = "0.8", features = [
     "runtime-tokio",
     "tls-rustls",
-    "sqlite",
+    "postgres",
     "chrono",
     "uuid",
     "migrate",
