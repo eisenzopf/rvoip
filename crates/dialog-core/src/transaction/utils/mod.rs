@@ -46,6 +46,8 @@ pub use response_builders::{
     create_ok_response_with_dialog_info,
     create_ringing_response_with_tag,
     create_ringing_response_with_dialog_info,
+    fix_via_nat,
+    create_response_with_nat,
 };
 
 // Transaction helpers

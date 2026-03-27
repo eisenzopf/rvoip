@@ -54,15 +54,16 @@ impl UpdateHandler for DialogManager {
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for UPDATE: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
-            
+            let mut response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            response_builders::fix_via_nat(&mut response, source);
+
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to UPDATE: {}", e),
                 })?;
-            
+
             debug!("UPDATE processed with 481 response (no dialog found)");
             Ok(())
         }
@@ -88,7 +89,8 @@ impl DialogManager {
                         message: format!("Failed to create server transaction for UPDATE rejection: {}", e),
                     })?;
                 let transaction_id = server_transaction.id().clone();
-                let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+                let mut response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+                response_builders::fix_via_nat(&mut response, source);
                 self.transaction_manager.send_response(&transaction_id, response).await
                     .map_err(|e| DialogError::TransactionError {
                         message: format!("Failed to send 481 response to UPDATE: {}", e),

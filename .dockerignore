@@ -1,0 +1,12 @@
+target/
+.git/
+*.log
+*.trace
+*.wav
+*.db
+node_modules/
+crates/web-console/frontend/node_modules/
+crates/web-console/frontend/dist/
+.claude/
+.vscode/
+.idea/

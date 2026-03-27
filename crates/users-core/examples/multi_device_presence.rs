@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
 
     // Initialize users-core
     let config = UsersConfig {
-        database_url: "sqlite://presence_example.db?mode=rwc".to_string(),
+        database_url: "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string(),
         ..Default::default()
     };
     
@@ -249,9 +249,6 @@ async fn main() -> Result<()> {
     println!("   • Support rich presence (status messages)");
     println!("   • Implement presence authorization (privacy)");
     println!("   • Use PIDF for standard compliance");
-    
-    // Clean up
-    std::fs::remove_file("presence_example.db").ok();
     
     println!("\n✨ Multi-device presence example completed!");
     Ok(())

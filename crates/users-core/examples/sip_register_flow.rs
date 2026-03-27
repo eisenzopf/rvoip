@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     // Initialize users-core
     let config = UsersConfig {
-        database_url: "sqlite://sip_example.db?mode=rwc".to_string(),
+        database_url: "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string(),
         ..Default::default()
     };
     
@@ -160,9 +160,6 @@ async fn main() -> Result<()> {
     println!("3. Client authenticates with users-core to get JWT");
     println!("4. Client resends REGISTER with Authorization: Bearer <jwt>");
 
-    // Clean up
-    std::fs::remove_file("sip_example.db").ok();
-    
     println!("\n✨ SIP REGISTER example completed!");
     Ok(())
 }

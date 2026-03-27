@@ -57,15 +57,16 @@ impl ByeHandler for DialogManager {
         
         // Find the dialog for this BYE
         if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
-            self.process_bye_in_dialog(transaction_id, request, dialog_id).await
+            self.process_bye_in_dialog(transaction_id, request, source, dialog_id).await
         } else {
             // Send 481 Call/Transaction Does Not Exist using transaction-core helper
-            let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            let mut response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            response_builders::fix_via_nat(&mut response, source);
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to BYE: {}", e),
                 })?;
-            
+
             Err(DialogError::dialog_not_found("BYE request dialog"))
         }
     }
@@ -78,6 +79,7 @@ impl DialogManager {
         &self,
         transaction_id: TransactionKey,
         request: Request,
+        source: std::net::SocketAddr,
         dialog_id: DialogId,
     ) -> DialogResult<()> {
         debug!("Processing BYE for dialog {}", dialog_id);
@@ -87,7 +89,8 @@ impl DialogManager {
             let dialog = self.get_dialog(&dialog_id)?;
             if dialog.state != DialogState::Confirmed {
                 warn!("BYE received for dialog {} in {:?} state, rejecting with 481", dialog_id, dialog.state);
-                let response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+                let mut response = response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+                response_builders::fix_via_nat(&mut response, source);
                 self.transaction_manager.send_response(&transaction_id, response).await
                     .map_err(|e| DialogError::TransactionError {
                         message: format!("Failed to send 481 response to BYE: {}", e),
@@ -105,9 +108,10 @@ impl DialogManager {
             dialog.update_remote_sequence(&request)?;
             dialog.terminate();
         }
-        
+
         // Send 200 OK response
-        let response = response_builders::create_response(&request, StatusCode::Ok);
+        let mut response = response_builders::create_response(&request, StatusCode::Ok);
+        response_builders::fix_via_nat(&mut response, source);
         self.transaction_manager.send_response(&transaction_id, response).await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send 200 OK to BYE: {}", e),

@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
 
     // Configure users-core
     let config = UsersConfig {
-        database_url: "sqlite://example_users.db?mode=rwc".to_string(),
+        database_url: "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string(),
         ..Default::default()
     };
 
@@ -96,10 +96,6 @@ async fn main() -> Result<()> {
     for user in all_users {
         println!("   - {} ({})", user.username, user.id);
     }
-
-    // Clean up
-    println!("\n🧹 Cleaning up test database...");
-    std::fs::remove_file("example_users.db").ok();
 
     println!("\n✨ Example completed successfully!");
     Ok(())

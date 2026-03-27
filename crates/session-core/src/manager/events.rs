@@ -90,6 +90,13 @@ pub enum SessionEvent {
         reason: Option<String>,
     },
     
+    /// B2BUA: B-leg call established (200 OK received from callee)
+    /// Carries the SDP answer to forward to the A-leg
+    B2BuaLegEstablished {
+        session_id: SessionId,
+        sdp_answer: Option<String>,
+    },
+
     /// Session is terminating (Phase 1 - cleanup in progress)
     SessionTerminating {
         session_id: SessionId,

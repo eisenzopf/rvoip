@@ -37,7 +37,7 @@ fn create_test_config(db_url: String) -> UsersConfig {
 async fn test_complete_authentication_flow() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let config = create_test_config(db_url);
     let auth_service = init(config).await.unwrap();
@@ -91,7 +91,7 @@ async fn test_complete_authentication_flow() {
 async fn test_password_validation() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let config = create_test_config(db_url);
     let auth_service = init(config).await.unwrap();
@@ -127,7 +127,7 @@ async fn test_password_validation() {
 async fn test_api_key_authentication() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let config = create_test_config(db_url);
     let auth_service = init(config).await.unwrap();
@@ -166,7 +166,7 @@ async fn test_api_key_authentication() {
 async fn test_change_password() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let config = create_test_config(db_url);
     let auth_service = init(config).await.unwrap();
@@ -203,7 +203,7 @@ async fn test_change_password() {
 async fn test_inactive_user_cannot_authenticate() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let config = create_test_config(db_url);
     let auth_service = init(config).await.unwrap();
@@ -241,7 +241,7 @@ async fn test_jwt_claims_content() {
     
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
     
     let config = create_test_config(db_url);
     let auth_service = init(config).await.unwrap();

@@ -174,15 +174,16 @@ impl ProtocolHandlers for DialogManager {
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for CANCEL: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
-            
+            let mut response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
+
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to CANCEL: {}", e),
                 })?;
-            
+
             debug!("CANCEL processed with 481 response (no matching INVITE)");
             Ok(())
         }
@@ -223,22 +224,22 @@ impl ProtocolHandlers for DialogManager {
         // Otherwise, forward to session layer for application handling
         if self.should_auto_respond_to_options() {
             debug!("Auto-responding to OPTIONS request (configured for auto-response)");
-            self.send_basic_options_response(&transaction_id, &request).await?;
+            self.send_basic_options_response(&transaction_id, &request, source).await?;
         } else {
             debug!("Forwarding OPTIONS request to session layer (auto-response disabled)");
-            
+
             // Send session coordination event for capability query
             let event = crate::events::SessionCoordinationEvent::CapabilityQuery {
                 transaction_id: transaction_id.clone(),
                 request: request.clone(),
                 source,
             };
-            
+
             if let Err(e) = self.notify_session_layer(event).await {
                 debug!("Failed to notify session layer of OPTIONS: {}, sending fallback response", e);
-                
+
                 // Fallback: send basic 200 OK with supported methods
-                self.send_basic_options_response(&transaction_id, &request).await?;
+                self.send_basic_options_response(&transaction_id, &request, source).await?;
             }
         }
         
@@ -296,20 +297,21 @@ impl MethodHandler for DialogManager {
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for INFO: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
-            
+            let mut response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
+
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to INFO: {}", e),
                 })?;
-            
+
             debug!("INFO processed with 481 response (no dialog found)");
             Ok(())
         }
     }
-    
+
     /// Handle REFER requests (call transfer)
     async fn handle_refer_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         debug!("Processing REFER request from {}", source);
@@ -371,20 +373,21 @@ impl MethodHandler for DialogManager {
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for REFER: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
-            
+            let mut response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
+
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to REFER: {}", e),
                 })?;
-            
+
             debug!("REFER processed with 481 response (no dialog found)");
             Ok(())
         }
     }
-    
+
     /// Handle SUBSCRIBE requests using SubscriptionManager
     async fn handle_subscribe_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         debug!("Processing SUBSCRIBE request from {}", source);
@@ -395,10 +398,11 @@ impl MethodHandler for DialogManager {
             let local_addr = self.local_address;
             
             // Handle subscription with SubscriptionManager
-            let (response, dialog_id) = subscription_manager
+            let (mut response, dialog_id) = subscription_manager
                 .handle_subscribe(request.clone(), source, local_addr)
                 .await?;
-            
+            crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
+
             // Create server transaction for the response
             let server_transaction = self.transaction_manager
                 .create_server_transaction(request.clone(), source)
@@ -406,9 +410,9 @@ impl MethodHandler for DialogManager {
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for SUBSCRIBE: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            
+
             // Send the response
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -454,10 +458,11 @@ impl MethodHandler for DialogManager {
         // Use SubscriptionManager if available
         if let Some(ref subscription_manager) = self.subscription_manager {
             // Handle NOTIFY with SubscriptionManager
-            let response = subscription_manager
+            let mut response = subscription_manager
                 .handle_notify(request.clone(), source)
                 .await?;
-            
+            crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
+
             // Create server transaction for the response
             let server_transaction = self.transaction_manager
                 .create_server_transaction(request.clone(), source)
@@ -465,9 +470,9 @@ impl MethodHandler for DialogManager {
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for NOTIFY: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            
+
             // Send the response (always 200 OK per RFC 6665)
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
@@ -506,15 +511,16 @@ impl MethodHandler for DialogManager {
                     .map_err(|e| DialogError::TransactionError {
                         message: format!("Failed to create server transaction for NOTIFY: {}", e),
                     })?;
-                
+
                 let transaction_id = server_transaction.id().clone();
-                let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
-                
+                let mut response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+                crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
+
                 self.transaction_manager.send_response(&transaction_id, response).await
                     .map_err(|e| DialogError::TransactionError {
                         message: format!("Failed to send 481 response to NOTIFY: {}", e),
                     })?;
-                
+
                 debug!("NOTIFY processed with 481 response (no dialog found)");
                 Ok(())
             }
@@ -542,9 +548,10 @@ impl MethodHandler for DialogManager {
 
         if event_type.is_empty() {
             warn!("PUBLISH request missing Event header");
-            let response = crate::transaction::utils::response_builders::create_response(
+            let mut response = crate::transaction::utils::response_builders::create_response(
                 &request, StatusCode::BadRequest,
             );
+            crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 400 response to PUBLISH: {}", e),
@@ -558,9 +565,10 @@ impl MethodHandler for DialogManager {
             .map(|s| s.to_string());
 
         // Send 200 OK
-        let response = crate::transaction::utils::response_builders::create_response(
+        let mut response = crate::transaction::utils::response_builders::create_response(
             &request, StatusCode::Ok,
         );
+        crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
         self.transaction_manager.send_response(&transaction_id, response).await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send 200 response to PUBLISH: {}", e),
@@ -604,9 +612,10 @@ impl MethodHandler for DialogManager {
 
             if rack_value.is_empty() {
                 warn!("PRACK request missing RAck header");
-                let response = crate::transaction::utils::response_builders::create_response(
+                let mut response = crate::transaction::utils::response_builders::create_response(
                     &request, StatusCode::BadRequest,
                 );
+                crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
                 self.transaction_manager.send_response(&transaction_id, response).await
                     .map_err(|e| DialogError::TransactionError {
                         message: format!("Failed to send 400 response to PRACK: {}", e),
@@ -615,9 +624,10 @@ impl MethodHandler for DialogManager {
             }
 
             // Send 200 OK
-            let response = crate::transaction::utils::response_builders::create_response(
+            let mut response = crate::transaction::utils::response_builders::create_response(
                 &request, StatusCode::Ok,
             );
+            crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 200 response to PRACK: {}", e),
@@ -646,9 +656,10 @@ impl MethodHandler for DialogManager {
                 })?;
 
             let transaction_id = server_transaction.id().clone();
-            let response = crate::transaction::utils::response_builders::create_response(
+            let mut response = crate::transaction::utils::response_builders::create_response(
                 &request, StatusCode::CallOrTransactionDoesNotExist,
             );
+            crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
             self.transaction_manager.send_response(&transaction_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to PRACK: {}", e),
@@ -679,9 +690,10 @@ impl MethodHandler for DialogManager {
             .map(|s| s.to_string());
 
         // Send 200 OK
-        let response = crate::transaction::utils::response_builders::create_response(
+        let mut response = crate::transaction::utils::response_builders::create_response(
             &request, StatusCode::Ok,
         );
+        crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
         self.transaction_manager.send_response(&transaction_id, response).await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send 200 response to MESSAGE: {}", e),
@@ -711,6 +723,7 @@ impl DialogManager {
         &self,
         transaction_id: &TransactionKey,
         request: &Request,
+        source: SocketAddr,
     ) -> DialogResult<()> {
         // Use transaction-core helper for OPTIONS response with Allow header
         let allowed_methods = vec![
@@ -726,14 +739,15 @@ impl DialogManager {
             Method::Prack,
             Method::Message,
         ];
-        
-        let response = crate::transaction::utils::response_builders::create_ok_response_for_options(request, &allowed_methods);
-        
+
+        let mut response = crate::transaction::utils::response_builders::create_ok_response_for_options(request, &allowed_methods);
+        crate::transaction::utils::response_builders::fix_via_nat(&mut response, source);
+
         self.transaction_manager.send_response(transaction_id, response).await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send OPTIONS response: {}", e),
             })?;
-        
+
         debug!("Sent basic OPTIONS response");
         Ok(())
     }

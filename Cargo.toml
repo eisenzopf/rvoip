@@ -19,6 +19,10 @@ members = [
     "crates/registrar-core", "crates/users-core",
     "crates/intermediary-core",
     "crates/auth-core",
+    "crates/ai-copilot",
+    "crates/web-console",
+    "crates/mcp-server",
+    "crates/cli",
     "crates/integration-tests",
 ]
 
@@ -140,6 +144,10 @@ rvoip-sip-client = { path = "crates/sip-client", version = "0.1.26", features = 
 rvoip = { path = "crates/rvoip", version = "0.1.26" }
 rvoip-infra-common = { path = "crates/infra-common", version = "0.1.26" }
 rvoip-registrar-core = { path = "crates/registrar-core", version = "0.1.26" }
+rvoip-ai-copilot = { path = "crates/ai-copilot", version = "0.1.26" }
+rvoip-web-console = { path = "crates/web-console", version = "0.1.26" }
+rvoip-mcp-server = { path = "crates/mcp-server", version = "0.1.26" }
+rvoip-cli = { path = "crates/cli", version = "0.1.26" }
 
 # External dependencies
 tokio = { version = "1.36", features = ["full"] }

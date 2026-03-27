@@ -82,7 +82,7 @@ fn validate_username_format(username: &str) -> Result<(), ValidationError> {
 
 /// Validate user roles against whitelist
 pub fn validate_roles(roles: &Vec<String>) -> Result<(), ValidationError> {
-    const ALLOWED_ROLES: &[&str] = &["user", "admin", "moderator", "guest"];
+    const ALLOWED_ROLES: &[&str] = &["user", "admin", "moderator", "guest", "super_admin", "supervisor", "agent"];
     
     for role in roles {
         if !ALLOWED_ROLES.contains(&role.as_str()) {

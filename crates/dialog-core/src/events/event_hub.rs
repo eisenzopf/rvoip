@@ -95,6 +95,19 @@ impl DialogEventHub {
             info!("✅ [event_hub] Published cross-crate event successfully");
         } else {
             info!("⚠️ [event_hub] convert_coordination_to_cross_crate returned None for: {:?}", event);
+
+            // For OPTIONS/REGISTER, caller must see failure so the protocol
+            // handler can fall back to a local 200 OK response.
+            // SessionCoordinationEvent is already the type of `event`
+            match event {
+                SessionCoordinationEvent::CapabilityQuery { .. }
+                | SessionCoordinationEvent::RegistrationRequest { .. } => {
+                    return Err(anyhow::anyhow!(
+                        "No cross-crate mapping for coordination event requiring fallback response"
+                    ));
+                }
+                _ => {}
+            }
         }
 
         Ok(())
@@ -200,34 +213,32 @@ impl DialogEventHub {
             
             SessionCoordinationEvent::CallAnswered { dialog_id, session_answer } => {
                 info!("🔍 [event_hub] Processing CallAnswered for dialog: {}", dialog_id);
-                match self.dialog_manager.get_session_id(&dialog_id) {
-                    Some(session_id) => {
-                        info!("✅ [event_hub] Found session ID {} for dialog {}", session_id, dialog_id);
-                        Some(RvoipCrossCrateEvent::DialogToSession(
-                            DialogToSessionEvent::CallEstablished {
-                                session_id,
-                                sdp_answer: Some(session_answer),
-                            }
-                        ))
+                // Use dialog-core's mapping first, fallback to dialog_id as session identifier.
+                // For B2BUA outgoing legs, dialog-core may not have the mapping —
+                // session-core will resolve via its own dialog↔session table.
+                let session_id = self.dialog_manager.get_session_id(&dialog_id)
+                    .unwrap_or_else(|| {
+                        let fallback = format!("dialog:{}", dialog_id);
+                        info!("📞 [event_hub] Using dialog-based fallback session ID: {}", fallback);
+                        fallback
+                    });
+                Some(RvoipCrossCrateEvent::DialogToSession(
+                    DialogToSessionEvent::CallEstablished {
+                        session_id,
+                        sdp_answer: Some(session_answer),
                     }
-                    None => {
-                        warn!("❌ [event_hub] No session ID found for dialog {} in CallAnswered event", dialog_id);
-                        None
-                    }
-                }
+                ))
             }
             
             SessionCoordinationEvent::CallTerminating { dialog_id, reason } => {
-                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
-                    Some(RvoipCrossCrateEvent::DialogToSession(
-                        DialogToSessionEvent::CallTerminated {
-                            session_id,
-                            reason: TerminationReason::RemoteHangup,
-                        }
-                    ))
-                } else {
-                    None
-                }
+                let session_id = self.dialog_manager.get_session_id(&dialog_id)
+                    .unwrap_or_else(|| format!("dialog:{}", dialog_id));
+                Some(RvoipCrossCrateEvent::DialogToSession(
+                    DialogToSessionEvent::CallTerminated {
+                        session_id,
+                        reason: TerminationReason::RemoteHangup,
+                    }
+                ))
             }
             
             SessionCoordinationEvent::ResponseReceived { dialog_id, response, .. } => {

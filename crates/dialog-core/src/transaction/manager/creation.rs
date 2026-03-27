@@ -108,6 +108,14 @@ impl TransactionManager {
             tracing::trace!("  Via[{}]: {}", i, via);
         }
         
+        // Select the best transport for this destination (prefer WS/TCP if available)
+        let tx_transport = if let Some(ref tm) = self.transport_manager {
+            tm.get_transport_for_destination(destination).await
+                .unwrap_or_else(|| self.transport.clone())
+        } else {
+            self.transport.clone()
+        };
+
         // Create the appropriate transaction based on the request method
         let transaction: Arc<dyn ClientTransaction + Send + Sync> = match modified_request.method() {
             Method::Invite => {
@@ -116,7 +124,7 @@ impl TransactionManager {
                     key.clone(),
                     modified_request.clone(),
                     destination,
-                    self.transport.clone(),
+                    tx_transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request)
                 )?;
@@ -133,7 +141,7 @@ impl TransactionManager {
                     key.clone(),
                     modified_request.clone(),
                     destination,
-                    self.transport.clone(),
+                    tx_transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request)
                 )?;
@@ -149,7 +157,7 @@ impl TransactionManager {
                     key.clone(),
                     modified_request.clone(),
                     destination,
-                    self.transport.clone(),
+                    tx_transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request)
                 )?;
@@ -160,7 +168,7 @@ impl TransactionManager {
                     key.clone(),
                     modified_request.clone(),
                     destination,
-                    self.transport.clone(),
+                    tx_transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request)
                 )?;
@@ -226,9 +234,9 @@ impl TransactionManager {
             }
         };
         
-        // Send the ACK directly without creating a transaction
-        self.transport.send_message(Message::Request(ack_request), destination).await
-            .map_err(|e| Error::transport_error(e, "Failed to send ACK"))?;
+        // Send the ACK directly without creating a transaction, using transport routing.
+        self.send_with_routing(Message::Request(ack_request), destination)
+            .await?;
         
         Ok(())
     }
@@ -363,6 +371,34 @@ impl TransactionManager {
             }
         }
         
+        // Select the best transport for this peer — prefer the one that received the message
+        let tx_transport = if let Some(ref tm) = self.transport_manager {
+            if let Some(transport) = tm.get_transport_for_destination(remote_addr).await {
+                info!(
+                    remote_addr = %remote_addr,
+                    transport_type = ?transport.default_transport_type(),
+                    "Selected transport for server transaction from transport_manager"
+                );
+                transport
+            } else {
+                let fallback = self.transport.clone();
+                info!(
+                    remote_addr = %remote_addr,
+                    transport_type = ?fallback.default_transport_type(),
+                    "Selected fallback default transport for server transaction (no mapped transport)"
+                );
+                fallback
+            }
+        } else {
+            let fallback = self.transport.clone();
+            info!(
+                remote_addr = %remote_addr,
+                transport_type = ?fallback.default_transport_type(),
+                "Selected default transport for server transaction (transport_manager unavailable)"
+            );
+            fallback
+        };
+
         // Create a new transaction based on the request method
         let transaction: Arc<dyn ServerTransaction> = match request.method() {
             Method::Invite => {
@@ -370,7 +406,7 @@ impl TransactionManager {
                     key.clone(),
                     request.clone(),
                     remote_addr,
-                    self.transport.clone(),
+                    tx_transport.clone(),
                     self.events_tx.clone(),
                     None, // No timer override
                 )?);
@@ -407,7 +443,7 @@ impl TransactionManager {
                     key.clone(),
                     request.clone(),
                     remote_addr,
-                    self.transport.clone(),
+                    tx_transport.clone(),
                     self.events_tx.clone(),
                     None, // No timer override
                 )?);
@@ -437,7 +473,7 @@ impl TransactionManager {
                     key.clone(),
                     request.clone(),
                     remote_addr,
-                    self.transport.clone(),
+                    tx_transport.clone(),
                     self.events_tx.clone(),
                     None, // No timer override
                 )?);
@@ -450,7 +486,7 @@ impl TransactionManager {
                     key.clone(),
                     request.clone(),
                     remote_addr,
-                    self.transport.clone(),
+                    tx_transport.clone(),
                     self.events_tx.clone(),
                     None, // No timer override
                 )?);

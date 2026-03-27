@@ -139,7 +139,7 @@ async fn main() -> Result<()> {
     // Step 1: Initialize users-core
     println!("📦 Step 1: Initialize users-core...");
     let users_config = UsersConfig {
-        database_url: "sqlite://integration_example.db?mode=rwc".to_string(),
+        database_url: "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string(),
         ..Default::default()
     };
     
@@ -256,7 +256,7 @@ async fn main() -> Result<()> {
     // Step 8: Show configuration summary
     println!("\n⚙️ Step 8: Configuration Summary");
     println!("\n[users-core]");
-    println!("   - Database: SQLite");
+    println!("   - Database: PostgreSQL");
     println!("   - JWT Algorithm: RS256");
     println!("   - Token TTL: 15 minutes");
     println!("   - Issuer: https://users.rvoip.local");
@@ -272,7 +272,7 @@ async fn main() -> Result<()> {
     println!("   - Events: Bi-directional mapping");
     
     println!("\n[registrar-core]");
-    println!("   - Storage: In-memory (SQLite in production)");
+    println!("   - Storage: In-memory (PostgreSQL in production)");
     println!("   - Features: Multi-device, presence, PIDF");
 
     // Step 9: Error handling examples
@@ -303,9 +303,6 @@ async fn main() -> Result<()> {
     println!("   7. Implement rate limiting on authentication");
     println!("   8. Use TLS for all communications");
 
-    // Clean up
-    std::fs::remove_file("integration_example.db").ok();
-    
     println!("\n✨ Session-core-v2 integration example completed!");
     Ok(())
 }

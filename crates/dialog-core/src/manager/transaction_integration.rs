@@ -71,9 +71,20 @@ impl TransactionIntegration for DialogManager {
         // Get destination and dialog context
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
-            
-            let destination = dialog.get_remote_target_address().await
-                .ok_or_else(|| crate::errors::DialogError::routing_error("No remote target address available"))?;
+
+            // Try REGISTER-learned route first (for WS peers like SIP.js),
+            // then fall back to DNS resolution of the remote target URI.
+            let registered_route = self.transaction_manager
+                .resolve_registered_route(&dialog.remote_uri)
+                .await;
+
+            let destination = if let Some(addr) = registered_route {
+                debug!("Using REGISTER-learned route {} for {} request (pre-resolution)", addr, method);
+                addr
+            } else {
+                dialog.get_remote_target_address().await
+                    .ok_or_else(|| crate::errors::DialogError::routing_error("No remote target address available"))?
+            };
             
             // Convert body to String if provided
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
@@ -138,6 +149,12 @@ impl TransactionIntegration for DialogManager {
                             // Initial INVITE: No remote tag yet, creating new dialog
                             use crate::transaction::client::builders::InviteBuilder;
                             
+                            // RFC 3261 §8.1.1.8: INVITE MUST contain Contact header
+                            let contact_user = template.local_uri.user
+                                .as_deref()
+                                .unwrap_or("user");
+                            let contact_uri = format!("sip:{}@{}", contact_user, self.local_address);
+
                             let mut invite_builder = InviteBuilder::new()
                                 .from_detailed(
                                     Some("User"), // Display name
@@ -145,14 +162,15 @@ impl TransactionIntegration for DialogManager {
                                     Some(&local_tag)
                                 )
                                 .to_detailed(
-                                    Some("User"), // Display name  
+                                    Some("User"), // Display name
                                     template.remote_uri.to_string(),
                                     None // No remote tag for initial INVITE
                                 )
                                 .call_id(&template.call_id)
                                 .cseq(template.cseq_number)
                                 .request_uri(template.target_uri.to_string())
-                                .local_address(self.local_address);
+                                .local_address(self.local_address)
+                                .contact(contact_uri);
                             
                             // Add route set if present
                             for route in &template.route_set {
@@ -344,6 +362,17 @@ impl TransactionIntegration for DialogManager {
             (destination, request)
         };
         
+        // Try REGISTER-learned route first (for WS peers), then fall back to dialog route
+        let destination = if let Some(addr) = self.transaction_manager
+            .resolve_registered_route(request.uri())
+            .await
+        {
+            debug!("Using REGISTER-learned route {} for {} request", addr, method);
+            addr
+        } else {
+            destination
+        };
+
         // Use transaction-core helpers to create appropriate transaction
         let transaction_id = if method == Method::Invite {
             self.transaction_manager

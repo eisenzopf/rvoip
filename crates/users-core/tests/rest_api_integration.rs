@@ -32,7 +32,7 @@ async fn body_to_json(body: Body) -> Value {
     serde_json::from_slice(&bytes).expect("response is not valid JSON")
 }
 
-/// Create a test config with an in-memory-like SQLite DB in a temp dir
+/// Create a test config with a PostgreSQL DB
 fn create_test_config(db_url: String) -> UsersConfig {
     UsersConfig {
         database_url: db_url,
@@ -57,7 +57,7 @@ fn create_test_config(db_url: String) -> UsersConfig {
 async fn setup() -> (axum::Router, TempDir, Arc<users_core::AuthenticationService>) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
     let db_path = temp_dir.path().join("test.db");
-    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let db_url = "postgres://rvoip:rvoip_dev@localhost:5432/rvoip".to_string();
 
     let config = create_test_config(db_url);
     let auth_service = Arc::new(init(config).await.expect("failed to init auth service"));

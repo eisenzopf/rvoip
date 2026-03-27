@@ -107,6 +107,8 @@ impl TransactionManager {
             timer_manager,
             timer_factory,
             shutdown_tx,
+            transport_manager: None,
+            aor_peer_routes: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Start the message processing loop
@@ -215,6 +217,8 @@ impl TransactionManager {
             timer_manager,
             timer_factory,
             shutdown_tx,
+            transport_manager: None,
+            aor_peer_routes: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Start the message processing loop
@@ -346,6 +350,8 @@ impl TransactionManager {
             timer_manager,
             timer_factory,
             shutdown_tx,
+            transport_manager: Some(Arc::new(transport_manager)),
+            aor_peer_routes: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Start the message processing loop
@@ -430,6 +436,8 @@ impl TransactionManager {
             timer_manager,
             timer_factory,
             shutdown_tx,
+            transport_manager: None,
+            aor_peer_routes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -491,6 +499,8 @@ impl TransactionManager {
             next_subscriber_id,
             transport_rx: Arc::new(Mutex::new(transport_rx)),
             shutdown_tx,
+            transport_manager: None,
+            aor_peer_routes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
