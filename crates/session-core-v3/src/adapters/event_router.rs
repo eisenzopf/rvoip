@@ -309,6 +309,9 @@ impl EventRouter {
             Action::AttemptMediaRecovery |
             Action::CleanupResources |
             Action::SendREGISTER |
+            Action::SendREGISTERWithAuth |
+            Action::SendUnREGISTER |
+            Action::StoreAuthChallenge |
             Action::ProcessRegistrationResponse |
             Action::SendSUBSCRIBE |
             Action::ProcessNOTIFY |

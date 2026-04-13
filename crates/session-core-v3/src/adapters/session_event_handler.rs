@@ -42,8 +42,6 @@ pub struct SessionCrossCrateEventHandler {
     /// Channel to send incoming call notifications
     incoming_call_tx: Option<mpsc::Sender<crate::types::IncomingCallInfo>>,
 
-    /// SimplePeer event channel for forwarding events
-    simple_peer_event_tx: Option<tokio::sync::mpsc::Sender<crate::api::events::Event>>,
 }
 
 impl SessionCrossCrateEventHandler {
@@ -61,10 +59,9 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: None,
-            simple_peer_event_tx: None,
         }
     }
-    
+
     pub fn with_incoming_call_channel(
         state_machine: Arc<StateMachineExecutor>,
         global_coordinator: Arc<GlobalEventCoordinator>,
@@ -80,11 +77,31 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: Some(incoming_call_tx),
-            simple_peer_event_tx: None,
         }
     }
 
-    /// Create event handler with SimplePeer event integration
+    /// Preferred constructor — events are published to the global coordinator's
+    /// "session_to_app" channel automatically; no separate broadcast sender needed.
+    pub fn with_event_broadcast(
+        state_machine: Arc<StateMachineExecutor>,
+        global_coordinator: Arc<GlobalEventCoordinator>,
+        dialog_adapter: Arc<DialogAdapter>,
+        media_adapter: Arc<MediaAdapter>,
+        registry: Arc<SessionRegistry>,
+        incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
+    ) -> Self {
+        Self::with_incoming_call_channel(
+            state_machine,
+            global_coordinator,
+            dialog_adapter,
+            media_adapter,
+            registry,
+            incoming_call_tx,
+        )
+    }
+
+    /// Deprecated: use `with_event_broadcast` instead.
+    #[deprecated(note = "Use with_event_broadcast")]
     pub fn with_simple_peer_events(
         state_machine: Arc<StateMachineExecutor>,
         global_coordinator: Arc<GlobalEventCoordinator>,
@@ -92,17 +109,16 @@ impl SessionCrossCrateEventHandler {
         media_adapter: Arc<MediaAdapter>,
         registry: Arc<SessionRegistry>,
         incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
-        simple_peer_event_tx: tokio::sync::mpsc::Sender<crate::api::events::Event>,
+        _simple_peer_event_tx: tokio::sync::mpsc::Sender<crate::api::events::Event>,
     ) -> Self {
-        Self {
+        Self::with_incoming_call_channel(
             state_machine,
             global_coordinator,
             dialog_adapter,
             media_adapter,
             registry,
-            incoming_call_tx: Some(incoming_call_tx),
-            simple_peer_event_tx: Some(simple_peer_event_tx),
-        }
+            incoming_call_tx,
+        )
     }
     
     /// Start event processing loops
@@ -406,26 +422,23 @@ impl SessionCrossCrateEventHandler {
             let _ = self.state_machine.store.remove_session(&session_id).await;
             self.registry.remove_session(&session_id).await;
         } else {
-            // Forward to SimplePeer event system
-            if let Some(ref event_tx) = self.simple_peer_event_tx {
-                debug!("🔍 [DEBUG] Forwarding IncomingCall event to SimplePeer");
-                let event = crate::api::events::Event::IncomingCall {
+            // Publish IncomingCall event to the global coordinator's "session_to_app" channel.
+            // All active subscribers (StreamPeer, CallbackPeer, etc.) will receive it.
+            {
+                debug!("🔍 [DEBUG] Publishing IncomingCall event to global coordinator");
+                let api_event = crate::api::events::Event::IncomingCall {
                     call_id: session_id.clone(),
                     from: from.clone(),
                     to: to.clone(),
                     sdp: session_remote_sdp,
                 };
-                
-                // Use try_send to avoid blocking if receiver stopped draining
-                match event_tx.try_send(event) {
-                    Ok(_) => debug!("🔍 [DEBUG] Successfully sent IncomingCall event to SimplePeer"),
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        warn!("⚠️ Event channel full, dropping IncomingCall event (receiver not draining)");
+                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+                let coordinator = self.global_coordinator.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = coordinator.publish(wrapped).await {
+                        tracing::warn!("Failed to publish IncomingCall to global coordinator: {}", e);
                     }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        debug!("Event channel closed, receiver already shut down");
-                    }
-                }
+                });
             }
             
             // Legacy incoming call notification (keep for compatibility)
@@ -491,24 +504,20 @@ impl SessionCrossCrateEventHandler {
             error!("Failed to process CallEstablished as Dialog200OK: {}", e);
         }
 
-        // Forward to SimplePeer event system
-        if let Some(ref event_tx) = self.simple_peer_event_tx {
-            debug!("🔍 [DEBUG] Forwarding CallAnswered event to SimplePeer");
-            let event = crate::api::events::Event::CallAnswered {
+        // Publish CallAnswered event to the global coordinator's "session_to_app" channel.
+        {
+            debug!("🔍 [DEBUG] Publishing CallAnswered event to global coordinator");
+            let api_event = crate::api::events::Event::CallAnswered {
                 call_id: session_id.clone(),
                 sdp: sdp_answer,
             };
-            
-            // Use try_send to avoid blocking if receiver stopped draining
-            match event_tx.try_send(event) {
-                Ok(_) => debug!("🔍 [DEBUG] Successfully sent CallAnswered event to SimplePeer"),
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    warn!("⚠️ Event channel full, dropping CallAnswered event (receiver not draining)");
+            let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+            let coordinator = self.global_coordinator.clone();
+            tokio::spawn(async move {
+                if let Err(e) = coordinator.publish(wrapped).await {
+                    tracing::warn!("Failed to publish CallAnswered to global coordinator: {}", e);
                 }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    debug!("Event channel closed, receiver already shut down");
-                }
-            }
+            });
         }
 
         Ok(())
@@ -559,29 +568,20 @@ impl SessionCrossCrateEventHandler {
                         info!("✅ [handle_call_terminated] DialogTerminated processed successfully for {}", session_id);
                     }
             
-            // Forward to SimplePeer event system
-            if let Some(ref event_tx) = self.simple_peer_event_tx {
-                info!("🔔 [handle_call_terminated] Forwarding CallEnded event to SimplePeer for session {}", session_id);
-                let event = crate::api::events::Event::CallEnded {
+            // Publish CallEnded event to the global coordinator's "session_to_app" channel.
+            {
+                info!("🔔 [handle_call_terminated] Publishing CallEnded for session {}", session_id);
+                let api_event = crate::api::events::Event::CallEnded {
                     call_id: session_id.clone(),
                     reason: reason.clone(),
                 };
-                
-                // Use try_send to avoid blocking if the receiver stopped draining events
-                // (e.g., if user code doesn't have an event loop after hangup)
-                match event_tx.try_send(event) {
-                    Ok(_) => {
-                        info!("✅ Successfully sent CallEnded event to SimplePeer for session {}", session_id);
+                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+                let coordinator = self.global_coordinator.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = coordinator.publish(wrapped).await {
+                        tracing::warn!("Failed to publish CallEnded to global coordinator: {}", e);
                     }
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        warn!("⚠️ Event channel full, dropping CallEnded event for session {} (receiver not draining)", session_id);
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        debug!("Event channel closed, receiver already shut down for session {}", session_id);
-                    }
-                }
-            } else {
-                warn!("⚠️ [handle_call_terminated] simple_peer_event_tx is None, cannot forward CallEnded for session {}", session_id);
+                });
             }
         } else {
             warn!("⚠️ [handle_call_terminated] Failed to extract session_id, cannot forward CallEnded event");
@@ -716,28 +716,24 @@ impl SessionCrossCrateEventHandler {
                 error!("Failed to process TransferRequested: {}", e);
             }
 
-            // Forward to SimplePeer event system
-            if let Some(ref event_tx) = self.simple_peer_event_tx {
-                debug!("🔍 [DEBUG] Forwarding ReferReceived event to SimplePeer with transaction_id and transfer_type");
-                let event = crate::api::events::Event::ReferReceived {
+            // Publish ReferReceived event to the global coordinator's "session_to_app" channel.
+            {
+                debug!("🔍 [DEBUG] Publishing ReferReceived event to global coordinator");
+                let api_event = crate::api::events::Event::ReferReceived {
                     call_id: session_id.clone(),
                     refer_to: refer_to.clone(),
                     referred_by: None, // TODO: Extract from event if available
                     replaces: None,    // TODO: Extract from event if available
-                    transaction_id: transaction_id.clone(),  // NEW: Include for NOTIFY correlation
-                    transfer_type: transfer_type.clone(),     // NEW: Include transfer type
+                    transaction_id: transaction_id.clone(),
+                    transfer_type: transfer_type.clone(),
                 };
-                
-                // Use try_send to avoid blocking if receiver stopped draining
-                match event_tx.try_send(event) {
-                    Ok(_) => debug!("🔍 [DEBUG] Successfully sent ReferReceived event to SimplePeer"),
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        warn!("⚠️ Event channel full, dropping ReferReceived event (receiver not draining)");
+                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+                let coordinator = self.global_coordinator.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = coordinator.publish(wrapped).await {
+                        tracing::warn!("Failed to publish ReferReceived to global coordinator: {}", e);
                     }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        debug!("Event channel closed, receiver already shut down");
-                    }
-                }
+                });
             }
         }
         Ok(())

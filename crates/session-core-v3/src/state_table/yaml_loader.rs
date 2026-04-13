@@ -553,6 +553,8 @@ impl YamlTableLoader {
             // Registration events
             "StartRegistration" => Ok(EventType::StartRegistration),
             "Registration200OK" => Ok(EventType::Registration200OK),
+            "Registration401" => Ok(EventType::Registration401),
+            "RetryRegistration" => Ok(EventType::RetryRegistration),
             "RegistrationFailed" => Ok(EventType::RegistrationFailed(0)),
             "UnregisterRequest" => Ok(EventType::UnregisterRequest),
             "RegistrationExpired" => Ok(EventType::RegistrationExpired),

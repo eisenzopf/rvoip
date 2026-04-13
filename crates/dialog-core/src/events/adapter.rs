@@ -19,6 +19,8 @@ use rvoip_infra_common::planes::LayerTaskManager;
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::dialog::{DialogId, DialogState};
 use crate::errors::DialogError;
+use crate::manager::DialogManager;
+use crate::transaction::TransactionKey;
 
 /// Dialog Event Adapter that bridges local dialog events with global cross-crate events
 pub struct DialogEventAdapter {
@@ -30,6 +32,9 @@ pub struct DialogEventAdapter {
     
     /// Running state
     is_running: Arc<RwLock<bool>>,
+    
+    /// Dialog manager for sending responses
+    dialog_manager: Arc<RwLock<Option<Arc<DialogManager>>>>,
 }
 
 impl DialogEventAdapter {
@@ -41,7 +46,13 @@ impl DialogEventAdapter {
             global_coordinator,
             task_manager,
             is_running: Arc::new(RwLock::new(false)),
+            dialog_manager: Arc::new(RwLock::new(None)),
         })
+    }
+    
+    /// Set the dialog manager for response handling
+    pub async fn set_dialog_manager(&self, manager: Arc<DialogManager>) {
+        *self.dialog_manager.write().await = Some(manager);
     }
     
     /// Start the dialog event adapter
@@ -94,17 +105,40 @@ impl DialogEventAdapter {
     async fn start_event_processing_tasks(&self) -> Result<()> {
         debug!("Starting dialog event processing tasks");
         
-        // Task: Process incoming cross-crate events from session-core and sip-transport
+        // Task: Process incoming SendRegisterResponse events from session-core
         let coordinator = self.global_coordinator.clone();
+        let dialog_manager = self.dialog_manager.clone();
         
         self.task_manager.spawn_tracked(
-            "dialog-cross-crate-handler",
+            "dialog-register-response-handler",
             rvoip_infra_common::planes::TaskPriority::High,
             async move {
+                info!("🔔 Starting SendRegisterResponse event listener");
+                
+                // Subscribe to session-to-dialog events
+                let mut receiver = match coordinator.subscribe("session_to_dialog").await {
+                    Ok(rx) => rx,
+                    Err(e) => {
+                        error!("Failed to subscribe to session_to_dialog: {}", e);
+                        return;
+                    }
+                };
+                
                 loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    debug!("Processing cross-crate events for dialog-core...");
+                    match receiver.recv().await {
+                        Some(_event_arc) => {
+                            // NOTE: SendRegisterResponse handling is done in DialogEventHub
+                            // This adapter is not currently used for registration
+                            debug!("Received session_to_dialog event (handled by DialogEventHub)");
+                        }
+                        None => {
+                            debug!("SendRegisterResponse event channel closed");
+                            break;
+                        }
+                    }
                 }
+                
+                info!("🛑 SendRegisterResponse event listener stopped");
             }
         ).await?;
         

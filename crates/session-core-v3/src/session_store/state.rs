@@ -83,6 +83,15 @@ pub struct SessionState {
     pub is_transfer_call: bool, // Flag indicating this session is a result of a transfer
     pub transferor_session_id: Option<SessionId>, // Session ID of who sent us the REFER (for NOTIFY messages)
 
+    // Registration fields
+    pub registrar_uri: Option<String>, // URI of the registrar server
+    pub registration_expires: Option<u32>, // Registration expiry in seconds
+    pub registration_contact: Option<String>, // Contact URI for registration
+    pub credentials: Option<crate::types::Credentials>, // User credentials for authentication
+    pub is_registered: bool, // Whether registration is complete
+    pub auth_challenge: Option<crate::auth::DigestChallenge>, // Cached authentication challenge from 401
+    pub registration_retry_count: u32, // Number of retries attempted (prevent infinite loops)
+
     // Timestamps
     pub created_at: Instant,
     
@@ -125,6 +134,13 @@ impl SessionState {
             refer_transaction_id: None,
             is_transfer_call: false,
             transferor_session_id: None,
+            registrar_uri: None,
+            registration_expires: None,
+            registration_contact: None,
+            credentials: None,
+            is_registered: false,
+            auth_challenge: None,
+            registration_retry_count: 0,
             created_at: now,
             history: None,
         }

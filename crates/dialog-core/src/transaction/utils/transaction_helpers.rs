@@ -6,7 +6,7 @@
 use rvoip_sip_core::prelude::*;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::{TransactionKey, TransactionKind};
-use tracing::debug;
+use tracing::{debug, info, error};
 
 use super::message_extractors::{extract_branch, extract_cseq};
 
@@ -66,18 +66,23 @@ pub fn transaction_key_from_message(message: &Message) -> Option<TransactionKey>
                         // Get method from CSeq header
                         if let Some(cseq) = response.typed_header::<CSeq>() {
                             let key = TransactionKey::new(branch.to_string(), cseq.method.clone(), false);
+                            info!("🔍 TX_KEY: Generated client key from response {} {}: {}", response.status(), cseq.method, key);
                             debug!("🔍 TX_KEY: Generated client key from response {} {}: {}", response.status(), cseq.method, key);
                             return Some(key);
                         } else {
+                            error!("🔍 TX_KEY: Response missing CSeq header!");
                             debug!("🔍 TX_KEY: Response missing CSeq header");
                         }
                     } else {
+                        error!("🔍 TX_KEY: Response Via header missing branch parameter!");
                         debug!("🔍 TX_KEY: Response Via header missing branch parameter");
                     }
                 } else {
+                    error!("🔍 TX_KEY: Response Via header is empty!");
                     debug!("🔍 TX_KEY: Response Via header is empty");
                 }
             } else {
+                error!("🔍 TX_KEY: Response missing Via header!");
                 debug!("🔍 TX_KEY: Response missing Via header");
             }
             None

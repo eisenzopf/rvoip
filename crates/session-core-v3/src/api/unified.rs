@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::net::{IpAddr, SocketAddr};
 use tokio::sync::{mpsc, RwLock};
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
-use tracing::debug;
 
 /// Configuration for the unified coordinator
 #[derive(Debug, Clone)]
@@ -59,7 +58,7 @@ impl Default for Config {
 #[allow(dead_code)]
 pub struct UnifiedCoordinator {
     /// State machine helpers
-    helpers: Arc<StateMachineHelpers>,
+    pub(crate) helpers: Arc<StateMachineHelpers>,
 
     /// Media adapter for audio operations
     media_adapter: Arc<MediaAdapter>,
@@ -67,10 +66,12 @@ pub struct UnifiedCoordinator {
     /// Dialog adapter for SIP operations
     dialog_adapter: Arc<DialogAdapter>,
 
-    // Callback registry removed - using event-driven approach
-
     /// Incoming call receiver
     incoming_rx: Arc<RwLock<mpsc::Receiver<IncomingCallInfo>>>,
+
+    /// Global event coordinator — used to publish and subscribe to session API events.
+    /// Events are published to the "session_to_app" channel.
+    pub(crate) global_coordinator: Arc<GlobalEventCoordinator>,
 
     /// Configuration
     config: Config,
@@ -120,6 +121,12 @@ impl UnifiedCoordinator {
             media_adapter.clone(),
         ));
         
+        // Set state machine reference in dialog adapter (for REGISTER response handling)
+        {
+            let adapter = Arc::as_ptr(&dialog_adapter) as *mut DialogAdapter;
+            unsafe { (*adapter).set_state_machine(state_machine.clone()); }
+        }
+        
         // Create helpers
         let helpers = Arc::new(StateMachineHelpers::new(state_machine.clone()));
 
@@ -130,16 +137,17 @@ impl UnifiedCoordinator {
             helpers,
             media_adapter: media_adapter.clone(),
             dialog_adapter: dialog_adapter.clone(),
-            // callback_registry removed
             incoming_rx: Arc::new(RwLock::new(incoming_rx)),
+            global_coordinator: global_coordinator.clone(),
             config,
         });
-        
+
         // Start the dialog adapter
         dialog_adapter.start().await?;
-        
-        // Create and start the centralized event handler with incoming call channel
-        let event_handler = crate::adapters::SessionCrossCrateEventHandler::with_incoming_call_channel(
+
+        // Create and start the centralized event handler.
+        // Events are published to the global coordinator's "session_to_app" channel.
+        let event_handler = crate::adapters::SessionCrossCrateEventHandler::with_event_broadcast(
             state_machine.clone(),
             global_coordinator.clone(),
             dialog_adapter.clone(),
@@ -148,100 +156,45 @@ impl UnifiedCoordinator {
             incoming_tx,
         );
 
-        // Transfer coordinator removed - using callback system instead
-
         // Start the event handler (sets up channels and subscriptions)
         event_handler.start().await?;
 
         Ok(coordinator)
     }
     
-    /// Create a new coordinator with SimplePeer event integration
+    /// Create a new coordinator with SimplePeer event integration.
+    ///
+    /// **Deprecated** — use [`UnifiedCoordinator::new()`] then [`subscribe_events()`][Self::subscribe_events].
+    /// The `simple_peer_event_tx` parameter is ignored; events are now broadcast internally.
+    #[deprecated(note = "Use UnifiedCoordinator::new() then subscribe_events()")]
     pub async fn with_simple_peer_events(
-        config: Config, 
-        simple_peer_event_tx: tokio::sync::mpsc::Sender<crate::api::events::Event>
+        config: Config,
+        _simple_peer_event_tx: tokio::sync::mpsc::Sender<crate::api::events::Event>,
     ) -> Result<Arc<Self>> {
-        // Get the global event coordinator singleton
-        let global_coordinator = rvoip_infra_common::events::global_coordinator()
-            .await
-            .clone();
-        
-        // Create core components
-        let store = Arc::new(SessionStore::new());
-        let registry = Arc::new(SessionRegistry::new());
-        
-        // Create adapters
-        let dialog_api = Self::create_dialog_api(&config, global_coordinator.clone()).await?;
-        let dialog_adapter = Arc::new(DialogAdapter::new(
-            dialog_api,
-            store.clone(),
-            global_coordinator.clone(),
-        ));
-        
-        let media_controller = Self::create_media_controller(&config, global_coordinator.clone()).await?;
-        let media_adapter = Arc::new(MediaAdapter::new(
-            media_controller,
-            store.clone(),
-            config.local_ip,
-            config.media_port_start,
-            config.media_port_end,
-        ));
-        
-        // Load state table based on config
-        let state_table = Arc::new(
-            crate::state_table::load_state_table_with_config(
-                config.state_table_path.as_deref()
-            )
-        );
-        
-        // Create state machine (standard constructor - no separate event channel needed)
-        let state_machine = Arc::new(StateMachine::new(
-            state_table,
-            store.clone(),
-            dialog_adapter.clone(),
-            media_adapter.clone(),
-        ));
-        
-        // Create helpers
-        let helpers = Arc::new(StateMachineHelpers::new(state_machine.clone()));
-
-        // Create incoming call channel (still needed for compatibility)
-        let (incoming_tx, incoming_rx) = mpsc::channel(100);
-
-        let coordinator = Arc::new(Self {
-            helpers,
-            media_adapter: media_adapter.clone(),
-            dialog_adapter: dialog_adapter.clone(),
-            // callback_registry removed
-            incoming_rx: Arc::new(RwLock::new(incoming_rx)),
-            config,
-        });
-        
-        // Start the dialog adapter
-        dialog_adapter.start().await?;
-        
-        // Create and start the centralized event handler with SimplePeer event integration
-        debug!("🔍 [DEBUG] Creating SessionCrossCrateEventHandler with SimplePeer events...");
-        let event_handler = crate::adapters::SessionCrossCrateEventHandler::with_simple_peer_events(
-            state_machine.clone(),
-            global_coordinator.clone(),
-            dialog_adapter.clone(),
-            media_adapter.clone(),
-            registry.clone(),
-            incoming_tx,
-            simple_peer_event_tx,
-        );
-
-        // Start the event handler (sets up channels and subscriptions)
-        debug!("🔍 [DEBUG] Starting SessionCrossCrateEventHandler...");
-        event_handler.start().await?;
-        debug!("🔍 [DEBUG] SessionCrossCrateEventHandler started successfully");
-
-        Ok(coordinator)
+        Self::new(config).await
     }
     
+    // ===== Event Subscription =====
+
+    /// Subscribe to all session API events.
+    ///
+    /// Returns an [`mpsc::Receiver`] that receives every [`crate::api::events::Event`] published
+    /// by this coordinator. Each call to `subscribe_events()` returns an independent receiver —
+    /// all subscribers receive the same events (broadcast semantics via the global event bus).
+    ///
+    /// Events are published on the `"session_to_app"` channel. Use this to build custom peer
+    /// types on top of `UnifiedCoordinator`, or to get a raw event stream.
+    pub async fn subscribe_events(&self) -> crate::errors::Result<tokio::sync::mpsc::Receiver<std::sync::Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>> {
+        self.global_coordinator
+            .subscribe(crate::adapters::SESSION_TO_APP_CHANNEL)
+            .await
+            .map_err(|e| crate::errors::SessionError::InternalError(
+                format!("Failed to subscribe to session events: {}", e)
+            ))
+    }
+
     // ===== Simple Call Operations =====
-    
+
     /// Make an outgoing call
     pub async fn make_call(&self, from: &str, to: &str) -> Result<SessionId> {
         self.helpers.make_call(from, to).await
@@ -427,6 +380,68 @@ impl UnifiedCoordinator {
     }
 
     // extract_field method removed - no longer needed without transfer coordinator
+    
+    // ===== Server-Side Registration =====
+    
+    /// Start server-side registration handling
+    /// 
+    /// This creates and starts a RegistrationAdapter that handles incoming REGISTER
+    /// requests via the global event bus. The registrar service authenticates users
+    /// and manages registrations.
+    /// 
+    /// # Arguments
+    /// * `realm` - The SIP realm for digest authentication (e.g., "example.com")
+    /// * `users` - Map of username -> password for authentication
+    /// 
+    /// # Returns
+    /// Arc<RegistrarService> - The registrar service for managing registrations
+    pub async fn start_registration_server(
+        &self,
+        realm: &str,
+        users: std::collections::HashMap<String, String>,
+    ) -> Result<Arc<rvoip_registrar_core::RegistrarService>> {
+        use rvoip_registrar_core::{RegistrarService, api::ServiceMode, types::RegistrarConfig};
+        use crate::adapters::RegistrationAdapter;
+        
+        tracing::info!("🔐 Starting server-side registration handler with realm: {}", realm);
+        
+        // Create registrar service with authentication
+        let registrar = RegistrarService::with_auth(
+            ServiceMode::B2BUA,
+            RegistrarConfig::default(),
+            realm,
+        ).await
+        .map_err(|e| SessionError::InternalError(format!("Failed to create registrar: {}", e)))?;
+        
+        // Add users to the registrar
+        if let Some(user_store) = registrar.user_store() {
+            for (username, password) in users {
+                user_store.add_user(&username, &password)
+                    .map_err(|e| SessionError::InternalError(format!("Failed to add user: {}", e)))?;
+                tracing::debug!("Added user: {}", username);
+            }
+        }
+        
+        let registrar = Arc::new(registrar);
+        
+        // Get the global event coordinator
+        let global_coordinator = rvoip_infra_common::events::global_coordinator()
+            .await
+            .clone();
+        
+        // Create and start the registration adapter
+        let adapter = Arc::new(RegistrationAdapter::new(
+            registrar.clone(),
+            global_coordinator,
+        ));
+        
+        adapter.start().await
+            .map_err(|e| SessionError::InternalError(format!("Failed to start registration adapter: {}", e)))?;
+        
+        tracing::info!("✅ Server-side registration handler started");
+        
+        Ok(registrar)
+    }
 
     // ===== Internal Helpers =====
     
@@ -523,4 +538,97 @@ impl UnifiedCoordinator {
     pub async fn quick_call(&self, from: &str, to: &str) -> Result<SessionId> {
         self.make_call(from, to).await
     }
+}
+
+/// Registration API
+impl UnifiedCoordinator {
+    /// Register with SIP server
+    ///
+    /// # Arguments
+    /// * `registrar_uri` - URI of the registrar server (e.g., "sip:registrar.example.com")
+    /// * `from_uri` - From URI (e.g., "sip:user@example.com")
+    /// * `contact_uri` - Contact URI (e.g., "sip:user@192.168.1.100:5060")
+    /// * `username` - Username for authentication
+    /// * `password` - Password for digest authentication
+    /// * `expires` - Registration expiry in seconds (typically 3600)
+    ///
+    /// # Returns
+    /// A `RegistrationHandle` that can be used to unregister or refresh
+    pub async fn register(
+        &self,
+        registrar_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        username: &str,
+        password: &str,
+        expires: u32,
+    ) -> Result<RegistrationHandle> {
+        // Create registration session
+        let session_id = SessionId::new();
+        tracing::info!("📝 Created registration session: {}", session_id.0);
+        self.helpers.create_session(
+            session_id.clone(),
+            from_uri.to_string(),
+            registrar_uri.to_string(),
+            crate::state_table::types::Role::UAC
+        ).await?;
+        
+        // Store credentials
+        let credentials = crate::types::Credentials::new(username, password);
+        
+        // Get session store and update
+        let session_store = &self.helpers.state_machine.store;
+        let mut session = session_store.get_session(&session_id).await?;
+        session.credentials = Some(credentials);
+        session.registrar_uri = Some(registrar_uri.to_string());
+        session.registration_contact = Some(contact_uri.to_string());
+        session.registration_expires = Some(expires);
+        session_store.update_session(session).await?;
+        
+        // Trigger registration via state machine
+        let _result = self.helpers.state_machine.process_event(&session_id, crate::state_table::types::EventType::StartRegistration).await
+            .map_err(|e| SessionError::InternalError(format!("Failed to trigger registration: {}", e)))?;
+        
+        Ok(RegistrationHandle { session_id })
+    }
+    
+    /// Unregister from SIP server
+    ///
+    /// Sends REGISTER with expires=0 to remove registration
+    pub async fn unregister(&self, handle: &RegistrationHandle) -> Result<()> {
+        // Trigger unregistration via state machine
+        let _result = self.helpers.state_machine.process_event(
+            &handle.session_id,
+            crate::state_table::types::EventType::StartUnregistration
+        ).await
+            .map_err(|e| SessionError::InternalError(format!("Failed to trigger unregistration: {}", e)))?;
+        Ok(())
+    }
+    
+    /// Refresh registration before it expires
+    ///
+    /// Sends a new REGISTER request with the same expiry time
+    pub async fn refresh_registration(&self, handle: &RegistrationHandle) -> Result<()> {
+        // Trigger refresh via state machine
+        let _result = self.helpers.state_machine.process_event(
+            &handle.session_id,
+            crate::state_table::types::EventType::RefreshRegistration
+        ).await
+            .map_err(|e| SessionError::InternalError(format!("Failed to trigger refresh: {}", e)))?;
+        Ok(())
+    }
+    
+    /// Get registration status
+    pub async fn is_registered(&self, handle: &RegistrationHandle) -> Result<bool> {
+        let session = self.helpers.state_machine.store.get_session(&handle.session_id).await?;
+        tracing::info!("🔍 Checking registration for session {}: is_registered={}, retry_count={}",
+                       handle.session_id.0, session.is_registered, session.registration_retry_count);
+        Ok(session.is_registered)
+    }
+}
+
+/// Handle for managing a registration
+#[derive(Debug, Clone)]
+pub struct RegistrationHandle {
+    pub session_id: SessionId,
 }

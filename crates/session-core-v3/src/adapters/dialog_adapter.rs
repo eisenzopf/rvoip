@@ -57,6 +57,9 @@ pub struct DialogAdapter {
     
     /// Global event coordinator for publishing events
     pub(crate) global_coordinator: Arc<GlobalEventCoordinator>,
+    
+    /// State machine reference for triggering events (needed for REGISTER response handling)
+    pub(crate) state_machine: Option<Arc<crate::state_machine::StateMachine>>,
 }
 
 impl DialogAdapter {
@@ -74,7 +77,13 @@ impl DialogAdapter {
             callid_to_session: Arc::new(DashMap::new()),
             outgoing_invite_tx: Arc::new(DashMap::new()),
             global_coordinator,
+            state_machine: None,  // Will be set after StateMachine is created
         }
+    }
+    
+    /// Set the state machine reference (called after construction)
+    pub fn set_state_machine(&mut self, state_machine: Arc<crate::state_machine::StateMachine>) {
+        self.state_machine = Some(state_machine);
     }
     
     // ===== Direct Dialog Operations =====
@@ -410,65 +419,176 @@ impl DialogAdapter {
 
     // ===== Registration Methods =====
 
-    /// Send a REGISTER request
+    /// Send REGISTER request and process response
     pub async fn send_register(
         &self,
         session_id: &SessionId,
-        from_uri: &str,
         registrar_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
         expires: u32,
+        credentials: Option<&crate::types::Credentials>,
     ) -> Result<()> {
-        tracing::info!("Sending REGISTER for session {} from {} to registrar {}",
-            session_id.0, from_uri, registrar_uri);
+        tracing::info!("Sending REGISTER for session {} to {} (expires={})",
+            session_id.0, registrar_uri, expires);
 
-        // Build REGISTER request
-        let request = rvoip_sip_core::builder::SimpleRequestBuilder::register(registrar_uri)
-            .map_err(|e| SessionError::DialogError(format!("Failed to create REGISTER builder: {}", e)))?
-            .from("", from_uri, None)
-            .to("", from_uri, None)  // REGISTER uses same From and To
-            .contact(from_uri, None)
-            .expires(expires)
-            .build();
+        // Build authorization header if credentials provided
+        let authorization = if let Some(creds) = credentials {
+            // Get challenge from session
+            let session = self.store.get_session(session_id).await?;
+            if let Some(ref challenge) = session.auth_challenge {
+                // Compute digest response using auth-core (shared module)
+                tracing::info!("🔍 CLIENT: Computing digest for user={}, realm={}, nonce={}, uri={}",
+                               creds.username, challenge.realm, challenge.nonce, registrar_uri);
+                
+                let (response, cnonce) = crate::auth::DigestAuth::compute_response(
+                    &creds.username,
+                    &creds.password,
+                    &challenge,
+                    "REGISTER",
+                    registrar_uri,
+                )?;
+                
+                tracing::info!("🔍 CLIENT: Computed response hash: {} (cnonce: {:?})", response, cnonce);
+                
+                // Format authorization header using auth-core (shared module)
+                // Pass the same cnonce that was used in computation!
+                let auth_header = crate::auth::DigestAuth::format_authorization(
+                    &creds.username,
+                    &challenge,
+                    registrar_uri,
+                    &response,
+                    cnonce.as_deref(),  // Pass cnonce from computation
+                );
+                
+                tracing::debug!("Computed digest auth for user {}", creds.username);
+                Some(auth_header)
+            } else {
+                tracing::debug!("No challenge stored, sending without auth");
+                None
+            }
+        } else {
+            None
+        };
 
-        // Parse destination address from registrar URI
-        let destination = self.parse_sip_uri_to_socket_addr(registrar_uri)?;
-
-        // Send as non-dialog request
-        let response = self.dialog_api.send_non_dialog_request(
-            request,
-            destination,
-            std::time::Duration::from_secs(30),
+        // Send REGISTER through dialog-core API and get response
+        // dialog-core handles CSeq incrementing automatically
+        let response = self.dialog_api.send_register(
+            registrar_uri,
+            from_uri,
+            contact_uri,
+            expires,
+            authorization,
         ).await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send REGISTER: {}", e)))?;
-
-        tracing::info!("REGISTER response: {} for session {}", response.status_code(), session_id.0);
-
-        // Update session state based on response
-        if response.status_code() == 200 {
-            // Emit registration success event
-            let event = RvoipCrossCrateEvent::DialogToSession(
-                rvoip_infra_common::events::cross_crate::DialogToSessionEvent::RegistrationSuccess {
-                    session_id: session_id.0.clone(),
+        .map_err(|e| SessionError::DialogError(format!("Failed to send REGISTER: {}", e)))?;
+        
+        tracing::info!("REGISTER response received: {} for session {}", response.status_code(), session_id.0);
+        
+        // Just update session state based on response - don't trigger events (avoids recursion)
+        // The state machine will query the session state to determine next transition
+        match response.status_code() {
+            200..=299 => {
+                // Registration successful!
+                let mut session = self.store.get_session(session_id).await?;
+                session.is_registered = true;
+                self.store.update_session(session).await?;
+                tracing::info!("✅ Registration successful - session {} marked as registered", session_id.0);
+                
+                // Don't trigger state machine events here to avoid recursion
+                // State machine can query is_registered flag if needed
+                tracing::debug!("Session marked as registered, state machine can check is_registered flag");
+            }
+            401 | 407 => {
+                // Authentication challenge - parse and store
+                use rvoip_sip_core::types::headers::HeaderAccess;
+                if let Some(www_auth_str) = response.raw_header_value(&rvoip_sip_core::types::header::HeaderName::WwwAuthenticate) {
+                    tracing::info!("Received 401 auth challenge for session {}", session_id.0);
+                    
+                    // Check retry count to prevent infinite loops
+                    let session = self.store.get_session(session_id).await?;
+                    
+                    if session.registration_retry_count >= 1 {
+                        tracing::error!("❌ Authentication failed - already retried once, invalid credentials");
+                        let mut session = self.store.get_session(session_id).await?;
+                        session.is_registered = false;
+                        self.store.update_session(session).await?;
+                        return Ok(());
+                    }
+                    
+                    // Store challenge and increment retry count
+                    self.handle_401_challenge(session_id, &www_auth_str).await?;
+                    
+                    let mut session = self.store.get_session(session_id).await?;
+                    session.registration_retry_count += 1;
+                    
+                    // Clone data we need before updating
+                    let retry_count = session.registration_retry_count;
+                    let creds = session.credentials.clone();
+                    let reg_uri = session.registrar_uri.clone();
+                    let contact = session.registration_contact.clone();
+                    let expires = session.registration_expires;
+                    
+                    self.store.update_session(session).await?;
+                    
+                    tracing::info!("✅ Challenge stored (retry #{}) - preparing authenticated retry", retry_count);
+                    
+                    // Send authenticated REGISTER with credentials
+                    // dialog-core will automatically use CSeq=2 based on authorization presence
+                    if let (Some(creds), Some(reg_uri), Some(contact), Some(expires)) = 
+                        (creds, reg_uri, contact, expires) {
+                        
+                        tracing::info!("🔄 Auto-retrying REGISTER with digest authentication");
+                        
+                        // Send with authentication - dialog-core handles CSeq increment
+                        // Box::pin to avoid recursion size issues
+                        Box::pin(self.send_register(
+                            session_id,
+                            &reg_uri,
+                            from_uri,
+                            &contact,
+                            expires,
+                            Some(&creds),
+                        )).await?;
+                        
+                        tracing::info!("✅ Sent authenticated REGISTER (dialog-core auto-incremented CSeq)");
+                    }
                 }
-            );
-            let _ = self.global_coordinator.publish(Arc::new(event)).await;
-        } else if response.status_code() >= 400 {
-            // Emit registration failure event
-            let event = RvoipCrossCrateEvent::DialogToSession(
-                rvoip_infra_common::events::cross_crate::DialogToSessionEvent::RegistrationFailed {
-                    session_id: session_id.0.clone(),
-                    status_code: response.status_code(),
-                }
-            );
-            let _ = self.global_coordinator.publish(Arc::new(event)).await;
+            }
+            _ => {
+                // Registration failed
+                tracing::warn!("❌ Registration failed with status {}", response.status_code());
+                let mut session = self.store.get_session(session_id).await?;
+                session.is_registered = false;
+                self.store.update_session(session).await?;
+            }
         }
-
+        
         Ok(())
     }
 
-    // ===== Subscription/NOTIFY Methods =====
+    /// Handle 401 Unauthorized response
+    pub async fn handle_401_challenge(
+        &self,
+        session_id: &SessionId,
+        www_authenticate: &str,
+    ) -> Result<()> {
+        tracing::info!("Handling 401 challenge for session {}", session_id.0);
+        
+        // Parse challenge using auth-core (shared module)
+        let challenge = rvoip_auth_core::DigestAuthenticator::parse_challenge(www_authenticate)?;
+        
+        tracing::debug!("Parsed challenge: realm={}, nonce={}", challenge.realm, challenge.nonce);
+        
+        // Store challenge in session
+        let mut session = self.store.get_session(session_id).await?;
+        session.auth_challenge = Some(challenge);
+        self.store.update_session(session).await?;
+        
+        tracing::info!("Auth challenge stored for session {}", session_id.0);
+        
+        Ok(())
+    }
 
-    /// Send a SUBSCRIBE request
     pub async fn send_subscribe(
         &self,
         session_id: &SessionId,
@@ -687,6 +807,7 @@ impl Clone for DialogAdapter {
             callid_to_session: self.callid_to_session.clone(),
             outgoing_invite_tx: self.outgoing_invite_tx.clone(),
             global_coordinator: self.global_coordinator.clone(),
+            state_machine: self.state_machine.clone(),
         }
     }
 }

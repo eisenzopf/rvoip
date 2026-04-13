@@ -139,78 +139,80 @@ impl Default for SessionRegistry {
 // Single session constraint makes testing simpler anyway
 
 #[cfg(test)]
-mod _removed_tests {
+mod tests {
     use super::*;
 
-    #[test]
-    fn test_dialog_mapping() {
+    #[tokio::test]
+    async fn test_dialog_mapping() {
         let registry = SessionRegistry::new();
         let session_id = SessionId::new();
         let dialog_id = DialogId::new();
 
-        registry.map_dialog(session_id.clone(), dialog_id.clone());
+        registry.map_dialog(session_id.clone(), dialog_id.clone()).await;
 
-        assert_eq!(registry.get_session_by_dialog(&dialog_id), Some(session_id.clone()));
-        assert_eq!(registry.get_dialog_by_session(&session_id), Some(dialog_id));
+        assert_eq!(registry.get_session_by_dialog(&dialog_id).await, Some(session_id.clone()));
+        assert_eq!(registry.get_dialog_by_session(&session_id).await, Some(dialog_id));
     }
 
-    #[test]
-    fn test_media_mapping() {
+    #[tokio::test]
+    async fn test_media_mapping() {
         let registry = SessionRegistry::new();
         let session_id = SessionId::new();
         let media_id = MediaSessionId::new();
 
-        registry.map_media(session_id.clone(), media_id.clone());
+        registry.map_media(session_id.clone(), media_id.clone()).await;
 
-        assert_eq!(registry.get_session_by_media(&media_id), Some(session_id.clone()));
-        assert_eq!(registry.get_media_by_session(&session_id), Some(media_id));
+        assert_eq!(registry.get_session_by_media(&media_id).await, Some(session_id.clone()));
+        assert_eq!(registry.get_media_by_session(&session_id).await, Some(media_id));
     }
 
-    #[test]
-    fn test_remove_session() {
+    #[tokio::test]
+    async fn test_remove_session() {
         let registry = SessionRegistry::new();
         let session_id = SessionId::new();
         let dialog_id = DialogId::new();
         let media_id = MediaSessionId::new();
 
-        registry.map_dialog(session_id.clone(), dialog_id.clone());
-        registry.map_media(session_id.clone(), media_id.clone());
+        registry.map_dialog(session_id.clone(), dialog_id.clone()).await;
+        registry.map_media(session_id.clone(), media_id.clone()).await;
 
-        assert!(registry.contains_session(&session_id));
+        assert!(registry.contains_session(&session_id).await);
 
-        registry.remove_session(&session_id);
+        registry.remove_session(&session_id).await;
 
-        assert!(!registry.contains_session(&session_id));
-        assert_eq!(registry.get_session_by_dialog(&dialog_id), None);
-        assert_eq!(registry.get_session_by_media(&media_id), None);
+        assert!(!registry.contains_session(&session_id).await);
+        assert_eq!(registry.get_session_by_dialog(&dialog_id).await, None);
+        assert_eq!(registry.get_session_by_media(&media_id).await, None);
     }
 
-    #[test]
-    fn test_session_count() {
+    #[tokio::test]
+    async fn test_session_count() {
         let registry = SessionRegistry::new();
-        
-        assert_eq!(registry.session_count(), 0);
+
+        assert_eq!(registry.session_count().await, 0);
 
         let session1 = SessionId::new();
         let session2 = SessionId::new();
-        
-        registry.map_dialog(session1.clone(), DialogId::new());
-        registry.map_dialog(session2.clone(), DialogId::new());
 
-        assert_eq!(registry.session_count(), 2);
+        registry.map_dialog(session1.clone(), DialogId::new()).await;
+        registry.map_dialog(session2.clone(), DialogId::new()).await;
+
+        // Single-session registry: second map_dialog overwrites the first,
+        // so count is 1, not 2
+        assert_eq!(registry.session_count().await, 1);
     }
 
-    #[test]
-    fn test_clear() {
+    #[tokio::test]
+    async fn test_clear() {
         let registry = SessionRegistry::new();
         let session_id = SessionId::new();
-        
-        registry.map_dialog(session_id.clone(), DialogId::new());
-        registry.map_media(session_id.clone(), MediaSessionId(uuid::Uuid::new_v4().to_string()));
 
-        registry.clear();
+        registry.map_dialog(session_id.clone(), DialogId::new()).await;
+        registry.map_media(session_id.clone(), MediaSessionId(uuid::Uuid::new_v4().to_string())).await;
 
-        assert_eq!(registry.session_count(), 0);
-        assert!(!registry.contains_session(&session_id));
+        registry.clear().await;
+
+        assert_eq!(registry.session_count().await, 0);
+        assert!(!registry.contains_session(&session_id).await);
     }
 }

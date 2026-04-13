@@ -306,20 +306,29 @@ pub mod types;      // Core types (legacy)
 pub mod events;     // Event-driven API for v3
 pub mod unified;    // Unified API
 pub mod builder;    // Session builder
-pub mod simple;     // Simple peer API
+pub mod simple;     // Simple peer API (legacy — use StreamPeer instead)
+
+// New v3 API modules
+pub mod audio;          // AudioStream, AudioSender, AudioReceiver
+pub mod handle;         // SessionHandle, CallId
+pub mod incoming;       // IncomingCall, IncomingCallGuard
+pub mod stream_peer;    // StreamPeer, PeerControl, EventReceiver
+pub mod callback_peer;  // CallbackPeer, CallHandler, CallHandlerDecision, EndReason
 
 // Re-export the main types
 pub use types::{
-    SessionId, CallSession, IncomingCall, CallDecision,
+    SessionId, CallSession, CallDecision,
     SessionStats, MediaInfo, AudioStreamConfig,
     parse_sdp_connection, SdpInfo,
 };
+// IncomingCall from types (data-only, legacy) is NOT re-exported here to avoid
+// clash with the new IncomingCall in `incoming`. Use `api::types::IncomingCall` if needed.
 pub use crate::types::CallState;
 
 // Re-export the unified API
-pub use unified::{UnifiedCoordinator, Config};
+pub use unified::{UnifiedCoordinator, Config, RegistrationHandle};
 
-// Re-export the simple API (the one people should actually use)
+// Re-export the simple API (legacy)
 pub use simple::SimplePeer;
 
 // Re-export event types
@@ -327,13 +336,28 @@ pub use events::{
     Event, CallHandle, CallId,
 };
 
-
 // Re-export builder
 pub use builder::SessionBuilder;
-
 
 // Re-export from state table for consistency
 pub use crate::state_table::types::{Role, EventType};
 
 // Error types
 pub use crate::errors::{Result, SessionError};
+
+// ── New public API surface ──────────────────────────────────────────────────
+
+// Audio
+pub use audio::{AudioStream, AudioSender, AudioReceiver};
+
+// SessionHandle
+pub use handle::SessionHandle;
+
+// IncomingCall / IncomingCallGuard
+pub use incoming::{IncomingCall, IncomingCallGuard};
+
+// StreamPeer (replaces SimplePeer for new code)
+pub use stream_peer::{StreamPeer, PeerControl, EventReceiver};
+
+// CallbackPeer (reactive server-style)
+pub use callback_peer::{CallbackPeer, CallHandler, CallHandlerDecision, EndReason};

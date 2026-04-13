@@ -7,10 +7,12 @@ use crate::error::Result;
 pub mod registry;
 pub mod location;
 pub mod manager;
+pub mod user_store;
 
 pub use registry::UserRegistry;
 pub use location::LocationService;
 pub use manager::RegistrationManager;
+pub use user_store::{UserStore, UserCredentials};
 
 /// Main registrar interface combining all registration functionality
 pub struct Registrar {

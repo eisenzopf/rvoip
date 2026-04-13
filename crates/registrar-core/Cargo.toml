@@ -31,6 +31,7 @@ anyhow = "1.0"
 # Internal dependencies
 rvoip-infra-common = { path = "../infra-common" }
 rvoip-sip-core = { path = "../sip-core" }
+rvoip-auth-core = { path = "../auth-core" }
 
 # UUID generation
 uuid = { version = "1.5", features = ["v4", "serde"] }

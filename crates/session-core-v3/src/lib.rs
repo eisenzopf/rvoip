@@ -22,38 +22,49 @@ pub mod state_machine;
 pub mod session_store;
 pub mod adapters;
 pub mod errors;
+pub mod auth;
 
 // New core infrastructure
 pub mod session_registry;
 pub mod types;
 
 
-// Re-export main types from API
-pub use api::{
-    UnifiedCoordinator, SessionBuilder,
-    SimplePeer,
-};
+// ── Primary public API ──────────────────────────────────────────────────────
 
-// Re-export from state_table for correct types
-pub use state_table::types::{
-    SessionId, Role, EventType,
-};
+// Peer types (new v3 API)
+pub use api::stream_peer::{StreamPeer, PeerControl, EventReceiver};
+pub use api::callback_peer::{CallbackPeer, CallHandler, CallHandlerDecision, EndReason};
 
-// Re-export CallState from types
-pub use types::CallState;
+// Core session types
+pub use api::handle::{SessionHandle, CallId};
+pub use api::incoming::{IncomingCall, IncomingCallGuard};
+pub use api::audio::{AudioStream, AudioSender, AudioReceiver};
 
-// Re-export error types
-pub use errors::{Result, SessionError};
+// Configuration & registration
+pub use api::{UnifiedCoordinator, SessionBuilder, Config, RegistrationHandle};
 
-// Re-export event types
+// Events
 pub use api::events::{Event, CallHandle};
 
-// Re-export internal types for advanced usage
+// Errors
+pub use errors::{Result, SessionError};
+
+// State / identity types
+pub use state_table::types::{SessionId, Role, EventType};
+pub use types::CallState;
+
+// ── Legacy API (kept for backward compatibility) ────────────────────────────
+
+/// Deprecated: use [`StreamPeer`] instead.
+#[deprecated(note = "Use StreamPeer instead")]
+pub use api::simple::SimplePeer;
+
+// ── Internal / advanced usage ───────────────────────────────────────────────
+
+// Re-export internal types for advanced usage (power users)
 pub use session_store::{
     SessionStore, SessionState, NegotiatedConfig,
     SessionHistory, HistoryConfig, TransitionRecord, GuardResult, ActionRecord,
-    // SessionInspection, PossibleTransition, SessionHealth, ResourceUsage, // Disabled for single session
-    // CleanupConfig, CleanupStats, ResourceLimits, // Disabled for single session
 };
 pub use state_machine::StateMachine;
 pub use state_table::{Guard, Action};

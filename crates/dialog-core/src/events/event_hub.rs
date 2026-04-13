@@ -348,16 +348,43 @@ impl CrossCrateEventHandler for DialogEventHub {
     async fn handle(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
         debug!("Handling cross-crate event: {}", event.event_type());
         
-        // Since we can't directly downcast Arc<dyn CrossCrateEvent>, we'll use the
-        // event_type() to determine what kind of event it is and parse accordingly.
-        // This is a workaround until we have proper downcast support.
+        // Use trait-based downcasting via as_any()
+        if let Some(concrete) = event.as_any().downcast_ref::<RvoipCrossCrateEvent>() {
+            match concrete {
+                RvoipCrossCrateEvent::SessionToDialog(session_event) => {
+                    match session_event {
+                        SessionToDialogEvent::SendRegisterResponse {
+                            transaction_id,
+                            status_code,
+                            reason,
+                            www_authenticate,
+                            contact,
+                            expires,
+                        } => {
+                            info!("📩 Handling SendRegisterResponse via trait: {} {}", status_code, reason);
+                            self.handle_register_response(
+                                transaction_id,
+                                *status_code,
+                                reason,
+                                www_authenticate.as_deref(),
+                                contact.as_deref(),
+                                *expires,
+                            ).await?;
+                            return Ok(()); // Early return after handling
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
         
-        // Try to extract the event data from the debug representation
+        // Fallback to string parsing for other events (legacy support)
         let event_str = format!("{:?}", event);
         
         match event.event_type() {
             "session_to_dialog" => {
-                info!("Processing session-to-dialog event: {}", event_str);
+                debug!("Processing session-to-dialog event: {}", event_str);
                 
                 // Handle ReferResponse event
                 if event_str.contains("ReferResponse") {
@@ -411,6 +438,45 @@ impl CrossCrateEventHandler for DialogEventHub {
 }
 
 impl DialogEventHub {
+    /// Handle SendRegisterResponse event from session-core
+    async fn handle_register_response(
+        &self,
+        transaction_id: &str,
+        status_code: u16,
+        reason: &str,
+        www_authenticate: Option<&str>,
+        contact: Option<&str>,
+        expires: Option<u32>,
+    ) -> Result<()> {
+        debug!("Handling SendRegisterResponse: transaction={}, status={} {}", 
+               transaction_id, status_code, reason);
+        
+        // Parse transaction_id to TransactionKey
+        let tx_key = transaction_id.parse::<TransactionKey>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse transaction_id: {}", e))?;
+        
+        // Check if this transaction exists in our dialog manager
+        // This prevents multiple DialogEventHubs from trying to handle the same event
+        if self.dialog_manager.transaction_manager().original_request(&tx_key).await.is_err() {
+            debug!("Transaction {} not found in this DialogManager - skipping", transaction_id);
+            return Ok(()); // Not our transaction, skip silently
+        }
+        
+        // Call the dialog manager's send_register_response method
+        self.dialog_manager.send_register_response(
+            &tx_key,
+            status_code,
+            reason,
+            www_authenticate,
+            contact,
+            expires,
+        ).await
+        .map_err(|e| anyhow::anyhow!("Failed to send REGISTER response: {}", e))?;
+        
+        info!("✅ Sent REGISTER response: {} {}", status_code, reason);
+        Ok(())
+    }
+    
     /// Handle ReferResponse event from session-core
     async fn handle_refer_response(&self, event_str: &str) -> Result<()> {
         // Extract transaction_id, accept flag, status_code, and reason

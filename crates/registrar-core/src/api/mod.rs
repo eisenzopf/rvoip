@@ -30,6 +30,12 @@ pub struct RegistrarService {
     
     /// Service mode
     mode: ServiceMode,
+    
+    /// User credential store for authentication
+    user_store: Option<Arc<crate::registrar::UserStore>>,
+    
+    /// Digest authenticator
+    auth: Option<Arc<rvoip_auth_core::DigestAuthenticator>>,
 }
 
 /// Service operation mode
@@ -72,7 +78,37 @@ impl RegistrarService {
             config: Arc::new(config),
             event_bus: None,
             mode,
+            user_store: None,
+            auth: None,
         })
+    }
+    
+    /// Create with authentication support
+    pub async fn with_auth(
+        mode: ServiceMode,
+        config: RegistrarConfig,
+        realm: &str,
+    ) -> Result<Self> {
+        let mut service = Self::new_with_mode(mode, config).await?;
+        
+        // Create auth components
+        let auth = Arc::new(rvoip_auth_core::DigestAuthenticator::new(realm));
+        let user_store = Arc::new(crate::registrar::UserStore::new(realm));
+        
+        service.auth = Some(auth);
+        service.user_store = Some(user_store);
+        
+        Ok(service)
+    }
+    
+    /// Get user store for adding users
+    pub fn user_store(&self) -> Option<&Arc<crate::registrar::UserStore>> {
+        self.user_store.as_ref()
+    }
+    
+    /// Get digest authenticator
+    pub fn authenticator(&self) -> Option<&Arc<rvoip_auth_core::DigestAuthenticator>> {
+        self.auth.as_ref()
     }
     
     /// Set the event bus for publishing events
@@ -81,6 +117,76 @@ impl RegistrarService {
     }
     
     // ========== Registration Methods ==========
+    
+    /// Handle REGISTER request with authentication
+    /// 
+    /// This method:
+    /// 1. Checks for Authorization header
+    /// 2. If present, validates credentials
+    /// 3. If valid, processes registration
+    /// 4. If invalid or missing, returns 401 challenge
+    ///
+    /// Returns a tuple: (should_process, challenge_header)
+    pub async fn authenticate_register(
+        &self,
+        username: &str,
+        authorization: Option<&str>,
+        method: &str,
+        _uri: &str,
+    ) -> Result<(bool, Option<String>)> {
+        // If no auth configured, allow all
+        if self.auth.is_none() || self.user_store.is_none() {
+            return Ok((true, None));
+        }
+        
+        let auth = self.auth.as_ref().unwrap();
+        let user_store = self.user_store.as_ref().unwrap();
+        
+        // Check if user exists
+        if !user_store.user_exists(username) {
+            warn!("Registration attempt for unknown user: {}", username);
+            // Still send challenge (don't reveal user doesn't exist)
+            let challenge = auth.generate_challenge();
+            let www_auth = auth.format_www_authenticate(&challenge);
+            return Ok((false, Some(www_auth)));
+        }
+        
+        // Check for Authorization header
+        if let Some(auth_header) = authorization {
+            // Parse authorization header
+            let digest_response = rvoip_auth_core::DigestAuthenticator::parse_authorization(auth_header)
+                .map_err(|e| crate::error::RegistrarError::Internal(format!("Failed to parse auth: {}", e)))?;
+            
+            // Get password for user
+            let password = user_store.get_password(&digest_response.username)
+                .ok_or_else(|| crate::error::RegistrarError::UserNotFound(digest_response.username.clone()))?;
+            
+            // Validate digest response
+            info!("🔍 Validating digest for user={}, realm={}, nonce={}, uri={}",
+                  digest_response.username, digest_response.realm, digest_response.nonce, digest_response.uri);
+            info!("🔍 Client response hash: {}", digest_response.response);
+            
+            let is_valid = auth.validate_response(&digest_response, method, &password)
+                .map_err(|e| crate::error::RegistrarError::Internal(format!("Failed to validate digest: {}", e)))?;
+            
+            info!("🔍 Validation result: {}", is_valid);
+            
+            if is_valid {
+                info!("✅ User {} authenticated successfully", username);
+                Ok((true, None))
+            } else {
+                warn!("❌ Authentication failed for user {} - digest mismatch", username);
+                let challenge = auth.generate_challenge();
+                let www_auth = auth.format_www_authenticate(&challenge);
+                Ok((false, Some(www_auth)))
+            }
+        } else {
+            // No Authorization header - send challenge
+            let challenge = auth.generate_challenge();
+            let www_auth = auth.format_www_authenticate(&challenge);
+            Ok((false, Some(www_auth)))
+        }
+    }
     
     /// Register a user with contact information
     /// 

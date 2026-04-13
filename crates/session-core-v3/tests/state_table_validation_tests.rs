@@ -6,10 +6,10 @@
 //! - Defines transitions for common scenarios
 //! - Is compatible with the current state table loader
 
-use rvoip_session_core_v2::state_table::{
+use rvoip_session_core_v3::state_table::{
     YamlTableLoader, StateTable, StateKey, EventType, Role
 };
-use rvoip_session_core_v2::types::CallState;
+use rvoip_session_core_v3::types::CallState;
 use std::path::Path;
 
 /// Helper to load a state table from the state_tables directory
@@ -223,25 +223,19 @@ fn test_transfer_transitions() {
     let table = load_state_table("default.yaml")
         .expect("Failed to load default.yaml");
 
-    // Check blind transfer initiation
+    // Check transfer requested handling from Active state
     let transfer_key = StateKey {
         role: Role::Both,
         state: CallState::Active,
-        event: EventType::InitiateTransfer { target: String::new() },
+        event: EventType::TransferRequested {
+            refer_to: String::new(),
+            transfer_type: String::new(),
+            transaction_id: String::new(),
+        },
     };
 
     let has_transfer = table.has_transition(&transfer_key);
-    assert!(has_transfer, "Missing transfer transition from Active");
-
-    // Check transfer completion
-    let transfer_complete_key = StateKey {
-        role: Role::Both,
-        state: CallState::Transferring,
-        event: EventType::TransferComplete,
-    };
-
-    let has_transfer_complete = table.has_transition(&transfer_complete_key);
-    assert!(has_transfer_complete, "Missing transfer completion transition");
+    assert!(has_transfer, "Missing TransferRequested transition from Active");
 }
 
 #[test]

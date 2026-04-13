@@ -390,8 +390,22 @@ impl StateMachine {
             }
         }
         
-        // 10. Check if conditions trigger internal events
-        if session.all_conditions_met() && !session.call_established_triggered {
+        // 10. Reload session to pick up any changes made by actions
+        // Actions like send_register may have updated the session (e.g., is_registered flag)
+        let mut session = self.store.get_session(session_id).await
+            .map_err(|e| format!("Failed to reload session after actions: {}", e))?;
+        
+        // 11. Check if conditions trigger internal events
+        let all_conditions_met = session.all_conditions_met();
+        let call_established_triggered = session.call_established_triggered;
+        
+        // 12. Save the updated session state back to the store
+        // CRITICAL: Session changes during process_event must be persisted!
+        self.store.update_session(session).await
+            .map_err(|e| format!("Failed to save session state: {}", e))?;
+        
+        // 12. Trigger internal events after saving
+        if all_conditions_met && !call_established_triggered {
             debug!("All conditions met, triggering InternalCheckReady");
             Box::pin(self.process_event(session_id, EventType::InternalCheckReady)).await?;
         }

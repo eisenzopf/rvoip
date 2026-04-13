@@ -199,7 +199,13 @@ pub enum EventType {
     // Registration events
     StartRegistration,
     Registration200OK,
+    Registration401,
     RegistrationFailed(u16),
+    RetryRegistration,
+    RefreshRegistration,
+    StartUnregistration,
+    Unregistration200OK,
+    UnregistrationFailed,
     UnregisterRequest,
     RegistrationExpired,
 
@@ -260,6 +266,12 @@ impl EventType {
 
             // Registration events - normalize status codes
             EventType::RegistrationFailed(_) => EventType::RegistrationFailed(0),
+            EventType::UnregistrationFailed => EventType::UnregistrationFailed,
+            EventType::Registration401 => EventType::Registration401,
+            EventType::RetryRegistration => EventType::RetryRegistration,
+            EventType::RefreshRegistration => EventType::RefreshRegistration,
+            EventType::StartUnregistration => EventType::StartUnregistration,
+            EventType::Unregistration200OK => EventType::Unregistration200OK,
 
             // Subscription events - normalize status codes
             EventType::SubscriptionFailed(_) => EventType::SubscriptionFailed(0),
@@ -392,6 +404,9 @@ pub enum Action {
 
     // Registration actions
     SendREGISTER,
+    SendREGISTERWithAuth,
+    SendUnREGISTER,
+    StoreAuthChallenge,
     ProcessRegistrationResponse,
 
     // Subscription actions

@@ -34,6 +34,14 @@ path = "examples/blind_transfer/peer2_transferor.rs"
 name = "blind_transfer_peer3_target"
 path = "examples/blind_transfer/peer3_target.rs"
 
+[[example]]
+name = "register_uas"
+path = "examples/register_demo/uas.rs"
+
+[[example]]
+name = "register_uac"
+path = "examples/register_demo/uac.rs"
+
 
 [dependencies]
 # Core dependencies
@@ -54,6 +62,8 @@ rvoip-dialog-core = { path = "../dialog-core" }
 rvoip-media-core = { path = "../media-core" }
 rvoip-sip-core = { path = "../sip-core" }
 rvoip-rtp-core = { path = "../rtp-core" }
+rvoip-auth-core = { path = "../auth-core" }
+rvoip-registrar-core = { path = "../registrar-core" }
 
 # State management
 lazy_static = "1.4"
@@ -81,6 +91,7 @@ test-log = "0.2"
 env_logger = "0.11"
 tracing-subscriber = "0.3"
 rvoip-sip-transport = { path = "../sip-transport" }
+rvoip-registrar-core = { path = "../registrar-core" }
 serial_test = { workspace = true }
 
 [features]

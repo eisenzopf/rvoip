@@ -27,6 +27,15 @@ pub enum AuthError {
     
     #[error("Internal error: {0}")]
     InternalError(String),
+    
+    #[error("Invalid digest challenge: {0}")]
+    InvalidChallenge(String),
+    
+    #[error("Invalid digest response: {0}")]
+    InvalidResponse(String),
+    
+    #[error("Digest computation error: {0}")]
+    DigestError(String),
 }
 
 pub type Result<T> = std::result::Result<T, AuthError>;

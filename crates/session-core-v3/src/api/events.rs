@@ -210,6 +210,33 @@ pub enum Event {
         jitter_ms: u32,
     },
     
+    // ===== Registration Events =====
+    
+    /// Registration successful
+    RegistrationSuccess {
+        registrar: String,
+        expires: u32,
+        contact: String,
+    },
+    
+    /// Registration failed
+    RegistrationFailed {
+        registrar: String,
+        status_code: u16,
+        reason: String,
+    },
+    
+    /// Unregistration successful
+    UnregistrationSuccess {
+        registrar: String,
+    },
+    
+    /// Unregistration failed
+    UnregistrationFailed {
+        registrar: String,
+        reason: String,
+    },
+    
     // ===== Error Events =====
     
     /// Network error occurred
@@ -246,6 +273,11 @@ impl Event {
             Event::AuthenticationRequired { call_id, .. } => Some(call_id),
             Event::TransferCompleted { old_call_id, .. } => Some(old_call_id),
             Event::NetworkError { call_id, .. } => call_id.as_ref(),
+            // Registration events don't have call_id
+            Event::RegistrationSuccess { .. } |
+            Event::RegistrationFailed { .. } |
+            Event::UnregistrationSuccess { .. } |
+            Event::UnregistrationFailed { .. } => None,
         }
     }
     

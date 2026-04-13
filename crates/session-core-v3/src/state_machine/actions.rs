@@ -526,11 +526,75 @@ pub async fn execute_action(
             info!("Action::SendREGISTER for session {}", session.session_id);
             let from_uri = session.local_uri.as_deref()
                 .ok_or_else(|| "local_uri not set for registration".to_string())?;
-            let registrar_uri = session.remote_uri.as_deref()
+            let registrar_uri = session.registrar_uri.as_deref()
+                .or_else(|| session.remote_uri.as_deref())
                 .ok_or_else(|| "registrar_uri not set for registration".to_string())?;
-            let expires = 3600; // Default 1 hour registration
-            dialog_adapter.send_register(&session.session_id, from_uri, registrar_uri, expires).await?;
+            let contact_uri = session.registration_contact.as_deref()
+                .or_else(|| session.local_uri.as_deref())
+                .ok_or_else(|| "contact_uri not set for registration".to_string())?;
+            let expires = session.registration_expires.unwrap_or(3600);
+            
+            // Send REGISTER without authentication (first attempt)
+            dialog_adapter.send_register(
+                &session.session_id,
+                registrar_uri,
+                from_uri,
+                contact_uri,
+                expires,
+                None  // No credentials on first attempt
+            ).await?;
         }
+        
+        Action::SendREGISTERWithAuth => {
+            info!("Action::SendREGISTERWithAuth for session {}", session.session_id);
+            let from_uri = session.local_uri.as_deref()
+                .ok_or_else(|| "local_uri not set for registration".to_string())?;
+            let registrar_uri = session.registrar_uri.as_deref()
+                .or_else(|| session.remote_uri.as_deref())
+                .ok_or_else(|| "registrar_uri not set for registration".to_string())?;
+            let contact_uri = session.registration_contact.as_deref()
+                .or_else(|| session.local_uri.as_deref())
+                .ok_or_else(|| "contact_uri not set for registration".to_string())?;
+            let expires = session.registration_expires.unwrap_or(3600);
+            
+            // Send REGISTER with authentication
+            dialog_adapter.send_register(
+                &session.session_id,
+                registrar_uri,
+                from_uri,
+                contact_uri,
+                expires,
+                session.credentials.as_ref()
+            ).await?;
+        }
+        
+        Action::SendUnREGISTER => {
+            info!("Action::SendUnREGISTER for session {}", session.session_id);
+            let from_uri = session.local_uri.as_deref()
+                .ok_or_else(|| "local_uri not set for unregistration".to_string())?;
+            let registrar_uri = session.registrar_uri.as_deref()
+                .ok_or_else(|| "registrar_uri not set for unregistration".to_string())?;
+            let contact_uri = session.registration_contact.as_deref()
+                .ok_or_else(|| "contact_uri not set for unregistration".to_string())?;
+            
+            // Send REGISTER with expires=0 to unregister
+            dialog_adapter.send_register(
+                &session.session_id,
+                registrar_uri,
+                from_uri,
+                contact_uri,
+                0,  // expires=0 means unregister
+                session.credentials.as_ref()
+            ).await?;
+        }
+        
+        Action::StoreAuthChallenge => {
+            debug!("Action::StoreAuthChallenge for session {}", session.session_id);
+            // The challenge is already stored in session.auth_challenge by handle_401_challenge
+            // This action is just a marker in the state table
+            info!("Auth challenge stored (handled by DialogAdapter)");
+        }
+        
         Action::ProcessRegistrationResponse => {
             debug!("Processing registration response for session {}", session.session_id);
             // Response processing is handled by events from dialog adapter

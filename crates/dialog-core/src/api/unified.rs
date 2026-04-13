@@ -788,6 +788,103 @@ impl UnifiedDialogApi {
         self.manager.send_bye(dialog_id).await
     }
     
+    /// Send REGISTER request for SIP registration
+    /// 
+    /// Note: REGISTER is a non-dialog request, so it doesn't use a dialog_id.
+    /// This method sends a REGISTER request directly via the transaction manager.
+    ///
+    /// # Arguments
+    /// * `registrar_uri` - URI of the registrar (e.g., "sip:registrar.example.com")
+    /// * `from_uri` - From URI (e.g., "sip:user@example.com")
+    /// * `contact_uri` - Contact URI (e.g., "sip:user@192.168.1.100:5060")
+    /// * `expires` - Registration expiry in seconds
+    /// * `authorization` - Optional Authorization header value for digest auth
+    /// Send REGISTER request for SIP registration
+    /// 
+    /// Note: REGISTER is a non-dialog request, so it doesn't use a dialog_id.
+    /// This method sends a REGISTER request directly via the transaction manager
+    /// and waits for the response (including 401 auth challenges).
+    ///
+    /// # Arguments
+    /// * `registrar_uri` - URI of the registrar (e.g., "sip:registrar.example.com")
+    /// * `from_uri` - From URI (e.g., "sip:user@example.com")
+    /// * `contact_uri` - Contact URI (e.g., "sip:user@192.168.1.100:5060")
+    /// * `expires` - Registration expiry in seconds
+    /// * `authorization` - Optional Authorization header value for digest auth
+    ///
+    /// # Returns
+    /// The SIP response (200 OK, 401 Unauthorized, etc.)
+    pub async fn send_register(
+        &self,
+        registrar_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        expires: u32,
+        authorization: Option<String>,
+    ) -> ApiResult<Response> {
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+        use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip_core::types::header::HeaderName;
+        
+        // Determine CSeq based on whether this is a retry (has authorization)
+        let cseq = if authorization.is_some() { 2 } else { 1 };
+        
+        debug!("Building REGISTER request to {} (expires={}, cseq={}, auth={})", 
+               registrar_uri, expires, cseq, authorization.is_some());
+        
+        // Build REGISTER request
+        let mut builder = SimpleRequestBuilder::register(registrar_uri)
+            .map_err(|e| ApiError::protocol(e.to_string()))?
+            .from("", from_uri, None)
+            .to("", from_uri, None)  // To same as From for self-registration
+            .contact(contact_uri, None)
+            .expires(expires)
+            .cseq(cseq);  // CSeq=1 for initial, CSeq=2 for authenticated retry
+        
+        // Build the request
+        let mut request = builder.build();
+        
+        // Add Authorization header if provided (must add after building)
+        if let Some(auth) = authorization {
+            use rvoip_sip_core::types::header::HeaderValue;
+            request.headers.push(TypedHeader::Other(
+                HeaderName::Authorization,
+                HeaderValue::Raw(auth.into_bytes())
+            ));
+            debug!("Added Authorization header to REGISTER");
+        }
+        
+        // Parse destination from registrar URI
+        let dest_uri = registrar_uri.parse::<rvoip_sip_core::Uri>()
+            .map_err(|e| ApiError::protocol(format!("Invalid registrar URI: {}", e)))?;
+        
+        // Extract host and port
+        use rvoip_sip_core::types::uri::Host;
+        let host_ip = match &dest_uri.host {
+            Host::Address(ip) => *ip,
+            Host::Domain(domain) => {
+                // For now, only support IP addresses
+                // In production, this should do DNS resolution
+                domain.parse::<std::net::IpAddr>()
+                    .map_err(|e| ApiError::protocol(format!("Cannot parse domain as IP (DNS not implemented): {}", e)))?
+            }
+        };
+        let port = dest_uri.port.unwrap_or(5060);  // Default SIP port
+        let destination = SocketAddr::new(host_ip, port);
+        
+        debug!("Sending REGISTER to {}", destination);
+        
+        // Use existing send_non_dialog_request() - it handles everything!
+        let response = self.send_non_dialog_request(
+            request,
+            destination,
+            std::time::Duration::from_secs(32)  // RFC 3261 Timer F = 64*T1
+        ).await?;
+        
+        debug!("Received REGISTER response: {}", response.status_code());
+        Ok(response)
+    }
+    
     /// Send REFER request for call transfer
     pub async fn send_refer(
         &self,

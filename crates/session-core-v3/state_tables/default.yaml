@@ -804,3 +804,128 @@ transitions:
       - "MessageReceived"
     description: "Receive SIP MESSAGE"
 
+  # ========================================
+  # Registration Flow (UAC)
+  # ========================================
+  
+  # Start registration
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "StartRegistration"
+    next_state: "Registering"
+    actions:
+      - type: "SendREGISTER"
+    description: "Initiate SIP registration with server"
+
+  # Registration successful (200 OK without challenge)
+  - role: "UAC"
+    state: "Registering"
+    event:
+      type: "Registration200OK"
+    next_state: "Registered"
+    conditions:
+      IsRegistered: true
+    publish:
+      - "RegistrationSuccess"
+    description: "Registration completed successfully"
+
+  # Registration challenged (401 Unauthorized)
+  - role: "UAC"
+    state: "Registering"
+    event:
+      type: "Registration401"
+    next_state: "Authenticating"
+    actions:
+      - type: "StoreAuthChallenge"
+    description: "Received authentication challenge, prepare to respond"
+
+  # Send REGISTER with authentication
+  - role: "UAC"
+    state: "Authenticating"
+    event:
+      type: "RetryRegistration"
+    next_state: "Registering"
+    actions:
+      - type: "SendREGISTERWithAuth"
+    description: "Retry REGISTER with digest authentication"
+
+  # Authentication successful
+  - role: "UAC"
+    state: "Authenticating"
+    event:
+      type: "Registration200OK"
+    next_state: "Registered"
+    conditions:
+      IsRegistered: true
+    publish:
+      - "RegistrationSuccess"
+    description: "Registration with authentication successful"
+
+  # Registration failed (403, 404, etc.)
+  - role: "UAC"
+    state: "Registering"
+    event:
+      type: "RegistrationFailed"
+    next_state: "Idle"
+    conditions:
+      IsRegistered: false
+    publish:
+      - "RegistrationFailed"
+    description: "Registration failed"
+
+  # Authentication failed
+  - role: "UAC"
+    state: "Authenticating"
+    event:
+      type: "RegistrationFailed"
+    next_state: "Idle"
+    conditions:
+      IsRegistered: false
+    publish:
+      - "RegistrationFailed"
+    description: "Authentication failed"
+
+  # Refresh registration (from Registered state)
+  - role: "UAC"
+    state: "Registered"
+    event:
+      type: "RefreshRegistration"
+    next_state: "Registering"
+    actions:
+      - type: "SendREGISTER"
+    description: "Refresh registration before expiry"
+
+  # Unregister (expires=0)
+  - role: "UAC"
+    state: "Registered"
+    event:
+      type: "StartUnregistration"
+    next_state: "Unregistering"
+    actions:
+      - type: "SendUnREGISTER"
+    description: "Initiate unregistration (expires=0)"
+
+  # Unregistration successful
+  - role: "UAC"
+    state: "Unregistering"
+    event:
+      type: "Unregistration200OK"
+    next_state: "Idle"
+    conditions:
+      IsRegistered: false
+    publish:
+      - "UnregistrationSuccess"
+    description: "Unregistration completed"
+
+  # Unregistration failed (still clear local state)
+  - role: "UAC"
+    state: "Unregistering"
+    event:
+      type: "UnregistrationFailed"
+    next_state: "Idle"
+    conditions:
+      IsRegistered: false
+    publish:
+      - "UnregistrationFailed"
+    description: "Unregistration failed but cleared local state"

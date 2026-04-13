@@ -25,6 +25,7 @@ pub use types::{
 };
 pub use error::{RegistrarError, Result};
 pub use events::{RegistrarEvent, PresenceEvent};
+pub use registrar::{UserStore, UserCredentials};
 
 // Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

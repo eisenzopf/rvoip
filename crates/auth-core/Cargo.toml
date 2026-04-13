@@ -44,6 +44,11 @@ chrono = { version = "0.4", features = ["serde"] }
 # Logging
 tracing = "0.1"
 
+# SIP Digest authentication
+md5 = "0.7"
+hex = "0.4"
+rand = "0.8"
+
 # Internal dependencies
 rvoip-infra-common = { path = "../infra-common", version = "0.1.0" }
 

@@ -54,6 +54,12 @@ pub enum SessionError {
     #[error("Transfer failed: {0}")]
     TransferFailed(String),
     
+    #[error("Authentication error: {0}")]
+    AuthError(String),
+    
+    #[error("Registration failed: {0}")]
+    RegistrationFailed(String),
+    
     #[error("Other error: {0}")]
     Other(String),
 }
@@ -67,5 +73,11 @@ impl From<Box<dyn std::error::Error>> for SessionError {
 impl From<Box<dyn std::error::Error + Send + Sync>> for SessionError {
     fn from(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
         SessionError::Other(err.to_string())
+    }
+}
+
+impl From<rvoip_auth_core::AuthError> for SessionError {
+    fn from(err: rvoip_auth_core::AuthError) -> Self {
+        SessionError::AuthError(err.to_string())
     }
 }

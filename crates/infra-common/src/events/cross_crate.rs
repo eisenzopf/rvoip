@@ -48,6 +48,9 @@ pub trait CrossCrateEvent: Send + Sync + std::fmt::Debug {
     fn source_plane(&self) -> PlaneType;
     fn target_plane(&self) -> PlaneType;
     fn priority(&self) -> EventPriority;
+    
+    /// Convert to Any for downcasting (trait-based approach)
+    fn as_any(&self) -> &dyn Any;
 }
 
 impl CrossCrateEvent for RvoipCrossCrateEvent {
@@ -102,6 +105,10 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::RtpToMedia(_) => EventPriority::Normal,
         }
     }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 impl Event for RvoipCrossCrateEvent {
@@ -135,6 +142,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 SessionToDialogEvent::SendDtmf { session_id, .. } => Some(session_id),
                 SessionToDialogEvent::StoreDialogMapping { session_id, .. } => Some(session_id),
                 SessionToDialogEvent::ReferResponse { .. } => None, // No session_id in ReferResponse
+                SessionToDialogEvent::SendRegisterResponse { .. } => None, // Transaction-based, no session_id
             },
             RvoipCrossCrateEvent::DialogToSession(event) => match event {
                 DialogToSessionEvent::IncomingCall { session_id, .. } => Some(session_id),
@@ -155,6 +163,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::NotifyReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::MessageDelivered { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::MessageFailed { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::IncomingRegister { .. } => None, // No session_id yet for incoming REGISTER
             },
             RvoipCrossCrateEvent::SessionToMedia(event) => match event {
                 SessionToMediaEvent::StartMediaStream { session_id, .. } => Some(session_id),
@@ -258,6 +267,16 @@ pub enum SessionToDialogEvent {
         accept: bool,
         status_code: u16,
         reason: String,
+    },
+    
+    /// Send REGISTER response (401/200) - server-side
+    SendRegisterResponse {
+        transaction_id: String,
+        status_code: u16,
+        reason: String,
+        www_authenticate: Option<String>,  // For 401 challenge
+        contact: Option<String>,           // For 200 OK
+        expires: Option<u32>,              // For 200 OK
     },
 }
 
@@ -381,6 +400,17 @@ pub enum DialogToSessionEvent {
     MessageFailed {
         session_id: String,
         status_code: u16,
+    },
+    
+    /// Incoming REGISTER request (server-side)
+    IncomingRegister {
+        transaction_id: String,
+        from_uri: String,
+        to_uri: String,
+        contact_uri: String,
+        expires: u32,
+        authorization: Option<String>,  // Authorization header if present
+        call_id: String,
     },
 }
 
