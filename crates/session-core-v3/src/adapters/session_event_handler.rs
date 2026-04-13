@@ -248,6 +248,12 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
 
 impl SessionCrossCrateEventHandler {
     
+    /// Check if a session belongs to this handler's store.
+    /// Returns false (and logs at debug) if the session was created by a different peer.
+    async fn is_our_session(&self, session_id: &SessionId) -> bool {
+        self.state_machine.store.get_session(session_id).await.is_ok()
+    }
+
     /// Extract session ID from event debug string (temporary workaround)
     fn extract_session_id(&self, event_str: &str) -> Option<String> {
         // Look for session_id in the debug output
@@ -330,16 +336,26 @@ impl SessionCrossCrateEventHandler {
             "unknown".to_string()
         };
 
-        // IMPORTANT: Check if this event is for OUR dialog instance
-        // Parse dialog UUID to check against our dialog adapter
+        // IMPORTANT: Check if this event is for OUR dialog instance.
+        // Multiple peers in the same process share a GlobalEventCoordinator,
+        // so every handler receives every IncomingCall event. We must only
+        // process the event if the dialog was created by OUR dialog-core.
         if let Ok(dialog_uuid) = uuid::Uuid::parse_str(&dialog_id_str) {
             let rvoip_dialog_id = rvoip_dialog_core::DialogId(dialog_uuid);
 
             // Check if this dialog exists in our dialog adapter's session_to_dialog map
             // If the dialog is already mapped, it means another peer is handling it
             if self.dialog_adapter.dialog_to_session.contains_key(&rvoip_dialog_id) {
-                // This dialog is already being handled (probably by another peer in the same process)
                 debug!("Ignoring IncomingCall for dialog {} - already handled by another peer", dialog_id_str);
+                return Ok(());
+            }
+
+            // Check if this dialog exists in our own dialog-core instance.
+            // If it doesn't, the INVITE was received by a different peer's
+            // dialog-core and we must not try to process it.
+            use rvoip_dialog_core::manager::DialogStore;
+            if !self.dialog_adapter.dialog_api.dialog_manager().core().has_dialog(&rvoip_dialog_id) {
+                debug!("Ignoring IncomingCall for dialog {} - not in our dialog-core", dialog_id_str);
                 return Ok(());
             }
         }
@@ -481,6 +497,12 @@ impl SessionCrossCrateEventHandler {
 
         let session_id = SessionId(session_id_str);
 
+        // Skip if this session isn't ours — multiple peers share the global event bus
+        if self.state_machine.store.get_session(&session_id).await.is_err() {
+            debug!("Ignoring CallEstablished for session {} - not in our store", session_id);
+            return Ok(());
+        }
+
         info!("🎯 [handle_call_established] Processing CallEstablished for session {}", session_id);
 
         let sdp_answer = self.extract_field(event_str, "sdp_answer: Some(\"")
@@ -525,18 +547,17 @@ impl SessionCrossCrateEventHandler {
     
     async fn handle_call_state_changed(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
+            let sid = SessionId(session_id);
+            if self.state_machine.store.get_session(&sid).await.is_err() {
+                debug!("Ignoring CallStateChanged for session {} - not in our store", sid);
+                return Ok(());
+            }
             if event_str.contains("Ringing") {
-                        if let Err(e) = self.state_machine.process_event(
-                            &SessionId(session_id),
-                    EventType::Dialog180Ringing
-                        ).await {
+                if let Err(e) = self.state_machine.process_event(&sid, EventType::Dialog180Ringing).await {
                     error!("Failed to process Dialog180Ringing: {}", e);
                 }
             } else if event_str.contains("Terminated") {
-                        if let Err(e) = self.state_machine.process_event(
-                            &SessionId(session_id),
-                    EventType::DialogBYE
-                        ).await {
+                if let Err(e) = self.state_machine.process_event(&sid, EventType::DialogBYE).await {
                     error!("Failed to process DialogBYE: {}", e);
                 }
             }
@@ -545,13 +566,19 @@ impl SessionCrossCrateEventHandler {
     }
     
     async fn handle_call_terminated(&self, event_str: &str) -> Result<()> {
-        info!("🎯 [handle_call_terminated] Called with event: {}", 
+        info!("🎯 [handle_call_terminated] Called with event: {}",
               if event_str.len() > 200 { &event_str[..200] } else { event_str });
-        
+
         if let Some(session_id_str) = self.extract_session_id(event_str) {
-            info!("🎯 [handle_call_terminated] Extracted session_id: {}", session_id_str);
-            
             let session_id = SessionId(session_id_str.clone());
+
+            // Skip if this session isn't ours
+            if self.state_machine.store.get_session(&session_id).await.is_err() {
+                debug!("Ignoring CallTerminated for session {} - not in our store", session_id);
+                return Ok(());
+            }
+
+            info!("🎯 [handle_call_terminated] Extracted session_id: {}", session_id_str);
             let reason = self.extract_field(event_str, "reason: ").unwrap_or_else(|| "Unknown".to_string());
             
             info!("🎯 [handle_call_terminated] Processing DialogTerminated for session {} with reason: {}", 
@@ -593,12 +620,13 @@ impl SessionCrossCrateEventHandler {
     
     async fn handle_dialog_error(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
+            let sid = SessionId(session_id);
+            if self.state_machine.store.get_session(&sid).await.is_err() {
+                debug!("Ignoring DialogError for session {} - not in our store", sid);
+                return Ok(());
+            }
             let error = self.extract_field(event_str, "error: \"").unwrap_or_else(|| "Unknown error".to_string());
-            
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::DialogError(error)
-            ).await {
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::DialogError(error)).await {
                 error!("Failed to process dialog error: {}", e);
             }
         }
@@ -608,81 +636,71 @@ impl SessionCrossCrateEventHandler {
     // Media event handlers
     async fn handle_media_stream_started(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::MediaSessionReady
-            ).await {
+            let sid = SessionId(session_id);
+            if !self.is_our_session(&sid).await { return Ok(()); }
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::MediaSessionReady).await {
                 error!("Failed to process media stream started: {}", e);
             }
         }
         Ok(())
     }
-    
+
     async fn handle_media_stream_stopped(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
+            let sid = SessionId(session_id);
+            if !self.is_our_session(&sid).await { return Ok(()); }
             let reason = self.extract_field(event_str, "reason: \"").unwrap_or_else(|| "Unknown reason".to_string());
-            
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::MediaError(format!("Media stream stopped: {}", reason))
-            ).await {
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::MediaError(format!("Media stream stopped: {}", reason))).await {
                 error!("Failed to process media stream stopped: {}", e);
             }
         }
         Ok(())
     }
-    
+
     async fn handle_media_flow_established(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::MediaFlowEstablished
-            ).await {
+            let sid = SessionId(session_id);
+            if !self.is_our_session(&sid).await { return Ok(()); }
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::MediaFlowEstablished).await {
                 error!("Failed to process media flow established: {}", e);
             }
         }
         Ok(())
     }
-    
+
     async fn handle_media_error(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
+            let sid = SessionId(session_id);
+            if !self.is_our_session(&sid).await { return Ok(()); }
             let error = self.extract_field(event_str, "error: \"").unwrap_or_else(|| "Unknown error".to_string());
-            
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::MediaError(error)
-            ).await {
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::MediaError(error)).await {
                 error!("Failed to process media error: {}", e);
             }
         }
         Ok(())
     }
-    
+
     // New dialog event handlers
     async fn handle_dialog_state_changed(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
+            let sid = SessionId(session_id);
+            if !self.is_our_session(&sid).await { return Ok(()); }
             let old_state = self.extract_field(event_str, "old_state: \"").unwrap_or_else(|| "unknown".to_string());
             let new_state = self.extract_field(event_str, "new_state: \"").unwrap_or_else(|| "unknown".to_string());
-            
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::DialogStateChanged { old_state, new_state }
-            ).await {
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::DialogStateChanged { old_state, new_state }).await {
                 error!("Failed to process DialogStateChanged: {}", e);
             }
         }
         Ok(())
     }
-    
+
     async fn handle_reinvite_received(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
+            let sid = SessionId(session_id);
+            if !self.is_our_session(&sid).await { return Ok(()); }
             let sdp = self.extract_field(event_str, "sdp: Some(\"")
                 .map(|s| s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\\"", "\""));
-            
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::ReinviteReceived { sdp }
-            ).await {
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::ReinviteReceived { sdp }).await {
                 error!("Failed to process ReinviteReceived: {}", e);
             }
         }
@@ -691,11 +709,17 @@ impl SessionCrossCrateEventHandler {
     
     async fn handle_transfer_requested(&self, event_str: &str) -> Result<()> {
         if let Some(session_id_str) = self.extract_session_id(event_str) {
+            let session_id = SessionId(session_id_str.clone());
+
+            // Skip if this session isn't ours
+            if self.state_machine.store.get_session(&session_id).await.is_err() {
+                debug!("Ignoring TransferRequested for session {} - not in our store", session_id);
+                return Ok(());
+            }
+
             let refer_to = self.extract_field(event_str, "refer_to: \"").unwrap_or_else(|| "unknown".to_string());
             let transfer_type = self.extract_field(event_str, "transfer_type: \"").unwrap_or_else(|| "blind".to_string());
             let transaction_id = self.extract_field(event_str, "transaction_id: \"").unwrap_or_else(|| "unknown".to_string());
-
-            let session_id = SessionId(session_id_str.clone());
 
             // RFC 3515 Compliance: Store transferor session ID
             if let Ok(mut session) = self.state_machine.store.get_session(&session_id).await {
@@ -781,6 +805,14 @@ impl SessionCrossCrateEventHandler {
             });
 
         info!("📨 ACK was received by dialog-core, triggering DialogACK event for session {}", session_id_str);
+
+        // Check if this session belongs to us — multiple peers share the global event bus
+        let session_id = SessionId(session_id_str.clone());
+        if self.state_machine.store.get_session(&session_id).await.is_err() {
+            debug!("Ignoring AckReceived for session {} - not in our store", session_id_str);
+            return Ok(());
+        }
+
         info!("🔍 About to call process_event with DialogACK");
 
         // Trigger DialogACK event in state machine
@@ -804,6 +836,8 @@ impl SessionCrossCrateEventHandler {
     // New media event handlers
     async fn handle_media_quality_degraded(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
+            let sid = SessionId(session_id);
+            if !self.is_our_session(&sid).await { return Ok(()); }
             let packet_loss_percent = self.extract_field(event_str, "packet_loss: ")
                 .and_then(|s| s.parse::<f32>().ok())
                 .map(|f| (f * 100.0) as u32)
@@ -813,61 +847,51 @@ impl SessionCrossCrateEventHandler {
                 .map(|f| (f * 1000.0) as u32)
                 .unwrap_or(0);
             let severity = self.extract_field(event_str, "severity: \"").unwrap_or_else(|| "unknown".to_string());
-            
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::MediaQualityDegraded { packet_loss_percent, jitter_ms, severity }
-            ).await {
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::MediaQualityDegraded { packet_loss_percent, jitter_ms, severity }).await {
                 error!("Failed to process MediaQualityDegraded: {}", e);
             }
         }
         Ok(())
     }
-    
+
     async fn handle_dtmf_detected(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
+            let sid = SessionId(session_id);
+            if !self.is_our_session(&sid).await { return Ok(()); }
             let digit = self.extract_field(event_str, "digit: '")
                 .and_then(|s| s.chars().next())
                 .unwrap_or('?');
             let duration_ms = self.extract_field(event_str, "duration_ms: ")
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(0);
-            
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::DtmfDetected { digit, duration_ms }
-            ).await {
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::DtmfDetected { digit, duration_ms }).await {
                 error!("Failed to process DtmfDetected: {}", e);
             }
         }
         Ok(())
     }
-    
+
     async fn handle_rtp_timeout(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
+            let sid = SessionId(session_id);
+            if !self.is_our_session(&sid).await { return Ok(()); }
             let last_packet_time = self.extract_field(event_str, "last_packet_time: \"").unwrap_or_else(|| "unknown".to_string());
-            
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::RtpTimeout { last_packet_time }
-            ).await {
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::RtpTimeout { last_packet_time }).await {
                 error!("Failed to process RtpTimeout: {}", e);
             }
         }
         Ok(())
     }
-    
+
     async fn handle_packet_loss_threshold_exceeded(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
+            let sid = SessionId(session_id);
+            if !self.is_our_session(&sid).await { return Ok(()); }
             let loss_percentage = self.extract_field(event_str, "loss_percentage: ")
                 .and_then(|s| s.parse::<f32>().ok())
                 .map(|f| (f * 100.0) as u32)
                 .unwrap_or(0);
-            
-            if let Err(e) = self.state_machine.process_event(
-                &SessionId(session_id),
-                EventType::PacketLossThresholdExceeded { loss_percentage }
-            ).await {
+            if let Err(e) = self.state_machine.process_event(&sid, EventType::PacketLossThresholdExceeded { loss_percentage }).await {
                 error!("Failed to process PacketLossThresholdExceeded: {}", e);
             }
         }
