@@ -284,3 +284,71 @@ impl<H: CallHandler> CallbackPeer<H> {
         }
     }
 }
+
+// ===== Convenience constructors using built-in handlers =====
+
+use crate::api::handlers::{AutoAnswerHandler, RejectAllHandler};
+
+impl CallbackPeer<AutoAnswerHandler> {
+    /// Create a peer that auto-answers all incoming calls and allows transfers.
+    pub async fn with_auto_answer(config: Config) -> Result<Self> {
+        Self::new(AutoAnswerHandler, config).await
+    }
+}
+
+// ===== ClosureHandler — use a closure instead of a full trait impl =====
+
+/// A [`CallHandler`] that delegates `on_incoming_call` to a closure.
+///
+/// Created by [`CallbackPeer::from_fn()`].
+pub struct ClosureHandler {
+    f: Box<dyn Fn(IncomingCall) -> CallHandlerDecision + Send + Sync>,
+}
+
+#[async_trait]
+impl CallHandler for ClosureHandler {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
+        (self.f)(call)
+    }
+}
+
+impl CallbackPeer<ClosureHandler> {
+    /// Create a peer with a closure for handling incoming calls.
+    ///
+    /// This is a quick alternative to implementing [`CallHandler`] when you only
+    /// need custom logic for `on_incoming_call`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> anyhow::Result<()> {
+    /// use rvoip_session_core_v3::{CallbackPeer, CallHandlerDecision, Config};
+    ///
+    /// let peer = CallbackPeer::from_fn(Config::default(), |call| {
+    ///     println!("Call from {}", call.from);
+    ///     CallHandlerDecision::Accept
+    /// }).await?;
+    ///
+    /// peer.run().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn from_fn(
+        config: Config,
+        handler: impl Fn(IncomingCall) -> CallHandlerDecision + Send + Sync + 'static,
+    ) -> Result<Self> {
+        Self::new(ClosureHandler { f: Box::new(handler) }, config).await
+    }
+}
+
+impl CallbackPeer<RejectAllHandler> {
+    /// Create a peer that rejects all incoming calls with `486 Busy Here`.
+    pub async fn with_reject_all(config: Config) -> Result<Self> {
+        Self::new(RejectAllHandler::default(), config).await
+    }
+
+    /// Create a peer that rejects all calls with a custom status and reason.
+    pub async fn with_reject(config: Config, status: u16, reason: impl Into<String>) -> Result<Self> {
+        Self::new(RejectAllHandler::new(status, reason), config).await
+    }
+}

@@ -6,41 +6,58 @@ authors = ["RVoIP Contributors"]
 description = "State table-based session coordination layer for RVoIP"
 license = "MIT OR Apache-2.0"
 
+# Getting started
 [[example]]
-name = "api_peer_audio_peer1"
-path = "examples/api_peer_audio/peer1.rs"
+name = "hello_caller"
+path = "examples/getting_started/caller.rs"
+[[example]]
+name = "hello_receiver"
+path = "examples/getting_started/receiver.rs"
 
+# StreamPeer examples (sequential / client-side)
 [[example]]
-name = "api_peer_audio_peer2"
-path = "examples/api_peer_audio/peer2.rs"
+name = "streampeer_audio"
+path = "examples/streampeer/audio.rs"
+[[example]]
+name = "streampeer_dtmf"
+path = "examples/streampeer/dtmf.rs"
+[[example]]
+name = "streampeer_hold_resume"
+path = "examples/streampeer/hold_resume.rs"
+[[example]]
+name = "streampeer_registration"
+path = "examples/streampeer/registration.rs"
+[[example]]
+name = "streampeer_blind_transfer"
+path = "examples/streampeer/blind_transfer.rs"
 
+# CallbackPeer examples (reactive / server-side)
 [[example]]
-name = "uas_answerer"
-path = "examples/thread_benchmark/uas_answerer.rs"
+name = "callbackpeer_auto_answer"
+path = "examples/callbackpeer/auto_answer.rs"
+[[example]]
+name = "callbackpeer_closure"
+path = "examples/callbackpeer/closure.rs"
+[[example]]
+name = "callbackpeer_routing"
+path = "examples/callbackpeer/routing.rs"
+[[example]]
+name = "callbackpeer_ivr"
+path = "examples/callbackpeer/ivr.rs"
+[[example]]
+name = "callbackpeer_queue"
+path = "examples/callbackpeer/queue.rs"
+[[example]]
+name = "callbackpeer_custom"
+path = "examples/callbackpeer/custom.rs"
 
+# Advanced / multi-peer scenarios
 [[example]]
-name = "uac_caller"
-path = "examples/thread_benchmark/uac_caller.rs"
-
+name = "advanced_concurrent_calls"
+path = "examples/advanced/concurrent_calls.rs"
 [[example]]
-name = "blind_transfer_peer1_caller"
-path = "examples/blind_transfer/peer1_caller.rs"
-
-[[example]]
-name = "blind_transfer_peer2_transferor"
-path = "examples/blind_transfer/peer2_transferor.rs"
-
-[[example]]
-name = "blind_transfer_peer3_target"
-path = "examples/blind_transfer/peer3_target.rs"
-
-[[example]]
-name = "register_uas"
-path = "examples/register_demo/uas.rs"
-
-[[example]]
-name = "register_uac"
-path = "examples/register_demo/uac.rs"
+name = "advanced_registrar_server"
+path = "examples/advanced/registrar_server.rs"
 
 
 [dependencies]

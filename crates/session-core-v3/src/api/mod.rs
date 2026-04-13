@@ -1,56 +1,47 @@
-//! # Session Core v2 API
+//! # Session Core v3 API
 //!
-//! A clean, state-machine driven SIP session management library with support for calls,
-//! registration, subscriptions, and instant messaging.
+//! A state-machine driven SIP session management library for building clients,
+//! servers, proxies, and call center software.
 //!
-//! ## Quick Start
+//! ## Two API Styles
 //!
-//! The simplest way to use this library is through the `SimplePeer` API:
+//! | API | Best for | Style |
+//! |-----|----------|-------|
+//! | [`StreamPeer`] | Clients, scripts, tests | Sequential — call methods, await results |
+//! | [`CallbackPeer`] | Servers, proxies, IVR | Reactive — implement [`CallHandler`] trait |
+//!
+//! ## Quick Start — Making a Call
 //!
 //! ```rust,no_run
-//! use rvoip_session_core_v2::api::simple::SimplePeer;
+//! use rvoip_session_core_v3::*;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), rvoip_session_core_v2::errors::SessionError> {
-//!     // Create a SIP peer
-//!     let peer = SimplePeer::new("alice").await?;
+//! async fn main() -> Result<()> {
+//!     let mut peer = StreamPeer::new("alice").await?;
+//!     let handle = peer.call("sip:bob@192.168.1.100:5060").await?;
 //!
-//!     // Make a call
-//!     let call_id = peer.call("sip:bob@192.168.1.100:5060").await?;
-//!
-//!     // Wait a bit for the call to be established
-//!     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-//!
-//!     // End the call
-//!     peer.hangup(&call_id).await?;
+//!     // Wait for the remote side to answer
+//!     peer.wait_for_answered(handle.id()).await?;
+//!     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+//!     handle.hangup().await?;
 //!
 //!     Ok(())
 //! }
 //! ```
 //!
-//! ## Receiving Calls
-//!
-//! Handle incoming calls with accept/reject logic:
+//! ## Quick Start — Receiving a Call
 //!
 //! ```rust,no_run
-//! use rvoip_session_core_v2::api::simple::{SimplePeer, IncomingCall};
+//! use rvoip_session_core_v3::*;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), rvoip_session_core_v2::errors::SessionError> {
-//!     let mut peer = SimplePeer::new("bob").await?;
+//! async fn main() -> Result<()> {
+//!     let mut peer = StreamPeer::new("bob").await?;
+//!     let incoming = peer.wait_for_incoming().await?;
+//!     println!("Call from {}", incoming.from);
 //!
-//!     // Wait for an incoming call
-//!     if let Some(incoming) = peer.incoming_call().await {
-//!         // Note: incoming has session info, not a from() method directly
-//!
-//!         // Accept the call
-//!         incoming.accept(&peer).await?;
-//!
-//!         // Talk for a while
-//!         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-//!
-//!         // Note: hangup would use the call_id from the incoming call
-//!     }
+//!     let handle = incoming.accept().await?;
+//!     handle.wait_for_end(None).await?;
 //!
 //!     Ok(())
 //! }
@@ -58,233 +49,62 @@
 //!
 //! ## Call Features
 //!
-//! The API supports various call features:
+//! [`SessionHandle`] provides hold, resume, transfer, DTMF, and audio:
 //!
 //! ```rust,no_run
-//! use rvoip_session_core_v2::api::simple::SimplePeer;
+//! # use rvoip_session_core_v3::*;
+//! # async fn example(handle: SessionHandle) -> Result<()> {
+//! handle.hold().await?;
+//! handle.resume().await?;
+//! handle.send_dtmf('1').await?;
+//! handle.transfer_blind("sip:charlie@example.com").await?;
 //!
-//! #[tokio::main]
-//! async fn main() -> Result<(), rvoip_session_core_v2::errors::SessionError> {
-//!     let peer = SimplePeer::new("alice").await?;
-//!     let call_id = peer.call("sip:bob@example.com:5060").await?;
-//!
-//!     // Hold the call
-//!     peer.hold(&call_id).await?;
-//!
-//!     // Resume the call
-//!     peer.resume(&call_id).await?;
-//!
-//!     // Send DTMF tones
-//!     peer.send_dtmf(&call_id, '1').await?;
-//!     peer.send_dtmf(&call_id, '#').await?;
-//!
-//!     // Transfer the call
-//!     peer.transfer(&call_id, "sip:charlie@example.com:5060").await?;
-//!
-//!     Ok(())
-//! }
+//! let audio = handle.audio().await?;
+//! let (sender, receiver) = audio.split();
+//! # Ok(())
+//! # }
 //! ```
 //!
-//! ## Registration
+//! ## Server with CallbackPeer
 //!
-//! Register with a SIP registrar for receiving calls:
-//!
-//! ```rust,no_run
-//! use rvoip_session_core_v2::api::unified::{UnifiedCoordinator, Config};
-//! use rvoip_session_core_v2::state_table::types::EventType;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), rvoip_session_core_v2::errors::SessionError> {
-//!     let config = Config {
-//!         local_uri: "sip:alice@example.com".to_string(),
-//!         sip_port: 5060,
-//!         ..Default::default()
-//!     };
-//!
-//!     let coordinator = UnifiedCoordinator::new(config).await?;
-//!
-//!     // Registration happens through the state machine
-//!     // You would typically trigger it through the simple API or events
-//!
-//!     // Registration is now active
-//!     // The session will handle registration refreshes automatically
-//!
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## Subscriptions and NOTIFY
-//!
-//! Subscribe to presence or other events:
+//! For servers, implement [`CallHandler`] or use a built-in handler:
 //!
 //! ```rust,no_run
-//! use rvoip_session_core_v2::api::unified::{UnifiedCoordinator, Config};
+//! use rvoip_session_core_v3::*;
+//! use rvoip_session_core_v3::api::handlers::{RoutingHandler, RoutingAction};
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), rvoip_session_core_v2::errors::SessionError> {
-//!     let coordinator = UnifiedCoordinator::new(Config::default()).await?;
+//! async fn main() -> Result<()> {
+//!     let handler = RoutingHandler::new()
+//!         .with_rule("support@", RoutingAction::Accept)
+//!         .with_rule("spam@", RoutingAction::Reject {
+//!             status: 403,
+//!             reason: "Forbidden".into(),
+//!         });
 //!
-//!     // Subscription support is built into the state machine
-//!     // SUBSCRIBE/NOTIFY messages are handled automatically
-//!     // when the appropriate events are triggered
-//!
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## Instant Messaging (MESSAGE)
-//!
-//! Send and receive SIP MESSAGE requests:
-//!
-//! ```rust,no_run
-//! use rvoip_session_core_v2::api::unified::{UnifiedCoordinator, Config};
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), rvoip_session_core_v2::errors::SessionError> {
-//!     let config = Config {
-//!         local_uri: "sip:alice@example.com".to_string(),
-//!         ..Default::default()
-//!     };
-//!     let coordinator = UnifiedCoordinator::new(config).await?;
-//!
-//!     // MESSAGE support is built into the state machine
-//!     // SIP MESSAGE requests are handled through the dialog adapter
-//!
+//!     let peer = CallbackPeer::new(handler, Config::default()).await?;
+//!     peer.run().await?;
 //!     Ok(())
 //! }
 //! ```
 //!
 //! ## Custom Configuration
 //!
-//! Configure the peer with specific network settings:
+//! Use [`StreamPeer::builder()`] or [`Config`] directly:
 //!
 //! ```rust,no_run
-//! use rvoip_session_core_v2::api::simple::{SimplePeer, Config};
+//! use rvoip_session_core_v3::*;
 //!
 //! #[tokio::main]
-//! async fn main() -> Result<(), rvoip_session_core_v2::errors::SessionError> {
-//!     let config = Config {
-//!         sip_port: 5080,  // Custom SIP port
-//!         media_port_start: 10000,
-//!         media_port_end: 20000,
-//!         local_ip: "192.168.1.100".parse().unwrap(),
-//!         bind_addr: "192.168.1.100:5080".parse().unwrap(),
-//!         local_uri: "sip:alice@192.168.1.100:5080".to_string(),
-//!         state_table_path: Some("custom_states.yaml".into()),
-//!     };
-//!
-//!     let peer = SimplePeer::with_config("alice", config).await?;
-//!
-//!     // Use the peer normally
-//!     let call_id = peer.call("sip:bob@192.168.1.200:5060").await?;
-//!
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## Parallel Operations
-//!
-//! Handle multiple calls simultaneously:
-//!
-//! ```rust,no_run
-//! use rvoip_session_core_v2::api::simple::SimplePeer;
-//! use tokio::task::JoinSet;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), rvoip_session_core_v2::errors::SessionError> {
-//!     let mut calls = JoinSet::new();
-//!
-//!     // Make multiple calls in parallel with separate peers
-//!     for i in 1..=3 {
-//!         let name = format!("operator{}", i);
-//!         let uri = format!("sip:user{}@example.com:5060", i);
-//!
-//!         calls.spawn(async move {
-//!             let peer = SimplePeer::new(&name).await?;
-//!             let call_id = peer.call(&uri).await?;
-//!             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-//!             peer.hangup(&call_id).await?;
-//!             Ok::<_, rvoip_session_core_v2::errors::SessionError>(())
-//!         });
-//!     }
-//!
-//!     // Wait for all calls to complete
-//!     while let Some(result) = calls.join_next().await {
-//!         result.unwrap()?;
-//!     }
-//!
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## Conference Calls
-//!
-//! Create a simple conference by bridging calls:
-//!
-//! ```rust,no_run
-//! use rvoip_session_core_v2::api::simple::SimplePeer;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), rvoip_session_core_v2::errors::SessionError> {
-//!     let peer = SimplePeer::new("conference_host").await?;
-//!
-//!     // Make first call
-//!     let call1 = peer.call("sip:alice@example.com:5060").await?;
-//!
-//!     // Make second call
-//!     let call2 = peer.call("sip:bob@example.com:5060").await?;
-//!
-//!     // Create a conference (using the create_conference method that takes a CallId and name)
-//!     peer.create_conference(&call1, "my_conference").await?;
-//!
-//!     // Add second call to the conference
-//!     peer.add_to_conference(&call1, &call2).await?;
-//!
-//!     // Let them talk
-//!     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-//!
-//!     // End the calls
-//!     peer.hangup(&call1).await?;
-//!     peer.hangup(&call2).await?;
-//!
-//!     Ok(())
-//! }
-//! ```
-//!
-//! ## Error Handling
-//!
-//! Proper error handling with retry logic:
-//!
-//! ```rust,no_run
-//! use rvoip_session_core_v2::api::simple::SimplePeer;
-//! use rvoip_session_core_v2::errors::SessionError;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), rvoip_session_core_v2::errors::SessionError> {
-//!     let peer = SimplePeer::new("reliable_caller").await?;
-//!
-//!     // Retry call with exponential backoff
-//!     let mut retry_count = 0;
-//!     let max_retries = 3;
-//!     let mut delay = std::time::Duration::from_secs(1);
-//!
-//!     loop {
-//!         match peer.call("sip:busy@example.com:5060").await {
-//!             Ok(call_id) => {
-//!                 println!("Call established: {:?}", call_id);
-//!                 break;
-//!             }
-//!             Err(e) => {
-//!                 retry_count += 1;
-//!                 if retry_count >= max_retries {
-//!                     return Err(e.into());
-//!                 }
-//!                 println!("Call failed, retrying in {:?}...", delay);
-//!                 tokio::time::sleep(delay).await;
-//!                 delay *= 2;  // Exponential backoff
-//!             }
-//!         }
-//!     }
+//! async fn main() -> Result<()> {
+//!     // Builder style
+//!     let peer = StreamPeer::builder()
+//!         .name("alice")
+//!         .sip_port(5080)
+//!         .local_ip("192.168.1.100".parse().unwrap())
+//!         .media_ports(10000, 20000)
+//!         .build()
+//!         .await?;
 //!
 //!     Ok(())
 //! }
@@ -292,14 +112,27 @@
 //!
 //! ## Module Structure
 //!
-//! - `types` - Core data types (SessionId, CallState, etc.)
-//! - `unified` - The unified coordinator that manages sessions
-//! - `simple` - Simplified peer API for easy use
-//! - `builder` - Session configuration builders
+//! - [`stream_peer`] — Sequential SIP peer for clients and scripts
+//! - [`callback_peer`] — Reactive SIP peer for servers and proxies
+//! - [`handlers`] — Built-in [`CallHandler`] implementations
+//! - [`handle`] — [`SessionHandle`] for controlling active calls
+//! - [`incoming`] — [`IncomingCall`] and [`IncomingCallGuard`]
+//! - [`audio`] — [`AudioStream`], [`AudioSender`], [`AudioReceiver`]
+//! - [`events`] — [`Event`] enum for session lifecycle events
+//! - [`unified`] — [`UnifiedCoordinator`] and [`Config`]
 //!
-//! The library uses a state machine approach where all business logic
-//! is defined in YAML state tables, making it highly customizable
-//! without code changes.
+//! [`StreamPeer`]: stream_peer::StreamPeer
+//! [`CallbackPeer`]: callback_peer::CallbackPeer
+//! [`CallHandler`]: callback_peer::CallHandler
+//! [`SessionHandle`]: handle::SessionHandle
+//! [`IncomingCall`]: incoming::IncomingCall
+//! [`IncomingCallGuard`]: incoming::IncomingCallGuard
+//! [`AudioStream`]: audio::AudioStream
+//! [`AudioSender`]: audio::AudioSender
+//! [`AudioReceiver`]: audio::AudioReceiver
+//! [`Event`]: events::Event
+//! [`UnifiedCoordinator`]: unified::UnifiedCoordinator
+//! [`Config`]: unified::Config
 
 // Core modules only
 pub mod types;      // Core types (legacy)
@@ -312,8 +145,9 @@ pub mod simple;     // Simple peer API (legacy — use StreamPeer instead)
 pub mod audio;          // AudioStream, AudioSender, AudioReceiver
 pub mod handle;         // SessionHandle, CallId
 pub mod incoming;       // IncomingCall, IncomingCallGuard
-pub mod stream_peer;    // StreamPeer, PeerControl, EventReceiver
+pub mod stream_peer;    // StreamPeer, PeerControl, EventReceiver, StreamPeerBuilder
 pub mod callback_peer;  // CallbackPeer, CallHandler, CallHandlerDecision, EndReason
+pub mod handlers;       // Built-in CallHandler impls: AutoAnswerHandler, RejectAllHandler, etc.
 
 // Re-export the main types
 pub use types::{

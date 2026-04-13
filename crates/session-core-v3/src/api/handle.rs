@@ -171,6 +171,18 @@ impl SessionHandle {
         self.coordinator.get_session_info(&self.call_id).await
     }
 
+    // ===== State predicates =====
+
+    /// Check whether the call is currently active (connected and not on hold).
+    pub async fn is_active(&self) -> bool {
+        matches!(self.state().await, Ok(CallState::Active))
+    }
+
+    /// Check whether the call is currently on hold.
+    pub async fn is_on_hold(&self) -> bool {
+        matches!(self.state().await, Ok(CallState::OnHold))
+    }
+
     // ===== Events =====
 
     /// Subscribe to events for this specific session.

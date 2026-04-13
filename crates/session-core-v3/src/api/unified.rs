@@ -38,10 +38,16 @@ pub struct Config {
     pub local_uri: String,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        let ip = "127.0.0.1".parse::<IpAddr>().unwrap();
-        let port = 5060;
+impl Config {
+    /// Create a config for local development/testing on 127.0.0.1.
+    ///
+    /// ```
+    /// # use rvoip_session_core_v3::Config;
+    /// let config = Config::local("alice", 5060);
+    /// assert_eq!(config.local_uri, "sip:alice@127.0.0.1:5060");
+    /// ```
+    pub fn local(name: &str, port: u16) -> Self {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
         Self {
             local_ip: ip,
             sip_port: port,
@@ -49,8 +55,33 @@ impl Default for Config {
             media_port_end: 17000,
             bind_addr: SocketAddr::new(ip, port),
             state_table_path: None,
-            local_uri: format!("sip:user@{}:{}", ip, port),
+            local_uri: format!("sip:{}@{}:{}", name, ip, port),
         }
+    }
+
+    /// Create a config bound to a specific IP address (e.g. for LAN or production).
+    ///
+    /// ```
+    /// # use rvoip_session_core_v3::Config;
+    /// let config = Config::on("alice", "192.168.1.50".parse().unwrap(), 5060);
+    /// assert_eq!(config.local_uri, "sip:alice@192.168.1.50:5060");
+    /// ```
+    pub fn on(name: &str, ip: IpAddr, port: u16) -> Self {
+        Self {
+            local_ip: ip,
+            sip_port: port,
+            media_port_start: 16000,
+            media_port_end: 17000,
+            bind_addr: SocketAddr::new(ip, port),
+            state_table_path: None,
+            local_uri: format!("sip:{}@{}:{}", name, ip, port),
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config::local("user", 5060)
     }
 }
 
@@ -591,6 +622,29 @@ impl UnifiedCoordinator {
         
         Ok(RegistrationHandle { session_id })
     }
+
+    /// Register with a SIP server using a [`Registration`] builder.
+    ///
+    /// This is the preferred way to register — `from_uri` and `contact_uri`
+    /// default to the peer's `local_uri` from [`Config`].
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core_v3::UnifiedCoordinator>) -> rvoip_session_core_v3::Result<()> {
+    /// use rvoip_session_core_v3::Registration;
+    ///
+    /// let handle = coordinator.register_with(
+    ///     Registration::new("sip:registrar.example.com", "alice", "secret123")
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn register_with(&self, reg: Registration) -> Result<RegistrationHandle> {
+        let from_uri = reg.from_uri.as_deref().unwrap_or(&self.config.local_uri);
+        let contact_uri = reg.contact_uri.as_deref().unwrap_or(&self.config.local_uri);
+        self.register(&reg.registrar, from_uri, contact_uri, &reg.username, &reg.password, reg.expires).await
+    }
     
     /// Unregister from SIP server
     ///
@@ -631,4 +685,67 @@ impl UnifiedCoordinator {
 #[derive(Debug, Clone)]
 pub struct RegistrationHandle {
     pub session_id: SessionId,
+}
+
+/// Configuration for SIP registration.
+///
+/// Use [`Registration::new()`] for the common case where `from_uri` and
+/// `contact_uri` are derived from the peer's [`Config`].
+///
+/// # Example
+///
+/// ```
+/// use rvoip_session_core_v3::Registration;
+///
+/// let reg = Registration::new("sip:registrar.example.com", "alice", "secret123")
+///     .expires(1800);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Registration {
+    /// SIP URI of the registrar server (e.g. `sip:registrar.example.com`)
+    pub registrar: String,
+    /// Username for digest authentication
+    pub username: String,
+    /// Password for digest authentication
+    pub password: String,
+    /// Registration expiry in seconds (default: 3600)
+    pub expires: u32,
+    /// Override the From URI (defaults to the peer's local_uri)
+    pub from_uri: Option<String>,
+    /// Override the Contact URI (defaults to the peer's local_uri)
+    pub contact_uri: Option<String>,
+}
+
+impl Registration {
+    /// Create a registration with the minimum required fields.
+    ///
+    /// `from_uri` and `contact_uri` will be derived from the peer's config.
+    pub fn new(registrar: impl Into<String>, username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            registrar: registrar.into(),
+            username: username.into(),
+            password: password.into(),
+            expires: 3600,
+            from_uri: None,
+            contact_uri: None,
+        }
+    }
+
+    /// Set the registration expiry in seconds (default: 3600).
+    pub fn expires(mut self, secs: u32) -> Self {
+        self.expires = secs;
+        self
+    }
+
+    /// Override the From URI (defaults to the peer's local_uri).
+    pub fn from_uri(mut self, uri: impl Into<String>) -> Self {
+        self.from_uri = Some(uri.into());
+        self
+    }
+
+    /// Override the Contact URI (defaults to the peer's local_uri).
+    pub fn contact_uri(mut self, uri: impl Into<String>) -> Self {
+        self.contact_uri = Some(uri.into());
+        self
+    }
 }

@@ -8,6 +8,7 @@
 //!
 //! [`CallbackPeer`]: crate::api::callback_peer::CallbackPeer
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use tokio::sync::mpsc;
@@ -89,6 +90,75 @@ impl EventReceiver {
                 }
             }
             return Some(event);
+        }
+    }
+
+    // ===== Filtered-wait helpers =====
+    //
+    // Each method loops over `self.next()` and returns only matching events.
+    // Non-matching events are consumed and discarded — the same behaviour as
+    // the existing `wait_for_*` methods on `StreamPeer`.
+
+    /// Wait for the next incoming call event, skipping all others.
+    ///
+    /// Returns `(call_id, from, to, sdp)` or `None` on channel close.
+    pub async fn next_incoming(&mut self) -> Option<(CallId, String, String, Option<String>)> {
+        loop {
+            match self.next().await? {
+                Event::IncomingCall { call_id, from, to, sdp } => {
+                    return Some((call_id, from, to, sdp));
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    /// Wait for the next DTMF digit on any call, skipping all others.
+    ///
+    /// Returns `(call_id, digit)` or `None` on channel close.
+    pub async fn next_dtmf(&mut self) -> Option<(CallId, char)> {
+        loop {
+            match self.next().await? {
+                Event::DtmfReceived { call_id, digit } => {
+                    return Some((call_id, digit));
+                }
+                _ => continue,
+            }
+        }
+    }
+
+    /// Wait for the next transfer-related event, skipping all others.
+    ///
+    /// Matches `ReferReceived`, `TransferAccepted`, `TransferCompleted`,
+    /// `TransferFailed`, and `TransferProgress`.
+    pub async fn next_transfer(&mut self) -> Option<Event> {
+        loop {
+            let event = self.next().await?;
+            if event.is_transfer_event() {
+                return Some(event);
+            }
+        }
+    }
+
+    /// Wait for the next event matching `predicate`, discarding non-matches.
+    ///
+    /// Returns `None` on channel close.
+    pub async fn next_where<F: FnMut(&Event) -> bool>(&mut self, mut predicate: F) -> Option<Event> {
+        loop {
+            let event = self.next().await?;
+            if predicate(&event) {
+                return Some(event);
+            }
+        }
+    }
+
+    /// Wait for the next event belonging to `call_id`, skipping others.
+    pub async fn next_for_call(&mut self, call_id: &CallId) -> Option<Event> {
+        loop {
+            let event = self.next().await?;
+            if event.call_id() == Some(call_id) {
+                return Some(event);
+            }
         }
     }
 }
@@ -286,7 +356,10 @@ impl StreamPeer {
         self.events.next().await
     }
 
-    /// Register with a SIP server.
+    /// Register with a SIP server (6-arg form).
+    ///
+    /// Prefer [`register_with()`](Self::register_with) which uses a builder and
+    /// derives `from_uri`/`contact_uri` from the peer's config.
     pub async fn register(
         &mut self,
         registrar_uri: &str,
@@ -302,6 +375,28 @@ impl StreamPeer {
             .await
     }
 
+    /// Register with a SIP server using a [`Registration`](crate::Registration) builder.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core_v3::Result<()> {
+    /// use rvoip_session_core_v3::{StreamPeer, Registration};
+    ///
+    /// let mut peer = StreamPeer::new("alice").await?;
+    /// let handle = peer.register_with(
+    ///     Registration::new("sip:registrar.example.com", "alice", "secret123")
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn register_with(
+        &mut self,
+        reg: crate::api::unified::Registration,
+    ) -> Result<crate::api::unified::RegistrationHandle> {
+        self.control.coordinator.register_with(reg).await
+    }
+
     /// Graceful shutdown — stops background tasks and drops resources.
     ///
     /// Previously `SimplePeer::shutdown()` called `process::exit(0)`. This version
@@ -312,5 +407,91 @@ impl StreamPeer {
         // Background tasks holding Arcs will observe channel closure and exit.
         drop(self);
         Ok(())
+    }
+
+    /// Start building a new `StreamPeer` with configuration options.
+    pub fn builder() -> StreamPeerBuilder {
+        StreamPeerBuilder::new()
+    }
+}
+
+// ===== StreamPeerBuilder =====
+
+/// Builder for [`StreamPeer`] with fluent configuration.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # async fn example() -> anyhow::Result<()> {
+/// use rvoip_session_core_v3::StreamPeer;
+///
+/// let peer = StreamPeer::builder()
+///     .name("alice")
+///     .sip_port(5080)
+///     .build()
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct StreamPeerBuilder {
+    config: Config,
+    name: Option<String>,
+}
+
+impl StreamPeerBuilder {
+    /// Create a new builder with default configuration.
+    pub fn new() -> Self {
+        Self {
+            config: Config::default(),
+            name: None,
+        }
+    }
+
+    /// Set the display name (auto-generates a SIP URI from it).
+    pub fn name(mut self, name: &str) -> Self {
+        self.name = Some(name.to_string());
+        self
+    }
+
+    /// Set the SIP port.
+    pub fn sip_port(mut self, port: u16) -> Self {
+        self.config.sip_port = port;
+        self.config.bind_addr.set_port(port);
+        self
+    }
+
+    /// Set the local IP address.
+    pub fn local_ip(mut self, ip: IpAddr) -> Self {
+        self.config.local_ip = ip;
+        self.config.bind_addr.set_ip(ip);
+        self
+    }
+
+    /// Set the media port range.
+    pub fn media_ports(mut self, start: u16, end: u16) -> Self {
+        self.config.media_port_start = start;
+        self.config.media_port_end = end;
+        self
+    }
+
+    /// Use a fully custom config (overrides all previous settings).
+    pub fn config(mut self, config: Config) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Build the `StreamPeer`.
+    pub async fn build(mut self) -> Result<StreamPeer> {
+        if let Some(name) = self.name {
+            self.config.local_uri =
+                format!("sip:{}@{}:{}", name, self.config.local_ip, self.config.sip_port);
+        }
+        StreamPeer::with_config(self.config).await
+    }
+}
+
+impl Default for StreamPeerBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
