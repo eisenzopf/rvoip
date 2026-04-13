@@ -8,11 +8,8 @@ license = "MIT OR Apache-2.0"
 
 # Getting started
 [[example]]
-name = "hello_caller"
-path = "examples/getting_started/caller.rs"
-[[example]]
-name = "hello_receiver"
-path = "examples/getting_started/receiver.rs"
+name = "hello"
+path = "examples/getting_started/hello.rs"
 
 # StreamPeer examples (sequential / client-side)
 [[example]]

@@ -11,10 +11,11 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 
 use rvoip_session_core_v3::{
     CallHandler, CallHandlerDecision, CallId, CallbackPeer, Config, EndReason, IncomingCall,
-    SessionHandle,
+    SessionHandle, StreamPeer,
 };
 
 /// Per-call state tracking which menu option was selected.
@@ -34,7 +35,6 @@ impl IvrHandler {
 impl CallHandler for IvrHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
         println!("[IVR] Incoming call from {}", call.from);
-        // Track this call
         self.calls
             .lock()
             .await
@@ -43,10 +43,7 @@ impl CallHandler for IvrHandler {
     }
 
     async fn on_call_established(&self, handle: SessionHandle) {
-        println!(
-            "[IVR] Call {} connected — presenting menu",
-            handle.id()
-        );
+        println!("[IVR] Call {} connected — presenting menu", handle.id());
         println!("[IVR]   Press 1 for Sales");
         println!("[IVR]   Press 2 for Support");
         println!("[IVR]   Press 9 to hang up");
@@ -90,6 +87,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter("rvoip_session_core_v3=info")
         .init();
 
+    // --- Background: test caller that dials in and presses DTMF digits ---
+    tokio::spawn(async {
+        sleep(Duration::from_secs(1)).await;
+        let mut caller = StreamPeer::with_config(Config::local("caller", 5061)).await.unwrap();
+
+        println!("[TEST] Calling IVR...");
+        let handle = caller.call("sip:ivr@127.0.0.1:5060").await.unwrap();
+        caller.wait_for_answered(handle.id()).await.ok();
+
+        // Navigate the menu
+        for digit in ['1', '2', '9'] {
+            sleep(Duration::from_secs(1)).await;
+            println!("[TEST] Pressing '{}'", digit);
+            handle.send_dtmf(digit).await.ok();
+        }
+
+        sleep(Duration::from_secs(2)).await;
+        handle.hangup().await.ok();
+        println!("[TEST] Done.");
+        sleep(Duration::from_secs(1)).await;
+        std::process::exit(0);
+    });
+
+    // --- Demo: IVR server ---
     println!("IVR server on port 5060...");
     let peer = CallbackPeer::new(IvrHandler::new(), Config::local("ivr", 5060)).await?;
     peer.run().await?;

@@ -9,7 +9,8 @@
 use std::time::Duration;
 
 use rvoip_session_core_v3::api::handlers::QueueHandler;
-use rvoip_session_core_v3::{CallbackPeer, Config};
+use rvoip_session_core_v3::{CallbackPeer, Config, StreamPeer};
+use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,20 +28,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "[AGENT] Call {} in queue, answering in 2 seconds...",
                 guard.call_id()
             );
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            sleep(Duration::from_secs(2)).await;
 
             match guard.accept().await {
-                Ok(handle) => {
-                    println!("[AGENT] Answered call {}", handle.id());
-                    // In a real app, you'd handle the call here
-                }
-                Err(e) => {
-                    println!("[AGENT] Failed to accept: {}", e);
-                }
+                Ok(handle) => println!("[AGENT] Answered call {}", handle.id()),
+                Err(e) => println!("[AGENT] Failed to accept: {}", e),
             }
         }
     });
 
+    // --- Background: 3 test callers with staggered timing ---
+    tokio::spawn(async {
+        sleep(Duration::from_secs(1)).await;
+
+        for i in 0..3 {
+            let port = 5061 + i as u16;
+            let mut caller =
+                StreamPeer::with_config(Config::local(&format!("caller{}", i), port))
+                    .await
+                    .unwrap();
+            println!("[TEST] Caller {} dialing in...", i);
+            let h = caller.call("sip:queue@127.0.0.1:5060").await.unwrap();
+            caller.wait_for_answered(h.id()).await.ok();
+            sleep(Duration::from_secs(3)).await;
+            h.hangup().await.ok();
+            caller.wait_for_ended(h.id()).await.ok();
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        println!("[TEST] All callers done.");
+        sleep(Duration::from_secs(1)).await;
+        std::process::exit(0);
+    });
+
+    // --- Demo: queue server ---
     println!("Call queue server on port 5060...");
     println!("  Calls ring for up to 30 seconds");
     println!("  Agent picks up after ~2 second delay");

@@ -9,7 +9,8 @@
 //! - anything else -> Reject 404
 
 use rvoip_session_core_v3::api::handlers::{RoutingAction, RoutingHandler};
-use rvoip_session_core_v3::{CallbackPeer, Config};
+use rvoip_session_core_v3::{CallbackPeer, Config, StreamPeer};
+use tokio::time::{sleep, Duration};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,6 +18,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter("rvoip_session_core_v3=info")
         .init();
 
+    // --- Background: test callers for each route ---
+    tokio::spawn(async {
+        sleep(Duration::from_secs(1)).await;
+
+        for (i, target) in ["support", "spam", "unknown"].iter().enumerate() {
+            let port = 5061 + i as u16;
+            let mut caller =
+                StreamPeer::with_config(Config::local(&format!("caller{}", i), port))
+                    .await
+                    .unwrap();
+            println!("[TEST] Calling {}@... ", target);
+            let h = caller
+                .call(&format!("sip:{}@127.0.0.1:5060", target))
+                .await
+                .unwrap();
+            sleep(Duration::from_secs(2)).await;
+            h.hangup().await.ok();
+            caller.wait_for_ended(h.id()).await.ok();
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        println!("[TEST] Done.");
+        sleep(Duration::from_secs(1)).await;
+        std::process::exit(0);
+    });
+
+    // --- Demo: routing handler ---
     let handler = RoutingHandler::new()
         .with_rule("support@", RoutingAction::Accept)
         .with_rule("sales@", RoutingAction::Accept)
