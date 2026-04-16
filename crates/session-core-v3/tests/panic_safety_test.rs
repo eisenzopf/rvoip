@@ -5,21 +5,13 @@
 //! sends a `500 Server Internal Error` response via the state machine's
 //! `SendRejectResponse` action.
 //!
-//! ## What this test DOES verify
+//! ## What this test verifies
 //!
 //! - `IncomingCall::drop` correctly detects panic unwinding.
-//! - The spawned `reject_call` completes without error, meaning the state
-//!   machine actually executed the rejection (session transitions to
-//!   `Terminated`, 500 response is built and handed to dialog-core).
-//!
-//! ## What this test does NOT verify (separate dialog-core issue)
-//!
-//! - Whether the UAC receives the 500 response as a `CallFailed` event.
-//!   `dialog-core`'s `event_hub` currently maps only 180/200 responses into
-//!   cross-crate events — 4xx/5xx/6xx responses are dropped. Fixing that is
-//!   out of scope for the panic-safety work. The RFC 3261 compliance we
-//!   care about here is that our UAS emits a final response within the
-//!   panic's unwind; whether the UAC sees it correctly is a separate bug.
+//! - The spawned `reject_call` completes without error — the state machine
+//!   executes the rejection, builds a 500 response, and hands it to dialog-core.
+//! - The UAC receives the 500 as `Event::CallFailed { status_code: 500, .. }`
+//!   within a few seconds (not waiting ~3 min for Timer C).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -29,8 +21,9 @@ use async_trait::async_trait;
 use tokio::time::sleep;
 
 use rvoip_session_core_v3::{
-    CallHandler, CallHandlerDecision, CallbackPeer, Config, IncomingCall, StreamPeer,
+    CallHandler, CallHandlerDecision, CallbackPeer, Config, Event, IncomingCall, StreamPeer,
 };
+use tokio::time::timeout;
 
 /// Handler that panics as soon as it receives an incoming call, without
 /// resolving it. Drop's panic-aware path must send a 500 in its place.
@@ -66,27 +59,38 @@ async fn panicking_handler_triggers_drop_safety_net() {
 
     sleep(Duration::from_millis(500)).await;
 
-    // Send an INVITE from the UAC. We do not care what the UAC sees here —
-    // we care that the UAS handler panics and the safety net runs.
+    // Subscribe to UAC events before placing the call so we don't race
+    // against the 500 arriving.
     let mut caller = StreamPeer::with_config(Config::local("caller", CLIENT_PORT))
         .await
         .expect("build caller");
-    let _handle = caller
+    let mut events = caller.control().subscribe_events().await.expect("subscribe");
+    let handle = caller
         .call(&format!("sip:srv@127.0.0.1:{}", SERVER_PORT))
         .await
         .expect("send INVITE");
 
-    // Give the server handler enough time to be invoked and panic.
-    // The spawned reject_call in Drop's panic path should complete within
-    // a few hundred ms (it's a local state machine transition).
-    sleep(Duration::from_secs(2)).await;
+    // Wait up to 5 seconds for CallFailed — well under Timer C's 3 minutes.
+    let status = timeout(Duration::from_secs(5), async {
+        loop {
+            match events.next().await {
+                Some(Event::CallFailed { call_id, status_code, .. }) if call_id == *handle.id() => {
+                    return Some(status_code);
+                }
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for CallFailed — panic safety net did not propagate to UAC")
+    .expect("event stream closed unexpectedly");
 
-    // Verify the handler was invoked before it panicked. This confirms the
-    // IncomingCall reached our handler code path.
     assert!(
         called.load(Ordering::SeqCst),
         "handler never ran — INVITE did not reach the UAS"
     );
+    assert_eq!(status, 500, "expected 500 Server Internal Error, got {}", status);
 
     // Clean shutdown
     stop.shutdown();

@@ -149,6 +149,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::CallStateChanged { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallEstablished { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallTerminated { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::CallFailed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DtmfReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogError { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogCreated { .. } => None, // No session_id in DialogCreated
@@ -315,7 +316,16 @@ pub enum DialogToSessionEvent {
         session_id: String,
         reason: TerminationReason,
     },
-    
+
+    /// Final failure response received for an outgoing request
+    /// (3xx redirect, 4xx client error, 5xx server error, 6xx global failure).
+    /// RFC 3261 §8.1.3 — the UAC transaction is complete on a final response.
+    CallFailed {
+        session_id: String,
+        status_code: u16,
+        reason_phrase: String,
+    },
+
     /// DTMF tones received
     DtmfReceived {
         session_id: String,

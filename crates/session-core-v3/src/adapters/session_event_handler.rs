@@ -217,6 +217,8 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                     self.handle_incoming_call(&event_str).await?;
                 } else if event_str.contains("CallEstablished") {
                     self.handle_call_established(&event_str).await?;
+                } else if event_str.contains("CallFailed") {
+                    self.handle_call_failed(&event_str).await?;
                 } else if event_str.contains("CallStateChanged") {
                     self.handle_call_state_changed(&event_str).await?;
                 } else if event_str.contains("CallTerminated") {
@@ -565,7 +567,65 @@ impl SessionCrossCrateEventHandler {
 
         Ok(())
     }
-    
+
+    /// Handle a 3xx/4xx/5xx/6xx final failure response for an outgoing request.
+    /// Drives the state machine through the appropriate `Dialog{4,5,6}xxFailure`
+    /// transition and publishes an app-level `CallFailed` event so peer
+    /// subscribers (StreamPeer, CallbackPeer) learn the call was rejected.
+    async fn handle_call_failed(&self, event_str: &str) -> Result<()> {
+        let Some(session_id_str) = self.extract_session_id(event_str) else {
+            warn!("Could not extract session_id from CallFailed event");
+            return Ok(());
+        };
+        let session_id = SessionId(session_id_str);
+
+        if !self.is_our_session(&session_id).await {
+            debug!("Ignoring CallFailed for session {} - not in our store", session_id);
+            return Ok(());
+        }
+
+        let status = self
+            .extract_field(event_str, "status_code: ")
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse::<u16>().ok()))
+            .unwrap_or(500);
+        let reason = self
+            .extract_field(event_str, "reason_phrase: \"")
+            .unwrap_or_else(|| "Failure".to_string());
+
+        info!("🎯 [handle_call_failed] session={} status={} reason={}", session_id, status, reason);
+
+        // Drive the existing Dialog{4,5,6}xxFailure state transitions. 3xx
+        // currently maps onto the 4xx path because the default state table
+        // has no dedicated redirect transition; proper 3xx/redirect handling
+        // is a separate feature.
+        let event_type = match status {
+            300..=499 => EventType::Dialog4xxFailure(status),
+            500..=599 => EventType::Dialog5xxFailure(status),
+            600..=699 => EventType::Dialog6xxFailure(status),
+            _ => EventType::DialogError(format!("unexpected CallFailed status {}", status)),
+        };
+
+        if let Err(e) = self.state_machine.process_event(&session_id, event_type).await {
+            error!("Failed to process CallFailed({}) for session {}: {}", status, session_id, e);
+        }
+
+        // Publish app-level CallFailed for any StreamPeer/CallbackPeer subscribers.
+        let api_event = crate::api::events::Event::CallFailed {
+            call_id: session_id.clone(),
+            status_code: status,
+            reason: reason.clone(),
+        };
+        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+        let coordinator = self.global_coordinator.clone();
+        tokio::spawn(async move {
+            if let Err(e) = coordinator.publish(wrapped).await {
+                tracing::warn!("Failed to publish CallFailed to global coordinator: {}", e);
+            }
+        });
+
+        Ok(())
+    }
+
     async fn handle_call_state_changed(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let sid = SessionId(session_id);

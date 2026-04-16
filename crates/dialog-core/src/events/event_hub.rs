@@ -242,7 +242,7 @@ impl DialogEventHub {
                             } else {
                                 None
                             };
-                            
+
                             Some(RvoipCrossCrateEvent::DialogToSession(
                                 DialogToSessionEvent::CallEstablished {
                                     session_id,
@@ -250,8 +250,8 @@ impl DialogEventHub {
                                 }
                             ))
                         }
-                        180 => {
-                            // 180 Ringing
+                        180 | 183 => {
+                            // Provisional ringing / early media
                             Some(RvoipCrossCrateEvent::DialogToSession(
                                 DialogToSessionEvent::CallStateChanged {
                                     session_id,
@@ -260,7 +260,20 @@ impl DialogEventHub {
                                 }
                             ))
                         }
-                        _ => None, // Other response codes not mapped for now
+                        code if (300..700).contains(&code) => {
+                            // RFC 3261 §8.1.3 — any final 3xx/4xx/5xx/6xx response
+                            // ends the UAC's INVITE transaction. Propagate to the
+                            // session layer so it can emit CallFailed and run the
+                            // Dialog{4,5,6}xxFailure state transitions.
+                            Some(RvoipCrossCrateEvent::DialogToSession(
+                                DialogToSessionEvent::CallFailed {
+                                    session_id,
+                                    status_code: code,
+                                    reason_phrase: response.reason_phrase().to_string(),
+                                }
+                            ))
+                        }
+                        _ => None, // Other 1xx provisional responses stay unmapped
                     }
                 } else {
                     warn!("No session ID found for dialog {:?}", dialog_id);
