@@ -106,6 +106,9 @@ pub struct UnifiedCoordinator {
 
     /// Configuration
     config: Config,
+
+    /// Shutdown signal — send `true` to stop all background tasks.
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl UnifiedCoordinator {
@@ -163,6 +166,7 @@ impl UnifiedCoordinator {
 
         // Create incoming call channel
         let (incoming_tx, incoming_rx) = mpsc::channel(100);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         let coordinator = Arc::new(Self {
             helpers,
@@ -171,6 +175,7 @@ impl UnifiedCoordinator {
             incoming_rx: Arc::new(RwLock::new(incoming_rx)),
             global_coordinator: global_coordinator.clone(),
             config,
+            shutdown_tx,
         });
 
         // Start the dialog adapter
@@ -188,7 +193,7 @@ impl UnifiedCoordinator {
         );
 
         // Start the event handler (sets up channels and subscriptions)
-        event_handler.start().await?;
+        event_handler.start(shutdown_rx).await?;
 
         Ok(coordinator)
     }
@@ -215,6 +220,15 @@ impl UnifiedCoordinator {
     ///
     /// Events are published on the `"session_to_app"` channel. Use this to build custom peer
     /// types on top of `UnifiedCoordinator`, or to get a raw event stream.
+    /// Shut down this coordinator and all its background tasks.
+    ///
+    /// After calling this, the coordinator stops processing events. Existing
+    /// call sessions are not explicitly terminated — use [`hangup()`] first if
+    /// you need clean call teardown.
+    pub fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+
     pub async fn subscribe_events(&self) -> crate::errors::Result<tokio::sync::mpsc::Receiver<std::sync::Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>> {
         self.global_coordinator
             .subscribe(crate::adapters::SESSION_TO_APP_CHANNEL)
@@ -236,9 +250,14 @@ impl UnifiedCoordinator {
         self.helpers.accept_call(session_id).await
     }
     
-    /// Reject an incoming call
-    pub async fn reject_call(&self, session_id: &SessionId, reason: &str) -> Result<()> {
-        self.helpers.reject_call(session_id, reason).await
+    /// Reject an incoming call with a specific SIP status code and reason phrase.
+    pub async fn reject_call(
+        &self,
+        session_id: &SessionId,
+        status: u16,
+        reason: &str,
+    ) -> Result<()> {
+        self.helpers.reject_call(session_id, status, reason).await
     }
     
     /// Hangup a call

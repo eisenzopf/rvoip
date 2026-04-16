@@ -216,7 +216,7 @@ transitions:
     next_state: "Terminating"
     actions:
       - type: "SendBYE"
-      - type: "StopMediaSession"
+      - type: "CleanupMedia"
     description: "UAS hangs up before receiving ACK"
 
   # UAS receives BYE before ACK (peer changed their mind)
@@ -233,16 +233,14 @@ transitions:
       - type: "CleanupMedia"
     description: "Remote party sent BYE before ACK"
 
-  # UAS rejects call
+  # UAS rejects call — status/reason come from the RejectCall event
   - role: "UAS"
     state: "Ringing"
     event:
       type: "RejectCall"
     next_state: "Terminated"
     actions:
-      - type: "SendSIPResponse"
-        code: 486
-        reason: "Busy Here"
+      - type: "SendRejectResponse"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
     publish:
@@ -257,7 +255,7 @@ transitions:
     next_state: "Terminating"
     actions:
       - type: "SendBYE"
-      - type: "StopMediaSession"
+      - type: "CleanupMedia"
     description: "Hangup active call"
 
   # Both sides receive BYE
@@ -270,7 +268,7 @@ transitions:
       - type: "SendSIPResponse"
         code: 200
         reason: "OK"
-      - type: "StopMediaSession"
+      - type: "CleanupMedia"
     description: "Remote hangup"
 
   # Cleanup after terminating

@@ -121,51 +121,73 @@ impl SessionCrossCrateEventHandler {
         )
     }
     
-    /// Start event processing loops
-    pub async fn start(&self) -> SessionResult<()> {
-        // Start subscription to global events
-        self.start_global_event_subscriptions().await?;
-        
+    /// Start event processing loops.
+    ///
+    /// Background tasks will stop when `shutdown_rx` receives `true`.
+    pub async fn start(&self, shutdown_rx: tokio::sync::watch::Receiver<bool>) -> SessionResult<()> {
+        self.start_global_event_subscriptions(shutdown_rx).await?;
         Ok(())
     }
-    
-    
-    
+
     /// Start subscriptions to global cross-crate events
-    async fn start_global_event_subscriptions(&self) -> SessionResult<()> {
+    async fn start_global_event_subscriptions(
+        &self,
+        shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> SessionResult<()> {
         // Subscribe to dialog-to-session events
         let mut dialog_sub = self.global_coordinator
             .subscribe("dialog_to_session")
             .await
             .map_err(|e| SessionError::InternalError(format!("Failed to subscribe to dialog events: {}", e)))?;
-            
+
         let handler = self.clone();
+        let mut shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
             info!("🔔 [session_event_handler] Started dialog-to-session event loop");
-            while let Some(event) = dialog_sub.recv().await {
-                info!("🔔 [session_event_handler] Received event from channel: {:?}", event);
-                if let Err(e) = handler.handle(event).await {
-                    error!("Error handling dialog-to-session event: {}", e);
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            info!("🔔 [session_event_handler] Dialog event loop shutting down");
+                            break;
+                        }
+                    }
+                    event = dialog_sub.recv() => {
+                        let Some(event) = event else { break };
+                        info!("🔔 [session_event_handler] Received event from channel: {:?}", event);
+                        if let Err(e) = handler.handle(event).await {
+                            error!("Error handling dialog-to-session event: {}", e);
+                        }
+                    }
                 }
             }
-            warn!("🔔 [session_event_handler] Dialog-to-session event loop ended");
+            info!("🔔 [session_event_handler] Dialog-to-session event loop ended");
         });
-        
+
         // Subscribe to media-to-session events
         let mut media_sub = self.global_coordinator
             .subscribe("media_to_session")
             .await
             .map_err(|e| SessionError::InternalError(format!("Failed to subscribe to media events: {}", e)))?;
-            
+
         let handler = self.clone();
+        let mut shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
-            while let Some(event) = media_sub.recv().await {
-                if let Err(e) = handler.handle(event).await {
-                    error!("Error handling media-to-session event: {}", e);
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() { break; }
+                    }
+                    event = media_sub.recv() => {
+                        let Some(event) = event else { break };
+                        if let Err(e) = handler.handle(event).await {
+                            error!("Error handling media-to-session event: {}", e);
+                        }
+                    }
                 }
             }
         });
-        
+
         Ok(())
     }
 }
@@ -353,7 +375,6 @@ impl SessionCrossCrateEventHandler {
             // Check if this dialog exists in our own dialog-core instance.
             // If it doesn't, the INVITE was received by a different peer's
             // dialog-core and we must not try to process it.
-            use rvoip_dialog_core::manager::DialogStore;
             if !self.dialog_adapter.dialog_api.dialog_manager().core().has_dialog(&rvoip_dialog_id) {
                 debug!("Ignoring IncomingCall for dialog {} - not in our dialog-core", dialog_id_str);
                 return Ok(());

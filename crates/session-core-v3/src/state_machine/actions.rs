@@ -45,6 +45,14 @@ pub async fn execute_action(
             session.local_sdp = Some(sdp.clone());
             info!("Generated SDP with {} bytes", sdp.len());
         }
+        Action::SendRejectResponse => {
+            let status = session.reject_status.unwrap_or(486);
+            info!(
+                "Action::SendRejectResponse for session {} with status {}",
+                session.session_id, status
+            );
+            dialog_adapter.send_response(&session.session_id, status, None).await?;
+        }
         Action::SendSIPResponse(code, _reason) => {
             dialog_adapter.send_response(&session.session_id, *code, session.local_sdp.clone()).await?;
             // RFC 3261: Dialog is established when UAS sends 200 OK to INVITE
@@ -131,9 +139,6 @@ pub async fn execute_action(
             // Mark media as ready after successfully starting
             session.media_session_ready = true;
             info!("Media session started and marked as ready for session {}", session.session_id);
-        }
-        Action::StopMediaSession => {
-            media_adapter.stop_session(&session.session_id).await?;
         }
         Action::NegotiateSDPAsUAC => {
             if let Some(remote_sdp) = &session.remote_sdp {

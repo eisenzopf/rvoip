@@ -24,6 +24,7 @@ pub struct ReferRequest {
 }
 
 /// A simple SIP peer with sequential API
+#[allow(dead_code)]
 pub struct SimplePeer {
     coordinator: Arc<UnifiedCoordinator>,
     event_rx: mpsc::Receiver<Event>,
@@ -50,6 +51,7 @@ impl SimplePeer {
         let local_uri = config.local_uri.clone();
         
         let (event_tx, event_rx) = mpsc::channel(1000);
+        #[allow(deprecated)]
         let coordinator = UnifiedCoordinator::with_simple_peer_events(config, event_tx).await?;
 
         Ok(Self {

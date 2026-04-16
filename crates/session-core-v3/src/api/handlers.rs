@@ -43,6 +43,7 @@ pub struct AutoAnswerHandler;
 #[async_trait]
 impl CallHandler for AutoAnswerHandler {
     async fn on_incoming_call(&self, _call: IncomingCall) -> CallHandlerDecision {
+        // Dispatch applies the decision — no need to consume `call` manually.
         CallHandlerDecision::Accept
     }
 
@@ -190,26 +191,24 @@ impl Default for RoutingHandler {
     }
 }
 
-fn action_to_decision(action: &RoutingAction) -> CallHandlerDecision {
-    match action {
-        RoutingAction::Accept => CallHandlerDecision::Accept,
-        RoutingAction::Reject { status, reason } => CallHandlerDecision::Reject {
-            status: *status,
-            reason: reason.clone(),
-        },
-        RoutingAction::Redirect(target) => CallHandlerDecision::Redirect(target.clone()),
-    }
-}
-
 #[async_trait]
 impl CallHandler for RoutingHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
-        for rule in &self.rules {
-            if call.to.contains(&rule.pattern) {
-                return action_to_decision(&rule.action);
-            }
+        let action = self
+            .rules
+            .iter()
+            .find(|r| call.to.contains(&r.pattern))
+            .map(|r| &r.action)
+            .unwrap_or(&self.default_action);
+
+        match action {
+            RoutingAction::Accept => CallHandlerDecision::Accept,
+            RoutingAction::Reject { status, reason } => CallHandlerDecision::Reject {
+                status: *status,
+                reason: reason.clone(),
+            },
+            RoutingAction::Redirect(target) => CallHandlerDecision::Redirect(target.clone()),
         }
-        action_to_decision(&self.default_action)
     }
 }
 

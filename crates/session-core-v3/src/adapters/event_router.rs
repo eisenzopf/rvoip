@@ -97,6 +97,12 @@ impl EventRouter {
                     state.local_sdp.clone(),
                 ).await?;
             }
+
+            Action::SendRejectResponse => {
+                let state = self.store.get_session(session_id).await?;
+                let status = state.reject_status.unwrap_or(486);
+                self.dialog_adapter.send_response(session_id, status, None).await?;
+            }
             
             Action::SendACK => {
                 // Get the stored 200 OK response
@@ -136,11 +142,7 @@ impl EventRouter {
             Action::StartMediaSession => {
                 self.media_adapter.start_session(session_id).await?;
             }
-            
-            Action::StopMediaSession => {
-                self.media_adapter.stop_session(session_id).await?;
-            }
-            
+
             Action::NegotiateSDPAsUAC => {
                 let mut state = self.store.get_session(session_id).await?;
                 if let Some(remote_sdp) = state.remote_sdp.clone() {

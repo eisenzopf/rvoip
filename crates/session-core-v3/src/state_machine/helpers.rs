@@ -122,11 +122,16 @@ impl StateMachineHelpers {
         Ok(())
     }
     
-    /// Reject an incoming call
-    pub async fn reject_call(&self, session_id: &SessionId, reason: &str) -> Result<()> {
+    /// Reject an incoming call with a specific SIP status code and reason phrase.
+    pub async fn reject_call(
+        &self,
+        session_id: &SessionId,
+        status: u16,
+        reason: &str,
+    ) -> Result<()> {
         self.state_machine.process_event(
             session_id,
-            EventType::RejectCall { reason: reason.to_string() },
+            EventType::RejectCall { status, reason: reason.to_string() },
         ).await?;
         Ok(())
     }

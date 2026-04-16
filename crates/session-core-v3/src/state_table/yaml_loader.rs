@@ -502,7 +502,7 @@ impl YamlTableLoader {
             // Application events
             "MakeCall" => Ok(EventType::MakeCall { target: String::new() }),
             "AcceptCall" => Ok(EventType::AcceptCall),
-            "RejectCall" => Ok(EventType::RejectCall { reason: String::new() }),
+            "RejectCall" => Ok(EventType::RejectCall { status: 0, reason: String::new() }),
             "HangupCall" => Ok(EventType::HangupCall),
             "HoldCall" => Ok(EventType::HoldCall),
             "ResumeCall" => Ok(EventType::ResumeCall),
@@ -662,13 +662,17 @@ impl YamlTableLoader {
             "SendINVITE" | "TriggerDialogINVITE" => Ok(Action::SendINVITE),
             "SendACK" => Ok(Action::SendACK),
             "SendBYE" => Ok(Action::SendBYE),
+            "SendRejectResponse" => Ok(Action::SendRejectResponse),
             "SendCANCEL" => Ok(Action::SendCANCEL),
             "SendReINVITE" => Ok(Action::SendReINVITE),
             
             // Media actions
             "CreateMediaSession" => Ok(Action::CreateMediaSession),
             "StartMediaSession" => Ok(Action::StartMediaSession),
-            "StopMediaSession" | "StopMedia" => Ok(Action::StopMediaSession),
+            // StopMediaSession/StopMedia aliases map to CleanupMedia — the
+            // two used to be distinct but StopMediaSession was broken (see
+            // MediaAdapter history), so they're unified now.
+            "StopMediaSession" | "StopMedia" => Ok(Action::CleanupMedia),
             "NegotiateSDPAsUAC" => Ok(Action::NegotiateSDPAsUAC),
             "NegotiateSDPAsUAS" => Ok(Action::NegotiateSDPAsUAS),
             "SuspendMedia" => Ok(Action::Custom("SuspendMedia".to_string())),

@@ -1,9 +1,7 @@
-//! Bidirectional audio exchange between two peers in a single process.
+//! Audio caller (Alice) — calls Bob, sends 440Hz tone, saves received audio.
 //!
-//!   cargo run --example streampeer_audio
-//!
-//! Alice calls Bob, they exchange audio tones for 3 seconds, then hang up.
-//! Audio is saved to WAV files in an `output/` directory.
+//! Run standalone:  cargo run -p rvoip-session-core-v3 --example streampeer_audio_alice
+//! Or with bob:     ./examples/streampeer/audio/run.sh
 
 use rvoip_media_core::types::AudioFrame;
 use rvoip_session_core_v3::{Config, StreamPeer};
@@ -41,55 +39,9 @@ fn save_wav(name: &str, samples: &[i16]) -> Result<(), Box<dyn std::error::Error
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
-        .with_env_filter("rvoip_session_core_v3=info")
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
         .init();
 
-    // Spawn Bob (receiver) as a background task
-    let bob_task = tokio::spawn(async {
-        let mut bob = StreamPeer::with_config(Config {
-            media_port_start: 10100,
-            media_port_end: 10200,
-            ..Config::local("bob", 5061)
-        })
-        .await?;
-
-        println!("[BOB] Waiting for call...");
-        let incoming = bob.wait_for_incoming().await?;
-        println!("[BOB] Call from {}", incoming.from);
-        let handle = incoming.accept().await?;
-
-        // Send 880Hz tone and receive audio
-        let audio = handle.audio().await?;
-        let (sender, mut receiver) = audio.split();
-
-        let recv_task = tokio::spawn(async move {
-            let mut samples = Vec::new();
-            while let Some(frame) = receiver.recv().await {
-                samples.extend_from_slice(&frame.samples);
-            }
-            samples
-        });
-
-        for i in 0..150 {
-            // 3 seconds at 20ms/frame
-            let samples = generate_tone(880.0, i);
-            let frame = AudioFrame::new(samples, SAMPLE_RATE, 1, (i * FRAME_SIZE) as u32);
-            if sender.send(frame).await.is_err() {
-                break;
-            }
-            sleep(Duration::from_millis(20)).await;
-        }
-
-        handle.wait_for_end(Some(Duration::from_secs(5))).await.ok();
-        let received = recv_task.await.unwrap_or_default();
-        save_wav("bob_received.wav", &received)?;
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-    });
-
-    // Give Bob a moment to start listening
-    sleep(Duration::from_secs(1)).await;
-
-    // Alice (caller)
     let mut alice = StreamPeer::with_config(Config {
         media_port_start: 10000,
         media_port_end: 10100,
@@ -123,14 +75,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         sleep(Duration::from_millis(20)).await;
     }
 
+    // Drop sender so recv_task's channel closes
+    drop(sender);
+
     println!("[ALICE] Hanging up...");
     handle.hangup().await?;
     alice.wait_for_ended(handle.id()).await?;
 
     let received = recv_task.await.unwrap_or_default();
     save_wav("alice_received.wav", &received)?;
+    println!("[ALICE] Done.");
 
-    bob_task.await.unwrap().unwrap();
-    println!("Done.");
-    Ok(())
+    std::process::exit(0);
 }

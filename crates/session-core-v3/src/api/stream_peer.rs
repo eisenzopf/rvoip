@@ -193,9 +193,9 @@ impl PeerControl {
         Ok(SessionHandle::new(call_id.clone(), self.coordinator.clone()))
     }
 
-    /// Reject an incoming call.
-    pub async fn reject(&self, call_id: &CallId, _status: u16, reason: &str) -> Result<()> {
-        self.coordinator.reject_call(call_id, reason).await
+    /// Reject an incoming call with the given SIP status code and reason phrase.
+    pub async fn reject(&self, call_id: &CallId, status: u16, reason: &str) -> Result<()> {
+        self.coordinator.reject_call(call_id, status, reason).await
     }
 
     /// Subscribe to all events from this coordinator.
@@ -403,8 +403,9 @@ impl StreamPeer {
     /// cleanly drops the coordinator, causing background tasks to terminate when
     /// they next observe their channels are closed.
     pub async fn shutdown(self) -> Result<()> {
-        // Drop self — the coordinator Arc reference count decreases.
-        // Background tasks holding Arcs will observe channel closure and exit.
+        // Signal the coordinator to stop its background event loops,
+        // then drop self so remaining Arc references decrease.
+        self.control.coordinator.shutdown();
         drop(self);
         Ok(())
     }

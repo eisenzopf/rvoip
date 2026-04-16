@@ -13,45 +13,84 @@ path = "examples/getting_started/hello.rs"
 
 # StreamPeer examples (sequential / client-side)
 [[example]]
-name = "streampeer_audio"
-path = "examples/streampeer/audio.rs"
+name = "streampeer_audio_alice"
+path = "examples/streampeer/audio/alice.rs"
 [[example]]
-name = "streampeer_dtmf"
-path = "examples/streampeer/dtmf.rs"
+name = "streampeer_audio_bob"
+path = "examples/streampeer/audio/bob.rs"
 [[example]]
-name = "streampeer_hold_resume"
-path = "examples/streampeer/hold_resume.rs"
+name = "streampeer_dtmf_server"
+path = "examples/streampeer/dtmf/server.rs"
 [[example]]
-name = "streampeer_registration"
-path = "examples/streampeer/registration.rs"
+name = "streampeer_dtmf_client"
+path = "examples/streampeer/dtmf/client.rs"
 [[example]]
-name = "streampeer_blind_transfer"
-path = "examples/streampeer/blind_transfer.rs"
+name = "streampeer_hold_resume_server"
+path = "examples/streampeer/hold_resume/server.rs"
+[[example]]
+name = "streampeer_hold_resume_client"
+path = "examples/streampeer/hold_resume/client.rs"
+[[example]]
+name = "streampeer_registration_server"
+path = "examples/streampeer/registration/server.rs"
+[[example]]
+name = "streampeer_registration_client"
+path = "examples/streampeer/registration/client.rs"
+[[example]]
+name = "streampeer_blind_transfer_alice"
+path = "examples/streampeer/blind_transfer/alice.rs"
+[[example]]
+name = "streampeer_blind_transfer_bob"
+path = "examples/streampeer/blind_transfer/bob.rs"
+[[example]]
+name = "streampeer_blind_transfer_charlie"
+path = "examples/streampeer/blind_transfer/charlie.rs"
 
 # CallbackPeer examples (reactive / server-side)
 [[example]]
-name = "callbackpeer_auto_answer"
-path = "examples/callbackpeer/auto_answer.rs"
+name = "callbackpeer_auto_answer_server"
+path = "examples/callbackpeer/auto_answer/server.rs"
 [[example]]
-name = "callbackpeer_closure"
-path = "examples/callbackpeer/closure.rs"
+name = "callbackpeer_auto_answer_client"
+path = "examples/callbackpeer/auto_answer/client.rs"
 [[example]]
-name = "callbackpeer_routing"
-path = "examples/callbackpeer/routing.rs"
+name = "callbackpeer_closure_server"
+path = "examples/callbackpeer/closure/server.rs"
 [[example]]
-name = "callbackpeer_ivr"
-path = "examples/callbackpeer/ivr.rs"
+name = "callbackpeer_closure_client"
+path = "examples/callbackpeer/closure/client.rs"
 [[example]]
-name = "callbackpeer_queue"
-path = "examples/callbackpeer/queue.rs"
+name = "callbackpeer_routing_server"
+path = "examples/callbackpeer/routing/server.rs"
 [[example]]
-name = "callbackpeer_custom"
-path = "examples/callbackpeer/custom.rs"
+name = "callbackpeer_routing_client"
+path = "examples/callbackpeer/routing/client.rs"
+[[example]]
+name = "callbackpeer_ivr_server"
+path = "examples/callbackpeer/ivr/server.rs"
+[[example]]
+name = "callbackpeer_ivr_client"
+path = "examples/callbackpeer/ivr/client.rs"
+[[example]]
+name = "callbackpeer_queue_server"
+path = "examples/callbackpeer/queue/server.rs"
+[[example]]
+name = "callbackpeer_queue_client"
+path = "examples/callbackpeer/queue/client.rs"
+[[example]]
+name = "callbackpeer_custom_server"
+path = "examples/callbackpeer/custom/server.rs"
+[[example]]
+name = "callbackpeer_custom_client"
+path = "examples/callbackpeer/custom/client.rs"
 
 # Advanced / multi-peer scenarios
 [[example]]
-name = "advanced_concurrent_calls"
-path = "examples/advanced/concurrent_calls.rs"
+name = "advanced_concurrent_calls_server"
+path = "examples/advanced/concurrent_calls/server.rs"
+[[example]]
+name = "advanced_concurrent_calls_client"
+path = "examples/advanced/concurrent_calls/client.rs"
 [[example]]
 name = "advanced_registrar_server"
 path = "examples/advanced/registrar_server.rs"

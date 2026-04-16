@@ -22,6 +22,24 @@ use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 use crate::api::unified::{Config, UnifiedCoordinator};
 use crate::errors::Result;
 
+// ===== ShutdownHandle =====
+
+/// Cloneable handle for stopping a [`CallbackPeer`] from another task.
+///
+/// Obtained via [`CallbackPeer::shutdown_handle()`] **before** calling
+/// [`run()`](CallbackPeer::run).
+#[derive(Clone)]
+pub struct ShutdownHandle {
+    tx: tokio::sync::watch::Sender<bool>,
+}
+
+impl ShutdownHandle {
+    /// Signal the peer to stop its event loop.
+    pub fn shutdown(&self) {
+        let _ = self.tx.send(true);
+    }
+}
+
 // ===== CallHandlerDecision =====
 
 /// How the [`CallHandler`] wants to resolve an incoming call.
@@ -101,6 +119,13 @@ pub trait CallHandler: Send + Sync + 'static {
     ///
     /// This is the only required method. The call waits in `Ringing` state until
     /// this future returns or the session ringing timeout expires.
+    ///
+    /// Either:
+    /// - Consume the [`IncomingCall`] directly by calling `accept().await`,
+    ///   `reject(...)`, `defer(...)`, or `redirect(...)` on it, or
+    /// - Return a [`CallHandlerDecision`] and the dispatch will apply it.
+    ///
+    /// Both paths converge to the same state machine transitions.
     async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision;
 
     /// Called when an outgoing or accepted incoming call is fully established.
@@ -187,6 +212,29 @@ impl<H: CallHandler> CallbackPeer<H> {
         let _ = self.shutdown_tx.send(true);
     }
 
+    /// Return a handle that can signal shutdown from another task.
+    ///
+    /// Obtain this **before** calling [`run()`], which consumes `self`.
+    ///
+    /// ```rust,no_run
+    /// # async fn demo() -> rvoip_session_core_v3::Result<()> {
+    /// # use rvoip_session_core_v3::*;
+    /// let peer = CallbackPeer::with_auto_answer(Config::default()).await?;
+    /// let stop = peer.shutdown_handle();
+    /// tokio::spawn(async move { peer.run().await });
+    /// // … later …
+    /// stop.shutdown();
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`run()`]: Self::run
+    pub fn shutdown_handle(&self) -> ShutdownHandle {
+        ShutdownHandle {
+            tx: self.shutdown_tx.clone(),
+        }
+    }
+
     /// Start the event loop.
     ///
     /// Processes events until [`shutdown()`] is called or the coordinator is dropped.
@@ -227,6 +275,8 @@ impl<H: CallHandler> CallbackPeer<H> {
             }
         }
 
+        // Shut down the coordinator's background tasks too
+        self.coordinator.shutdown();
         Ok(())
     }
 
@@ -237,14 +287,37 @@ impl<H: CallHandler> CallbackPeer<H> {
 
         match event {
             Event::IncomingCall { call_id, from, to, sdp } => {
-                let incoming = IncomingCall::new(call_id, from, to, sdp, coordinator.clone());
+                // The handler may resolve the call itself (accept/reject/defer)
+                // by consuming IncomingCall. If it only returns a decision
+                // without consuming the call, the dispatch applies it via the
+                // coordinator below. Handler Drop still acts as a safety net.
+                let incoming = IncomingCall::new(call_id.clone(), from, to, sdp, coordinator.clone());
+                let coord = coordinator.clone();
+                let cid = call_id;
                 tokio::spawn(async move {
                     let decision = handler.on_incoming_call(incoming).await;
-                    // IncomingCall's Drop impl handles auto-reject if not yet resolved.
-                    // The decision is already applied because the accept/reject/defer methods
-                    // on IncomingCall consume `self`, so by the time we return from
-                    // on_incoming_call, the call has been resolved (or the guard returned).
-                    let _ = decision; // Decision already applied by IncomingCall methods
+                    // These coordinator calls are idempotent — if the handler
+                    // already resolved the call, the session has transitioned
+                    // out of Ringing and the call becomes a no-op error we ignore.
+                    match decision {
+                        CallHandlerDecision::Accept => {
+                            let _ = coord.accept_call(&cid).await;
+                        }
+                        CallHandlerDecision::AcceptWithSdp(_sdp) => {
+                            // TODO: pass custom SDP through accept_call
+                            let _ = coord.accept_call(&cid).await;
+                        }
+                        CallHandlerDecision::Reject { status, reason } => {
+                            let _ = coord.reject_call(&cid, status, &reason).await;
+                        }
+                        CallHandlerDecision::Redirect(_target) => {
+                            // TODO: proper 3xx support; fall back to 302 Moved for now
+                            let _ = coord.reject_call(&cid, 302, "Moved Temporarily").await;
+                        }
+                        CallHandlerDecision::Defer(_guard) => {
+                            // Handler kept the guard alive; call stays in Ringing.
+                        }
+                    }
                 });
             }
 
@@ -300,23 +373,47 @@ impl CallbackPeer<AutoAnswerHandler> {
 
 /// A [`CallHandler`] that delegates `on_incoming_call` to a closure.
 ///
-/// Created by [`CallbackPeer::from_fn()`].
+/// Created by [`CallbackPeer::from_fn()`]. The closure receives a borrowed
+/// [`IncomingCall`] for inspection and returns a [`CallHandlerDecision`].
+/// The decision is applied automatically by the handler (accept/reject/etc.).
 pub struct ClosureHandler {
-    f: Box<dyn Fn(IncomingCall) -> CallHandlerDecision + Send + Sync>,
+    f: Box<dyn Fn(&IncomingCall) -> CallHandlerDecision + Send + Sync>,
 }
 
 #[async_trait]
 impl CallHandler for ClosureHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
-        (self.f)(call)
+        let decision = (self.f)(&call);
+        match &decision {
+            CallHandlerDecision::Accept => {
+                let _ = call.accept().await;
+            }
+            CallHandlerDecision::AcceptWithSdp(sdp) => {
+                let _ = call.accept_with_sdp(sdp.clone()).await;
+            }
+            CallHandlerDecision::Reject { status, reason } => {
+                call.reject(*status, reason);
+            }
+            CallHandlerDecision::Redirect(target) => {
+                call.redirect(target);
+            }
+            CallHandlerDecision::Defer(_) => {
+                // Defer is not supported for closure handlers because a
+                // captured IncomingCallGuard can't escape the &IncomingCall
+                // closure signature. Use a trait impl for queue patterns.
+                tracing::warn!("[ClosureHandler] Defer decision not supported; rejecting");
+                call.reject(503, "Service Unavailable");
+            }
+        }
+        decision
     }
 }
 
 impl CallbackPeer<ClosureHandler> {
     /// Create a peer with a closure for handling incoming calls.
     ///
-    /// This is a quick alternative to implementing [`CallHandler`] when you only
-    /// need custom logic for `on_incoming_call`.
+    /// The closure receives a `&IncomingCall` (borrowed) and returns a
+    /// [`CallHandlerDecision`]. The handler applies the decision automatically.
     ///
     /// # Example
     ///
@@ -335,7 +432,7 @@ impl CallbackPeer<ClosureHandler> {
     /// ```
     pub async fn from_fn(
         config: Config,
-        handler: impl Fn(IncomingCall) -> CallHandlerDecision + Send + Sync + 'static,
+        handler: impl Fn(&IncomingCall) -> CallHandlerDecision + Send + Sync + 'static,
     ) -> Result<Self> {
         Self::new(ClosureHandler { f: Box::new(handler) }, config).await
     }

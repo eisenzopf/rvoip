@@ -125,7 +125,7 @@ pub enum EventType {
     MakeCall { target: String },
     IncomingCall { from: String, sdp: Option<String> },
     AcceptCall,
-    RejectCall { reason: String },
+    RejectCall { status: u16, reason: String },
     HangupCall,
     HoldCall,
     ResumeCall,
@@ -242,7 +242,7 @@ impl EventType {
             // User events - normalize to empty/default values
             EventType::MakeCall { .. } => EventType::MakeCall { target: String::new() },
             EventType::IncomingCall { .. } => EventType::IncomingCall { from: String::new(), sdp: None },
-            EventType::RejectCall { .. } => EventType::RejectCall { reason: String::new() },
+            EventType::RejectCall { .. } => EventType::RejectCall { status: 0, reason: String::new() },
             // BlindTransfer and AttendedTransfer events removed
             
             // Media events - normalize
@@ -330,6 +330,11 @@ pub enum Action {
     CreateMediaSession,
     GenerateLocalSDP,
     SendSIPResponse(u16, String),
+    /// Send a SIP response using the status/reason captured from the current
+    /// RejectCall event. Use this in `RejectCall` transitions so the handler's
+    /// chosen status code (e.g. 403 Forbidden, 404 Not Found) is preserved
+    /// instead of being replaced by a hardcoded value.
+    SendRejectResponse,
     SendINVITE,
     SendACK,
     SendBYE,
@@ -346,7 +351,6 @@ pub enum Action {
     
     // Media actions
     StartMediaSession,
-    StopMediaSession,
     NegotiateSDPAsUAC,
     NegotiateSDPAsUAS,
     PlayAudioFile(String),

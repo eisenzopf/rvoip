@@ -92,13 +92,13 @@ impl IncomingCall {
     }
 
     /// Reject the call immediately with an explicit SIP status code and reason.
-    pub fn reject(mut self, _status: u16, reason: &str) {
+    pub fn reject(mut self, status: u16, reason: &str) {
         self.resolved = true;
         let coordinator = self.coordinator.clone();
         let call_id = self.call_id.clone();
         let reason = reason.to_string();
         tokio::spawn(async move {
-            if let Err(e) = coordinator.reject_call(&call_id, &reason).await {
+            if let Err(e) = coordinator.reject_call(&call_id, status, &reason).await {
                 tracing::warn!("[IncomingCall] reject failed for {}: {}", call_id, e);
             }
         });
@@ -143,14 +143,39 @@ impl IncomingCall {
 
 impl Drop for IncomingCall {
     fn drop(&mut self) {
-        if !self.resolved {
-            let coordinator = self.coordinator.clone();
-            let call_id = self.call_id.clone();
-            // Auto-reject so the remote party isn't left ringing forever
-            tokio::spawn(async move {
-                let _ = coordinator.reject_call(&call_id, "Busy Here").await;
-            });
+        // Safety net for panicking handlers only. Normal paths set
+        // `resolved = true` via accept/reject/defer, OR rely on the
+        // CallbackPeer dispatch to apply the CallHandlerDecision after
+        // this IncomingCall is dropped — neither should trigger an
+        // auto-reject here.
+        //
+        // `thread::panicking()` is true while the current thread is
+        // unwinding from a panic (which is exactly when destructors run
+        // during task panics under tokio). This lets us distinguish the
+        // rare "handler crashed" path from ordinary drops.
+        if self.resolved || !std::thread::panicking() {
+            return;
         }
+        let coordinator = self.coordinator.clone();
+        let call_id = self.call_id.clone();
+        // RFC 3261 §21.5.1: 500 is the correct code for a server-side
+        // unexpected failure. Sending it terminates the UAC's INVITE
+        // transaction cleanly instead of leaving it hanging until Timer C.
+        tracing::warn!(
+            "[IncomingCall] handler panicked for call {} — sending 500 Server Internal Error",
+            call_id
+        );
+        tokio::spawn(async move {
+            if let Err(e) = coordinator
+                .reject_call(&call_id, 500, "Server Internal Error")
+                .await
+            {
+                tracing::error!(
+                    "[IncomingCall] panic-path reject_call failed for {}: {}",
+                    call_id, e
+                );
+            }
+        });
     }
 }
 
@@ -183,7 +208,7 @@ impl IncomingCallGuard {
             tokio::time::sleep(remaining).await;
             // The coordinator will silently ignore this if the session is already gone
             let _ = coordinator_clone
-                .reject_call(&call_id_clone, "Service Unavailable")
+                .reject_call(&call_id_clone, 503, "Service Unavailable")
                 .await;
         });
 
@@ -217,14 +242,14 @@ impl IncomingCallGuard {
         Ok(SessionHandle::new(self.call_id.clone(), self.coordinator.clone()))
     }
 
-    /// Reject the call now.
-    pub fn reject(mut self, _status: u16, reason: &str) {
+    /// Reject the call now with the given SIP status code and reason phrase.
+    pub fn reject(mut self, status: u16, reason: &str) {
         self.resolved = true;
         let coordinator = self.coordinator.clone();
         let call_id = self.call_id.clone();
         let reason = reason.to_string();
         tokio::spawn(async move {
-            let _ = coordinator.reject_call(&call_id, &reason).await;
+            let _ = coordinator.reject_call(&call_id, status, &reason).await;
         });
     }
 }
@@ -236,7 +261,7 @@ impl Drop for IncomingCallGuard {
             let call_id = self.call_id.clone();
             tokio::spawn(async move {
                 let _ = coordinator
-                    .reject_call(&call_id, "Service Unavailable")
+                    .reject_call(&call_id, 503, "Service Unavailable")
                     .await;
             });
         }

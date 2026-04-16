@@ -70,6 +70,10 @@ pub struct SessionState {
     pub transfer_target: Option<String>, // Target for transfers
     pub dtmf_digits: Option<String>, // DTMF digits to send
 
+    // Rejection details captured from RejectCall event for use by SendRejectResponse
+    pub reject_status: Option<u16>,
+    pub reject_reason: Option<String>,
+
     // Attended transfer tracking
     pub consultation_session_id: Option<SessionId>, // Consultation call session for attended transfer
     pub original_session_id: Option<SessionId>, // Original session (set in consultation call)
@@ -125,6 +129,8 @@ impl SessionState {
             conference_mixer_id: None,
             transfer_target: None,
             dtmf_digits: None,
+            reject_status: None,
+            reject_reason: None,
             consultation_session_id: None,
             original_session_id: None,
             transfer_state: TransferState::None,

@@ -171,7 +171,7 @@ async fn test_accept_reject_incoming_via_coordinator() {
     assert!(accept_result.is_err());
 
     // Simulate rejecting a call
-    let reject_result = coordinator.reject_call(&fake_session_id, "Busy").await;
+    let reject_result = coordinator.reject_call(&fake_session_id, 486, "Busy").await;
     // Will fail because session doesn't exist, but API works
     assert!(reject_result.is_err());
 }

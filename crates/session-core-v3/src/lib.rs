@@ -31,7 +31,7 @@ pub mod types;
 
 // Peer types
 pub use api::stream_peer::{StreamPeer, PeerControl, EventReceiver, StreamPeerBuilder};
-pub use api::callback_peer::{CallbackPeer, CallHandler, CallHandlerDecision, EndReason, ClosureHandler};
+pub use api::callback_peer::{CallbackPeer, CallHandler, CallHandlerDecision, EndReason, ClosureHandler, ShutdownHandle};
 
 // Built-in handlers
 pub use api::handlers::{AutoAnswerHandler, RejectAllHandler, RoutingHandler, RoutingAction, RoutingRule, QueueHandler};

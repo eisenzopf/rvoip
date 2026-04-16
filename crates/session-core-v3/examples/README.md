@@ -1,47 +1,65 @@
 # Examples
 
-Every example runs standalone with a single command. No second terminal needed.
+Multi-peer examples run each SIP peer as a separate OS process. This models real deployments (SIP peers are typically separate processes or machines) and avoids shared-state issues from running multiple peers in one process.
 
-```
-cargo run --example <name>
+Each multi-peer example has a `run.sh` script that starts every peer and multiplexes their output with colored prefixes (`[SERVER]`, `[CLIENT]`, etc.):
+
+```bash
+./examples/<category>/<name>/run.sh
 ```
 
-For verbose logging, add `RUST_LOG=rvoip_session_core_v3=debug` before the command.
+You can also run each peer separately in its own terminal for step-by-step debugging. For verbose logging, set `RUST_LOG=rvoip_session_core_v3=debug`.
 
 ## Getting Started
 
+Single-process example (two peers in one binary — good for a quick intro):
+
 | Command | Description |
 |---------|-------------|
-| `cargo run --example hello` | Make and receive a SIP call between two peers |
+| `cargo run --example hello` | Make and receive a SIP call |
 
-## StreamPeer (sequential / client-side)
+## StreamPeer — sequential / client-side API
 
 Use `StreamPeer` for clients, scripts, and test tools. Call methods, await results.
 
-| Command | Description |
-|---------|-------------|
-| `cargo run --example streampeer_audio` | Bidirectional audio exchange with WAV output |
-| `cargo run --example streampeer_dtmf` | Send DTMF digits during a call |
-| `cargo run --example streampeer_hold_resume` | Put a call on hold and resume it |
-| `cargo run --example streampeer_registration` | Register with a SIP registrar server |
-| `cargo run --example streampeer_blind_transfer` | Three-party blind transfer (REFER) |
+| Script | Description |
+|--------|-------------|
+| `./examples/streampeer/dtmf/run.sh` | Send DTMF digits during a call |
+| `./examples/streampeer/hold_resume/run.sh` | Put a call on hold and resume it |
+| `./examples/streampeer/audio/run.sh` | Bidirectional audio exchange with WAV output |
+| `./examples/streampeer/blind_transfer/run.sh` | Three-party blind transfer (REFER) |
+| `./examples/streampeer/registration/run.sh` | Register with a SIP registrar server |
 
-## CallbackPeer (reactive / server-side)
+## CallbackPeer — reactive / server-side API
 
 Use `CallbackPeer` for servers, proxies, and IVR systems. Implement the `CallHandler` trait or use a built-in handler.
 
-| Command | Description |
-|---------|-------------|
-| `cargo run --example callbackpeer_auto_answer` | Auto-answer every call (simplest server) |
-| `cargo run --example callbackpeer_closure` | Closure-based handler, no trait needed |
-| `cargo run --example callbackpeer_routing` | Route calls by URI pattern matching |
-| `cargo run --example callbackpeer_ivr` | IVR menu with DTMF navigation |
-| `cargo run --example callbackpeer_queue` | Call center queue with deferred accept |
-| `cargo run --example callbackpeer_custom` | Full `CallHandler` trait (all 5 methods) |
+| Script | Description |
+|--------|-------------|
+| `./examples/callbackpeer/auto_answer/run.sh` | Auto-answer every call (simplest server) |
+| `./examples/callbackpeer/closure/run.sh` | Closure-based handler, no trait needed |
+| `./examples/callbackpeer/routing/run.sh` | Route calls by URI pattern matching |
+| `./examples/callbackpeer/ivr/run.sh` | IVR menu with DTMF navigation |
+| `./examples/callbackpeer/queue/run.sh` | Call center queue with deferred accept |
+| `./examples/callbackpeer/custom/run.sh` | Full `CallHandler` trait (all 5 methods) |
 
 ## Advanced
 
-| Command | Description |
-|---------|-------------|
-| `cargo run --example advanced_concurrent_calls` | 5 concurrent callers + 1 answerer |
-| `cargo run --example advanced_registrar_server` | Registrar server with digest auth (standalone, use with `streampeer_registration`) |
+| Script / Command | Description |
+|------------------|-------------|
+| `./examples/advanced/concurrent_calls/run.sh` | 5 concurrent callers + 1 answerer |
+| `cargo run --example advanced_registrar_server` | Standalone registrar server (pair with `streampeer_registration_client`) |
+
+## Running peers individually
+
+Each peer is also a separate `cargo` example binary, so you can run them in separate terminals for debugging. For example, for `callbackpeer/auto_answer`:
+
+```bash
+# Terminal 1
+cargo run -p rvoip-session-core-v3 --example callbackpeer_auto_answer_server
+
+# Terminal 2
+cargo run -p rvoip-session-core-v3 --example callbackpeer_auto_answer_client
+```
+
+Run `cargo run -p rvoip-session-core-v3 --example` with no name to see the full list.

@@ -1,24 +1,17 @@
 //! Send DTMF digits during a call.
 //!
-//!   cargo run --example streampeer_dtmf
+//! Run standalone:  cargo run -p rvoip-session-core-v3 --example streampeer_dtmf_client
+//! Or with server:  ./examples/streampeer/dtmf/run.sh
 
-use rvoip_session_core_v3::{CallbackPeer, Config, StreamPeer};
+use rvoip_session_core_v3::{Config, StreamPeer};
 use tokio::time::{sleep, Duration};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter("rvoip_session_core_v3=info")
+        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
         .init();
 
-    // --- Background: auto-answer server ---
-    tokio::spawn(async {
-        let peer = CallbackPeer::with_auto_answer(Config::local("server", 5060)).await.unwrap();
-        peer.run().await.ok();
-    });
-    sleep(Duration::from_secs(1)).await;
-
-    // --- Demo: send DTMF digits ---
     let mut peer = StreamPeer::with_config(Config::local("dtmf_sender", 5061)).await?;
 
     println!("Calling server...");
@@ -36,5 +29,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     handle.hangup().await?;
     peer.wait_for_ended(handle.id()).await?;
     println!("Done.");
-    Ok(())
+
+    std::process::exit(0);
 }

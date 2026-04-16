@@ -171,6 +171,10 @@ impl StateMachine {
                     session.remote_sdp = Some(sdp_data.clone());
                 }
             }
+            EventType::RejectCall { status, reason } => {
+                session.reject_status = Some(*status);
+                session.reject_reason = Some(reason.clone());
+            }
             // BlindTransfer event removed
             EventType::TransferRequested { refer_to, transfer_type, transaction_id } => {
                 session.transfer_target = Some(refer_to.clone());
@@ -392,7 +396,7 @@ impl StateMachine {
         
         // 10. Reload session to pick up any changes made by actions
         // Actions like send_register may have updated the session (e.g., is_registered flag)
-        let mut session = self.store.get_session(session_id).await
+        let session = self.store.get_session(session_id).await
             .map_err(|e| format!("Failed to reload session after actions: {}", e))?;
         
         // 11. Check if conditions trigger internal events

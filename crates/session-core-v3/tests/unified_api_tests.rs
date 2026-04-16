@@ -216,7 +216,7 @@ async fn test_accept_reject_calls() {
     assert!(accept_result.is_err()); // No such session
 
     // Reject
-    let reject_result = coordinator.reject_call(&fake_session_id, "Busy").await;
+    let reject_result = coordinator.reject_call(&fake_session_id, 486, "Busy").await;
     assert!(reject_result.is_err()); // No such session
 }
 

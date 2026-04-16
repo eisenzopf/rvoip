@@ -148,22 +148,6 @@ impl MediaAdapter {
         Ok(())
     }
     
-    /// Stop a media session
-    pub async fn stop_session(&self, session_id: &SessionId) -> Result<()> {
-        if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
-            self.controller.stop_media(&dialog_id)
-                .await
-                .map_err(|e| SessionError::MediaError(format!("Failed to stop media session: {}", e)))?;
-            
-            // Clean up mappings
-            self.session_to_dialog.remove(session_id);
-            self.dialog_to_session.remove(&*dialog_id);
-            self.media_sessions.remove(session_id);
-        }
-        
-        Ok(())
-    }
-    
     /// Generate SDP offer (for UAC)
     pub async fn generate_sdp_offer(&self, session_id: &SessionId) -> Result<String> {
         let info = self.media_sessions.get(session_id)
@@ -668,25 +652,29 @@ impl MediaAdapter {
         Ok(())
     }
     
-    /// Clean up all mappings and resources for a session
+    /// Clean up all mappings and resources for a session.
+    ///
+    /// Idempotent — safe to call multiple times. Always removes the audio
+    /// frame callback from media-core (so subscriber `rx.recv()` calls can
+    /// return `None` and exit their loops) as long as the dialog mapping is
+    /// still present.
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
-        // Stop the media session if it exists
-        if let Some(dialog_id) = self.session_to_dialog.remove(session_id) {
-            // Remove audio frame callback if one was set
-            if self.audio_receivers.contains_key(session_id) {
-                let _ = self.controller.remove_audio_frame_callback(&dialog_id.1).await;
-            }
-            
-            let _ = self.controller.stop_media(&dialog_id.1).await;
-            self.dialog_to_session.remove(&dialog_id.1);
+        // Remove the session->dialog mapping first so we can reach the dialog_id
+        if let Some((_, dialog_id)) = self.session_to_dialog.remove(session_id) {
+            // Always remove the audio frame callback — this drops the tx in
+            // media-core's audio_frame_callbacks map so subscribers' rx.recv()
+            // returns None. media-core's remove_audio_frame_callback is a
+            // HashMap::remove and safe to call even if nothing was registered.
+            let _ = self.controller.remove_audio_frame_callback(&dialog_id).await;
+            let _ = self.controller.stop_media(&dialog_id).await;
+            self.dialog_to_session.remove(&dialog_id);
         }
-        
+
         self.media_sessions.remove(session_id);
-        
-        // Clean up audio frame receivers
+        // Drop our own clone of the tx as well (the other lived in media-core).
         self.audio_receivers.remove(session_id);
-        
-        tracing::debug!("Cleaned up media adapter mappings for session {}", session_id.0);
+
+        tracing::debug!("Cleaned up media adapter resources for session {}", session_id.0);
         Ok(())
     }
     
