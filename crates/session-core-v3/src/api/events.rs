@@ -130,7 +130,14 @@ pub enum Event {
         status_code: u16,
         reason: String,
     },
-    
+
+    /// Caller cancelled before the call was answered (RFC 3261 §15.1.2 —
+    /// 487 Request Terminated following CANCEL). Distinct from `CallFailed`
+    /// so UIs can render "missed call" rather than "call rejected".
+    CallCancelled {
+        call_id: CallId,
+    },
+
     // ===== Transfer Events =====
     
     /// REFER request received
@@ -260,6 +267,7 @@ impl Event {
             Event::CallAnswered { call_id, .. } |
             Event::CallEnded { call_id, .. } |
             Event::CallFailed { call_id, .. } |
+            Event::CallCancelled { call_id, .. } |
             Event::ReferReceived { call_id, .. } |
             Event::TransferAccepted { call_id, .. } |
             Event::TransferFailed { call_id, .. } |
@@ -283,11 +291,12 @@ impl Event {
     
     /// Check if this is a call-related event
     pub fn is_call_event(&self) -> bool {
-        matches!(self, 
+        matches!(self,
             Event::IncomingCall { .. } |
             Event::CallAnswered { .. } |
             Event::CallEnded { .. } |
-            Event::CallFailed { .. }
+            Event::CallFailed { .. } |
+            Event::CallCancelled { .. }
         )
     }
     

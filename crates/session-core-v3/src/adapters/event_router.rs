@@ -103,6 +103,21 @@ impl EventRouter {
                 let status = state.reject_status.unwrap_or(486);
                 self.dialog_adapter.send_response(session_id, status, None).await?;
             }
+
+            Action::RetryWithContact => {
+                // Delegated path: the main state machine executor handles this.
+                // event_router is an older dispatcher not used by CallbackPeer/
+                // StreamPeer — noop here to avoid accidentally double-sending.
+                tracing::debug!(
+                    "event_router: RetryWithContact is a no-op (handled by state_machine::actions)"
+                );
+            }
+
+            Action::ScheduleReinviteRetry => {
+                tracing::debug!(
+                    "event_router: ScheduleReinviteRetry is a no-op (handled by state_machine::actions)"
+                );
+            }
             
             Action::SendACK => {
                 // Get the stored 200 OK response

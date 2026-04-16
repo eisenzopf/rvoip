@@ -17,6 +17,17 @@ pub struct NegotiatedConfig {
     pub channels: u8,
 }
 
+/// Kind of mid-dialog re-INVITE that was in flight when a 491 Request
+/// Pending arrived — captured so `ScheduleReinviteRetry` can re-issue the
+/// correct operation after the RFC 3261 §14.1 random backoff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingReinvite {
+    Hold,
+    Resume,
+    /// Generic SDP update with a specific offer (codec change, etc.).
+    SdpUpdate(String),
+}
+
 /// Transfer state tracking
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferState {
@@ -73,6 +84,19 @@ pub struct SessionState {
     // Rejection details captured from RejectCall event for use by SendRejectResponse
     pub reject_status: Option<u16>,
     pub reject_reason: Option<String>,
+
+    // 3xx redirect follow-up state (RFC 3261 §8.1.3.4)
+    // Remaining redirect targets to try (first = highest priority); popped
+    // from the front by RetryWithContact.
+    pub redirect_targets: Vec<String>,
+    // Number of redirects followed so far; RFC-recommended cap is 5.
+    pub redirect_attempts: u8,
+
+    // 491 Request Pending retry state (RFC 3261 §14.1). Remembers the kind
+    // of re-INVITE that was in flight when a 491 was received, so we can
+    // re-issue it after the random backoff.
+    pub pending_reinvite: Option<PendingReinvite>,
+    pub reinvite_retry_attempts: u8,
 
     // Attended transfer tracking
     pub consultation_session_id: Option<SessionId>, // Consultation call session for attended transfer
@@ -131,6 +155,10 @@ impl SessionState {
             dtmf_digits: None,
             reject_status: None,
             reject_reason: None,
+            redirect_targets: Vec::new(),
+            redirect_attempts: 0,
+            pending_reinvite: None,
+            reinvite_retry_attempts: 0,
             consultation_session_id: None,
             original_session_id: None,
             transfer_state: TransferState::None,

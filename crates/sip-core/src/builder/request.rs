@@ -1233,6 +1233,7 @@ impl SimpleRequestBuilder {
             TypedHeader::MinSE(_) |
             TypedHeader::Date(_) |
             TypedHeader::RSeq(_) |
+            TypedHeader::RAck(_) |
             TypedHeader::SipETag(_) |        // Single-value header for entity tags
             TypedHeader::SipIfMatch(_) => {  // Single-value header for conditional requests
                  self.request.headers.retain(|h| h.name() != new_header_name);

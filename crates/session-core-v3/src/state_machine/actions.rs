@@ -84,6 +84,100 @@ pub async fn execute_action(
                 info!("INVITE sent successfully");
             }
         }
+        Action::ScheduleReinviteRetry => {
+            // RFC 3261 §14.1 — glare avoidance. We don't have a reliable way
+            // to distinguish "owner" from "non-owner" of the dialog at this
+            // layer, so we use the owner range (2.1–4.0 s). Cap retries.
+            use crate::session_store::state::PendingReinvite;
+            const MAX_GLARE_RETRIES: u8 = 3;
+            if session.reinvite_retry_attempts >= MAX_GLARE_RETRIES {
+                session.pending_reinvite = None;
+                return Err(format!(
+                    "491 glare retry limit ({}) exceeded for session {}",
+                    MAX_GLARE_RETRIES, session.session_id
+                ).into());
+            }
+            let kind = match session.pending_reinvite.clone() {
+                Some(k) => k,
+                None => {
+                    warn!(
+                        "ScheduleReinviteRetry with no pending_reinvite for session {}; noop",
+                        session.session_id
+                    );
+                    return Ok(());
+                }
+            };
+            session.reinvite_retry_attempts += 1;
+
+            // Random interval in [2.1s, 4.0s) — "owner" range. For a purely
+            // local stack without dialog-role awareness this is the safer
+            // pick: strictly longer than the non-owner range, so if both
+            // peers are running this implementation one will go first.
+            let millis: u64 = 2100 + (rand::random::<u64>() % 1900);
+            let backoff = std::time::Duration::from_millis(millis);
+            info!(
+                "⏳ 491 glare: sleeping {:?} before retrying {:?} for session {} (attempt {}/{})",
+                backoff, kind, session.session_id, session.reinvite_retry_attempts, MAX_GLARE_RETRIES
+            );
+            tokio::time::sleep(backoff).await;
+
+            let sdp = match kind {
+                PendingReinvite::Hold => media_adapter
+                    .create_hold_sdp()
+                    .await
+                    .map_err(|e| format!("create_hold_sdp failed: {}", e))?,
+                PendingReinvite::Resume => media_adapter
+                    .create_active_sdp()
+                    .await
+                    .map_err(|e| format!("create_active_sdp failed: {}", e))?,
+                PendingReinvite::SdpUpdate(sdp) => sdp,
+            };
+            session.local_sdp = Some(sdp.clone());
+            dialog_adapter.send_reinvite_session(&session.session_id, sdp).await?;
+        }
+        Action::RetryWithContact => {
+            // RFC 3261 §8.1.3.4 / §19.1.5 — follow a 3xx redirect's Contact URI.
+            // The executor pre-process has already pushed the response's targets
+            // onto session.redirect_targets. Cap total follow-ups at 5 hops per
+            // RFC-recommended loop breaker so misconfigured redirect chains fail.
+            const MAX_REDIRECTS: u8 = 5;
+            if session.redirect_attempts >= MAX_REDIRECTS {
+                return Err(format!(
+                    "Exceeded max {} redirect hops for session {}",
+                    MAX_REDIRECTS, session.session_id
+                ).into());
+            }
+            let next_target = session
+                .redirect_targets
+                .first()
+                .cloned()
+                .ok_or_else(|| "RetryWithContact: no redirect targets on session".to_string())?;
+            session.redirect_targets.remove(0);
+            session.redirect_attempts += 1;
+            session.remote_uri = Some(next_target.clone());
+
+            // Reset readiness flags so the state machine treats this as a fresh
+            // call attempt (media session was already cleaned up by CleanupMedia
+            // earlier in this transition's action sequence).
+            session.dialog_established = false;
+            session.sdp_negotiated = false;
+            session.dialog_id = None;
+
+            let from = session.local_uri.clone()
+                .ok_or_else(|| "local_uri not set for redirect retry".to_string())?;
+            info!(
+                "🔀 Following 3xx redirect (attempt {}/{}) from {} to {}",
+                session.redirect_attempts, MAX_REDIRECTS, from, next_target
+            );
+
+            dialog_adapter
+                .send_invite_with_details(&session.session_id, &from, &next_target, session.local_sdp.clone())
+                .await?;
+            if let Some(real_dialog_id) = dialog_adapter.session_to_dialog.get(&session.session_id) {
+                let dialog_id: crate::types::DialogId = real_dialog_id.value().clone().into();
+                session.dialog_id = Some(dialog_id);
+            }
+        }
         Action::SendACK => {
             // NO-OP for SIP: dialog-core sends ACK automatically per RFC 3261
             // However, we still set dialog_established = true here because for UAC,
@@ -100,16 +194,23 @@ pub async fn execute_action(
         
         // Call control actions
         Action::HoldCall => {
-            // Send re-INVITE with sendonly SDP
+            // Send re-INVITE with sendonly SDP. Record that this is a Hold so
+            // RFC 3261 §14.1 glare (491) retry can reissue the correct kind.
             if let Some(hold_sdp) = media_adapter.create_hold_sdp().await.ok() {
                 session.local_sdp = Some(hold_sdp.clone());
+                session.pending_reinvite = Some(
+                    crate::session_store::state::PendingReinvite::Hold,
+                );
                 dialog_adapter.send_reinvite_session(&session.session_id, hold_sdp).await?;
             }
         }
         Action::ResumeCall => {
-            // Send re-INVITE with sendrecv SDP
+            // Send re-INVITE with sendrecv SDP.
             if let Some(active_sdp) = media_adapter.create_active_sdp().await.ok() {
                 session.local_sdp = Some(active_sdp.clone());
+                session.pending_reinvite = Some(
+                    crate::session_store::state::PendingReinvite::Resume,
+                );
                 dialog_adapter.send_reinvite_session(&session.session_id, active_sdp).await?;
             }
         }

@@ -375,6 +375,7 @@ pub mod warning;
 pub mod multipart;
 pub mod path;
 pub mod proxy_require;
+pub mod rack;
 pub mod rseq;
 
 // Modules missing re-exports - Add them
@@ -447,6 +448,7 @@ pub use sip_etag::SipETag;
 pub use sip_if_match::SipIfMatch;
 pub use allow_events::AllowEvents;
 pub use rseq::RSeq;
+pub use rack::RAck;
 pub use pidf::{PidfDocument, BasicStatus, Status, Tuple, Presence};
 
 // Add AsRef implementations for Message

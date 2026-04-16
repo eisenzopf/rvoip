@@ -531,6 +531,52 @@ transitions:
       - "MessageReceived"
     description: "Receive SIP MESSAGE"
 
+  # RFC 3261 §14.1 — 491 Request Pending on a re-INVITE (glare).
+  # Sleep a random interval and retry the pending hold/resume/SDP-update.
+  # Transition stays in Active / OnHold so the dialog isn't torn down.
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "ReinviteGlare"
+    next_state: "Active"
+    actions:
+      - type: "ScheduleReinviteRetry"
+    description: "491 Request Pending — retry re-INVITE after backoff (Active)"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "ReinviteGlare"
+    next_state: "OnHold"
+    actions:
+      - type: "ScheduleReinviteRetry"
+    description: "491 Request Pending — retry re-INVITE after backoff (OnHold)"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "ReinviteGlare"
+    next_state: "Resuming"
+    actions:
+      - type: "ScheduleReinviteRetry"
+    description: "491 Request Pending — retry re-INVITE after backoff (Resuming)"
+
+  # RFC 3261 §8.1.3.4 — 3xx redirect. Tear down the in-flight dialog/media
+  # and follow the next Contact URI via RetryWithContact. Max 5 hops is
+  # enforced inside the action.
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "Dialog3xxRedirect"
+    next_state: "Initiating"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+      - type: "CreateMediaSession"
+      - type: "GenerateLocalSDP"
+      - type: "RetryWithContact"
+    description: "Follow 3xx redirect to next Contact URI"
+
   # Error handling - call failures
   - role: "Both"
     state: "Initiating"

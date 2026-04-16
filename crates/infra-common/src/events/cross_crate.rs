@@ -150,6 +150,9 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::CallEstablished { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallTerminated { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallFailed { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::CallCancelled { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::CallRedirected { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::ReinviteGlare { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DtmfReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogError { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogCreated { .. } => None, // No session_id in DialogCreated
@@ -324,6 +327,32 @@ pub enum DialogToSessionEvent {
         session_id: String,
         status_code: u16,
         reason_phrase: String,
+    },
+
+    /// Caller cancelled before the call was answered (RFC 3261 §15.1.2 —
+    /// 487 Request Terminated after CANCEL). Distinct from CallFailed so
+    /// applications can render "missed call" UX rather than "call failed".
+    CallCancelled {
+        session_id: String,
+    },
+
+    /// 3xx redirect response received (RFC 3261 §8.1.3.4 / §21.3). The UAC
+    /// SHOULD retry the INVITE against the first URI in `targets`. `q_values`
+    /// carries the relative priority from Contact headers (RFC 3261 §20.10);
+    /// each entry defaults to 1.0 when the server omits it.
+    CallRedirected {
+        session_id: String,
+        status_code: u16,
+        targets: Vec<String>,
+        q_values: Vec<f32>,
+    },
+
+    /// 491 Request Pending for a mid-dialog request (RFC 3261 §14.1). The
+    /// UAC SHOULD wait a random interval and retry. Emitted only for
+    /// re-INVITEs (and UPDATEs) — call-setup INVITEs fall through the
+    /// generic CallFailed path.
+    ReinviteGlare {
+        session_id: String,
     },
 
     /// DTMF tones received

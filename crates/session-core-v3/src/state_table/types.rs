@@ -150,6 +150,11 @@ pub enum EventType {
     DialogCANCEL,
     DialogREFER,
     DialogReINVITE,
+    Dialog3xxRedirect { status: u16, targets: Vec<String> },
+    /// RFC 3261 §14.1 — 491 Request Pending on a re-INVITE. UAC should wait
+    /// a random interval and retry whatever re-INVITE was in flight
+    /// (session.pending_reinvite captures that).
+    ReinviteGlare,
     Dialog4xxFailure(u16),
     Dialog5xxFailure(u16),
     Dialog6xxFailure(u16),
@@ -264,6 +269,13 @@ impl EventType {
                 transaction_id: String::new(),
             },
 
+            // Dialog failure events — normalize payloads so the state table
+            // can match on the variant alone, not the carried details.
+            EventType::Dialog3xxRedirect { .. } => EventType::Dialog3xxRedirect {
+                status: 0,
+                targets: Vec::new(),
+            },
+
             // Registration events - normalize status codes
             EventType::RegistrationFailed(_) => EventType::RegistrationFailed(0),
             EventType::UnregistrationFailed => EventType::UnregistrationFailed,
@@ -340,6 +352,14 @@ pub enum Action {
     SendBYE,
     SendCANCEL,
     SendReINVITE,
+    /// Follow a 3xx redirect (RFC 3261 §8.1.3.4): pop the next URI from
+    /// `session.redirect_targets` and re-send INVITE to it. Gives up after
+    /// 5 redirects per RFC-recommended loop breaker.
+    RetryWithContact,
+    /// RFC 3261 §14.1 — after receiving 491 Request Pending on a re-INVITE,
+    /// sleep a random interval (owner: 2.1-4.0 s, non-owner: 0-2.0 s) and
+    /// re-issue whatever re-INVITE kind was pending. Caps at 3 retries.
+    ScheduleReinviteRetry,
     
     // Call control actions
     HoldCall,

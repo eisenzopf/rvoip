@@ -382,18 +382,26 @@ impl DialogAdapter {
         Ok(())
     }
     
-    /// Send re-INVITE (for hold/resume) (for state machine)
+    /// Send a re-INVITE for hold/resume or mid-call SDP updates.
+    ///
+    /// RFC 3261 §14 — re-INVITE is the standard mechanism for modifying an
+    /// established dialog's session parameters (SDP direction attributes for
+    /// hold/resume, codec changes, etc.). This previously routed through
+    /// UPDATE (RFC 3311) which caused Timer F timeouts when the remote
+    /// didn't answer an UPDATE promptly; re-INVITE is both more widely
+    /// supported and the RFC-recommended method here.
     pub async fn send_reinvite_session(&self, session_id: &SessionId, sdp: String) -> Result<()> {
+        use rvoip_sip_core::Method;
+
         let dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
-        
-        // Use UPDATE method for re-INVITE
+
         self.dialog_api
-            .send_update(&dialog_id, Some(sdp))
+            .send_request_in_dialog(&dialog_id, Method::Invite, Some(bytes::Bytes::from(sdp)))
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send re-INVITE: {}", e)))?;
-        
+
         Ok(())
     }
     
@@ -554,6 +562,68 @@ impl DialogAdapter {
                     }
                 }
             }
+            423 => {
+                // RFC 3261 §10.2.8 — Interval Too Brief. The registrar requires
+                // a minimum expiry; it MUST include a Min-Expires header with
+                // its minimum acceptable value. Retry once using that value.
+                use rvoip_sip_core::types::headers::HeaderAccess;
+                let min_expires = response
+                    .raw_header_value(&rvoip_sip_core::types::header::HeaderName::MinExpires)
+                    .and_then(|s| s.trim().parse::<u32>().ok());
+
+                let session = self.store.get_session(session_id).await?;
+                // Cap retries at 2 attempts to avoid loops if a broken registrar
+                // keeps sending 423 regardless of the expiry we send.
+                if session.registration_retry_count >= 2 {
+                    tracing::error!(
+                        "❌ Registration failed with repeated 423 — giving up (retry count {})",
+                        session.registration_retry_count
+                    );
+                    let mut session = self.store.get_session(session_id).await?;
+                    session.is_registered = false;
+                    self.store.update_session(session).await?;
+                    return Ok(());
+                }
+
+                let new_expires = match min_expires {
+                    Some(min) if min > 0 && min <= 7200 => min,
+                    Some(min) => {
+                        tracing::warn!("423 Min-Expires={} out of sane range; clamping to 3600", min);
+                        min.min(3600)
+                    }
+                    None => {
+                        tracing::error!("423 Interval Too Brief without Min-Expires header — cannot retry");
+                        let mut session = self.store.get_session(session_id).await?;
+                        session.is_registered = false;
+                        self.store.update_session(session).await?;
+                        return Ok(());
+                    }
+                };
+
+                tracing::info!(
+                    "🔄 423 Interval Too Brief — retrying REGISTER with Expires={} (server required min)",
+                    new_expires
+                );
+
+                // Persist new expiry and bump the retry counter.
+                let mut session = self.store.get_session(session_id).await?;
+                session.registration_expires = Some(new_expires);
+                session.registration_retry_count += 1;
+                self.store.update_session(session).await?;
+
+                // Re-issue with the required expiry. Credentials, if any, get
+                // reused (we have the challenge stored). `Box::pin` to prevent
+                // the recursive async future from blowing up its size on the
+                // stack, matching the 401/407 path above.
+                Box::pin(self.send_register(
+                    session_id,
+                    registrar_uri,
+                    from_uri,
+                    contact_uri,
+                    new_expires,
+                    credentials,
+                )).await?;
+            }
             _ => {
                 // Registration failed
                 tracing::warn!("❌ Registration failed with status {}", response.status_code());
@@ -562,7 +632,7 @@ impl DialogAdapter {
                 self.store.update_session(session).await?;
             }
         }
-        
+
         Ok(())
     }
 

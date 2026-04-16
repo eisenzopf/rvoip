@@ -175,6 +175,16 @@ impl StateMachine {
                 session.reject_status = Some(*status);
                 session.reject_reason = Some(reason.clone());
             }
+            EventType::Dialog3xxRedirect { targets, .. } => {
+                // Append to any existing targets (keeps earlier hops' fallbacks
+                // reachable in case the newly-suggested target also redirects).
+                // Dedupe trivially to avoid fast loops.
+                for t in targets {
+                    if !session.redirect_targets.contains(t) {
+                        session.redirect_targets.push(t.clone());
+                    }
+                }
+            }
             // BlindTransfer event removed
             EventType::TransferRequested { refer_to, transfer_type, transaction_id } => {
                 session.transfer_target = Some(refer_to.clone());

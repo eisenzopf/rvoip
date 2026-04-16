@@ -512,6 +512,11 @@ impl YamlTableLoader {
             "Dialog183SessionProgress" => Ok(EventType::Dialog183SessionProgress),
             "DialogEstablished" | "Dialog200OK" => Ok(EventType::Dialog200OK),
             "DialogFailed" => Ok(EventType::Dialog4xxFailure(400)),
+            "Dialog3xxRedirect" => Ok(EventType::Dialog3xxRedirect {
+                status: 0,
+                targets: Vec::new(),
+            }),
+            "ReinviteGlare" => Ok(EventType::ReinviteGlare),
             "DialogTerminated" => Ok(EventType::DialogBYE),
             
             // Gateway-specific BYE events
@@ -663,6 +668,8 @@ impl YamlTableLoader {
             "SendACK" => Ok(Action::SendACK),
             "SendBYE" => Ok(Action::SendBYE),
             "SendRejectResponse" => Ok(Action::SendRejectResponse),
+            "RetryWithContact" => Ok(Action::RetryWithContact),
+            "ScheduleReinviteRetry" => Ok(Action::ScheduleReinviteRetry),
             "SendCANCEL" => Ok(Action::SendCANCEL),
             "SendReINVITE" => Ok(Action::SendReINVITE),
             

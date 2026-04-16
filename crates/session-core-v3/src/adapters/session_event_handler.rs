@@ -217,6 +217,12 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                     self.handle_incoming_call(&event_str).await?;
                 } else if event_str.contains("CallEstablished") {
                     self.handle_call_established(&event_str).await?;
+                } else if event_str.contains("CallCancelled") {
+                    self.handle_call_cancelled(&event_str).await?;
+                } else if event_str.contains("CallRedirected") {
+                    self.handle_call_redirected(&event_str).await?;
+                } else if event_str.contains("ReinviteGlare") {
+                    self.handle_reinvite_glare(&event_str).await?;
                 } else if event_str.contains("CallFailed") {
                     self.handle_call_failed(&event_str).await?;
                 } else if event_str.contains("CallStateChanged") {
@@ -620,6 +626,146 @@ impl SessionCrossCrateEventHandler {
         tokio::spawn(async move {
             if let Err(e) = coordinator.publish(wrapped).await {
                 tracing::warn!("Failed to publish CallFailed to global coordinator: {}", e);
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Handle a 3xx redirect response (RFC 3261 §8.1.3.4). Parses the
+    /// `targets: [...]` list from the debug-formatted event and passes it
+    /// to the state machine's `Dialog3xxRedirect` transition, which runs
+    /// `RetryWithContact` to re-send INVITE to the first URI.
+    async fn handle_call_redirected(&self, event_str: &str) -> Result<()> {
+        let Some(session_id_str) = self.extract_session_id(event_str) else {
+            warn!("Could not extract session_id from CallRedirected event");
+            return Ok(());
+        };
+        let session_id = SessionId(session_id_str);
+
+        if !self.is_our_session(&session_id).await {
+            debug!("Ignoring CallRedirected for session {} - not in our store", session_id);
+            return Ok(());
+        }
+
+        let status = self
+            .extract_field(event_str, "status_code: ")
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse::<u16>().ok()))
+            .unwrap_or(302);
+
+        // targets comes across as `targets: ["sip:a@...", "sip:b@..."]`. Pull
+        // the first balanced `[...]` out, then extract the quoted URIs.
+        let targets: Vec<String> = if let Some(start) = event_str.find("targets: [") {
+            let after = &event_str[start + "targets: [".len()..];
+            if let Some(end) = after.find(']') {
+                let inner = &after[..end];
+                inner
+                    .split(',')
+                    .filter_map(|frag| {
+                        let f = frag.trim();
+                        f.strip_prefix('"')
+                            .and_then(|s| s.strip_suffix('"'))
+                            .map(|s| s.to_string())
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        info!(
+            "🔀 [handle_call_redirected] session={} status={} targets={:?}",
+            session_id, status, targets
+        );
+
+        if targets.is_empty() {
+            // No usable contacts — treat as a 4xx failure.
+            warn!("3xx response with no Contact URIs — treating as failure");
+            let _ = self
+                .state_machine
+                .process_event(&session_id, EventType::Dialog4xxFailure(status))
+                .await;
+            return Ok(());
+        }
+
+        if let Err(e) = self
+            .state_machine
+            .process_event(
+                &session_id,
+                EventType::Dialog3xxRedirect { status, targets },
+            )
+            .await
+        {
+            error!("Failed to process CallRedirected for session {}: {}", session_id, e);
+        }
+
+        Ok(())
+    }
+
+    /// Handle 491 Request Pending (RFC 3261 §14.1) on a re-INVITE. The
+    /// state machine's ReinviteGlare transition runs ScheduleReinviteRetry,
+    /// which sleeps a random interval and re-issues the pending re-INVITE.
+    async fn handle_reinvite_glare(&self, event_str: &str) -> Result<()> {
+        let Some(session_id_str) = self.extract_session_id(event_str) else {
+            warn!("Could not extract session_id from ReinviteGlare event");
+            return Ok(());
+        };
+        let session_id = SessionId(session_id_str);
+
+        if !self.is_our_session(&session_id).await {
+            debug!("Ignoring ReinviteGlare for session {} - not in our store", session_id);
+            return Ok(());
+        }
+
+        info!("🔄 [handle_reinvite_glare] session={} — scheduling re-INVITE retry", session_id);
+
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::ReinviteGlare)
+            .await
+        {
+            error!("Failed to process ReinviteGlare for session {}: {}", session_id, e);
+        }
+        Ok(())
+    }
+
+    /// Handle 487 Request Terminated — the caller CANCELed before the UAS
+    /// answered. Distinct from the generic failure path so we can publish
+    /// `Event::CallCancelled` (distinct "missed call" semantic for UIs).
+    async fn handle_call_cancelled(&self, event_str: &str) -> Result<()> {
+        let Some(session_id_str) = self.extract_session_id(event_str) else {
+            warn!("Could not extract session_id from CallCancelled event");
+            return Ok(());
+        };
+        let session_id = SessionId(session_id_str);
+
+        if !self.is_our_session(&session_id).await {
+            debug!("Ignoring CallCancelled for session {} - not in our store", session_id);
+            return Ok(());
+        }
+
+        info!("🎯 [handle_call_cancelled] session={}", session_id);
+
+        // Drive the existing Dialog487RequestTerminated state transition.
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::Dialog487RequestTerminated)
+            .await
+        {
+            error!("Failed to process CallCancelled for session {}: {}", session_id, e);
+        }
+
+        // Publish app-level CallCancelled for StreamPeer/CallbackPeer subscribers.
+        let api_event = crate::api::events::Event::CallCancelled {
+            call_id: session_id.clone(),
+        };
+        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+        let coordinator = self.global_coordinator.clone();
+        tokio::spawn(async move {
+            if let Err(e) = coordinator.publish(wrapped).await {
+                tracing::warn!("Failed to publish CallCancelled to global coordinator: {}", e);
             }
         });
 

@@ -251,7 +251,7 @@ impl DialogEventHub {
                             ))
                         }
                         180 | 183 => {
-                            // Provisional ringing / early media
+                            // 180 Ringing / 183 Session Progress (early media)
                             Some(RvoipCrossCrateEvent::DialogToSession(
                                 DialogToSessionEvent::CallStateChanged {
                                     session_id,
@@ -260,11 +260,86 @@ impl DialogEventHub {
                                 }
                             ))
                         }
-                        code if (300..700).contains(&code) => {
-                            // RFC 3261 §8.1.3 — any final 3xx/4xx/5xx/6xx response
-                            // ends the UAC's INVITE transaction. Propagate to the
-                            // session layer so it can emit CallFailed and run the
-                            // Dialog{4,5,6}xxFailure state transitions.
+                        181 | 182 | 199 => {
+                            // Less common provisional responses (RFC 3261 §21.1):
+                            //   181 Call Is Being Forwarded
+                            //   182 Queued
+                            //   199 Early Dialog Terminated
+                            // All three keep the dialog in a Ringing-like state
+                            // from the session layer's POV; attach the reason
+                            // phrase so the application can distinguish them.
+                            let reason = match response.status_code() {
+                                181 => Some("Forwarded".to_string()),
+                                182 => Some("Queued".to_string()),
+                                199 => Some("EarlyDialogTerminated".to_string()),
+                                _ => None,
+                            };
+                            Some(RvoipCrossCrateEvent::DialogToSession(
+                                DialogToSessionEvent::CallStateChanged {
+                                    session_id,
+                                    new_state: CallState::Ringing,
+                                    reason,
+                                }
+                            ))
+                        }
+                        487 => {
+                            // RFC 3261 §15.1.2 — 487 Request Terminated follows a
+                            // CANCEL. Distinct from generic CallFailed so UIs can
+                            // render "missed call" rather than "call rejected".
+                            Some(RvoipCrossCrateEvent::DialogToSession(
+                                DialogToSessionEvent::CallCancelled { session_id }
+                            ))
+                        }
+                        491 => {
+                            // RFC 3261 §14.1 — 491 Request Pending on a re-INVITE
+                            // or UPDATE. Session layer should wait a random
+                            // backoff and retry. 491 on the initial INVITE is
+                            // nonsensical per the spec so we surface it as glare
+                            // unconditionally; higher layers decide how to handle.
+                            Some(RvoipCrossCrateEvent::DialogToSession(
+                                DialogToSessionEvent::ReinviteGlare { session_id }
+                            ))
+                        }
+                        code if (300..400).contains(&code) => {
+                            // RFC 3261 §8.1.3.4 / §21.3 — redirect. Extract Contact
+                            // URIs with q-values so the UAC can retry. Any 3xx
+                            // response carries one or more Contact: headers per
+                            // §19.1.5.
+                            let mut targets: Vec<String> = Vec::new();
+                            let mut q_values: Vec<f32> = Vec::new();
+                            for header in &response.headers {
+                                if let rvoip_sip_core::TypedHeader::Contact(contact) = header {
+                                    for address in contact.addresses() {
+                                        targets.push(address.uri.to_string());
+                                        let q = address
+                                            .params
+                                            .iter()
+                                            .find_map(|p| {
+                                                if let rvoip_sip_core::types::param::Param::Q(v) = p {
+                                                    Some(*v.as_ref() as f32)
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .unwrap_or(1.0);
+                                        q_values.push(q);
+                                    }
+                                }
+                            }
+                            Some(RvoipCrossCrateEvent::DialogToSession(
+                                DialogToSessionEvent::CallRedirected {
+                                    session_id,
+                                    status_code: code,
+                                    targets,
+                                    q_values,
+                                }
+                            ))
+                        }
+                        code if (400..700).contains(&code) => {
+                            // RFC 3261 §8.1.3 — any other final 3xx/4xx/5xx/6xx
+                            // response ends the UAC's INVITE transaction. Propagate
+                            // to the session layer so it can emit CallFailed and
+                            // run the Dialog{4,5,6}xxFailure state transitions.
                             Some(RvoipCrossCrateEvent::DialogToSession(
                                 DialogToSessionEvent::CallFailed {
                                     session_id,

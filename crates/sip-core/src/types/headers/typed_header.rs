@@ -63,6 +63,7 @@ use crate::types::min_expires::MinExpires;
 use crate::types::min_se::MinSE;
 use crate::types::organization::Organization;
 use crate::types::rseq::RSeq;
+use crate::types::rack::RAck;
 
 // Import parser components
 use crate::parser;
@@ -167,6 +168,9 @@ pub enum TypedHeader {
     SessionExpires(SessionExpires), // Added SessionExpires variant
     MinSE(MinSE),
     RSeq(crate::types::rseq::RSeq), // Added RSeq variant
+    /// RAck header (RFC 3262 §7.2) — acknowledges a reliable provisional
+    /// response in a PRACK request. Carries rseq, cseq, and method.
+    RAck(crate::types::rack::RAck),
     SipETag(crate::types::sip_etag::SipETag), // Added SIP-ETag variant
     SipIfMatch(crate::types::sip_if_match::SipIfMatch), // Added SIP-If-Match variant
     AllowEvents(crate::types::allow_events::AllowEvents), // Added Allow-Events variant
@@ -232,6 +236,7 @@ impl TypedHeader {
             TypedHeader::SessionExpires(_) => HeaderName::SessionExpires, // Added SessionExpires case
             TypedHeader::MinSE(_) => HeaderName::MinSE,
             TypedHeader::RSeq(_) => HeaderName::RSeq, // Use proper HeaderName enum variant
+            TypedHeader::RAck(_) => HeaderName::RAck,
             TypedHeader::SipETag(_) => HeaderName::SipETag,
             TypedHeader::SipIfMatch(_) => HeaderName::SipIfMatch,
             TypedHeader::AllowEvents(_) => HeaderName::AllowEvents,
@@ -301,6 +306,8 @@ impl TypedHeader {
             TypedHeader::MinSE(h) if type_id_t == std::any::TypeId::of::<crate::types::min_se::MinSE>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
             TypedHeader::RSeq(h) if type_id_t == std::any::TypeId::of::<crate::types::rseq::RSeq>() =>
+                Some(unsafe { &*(h as *const _ as *const T) }),
+            TypedHeader::RAck(h) if type_id_t == std::any::TypeId::of::<crate::types::rack::RAck>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
             TypedHeader::ReferTo(h) if type_id_t == std::any::TypeId::of::<crate::types::refer_to::ReferTo>() =>
                 Some(unsafe { &*(h as *const _ as *const T) }),
@@ -420,6 +427,7 @@ impl fmt::Display for TypedHeader {
             TypedHeader::SessionExpires(session_expires) => write!(f, "{}: {}", HeaderName::SessionExpires, session_expires),
             TypedHeader::MinSE(val) => write!(f, "{}: {}", HeaderName::MinSE, val),
             TypedHeader::RSeq(val) => write!(f, "{}: {}", HeaderName::RSeq, val),
+            TypedHeader::RAck(val) => write!(f, "{}: {}", HeaderName::RAck, val),
             TypedHeader::SipETag(val) => write!(f, "{}: {}", HeaderName::SipETag, val),
             TypedHeader::SipIfMatch(val) => write!(f, "{}: {}", HeaderName::SipIfMatch, val),
             TypedHeader::AllowEvents(val) => write!(f, "{}: {}", HeaderName::AllowEvents, val),
@@ -1174,6 +1182,11 @@ impl TryFrom<Header> for TypedHeader {
                 let value_str = std::str::from_utf8(value_bytes)
                     .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in RSeq header value: {}", e)))?;
                 Ok(TypedHeader::RSeq(crate::types::rseq::RSeq::from_str(value_str)?))
+            },
+            HeaderName::RAck => {
+                let value_str = std::str::from_utf8(value_bytes)
+                    .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in RAck header value: {}", e)))?;
+                Ok(TypedHeader::RAck(crate::types::rack::RAck::from_str(value_str)?))
             },
             HeaderName::SipETag => {
                 match all_consuming(parser::headers::parse_sip_etag)(value_bytes) {

@@ -1623,6 +1623,7 @@ impl SimpleResponseBuilder {
             TypedHeader::Date(_) |
             TypedHeader::Timestamp(_) |
             TypedHeader::RSeq(_) |
+            TypedHeader::RAck(_) |
             TypedHeader::SipETag(_) |        // Single-value header for entity tags
             TypedHeader::SipIfMatch(_) => {  // Single-value header for conditional requests
                 self.response.headers.retain(|h| h.name() != new_header_name);
