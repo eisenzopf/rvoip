@@ -6,13 +6,19 @@
 use rvoip_session_core_v3::{Config, StreamPeer};
 use tokio::time::Duration;
 
+fn env_port(key: &str, default: u16) -> u16 {
+    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
         .init();
 
-    let mut charlie = StreamPeer::with_config(Config::local("charlie", 5062)).await?;
+    let charlie_port = env_port("CHARLIE_PORT", 5062);
+
+    let mut charlie = StreamPeer::with_config(Config::local("charlie", charlie_port)).await?;
     println!("[CHARLIE] Waiting for transferred call...");
 
     let incoming = charlie.wait_for_incoming().await?;

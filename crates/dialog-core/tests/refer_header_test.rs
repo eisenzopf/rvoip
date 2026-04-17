@@ -3,20 +3,15 @@
 
 use std::sync::Arc;
 use std::net::SocketAddr;
-use tokio::sync::mpsc;
 
 use rvoip_dialog_core::{
     api::unified::UnifiedDialogApi,
     config::DialogManagerConfig,
-    events::SessionCoordinationEvent,
 };
 use rvoip_sip_core::{
-    Request, Method, StatusCode,
+    Method,
     builder::{SimpleRequestBuilder, headers::ReferToExt},
-    types::{
-        refer_to::ReferTo,
-        header::TypedHeader,
-    },
+    types::refer_to::ReferTo,
 };
 
 #[tokio::test]
@@ -81,11 +76,9 @@ async fn test_incoming_refer_with_proper_header() {
             .expect("Failed to create dialog API")
     );
     
-    // Set up event channel to capture transfer requests
-    let (event_tx, mut event_rx) = mpsc::channel::<SessionCoordinationEvent>(100);
-    dialog_api.dialog_manager().set_session_coordinator(event_tx).await;
-    
-    // Start the API
+    // Start the API. Session-coordination events now flow via the
+    // GlobalEventCoordinator; this test only checks REFER structure, so no
+    // per-test event-channel wiring is needed.
     dialog_api.start().await.expect("Failed to start dialog API");
     
     // Create REFER request with Refer-To as a HEADER (not body)

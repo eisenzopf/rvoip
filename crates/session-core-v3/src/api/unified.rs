@@ -18,6 +18,8 @@ use std::net::{IpAddr, SocketAddr};
 use tokio::sync::{mpsc, RwLock};
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 
+pub use rvoip_dialog_core::api::RelUsage;
+
 /// Configuration for the unified coordinator
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -36,6 +38,13 @@ pub struct Config {
     pub state_table_path: Option<String>,
     /// Local SIP URI (e.g., "sip:alice@127.0.0.1:5060")
     pub local_uri: String,
+    /// Policy for RFC 3262 `100rel` reliable provisionals on outgoing INVITE.
+    ///
+    /// Default is `Supported` — advertise capability without demanding it,
+    /// which is the safe setting for interop and unchanged wire behavior.
+    /// Set to `Required` when connecting to a carrier that mandates 100rel,
+    /// or `NotSupported` to omit the tag entirely.
+    pub use_100rel: RelUsage,
 }
 
 impl Config {
@@ -56,6 +65,7 @@ impl Config {
             bind_addr: SocketAddr::new(ip, port),
             state_table_path: None,
             local_uri: format!("sip:{}@{}:{}", name, ip, port),
+            use_100rel: RelUsage::default(),
         }
     }
 
@@ -75,6 +85,7 @@ impl Config {
             bind_addr: SocketAddr::new(ip, port),
             state_table_path: None,
             local_uri: format!("sip:{}@{}:{}", name, ip, port),
+            use_100rel: RelUsage::default(),
         }
     }
 }
@@ -533,6 +544,7 @@ impl UnifiedCoordinator {
         // Create dialog config - use hybrid mode to support both incoming and outgoing calls
         let dialog_config = DialogManagerConfig::hybrid(config.bind_addr)
             .with_from_uri(&config.local_uri)
+            .with_100rel(config.use_100rel)
             .build();
         
         // Create dialog API with global event coordination AND transaction events

@@ -34,6 +34,7 @@ async fn create_test_coordinator(port: u16) -> Arc<UnifiedCoordinator> {
         media_port_start: 16000 + port,
         media_port_end: 17000 + port,
         state_table_path: None,
+        use_100rel: Default::default(),
     };
 
     UnifiedCoordinator::new(config).await.expect("Failed to create coordinator")

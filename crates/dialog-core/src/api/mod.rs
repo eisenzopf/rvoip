@@ -81,7 +81,7 @@ pub use unified::UnifiedDialogApi;
 
 // Re-export shared types
 pub use common::{DialogHandle, CallHandle, DialogEvent, CallInfo};
-pub use config::{ClientConfig, ServerConfig, DialogConfig, Credentials};
+pub use config::{ClientConfig, ServerConfig, DialogConfig, Credentials, RelUsage};
 
 // Re-export error types
 pub use errors::{ApiError, ApiResult};

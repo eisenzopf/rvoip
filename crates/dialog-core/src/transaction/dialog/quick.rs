@@ -13,6 +13,8 @@
 
 use std::net::SocketAddr;
 use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
+use rvoip_sip_core::types::TypedHeader;
+use rvoip_sip_core::types::rack::RAck;
 use crate::transaction::error::{Error, Result};
 use super::{DialogRequestTemplate, DialogTransactionContext, request_builder_from_dialog_template, response_builder_for_dialog_transaction};
 
@@ -564,6 +566,63 @@ pub fn reinvite_for_dialog(
     request_builder_from_dialog_template(&template, Method::Invite, Some(sdp_offer.into()), Some("application/sdp".to_string()))
 }
 
+/// Quick PRACK request creation (RFC 3262 §7.2)
+///
+/// Creates a PRACK request acknowledging a reliable provisional (18x)
+/// response. The `RAck` header is populated from the `RSeq` of the 18x
+/// being acknowledged, plus the CSeq and method of the original INVITE.
+///
+/// # Arguments
+/// * `call_id` - Dialog Call-ID
+/// * `from_uri` - Local URI (From header)
+/// * `from_tag` - Local tag (From header tag)
+/// * `to_uri` - Remote URI (To header)
+/// * `to_tag` - Remote tag (To header tag) — required; PRACK is in-dialog
+/// * `rseq` - `RSeq` value from the reliable 18x being acknowledged
+/// * `invite_cseq` - CSeq of the original INVITE that produced the 18x
+/// * `prack_cseq` - Next local CSeq to use for this PRACK
+/// * `local_address` - Local address for Via header
+/// * `route_set` - Optional route set for proxy routing
+pub fn prack_for_dialog(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    rseq: u32,
+    invite_cseq: u32,
+    prack_cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>
+) -> Result<Request> {
+    let to_uri_string = to_uri.into();
+    let template = DialogRequestTemplate {
+        call_id: call_id.into(),
+        from_uri: from_uri.into(),
+        from_tag: from_tag.into(),
+        to_uri: to_uri_string.clone(),
+        to_tag: to_tag.into(),
+        request_uri: to_uri_string,
+        cseq: prack_cseq,
+        local_address,
+        route_set: route_set.unwrap_or_default(),
+        contact: None,
+    };
+
+    let mut request = request_builder_from_dialog_template(
+        &template,
+        Method::Prack,
+        None,
+        None,
+    )?;
+
+    // The generic builder doesn't know about RAck; append it here per RFC 3262 §7.2.
+    let rack = RAck::new(rseq, invite_cseq, Method::Invite);
+    request.headers.push(TypedHeader::RAck(rack));
+
+    Ok(request)
+}
+
 /// Quick response creation for dialog transactions
 /// 
 /// Creates an appropriate response for a dialog transaction with automatic
@@ -756,6 +815,7 @@ mod tests {
             "bob-tag",
             "dialog",
             Some(notification_body.to_string()),
+            None, // subscription_state
             6,
             local_addr,
             None

@@ -18,6 +18,7 @@ fn test_config(base_port: u16) -> Config {
         bind_addr: format!("127.0.0.1:{}", base_port).parse().unwrap(),
         state_table_path: None,
         local_uri: format!("sip:test@127.0.0.1:{}", base_port),
+        use_100rel: Default::default(),
     }
 }
 
@@ -93,22 +94,11 @@ async fn test_conference_operations() {
     assert!(in_conf1.is_ok());
 }
 
-#[tokio::test]
-async fn test_transfer_via_send_refer() {
-    let coordinator = UnifiedCoordinator::new(test_config(15208)).await.unwrap();
-
-    let session_id = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15209"
-    ).await.unwrap();
-
-    // Use send_refer (blind_transfer method was removed)
-    let result = coordinator.send_refer(
-        &session_id,
-        "sip:charlie@localhost:15210"
-    ).await;
-    assert!(result.is_ok());
-}
+// REFER requires a Confirmed dialog, which in turn requires a real peer
+// answering on the wire. We do not try to pair two in-process StreamPeers in
+// the same Tokio runtime — it's been unreliable. Transfer coverage lives in
+// `tests/blind_transfer_integration.rs`, which drives three separate example
+// binaries as subprocesses.
 
 #[tokio::test]
 #[ignore = "start_attended_transfer / complete_attended_transfer methods were removed in v3"]

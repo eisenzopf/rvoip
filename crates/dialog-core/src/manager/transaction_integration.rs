@@ -21,7 +21,82 @@ use crate::transaction::dialog::{request_builder_from_dialog_template, DialogReq
 use crate::errors::DialogResult;
 use crate::dialog::DialogId;
 use crate::events::{DialogEvent, SessionCoordinationEvent};
+use crate::api::config::RelUsage;
 use super::core::DialogManager;
+
+/// Detect a reliable provisional response per RFC 3262.
+///
+/// Returns `Some(rseq)` when the response carries both `Require: 100rel`
+/// and an `RSeq` header — meaning the UAC must PRACK it. Returns `None`
+/// for unreliable provisionals.
+pub fn detect_reliable_provisional(response: &Response) -> Option<u32> {
+    use rvoip_sip_core::types::TypedHeader;
+
+    let mut requires_100rel = false;
+    let mut rseq_value: Option<u32> = None;
+
+    for header in &response.headers {
+        match header {
+            TypedHeader::Require(req) if req.requires("100rel") => {
+                requires_100rel = true;
+            }
+            TypedHeader::RSeq(rseq) => {
+                rseq_value = Some(rseq.value);
+            }
+            _ => {}
+        }
+    }
+
+    if requires_100rel { rseq_value } else { None }
+}
+
+/// Inject the configured `100rel` option tag into an outgoing INVITE
+/// (adds to existing `Supported`/`Require` headers if present).
+///
+/// `NotSupported` is a no-op — no header is added. `Supported` appends
+/// `100rel` to any existing `Supported` header or creates one. `Required`
+/// does the same for `Require`.
+pub fn inject_100rel_policy(request: &mut Request, policy: RelUsage) {
+    use rvoip_sip_core::types::{TypedHeader, Supported, Require};
+
+    match policy {
+        RelUsage::NotSupported => {}
+        RelUsage::Supported => {
+            let mut updated = false;
+            for header in request.headers.iter_mut() {
+                if let TypedHeader::Supported(ref mut sup) = header {
+                    if !sup.option_tags.iter().any(|t| t == "100rel") {
+                        sup.option_tags.push("100rel".to_string());
+                    }
+                    updated = true;
+                    break;
+                }
+            }
+            if !updated {
+                request.headers.push(TypedHeader::Supported(
+                    Supported::new(vec!["100rel".to_string()]),
+                ));
+            }
+        }
+        RelUsage::Required => {
+            let mut updated = false;
+            for header in request.headers.iter_mut() {
+                if let TypedHeader::Require(ref mut req) = header {
+                    if !req.requires("100rel") {
+                        req.add_tag("100rel");
+                    }
+                    updated = true;
+                    break;
+                }
+            }
+            if !updated {
+                request.headers.push(TypedHeader::Require(
+                    Require::with_tag("100rel"),
+                ));
+            }
+        }
+    }
+}
 
 /// Trait for transaction integration operations
 pub trait TransactionIntegration {
@@ -80,6 +155,27 @@ impl TransactionIntegration for DialogManager {
             
             // Create dialog template using the proper dialog method
             let template = dialog.create_request_template(method.clone());
+
+            // Capture INVITE CSeq for later use by RAck (RFC 3262 §7.2). Applies
+            // to both initial INVITE and re-INVITE — a re-INVITE can also produce
+            // reliable provisionals, so the most recent INVITE CSeq is what counts.
+            if method == Method::Invite {
+                dialog.invite_cseq = Some(template.cseq_number);
+            }
+
+            // Read dialog-scoped fields needed by per-method request builders
+            // BEFORE entering the match — the DashMap write lock held by
+            // `dialog` would otherwise deadlock on any `self.get_dialog()` call
+            // inside an arm (hit us on NOTIFY, which reads event_package +
+            // subscription_state).
+            let notify_event_package = dialog
+                .event_package
+                .clone()
+                .unwrap_or_else(|| "dialog".to_string());
+            let notify_subscription_state = dialog
+                .subscription_state
+                .as_ref()
+                .map(|s| s.to_header_value());
             
             // Generate local tag if missing (for outgoing requests we should always have a local tag)
             let local_tag = match template.local_tag {
@@ -265,23 +361,15 @@ impl TransactionIntegration for DialogManager {
                         crate::errors::DialogError::protocol_error("NOTIFY request requires remote tag in established dialog")
                     })?;
 
-                    // Get event type and subscription state from dialog (RFC 6665 compliance)
-                    let (event_type, subscription_state) = {
-                        let dialog_ref = self.get_dialog(&dialog_id)?;
-                        let event = dialog_ref.event_package.clone().unwrap_or_else(|| "dialog".to_string());
-                        let sub_state = dialog_ref.subscription_state.as_ref().map(|s| s.to_header_value());
-                        (event, sub_state)
-                    };
-
                     dialog_quick::notify_for_dialog(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
                         &template.remote_uri.to_string(),
                         &remote_tag,
-                        &event_type,
+                        &notify_event_package,
                         body_string,
-                        subscription_state,
+                        notify_subscription_state.clone(),
                         template.cseq_number,
                         self.local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
@@ -340,7 +428,14 @@ impl TransactionIntegration for DialogManager {
                 message: format!("Failed to build {} request using Phase 3 dialog functions: {}", method, e),
                 context: None,
             })?;
-            
+
+            let mut request = request;
+            // RFC 3262: advertise or demand the `100rel` extension on outgoing
+            // INVITEs per dialog config. Applies to both initial and re-INVITE.
+            if method == Method::Invite {
+                inject_100rel_policy(&mut request, self.config_100rel_policy());
+            }
+
             (destination, request)
         };
         
@@ -722,14 +817,14 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         response: Response,
     ) -> DialogResult<()> {
-        debug!("Transaction {} received provisional response {} {} for dialog {}", 
+        debug!("Transaction {} received provisional response {} {} for dialog {}",
                transaction_id, response.status_code(), response.reason_phrase(), dialog_id);
-        
+
         // Update dialog state for early dialogs
         let dialog_created = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
             let old_state = dialog.state.clone();
-            
+
             // For provisional responses with to-tag, create early dialog
             if let Some(to_header) = response.to() {
                 if let Some(to_tag) = to_header.tag() {
@@ -751,7 +846,7 @@ impl DialogManager {
                 None
             }
         };
-        
+
         // Emit dialog state change if early dialog was created
         if let Some((old_state, new_state)) = dialog_created {
             self.emit_dialog_event(DialogEvent::StateChanged {
@@ -759,6 +854,47 @@ impl DialogManager {
                 old_state,
                 new_state,
             }).await;
+        }
+
+        // RFC 3262: auto-PRACK reliable provisionals.
+        // Only applies to 18x (101..200), and only when the response carries
+        // both Require: 100rel and an RSeq header.
+        let status = response.status_code();
+        if (101..200).contains(&status) {
+            if let Some(rseq_value) = detect_reliable_provisional(&response) {
+                let should_send = {
+                    let mut dialog = self.get_dialog_mut(dialog_id)?;
+                    match dialog.last_rseq_acked {
+                        Some(prev) if rseq_value <= prev => {
+                            debug!(
+                                "Ignoring duplicate/out-of-order reliable {}: dialog {} already acked RSeq {} (got {})",
+                                status, dialog_id, prev, rseq_value
+                            );
+                            false
+                        }
+                        _ => {
+                            dialog.last_rseq_acked = Some(rseq_value);
+                            true
+                        }
+                    }
+                };
+
+                if should_send {
+                    if let Err(e) = self.send_prack(dialog_id, rseq_value).await {
+                        warn!(
+                            "Auto-PRACK failed for dialog {} (RSeq={}): {}",
+                            dialog_id, rseq_value, e
+                        );
+                        // Roll back the ack record so a retransmit can re-trigger.
+                        if let Ok(mut dialog) = self.get_dialog_mut(dialog_id) {
+                            // Only roll back if we're still the most recent acker.
+                            if dialog.last_rseq_acked == Some(rseq_value) {
+                                dialog.last_rseq_acked = None;
+                            }
+                        }
+                    }
+                }
+            }
         }
         
         // Handle specific provisional responses and emit session coordination events
@@ -964,8 +1100,106 @@ impl DialogManager {
         (dialog_count, transaction_mapping_count)
     }
     
+    /// Resolve the configured 100rel policy for outgoing INVITEs.
+    ///
+    /// Reads `DialogConfig.use_100rel` from the unified config when present,
+    /// otherwise defaults to `RelUsage::Supported` (advertise capability).
+    pub fn config_100rel_policy(&self) -> RelUsage {
+        self.config
+            .as_ref()
+            .map(|c| c.dialog_config().use_100rel)
+            .unwrap_or_default()
+    }
+
+    /// Send a PRACK request acknowledging a reliable provisional (RFC 3262 §7.2).
+    ///
+    /// Builds a PRACK within the given dialog whose `RAck` header references the
+    /// supplied `rseq` and the original INVITE's CSeq. A new non-INVITE client
+    /// transaction is created and sent. This is the low-level send — callers that
+    /// want auto-PRACK on receipt of a reliable 18x should go through
+    /// `handle_transaction_provisional_response`.
+    pub async fn send_prack(
+        &self,
+        dialog_id: &DialogId,
+        rseq: u32,
+    ) -> DialogResult<TransactionKey> {
+        debug!("Building PRACK for dialog {} acknowledging RSeq={}", dialog_id, rseq);
+
+        let (destination, request) = {
+            let mut dialog = self.get_dialog_mut(dialog_id)?;
+
+            let destination = dialog.get_remote_target_address().await
+                .ok_or_else(|| crate::errors::DialogError::routing_error(
+                    "No remote target address available for PRACK",
+                ))?;
+
+            let invite_cseq = dialog.invite_cseq.ok_or_else(|| {
+                crate::errors::DialogError::protocol_error(
+                    "Cannot send PRACK: dialog has no INVITE CSeq recorded",
+                )
+            })?;
+
+            // Need both tags: PRACK is in-dialog and reliable 18x establishes an early dialog.
+            let local_tag = dialog.local_tag.clone().ok_or_else(|| {
+                crate::errors::DialogError::protocol_error("PRACK requires local tag")
+            })?;
+            let remote_tag = dialog.remote_tag.clone().ok_or_else(|| {
+                crate::errors::DialogError::protocol_error(
+                    "PRACK requires remote tag from the reliable 18x response",
+                )
+            })?;
+
+            // Increment local CSeq for the PRACK (it's a new transaction).
+            dialog.local_cseq += 1;
+            let prack_cseq = dialog.local_cseq;
+            let route_set = dialog.route_set.clone();
+            let call_id = dialog.call_id.clone();
+            let local_uri = dialog.local_uri.to_string();
+            let remote_uri = dialog.remote_uri.to_string();
+
+            let request = crate::transaction::dialog::prack_for_dialog(
+                call_id,
+                local_uri,
+                local_tag,
+                remote_uri,
+                remote_tag,
+                rseq,
+                invite_cseq,
+                prack_cseq,
+                self.local_address,
+                if route_set.is_empty() { None } else { Some(route_set) },
+            )
+            .map_err(|e| crate::errors::DialogError::InternalError {
+                message: format!("Failed to build PRACK: {}", e),
+                context: None,
+            })?;
+
+            (destination, request)
+        };
+
+        let transaction_id = self.transaction_manager
+            .create_non_invite_client_transaction(request, destination)
+            .await
+            .map_err(|e| crate::errors::DialogError::TransactionError {
+                message: format!("Failed to create PRACK transaction: {}", e),
+            })?;
+
+        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
+
+        self.transaction_manager
+            .send_request(&transaction_id)
+            .await
+            .map_err(|e| crate::errors::DialogError::TransactionError {
+                message: format!("Failed to send PRACK: {}", e),
+            })?;
+
+        info!("Sent PRACK for dialog {} (transaction {}, RSeq={})",
+              dialog_id, transaction_id, rseq);
+        Ok(transaction_id)
+    }
+
     /// Cleanup orphaned transaction mappings
-    /// 
+    ///
     /// Removes transaction-dialog mappings for terminated dialogs.
     pub async fn cleanup_orphaned_transaction_mappings(&self) -> usize {
         let mut orphaned_count = 0;

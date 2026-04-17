@@ -115,6 +115,31 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
+/// Policy for the SIP `100rel` reliable-provisional-response extension
+/// (RFC 3262).
+///
+/// Controls how outgoing INVITEs advertise (or demand) reliable provisional
+/// responses. Inbound 18x with `Require: 100rel` are auto-PRACKed regardless
+/// of this setting; this only affects what we put on our own outgoing INVITE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelUsage {
+    /// Don't advertise 100rel at all. Carriers that mandate reliable 18x will
+    /// reject the INVITE.
+    NotSupported,
+    /// Advertise via `Supported: 100rel`. The peer may use reliable 18x but
+    /// is not required to. This is the safe default.
+    Supported,
+    /// Demand via `Require: 100rel`. The peer must support 100rel or the
+    /// call setup fails with 420 Bad Extension.
+    Required,
+}
+
+impl Default for RelUsage {
+    fn default() -> Self {
+        RelUsage::Supported
+    }
+}
+
 /// Main configuration for dialog operations
 ///
 /// This is the foundational configuration struct that controls core dialog
@@ -200,6 +225,12 @@ pub struct DialogConfig {
     /// Longer intervals are more efficient but allow terminated dialogs
     /// to accumulate temporarily.
     pub cleanup_interval: Duration,
+
+    /// Policy for the SIP 100rel (reliable provisional) extension on
+    /// outgoing INVITE. Default is `Supported` (advertise capability, don't
+    /// demand it).
+    #[serde(default)]
+    pub use_100rel: RelUsage,
 }
 
 impl Default for DialogConfig {
@@ -211,6 +242,7 @@ impl Default for DialogConfig {
             max_dialogs: Some(10000),
             auto_cleanup: true,
             cleanup_interval: Duration::from_secs(30),
+            use_100rel: RelUsage::default(),
         }
     }
 }
@@ -325,6 +357,22 @@ impl DialogConfig {
         self
     }
     
+    /// Set the 100rel (reliable provisional) policy (RFC 3262).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_dialog_core::api::{DialogConfig, config::RelUsage};
+    ///
+    /// let config = DialogConfig::new("127.0.0.1:5060".parse().unwrap())
+    ///     .with_100rel(RelUsage::Required);
+    /// assert_eq!(config.use_100rel, RelUsage::Required);
+    /// ```
+    pub fn with_100rel(mut self, policy: RelUsage) -> Self {
+        self.use_100rel = policy;
+        self
+    }
+
     /// Disable automatic cleanup
     ///
     /// Turns off automatic cleanup of terminated dialogs, giving the

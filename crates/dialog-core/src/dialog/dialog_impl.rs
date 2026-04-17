@@ -92,9 +92,23 @@ pub struct Dialog {
     
     /// Number of failed refresh attempts
     pub refresh_failures: u32,
-    
+
     /// Maximum refresh failures before termination
     pub max_refresh_failures: u32,
+
+    // PRACK / 100rel fields (RFC 3262)
+
+    /// CSeq number of the INVITE that created this dialog.
+    ///
+    /// Captured by the UAC when the initial INVITE is sent, and by the UAS
+    /// when the INVITE is received. Needed to populate the `RAck` header
+    /// when sending PRACK in response to a reliable provisional.
+    pub invite_cseq: Option<u32>,
+
+    /// Highest `RSeq` value that has already been acknowledged by PRACK on
+    /// this dialog. Used to drop retransmitted reliable provisionals and
+    /// preserve RFC 3262 §4 monotonic ordering.
+    pub last_rseq_acked: Option<u32>,
 }
 
 impl Dialog {
@@ -131,9 +145,11 @@ impl Dialog {
             event_id: None,
             refresh_failures: 0,
             max_refresh_failures: 3,
+            invite_cseq: None,
+            last_rseq_acked: None,
         }
     }
-    
+
     /// Create a new early dialog
     pub fn new_early(
         call_id: String,
@@ -300,9 +316,11 @@ impl Dialog {
             event_id: None,
             refresh_failures: 0,
             max_refresh_failures: 3,
+            invite_cseq: Some(cseq_number),
+            last_rseq_acked: None,
         })
     }
-    
+
     /// Create a dialog from an early (1xx) response to an INVITE
     pub fn from_provisional_response(request: &Request, response: &Response, is_initiator: bool) -> Option<Self> {
         // Only certain provisional responses can create dialogs
@@ -393,9 +411,11 @@ impl Dialog {
             event_id: None,
             refresh_failures: 0,
             max_refresh_failures: 3,
+            invite_cseq: Some(cseq_number),
+            last_rseq_acked: None,
         })
     }
-    
+
     // ===== Subscription-specific methods (RFC 6665) =====
     
     /// Initialize dialog for subscription with event package

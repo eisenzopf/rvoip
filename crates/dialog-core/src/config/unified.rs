@@ -77,7 +77,7 @@
 use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 
-use crate::api::{DialogConfig, Credentials};
+use crate::api::{DialogConfig, Credentials, RelUsage};
 
 /// Unified configuration for DialogManager
 ///
@@ -271,6 +271,11 @@ impl DialogManagerConfig {
         }
     }
     
+    /// Get the configured 100rel policy for outgoing INVITEs (RFC 3262).
+    pub fn use_100rel(&self) -> RelUsage {
+        self.dialog_config().use_100rel
+    }
+
     /// Check if automatic REGISTER response is enabled
     pub fn auto_register_enabled(&self) -> bool {
         match self {
@@ -437,6 +442,12 @@ impl ClientConfigBuilder {
         self
     }
     
+    /// Set the 100rel (reliable provisional) policy (RFC 3262).
+    pub fn with_100rel(mut self, policy: RelUsage) -> Self {
+        self.behavior.dialog.use_100rel = policy;
+        self
+    }
+
     /// Build the final configuration
     pub fn build(self) -> DialogManagerConfig {
         DialogManagerConfig::Client(self.behavior)
@@ -476,6 +487,12 @@ impl ServerConfigBuilder {
         self
     }
     
+    /// Set the 100rel (reliable provisional) policy (RFC 3262).
+    pub fn with_100rel(mut self, policy: RelUsage) -> Self {
+        self.behavior.dialog.use_100rel = policy;
+        self
+    }
+
     /// Build the final configuration
     pub fn build(self) -> DialogManagerConfig {
         DialogManagerConfig::Server(self.behavior)
@@ -534,6 +551,12 @@ impl HybridConfigBuilder {
         self
     }
     
+    /// Set the 100rel (reliable provisional) policy (RFC 3262).
+    pub fn with_100rel(mut self, policy: RelUsage) -> Self {
+        self.behavior.dialog.use_100rel = policy;
+        self
+    }
+
     /// Build the final configuration
     pub fn build(self) -> DialogManagerConfig {
         DialogManagerConfig::Hybrid(self.behavior)

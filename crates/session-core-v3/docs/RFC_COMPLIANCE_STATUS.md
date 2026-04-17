@@ -116,9 +116,18 @@ closed or a new gap is identified.
 
 ### Reliability / strict carrier interop
 
-1. **PRACK / 100rel (RFC 3262)** — No support. Required for some strict carrier UAS configurations that set `Require: 100rel` on provisional responses. Needed for send+receive PRACK, RSeq/RAck header parsing, and reliable-provisional retransmission.
+1. **PRACK / 100rel (RFC 3262)** — **Partial**. Header types landed this session:
+   - `RSeq` — already existed in `sip-core::types::rseq` (full parse/serialize)
+   - `RAck` — **NEW this session** in `sip-core::types::rack` (parse/serialize/`TypedHeader` integration, 10 unit tests)
+   - `Method::Prack` — already defined
+   - `HeaderName::RAck` / `HeaderName::RSeq` — already defined
 
-2. **Session-Expires / session timers (RFC 4028)** — Not implemented. Long-running calls behind NAT can lose binding without periodic refresh. Needs `Session-Expires:` and `Min-SE:` header parsing, half-expiry re-INVITE scheduling, and `UPDATE` integration (dialog-core has UPDATE; session-core-v3 just needs to wire it).
+   **Still missing** (tracked as Phase C.1 follow-on):
+   - dialog-core UAC: detect `Require: 100rel` + `RSeq` on 18x, auto-generate PRACK with `RAck`, track `last_rseq` per dialog
+   - dialog-core UAS: generate reliable 18x with `Require: 100rel`, retransmit with T1 backoff per RFC 3262 §3, process incoming PRACK
+   - session-core-v3 `Config.use_100rel: RelUsage` flag
+
+2. **Session-Expires / session timers (RFC 4028)** — Not implemented. Long-running calls behind NAT can lose binding without periodic refresh. Needs `Session-Expires:` and `Min-SE:` header parsing, negotiation, half-expiry UPDATE/re-INVITE scheduling, and 408-reason BYE on refresh failure. dialog-core has UPDATE plumbing (see `UPDATE_STATUS.md`); session-core-v3 just needs to wire it to a timer.
 
 ### Partial / aesthetic
 

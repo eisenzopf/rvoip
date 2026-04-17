@@ -847,6 +847,22 @@ impl UnifiedDialogManager {
         let update_body = sdp.map(|s| bytes::Bytes::from(s));
         self.send_request_in_dialog(dialog_id, Method::Update, update_body).await
     }
+
+    /// Send PRACK for a reliable provisional response (RFC 3262).
+    ///
+    /// `rseq` is the `RSeq` value of the 18x being acknowledged. The dialog
+    /// must already have its `invite_cseq` recorded (set on initial INVITE)
+    /// and must have a remote tag (established by the reliable 18x itself).
+    pub async fn send_prack(
+        &self,
+        dialog_id: &DialogId,
+        rseq: u32,
+    ) -> ApiResult<TransactionKey> {
+        self.core.send_prack(dialog_id, rseq).await.map_err(|e| {
+            error!("Failed to send PRACK for dialog {} (RSeq={}): {}", dialog_id, rseq, e);
+            ApiError::from(e)
+        })
+    }
     
     /// Send INFO request for application-specific information
     pub async fn send_info(

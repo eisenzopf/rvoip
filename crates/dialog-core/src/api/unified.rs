@@ -924,6 +924,15 @@ impl UnifiedDialogApi {
     ) -> ApiResult<TransactionKey> {
         self.manager.send_update(dialog_id, sdp).await
     }
+
+    /// Send PRACK for a reliable provisional response (RFC 3262).
+    pub async fn send_prack(
+        &self,
+        dialog_id: &DialogId,
+        rseq: u32,
+    ) -> ApiResult<TransactionKey> {
+        self.manager.send_prack(dialog_id, rseq).await
+    }
     
     /// Send INFO request for application-specific information
     pub async fn send_info(

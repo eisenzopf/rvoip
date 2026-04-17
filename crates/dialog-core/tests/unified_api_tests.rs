@@ -447,27 +447,19 @@ async fn test_unified_api_shared_operations() -> Result<(), Box<dyn std::error::
 
 #[tokio::test]
 async fn test_unified_api_session_coordination() -> Result<(), Box<dyn std::error::Error>> {
+    // The channel-based `set_session_coordinator` / `set_dialog_event_sender`
+    // APIs were removed in favour of the global `GlobalEventCoordinator` bus.
+    // This test now only verifies that the server-mode API starts and stops
+    // cleanly under that new model; cross-layer event delivery is covered by
+    // session-core-v3 integration tests.
     let env = UnifiedTestEnvironment::new().await?;
-    
+
     let config = DialogManagerConfig::server(env.local_address)
         .with_domain("test.com")
         .build();
-    
+
     let api = UnifiedDialogApi::new(env.transaction_manager, config).await?;
-    
-    // Set up session coordination
-    let (session_tx, _session_rx) = mpsc::channel(100);
-    api.set_session_coordinator(session_tx).await?;
-    
-    // Set up dialog events
-    let (dialog_tx, _dialog_rx) = mpsc::channel(100);
-    api.set_dialog_event_sender(dialog_tx).await?;
-    
     api.start().await?;
-    
-    // Test event channels are working
-    // (In a real test, we would send SIP messages and verify events)
-    
     api.stop().await?;
     Ok(())
 }
@@ -511,7 +503,8 @@ async fn test_unified_api_sip_method_helpers() -> Result<(), Box<dyn std::error:
     let notify_result = api.send_notify(
         &dialog_id,
         "presence".to_string(),
-        Some("online".to_string())
+        Some("online".to_string()),
+        None, // subscription_state
     ).await;
     assert!(notify_result.is_err());
     
