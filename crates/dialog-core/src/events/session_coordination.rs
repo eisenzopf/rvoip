@@ -198,6 +198,23 @@ pub enum SessionCoordinationEvent {
         negotiated_sdp: Option<String>,
     },
     
+    /// RFC 4028 session-timer refresh succeeded (UPDATE or re-INVITE sent).
+    SessionRefreshed {
+        /// Dialog that was refreshed.
+        dialog_id: DialogId,
+        /// Negotiated session-expires interval in seconds.
+        expires_secs: u32,
+    },
+
+    /// RFC 4028 session-timer refresh failed. The dialog has been torn
+    /// down with BYE (§10). The session layer should emit CallEnded.
+    SessionRefreshFailed {
+        /// Dialog whose refresh failed.
+        dialog_id: DialogId,
+        /// Human-readable reason.
+        reason: String,
+    },
+
     /// Cleanup confirmation from a layer
     CleanupConfirmation {
         /// Dialog ID for the cleanup

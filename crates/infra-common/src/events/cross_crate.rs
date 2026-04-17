@@ -151,6 +151,8 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::CallTerminated { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallFailed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallCancelled { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::SessionRefreshed { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::SessionRefreshFailed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallRedirected { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::ReinviteGlare { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DtmfReceived { session_id, .. } => Some(session_id),
@@ -334,6 +336,20 @@ pub enum DialogToSessionEvent {
     /// applications can render "missed call" UX rather than "call failed".
     CallCancelled {
         session_id: String,
+    },
+
+    /// RFC 4028 session-timer refresh succeeded (UPDATE or re-INVITE
+    /// completed round-trip). Emitted once per successful refresh.
+    SessionRefreshed {
+        session_id: String,
+        expires_secs: u32,
+    },
+
+    /// RFC 4028 session-timer refresh failed; the dialog has been torn
+    /// down with BYE (§10). A subsequent CallTerminated will also fire.
+    SessionRefreshFailed {
+        session_id: String,
+        reason: String,
     },
 
     /// 3xx redirect response received (RFC 3261 §8.1.3.4 / §21.3). The UAC

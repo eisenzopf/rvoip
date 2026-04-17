@@ -26,8 +26,8 @@ use super::utils::SourceExtractor;
 
 // Import all the specialized protocol handlers
 use crate::protocol::{
-    InviteHandler, ByeHandler, ResponseHandler, 
-    UpdateHandler, RegisterHandler
+    InviteHandler, ByeHandler, ResponseHandler,
+    UpdateHandler, RegisterHandler, PrackHandler,
 };
 
 /// Trait for SIP method handling (main protocol coordination)
@@ -69,7 +69,13 @@ pub trait ProtocolHandlers {
         &self,
         request: Request,
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-    
+
+    /// Handle PRACK requests (RFC 3262 reliable-provisional acknowledgment)
+    fn handle_prack_method(
+        &self,
+        request: Request,
+    ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
+
     /// Handle responses to client transactions
     fn handle_response_message(
         &self,
@@ -229,7 +235,12 @@ impl ProtocolHandlers for DialogManager {
     async fn handle_update_method(&self, request: Request) -> DialogResult<()> {
         UpdateHandler::handle_update_method(self, request).await
     }
-    
+
+    /// Delegate PRACK handling to the specialized prack_handler module
+    async fn handle_prack_method(&self, request: Request) -> DialogResult<()> {
+        PrackHandler::handle_prack_method(self, request).await
+    }
+
     /// Delegate response handling to the specialized response_handler module
     async fn handle_response_message(&self, response: Response, transaction_id: TransactionKey) -> DialogResult<()> {
         ResponseHandler::handle_response_message(self, response, transaction_id).await

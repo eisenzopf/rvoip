@@ -229,7 +229,23 @@ impl DialogEventHub {
                     None
                 }
             }
-            
+
+            SessionCoordinationEvent::SessionRefreshed { dialog_id, expires_secs } => {
+                self.dialog_manager.get_session_id(&dialog_id).map(|session_id| {
+                    RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::SessionRefreshed { session_id, expires_secs },
+                    )
+                })
+            }
+
+            SessionCoordinationEvent::SessionRefreshFailed { dialog_id, reason } => {
+                self.dialog_manager.get_session_id(&dialog_id).map(|session_id| {
+                    RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::SessionRefreshFailed { session_id, reason },
+                    )
+                })
+            }
+
             SessionCoordinationEvent::ResponseReceived { dialog_id, response, .. } => {
                 // Try to get session ID from stored mapping first
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {

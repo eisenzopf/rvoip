@@ -231,6 +231,23 @@ pub struct DialogConfig {
     /// demand it).
     #[serde(default)]
     pub use_100rel: RelUsage,
+
+    /// Session-Expires (RFC 4028) interval to request on outgoing INVITEs,
+    /// in seconds. `None` disables session timers entirely (no header sent,
+    /// no refresh scheduled). Common carrier value is 1800 (30 minutes).
+    #[serde(default)]
+    pub session_timer_secs: Option<u32>,
+
+    /// Minimum session-expires interval we're willing to accept (`Min-SE:`
+    /// header per RFC 4028 §5). If the peer's `Min-SE` exceeds our
+    /// `session_timer_secs`, we respond 422 Session Interval Too Small.
+    /// Default is 90 s (the RFC's recommended minimum).
+    #[serde(default = "default_min_se")]
+    pub session_timer_min_se: u32,
+}
+
+fn default_min_se() -> u32 {
+    90
 }
 
 impl Default for DialogConfig {
@@ -243,6 +260,8 @@ impl Default for DialogConfig {
             auto_cleanup: true,
             cleanup_interval: Duration::from_secs(30),
             use_100rel: RelUsage::default(),
+            session_timer_secs: None,
+            session_timer_min_se: default_min_se(),
         }
     }
 }
@@ -370,6 +389,19 @@ impl DialogConfig {
     /// ```
     pub fn with_100rel(mut self, policy: RelUsage) -> Self {
         self.use_100rel = policy;
+        self
+    }
+
+    /// Enable RFC 4028 session timers with the given expiry in seconds.
+    /// Pass `None` to disable.
+    pub fn with_session_timer(mut self, secs: Option<u32>) -> Self {
+        self.session_timer_secs = secs;
+        self
+    }
+
+    /// Configure the minimum accepted session-expires interval (RFC 4028 §5).
+    pub fn with_min_se(mut self, min_se: u32) -> Self {
+        self.session_timer_min_se = min_se;
         self
     }
 

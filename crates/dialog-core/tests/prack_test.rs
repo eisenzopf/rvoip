@@ -9,15 +9,18 @@
 //! covered by integration tests in session-core-v3.
 
 use rvoip_dialog_core::api::config::RelUsage;
+use rvoip_dialog_core::dialog::Dialog;
 use rvoip_dialog_core::manager::transaction_integration::{
-    detect_reliable_provisional, inject_100rel_policy,
+    detect_peer_100rel_support, detect_reliable_provisional, inject_100rel_policy,
+    inject_reliable_provisional_headers, should_send_reliably,
 };
 use rvoip_dialog_core::transaction::dialog::prack_for_dialog;
 use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::types::{HeaderName, Method, RSeq, Require, Supported, TypedHeader};
 use rvoip_sip_core::types::rack::RAck;
-use rvoip_sip_core::{Response, StatusCode, Version};
+use rvoip_sip_core::{Response, StatusCode, Uri, Version};
 use std::net::SocketAddr;
+use std::str::FromStr;
 
 fn make_response(status: StatusCode, headers: Vec<TypedHeader>) -> Response {
     let mut r = Response::new(status);
@@ -185,4 +188,112 @@ fn prack_for_dialog_builds_valid_request() {
         }
         other => panic!("Expected TypedHeader::RAck, got {:?}", other),
     }
+}
+
+// ---- UAS-side tests (C.1.3) ----
+
+#[test]
+fn detect_peer_100rel_support_via_supported_header() {
+    let req = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+        .unwrap()
+        .header(TypedHeader::Supported(Supported::new(vec!["100rel".to_string()])))
+        .build();
+    let (supports, requires) = detect_peer_100rel_support(&req);
+    assert!(supports);
+    assert!(!requires);
+}
+
+#[test]
+fn detect_peer_100rel_support_via_require_header() {
+    let req = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+        .unwrap()
+        .header(TypedHeader::Require(Require::with_tag("100rel")))
+        .build();
+    let (supports, requires) = detect_peer_100rel_support(&req);
+    assert!(supports);
+    assert!(requires);
+}
+
+#[test]
+fn detect_peer_100rel_support_absent() {
+    let req = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+        .unwrap()
+        .build();
+    let (supports, requires) = detect_peer_100rel_support(&req);
+    assert!(!supports);
+    assert!(!requires);
+}
+
+#[test]
+fn should_send_reliably_skips_100_trying() {
+    let mut r = Response::new(StatusCode::Trying);
+    r.body = bytes::Bytes::from_static(b"v=0\r\n");
+    assert!(!should_send_reliably(&r));
+}
+
+#[test]
+fn should_send_reliably_skips_bodiless_18x() {
+    let r = Response::new(StatusCode::Ringing);
+    assert!(!should_send_reliably(&r));
+}
+
+#[test]
+fn should_send_reliably_accepts_183_with_body() {
+    let mut r = Response::new(StatusCode::SessionProgress);
+    r.body = bytes::Bytes::from_static(b"v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\n");
+    assert!(should_send_reliably(&r));
+}
+
+#[test]
+fn should_send_reliably_skips_2xx() {
+    let mut r = Response::new(StatusCode::Ok);
+    r.body = bytes::Bytes::from_static(b"v=0\r\n");
+    assert!(!should_send_reliably(&r));
+}
+
+#[test]
+fn inject_reliable_provisional_headers_adds_both() {
+    let mut r = Response::new(StatusCode::SessionProgress);
+    inject_reliable_provisional_headers(&mut r, 42);
+
+    let require = r.headers.iter().find_map(|h| {
+        if let TypedHeader::Require(r) = h { Some(r) } else { None }
+    }).expect("Require header must be present");
+    assert!(require.requires("100rel"));
+
+    let rseq = r.headers.iter().find_map(|h| {
+        if let TypedHeader::RSeq(r) = h { Some(r) } else { None }
+    }).expect("RSeq header must be present");
+    assert_eq!(rseq.value, 42);
+}
+
+#[test]
+fn inject_reliable_provisional_headers_extends_existing_require() {
+    let mut r = Response::new(StatusCode::SessionProgress);
+    r.headers.push(TypedHeader::Require(Require::with_tag("timer")));
+    inject_reliable_provisional_headers(&mut r, 1);
+
+    let requires: Vec<_> = r.headers.iter().filter_map(|h| {
+        if let TypedHeader::Require(r) = h { Some(r) } else { None }
+    }).collect();
+    assert_eq!(requires.len(), 1, "Require header should not duplicate");
+    assert!(requires[0].requires("timer"));
+    assert!(requires[0].requires("100rel"));
+}
+
+#[test]
+fn dialog_next_local_rseq_is_monotonic() {
+    let mut dialog = Dialog::new(
+        "call-1".to_string(),
+        Uri::from_str("sip:a@127.0.0.1").unwrap(),
+        Uri::from_str("sip:b@127.0.0.1").unwrap(),
+        None,
+        None,
+        false,
+    );
+    assert_eq!(dialog.local_rseq_counter, 0);
+    assert_eq!(dialog.next_local_rseq(), 1);
+    assert_eq!(dialog.next_local_rseq(), 2);
+    assert_eq!(dialog.next_local_rseq(), 3);
+    assert_eq!(dialog.local_rseq_counter, 3);
 }

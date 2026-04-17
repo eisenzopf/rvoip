@@ -200,16 +200,29 @@ impl DialogStore for DialogManager {
     }
     
     /// Terminate a dialog
-    /// 
+    ///
     /// Implements RFC 3261 Section 12.3 dialog termination.
     /// Properly cleans up all dialog state and lookup entries.
     async fn terminate_dialog(&self, dialog_id: &DialogId) -> DialogResult<()> {
         debug!("Terminating dialog {}", dialog_id);
-        
+
+        // Cancel any RFC 4028 refresh task + RFC 3262 retransmit tasks
+        // associated with this dialog before we unwind state.
+        crate::manager::session_timer::cancel_refresh_task(self, dialog_id);
+        self.reliable_provisional_tasks
+            .retain(|(d, _), abort| {
+                if d == dialog_id {
+                    abort.abort();
+                    false
+                } else {
+                    true
+                }
+            });
+
         // Get the dialog and terminate it
         if let Some(mut dialog_entry) = self.dialogs.get_mut(dialog_id) {
             let dialog = dialog_entry.value_mut();
-            
+
             // Only terminate if not already terminated
             if dialog.state != DialogState::Terminated {
                 let previous_state = dialog.state.clone();

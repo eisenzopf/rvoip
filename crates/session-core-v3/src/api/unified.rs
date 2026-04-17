@@ -45,6 +45,15 @@ pub struct Config {
     /// Set to `Required` when connecting to a carrier that mandates 100rel,
     /// or `NotSupported` to omit the tag entirely.
     pub use_100rel: RelUsage,
+
+    /// RFC 4028 `Session-Expires` value in seconds to advertise on outgoing
+    /// INVITEs. `None` disables session timers entirely. Common carrier
+    /// value is 1800 (30 min).
+    pub session_timer_secs: Option<u32>,
+
+    /// Minimum-session-expires (`Min-SE:`) we're willing to accept, in
+    /// seconds. Default 90 per RFC 4028 §5.
+    pub session_timer_min_se: u32,
 }
 
 impl Config {
@@ -66,6 +75,8 @@ impl Config {
             state_table_path: None,
             local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
+            session_timer_secs: None,
+            session_timer_min_se: 90,
         }
     }
 
@@ -86,6 +97,8 @@ impl Config {
             state_table_path: None,
             local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
+            session_timer_secs: None,
+            session_timer_min_se: 90,
         }
     }
 }
@@ -545,6 +558,8 @@ impl UnifiedCoordinator {
         let dialog_config = DialogManagerConfig::hybrid(config.bind_addr)
             .with_from_uri(&config.local_uri)
             .with_100rel(config.use_100rel)
+            .with_session_timer(config.session_timer_secs)
+            .with_min_se(config.session_timer_min_se)
             .build();
         
         // Create dialog API with global event coordination AND transaction events

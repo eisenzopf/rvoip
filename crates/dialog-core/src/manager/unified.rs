@@ -370,12 +370,45 @@ impl UnifiedDialogManager {
     }
 
     /// Make an outgoing call with specific Call-ID
+    /// Variant of `make_call_with_id` that pre-registers a session↔dialog
+    /// mapping before sending the INVITE. Eliminates the fast-RTT race where
+    /// a 4xx/5xx response can arrive (and be processed by the event loop)
+    /// before the caller has a chance to store the mapping.
+    pub async fn make_call_for_session(
+        &self,
+        session_id: &str,
+        from_uri: &str,
+        to_uri: &str,
+        sdp_offer: Option<String>,
+        call_id: Option<String>,
+    ) -> ApiResult<CallHandle> {
+        self.make_call_inner(
+            from_uri,
+            to_uri,
+            sdp_offer,
+            call_id,
+            Some(session_id.to_string()),
+        )
+        .await
+    }
+
     pub async fn make_call_with_id(
         &self,
         from_uri: &str,
         to_uri: &str,
         sdp_offer: Option<String>,
         call_id: Option<String>,
+    ) -> ApiResult<CallHandle> {
+        self.make_call_inner(from_uri, to_uri, sdp_offer, call_id, None).await
+    }
+
+    async fn make_call_inner(
+        &self,
+        from_uri: &str,
+        to_uri: &str,
+        sdp_offer: Option<String>,
+        call_id: Option<String>,
+        pre_register_session_id: Option<String>,
     ) -> ApiResult<CallHandle> {
         // Check if outgoing calls are supported
         if !self.config.supports_outgoing_calls() {
@@ -410,17 +443,29 @@ impl UnifiedDialogManager {
                 error!("Failed to create outgoing dialog: {}", e);
                 ApiError::from(e)
             })?;
-        
+
+        // Register the session↔dialog mapping BEFORE sending the INVITE.
+        // Otherwise a sub-millisecond RTT failure response (e.g. localhost
+        // 420) can race: the event-processor task may pick up the response
+        // and try to route it to a session while the caller is still inside
+        // this await, before the async `StoreDialogMapping` event has been
+        // processed. Pre-registering closes that window with a write that
+        // is ordered-before the INVITE goes on the wire.
+        if let Some(ref sid) = pre_register_session_id {
+            self.core.session_to_dialog.insert(sid.clone(), dialog_id.clone());
+            self.core.dialog_to_session.insert(dialog_id.clone(), sid.clone());
+        }
+
         // Update stats
         {
             let mut stats = self.stats.write().await;
             stats.outgoing_calls += 1;
             stats.active_dialogs += 1;
         }
-        
+
         // Emit dialog creation event
         self.core.emit_dialog_event(DialogEvent::Created { dialog_id: dialog_id.clone() }).await;
-        
+
         // Send INVITE request
         let body_bytes = sdp_offer.map(|s| bytes::Bytes::from(s));
         let _transaction_key = match self.core.send_request(&dialog_id, Method::Invite, body_bytes).await {

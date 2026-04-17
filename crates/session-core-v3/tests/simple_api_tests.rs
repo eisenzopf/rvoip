@@ -24,6 +24,8 @@ fn test_config(base_port: u16) -> Config {
         state_table_path: None,
         local_uri: format!("sip:test@127.0.0.1:{}", base_port),
         use_100rel: Default::default(),
+        session_timer_secs: None,
+        session_timer_min_se: 90,
     }
 }
 

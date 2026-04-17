@@ -17,6 +17,7 @@ pub mod response_lifecycle;
 pub mod event_processing;
 pub mod session_coordination;
 pub mod message_routing;
+pub mod session_timer;
 pub mod utils;
 
 // Transaction integration (organized by module)

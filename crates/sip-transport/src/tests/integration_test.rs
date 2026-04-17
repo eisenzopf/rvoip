@@ -137,6 +137,13 @@ impl SimplifiedTransactionCore {
                         // Transport closed, we can break the loop
                         break;
                     },
+                    // Graceful-shutdown signals don't need handling for this
+                    // integration test; they were added after the test was
+                    // written and aren't part of the bridge's remit.
+                    TransportEvent::ShutdownRequested
+                    | TransportEvent::ShutdownReady
+                    | TransportEvent::ShutdownNow
+                    | TransportEvent::ShutdownComplete => {}
                 }
             }
         });

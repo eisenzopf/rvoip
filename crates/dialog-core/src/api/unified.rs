@@ -518,6 +518,24 @@ impl UnifiedDialogApi {
     ) -> ApiResult<CallHandle> {
         self.manager.make_call_with_id(from_uri, to_uri, sdp_offer, call_id).await
     }
+
+    /// Send an INVITE and pre-register the given session↔dialog mapping
+    /// before the INVITE goes on the wire. Use this from session-core layers
+    /// to close the race where a fast-RTT failure response (e.g. 420 on
+    /// localhost) arrives before the mapping has been populated and gets
+    /// dropped by the event-hub converter.
+    pub async fn make_call_for_session(
+        &self,
+        session_id: &str,
+        from_uri: &str,
+        to_uri: &str,
+        sdp_offer: Option<String>,
+        call_id: Option<String>,
+    ) -> ApiResult<CallHandle> {
+        self.manager
+            .make_call_for_session(session_id, from_uri, to_uri, sdp_offer, call_id)
+            .await
+    }
     
     /// Create an outgoing dialog without sending INVITE (Client/Hybrid modes only)
     ///
@@ -923,6 +941,25 @@ impl UnifiedDialogApi {
         sdp: Option<String>
     ) -> ApiResult<TransactionKey> {
         self.manager.send_update(dialog_id, sdp).await
+    }
+
+    /// Send a re-INVITE on an established dialog. Used by RFC 4028 session
+    /// timer refreshers as a fallback when UPDATE is not supported (501
+    /// Not Implemented), and by hold/resume flows.
+    pub async fn send_reinvite(
+        &self,
+        dialog_id: &DialogId,
+        sdp: Option<String>,
+    ) -> ApiResult<TransactionKey> {
+        self.manager
+            .inner_manager()
+            .send_request(
+                dialog_id,
+                rvoip_sip_core::Method::Invite,
+                sdp.map(bytes::Bytes::from),
+            )
+            .await
+            .map_err(ApiError::from)
     }
 
     /// Send PRACK for a reliable provisional response (RFC 3262).

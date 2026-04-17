@@ -45,6 +45,18 @@ path = "examples/streampeer/blind_transfer/bob.rs"
 [[example]]
 name = "streampeer_blind_transfer_charlie"
 path = "examples/streampeer/blind_transfer/charlie.rs"
+[[example]]
+name = "streampeer_prack_alice"
+path = "examples/streampeer/prack/alice.rs"
+[[example]]
+name = "streampeer_prack_bob"
+path = "examples/streampeer/prack/bob.rs"
+[[example]]
+name = "streampeer_session_timer_alice"
+path = "examples/streampeer/session_timer/alice.rs"
+[[example]]
+name = "streampeer_session_timer_bob"
+path = "examples/streampeer/session_timer/bob.rs"
 
 # CallbackPeer examples (reactive / server-side)
 [[example]]

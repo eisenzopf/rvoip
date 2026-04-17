@@ -71,7 +71,7 @@ impl DialogManager {
         // Update dialog state based on response
         {
             let mut dialog = self.get_dialog_mut(&dialog_id)?;
-            
+
             if response.status_code() >= 200 && response.status_code() < 300 {
                 // 2xx response - confirm dialog if in Early state
                 if dialog.state == DialogState::Early {
@@ -80,10 +80,45 @@ impl DialogManager {
                         debug!("Confirmed dialog {} with 2xx response", dialog_id);
                     }
                 }
+
+                // RFC 4028 UAC: capture the negotiated Session-Expires from
+                // a 2xx to INVITE. If the peer echoed `refresher=uac` (or
+                // omitted it — RFC 4028 §7 default is uac when the UAC
+                // originally requested uac) we are the refresher.
+                if response.status_code() == 200 {
+                    use rvoip_sip_core::types::TypedHeader;
+                    use rvoip_sip_core::types::session_expires::Refresher;
+                    if let Some(se) = response.headers.iter().find_map(|h| {
+                        if let TypedHeader::SessionExpires(se) = h { Some(se) } else { None }
+                    }) {
+                        dialog.session_expires_secs = Some(se.delta_seconds);
+                        dialog.is_session_refresher = matches!(
+                            se.refresher,
+                            None | Some(Refresher::Uac)
+                        );
+                    }
+                }
             } else if response.status_code() >= 300 {
                 // 3xx+ response - terminate dialog
                 dialog.terminate();
                 debug!("Terminated dialog {} due to final non-2xx response", dialog_id);
+            }
+        }
+
+        // RFC 4028 UAC: dialog is now confirmed and we've captured the
+        // negotiated interval. Spawn the refresh task if we're refresher.
+        if response.status_code() == 200 {
+            if let Ok(dlg) = self.get_dialog(&dialog_id) {
+                if let Some(secs) = dlg.session_expires_secs {
+                    let is_refresher = dlg.is_session_refresher;
+                    drop(dlg);
+                    crate::manager::session_timer::spawn_refresh_task(
+                        self.clone(),
+                        dialog_id.clone(),
+                        secs,
+                        is_refresher,
+                    );
+                }
             }
         }
         

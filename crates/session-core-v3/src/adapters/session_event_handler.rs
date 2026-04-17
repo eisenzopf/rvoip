@@ -223,6 +223,13 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                     self.handle_call_redirected(&event_str).await?;
                 } else if event_str.contains("ReinviteGlare") {
                     self.handle_reinvite_glare(&event_str).await?;
+                } else if event_str.contains("SessionRefreshFailed") {
+                    // Check this BEFORE SessionRefreshed — the latter is a
+                    // substring of the former and `contains()` would match
+                    // either.
+                    self.handle_session_refresh_failed(&event_str).await?;
+                } else if event_str.contains("SessionRefreshed") {
+                    self.handle_session_refreshed(&event_str).await?;
                 } else if event_str.contains("CallFailed") {
                     self.handle_call_failed(&event_str).await?;
                 } else if event_str.contains("CallStateChanged") {
@@ -734,6 +741,63 @@ impl SessionCrossCrateEventHandler {
     /// Handle 487 Request Terminated — the caller CANCELed before the UAS
     /// answered. Distinct from the generic failure path so we can publish
     /// `Event::CallCancelled` (distinct "missed call" semantic for UIs).
+    async fn handle_session_refreshed(&self, event_str: &str) -> Result<()> {
+        let Some(session_id_str) = self.extract_session_id(event_str) else {
+            warn!("Could not extract session_id from SessionRefreshed event");
+            return Ok(());
+        };
+        let session_id = SessionId(session_id_str);
+        if !self.is_our_session(&session_id).await {
+            return Ok(());
+        }
+        let expires_secs = self
+            .extract_field(event_str, "expires_secs: ")
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse::<u32>().ok()))
+            .unwrap_or(0);
+        info!("🎯 [handle_session_refreshed] session={} expires={}", session_id, expires_secs);
+
+        let api_event = crate::api::events::Event::SessionRefreshed {
+            call_id: session_id.clone(),
+            expires_secs,
+        };
+        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+        let coordinator = self.global_coordinator.clone();
+        tokio::spawn(async move {
+            if let Err(e) = coordinator.publish(wrapped).await {
+                tracing::warn!("Failed to publish SessionRefreshed: {}", e);
+            }
+        });
+        Ok(())
+    }
+
+    async fn handle_session_refresh_failed(&self, event_str: &str) -> Result<()> {
+        let Some(session_id_str) = self.extract_session_id(event_str) else {
+            warn!("Could not extract session_id from SessionRefreshFailed event");
+            return Ok(());
+        };
+        let session_id = SessionId(session_id_str);
+        if !self.is_our_session(&session_id).await {
+            return Ok(());
+        }
+        let reason = self
+            .extract_field(event_str, "reason: \"")
+            .unwrap_or_else(|| "Session expired".to_string());
+        warn!("🎯 [handle_session_refresh_failed] session={} reason={}", session_id, reason);
+
+        let api_event = crate::api::events::Event::SessionRefreshFailed {
+            call_id: session_id.clone(),
+            reason,
+        };
+        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+        let coordinator = self.global_coordinator.clone();
+        tokio::spawn(async move {
+            if let Err(e) = coordinator.publish(wrapped).await {
+                tracing::warn!("Failed to publish SessionRefreshFailed: {}", e);
+            }
+        });
+        Ok(())
+    }
+
     async fn handle_call_cancelled(&self, event_str: &str) -> Result<()> {
         let Some(session_id_str) = self.extract_session_id(event_str) else {
             warn!("Could not extract session_id from CallCancelled event");

@@ -28,8 +28,14 @@ pub struct DialogManager {
     pub(crate) local_address: SocketAddr,
     
     /// **NEW**: Optional unified configuration for behavioral modes
-    /// When present, enables mode-specific behavior (auto-responses, etc.)
-    pub(crate) config: Option<DialogManagerConfig>,
+    /// When present, enables mode-specific behavior (auto-responses, etc.).
+    ///
+    /// Wrapped in `Arc<RwLock<...>>` so that `set_config` propagates to every
+    /// `DialogManager` clone — notably the background event-processor task
+    /// spawned during construction, which otherwise would never see the
+    /// config set later by `UnifiedDialogManager` (RFC 3262 420 + RFC 4028
+    /// negotiation both rely on this config on the incoming-request path).
+    pub(crate) config: Arc<std::sync::RwLock<Option<DialogManagerConfig>>>,
     
     /// Active dialogs by dialog ID
     pub(crate) dialogs: Arc<DashMap<DialogId, Dialog>>,
@@ -63,6 +69,19 @@ pub struct DialogManager {
     
     /// Subscription manager for handling SUBSCRIBE/NOTIFY
     pub(crate) subscription_manager: Option<Arc<SubscriptionManager>>,
+
+    /// Abort handles for in-flight UAS reliable-provisional retransmit tasks
+    /// (RFC 3262 §3). Keyed by `(dialog_id, rseq)`. On PRACK arrival the
+    /// matching entry is removed and aborted so the 18x stops retransmitting;
+    /// on dialog termination every entry for that dialog is aborted.
+    pub(crate) reliable_provisional_tasks:
+        Arc<DashMap<(DialogId, u32), tokio::task::AbortHandle>>,
+
+    /// Abort handles for per-dialog RFC 4028 session-timer refresh tasks.
+    /// Populated when the UAC or UAS is designated refresher; one entry per
+    /// dialog. Aborted on dialog termination.
+    pub(crate) session_refresh_tasks:
+        Arc<DashMap<DialogId, tokio::task::AbortHandle>>,
 }
 
 impl DialogManager {
@@ -100,7 +119,7 @@ impl DialogManager {
         Ok(Self {
             transaction_manager,
             local_address,
-            config: None,
+            config: Arc::new(std::sync::RwLock::new(None)),
             dialogs,
             dialog_lookup,
             transaction_to_dialog: Arc::new(DashMap::new()),
@@ -112,6 +131,8 @@ impl DialogManager {
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
+            reliable_provisional_tasks: Arc::new(DashMap::new()),
+            session_refresh_tasks: Arc::new(DashMap::new()),
         })
     }
     
@@ -151,7 +172,7 @@ impl DialogManager {
         let manager = Self {
             transaction_manager,
             local_address,
-            config: None,
+            config: Arc::new(std::sync::RwLock::new(None)),
             dialogs,
             dialog_lookup,
             transaction_to_dialog: Arc::new(DashMap::new()),
@@ -163,6 +184,8 @@ impl DialogManager {
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
+            reliable_provisional_tasks: Arc::new(DashMap::new()),
+            session_refresh_tasks: Arc::new(DashMap::new()),
         };
         
         // Spawn global transaction event processor
@@ -452,6 +475,7 @@ impl DialogManager {
             Method::Refer => self.handle_refer(request, source).await,
             Method::Subscribe => self.handle_subscribe(request, source).await,
             Method::Notify => self.handle_notify(request, source).await,
+            Method::Prack => self.handle_prack(request).await,
             method => {
                 warn!("Unsupported SIP method: {}", method);
                 Err(DialogError::protocol_error(&format!("Unsupported method: {}", method)))
@@ -608,58 +632,50 @@ impl DialogManager {
     /// * `config` - Unified configuration determining behavior mode
     pub fn set_config(&mut self, config: DialogManagerConfig) {
         debug!("Setting unified configuration to {:?} mode", Self::config_mode_name(&config));
-        self.config = Some(config);
+        if let Ok(mut guard) = self.config.write() {
+            *guard = Some(config);
+        }
     }
-    
-    /// Get the current configuration (if any)
-    /// 
-    /// Returns the unified configuration if it was provided.
-    pub fn config(&self) -> Option<&DialogManagerConfig> {
-        self.config.as_ref()
+
+    /// Get a clone of the current configuration (if any).
+    pub fn config(&self) -> Option<DialogManagerConfig> {
+        self.config.read().ok().and_then(|g| g.clone())
     }
-    
+
     /// Check if auto-response to OPTIONS requests is enabled
-    /// 
-    /// Returns true if the unified configuration enables automatic OPTIONS responses.
-    /// If no configuration is set, defaults to false (session layer handling).
     pub fn should_auto_respond_to_options(&self) -> bool {
         self.config
-            .as_ref()
-            .map(|config| config.auto_options_enabled())
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.auto_options_enabled()))
             .unwrap_or(false)
     }
-    
+
     /// Check if auto-response to REGISTER requests is enabled
-    /// 
-    /// Returns true if the unified configuration enables automatic REGISTER responses.
-    /// If no configuration is set, defaults to false (session layer handling).
     pub fn should_auto_respond_to_register(&self) -> bool {
         self.config
-            .as_ref()
-            .map(|config| config.auto_register_enabled())
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.auto_register_enabled()))
             .unwrap_or(false)
     }
-    
-    /// Check if outgoing calls are supported
-    /// 
-    /// Returns true if the configuration supports outgoing calls (Client/Hybrid modes).
-    /// If no configuration is set, defaults to true for backward compatibility.
+
+    /// Check if outgoing calls are supported (defaults to true when no config).
     pub fn supports_outgoing_calls(&self) -> bool {
         self.config
-            .as_ref()
-            .map(|config| config.supports_outgoing_calls())
-            .unwrap_or(true) // Default to true for backward compatibility
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.supports_outgoing_calls()))
+            .unwrap_or(true)
     }
-    
-    /// Check if incoming calls are supported
-    /// 
-    /// Returns true if the configuration supports incoming calls (Server/Hybrid modes).
-    /// If no configuration is set, defaults to true for backward compatibility.
+
+    /// Check if incoming calls are supported (defaults to true when no config).
     pub fn supports_incoming_calls(&self) -> bool {
         self.config
-            .as_ref()
-            .map(|config| config.supports_incoming_calls())
-            .unwrap_or(true) // Default to true for backward compatibility
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.supports_incoming_calls()))
+            .unwrap_or(true)
     }
     
     /// Get configuration mode name for logging
@@ -770,6 +786,10 @@ impl DialogManager {
     
     pub async fn handle_update(&self, request: Request) -> DialogResult<()> {
         <Self as super::protocol_handlers::ProtocolHandlers>::handle_update_method(self, request).await
+    }
+
+    pub async fn handle_prack(&self, request: Request) -> DialogResult<()> {
+        <Self as super::protocol_handlers::ProtocolHandlers>::handle_prack_method(self, request).await
     }
     
     pub async fn handle_info(&self, request: Request, source: SocketAddr) -> DialogResult<()> {

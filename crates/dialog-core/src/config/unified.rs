@@ -448,6 +448,18 @@ impl ClientConfigBuilder {
         self
     }
 
+    /// Enable RFC 4028 session timers with the given expiry in seconds.
+    pub fn with_session_timer(mut self, secs: Option<u32>) -> Self {
+        self.behavior.dialog.session_timer_secs = secs;
+        self
+    }
+
+    /// Set the minimum-session-expires value (RFC 4028 §5).
+    pub fn with_min_se(mut self, min_se: u32) -> Self {
+        self.behavior.dialog.session_timer_min_se = min_se;
+        self
+    }
+
     /// Build the final configuration
     pub fn build(self) -> DialogManagerConfig {
         DialogManagerConfig::Client(self.behavior)
@@ -490,6 +502,18 @@ impl ServerConfigBuilder {
     /// Set the 100rel (reliable provisional) policy (RFC 3262).
     pub fn with_100rel(mut self, policy: RelUsage) -> Self {
         self.behavior.dialog.use_100rel = policy;
+        self
+    }
+
+    /// Enable RFC 4028 session timers with the given expiry in seconds.
+    pub fn with_session_timer(mut self, secs: Option<u32>) -> Self {
+        self.behavior.dialog.session_timer_secs = secs;
+        self
+    }
+
+    /// Set the minimum-session-expires value (RFC 4028 §5).
+    pub fn with_min_se(mut self, min_se: u32) -> Self {
+        self.behavior.dialog.session_timer_min_se = min_se;
         self
     }
 
@@ -554,6 +578,18 @@ impl HybridConfigBuilder {
     /// Set the 100rel (reliable provisional) policy (RFC 3262).
     pub fn with_100rel(mut self, policy: RelUsage) -> Self {
         self.behavior.dialog.use_100rel = policy;
+        self
+    }
+
+    /// Enable RFC 4028 session timers with the given expiry in seconds.
+    pub fn with_session_timer(mut self, secs: Option<u32>) -> Self {
+        self.behavior.dialog.session_timer_secs = secs;
+        self
+    }
+
+    /// Set the minimum-session-expires value (RFC 4028 §5).
+    pub fn with_min_se(mut self, min_se: u32) -> Self {
+        self.behavior.dialog.session_timer_min_se = min_se;
         self
     }
 

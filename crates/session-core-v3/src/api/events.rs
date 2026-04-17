@@ -138,6 +138,21 @@ pub enum Event {
         call_id: CallId,
     },
 
+    /// RFC 4028 session timer refresh succeeded (UPDATE or re-INVITE
+    /// round-tripped). Emitted once per successful refresh — applications
+    /// can use this to reset connection-health dashboards or log activity.
+    SessionRefreshed {
+        call_id: CallId,
+        expires_secs: u32,
+    },
+
+    /// RFC 4028 session-timer refresh failed; the dialog has been torn
+    /// down with BYE (§10). Follow-up `CallEnded` will still fire.
+    SessionRefreshFailed {
+        call_id: CallId,
+        reason: String,
+    },
+
     // ===== Transfer Events =====
     
     /// REFER request received
@@ -268,6 +283,8 @@ impl Event {
             Event::CallEnded { call_id, .. } |
             Event::CallFailed { call_id, .. } |
             Event::CallCancelled { call_id, .. } |
+            Event::SessionRefreshed { call_id, .. } |
+            Event::SessionRefreshFailed { call_id, .. } |
             Event::ReferReceived { call_id, .. } |
             Event::TransferAccepted { call_id, .. } |
             Event::TransferFailed { call_id, .. } |

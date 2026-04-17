@@ -50,6 +50,31 @@ pub fn detect_reliable_provisional(response: &Response) -> Option<u32> {
     if requires_100rel { rseq_value } else { None }
 }
 
+/// Inspect a request's `Supported`/`Require` headers for the `100rel`
+/// option tag. Returns `(supports, requires)` — `supports` is true when the
+/// tag appears in either header (i.e., the peer has indicated 100rel
+/// capability at minimum); `requires` is true only when the peer listed it
+/// in `Require` (i.e., insists on it per RFC 3262 §4).
+pub fn detect_peer_100rel_support(request: &Request) -> (bool, bool) {
+    use rvoip_sip_core::types::TypedHeader;
+
+    let mut supports = false;
+    let mut requires = false;
+    for header in &request.headers {
+        match header {
+            TypedHeader::Supported(sup) if sup.option_tags.iter().any(|t| t == "100rel") => {
+                supports = true;
+            }
+            TypedHeader::Require(req) if req.requires("100rel") => {
+                supports = true;
+                requires = true;
+            }
+            _ => {}
+        }
+    }
+    (supports, requires)
+}
+
 /// Inject the configured `100rel` option tag into an outgoing INVITE
 /// (adds to existing `Supported`/`Require` headers if present).
 ///
@@ -434,6 +459,11 @@ impl TransactionIntegration for DialogManager {
             // INVITEs per dialog config. Applies to both initial and re-INVITE.
             if method == Method::Invite {
                 inject_100rel_policy(&mut request, self.config_100rel_policy());
+                // RFC 4028: advertise session timers. Only emitted when the
+                // config has `session_timer_secs = Some(_)`.
+                if let Some((secs, min_se)) = self.config_session_timer_settings() {
+                    inject_session_timer_headers(&mut request, secs, min_se);
+                }
             }
 
             (destination, request)
@@ -470,15 +500,80 @@ impl TransactionIntegration for DialogManager {
     }
     
     /// Send a response using transaction-core
-    /// 
+    ///
     /// Delegates response sending to transaction-core while maintaining dialog state.
+    /// Reliable-provisional wrapping (RFC 3262 §3) is applied here: a 1xx
+    /// response with a body on a dialog whose peer advertised `100rel` is
+    /// rewritten with `Require: 100rel` + `RSeq: <n>` and retransmitted with
+    /// T1 backoff until PRACK acknowledges it.
     async fn send_transaction_response(
         &self,
         transaction_id: &TransactionKey,
-        response: Response,
+        mut response: Response,
     ) -> DialogResult<()> {
         debug!("Sending response {} for transaction {}", response.status_code(), transaction_id);
-        
+
+        // RFC 4028: echo Session-Expires on 2xx to INVITE so the UAC learns
+        // the negotiated interval + refresher assignment.
+        if response.status_code() == 200 {
+            if let Some(dialog_id_ref) = self.transaction_to_dialog.get(transaction_id) {
+                let dialog_id = dialog_id_ref.clone();
+                drop(dialog_id_ref);
+                if let Ok(dialog) = self.get_dialog(&dialog_id) {
+                    if let Some(secs) = dialog.session_expires_secs {
+                        let refresher = if dialog.is_session_refresher {
+                            rvoip_sip_core::types::session_expires::Refresher::Uas
+                        } else {
+                            rvoip_sip_core::types::session_expires::Refresher::Uac
+                        };
+                        let already_has = response.headers.iter().any(|h| matches!(h, rvoip_sip_core::types::TypedHeader::SessionExpires(_)));
+                        if !already_has {
+                            response.headers.push(rvoip_sip_core::types::TypedHeader::SessionExpires(
+                                rvoip_sip_core::types::session_expires::SessionExpires::new(secs, Some(refresher)),
+                            ));
+                        }
+                        let supports_has_timer = response.headers.iter().any(|h| matches!(h, rvoip_sip_core::types::TypedHeader::Require(r) if r.requires("timer")));
+                        if !supports_has_timer {
+                            response.headers.push(rvoip_sip_core::types::TypedHeader::Require(
+                                rvoip_sip_core::types::Require::with_tag("timer"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut reliable_spawn: Option<(DialogId, u32, Response)> = None;
+        if should_send_reliably(&response) {
+            if let Some(dialog_id_ref) = self.transaction_to_dialog.get(transaction_id) {
+                let dialog_id = dialog_id_ref.clone();
+                drop(dialog_id_ref);
+
+                let our_policy = self.config_100rel_policy();
+                let rseq_opt = match self.get_dialog_mut(&dialog_id) {
+                    Ok(mut dialog) => {
+                        if dialog.peer_supports_100rel
+                            && !matches!(our_policy, RelUsage::NotSupported)
+                        {
+                            Some(dialog.next_local_rseq())
+                        } else {
+                            None
+                        }
+                    }
+                    Err(_) => None,
+                };
+
+                if let Some(rseq) = rseq_opt {
+                    inject_reliable_provisional_headers(&mut response, rseq);
+                    reliable_spawn = Some((dialog_id, rseq, response.clone()));
+                    debug!(
+                        "Wrapping 18x {} as reliable (policy={:?}, rseq={})",
+                        response.status_code(), our_policy, rseq
+                    );
+                }
+            }
+        }
+
         // Use transaction-core to send the response
         self.transaction_manager
             .send_response(transaction_id, response)
@@ -486,10 +581,87 @@ impl TransactionIntegration for DialogManager {
             .map_err(|e| crate::errors::DialogError::TransactionError {
                 message: format!("Failed to send response: {}", e),
             })?;
-        
+
+        if let Some((dialog_id, rseq, stored_response)) = reliable_spawn {
+            crate::transaction::server::reliable_invite::spawn_reliable_provisional_retransmit(
+                dialog_id,
+                rseq,
+                transaction_id.clone(),
+                stored_response,
+                self.transaction_manager.clone(),
+                self.reliable_provisional_tasks.clone(),
+            );
+        }
+
         debug!("Successfully sent response for transaction {}", transaction_id);
         Ok(())
     }
+}
+
+/// A response qualifies for RFC 3262 reliable-provisional wrapping when it
+/// is a non-100 provisional (101–199) and carries a body (typically SDP
+/// early media). 100 Trying is hop-by-hop and never reliable; bodiless
+/// 180/183 are still sent unreliably since there's nothing to protect.
+pub fn should_send_reliably(response: &Response) -> bool {
+    let code = response.status_code();
+    (101..200).contains(&code) && !response.body().is_empty()
+}
+
+/// Append RFC 4028 session-timer headers to an outgoing INVITE: a
+/// `Session-Expires: <secs>;refresher=uac` (caller-side refresh by default —
+/// keeps NAT pinholes alive on the UAC), a `Min-SE: <min_se>`, and the
+/// `timer` option tag in `Supported`. No-op if `secs` is 0.
+pub fn inject_session_timer_headers(request: &mut Request, secs: u32, min_se: u32) {
+    use rvoip_sip_core::types::{Supported, TypedHeader};
+    use rvoip_sip_core::types::session_expires::{Refresher, SessionExpires};
+    use rvoip_sip_core::types::min_se::MinSE;
+
+    if secs == 0 {
+        return;
+    }
+
+    request.headers.push(TypedHeader::SessionExpires(
+        SessionExpires::new(secs, Some(Refresher::Uac)),
+    ));
+    request.headers.push(TypedHeader::MinSE(MinSE::new(min_se)));
+
+    let mut found = false;
+    for header in request.headers.iter_mut() {
+        if let TypedHeader::Supported(ref mut sup) = header {
+            if !sup.option_tags.iter().any(|t| t == "timer") {
+                sup.option_tags.push("timer".to_string());
+            }
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        request.headers.push(TypedHeader::Supported(
+            Supported::new(vec!["timer".to_string()]),
+        ));
+    }
+}
+
+/// Append `Require: 100rel` and `RSeq: <rseq>` to an outgoing 18x. Creates
+/// the `Require` header if absent, appends the tag otherwise.
+pub fn inject_reliable_provisional_headers(response: &mut Response, rseq: u32) {
+    use rvoip_sip_core::types::{Require, TypedHeader};
+    use rvoip_sip_core::types::rseq::RSeq;
+
+    let mut updated = false;
+    for header in response.headers.iter_mut() {
+        if let TypedHeader::Require(ref mut req) = header {
+            if !req.requires("100rel") {
+                req.add_tag("100rel");
+            }
+            updated = true;
+            break;
+        }
+    }
+    if !updated {
+        response.headers.push(TypedHeader::Require(Require::with_tag("100rel")));
+    }
+    response.headers.push(TypedHeader::RSeq(RSeq::new(rseq)));
 }
 
 impl TransactionHelpers for DialogManager {
@@ -640,14 +812,37 @@ impl DialogManager {
                 200 => {
                     if dialog.state == crate::dialog::DialogState::Early {
                         dialog.state = crate::dialog::DialogState::Confirmed;
-                        
+
                         // CRITICAL FIX: Update dialog lookup now that we have both tags
                         if let Some(tuple) = dialog.dialog_id_tuple() {
                             let key = crate::manager::utils::DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
                             self.dialog_lookup.insert(key, dialog_id.clone());
                             info!("Updated dialog lookup for confirmed dialog {}", dialog_id);
                         }
-                        
+
+                        // RFC 4028 UAC: capture negotiated Session-Expires
+                        // from the 2xx. The refresher is whoever the peer
+                        // named; if the peer omitted `refresher=`, RFC 4028
+                        // §7.1 default for a UAC that originally requested
+                        // `refresher=uac` is that the UAC refreshes.
+                        if transaction_id.method() == &rvoip_sip_core::Method::Invite {
+                            use rvoip_sip_core::types::TypedHeader;
+                            use rvoip_sip_core::types::session_expires::Refresher;
+                            if let Some(se) = response.headers.iter().find_map(|h| {
+                                if let TypedHeader::SessionExpires(se) = h { Some(se) } else { None }
+                            }) {
+                                dialog.session_expires_secs = Some(se.delta_seconds);
+                                dialog.is_session_refresher = matches!(
+                                    se.refresher,
+                                    None | Some(Refresher::Uac),
+                                );
+                                info!(
+                                    "UAC session timer negotiated: expires={}s, we_refresh={}",
+                                    se.delta_seconds, dialog.is_session_refresher
+                                );
+                            }
+                        }
+
                         true
                     } else {
                         false
@@ -728,6 +923,23 @@ impl DialogManager {
                         dialog_id: dialog_id.clone(),
                         session_answer: sdp,
                     }).await;
+                }
+
+                // RFC 4028 UAC: spawn the refresh task now that the dialog
+                // is confirmed and negotiated interval is on the dialog.
+                if transaction_id.method() == &rvoip_sip_core::Method::Invite {
+                    if let Ok(dlg) = self.get_dialog(dialog_id) {
+                        if let Some(secs) = dlg.session_expires_secs {
+                            let is_refresher = dlg.is_session_refresher;
+                            drop(dlg);
+                            crate::manager::session_timer::spawn_refresh_task(
+                                self.clone(),
+                                dialog_id.clone(),
+                                secs,
+                                is_refresher,
+                            );
+                        }
+                    }
                 }
             },
             _ => {
@@ -1106,9 +1318,23 @@ impl DialogManager {
     /// otherwise defaults to `RelUsage::Supported` (advertise capability).
     pub fn config_100rel_policy(&self) -> RelUsage {
         self.config
-            .as_ref()
-            .map(|c| c.dialog_config().use_100rel)
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().map(|c| c.dialog_config().use_100rel))
             .unwrap_or_default()
+    }
+
+    /// Resolve session-timer settings for outgoing INVITEs.
+    ///
+    /// Returns `Some((session_expires_secs, min_se_secs))` when session
+    /// timers are enabled in the config, otherwise `None`.
+    pub fn config_session_timer_settings(&self) -> Option<(u32, u32)> {
+        self.config.read().ok().and_then(|g| {
+            g.as_ref().and_then(|c| {
+                let dc = c.dialog_config();
+                dc.session_timer_secs.map(|secs| (secs, dc.session_timer_min_se))
+            })
+        })
     }
 
     /// Send a PRACK request acknowledging a reliable provisional (RFC 3262 §7.2).

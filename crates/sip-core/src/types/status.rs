@@ -144,6 +144,8 @@ pub enum StatusCode {
     BadExtension = 420,
     /// 421 Extension Required
     ExtensionRequired = 421,
+    /// 422 Session Interval Too Small (RFC 4028)
+    SessionIntervalTooSmall = 422,
     /// 423 Interval Too Brief
     IntervalTooBrief = 423,
     /// 480 Temporarily Unavailable
@@ -272,6 +274,7 @@ impl StatusCode {
             416 => Ok(StatusCode::UnsupportedUriScheme),
             420 => Ok(StatusCode::BadExtension),
             421 => Ok(StatusCode::ExtensionRequired),
+            422 => Ok(StatusCode::SessionIntervalTooSmall),
             423 => Ok(StatusCode::IntervalTooBrief),
             480 => Ok(StatusCode::TemporarilyUnavailable),
             481 => Ok(StatusCode::CallOrTransactionDoesNotExist),
@@ -354,6 +357,7 @@ impl StatusCode {
             StatusCode::UnsupportedUriScheme => 416,
             StatusCode::BadExtension => 420,
             StatusCode::ExtensionRequired => 421,
+            StatusCode::SessionIntervalTooSmall => 422,
             StatusCode::IntervalTooBrief => 423,
             StatusCode::TemporarilyUnavailable => 480,
             StatusCode::CallOrTransactionDoesNotExist => 481,
@@ -436,6 +440,7 @@ impl StatusCode {
             StatusCode::UnsupportedUriScheme => "Unsupported URI Scheme",
             StatusCode::BadExtension => "Bad Extension",
             StatusCode::ExtensionRequired => "Extension Required",
+            StatusCode::SessionIntervalTooSmall => "Session Interval Too Small",
             StatusCode::IntervalTooBrief => "Interval Too Brief",
             StatusCode::TemporarilyUnavailable => "Temporarily Unavailable",
             StatusCode::CallOrTransactionDoesNotExist => "Call/Transaction Does Not Exist",
@@ -691,6 +696,7 @@ impl StatusCode {
             Self::UnsupportedUriScheme => "Unsupported URI Scheme",
             Self::BadExtension => "Bad Extension",
             Self::ExtensionRequired => "Extension Required",
+            Self::SessionIntervalTooSmall => "Session Interval Too Small",
             Self::IntervalTooBrief => "Interval Too Brief",
             Self::TemporarilyUnavailable => "Temporarily Unavailable",
             Self::CallOrTransactionDoesNotExist => "Call/Transaction Does Not Exist",

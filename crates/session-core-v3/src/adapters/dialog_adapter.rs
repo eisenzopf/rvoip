@@ -211,17 +211,24 @@ impl DialogAdapter {
         // This ensures any events that come back immediately can find the session
         self.callid_to_session.insert(call_id.clone(), session_id.clone());
 
+        // Use `make_call_for_session` so the session↔dialog mapping is
+        // installed on dialog-core *before* the INVITE goes on the wire.
+        // This closes the fast-RTT race where a 4xx response (e.g. 420 Bad
+        // Extension on localhost) can be processed by the event loop before
+        // the async `StoreDialogMapping` below has populated the lookup
+        // tables — which would otherwise cause the CallFailed event to be
+        // silently dropped by `event_hub::convert_coordination_to_cross_crate`.
         let call_handle = self.dialog_api
-            .make_call_with_id(from, to, sdp, Some(call_id.clone()))
+            .make_call_for_session(&session_id.0, from, to, sdp, Some(call_id.clone()))
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to make call: {}", e)))?;
 
         let dialog_id = call_handle.call_id().clone();
 
-        // Store remaining mappings
+        // Store remaining mappings on session-core-v3 side
         self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
         self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
-        
+
         // Publish StoreDialogMapping event to inform dialog-core about the session-dialog mapping
         let event = SessionToDialogEvent::StoreDialogMapping {
             session_id: session_id.0.clone(),

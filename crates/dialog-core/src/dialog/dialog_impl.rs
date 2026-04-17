@@ -109,6 +109,28 @@ pub struct Dialog {
     /// this dialog. Used to drop retransmitted reliable provisionals and
     /// preserve RFC 3262 §4 monotonic ordering.
     pub last_rseq_acked: Option<u32>,
+
+    /// Monotonic `RSeq` counter for UAS-originated reliable provisionals on
+    /// this dialog (RFC 3262 §3). Incremented before being placed on the
+    /// wire; initial value is chosen by `next_local_rseq()` to pick a random
+    /// starting point per RFC 3262 §7.1.
+    pub local_rseq_counter: u32,
+
+    /// Whether the peer advertised the `100rel` option tag (in `Supported`
+    /// or `Require`) on the dialog-creating INVITE. Used by the UAS to
+    /// decide whether an outgoing 18x response should be sent reliably.
+    pub peer_supports_100rel: bool,
+
+    // Session timer state (RFC 4028)
+
+    /// Negotiated session-expires interval in seconds. `None` when session
+    /// timers are disabled or not negotiated on this dialog.
+    pub session_expires_secs: Option<u32>,
+
+    /// Whether we are the refresher (per the `refresher=` parameter of the
+    /// negotiated `Session-Expires` header). Only meaningful when
+    /// `session_expires_secs.is_some()`.
+    pub is_session_refresher: bool,
 }
 
 impl Dialog {
@@ -147,6 +169,10 @@ impl Dialog {
             max_refresh_failures: 3,
             invite_cseq: None,
             last_rseq_acked: None,
+            local_rseq_counter: 0,
+            peer_supports_100rel: false,
+            session_expires_secs: None,
+            is_session_refresher: false,
         }
     }
 
@@ -318,6 +344,10 @@ impl Dialog {
             max_refresh_failures: 3,
             invite_cseq: Some(cseq_number),
             last_rseq_acked: None,
+            local_rseq_counter: 0,
+            peer_supports_100rel: false,
+            session_expires_secs: None,
+            is_session_refresher: false,
         })
     }
 
@@ -413,7 +443,22 @@ impl Dialog {
             max_refresh_failures: 3,
             invite_cseq: Some(cseq_number),
             last_rseq_acked: None,
+            local_rseq_counter: 0,
+            peer_supports_100rel: false,
+            session_expires_secs: None,
+            is_session_refresher: false,
         })
+    }
+
+    /// Allocate the next outgoing `RSeq` value for a UAS reliable provisional.
+    ///
+    /// RFC 3262 §7.1: the first `RSeq` in a dialog may be any value in
+    /// `[1, 2**31 - 1]`; subsequent values increment by 1. We start at 1 on
+    /// the first reliable response (simple, spec-compliant), then increment
+    /// monotonically. Saturates at `u32::MAX` rather than wrapping.
+    pub fn next_local_rseq(&mut self) -> u32 {
+        self.local_rseq_counter = self.local_rseq_counter.saturating_add(1);
+        self.local_rseq_counter
     }
 
     // ===== Subscription-specific methods (RFC 6665) =====
