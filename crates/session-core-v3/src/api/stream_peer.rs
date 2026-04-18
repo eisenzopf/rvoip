@@ -198,6 +198,29 @@ impl PeerControl {
         self.coordinator.reject_call(call_id, status, reason).await
     }
 
+    /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).
+    ///
+    /// Call before [`accept()`] on an incoming call to stream ringback,
+    /// announcements, or progress audio to the caller before answering. The
+    /// call enters [`CallState::EarlyMedia`]; a subsequent `accept()`
+    /// transitions to `Active` while reusing the negotiated SDP.
+    ///
+    /// If `sdp` is `None`, the SDP answer is generated from the INVITE's
+    /// offer. Callers wanting custom early-media streams can pass explicit
+    /// SDP via `Some(body)`.
+    ///
+    /// Fails with [`SessionError::UnreliableProvisionalsNotSupported`] if
+    /// the remote peer did not advertise `Supported: 100rel` on the INVITE.
+    ///
+    /// [`accept()`]: Self::accept
+    pub async fn send_early_media(
+        &self,
+        call_id: &CallId,
+        sdp: Option<String>,
+    ) -> Result<()> {
+        self.coordinator.send_early_media(call_id, sdp).await
+    }
+
     /// Subscribe to all events from this coordinator.
     ///
     /// Each call returns an independent receiver (broadcast semantics).

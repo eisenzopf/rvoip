@@ -280,6 +280,39 @@ pub async fn execute_action(
                 info!("SDP negotiated as UAS for session {}", session.session_id);
             }
         }
+        Action::PrepareEarlyMediaSDP => {
+            if let Some(sdp) = session.early_media_sdp.take() {
+                session.local_sdp = Some(sdp);
+                session.sdp_negotiated = true;
+                info!(
+                    "PrepareEarlyMediaSDP: using caller-supplied SDP for session {}",
+                    session.session_id
+                );
+            } else if let Some(remote_sdp) = session.remote_sdp.clone() {
+                let (local_sdp, config) = media_adapter
+                    .negotiate_sdp_as_uas(&session.session_id, &remote_sdp)
+                    .await?;
+                let session_config = crate::session_store::state::NegotiatedConfig {
+                    local_addr: config.local_addr,
+                    remote_addr: config.remote_addr,
+                    codec: config.codec,
+                    sample_rate: 8000,
+                    channels: 1,
+                };
+                session.local_sdp = Some(local_sdp);
+                session.negotiated_config = Some(session_config);
+                session.sdp_negotiated = true;
+                info!(
+                    "PrepareEarlyMediaSDP: auto-negotiated SDP answer for session {}",
+                    session.session_id
+                );
+            } else {
+                return Err(format!(
+                    "PrepareEarlyMediaSDP: no caller-supplied SDP and no remote offer on record for session {}",
+                    session.session_id
+                ).into());
+            }
+        }
         
         // State updates
         Action::SetCondition(condition, value) => {

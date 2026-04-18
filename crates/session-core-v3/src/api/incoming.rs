@@ -91,6 +91,28 @@ impl IncomingCall {
         Ok(SessionHandle::new(self.call_id.clone(), self.coordinator.clone()))
     }
 
+    /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).
+    ///
+    /// Does NOT consume the call — you still need to call [`accept()`] or
+    /// [`reject()`] afterward. Typical sequence:
+    ///
+    /// ```ignore
+    /// let incoming = peer.wait_for_incoming().await?;
+    /// incoming.send_early_media(None).await?;   // 183 + negotiated SDP
+    /// sleep(Duration::from_secs(2)).await;      // play ringback
+    /// let session = incoming.accept().await?;   // 200 OK (reuses SDP)
+    /// ```
+    ///
+    /// See [`PeerControl::send_early_media`] for the full semantics and the
+    /// 100rel failure mode.
+    ///
+    /// [`accept()`]: IncomingCall::accept
+    /// [`reject()`]: IncomingCall::reject
+    /// [`PeerControl::send_early_media`]: crate::api::stream_peer::PeerControl::send_early_media
+    pub async fn send_early_media(&self, sdp: Option<String>) -> Result<()> {
+        self.coordinator.send_early_media(&self.call_id, sdp).await
+    }
+
     /// Reject the call immediately with an explicit SIP status code and reason.
     pub fn reject(mut self, status: u16, reason: &str) {
         self.resolved = true;

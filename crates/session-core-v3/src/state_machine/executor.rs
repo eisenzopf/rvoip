@@ -175,6 +175,11 @@ impl StateMachine {
                 session.reject_status = Some(*status);
                 session.reject_reason = Some(reason.clone());
             }
+            EventType::SendEarlyMedia { sdp } => {
+                if let Some(sdp_data) = sdp {
+                    session.early_media_sdp = Some(sdp_data.clone());
+                }
+            }
             EventType::Dialog3xxRedirect { targets, .. } => {
                 // Append to any existing targets (keeps earlier hops' fallbacks
                 // reachable in case the newly-suggested target also redirects).

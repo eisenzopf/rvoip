@@ -193,6 +193,52 @@ transitions:
         reason: "OK"
     description: "Accept incoming call"
 
+  # UAS sends reliable 183 Session Progress with SDP (RFC 3262)
+  # SDP is either caller-supplied via SendEarlyMedia { sdp: Some(_) } or
+  # auto-negotiated from the stored remote offer. The reliable-18x wrapping
+  # (Require: 100rel + RSeq) and T1-backoff retransmit are applied
+  # automatically by dialog-core when the response carries a body.
+  - role: "UAS"
+    state: "Ringing"
+    event:
+      type: "SendEarlyMedia"
+    next_state: "EarlyMedia"
+    actions:
+      - type: "PrepareEarlyMediaSDP"
+      - type: "SendSIPResponse"
+        code: 183
+        reason: "Session Progress"
+    description: "Enter early media: send reliable 183 with SDP"
+
+  # UAS re-emits early media (RFC 3262 §3: each reliable provisional gets a
+  # fresh RSeq, so re-emission is valid). Self-loop keeps us in EarlyMedia.
+  - role: "UAS"
+    state: "EarlyMedia"
+    event:
+      type: "SendEarlyMedia"
+    next_state: "EarlyMedia"
+    actions:
+      - type: "PrepareEarlyMediaSDP"
+      - type: "SendSIPResponse"
+        code: 183
+        reason: "Session Progress"
+    description: "Re-emit reliable 183 with updated SDP"
+
+  # UAS accepts while in EarlyMedia — SDP already negotiated. Do NOT
+  # re-run GenerateLocalSDP/NegotiateSDPAsUAS: that would open a second
+  # media session and change ports mid-call. The 200 OK reuses the
+  # negotiated local_sdp from the 183.
+  - role: "UAS"
+    state: "EarlyMedia"
+    event:
+      type: "AcceptCall"
+    next_state: "Answering"
+    actions:
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+    description: "Accept after early media (reuse negotiated SDP)"
+
   # UAS receives ACK after 200 OK
   - role: "UAS"
     state: "Answering"

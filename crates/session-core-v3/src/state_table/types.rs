@@ -126,6 +126,10 @@ pub enum EventType {
     IncomingCall { from: String, sdp: Option<String> },
     AcceptCall,
     RejectCall { status: u16, reason: String },
+    /// RFC 3262 — emit a reliable 183 Session Progress with early-media SDP.
+    /// `sdp: Some(_)` uses caller-supplied SDP verbatim; `None` triggers
+    /// `negotiate_sdp_as_uas` against the stored remote offer.
+    SendEarlyMedia { sdp: Option<String> },
     HangupCall,
     HoldCall,
     ResumeCall,
@@ -248,6 +252,7 @@ impl EventType {
             EventType::MakeCall { .. } => EventType::MakeCall { target: String::new() },
             EventType::IncomingCall { .. } => EventType::IncomingCall { from: String::new(), sdp: None },
             EventType::RejectCall { .. } => EventType::RejectCall { status: 0, reason: String::new() },
+            EventType::SendEarlyMedia { .. } => EventType::SendEarlyMedia { sdp: None },
             // BlindTransfer and AttendedTransfer events removed
             
             // Media events - normalize
@@ -373,6 +378,13 @@ pub enum Action {
     StartMediaSession,
     NegotiateSDPAsUAC,
     NegotiateSDPAsUAS,
+    /// RFC 3262 — prepare SDP for a reliable 183. Uses caller-supplied SDP
+    /// from `session.early_media_sdp` if present, otherwise negotiates
+    /// against the stored remote offer. Writes the result into
+    /// `session.local_sdp` so the following `SendSIPResponse(183, …)` picks
+    /// it up. A separate action (rather than overloading `NegotiateSDPAsUAS`)
+    /// because the explicit-SDP path must bypass negotiation entirely.
+    PrepareEarlyMediaSDP,
     PlayAudioFile(String),
     StartRecordingMedia,
     StopRecordingMedia,

@@ -121,6 +121,21 @@ impl StateMachineHelpers {
         ).await?;
         Ok(())
     }
+
+    /// Send a reliable 183 Session Progress with SDP (RFC 3262 early media).
+    /// If `sdp` is `Some(_)`, the caller's SDP is sent verbatim. If `None`,
+    /// the SDP answer is negotiated from the stored remote offer.
+    pub async fn send_early_media(
+        &self,
+        session_id: &SessionId,
+        sdp: Option<String>,
+    ) -> Result<()> {
+        self.state_machine.process_event(
+            session_id,
+            EventType::SendEarlyMedia { sdp },
+        ).await?;
+        Ok(())
+    }
     
     /// Reject an incoming call with a specific SIP status code and reason phrase.
     pub async fn reject_call(

@@ -288,6 +288,27 @@ impl UnifiedCoordinator {
     pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.hangup(session_id).await
     }
+
+    /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).
+    ///
+    /// - `sdp: Some(body)` sends the supplied SDP verbatim.
+    /// - `sdp: None` generates an answer from the stored remote offer via
+    ///   `MediaAdapter::negotiate_sdp_as_uas` (same path as `accept_call`).
+    ///
+    /// Fails fast with `UnreliableProvisionalsNotSupported` when the peer
+    /// did not advertise `Supported: 100rel` on the INVITE. Transitions the
+    /// session to `CallState::EarlyMedia`. Valid from `Ringing` and
+    /// `EarlyMedia` (re-emission updates the SDP and bumps `RSeq`).
+    pub async fn send_early_media(
+        &self,
+        session_id: &SessionId,
+        sdp: Option<String>,
+    ) -> Result<()> {
+        if !self.dialog_adapter.peer_supports_100rel(session_id).await? {
+            return Err(SessionError::UnreliableProvisionalsNotSupported);
+        }
+        self.helpers.send_early_media(session_id, sdp).await
+    }
     
     /// Put a call on hold
     pub async fn hold(&self, session_id: &SessionId) -> Result<()> {

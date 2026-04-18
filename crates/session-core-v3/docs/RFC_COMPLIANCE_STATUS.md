@@ -22,7 +22,7 @@ closed or a new gap is identified.
 | 180 Ringing | ✅ | Emits `CallStateChanged(Ringing)` |
 | 181 Call Is Being Forwarded | ✅ | Emits `CallStateChanged(Ringing, reason="Forwarded")` |
 | 182 Queued | ✅ | Emits `CallStateChanged(Ringing, reason="Queued")` |
-| 183 Session Progress (early media) | ⚠️ | Emits `CallStateChanged(Ringing)`. Early-media SDP is not yet processed through the media adapter — codec/answer info is parsed but not applied. |
+| 183 Session Progress (early media) | ✅ | UAS emits reliable 183 with SDP via `PeerControl::send_early_media`/`IncomingCall::send_early_media` (RFC 3262). UAC auto-PRACKs; state transitions through `EarlyMedia` with negotiated SDP preserved into the 200 OK. Local RTP playback of early media is a separate media-adapter capability. |
 | 199 Early Dialog Terminated | ✅ | Emits `CallStateChanged(Ringing, reason="EarlyDialogTerminated")` |
 
 ### 2xx Success
@@ -120,7 +120,7 @@ closed or a new gap is identified.
 ### Partial / aesthetic
 
 1. **305 / 380** — Treated as generic 3xx; no proxy semantics.
-2. **Early-media SDP** — 183 Session Progress surfaces as `Ringing` but the early-media codec path isn't wired to the media adapter. A `send_early_media(sdp)` API on session-core-v3 would also unblock a positive-path PRACK integration test.
+2. **Early-media RTP playback** — the 183 Session Progress signalling path is complete (SDP negotiation, reliable 18x, auto-PRACK, handoff into 200 OK). What's *not* yet in scope: wiring an `AudioSource` onto the media session so UAS-side audio actually streams during the `EarlyMedia` window. Applications can send a 183 + SDP today to keep NAT pinholes alive and satisfy carriers that demand a reliable progress indication, but local playback of a ringback tone or announcement is a separate media-adapter feature.
 3. **INVITE proxy/downstream auth (401/407 on INVITE)** — Digest auth is only applied on REGISTER flows; INVITE auth is not auto-retried.
 4. **INFO method** — dialog-core supports it; no public session-core-v3 helper API.
 5. **Attended transfer with Replaces on the transferred leg** — Implemented but limited test coverage.
@@ -145,7 +145,7 @@ closed or a new gap is identified.
 | Panic in handler → 500 response | ✅ (panic_safety_test) |
 | REGISTER + digest auth | ✅ (registration example) |
 | PRACK 420 policy mismatch | ✅ (`tests/prack_integration.rs` — multi-binary) |
-| PRACK positive reliable-183 flow | ⚠️ (20 unit tests; no integration — blocked on `send_early_media` API) |
+| PRACK positive reliable-183 flow | ✅ (`tests/prack_integration.rs::prack_positive_reliable_183_flow` — multi-binary; uses `send_early_media`) |
 | Session timer refresh (UPDATE, UAC refresher) | ✅ (`tests/session_timer_integration.rs`) |
 | Session timer refresh-failure BYE | ⚠️ (wire-level implemented; test blocked on session-core-v3 API for dropping UPDATE) |
 | REGISTER + 423 retry | ❌ (no test — would need a 423-returning registrar mock) |

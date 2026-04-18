@@ -182,6 +182,29 @@ impl DialogAdapter {
         // For now, return a placeholder
         Ok("sip:remote@example.com".to_string())
     }
+
+    /// Does the remote peer support RFC 3262 100rel? Used to gate
+    /// `send_early_media` — we only emit a reliable 183 when the caller
+    /// advertised `Supported: 100rel` (or `Require: 100rel`) on the INVITE.
+    /// Returns `SessionNotFound` if the session has no dialog yet.
+    pub async fn peer_supports_100rel(&self, session_id: &SessionId) -> Result<bool> {
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .map(|e| e.value().clone())
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?;
+
+        let dialog = self
+            .dialog_api
+            .get_dialog_info(&dialog_id)
+            .await
+            .map_err(|e| SessionError::DialogError(format!(
+                "peer_supports_100rel: failed to read dialog {}: {}",
+                dialog_id, e
+            )))?;
+
+        Ok(dialog.peer_supports_100rel)
+    }
     
     // ===== Outbound Actions (from state machine) =====
     

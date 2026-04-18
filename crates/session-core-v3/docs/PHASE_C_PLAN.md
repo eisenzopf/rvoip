@@ -33,7 +33,7 @@ the "Progress log" section below for session-by-session status.
 
 All Phase C items above are complete. Remaining follow-on work (not blocking):
 
-- **Positive reliable-183 integration test** — requires session-core-v3 to expose a `send_early_media(sdp)` API so we can drive a UAS 183 with SDP through the public surface. Wire-level correctness is covered by the 20 unit tests in `crates/dialog-core/tests/prack_test.rs`.
+- ~~**Positive reliable-183 integration test**~~ — ✅ shipped. `send_early_media(sdp)` is now on `PeerControl` / `IncomingCall`, driven by `EventType::SendEarlyMedia` through the state machine. `tests/prack_integration.rs::prack_positive_reliable_183_flow` exercises Bob sending a reliable 183 with auto-negotiated SDP and Alice auto-PRACKing and finally receiving 200 OK. See `docs/SEND_EARLY_MEDIA_PLAN.md` and the updated plan artifact for design notes.
 - **422 Session Interval Too Small UAC-side retry** — parse `Min-SE:` from 422 and re-issue INVITE with bumped Session-Expires. Real-world carriers rarely 422 on fresh INVITE, so this is low-priority.
 - **`Reason: SIP ;cause=408` header on session-timer BYE** — RFC 4028 §10 nicety; currently we just send a BYE and rely on the `SessionRefreshFailed` event string for reason context.
 

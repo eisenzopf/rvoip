@@ -490,6 +490,12 @@ impl YamlTableLoader {
                             .map(String::from);
                         Ok(EventType::IncomingCall { from, sdp })
                     }
+                    "SendEarlyMedia" => {
+                        let sdp = parameters.get("sdp")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        Ok(EventType::SendEarlyMedia { sdp })
+                    }
                     _ => self.parse_event_by_name(&event_type),
                 }
             }
@@ -503,6 +509,7 @@ impl YamlTableLoader {
             "MakeCall" => Ok(EventType::MakeCall { target: String::new() }),
             "AcceptCall" => Ok(EventType::AcceptCall),
             "RejectCall" => Ok(EventType::RejectCall { status: 0, reason: String::new() }),
+            "SendEarlyMedia" => Ok(EventType::SendEarlyMedia { sdp: None }),
             "HangupCall" => Ok(EventType::HangupCall),
             "HoldCall" => Ok(EventType::HoldCall),
             "ResumeCall" => Ok(EventType::ResumeCall),
@@ -682,6 +689,7 @@ impl YamlTableLoader {
             "StopMediaSession" | "StopMedia" => Ok(Action::CleanupMedia),
             "NegotiateSDPAsUAC" => Ok(Action::NegotiateSDPAsUAC),
             "NegotiateSDPAsUAS" => Ok(Action::NegotiateSDPAsUAS),
+            "PrepareEarlyMediaSDP" => Ok(Action::PrepareEarlyMediaSDP),
             "SuspendMedia" => Ok(Action::Custom("SuspendMedia".to_string())),
             "ResumeMedia" => Ok(Action::Custom("ResumeMedia".to_string())),
             

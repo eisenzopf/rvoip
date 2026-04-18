@@ -337,6 +337,7 @@ impl EventRouter {
             Action::ProcessMESSAGE |
             Action::CleanupDialog |
             Action::CleanupMedia |
+            Action::PrepareEarlyMediaSDP |
             Action::SendReferAccepted => {
                 tracing::debug!("Advanced action {:?} for session {} - handled by state machine", action, session_id);
             }

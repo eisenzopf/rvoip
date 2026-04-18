@@ -41,6 +41,13 @@ pub enum SessionError {
     
     #[error("Protocol error: {0}")]
     ProtocolError(String),
+
+    /// RFC 3262 — the remote peer did not advertise `Supported: 100rel` on the
+    /// INVITE, so we cannot send a reliable 183 Session Progress. Raised by
+    /// `send_early_media`. Today we fail fast; a future `send_progress(sdp)`
+    /// API could fall back to an unreliable 183.
+    #[error("peer did not advertise 100rel; cannot send reliable 183")]
+    UnreliableProvisionalsNotSupported,
     
     #[error("Internal error: {0}")]
     InternalError(String),

@@ -1,21 +1,27 @@
-//! Multi-binary integration test for RFC 3262 PRACK policy.
+//! Multi-binary integration tests for RFC 3262 PRACK / reliable-provisional
+//! behaviour.
 //!
-//! Covers the 420 Bad Extension negative case: Alice advertises no 100rel
-//! support while Bob requires it, so Bob MUST reject with 420 per RFC 3262
-//! §4. Alice exits 0 only when she receives `CallFailed { status_code: 420 }`.
+//! Covers two scenarios, each running Alice and Bob in separate processes
+//! with ports selected per-test to avoid collision on shared CI runners:
 //!
-//! The positive reliable-provisional flow (PRACK round-trip against a real
-//! reliable 183 with SDP) is validated by wire-level unit tests in
-//! `dialog-core/tests/prack_test.rs`. A full session-core-v3 positive
-//! integration test requires a `send_early_media` API that isn't wired into
-//! session-core-v3 yet — tracked as follow-on work.
+//! - **Negative (420 Bad Extension)**: Alice advertises no 100rel while Bob
+//!   requires it. Bob MUST reject with 420 per RFC 3262 §4. Alice exits 0
+//!   when she sees `CallFailed { status_code: 420 }`.
+//!
+//! - **Positive (reliable 183 → auto-PRACK → 200 OK)**: both peers support
+//!   100rel. Bob calls `send_early_media(None)` on the incoming call, which
+//!   drives a reliable 183 with auto-negotiated SDP (Phase C.1.3 wire path).
+//!   Alice's auto-PRACK (Phase C.1.2) round-trips underneath, Bob accepts,
+//!   and Alice exits 0 on `CallAnswered`.
 
 use std::env;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const ALICE_PORT: u16 = 35063;
-const BOB_PORT: u16 = 35064;
+const NEG_ALICE_PORT: u16 = 35063;
+const NEG_BOB_PORT: u16 = 35064;
+const POS_ALICE_PORT: u16 = 35065;
+const POS_BOB_PORT: u16 = 35066;
 
 struct ChildGuard(std::process::Child);
 impl Drop for ChildGuard {
@@ -49,8 +55,7 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
     ChildGuard(child)
 }
 
-#[test]
-fn prack_policy_mismatch_returns_420() {
+fn build_examples() {
     let build_status = Command::new(cargo_bin())
         .args([
             "build",
@@ -65,19 +70,29 @@ fn prack_policy_mismatch_returns_420() {
         .status()
         .expect("failed to invoke cargo build");
     assert!(build_status.success(), "cargo build failed");
+}
 
+fn run_scenario(
+    alice_port: u16,
+    bob_port: u16,
+    mode: &str,
+    bob_wait_secs: u64,
+    alice_wait_secs: u64,
+) {
     let env_vars: Vec<(&str, String)> = vec![
-        ("ALICE_PORT", ALICE_PORT.to_string()),
-        ("BOB_PORT", BOB_PORT.to_string()),
+        ("ALICE_PORT", alice_port.to_string()),
+        ("BOB_PORT", bob_port.to_string()),
+        ("PRACK_MODE", mode.to_string()),
     ];
 
     // Bob listens; give him a moment to bind before Alice INVITEs.
     let _bob = spawn_example("streampeer_prack_bob", &env_vars);
     std::thread::sleep(Duration::from_millis(800));
+    let _ = bob_wait_secs;
 
     let mut alice = spawn_example("streampeer_prack_alice", &env_vars);
 
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(alice_wait_secs);
     let exit = loop {
         match alice.0.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -91,14 +106,28 @@ fn prack_policy_mismatch_returns_420() {
         }
     };
 
-    let status = match exit {
-        Some(s) => s,
-        None => panic!("Alice did not finish within 20s"),
-    };
+    let status = exit
+        .unwrap_or_else(|| panic!("Alice did not finish within {}s (mode={})", alice_wait_secs, mode));
 
     assert!(
         status.success(),
-        "Alice exited with {:?} (expected success — received 420)",
-        status.code()
+        "Alice exited with {:?} (mode={}, expected success)",
+        status.code(),
+        mode
     );
+}
+
+#[test]
+fn prack_policy_mismatch_returns_420() {
+    build_examples();
+    run_scenario(NEG_ALICE_PORT, NEG_BOB_PORT, "negative", 8, 20);
+}
+
+#[test]
+fn prack_positive_reliable_183_flow() {
+    build_examples();
+    // Positive path: Bob sends reliable 183, Alice auto-PRACKs, Bob 200s.
+    // Alice exits 0 on CallAnswered. Give generous margin for the
+    // multi-step dance on a loaded CI box.
+    run_scenario(POS_ALICE_PORT, POS_BOB_PORT, "positive", 12, 25);
 }

@@ -85,6 +85,11 @@ pub struct SessionState {
     pub reject_status: Option<u16>,
     pub reject_reason: Option<String>,
 
+    // Caller-supplied SDP for SendEarlyMedia. Consumed by PrepareEarlyMediaSDP
+    // on the way to the reliable 183; None means "auto-negotiate from remote
+    // offer" (the usual case for a call-flow-driven ringback).
+    pub early_media_sdp: Option<String>,
+
     // 3xx redirect follow-up state (RFC 3261 §8.1.3.4)
     // Remaining redirect targets to try (first = highest priority); popped
     // from the front by RetryWithContact.
@@ -155,6 +160,7 @@ impl SessionState {
             dtmf_digits: None,
             reject_status: None,
             reject_reason: None,
+            early_media_sdp: None,
             redirect_targets: Vec::new(),
             redirect_attempts: 0,
             pending_reinvite: None,
