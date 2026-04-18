@@ -48,6 +48,19 @@ pub enum SessionError {
     /// API could fall back to an unreliable 183.
     #[error("peer did not advertise 100rel; cannot send reliable 183")]
     UnreliableProvisionalsNotSupported,
+
+    /// RFC 3261 §22.2 — the server challenged our INVITE with 401/407 but the
+    /// session has no credentials on file. Set credentials via
+    /// `StreamPeerBuilder::with_credentials` (per-peer default) or
+    /// `PeerControl::call_with_auth` (per-call).
+    #[error("server challenged INVITE but no credentials are on file")]
+    MissingCredentialsForInviteAuth,
+
+    /// RFC 3261 §22.2 — INVITE auth has already been retried once and the
+    /// server challenged again. Prevents loops against a broken server or
+    /// wrong credentials.
+    #[error("INVITE auth retry limit exceeded")]
+    InviteAuthRetryExhausted,
     
     #[error("Internal error: {0}")]
     InternalError(String),

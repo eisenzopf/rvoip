@@ -15,7 +15,7 @@ pub async fn execute_action(
     session: &mut SessionState,
     dialog_adapter: &Arc<DialogAdapter>,
     media_adapter: &Arc<MediaAdapter>,
-    _session_store: &Arc<SessionStore>,
+    session_store: &Arc<SessionStore>,
     _simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>, // Unused - events handled by SessionCrossCrateEventHandler
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing action: {:?}", action);
@@ -682,8 +682,13 @@ pub async fn execute_action(
                 expires,
                 None  // No credentials on first attempt
             ).await?;
+            // `send_register` awaits the response and may mutate the store
+            // directly (set `is_registered`, bump retry counters, dispatch a
+            // recursive AuthRequired). Reload so the executor's final save
+            // doesn't overwrite those changes with a stale copy.
+            *session = session_store.get_session(&session.session_id).await?;
         }
-        
+
         Action::SendREGISTERWithAuth => {
             info!("Action::SendREGISTERWithAuth for session {}", session.session_id);
             let from_uri = session.local_uri.as_deref()
@@ -705,8 +710,10 @@ pub async fn execute_action(
                 expires,
                 session.credentials.as_ref()
             ).await?;
+            // Reload — see SendREGISTER above.
+            *session = session_store.get_session(&session.session_id).await?;
         }
-        
+
         Action::SendUnREGISTER => {
             info!("Action::SendUnREGISTER for session {}", session.session_id);
             let from_uri = session.local_uri.as_deref()
@@ -725,13 +732,114 @@ pub async fn execute_action(
                 0,  // expires=0 means unregister
                 session.credentials.as_ref()
             ).await?;
+            // Reload — see SendREGISTER above.
+            *session = session_store.get_session(&session.session_id).await?;
         }
         
         Action::StoreAuthChallenge => {
             debug!("Action::StoreAuthChallenge for session {}", session.session_id);
-            // The challenge is already stored in session.auth_challenge by handle_401_challenge
-            // This action is just a marker in the state table
-            info!("Auth challenge stored (handled by DialogAdapter)");
+            // Parse the challenge payload stashed in session.pending_auth by the
+            // executor (for AuthRequired events) and write the parsed
+            // `DigestChallenge` into session.auth_challenge. Both INVITE and
+            // REGISTER auth paths consume this field.
+            //
+            // Fallback: the legacy REGISTER shortcut in DialogAdapter may have
+            // already populated session.auth_challenge directly (Phase 2 will
+            // remove that path). If pending_auth is None and auth_challenge is
+            // already set, treat this action as a no-op.
+            if let Some((_, ref challenge_str)) = session.pending_auth {
+                let parsed = rvoip_auth_core::DigestAuthenticator::parse_challenge(challenge_str)?;
+                info!(
+                    "Stored auth challenge for session {} (realm={}, nonce={})",
+                    session.session_id, parsed.realm, parsed.nonce
+                );
+                session.auth_challenge = Some(parsed);
+                // Persist so the next action — `SendREGISTERWithAuth` or
+                // `SendINVITEWithAuth` — sees the challenge when it re-reads
+                // the session from the store inside the dialog adapter.
+                // Actions share a mutable local `session` but the adapter
+                // calls `store.get_session` which reads the persisted copy.
+                session_store.update_session(session.clone()).await?;
+            } else if session.auth_challenge.is_some() {
+                debug!("Auth challenge already stored (legacy path); continuing");
+            } else {
+                return Err(format!(
+                    "StoreAuthChallenge: no pending_auth on session {} and no prior challenge",
+                    session.session_id
+                ).into());
+            }
+        }
+        Action::SendINVITEWithAuth => {
+            // RFC 3261 §22.2 — compute a digest Authorization header and
+            // re-issue the INVITE on the same dialog (same Call-ID, bumped
+            // CSeq) via DialogAdapter::resend_invite_with_auth. Capped at one
+            // retry to prevent loops when credentials are wrong.
+            info!("Action::SendINVITEWithAuth for session {}", session.session_id);
+            const CAP: u8 = 1;
+            if session.invite_auth_retry_count >= CAP {
+                return Err(format!(
+                    "INVITE auth retry cap ({}) exceeded for session {}",
+                    CAP, session.session_id
+                ).into());
+            }
+            session.invite_auth_retry_count += 1;
+
+            let challenge = session.auth_challenge.clone().ok_or_else(|| {
+                format!(
+                    "SendINVITEWithAuth: no auth_challenge on session {}",
+                    session.session_id
+                )
+            })?;
+            let creds = session.credentials.clone().ok_or_else(|| {
+                format!(
+                    "SendINVITEWithAuth: no credentials on session {} — set via StreamPeer::with_credentials",
+                    session.session_id
+                )
+            })?;
+            let request_uri = session.remote_uri.clone().ok_or_else(|| {
+                format!(
+                    "SendINVITEWithAuth: no remote_uri on session {}",
+                    session.session_id
+                )
+            })?;
+
+            let (response_hash, cnonce) = rvoip_auth_core::DigestClient::compute_response(
+                &creds.username,
+                &creds.password,
+                &challenge,
+                "INVITE",
+                &request_uri,
+            )?;
+            let header_value = rvoip_auth_core::DigestClient::format_authorization(
+                &creds.username,
+                &challenge,
+                &request_uri,
+                &response_hash,
+                cnonce.as_deref(),
+            );
+
+            let (status, _) = session
+                .pending_auth
+                .take()
+                .unwrap_or((401, String::new()));
+            let header_name = if status == 407 {
+                "Proxy-Authorization"
+            } else {
+                "Authorization"
+            };
+
+            dialog_adapter
+                .resend_invite_with_auth(
+                    &session.session_id,
+                    session.local_sdp.clone(),
+                    header_name,
+                    header_value,
+                )
+                .await?;
+            info!(
+                "Auth-retry INVITE sent for session {} (retry #{}, header {})",
+                session.session_id, session.invite_auth_retry_count, header_name
+            );
         }
         
         Action::ProcessRegistrationResponse => {

@@ -351,6 +351,42 @@ impl DialogEventHub {
                                 }
                             ))
                         }
+                        401 | 407 => {
+                            // RFC 3261 §22.2 — digest auth challenge. If the
+                            // response carries a WWW-Authenticate (401) or
+                            // Proxy-Authenticate (407) header, surface it as
+                            // `AuthRequired` so session-core-v3 can compute a
+                            // digest response and retry. Method-agnostic:
+                            // this path fires for INVITE, REGISTER, and any
+                            // future auth-challenged request. Malformed 401/
+                            // 407 without a parseable challenge falls through
+                            // to CallFailed below.
+                            use rvoip_sip_core::types::headers::HeaderAccess;
+                            let header_name = if response.status_code() == 407 {
+                                rvoip_sip_core::types::header::HeaderName::ProxyAuthenticate
+                            } else {
+                                rvoip_sip_core::types::header::HeaderName::WwwAuthenticate
+                            };
+                            if let Some(challenge) = response.raw_header_value(&header_name) {
+                                let realm = extract_digest_realm(&challenge);
+                                Some(RvoipCrossCrateEvent::DialogToSession(
+                                    DialogToSessionEvent::AuthRequired {
+                                        session_id,
+                                        status_code: response.status_code(),
+                                        challenge,
+                                        realm,
+                                    }
+                                ))
+                            } else {
+                                Some(RvoipCrossCrateEvent::DialogToSession(
+                                    DialogToSessionEvent::CallFailed {
+                                        session_id,
+                                        status_code: response.status_code(),
+                                        reason_phrase: response.reason_phrase().to_string(),
+                                    }
+                                ))
+                            }
+                        }
                         code if (400..700).contains(&code) => {
                             // RFC 3261 §8.1.3 — any other final 3xx/4xx/5xx/6xx
                             // response ends the UAC's INVITE transaction. Propagate
@@ -651,4 +687,17 @@ impl DialogEventHub {
         }
         None
     }
+}
+
+/// Extract the `realm="..."` parameter from a `Digest` challenge header value,
+/// for logging / app-level routing. The authoritative parse happens in
+/// session-core-v3 via `auth-core::DigestAuthenticator::parse_challenge`, so
+/// this helper deliberately does the minimum needed to populate the optional
+/// `realm` field on `AuthRequired`. Returns `None` for non-digest schemes.
+fn extract_digest_realm(challenge: &str) -> Option<String> {
+    let marker = "realm=\"";
+    let start = challenge.find(marker)? + marker.len();
+    let rest = &challenge[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }

@@ -130,6 +130,13 @@ pub enum EventType {
     /// `sdp: Some(_)` uses caller-supplied SDP verbatim; `None` triggers
     /// `negotiate_sdp_as_uas` against the stored remote offer.
     SendEarlyMedia { sdp: Option<String> },
+    /// RFC 3261 §22.2 — server or proxy challenged the UAC request with
+    /// 401/407. `challenge` is the raw header value (e.g.
+    /// `Digest realm="...", nonce="..."`) ready for
+    /// `auth-core::DigestAuthenticator::parse_challenge`. Same variant drives
+    /// INVITE (`Initiating`) and REGISTER (`Registering`) retries — the
+    /// current state disambiguates which request to re-send.
+    AuthRequired { status_code: u16, challenge: String },
     HangupCall,
     HoldCall,
     ResumeCall,
@@ -253,6 +260,10 @@ impl EventType {
             EventType::IncomingCall { .. } => EventType::IncomingCall { from: String::new(), sdp: None },
             EventType::RejectCall { .. } => EventType::RejectCall { status: 0, reason: String::new() },
             EventType::SendEarlyMedia { .. } => EventType::SendEarlyMedia { sdp: None },
+            EventType::AuthRequired { .. } => EventType::AuthRequired {
+                status_code: 0,
+                challenge: String::new(),
+            },
             // BlindTransfer and AttendedTransfer events removed
             
             // Media events - normalize
@@ -385,6 +396,11 @@ pub enum Action {
     /// it up. A separate action (rather than overloading `NegotiateSDPAsUAS`)
     /// because the explicit-SDP path must bypass negotiation entirely.
     PrepareEarlyMediaSDP,
+    /// RFC 3261 §22.2 — compute a digest Authorization (or Proxy-Authorization)
+    /// header from `session.auth_challenge` + `session.credentials` and resend
+    /// the INVITE via `DialogAdapter::resend_invite_with_auth`. Bumps
+    /// `session.invite_auth_retry_count`; errors if the cap is exceeded.
+    SendINVITEWithAuth,
     PlayAudioFile(String),
     StartRecordingMedia,
     StopRecordingMedia,

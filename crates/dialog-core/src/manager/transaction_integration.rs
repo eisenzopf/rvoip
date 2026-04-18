@@ -598,6 +598,136 @@ impl TransactionIntegration for DialogManager {
     }
 }
 
+/// RFC 3261 §22.2 — resend an INVITE with an `Authorization` or
+/// `Proxy-Authorization` header after the UAS/proxy challenged with 401/407.
+///
+/// The original INVITE's dialog is reused: same `Call-ID`, same `From` tag,
+/// no remote tag (the challenge was a final response that did *not* establish
+/// a dialog). CSeq is bumped via `Dialog::create_request_template` so the
+/// retry forms a new transaction under the same dialog record. The caller
+/// supplies the fully-formatted digest header value via
+/// `auth-core::DigestClient::format_authorization`.
+impl DialogManager {
+    pub async fn send_invite_with_auth(
+        &self,
+        dialog_id: &DialogId,
+        body: Option<bytes::Bytes>,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> DialogResult<TransactionKey> {
+        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::TypedHeader;
+        use crate::transaction::client::builders::InviteBuilder;
+
+        debug!("Resending INVITE with auth for dialog {}", dialog_id);
+
+        let (destination, request) = {
+            let mut dialog = self.get_dialog_mut(dialog_id)?;
+
+            let destination = dialog.get_remote_target_address().await
+                .ok_or_else(|| crate::errors::DialogError::routing_error(
+                    "No remote target address available for auth retry",
+                ))?;
+
+            let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
+
+            let template = dialog.create_request_template(Method::Invite);
+
+            // Preserve the new INVITE's CSeq for later use by RAck (RFC 3262 §7.2).
+            dialog.invite_cseq = Some(template.cseq_number);
+
+            let local_tag = match template.local_tag.clone() {
+                Some(tag) if !tag.is_empty() => tag,
+                _ => {
+                    let new_tag = dialog.generate_local_tag();
+                    dialog.local_tag = Some(new_tag.clone());
+                    new_tag
+                }
+            };
+
+            // The challenge was a final response on the original INVITE, so no
+            // remote tag was established. Rebuild as an initial INVITE with
+            // the same Call-ID (dialog.create_request_template carries it).
+            let mut invite_builder = InviteBuilder::new()
+                .from_detailed(
+                    Some("User"),
+                    template.local_uri.to_string(),
+                    Some(&local_tag),
+                )
+                .to_detailed(
+                    Some("User"),
+                    template.remote_uri.to_string(),
+                    None,
+                )
+                .call_id(&template.call_id)
+                .cseq(template.cseq_number)
+                .request_uri(template.target_uri.to_string())
+                .local_address(self.local_address);
+
+            for route in &template.route_set {
+                invite_builder = invite_builder.add_route(route.clone());
+            }
+
+            if let Some(sdp_content) = body_string {
+                invite_builder = invite_builder.with_sdp(sdp_content);
+            }
+
+            let mut request = invite_builder.build().map_err(|e| {
+                crate::errors::DialogError::InternalError {
+                    message: format!("Failed to build auth-retry INVITE: {}", e),
+                    context: None,
+                }
+            })?;
+
+            // Re-inject the negotiated policy headers (100rel, session-timer)
+            // just like the initial send does.
+            inject_100rel_policy(&mut request, self.config_100rel_policy());
+            if let Some((secs, min_se)) = self.config_session_timer_settings() {
+                inject_session_timer_headers(&mut request, secs, min_se);
+            }
+
+            // Attach the digest authorization header. Use TypedHeader::Other
+            // with Raw bytes so we don't have to round-trip through a typed
+            // Authorization parser — the server only needs to read the string.
+            let header_name = match auth_header_name {
+                name if name.eq_ignore_ascii_case("Proxy-Authorization") => {
+                    HeaderName::ProxyAuthorization
+                }
+                _ => HeaderName::Authorization,
+            };
+            request.headers.push(TypedHeader::Other(
+                header_name,
+                HeaderValue::Raw(auth_header_value.into_bytes()),
+            ));
+
+            (destination, request)
+        };
+
+        let transaction_id = self.transaction_manager
+            .create_invite_client_transaction(request, destination)
+            .await
+            .map_err(|e| crate::errors::DialogError::TransactionError {
+                message: format!("Failed to create auth-retry INVITE transaction: {}", e),
+            })?;
+
+        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
+        debug!(
+            "Associated auth-retry INVITE transaction {} with dialog {}",
+            transaction_id, dialog_id
+        );
+
+        self.transaction_manager
+            .send_request(&transaction_id)
+            .await
+            .map_err(|e| crate::errors::DialogError::TransactionError {
+                message: format!("Failed to send auth-retry INVITE: {}", e),
+            })?;
+
+        debug!("Auth-retry INVITE sent for dialog {} (tx {})", dialog_id, transaction_id);
+        Ok(transaction_id)
+    }
+}
+
 /// A response qualifies for RFC 3262 reliable-provisional wrapping when it
 /// is a non-100 provisional (101–199) and carries a body (typically SDP
 /// early media). 100 Trying is hop-by-hop and never reliable; bodiless

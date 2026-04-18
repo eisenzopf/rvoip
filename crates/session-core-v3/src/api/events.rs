@@ -153,6 +153,18 @@ pub enum Event {
         reason: String,
     },
 
+    /// RFC 3261 §22.2 — server challenged our INVITE with 401/407 and we're
+    /// about to retry with a digest authorization header. Informational; no
+    /// action required from the app. If the retry fails (wrong credentials
+    /// or retry cap exceeded), `CallFailed` follows.
+    CallAuthRetrying {
+        call_id: CallId,
+        /// 401 or 407.
+        status_code: u16,
+        /// Digest realm the server asked us to authenticate against.
+        realm: String,
+    },
+
     // ===== Transfer Events =====
     
     /// REFER request received
@@ -285,6 +297,7 @@ impl Event {
             Event::CallCancelled { call_id, .. } |
             Event::SessionRefreshed { call_id, .. } |
             Event::SessionRefreshFailed { call_id, .. } |
+            Event::CallAuthRetrying { call_id, .. } |
             Event::ReferReceived { call_id, .. } |
             Event::TransferAccepted { call_id, .. } |
             Event::TransferFailed { call_id, .. } |

@@ -26,6 +26,7 @@ fn test_config(base_port: u16) -> Config {
         use_100rel: Default::default(),
         session_timer_secs: None,
         session_timer_min_se: 90,
+        credentials: None,
     }
 }
 

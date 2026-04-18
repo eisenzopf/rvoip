@@ -917,6 +917,25 @@ impl UnifiedDialogManager {
     ) -> ApiResult<TransactionKey> {
         self.send_request_in_dialog(dialog_id, Method::Info, Some(bytes::Bytes::from(info_body))).await
     }
+
+    /// RFC 3261 §22.2 — resend an INVITE with a digest authorization header
+    /// after a 401/407 challenge. Reuses the existing dialog's Call-ID and
+    /// From tag, bumps CSeq on a new client transaction, preserves SDP, and
+    /// attaches the caller-supplied `Authorization` (401) or
+    /// `Proxy-Authorization` (407) header value verbatim.
+    pub async fn send_invite_with_auth(
+        &self,
+        dialog_id: &DialogId,
+        sdp: Option<String>,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> ApiResult<TransactionKey> {
+        let body = sdp.map(bytes::Bytes::from);
+        self.core
+            .send_invite_with_auth(dialog_id, body, auth_header_name, auth_header_value)
+            .await
+            .map_err(ApiError::from)
+    }
     
     /// Send CANCEL request to cancel a pending INVITE
     ///

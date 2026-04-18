@@ -37,6 +37,7 @@ async fn create_test_coordinator(port: u16) -> Arc<UnifiedCoordinator> {
         use_100rel: Default::default(),
         session_timer_secs: None,
         session_timer_min_se: 90,
+        credentials: None,
     };
 
     UnifiedCoordinator::new(config).await.expect("Failed to create coordinator")

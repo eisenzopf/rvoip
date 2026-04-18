@@ -54,6 +54,14 @@ pub struct Config {
     /// Minimum-session-expires (`Min-SE:`) we're willing to accept, in
     /// seconds. Default 90 per RFC 4028 §5.
     pub session_timer_min_se: u32,
+
+    /// Default credentials to apply to every outgoing call for RFC 3261 §22.2
+    /// INVITE digest auth retry. When the server responds 401/407 to our
+    /// INVITE, session-core-v3 looks here (or at per-call credentials passed
+    /// via `PeerControl::call_with_auth`) to compute the digest response. When
+    /// `None`, a 401/407 on INVITE surfaces as `CallFailed` instead of
+    /// retrying. Default: `None`.
+    pub credentials: Option<crate::types::Credentials>,
 }
 
 impl Config {
@@ -77,6 +85,7 @@ impl Config {
             use_100rel: RelUsage::default(),
             session_timer_secs: None,
             session_timer_min_se: 90,
+            credentials: None,
         }
     }
 
@@ -99,6 +108,7 @@ impl Config {
             use_100rel: RelUsage::default(),
             session_timer_secs: None,
             session_timer_min_se: 90,
+            credentials: None,
         }
     }
 }
@@ -264,9 +274,28 @@ impl UnifiedCoordinator {
 
     // ===== Simple Call Operations =====
 
-    /// Make an outgoing call
+    /// Make an outgoing call. If the `Config.credentials` default is set,
+    /// those credentials are applied to the session before dispatch so the
+    /// state machine can transparently retry on a 401/407 INVITE challenge
+    /// (RFC 3261 §22.2).
     pub async fn make_call(&self, from: &str, to: &str) -> Result<SessionId> {
-        self.helpers.make_call(from, to).await
+        self.helpers
+            .make_call_with_credentials(from, to, self.config.credentials.clone())
+            .await
+    }
+
+    /// Make an outgoing call with explicit credentials, overriding the
+    /// per-peer default. Useful for multi-tenant clients where each call
+    /// authenticates with a different user.
+    pub async fn make_call_with_auth(
+        &self,
+        from: &str,
+        to: &str,
+        credentials: crate::types::Credentials,
+    ) -> Result<SessionId> {
+        self.helpers
+            .make_call_with_credentials(from, to, Some(credentials))
+            .await
     }
     
     /// Accept an incoming call

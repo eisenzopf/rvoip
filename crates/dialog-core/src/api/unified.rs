@@ -621,6 +621,21 @@ impl UnifiedDialogApi {
         self.manager.send_request_in_dialog(dialog_id, method, body).await
     }
     
+    /// RFC 3261 §22.2 — resend an INVITE with digest auth after a 401/407
+    /// challenge. Session-core-v3 uses this to transparently retry call setup
+    /// when the UAS or proxy challenged the original INVITE.
+    pub async fn send_invite_with_auth(
+        &self,
+        dialog_id: &DialogId,
+        sdp: Option<String>,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> ApiResult<TransactionKey> {
+        self.manager
+            .send_invite_with_auth(dialog_id, sdp, auth_header_name, auth_header_value)
+            .await
+    }
+
     /// Send a response to a transaction
     ///
     /// Available in all modes for sending responses to received requests.

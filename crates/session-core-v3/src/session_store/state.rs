@@ -90,6 +90,17 @@ pub struct SessionState {
     // offer" (the usual case for a call-flow-driven ringback).
     pub early_media_sdp: Option<String>,
 
+    // RFC 3261 §22.2 — AuthRequired payload stashed here by the executor
+    // (mirrors reject_status pattern). Consumed by StoreAuthChallenge and
+    // SendINVITEWithAuth to pick `Authorization` vs `Proxy-Authorization`
+    // based on status code. Carried as a tuple to keep the field count low.
+    pub pending_auth: Option<(u16, String)>,
+
+    // RFC 3261 §22.2 — INVITE auth retry counter, capped at 1 (two attempts
+    // total: initial + one authenticated retry). Prevents infinite loops when
+    // the server keeps re-challenging with the same nonce.
+    pub invite_auth_retry_count: u8,
+
     // 3xx redirect follow-up state (RFC 3261 §8.1.3.4)
     // Remaining redirect targets to try (first = highest priority); popped
     // from the front by RetryWithContact.
@@ -161,6 +172,8 @@ impl SessionState {
             reject_status: None,
             reject_reason: None,
             early_media_sdp: None,
+            pending_auth: None,
+            invite_auth_retry_count: 0,
             redirect_targets: Vec::new(),
             redirect_attempts: 0,
             pending_reinvite: None,

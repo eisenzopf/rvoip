@@ -180,6 +180,9 @@ impl StateMachine {
                     session.early_media_sdp = Some(sdp_data.clone());
                 }
             }
+            EventType::AuthRequired { status_code, challenge } => {
+                session.pending_auth = Some((*status_code, challenge.clone()));
+            }
             EventType::Dialog3xxRedirect { targets, .. } => {
                 // Append to any existing targets (keeps earlier hops' fallbacks
                 // reachable in case the newly-suggested target also redirects).
@@ -296,7 +299,24 @@ impl StateMachine {
         }
         
         info!("Executing transition for {:?} + {:?}", old_state, event);
-        
+
+        // Apply next_state and persist BEFORE executing actions so that any
+        // re-entrant event dispatch triggered from inside an action observes
+        // the post-transition state. Without this, actions that perform
+        // async I/O and then call back into the state machine (e.g.
+        // `DialogAdapter::send_register` dispatching `AuthRequired` inline
+        // on a 401) would see stale `call_state` and their event would miss
+        // the matching transition. If an action fails after this point the
+        // state change stays committed — mirrors how most state machines
+        // handle partial side-effect failures (caller sees the error and
+        // decides how to recover).
+        if let Some(new_state) = transition.next_state {
+            info!("State transition: {:?} -> {:?}", old_state, new_state);
+            session.call_state = new_state;
+            session.entered_state_at = Instant::now();
+            self.store.update_session(session.clone()).await?;
+        }
+
         // 5. Execute actions
         let mut actions_executed = Vec::new();
         for action in &transition.actions {
@@ -359,13 +379,9 @@ impl StateMachine {
             }
         }
         
-        // 6. Update state if specified
+        // 6. Record successful transition in history (state already applied
+        // above, before the action loop)
         let next_state = transition.next_state;
-        if let Some(new_state) = next_state {
-            info!("State transition: {:?} -> {:?}", old_state, new_state);
-        }
-        
-        // Record successful transition in history
         if session.history.is_some() {
             let now = Instant::now();
             let record = TransitionRecord {
@@ -386,13 +402,7 @@ impl StateMachine {
             };
             session.record_transition(record);
         }
-        
-        // Apply state change after recording history
-        if let Some(new_state) = transition.next_state {
-            session.call_state = new_state;
-            session.entered_state_at = Instant::now();
-        }
-        
+
         // 7. Apply condition updates
         session.apply_condition_updates(&transition.condition_updates);
         

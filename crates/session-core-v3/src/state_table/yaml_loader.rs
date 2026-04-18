@@ -496,6 +496,16 @@ impl YamlTableLoader {
                             .map(String::from);
                         Ok(EventType::SendEarlyMedia { sdp })
                     }
+                    "AuthRequired" => {
+                        let status_code = parameters.get("status_code")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u16;
+                        let challenge = parameters.get("challenge")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        Ok(EventType::AuthRequired { status_code, challenge })
+                    }
                     _ => self.parse_event_by_name(&event_type),
                 }
             }
@@ -510,6 +520,18 @@ impl YamlTableLoader {
             "AcceptCall" => Ok(EventType::AcceptCall),
             "RejectCall" => Ok(EventType::RejectCall { status: 0, reason: String::new() }),
             "SendEarlyMedia" => Ok(EventType::SendEarlyMedia { sdp: None }),
+            "AuthRequired" => Ok(EventType::AuthRequired {
+                status_code: 0,
+                challenge: String::new(),
+            }),
+            // RFC 3261 §22.2 — backward-compat alias. The dedicated
+            // Registration401 path has been retired in favor of the shared
+            // AuthRequired event, but externally-authored state tables may
+            // still reference the old name.
+            "Registration401" => Ok(EventType::AuthRequired {
+                status_code: 401,
+                challenge: String::new(),
+            }),
             "HangupCall" => Ok(EventType::HangupCall),
             "HoldCall" => Ok(EventType::HoldCall),
             "ResumeCall" => Ok(EventType::ResumeCall),
@@ -565,7 +587,9 @@ impl YamlTableLoader {
             // Registration events
             "StartRegistration" => Ok(EventType::StartRegistration),
             "Registration200OK" => Ok(EventType::Registration200OK),
-            "Registration401" => Ok(EventType::Registration401),
+            // "Registration401" is aliased above to EventType::AuthRequired
+            // (shared event with INVITE auth). Do not re-add the legacy
+            // binding here; the alias intentionally takes priority.
             "RetryRegistration" => Ok(EventType::RetryRegistration),
             "RegistrationFailed" => Ok(EventType::RegistrationFailed(0)),
             "UnregisterRequest" => Ok(EventType::UnregisterRequest),
@@ -690,6 +714,9 @@ impl YamlTableLoader {
             "NegotiateSDPAsUAC" => Ok(Action::NegotiateSDPAsUAC),
             "NegotiateSDPAsUAS" => Ok(Action::NegotiateSDPAsUAS),
             "PrepareEarlyMediaSDP" => Ok(Action::PrepareEarlyMediaSDP),
+            "StoreAuthChallenge" => Ok(Action::StoreAuthChallenge),
+            "SendINVITEWithAuth" => Ok(Action::SendINVITEWithAuth),
+            "SendREGISTERWithAuth" => Ok(Action::SendREGISTERWithAuth),
             "SuspendMedia" => Ok(Action::Custom("SuspendMedia".to_string())),
             "ResumeMedia" => Ok(Action::Custom("ResumeMedia".to_string())),
             
@@ -710,6 +737,7 @@ impl YamlTableLoader {
 
             // Registration actions
             "SendREGISTER" => Ok(Action::SendREGISTER),
+            "SendUnREGISTER" | "SendREGISTERWithExpires0" => Ok(Action::SendUnREGISTER),
             "ProcessRegistrationResponse" => Ok(Action::ProcessRegistrationResponse),
 
             // Subscription actions

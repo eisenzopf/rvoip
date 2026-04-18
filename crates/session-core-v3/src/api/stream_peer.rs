@@ -179,11 +179,33 @@ impl PeerControl {
     /// Initiate an outgoing call. Returns a [`SessionHandle`] immediately; the
     /// call enters `Ringing` state until the remote answers.
     ///
+    /// If the peer was configured with [`Config.credentials`] (or via
+    /// [`StreamPeerBuilder::with_credentials`]), those credentials are
+    /// attached to the session and used to transparently retry on a 401/407
+    /// INVITE challenge (RFC 3261 §22.2).
+    ///
     /// Use [`subscribe_events()`] to watch for [`Event::CallAnswered`].
     ///
     /// [`subscribe_events()`]: Self::subscribe_events
+    /// [`Config.credentials`]: crate::api::unified::Config::credentials
+    /// [`StreamPeerBuilder::with_credentials`]: StreamPeerBuilder::with_credentials
     pub async fn call(&self, target: &str) -> Result<SessionHandle> {
         let id = self.coordinator.make_call(&self.local_uri, target).await?;
+        Ok(SessionHandle::new(id, self.coordinator.clone()))
+    }
+
+    /// Initiate an outgoing call with explicit digest-auth credentials,
+    /// overriding any per-peer default. Useful for multi-tenant clients
+    /// where each call authenticates as a different user.
+    pub async fn call_with_auth(
+        &self,
+        target: &str,
+        credentials: crate::types::Credentials,
+    ) -> Result<SessionHandle> {
+        let id = self
+            .coordinator
+            .make_call_with_auth(&self.local_uri, target, credentials)
+            .await?;
         Ok(SessionHandle::new(id, self.coordinator.clone()))
     }
 
@@ -501,6 +523,17 @@ impl StreamPeerBuilder {
     /// Use a fully custom config (overrides all previous settings).
     pub fn config(mut self, config: Config) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Set per-peer default SIP digest credentials used for RFC 3261 §22.2
+    /// INVITE auth retry. When the server challenges an outgoing INVITE with
+    /// 401/407, these credentials are applied automatically so the call can
+    /// recover without intervention.
+    ///
+    /// Per-call override via [`PeerControl::call_with_auth`].
+    pub fn with_credentials(mut self, username: &str, password: &str) -> Self {
+        self.config.credentials = Some(crate::types::Credentials::new(username, password));
         self
     }
 

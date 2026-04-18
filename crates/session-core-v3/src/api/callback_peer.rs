@@ -147,6 +147,18 @@ pub trait CallHandler: Send + Sync + 'static {
     async fn on_transfer_request(&self, handle: SessionHandle, target: String) -> bool {
         false
     }
+
+    /// Called when an outgoing call receives a 401/407 and the coordinator is
+    /// about to retry with `Authorization` / `Proxy-Authorization` (RFC 3261
+    /// §22.2). Informational — the retry proceeds automatically if credentials
+    /// are on file via [`Config.credentials`] or
+    /// [`UnifiedCoordinator::make_call_with_auth`]; this hook does not alter
+    /// flow. Useful for logging or surfacing auth activity in a UI.
+    ///
+    /// [`Config.credentials`]: crate::api::unified::Config::credentials
+    /// [`UnifiedCoordinator::make_call_with_auth`]: crate::api::unified::UnifiedCoordinator::make_call_with_auth
+    #[allow(unused_variables)]
+    async fn on_auth_retrying(&self, call_id: CallId, status_code: u16, realm: String) {}
 }
 
 // ===== CallbackPeer =====
@@ -189,6 +201,27 @@ pub struct CallbackPeer<H: CallHandler> {
 
 impl<H: CallHandler> CallbackPeer<H> {
     /// Create a new `CallbackPeer`.
+    ///
+    /// Set `config.credentials` to enable automatic RFC 3261 §22.2 INVITE
+    /// digest-auth retry on 401/407 challenges from the server:
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core_v3::Result<()> {
+    /// use rvoip_session_core_v3::{CallbackPeer, Config, Credentials};
+    /// use rvoip_session_core_v3::api::handlers::AutoAnswerHandler;
+    ///
+    /// let config = Config {
+    ///     credentials: Some(Credentials::new("alice", "secret")),
+    ///     ..Config::default()
+    /// };
+    /// let peer = CallbackPeer::new(AutoAnswerHandler, config).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// For per-call overrides, use
+    /// [`UnifiedCoordinator::make_call_with_auth`](crate::api::unified::UnifiedCoordinator::make_call_with_auth)
+    /// via [`coordinator()`](Self::coordinator).
     pub async fn new(handler: H, config: Config) -> Result<Self> {
         let coordinator = UnifiedCoordinator::new(config).await?;
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -346,6 +379,12 @@ impl<H: CallHandler> CallbackPeer<H> {
                 let handle = SessionHandle::new(call_id, coordinator);
                 tokio::spawn(async move {
                     handler.on_transfer_request(handle, refer_to).await;
+                });
+            }
+
+            Event::CallAuthRetrying { call_id, status_code, realm } => {
+                tokio::spawn(async move {
+                    handler.on_auth_retrying(call_id, status_code, realm).await;
                 });
             }
 

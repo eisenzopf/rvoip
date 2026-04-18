@@ -230,6 +230,10 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                     self.handle_session_refresh_failed(&event_str).await?;
                 } else if event_str.contains("SessionRefreshed") {
                     self.handle_session_refreshed(&event_str).await?;
+                } else if event_str.contains("AuthRequired") {
+                    // Check BEFORE CallFailed — both could otherwise match via
+                    // substring on future enrichment.
+                    self.handle_auth_required(&event_str).await?;
                 } else if event_str.contains("CallFailed") {
                     self.handle_call_failed(&event_str).await?;
                 } else if event_str.contains("CallStateChanged") {
@@ -581,6 +585,52 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
+    /// Handle a 401/407 digest auth challenge (RFC 3261 §22.2) surfaced by
+    /// dialog-core as `DialogToSessionEvent::AuthRequired`. Parses the raw
+    /// challenge + status from the debug-formatted event string and drives
+    /// the state machine through the shared `AuthRequired` transition. The
+    /// action layer (`StoreAuthChallenge` + `SendINVITEWithAuth` /
+    /// `SendREGISTERWithAuth`) takes it from there.
+    ///
+    /// Method-agnostic: session state (`Initiating` / `Registering`)
+    /// disambiguates whether this retries INVITE or REGISTER.
+    async fn handle_auth_required(&self, event_str: &str) -> Result<()> {
+        let Some(session_id_str) = self.extract_session_id(event_str) else {
+            warn!("Could not extract session_id from AuthRequired event");
+            return Ok(());
+        };
+        let session_id = SessionId(session_id_str);
+
+        if !self.is_our_session(&session_id).await {
+            debug!("Ignoring AuthRequired for session {} - not in our store", session_id);
+            return Ok(());
+        }
+
+        let status = self
+            .extract_field(event_str, "status_code: ")
+            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse::<u16>().ok()))
+            .unwrap_or(401);
+        let challenge = self
+            .extract_field(event_str, "challenge: \"")
+            .unwrap_or_default();
+
+        info!(
+            "🎯 [handle_auth_required] session={} status={} challenge.len={}",
+            session_id,
+            status,
+            challenge.len()
+        );
+
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::AuthRequired { status_code: status, challenge })
+            .await
+        {
+            error!("Failed to process AuthRequired({}) for session {}: {}", status, session_id, e);
+        }
+        Ok(())
+    }
+
     /// Handle a 3xx/4xx/5xx/6xx final failure response for an outgoing request.
     /// Drives the state machine through the appropriate `Dialog{4,5,6}xxFailure`
     /// transition and publishes an app-level `CallFailed` event so peer
@@ -750,9 +800,16 @@ impl SessionCrossCrateEventHandler {
         if !self.is_our_session(&session_id).await {
             return Ok(());
         }
-        let expires_secs = self
-            .extract_field(event_str, "expires_secs: ")
-            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse::<u32>().ok()))
+        // `extract_field` terminates on the next `"`, which works for quoted
+        // string fields but not numeric ones — `expires_secs: 10 })` has no
+        // trailing quote, so the helper returns None. Parse the digits directly.
+        let expires_secs = event_str
+            .find("expires_secs: ")
+            .map(|idx| &event_str[idx + "expires_secs: ".len()..])
+            .and_then(|rest| {
+                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse::<u32>().ok()
+            })
             .unwrap_or(0);
         info!("🎯 [handle_session_refreshed] session={} expires={}", session_id, expires_secs);
 

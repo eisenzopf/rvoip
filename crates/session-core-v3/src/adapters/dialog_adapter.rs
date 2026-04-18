@@ -183,6 +183,41 @@ impl DialogAdapter {
         Ok("sip:remote@example.com".to_string())
     }
 
+    /// RFC 3261 §22.2 — resend an INVITE with digest `Authorization` (or
+    /// `Proxy-Authorization`) header on the same dialog after the server
+    /// challenged with 401/407. Session-core-v3's `SendINVITEWithAuth` action
+    /// owns the digest computation; this is a thin passthrough to dialog-core.
+    ///
+    /// Both REGISTER and INVITE 401/407 challenges flow through the state
+    /// machine via `DialogToSessionEvent::AuthRequired` → `EventType::AuthRequired`;
+    /// the previous inline REGISTER-auth shortcut (`handle_401_challenge`) was
+    /// retired when INVITE auth landed. See `default.yaml`'s `Initiating` /
+    /// `Registering` + `AuthRequired` transitions.
+    pub async fn resend_invite_with_auth(
+        &self,
+        session_id: &SessionId,
+        sdp: Option<String>,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> Result<()> {
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .map(|e| e.value().clone())
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?;
+
+        self.dialog_api
+            .send_invite_with_auth(&dialog_id, sdp, auth_header_name, auth_header_value)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!(
+                    "resend_invite_with_auth failed for session {}: {}",
+                    session_id.0, e
+                ))
+            })?;
+        Ok(())
+    }
+
     /// Does the remote peer support RFC 3262 100rel? Used to gate
     /// `send_early_media` — we only emit a reliable 183 when the caller
     /// advertised `Supported: 100rel` (or `Require: 100rel`) on the INVITE.
@@ -537,59 +572,79 @@ impl DialogAdapter {
                 tracing::debug!("Session marked as registered, state machine can check is_registered flag");
             }
             401 | 407 => {
-                // Authentication challenge - parse and store
+                // RFC 3261 §22.2 — auth challenge on REGISTER. Unified with the
+                // INVITE auth path: dispatch `EventType::AuthRequired` into the
+                // state machine and let the `Registering + AuthRequired →
+                // Registering` transition drive the retry via
+                // `StoreAuthChallenge` + `SendREGISTERWithAuth`. No inline
+                // loop here — keeps the retry policy in one place and gives
+                // session-scoped observability through the state-table.
+                //
+                // The cap lives on `registration_retry_count`: on a second
+                // 401 we mark the session unregistered and surface failure
+                // instead of re-firing the event (prevents infinite loops
+                // when the credentials are wrong).
                 use rvoip_sip_core::types::headers::HeaderAccess;
-                if let Some(www_auth_str) = response.raw_header_value(&rvoip_sip_core::types::header::HeaderName::WwwAuthenticate) {
-                    tracing::info!("Received 401 auth challenge for session {}", session_id.0);
-                    
-                    // Check retry count to prevent infinite loops
-                    let session = self.store.get_session(session_id).await?;
-                    
-                    if session.registration_retry_count >= 1 {
-                        tracing::error!("❌ Authentication failed - already retried once, invalid credentials");
+                let header_name = if response.status_code() == 407 {
+                    rvoip_sip_core::types::header::HeaderName::ProxyAuthenticate
+                } else {
+                    rvoip_sip_core::types::header::HeaderName::WwwAuthenticate
+                };
+                let challenge_opt = response.raw_header_value(&header_name);
+
+                let session_snapshot = self.store.get_session(session_id).await?;
+                let retry_count = session_snapshot.registration_retry_count;
+
+                if let Some(challenge) = challenge_opt {
+                    if retry_count >= 1 {
+                        tracing::error!(
+                            "❌ REGISTER auth failed (retry count {}); invalid credentials",
+                            retry_count
+                        );
                         let mut session = self.store.get_session(session_id).await?;
                         session.is_registered = false;
                         self.store.update_session(session).await?;
                         return Ok(());
                     }
-                    
-                    // Store challenge and increment retry count
-                    self.handle_401_challenge(session_id, &www_auth_str).await?;
-                    
-                    let mut session = self.store.get_session(session_id).await?;
-                    session.registration_retry_count += 1;
-                    
-                    // Clone data we need before updating
-                    let retry_count = session.registration_retry_count;
-                    let creds = session.credentials.clone();
-                    let reg_uri = session.registrar_uri.clone();
-                    let contact = session.registration_contact.clone();
-                    let expires = session.registration_expires;
-                    
-                    self.store.update_session(session).await?;
-                    
-                    tracing::info!("✅ Challenge stored (retry #{}) - preparing authenticated retry", retry_count);
-                    
-                    // Send authenticated REGISTER with credentials
-                    // dialog-core will automatically use CSeq=2 based on authorization presence
-                    if let (Some(creds), Some(reg_uri), Some(contact), Some(expires)) = 
-                        (creds, reg_uri, contact, expires) {
-                        
-                        tracing::info!("🔄 Auto-retrying REGISTER with digest authentication");
-                        
-                        // Send with authentication - dialog-core handles CSeq increment
-                        // Box::pin to avoid recursion size issues
-                        Box::pin(self.send_register(
-                            session_id,
-                            &reg_uri,
-                            from_uri,
-                            &contact,
-                            expires,
-                            Some(&creds),
-                        )).await?;
-                        
-                        tracing::info!("✅ Sent authenticated REGISTER (dialog-core auto-incremented CSeq)");
+                    {
+                        let mut session = self.store.get_session(session_id).await?;
+                        session.registration_retry_count += 1;
+                        self.store.update_session(session).await?;
                     }
+                    tracing::info!(
+                        "🔄 REGISTER {} challenge for session {} — dispatching AuthRequired",
+                        response.status_code(),
+                        session_id.0,
+                    );
+                    if let Some(state_machine) = &self.state_machine {
+                        // Box::pin: AuthRequired → SendREGISTERWithAuth →
+                        // send_register forms an async recursion the compiler
+                        // can't size inline.
+                        Box::pin(state_machine.process_event(
+                            session_id,
+                            crate::state_table::types::EventType::AuthRequired {
+                                status_code: response.status_code(),
+                                challenge,
+                            },
+                        ))
+                        .await
+                        .map_err(|e| SessionError::InternalError(format!(
+                            "REGISTER AuthRequired dispatch failed: {}",
+                            e
+                        )))?;
+                    } else {
+                        tracing::warn!(
+                            "No state_machine wired into DialogAdapter; REGISTER auth cannot retry"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        "REGISTER {} without challenge header — marking unregistered",
+                        response.status_code()
+                    );
+                    let mut session = self.store.get_session(session_id).await?;
+                    session.is_registered = false;
+                    self.store.update_session(session).await?;
                 }
             }
             423 => {
@@ -663,29 +718,6 @@ impl DialogAdapter {
             }
         }
 
-        Ok(())
-    }
-
-    /// Handle 401 Unauthorized response
-    pub async fn handle_401_challenge(
-        &self,
-        session_id: &SessionId,
-        www_authenticate: &str,
-    ) -> Result<()> {
-        tracing::info!("Handling 401 challenge for session {}", session_id.0);
-        
-        // Parse challenge using auth-core (shared module)
-        let challenge = rvoip_auth_core::DigestAuthenticator::parse_challenge(www_authenticate)?;
-        
-        tracing::debug!("Parsed challenge: realm={}, nonce={}", challenge.realm, challenge.nonce);
-        
-        // Store challenge in session
-        let mut session = self.store.get_session(session_id).await?;
-        session.auth_challenge = Some(challenge);
-        self.store.update_session(session).await?;
-        
-        tracing::info!("Auth challenge stored for session {}", session_id.0);
-        
         Ok(())
     }
 

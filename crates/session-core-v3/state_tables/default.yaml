@@ -113,6 +113,22 @@ transitions:
       - "CallRinging"
     description: "Remote party is ringing"
 
+  # UAC receives 401/407 auth challenge on INVITE (RFC 3261 §22.2).
+  # StoreAuthChallenge parses the challenge into session.auth_challenge;
+  # SendINVITEWithAuth computes the digest response via auth-core and
+  # re-issues the INVITE with Authorization / Proxy-Authorization through
+  # DialogAdapter::resend_invite_with_auth. Self-loop keeps us in
+  # Initiating until either the retry succeeds or the cap trips.
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "AuthRequired"
+    next_state: "Initiating"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendINVITEWithAuth"
+    description: "INVITE auth retry (RFC 3261 §22.2)"
+
   # UAC receives 183 Session Progress (early media)
   - role: "UAC"
     state: "Initiating"
@@ -448,28 +464,6 @@ transitions:
     publish:
       - "RegistrationSucceeded"
     description: "Registration successful"
-
-  - role: "Both"
-    state: "Registering"
-    event:
-      type: "Registration401Unauthorized"
-    next_state: "Authenticating"
-    actions:
-      - type: "ProcessAuthChallenge"
-      - type: "SendREGISTERWithAuth"
-    description: "Authentication required"
-
-  - role: "Both"
-    state: "Authenticating"
-    event:
-      type: "Registration200OK"
-    next_state: "Registered"
-    conditions:
-      IsRegistered: true
-      IsAuthenticated: true
-    publish:
-      - "RegistrationSucceeded"
-    description: "Authenticated and registered"
 
   - role: "Both"
     state: "Registered"
@@ -920,25 +914,21 @@ transitions:
       - "RegistrationSuccess"
     description: "Registration completed successfully"
 
-  # Registration challenged (401 Unauthorized)
+  # REGISTER challenged with 401/407 (RFC 3261 §22.2). Shares the
+  # `AuthRequired` event with INVITE auth — the `Registering` state
+  # disambiguates this from the INVITE retry transition. Single self-loop:
+  # parse + retry in one step; dialog-core's event_hub converter emits
+  # `AuthRequired` directly, bypassing the old `Registration401` →
+  # `Authenticating` → `RetryRegistration` → `Registering` three-step path.
   - role: "UAC"
     state: "Registering"
     event:
-      type: "Registration401"
-    next_state: "Authenticating"
-    actions:
-      - type: "StoreAuthChallenge"
-    description: "Received authentication challenge, prepare to respond"
-
-  # Send REGISTER with authentication
-  - role: "UAC"
-    state: "Authenticating"
-    event:
-      type: "RetryRegistration"
+      type: "AuthRequired"
     next_state: "Registering"
     actions:
+      - type: "StoreAuthChallenge"
       - type: "SendREGISTERWithAuth"
-    description: "Retry REGISTER with digest authentication"
+    description: "REGISTER auth retry (RFC 3261 §22.2)"
 
   # Authentication successful
   - role: "UAC"

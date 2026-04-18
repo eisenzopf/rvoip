@@ -94,8 +94,22 @@ impl StateMachineHelpers {
     
     /// Make an outgoing call (creates session + sends MakeCall event)
     pub async fn make_call(&self, from: &str, to: &str) -> Result<SessionId> {
+        self.make_call_with_credentials(from, to, None).await
+    }
+
+    /// Make an outgoing call with explicit digest-auth credentials attached
+    /// to the session. The credentials land on `SessionState.credentials`
+    /// before the INVITE goes on the wire, so if the server challenges with
+    /// 401/407 the state machine can compute a response without a round-trip
+    /// back to the caller. `None` = no auth retry on 401/407 for this call.
+    pub async fn make_call_with_credentials(
+        &self,
+        from: &str,
+        to: &str,
+        credentials: Option<crate::types::Credentials>,
+    ) -> Result<SessionId> {
         let session_id = SessionId::new();
-        
+
         // Create session
         self.create_session(
             session_id.clone(),
@@ -103,13 +117,19 @@ impl StateMachineHelpers {
             to.to_string(),
             Role::UAC,
         ).await?;
-        
+
+        if let Some(creds) = credentials {
+            let mut session = self.state_machine.store.get_session(&session_id).await?;
+            session.credentials = Some(creds);
+            self.state_machine.store.update_session(session).await?;
+        }
+
         // Send MakeCall event
         self.state_machine.process_event(
             &session_id,
             EventType::MakeCall { target: to.to_string() },
         ).await?;
-        
+
         Ok(session_id)
     }
     

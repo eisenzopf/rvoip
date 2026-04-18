@@ -153,6 +153,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::CallCancelled { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::SessionRefreshed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::SessionRefreshFailed { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::AuthRequired { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallRedirected { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::ReinviteGlare { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DtmfReceived { session_id, .. } => Some(session_id),
@@ -350,6 +351,25 @@ pub enum DialogToSessionEvent {
     SessionRefreshFailed {
         session_id: String,
         reason: String,
+    },
+
+    /// RFC 3261 §22.2 — server challenged the UAC request. Emitted on any
+    /// 401 Unauthorized or 407 Proxy Authentication Required that carries a
+    /// parseable challenge header. Method-agnostic: INVITE, REGISTER, and
+    /// future auth-challenged requests all route through this variant. If
+    /// the caller has credentials on file, session-core-v3 computes the
+    /// digest response and retries; otherwise this converts to a final
+    /// `CallFailed` / `RegistrationFailed` at the app level.
+    AuthRequired {
+        session_id: String,
+        /// 401 or 407.
+        status_code: u16,
+        /// Raw challenge header value (e.g. `Digest realm="...", nonce="..."`).
+        /// Passed verbatim to `auth-core::DigestAuthenticator::parse_challenge`.
+        challenge: String,
+        /// Pre-extracted realm, convenience for logging / app-level routing.
+        /// Authoritative parse is still done by auth-core.
+        realm: Option<String>,
     },
 
     /// 3xx redirect response received (RFC 3261 §8.1.3.4 / §21.3). The UAC
