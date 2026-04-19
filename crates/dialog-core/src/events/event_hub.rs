@@ -13,7 +13,7 @@ use rvoip_infra_common::events::cross_crate::{
     CrossCrateEvent, RvoipCrossCrateEvent, DialogToSessionEvent, SessionToDialogEvent,
     DialogToTransportEvent, TransportToDialogEvent, CallState, TerminationReason
 };
-use rvoip_sip_core::{StatusCode, Request};
+use rvoip_sip_core::{StatusCode, Request, Method};
 use crate::transaction::TransactionKey;
 
 use crate::events::{DialogEvent, SessionCoordinationEvent};
@@ -475,8 +475,62 @@ impl DialogEventHub {
                 }
             }
 
+            // 180 Ringing reached the UAC. Surface it to session-core as a
+            // `CallStateChanged { Ringing }` so the state machine can
+            // transition Initiating → Ringing (which is what the
+            // `UAC/Ringing/HangupCall → CANCEL` path and the public
+            // ringback signals rely on).
+            SessionCoordinationEvent::CallRinging { dialog_id } => {
+                self.dialog_manager.get_session_id(&dialog_id).map(|session_id| {
+                    RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::CallStateChanged {
+                            session_id,
+                            new_state: CallState::Ringing,
+                            reason: Some("180 Ringing".to_string()),
+                        },
+                    )
+                })
+            }
+
             // DTMF events would be handled separately if implemented
             // SessionCoordinationEvent doesn't have DtmfReceived yet
+
+            // Mid-dialog INVITE (re-INVITE) or UPDATE. Session-core drives
+            // the UAS-side response (200 OK for normal, 491 Request Pending
+            // on glare) through its state machine. INFO and NOTIFY are also
+            // emitted via this variant today — we deliberately skip them
+            // here so they do not get misrouted to the re-INVITE handler.
+            SessionCoordinationEvent::ReInvite { dialog_id, request, .. } => {
+                let method = request.method();
+                if !matches!(method, Method::Invite | Method::Update) {
+                    debug!(
+                        "Skipping ReInvite cross-crate conversion for method {:?} (dialog {})",
+                        method, dialog_id
+                    );
+                    return None;
+                }
+                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
+                    let sdp = if !request.body().is_empty() {
+                        String::from_utf8(request.body().to_vec()).ok()
+                    } else {
+                        None
+                    };
+                    info!(
+                        "Converting ReInvite ({}) to cross-crate event for session {}",
+                        method, session_id
+                    );
+                    Some(RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::ReinviteReceived {
+                            session_id,
+                            sdp,
+                            method: method.to_string(),
+                        },
+                    ))
+                } else {
+                    warn!("No session ID found for dialog {:?} in ReInvite", dialog_id);
+                    None
+                }
+            }
 
             _ => None, // Other events not yet mapped
         }

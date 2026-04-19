@@ -187,6 +187,9 @@ pub use audio::{AudioStream, AudioSender, AudioReceiver};
 // SessionHandle
 pub use handle::SessionHandle;
 
+// DialogIdentity (used when orchestrating attended transfer from a higher layer)
+pub use types::DialogIdentity;
+
 // IncomingCall / IncomingCallGuard
 pub use incoming::{IncomingCall, IncomingCallGuard};
 

@@ -310,28 +310,41 @@ impl DialogManager {
     async fn handle_unassociated_transaction_event(&self, transaction_id: &TransactionKey, event: TransactionEvent) -> DialogResult<()> {
         match event {
             TransactionEvent::InviteRequest { request, source, .. } => {
+                // RFC 3261 §14: an INVITE on an existing dialog is a
+                // re-INVITE. Every inbound INVITE spins up a fresh server
+                // transaction, so the transaction-to-dialog mapping is
+                // always empty at this point. We must dialog-match on
+                // (Call-ID, From-tag, To-tag) before falling through to
+                // initial INVITE handling. Same pattern as the REFER arm
+                // below.
+                if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
+                    debug!("INVITE request belongs to existing dialog {} — treating as re-INVITE", dialog_id);
+                    self.handle_reinvite(transaction_id.clone(), request, dialog_id).await?;
+                    return Ok(());
+                }
+
                 tracing::debug!("🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from {}", source);
                 debug!("Processing new incoming INVITE request from transaction {}", transaction_id);
-                
+
                 // This is a new incoming INVITE - create dialog and process it
                 self.handle_initial_invite(transaction_id.clone(), request, source).await?;
-                
+
                 debug!("Successfully processed new incoming INVITE from {}", source);
                 Ok(())
             },
             
             TransactionEvent::NonInviteRequest { request, source, .. } => {
                 debug!("Processing new incoming {} request from transaction {}", request.method(), transaction_id);
-                
+
                 // For REFER requests, check if they belong to an existing dialog
                 if request.method() == Method::Refer {
                     // Try to find the dialog using Call-ID, From tag, and To tag
                     if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
                         debug!("REFER request belongs to existing dialog {}", dialog_id);
-                        
+
                         // Store the transaction-to-dialog mapping
                         self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
-                        
+
                         // REFER within a dialog should be handled by the protocol handler
                         // which will emit the TransferRequest event to session-core
                         return self.handle_refer(request, source).await;
@@ -339,11 +352,25 @@ impl DialogManager {
                         debug!("REFER request does not match any existing dialog");
                     }
                 }
-                
+
                 // Handle non-INVITE requests (REGISTER, OPTIONS, etc.) or REFER without dialog
                 self.handle_request(request, source).await
             },
-            
+
+            // UAS-side CANCEL. The transaction manager emits this when an
+            // inbound CANCEL finds a matching INVITE server transaction.
+            // The CANCEL request itself has no dialog mapping of its own,
+            // so it arrives here as "unassociated" — route it to the
+            // protocol handler so we send 200 OK to CANCEL, 487 to the
+            // pending INVITE, and terminate the dialog.
+            TransactionEvent::CancelRequest { request, source, .. } => {
+                debug!(
+                    "Processing unassociated CANCEL request from transaction {}",
+                    transaction_id
+                );
+                self.handle_cancel(request).await
+            }
+
             _ => {
                 // Other unassociated events (responses, timeouts, etc.) - just log them
                 debug!("Received unassociated transaction event: {:?}", event);

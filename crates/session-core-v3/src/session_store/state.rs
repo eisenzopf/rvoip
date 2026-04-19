@@ -32,7 +32,6 @@ pub enum PendingReinvite {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferState {
     None,
-    ConsultationInProgress,
     TransferInitiated,
     TransferCompleted,
 }
@@ -85,6 +84,13 @@ pub struct SessionState {
     pub reject_status: Option<u16>,
     pub reject_reason: Option<String>,
 
+    // RFC 3261 §8.1.3.4 / §21.3 — redirect details captured from a local
+    // UAS-side RedirectCall event, used by `SendRedirectResponse`. The status
+    // must be 3xx; contacts are the URIs we'll advertise in the `Contact:`
+    // header so the UAC can pick one to follow.
+    pub redirect_response_status: Option<u16>,
+    pub redirect_response_contacts: Vec<String>,
+
     // Caller-supplied SDP for SendEarlyMedia. Consumed by PrepareEarlyMediaSDP
     // on the way to the reliable 183; None means "auto-negotiate from remote
     // offer" (the usual case for a call-flow-driven ringback).
@@ -114,9 +120,10 @@ pub struct SessionState {
     pub pending_reinvite: Option<PendingReinvite>,
     pub reinvite_retry_attempts: u8,
 
-    // Attended transfer tracking
-    pub consultation_session_id: Option<SessionId>, // Consultation call session for attended transfer
-    pub original_session_id: Option<SessionId>, // Original session (set in consultation call)
+    // Transfer tracking (blind transfer + REFER-with-Replaces primitive for
+    // higher-layer attended-transfer orchestrators). Per-session state only;
+    // linking two sessions (consultation + original) is an orchestration
+    // concern that lives outside this crate.
     pub transfer_state: TransferState, // Current transfer state
     pub transfer_notify_dialog: Option<DialogId>, // Dialog to send NOTIFY messages to (for blind transfer)
 
@@ -171,6 +178,8 @@ impl SessionState {
             dtmf_digits: None,
             reject_status: None,
             reject_reason: None,
+            redirect_response_status: None,
+            redirect_response_contacts: Vec::new(),
             early_media_sdp: None,
             pending_auth: None,
             invite_auth_retry_count: 0,
@@ -178,8 +187,6 @@ impl SessionState {
             redirect_attempts: 0,
             pending_reinvite: None,
             reinvite_retry_attempts: 0,
-            consultation_session_id: None,
-            original_session_id: None,
             transfer_state: TransferState::None,
             transfer_notify_dialog: None,
             replaces_header: None,

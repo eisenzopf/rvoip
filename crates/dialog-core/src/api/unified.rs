@@ -688,6 +688,94 @@ impl UnifiedDialogApi {
         self.manager.send_status_response(transaction_id, status_code, reason).await
     }
     
+    /// Send a 3xx redirect response for a session with one or more Contact
+    /// URIs (RFC 3261 §8.1.3.4 / §21.3).
+    ///
+    /// `status_code` should be in 300..=399 (300 Multiple Choices, 301 Moved
+    /// Permanently, 302 Moved Temporarily, 305 Use Proxy, 380 Alternative
+    /// Service). Each entry in `contacts` is parsed as a SIP URI and added as
+    /// a separate `ContactParamInfo` in a single `Contact:` header so the UAC
+    /// can choose among alternatives per RFC 3261 §8.1.3.4.
+    pub async fn send_redirect_response_for_session(
+        &self,
+        session_id: &str,
+        status_code: u16,
+        contacts: Vec<String>,
+    ) -> ApiResult<()> {
+        use rvoip_sip_core::types::{
+            address::Address,
+            contact::{Contact, ContactParamInfo},
+            uri::Uri,
+            TypedHeader,
+        };
+        use std::str::FromStr;
+
+        if !(300..=399).contains(&status_code) {
+            return Err(ApiError::Internal {
+                message: format!(
+                    "send_redirect_response_for_session: status {} is not 3xx",
+                    status_code
+                ),
+            });
+        }
+        if contacts.is_empty() {
+            return Err(ApiError::Internal {
+                message: "send_redirect_response_for_session: no Contact URIs supplied"
+                    .to_string(),
+            });
+        }
+
+        // Look up the dialog + transaction the same way send_response_for_session does.
+        let dialog_id = self
+            .manager
+            .core()
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| ApiError::Dialog {
+                message: format!("No dialog found for session {}", session_id),
+            })?
+            .clone();
+        let transaction_id = self
+            .manager
+            .core()
+            .transaction_to_dialog
+            .iter()
+            .find(|entry| entry.value() == &dialog_id)
+            .map(|entry| entry.key().clone())
+            .ok_or_else(|| ApiError::Dialog {
+                message: format!("No transaction found for dialog {}", dialog_id),
+            })?;
+
+        let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::MovedTemporarily);
+        let mut response = self
+            .build_response(&transaction_id, status, None)
+            .await?;
+
+        // Build Contact: uri1, uri2, ... as a single header with multiple params.
+        let mut params: Vec<ContactParamInfo> = Vec::with_capacity(contacts.len());
+        for raw in &contacts {
+            let uri = Uri::from_str(raw).map_err(|e| ApiError::Internal {
+                message: format!("Invalid Contact URI {:?}: {}", raw, e),
+            })?;
+            params.push(ContactParamInfo {
+                address: Address::new(uri),
+            });
+        }
+        response
+            .headers
+            .push(TypedHeader::Contact(Contact::new_params(params)));
+
+        info!(
+            "Sending {} redirect response for session {} via transaction {} with {} contact(s)",
+            status_code,
+            session_id,
+            transaction_id,
+            contacts.len()
+        );
+
+        self.send_response(&transaction_id, response).await
+    }
+
     /// Send a response for a session (session-core convenience method)
     ///
     /// Allows session-core to send responses without knowing transaction details.
@@ -887,24 +975,20 @@ impl UnifiedDialogApi {
             debug!("Added Authorization header to REGISTER");
         }
         
-        // Parse destination from registrar URI
+        // Parse destination from registrar URI and resolve via DNS if needed.
+        // Shares the resolver used by INVITE (dialog_utils::resolve_uri_to_socketaddr),
+        // which tries a literal-IP parse first and falls back to system
+        // A/AAAA resolution — no SRV/NAPTR yet (RFC 3263 is future work).
         let dest_uri = registrar_uri.parse::<rvoip_sip_core::Uri>()
             .map_err(|e| ApiError::protocol(format!("Invalid registrar URI: {}", e)))?;
-        
-        // Extract host and port
-        use rvoip_sip_core::types::uri::Host;
-        let host_ip = match &dest_uri.host {
-            Host::Address(ip) => *ip,
-            Host::Domain(domain) => {
-                // For now, only support IP addresses
-                // In production, this should do DNS resolution
-                domain.parse::<std::net::IpAddr>()
-                    .map_err(|e| ApiError::protocol(format!("Cannot parse domain as IP (DNS not implemented): {}", e)))?
-            }
-        };
-        let port = dest_uri.port.unwrap_or(5060);  // Default SIP port
-        let destination = SocketAddr::new(host_ip, port);
-        
+
+        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
+            .await
+            .ok_or_else(|| ApiError::protocol(format!(
+                "Failed to resolve registrar URI: {}",
+                registrar_uri
+            )))?;
+
         debug!("Sending REGISTER to {}", destination);
         
         // Use existing send_non_dialog_request() - it handles everything!

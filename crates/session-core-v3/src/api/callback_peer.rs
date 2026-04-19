@@ -38,6 +38,14 @@ impl ShutdownHandle {
     pub fn shutdown(&self) {
         let _ = self.tx.send(true);
     }
+
+    /// Internal constructor for peers that want to mint a shutdown handle
+    /// from an existing watch channel. Scoped to the crate so external
+    /// callers go through [`CallbackPeer::shutdown_handle`] /
+    /// [`StreamPeer::shutdown_handle`].
+    pub(crate) fn from_sender(tx: tokio::sync::watch::Sender<bool>) -> Self {
+        Self { tx }
+    }
 }
 
 // ===== CallHandlerDecision =====
@@ -239,6 +247,42 @@ impl<H: CallHandler> CallbackPeer<H> {
         &self.coordinator
     }
 
+    // ===== Registration (symmetric with StreamPeer) =====
+    //
+    // A CallbackPeer acting as a B2BUA leg may need to register itself
+    // upstream (with a carrier / SBC) before or while answering inbound
+    // calls. These are thin wrappers over the coordinator — same surface
+    // as `StreamPeer::register_with` / `is_registered` / `unregister`.
+
+    /// Register with a SIP server using a [`Registration`] builder.
+    pub async fn register_with(
+        &self,
+        reg: crate::api::unified::Registration,
+    ) -> Result<crate::api::unified::RegistrationHandle> {
+        self.coordinator.register_with(reg).await
+    }
+
+    /// Query whether a registration handle is currently registered.
+    ///
+    /// Returns `true` once the registrar has replied 200 OK to the REGISTER
+    /// (including after a 423 Interval Too Brief retry or 401 auth retry),
+    /// and `false` if the registration was rejected, unregistered, or has
+    /// not yet completed.
+    pub async fn is_registered(
+        &self,
+        handle: &crate::api::unified::RegistrationHandle,
+    ) -> Result<bool> {
+        self.coordinator.is_registered(handle).await
+    }
+
+    /// Unregister (sends REGISTER with `Expires: 0`).
+    pub async fn unregister(
+        &self,
+        handle: &crate::api::unified::RegistrationHandle,
+    ) -> Result<()> {
+        self.coordinator.unregister(handle).await
+    }
+
     /// Signal shutdown. The `run()` future will return after the current event
     /// is processed.
     pub fn shutdown(&self) {
@@ -271,12 +315,17 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// Start the event loop.
     ///
     /// Processes events until [`shutdown()`] is called or the coordinator is dropped.
-    /// Returns `Ok(())` on clean shutdown.
+    /// In-flight handler invocations are tracked in a `JoinSet`; on shutdown,
+    /// `run()` awaits all pending handlers before returning, so `Ok(())` means
+    /// "all user callbacks have observed their final events and returned." This
+    /// matters for tests (and b2bua) that tear down and re-create peers and
+    /// need to guarantee no user-code is still mutating shared state.
     ///
     /// [`shutdown()`]: Self::shutdown
     pub async fn run(self) -> Result<()> {
         let mut event_rx = self.coordinator.subscribe_events().await?;
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let mut handlers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
         loop {
             tokio::select! {
@@ -285,6 +334,16 @@ impl<H: CallHandler> CallbackPeer<H> {
                     if *shutdown_rx.borrow() {
                         tracing::info!("[CallbackPeer] Shutdown signal received");
                         break;
+                    }
+                }
+                // Reap completed handlers so the JoinSet doesn't grow
+                // unboundedly on a long-lived peer. This branch is only
+                // selected when there's at least one pending handler.
+                Some(join_result) = handlers.join_next(), if !handlers.is_empty() => {
+                    if let Err(e) = join_result {
+                        if !e.is_cancelled() {
+                            tracing::warn!("[CallbackPeer] Handler task panicked or errored: {}", e);
+                        }
                     }
                 }
                 // Process next event
@@ -303,7 +362,18 @@ impl<H: CallHandler> CallbackPeer<H> {
                     };
 
                     let event = session_event.event.clone();
-                    self.dispatch(event).await;
+                    self.dispatch(event, &mut handlers).await;
+                }
+            }
+        }
+
+        // Wait for all in-flight handler invocations to return before we tear
+        // down the coordinator. This is the whole point of the JoinSet: user
+        // code should never be interrupted mid-handler by a shutdown.
+        while let Some(join_result) = handlers.join_next().await {
+            if let Err(e) = join_result {
+                if !e.is_cancelled() {
+                    tracing::warn!("[CallbackPeer] Handler task panicked or errored on drain: {}", e);
                 }
             }
         }
@@ -313,8 +383,9 @@ impl<H: CallHandler> CallbackPeer<H> {
         Ok(())
     }
 
-    /// Dispatch a single event to the appropriate handler method.
-    async fn dispatch(&self, event: Event) {
+    /// Dispatch a single event to the appropriate handler method. Each spawn
+    /// is tracked in `handlers` so `run()` can drain them on shutdown.
+    async fn dispatch(&self, event: Event, handlers: &mut tokio::task::JoinSet<()>) {
         let handler = self.handler.clone();
         let coordinator = self.coordinator.clone();
 
@@ -327,7 +398,7 @@ impl<H: CallHandler> CallbackPeer<H> {
                 let incoming = IncomingCall::new(call_id.clone(), from, to, sdp, coordinator.clone());
                 let coord = coordinator.clone();
                 let cid = call_id;
-                tokio::spawn(async move {
+                handlers.spawn(async move {
                     let decision = handler.on_incoming_call(incoming).await;
                     // These coordinator calls are idempotent — if the handler
                     // already resolved the call, the session has transitioned
@@ -336,16 +407,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                         CallHandlerDecision::Accept => {
                             let _ = coord.accept_call(&cid).await;
                         }
-                        CallHandlerDecision::AcceptWithSdp(_sdp) => {
-                            // TODO: pass custom SDP through accept_call
-                            let _ = coord.accept_call(&cid).await;
+                        CallHandlerDecision::AcceptWithSdp(sdp) => {
+                            let _ = coord.accept_call_with_sdp(&cid, sdp).await;
                         }
                         CallHandlerDecision::Reject { status, reason } => {
                             let _ = coord.reject_call(&cid, status, &reason).await;
                         }
-                        CallHandlerDecision::Redirect(_target) => {
-                            // TODO: proper 3xx support; fall back to 302 Moved for now
-                            let _ = coord.reject_call(&cid, 302, "Moved Temporarily").await;
+                        CallHandlerDecision::Redirect(target) => {
+                            let _ = coord.redirect_call(&cid, 302, vec![target]).await;
                         }
                         CallHandlerDecision::Defer(_guard) => {
                             // Handler kept the guard alive; call stays in Ringing.
@@ -356,34 +425,34 @@ impl<H: CallHandler> CallbackPeer<H> {
 
             Event::CallAnswered { call_id, .. } => {
                 let handle = SessionHandle::new(call_id, coordinator);
-                tokio::spawn(async move {
+                handlers.spawn(async move {
                     handler.on_call_established(handle).await;
                 });
             }
 
             Event::CallEnded { call_id, reason } => {
                 let end_reason = EndReason::from(reason);
-                tokio::spawn(async move {
+                handlers.spawn(async move {
                     handler.on_call_ended(call_id, end_reason).await;
                 });
             }
 
             Event::DtmfReceived { call_id, digit } => {
                 let handle = SessionHandle::new(call_id, coordinator);
-                tokio::spawn(async move {
+                handlers.spawn(async move {
                     handler.on_dtmf(handle, digit).await;
                 });
             }
 
             Event::ReferReceived { call_id, refer_to, .. } => {
                 let handle = SessionHandle::new(call_id, coordinator);
-                tokio::spawn(async move {
+                handlers.spawn(async move {
                     handler.on_transfer_request(handle, refer_to).await;
                 });
             }
 
             Event::CallAuthRetrying { call_id, status_code, realm } => {
-                tokio::spawn(async move {
+                handlers.spawn(async move {
                     handler.on_auth_retrying(call_id, status_code, realm).await;
                 });
             }

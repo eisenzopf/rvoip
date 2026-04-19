@@ -10,7 +10,6 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
-use tracing::info;
 use crate::{
     types::{SessionId, SessionInfo, CallState},
     state_table::types::{Role, EventType},
@@ -142,6 +141,28 @@ impl StateMachineHelpers {
         Ok(())
     }
 
+    /// Accept an incoming call with a caller-supplied SDP answer, bypassing
+    /// local negotiation. Intended for b2bua scenarios where the answer comes
+    /// from the outbound leg's 200 OK. Writes the SDP into `session.local_sdp`
+    /// and flips `sdp_negotiated = true` before dispatching `AcceptCall`, so
+    /// the `GenerateLocalSDP`/`NegotiateSDPAsUAS` actions become no-ops.
+    pub async fn accept_call_with_sdp(
+        &self,
+        session_id: &SessionId,
+        sdp: String,
+    ) -> Result<()> {
+        let mut session = self.state_machine.store.get_session(session_id).await?;
+        session.local_sdp = Some(sdp);
+        session.sdp_negotiated = true;
+        self.state_machine.store.update_session(session).await?;
+
+        self.state_machine.process_event(
+            session_id,
+            EventType::AcceptCall,
+        ).await?;
+        Ok(())
+    }
+
     /// Send a reliable 183 Session Progress with SDP (RFC 3262 early media).
     /// If `sdp` is `Some(_)`, the caller's SDP is sent verbatim. If `None`,
     /// the SDP answer is negotiated from the stored remote offer.
@@ -167,6 +188,23 @@ impl StateMachineHelpers {
         self.state_machine.process_event(
             session_id,
             EventType::RejectCall { status, reason: reason.to_string() },
+        ).await?;
+        Ok(())
+    }
+
+    /// Redirect an incoming call (send a 3xx response with `Contact:` headers
+    /// per RFC 3261 §8.1.3.4 / §21.3). Valid from `Ringing` and `EarlyMedia`
+    /// on the UAS role. `status` should be 300-399; `contacts` must be
+    /// non-empty.
+    pub async fn redirect_call(
+        &self,
+        session_id: &SessionId,
+        status: u16,
+        contacts: Vec<String>,
+    ) -> Result<()> {
+        self.state_machine.process_event(
+            session_id,
+            EventType::RedirectCall { status, contacts },
         ).await?;
         Ok(())
     }
@@ -202,53 +240,6 @@ impl StateMachineHelpers {
             },
         ).await?;
         Ok(())
-    }
-
-    /// Create consultation call for attended transfer
-    pub async fn create_consultation_call(
-        &self,
-        original_session_id: &SessionId,
-        target: &str,
-    ) -> Result<SessionId> {
-        use crate::session_store::TransferState;
-
-        // Get original session to link them
-        let mut original_session = self.state_machine.store.get_session(original_session_id).await?;
-
-        // Create new session for consultation call
-        let consultation_session_id = SessionId::new();
-
-        // Determine local URI from original session
-        let from = original_session.local_uri.clone()
-            .unwrap_or_else(|| "sip:anonymous@localhost".to_string());
-
-        // Create the consultation session
-        self.create_session(
-            consultation_session_id.clone(),
-            from.clone(),
-            target.to_string(),
-            Role::UAC,
-        ).await?;
-
-        // Link consultation session back to original
-        let mut consultation_session = self.state_machine.store.get_session(&consultation_session_id).await?;
-        consultation_session.original_session_id = Some(original_session_id.clone());
-        self.state_machine.store.update_session(consultation_session).await?;
-
-        // Link original session to consultation
-        original_session.consultation_session_id = Some(consultation_session_id.clone());
-        original_session.transfer_state = TransferState::ConsultationInProgress;
-        self.state_machine.store.update_session(original_session).await?;
-
-        // Start the consultation call (send INVITE)
-        self.state_machine.process_event(
-            &consultation_session_id,
-            EventType::MakeCall { target: target.to_string() },
-        ).await?;
-
-        info!("Created consultation call {} for transfer from {}", consultation_session_id, original_session_id);
-
-        Ok(consultation_session_id)
     }
 
     // ========== Query Methods ==========

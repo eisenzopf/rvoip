@@ -1386,39 +1386,54 @@ impl DialogManager {
         Ok(transaction_id)
     }
     
+    /// Terminate the dialog associated with an INVITE transaction and
+    /// emit a `CallCancelled` session-coordination event.
+    ///
+    /// Shared between the client-side CANCEL path (we sent CANCEL) and
+    /// the server-side CANCEL handler (peer sent us CANCEL). Extracted
+    /// so both paths converge on a single definition of "cancel means
+    /// terminate the dialog + notify the upper layer."
+    pub async fn terminate_dialog_for_tx(
+        &self,
+        invite_tx_id: &TransactionKey,
+        reason: &str,
+    ) {
+        let Some(dialog_id) = self
+            .transaction_to_dialog
+            .get(invite_tx_id)
+            .map(|d| d.clone())
+        else {
+            return;
+        };
+
+        if let Ok(mut dialog) = self.get_dialog_mut(&dialog_id) {
+            dialog.terminate();
+            debug!("Terminated dialog {} due to INVITE cancellation", dialog_id);
+        }
+
+        if let Some(coordinator) = self.session_coordinator.read().await.as_ref() {
+            let event = crate::events::SessionCoordinationEvent::CallCancelled {
+                dialog_id: dialog_id.clone(),
+                reason: reason.to_string(),
+            };
+
+            if let Err(e) = coordinator.send(event).await {
+                warn!("Failed to send call cancellation event: {}", e);
+            }
+        }
+    }
+
     /// Cancel an INVITE transaction using transaction-core
-    /// 
+    ///
     /// Properly cancels INVITE transactions while updating associated dialogs.
     pub async fn cancel_invite_transaction_with_dialog(
         &self,
         invite_tx_id: &TransactionKey,
     ) -> DialogResult<TransactionKey> {
         debug!("Cancelling INVITE transaction {} with dialog cleanup", invite_tx_id);
-        
-        // Find and terminate associated dialog
-        if let Some(dialog_id) = self.transaction_to_dialog.get(invite_tx_id) {
-            let dialog_id = dialog_id.clone();
-            
-            {
-                if let Ok(mut dialog) = self.get_dialog_mut(&dialog_id) {
-                    dialog.terminate();
-                    debug!("Terminated dialog {} due to INVITE cancellation", dialog_id);
-                }
-            }
-            
-            // Send session coordination event
-            if let Some(ref coordinator) = self.session_coordinator.read().await.as_ref() {
-                let event = crate::events::SessionCoordinationEvent::CallCancelled {
-                    dialog_id: dialog_id.clone(),
-                    reason: "INVITE transaction cancelled".to_string(),
-                };
-                
-                if let Err(e) = coordinator.send(event).await {
-                    warn!("Failed to send call cancellation event: {}", e);
-                }
-            }
-        }
-        
+
+        self.terminate_dialog_for_tx(invite_tx_id, "INVITE transaction cancelled").await;
+
         // Cancel the transaction using transaction-core
         let cancel_tx_id = self.transaction_manager
             .cancel_invite_transaction(invite_tx_id)
@@ -1426,7 +1441,7 @@ impl DialogManager {
             .map_err(|e| crate::errors::DialogError::TransactionError {
                 message: format!("Failed to cancel INVITE transaction: {}", e),
             })?;
-        
+
         debug!("Successfully cancelled INVITE transaction {}, created CANCEL transaction {}", invite_tx_id, cancel_tx_id);
         Ok(cancel_tx_id)
     }

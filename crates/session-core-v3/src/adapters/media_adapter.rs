@@ -659,13 +659,26 @@ impl MediaAdapter {
     /// return `None` and exit their loops) as long as the dialog mapping is
     /// still present.
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
-        // Remove the session->dialog mapping first so we can reach the dialog_id
-        if let Some((_, dialog_id)) = self.session_to_dialog.remove(session_id) {
-            // Always remove the audio frame callback — this drops the tx in
-            // media-core's audio_frame_callbacks map so subscribers' rx.recv()
-            // returns None. media-core's remove_audio_frame_callback is a
-            // HashMap::remove and safe to call even if nothing was registered.
+        // Resolve dialog_id — prefer the mapping populated by create_session
+        // (which is authoritative once set) but fall back to the deterministic
+        // form `media-<session_id>` when the mapping has been lost (e.g. on a
+        // second CleanupMedia after a Dialog3xxRedirect transition's actions
+        // already cleared it). The fallback ensures media-core's sessions map
+        // is always freed so a subsequent CreateMediaSession can reuse the
+        // same dialog_id.
+        let removed = self.session_to_dialog.remove(session_id);
+        let dialog_id = match removed {
+            Some((_, d)) => Some(d),
+            None => {
+                // Fallback to deterministic form used by create_session.
+                Some(DialogId::new(format!("media-{}", session_id.0)))
+            }
+        };
+
+        if let Some(dialog_id) = dialog_id {
             let _ = self.controller.remove_audio_frame_callback(&dialog_id).await;
+            // stop_media may return "session not found" on the fallback path
+            // (media-core already cleaned up) — expected; ignore.
             let _ = self.controller.stop_media(&dialog_id).await;
             self.dialog_to_session.remove(&dialog_id);
         }

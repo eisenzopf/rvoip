@@ -161,60 +161,19 @@ pub fn create_cancel_request(invite_request: &Request, local_addr: &SocketAddr) 
         cancel_request = cancel_request.with_header(route_header.clone());
     }
     
-    // Extract the branch parameter from the original INVITE Via header
-    // According to RFC 3261 Section 9.1, the CANCEL request MUST have the same 
-    // branch parameter as the request it is canceling
-    let original_via = invite_request.first_via()
+    // RFC 3261 §9.1: the top Via of CANCEL MUST equal the top Via of the
+    // INVITE being cancelled — with all parameters preserved. Copying the
+    // first Via wholesale (rather than rebuilding with only `branch`)
+    // keeps `rport`, `received`, `maddr`, etc. aligned so downstream
+    // proxies and the target UAS match the transaction correctly.
+    let original_top_via = invite_request
+        .first_via()
         .ok_or_else(|| Error::Other("INVITE request missing Via header".to_string()))?;
-    
-    let original_branch = original_via.branch()
-        .ok_or_else(|| Error::Other("INVITE request Via header missing branch parameter".to_string()))?;
-    
-    // Create a new Via header with the same branch parameter but our local address
-    use rvoip_sip_core::types::via::Via;
-    
-    // Create a Via header with the original branch parameter
-    let params = vec![rvoip_sip_core::types::Param::branch(original_branch.to_string())];
-    
-    // Split the address into host and port
-    let host = local_addr.ip().to_string();
-    let port = Some(local_addr.port());
-    
-    // Create the Via header - creating a new one rather than cloning and modifying
-    // the original to avoid duplicate headers
-    let via = Via::new(
-        "SIP", "2.0", "UDP",
-        &host, port, params
-    )?;
-    
-    // Make sure we're only adding one Via header - explicitly remove any existing ones first
-    // though this should not be necessary since we're creating a new request
+    let _ = local_addr; // address came from the INVITE's Via; kept in signature for API stability
+
     cancel_request.headers.retain(|h| !matches!(h, TypedHeader::Via(_)));
-    cancel_request = cancel_request.with_header(TypedHeader::Via(via));
-    
-    // Debug the CANCEL request Via headers
-    println!("CANCEL request Via headers count: {}", cancel_request.via_headers().len());
-    for (i, via) in cancel_request.via_headers().iter().enumerate() {
-        println!("  Via[{}]: {}", i, via);
-    }
-    
-    // Double-check for multiple Via headers
-    if cancel_request.via_headers().len() > 1 {
-        println!("WARNING: CANCEL request has {} Via headers, removing duplicates", cancel_request.via_headers().len());
-        let first_via = cancel_request.first_via()
-            .ok_or_else(|| Error::Other("Missing Via header in CANCEL request after creation".to_string()))?
-            .clone();
-        
-        // Remove all Via headers and add only the first one
-        cancel_request.headers.retain(|h| !matches!(h, TypedHeader::Via(_)));
-        cancel_request = cancel_request.with_header(TypedHeader::Via(first_via));
-        
-        println!("After cleanup - CANCEL request Via headers count: {}", cancel_request.via_headers().len());
-        for (i, via) in cancel_request.via_headers().iter().enumerate() {
-            println!("  Via[{}]: {}", i, via);
-        }
-    }
-    
+    cancel_request = cancel_request.with_header(TypedHeader::Via(original_top_via));
+
     Ok(cancel_request)
 }
 
@@ -310,14 +269,18 @@ where
     let cancel_via = cancel_request.first_via()?;
     let cancel_branch = cancel_via.branch()?;
     
-    // Find a matching INVITE transaction by branch parameter
+    // Find a matching INVITE transaction by branch parameter. The
+    // caller is expected to have pre-filtered the candidate list to
+    // the right side (client vs server); this function just matches
+    // by branch, so it works for both the UAC path (cancel our own
+    // outgoing INVITE) and the UAS path (inbound CANCEL targeting an
+    // INVITE we received).
     for tx_key in invite_transactions {
-        if *tx_key.method() == Method::Invite && !tx_key.is_server && tx_key.branch() == cancel_branch {
-            // This is a client INVITE transaction with matching branch
+        if *tx_key.method() == Method::Invite && tx_key.branch() == cancel_branch {
             return Some(tx_key);
         }
     }
-    
+
     None
 }
 

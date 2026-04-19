@@ -104,6 +104,22 @@ impl EventRouter {
                 self.dialog_adapter.send_response(session_id, status, None).await?;
             }
 
+            Action::SendRedirectResponse => {
+                let state = self.store.get_session(session_id).await?;
+                let status = state.redirect_response_status.unwrap_or(302);
+                let contacts = state.redirect_response_contacts.clone();
+                if contacts.is_empty() {
+                    tracing::warn!(
+                        "event_router: SendRedirectResponse with no contacts for session {}",
+                        session_id
+                    );
+                } else {
+                    self.dialog_adapter
+                        .send_redirect_response(session_id, status, contacts)
+                        .await?;
+                }
+            }
+
             Action::RetryWithContact => {
                 // Delegated path: the main state machine executor handles this.
                 // event_router is an older dispatcher not used by CallbackPeer/

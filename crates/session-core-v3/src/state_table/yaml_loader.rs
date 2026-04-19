@@ -519,6 +519,7 @@ impl YamlTableLoader {
             "MakeCall" => Ok(EventType::MakeCall { target: String::new() }),
             "AcceptCall" => Ok(EventType::AcceptCall),
             "RejectCall" => Ok(EventType::RejectCall { status: 0, reason: String::new() }),
+            "RedirectCall" => Ok(EventType::RedirectCall { status: 0, contacts: Vec::new() }),
             "SendEarlyMedia" => Ok(EventType::SendEarlyMedia { sdp: None }),
             "AuthRequired" => Ok(EventType::AuthRequired {
                 status_code: 0,
@@ -546,6 +547,14 @@ impl YamlTableLoader {
                 targets: Vec::new(),
             }),
             "ReinviteGlare" => Ok(EventType::ReinviteGlare),
+            "ReinviteReceived" => Ok(EventType::ReinviteReceived { sdp: None }),
+            "UpdateReceived" => Ok(EventType::UpdateReceived { sdp: None }),
+            // ACK delivered to UAS — drives the Answering → Active transition
+            // that promotes the dialog from early to confirmed. Without this
+            // entry the YAML "DialogACK" event falls through to
+            // `EventType::MediaEvent("DialogACK")` and the transition never
+            // fires.
+            "DialogACK" => Ok(EventType::DialogACK),
             "DialogTerminated" => Ok(EventType::DialogBYE),
             
             // Gateway-specific BYE events
@@ -639,6 +648,7 @@ impl YamlTableLoader {
             "IsRegistered" => Ok(Guard::IsRegistered),
             "IsSubscribed" => Ok(Guard::IsSubscribed),
             "HasActiveSubscription" => Ok(Guard::HasActiveSubscription),
+            "HasPendingReinvite" => Ok(Guard::HasPendingReinvite),
             "OtherSessionActive" => Ok(Guard::Custom(name.to_string())),
             _ => {
                 debug!("Unknown guard '{}', treating as custom", name);
@@ -699,6 +709,7 @@ impl YamlTableLoader {
             "SendACK" => Ok(Action::SendACK),
             "SendBYE" => Ok(Action::SendBYE),
             "SendRejectResponse" => Ok(Action::SendRejectResponse),
+            "SendRedirectResponse" => Ok(Action::SendRedirectResponse),
             "RetryWithContact" => Ok(Action::RetryWithContact),
             "ScheduleReinviteRetry" => Ok(Action::ScheduleReinviteRetry),
             "SendCANCEL" => Ok(Action::SendCANCEL),

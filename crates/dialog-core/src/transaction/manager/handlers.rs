@@ -630,27 +630,53 @@ async fn resolve_host_to_socketaddr(host: &rvoip_sip_core::Host, port: u16) -> O
     }
 }
 
-/// Create a Via header with a branch parameter for a local address
+/// Create a Via header with a branch parameter for a local address.
+///
+/// Always requests `rport` (RFC 3581) with no value — carriers and NAT
+/// gateways use this to echo back the received port in responses so we
+/// can route ACKs and BYEs back through the same pinhole. The incoming
+/// path honors `received=` / `rport=` echoed on responses (see the
+/// response handler earlier in this module).
 pub fn create_via_header(local_addr: &SocketAddr, branch: &str) -> Result<TypedHeader> {
     use rvoip_sip_core::types::via::Via;
     use rvoip_sip_core::types::Param;
-    
-    // Create a new Via header with the specified branch parameter
-    let mut via_params = vec![Param::branch(branch.to_string())];
-    
-    // Add other params like rport if needed
-    // Example: via_params.push(Param::other("rport".to_string(), None));
-    
-    // Create the Via header
+
+    let via_params = vec![
+        Param::branch(branch.to_string()),
+        Param::Other("rport".to_string(), None),
+    ];
+
     let local_host = local_addr.ip().to_string();
     let local_port = local_addr.port();
-    
+
     let via = Via::new(
         "SIP", "2.0", "UDP",
         &local_host, Some(local_port), via_params
     ).map_err(Error::SipCoreError)?;
-    
+
     Ok(TypedHeader::Via(via))
+}
+
+#[cfg(test)]
+mod via_header_tests {
+    use super::*;
+
+    #[test]
+    fn via_header_includes_rport_param() {
+        let local: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+        let header = create_via_header(&local, "z9hG4bK-test").expect("create_via_header");
+        let serialized = format!("{}", header);
+        assert!(
+            serialized.contains(";rport"),
+            "Via header should include rport param, got: {}",
+            serialized
+        );
+        assert!(
+            serialized.contains(";branch=z9hG4bK-test"),
+            "Via header should include branch param, got: {}",
+            serialized
+        );
+    }
 }
 
 impl TransactionManager {

@@ -112,6 +112,34 @@ impl SessionHandle {
         self.coordinator.send_refer(&self.call_id, target).await
     }
 
+    /// Attended-transfer primitive: send REFER with a pre-built `Replaces`
+    /// header value (RFC 3891). `replaces` is the raw header value
+    /// (`call-id;to-tag=<remote>;from-tag=<local>`) — use
+    /// [`crate::api::types::DialogIdentity::to_replaces_value`] on the
+    /// *consultation* session's identity to produce it. The adapter
+    /// URI-escapes the value when embedding it in the Refer-To target.
+    ///
+    /// session-core-v3 only exposes the wire-level primitive. Linking an
+    /// original call to its consultation call, waiting on REFER NOTIFY
+    /// progress, and tearing down the consultation after success are all
+    /// orchestration concerns for a higher layer (application code or a
+    /// dedicated multi-session coordinator).
+    pub async fn transfer_attended(&self, target: &str, replaces: &str) -> Result<()> {
+        self.coordinator
+            .send_refer_with_replaces(&self.call_id, target, replaces)
+            .await
+    }
+
+    /// SIP-level dialog identity for this session: `Call-ID`, local tag,
+    /// remote tag. Returns `None` if the dialog isn't yet established or
+    /// has already been cleaned up.
+    ///
+    /// Intended for orchestrators building a `Replaces` header for
+    /// attended transfer — see [`transfer_attended`](Self::transfer_attended).
+    pub async fn dialog_identity(&self) -> Result<Option<crate::api::types::DialogIdentity>> {
+        self.coordinator.dialog_identity(&self.call_id).await
+    }
+
     // ===== DTMF =====
 
     /// Send a single DTMF digit in-band.

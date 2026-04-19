@@ -75,7 +75,12 @@ fn session_timer_refresh_emits_event() {
 
     let mut alice = spawn_example("streampeer_session_timer_alice", &env_vars);
 
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // 45s: 30s was too tight when the full cargo-test suite runs many
+    // integration test binaries in parallel and Alice's startup is slow.
+    // Alice's own inner assertion (SessionRefreshed within 12s of
+    // Connected) is what keeps this meaningful; the outer deadline is
+    // just a safety net against hangs.
+    let deadline = Instant::now() + Duration::from_secs(45);
     let exit = loop {
         match alice.0.try_wait() {
             Ok(Some(status)) => break Some(status),

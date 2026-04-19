@@ -224,9 +224,6 @@ fn test_transfer_state_lifecycle() {
     let mut s = SessionState::new(SessionId::new(), Role::UAC);
     assert_eq!(s.transfer_state, TransferState::None);
 
-    s.transfer_state = TransferState::ConsultationInProgress;
-    assert_eq!(s.transfer_state, TransferState::ConsultationInProgress);
-
     s.transfer_state = TransferState::TransferInitiated;
     assert_eq!(s.transfer_state, TransferState::TransferInitiated);
 

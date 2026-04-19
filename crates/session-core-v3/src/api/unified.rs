@@ -189,11 +189,11 @@ impl UnifiedCoordinator {
             media_adapter.clone(),
         ));
         
-        // Set state machine reference in dialog adapter (for REGISTER response handling)
-        {
-            let adapter = Arc::as_ptr(&dialog_adapter) as *mut DialogAdapter;
-            unsafe { (*adapter).set_state_machine(state_machine.clone()); }
-        }
+        // Wire the state machine into the dialog adapter (for REGISTER
+        // response handling). The adapter holds an `Arc<OnceLock<_>>`
+        // internally so this post-construction init is sound without
+        // `unsafe`.
+        let _ = dialog_adapter.init_state_machine(state_machine.clone());
         
         // Create helpers
         let helpers = Arc::new(StateMachineHelpers::new(state_machine.clone()));
@@ -263,6 +263,15 @@ impl UnifiedCoordinator {
         let _ = self.shutdown_tx.send(true);
     }
 
+    /// Return a cloneable handle that can signal
+    /// [`shutdown`](Self::shutdown) from another task. Mirrors
+    /// [`CallbackPeer::shutdown_handle`].
+    ///
+    /// [`CallbackPeer::shutdown_handle`]: crate::api::callback_peer::CallbackPeer::shutdown_handle
+    pub fn shutdown_handle(&self) -> crate::api::callback_peer::ShutdownHandle {
+        crate::api::callback_peer::ShutdownHandle::from_sender(self.shutdown_tx.clone())
+    }
+
     pub async fn subscribe_events(&self) -> crate::errors::Result<tokio::sync::mpsc::Receiver<std::sync::Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>> {
         self.global_coordinator
             .subscribe(crate::adapters::SESSION_TO_APP_CHANNEL)
@@ -302,7 +311,19 @@ impl UnifiedCoordinator {
     pub async fn accept_call(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.accept_call(session_id).await
     }
-    
+
+    /// Accept an incoming call with a caller-supplied SDP answer. Bypasses
+    /// local media negotiation — intended for b2bua flows where the answer
+    /// body comes from the outbound leg's 200 OK. See
+    /// [`StateMachineHelpers::accept_call_with_sdp`] for the mechanism.
+    pub async fn accept_call_with_sdp(
+        &self,
+        session_id: &SessionId,
+        sdp: String,
+    ) -> Result<()> {
+        self.helpers.accept_call_with_sdp(session_id, sdp).await
+    }
+
     /// Reject an incoming call with a specific SIP status code and reason phrase.
     pub async fn reject_call(
         &self,
@@ -311,6 +332,19 @@ impl UnifiedCoordinator {
         reason: &str,
     ) -> Result<()> {
         self.helpers.reject_call(session_id, status, reason).await
+    }
+
+    /// Redirect an incoming call to one or more alternate URIs (RFC 3261
+    /// §8.1.3.4 / §21.3). Sends a 3xx response with a `Contact:` header
+    /// listing the supplied URIs. `status` should be 300-399; `contacts`
+    /// must be non-empty.
+    pub async fn redirect_call(
+        &self,
+        session_id: &SessionId,
+        status: u16,
+        contacts: Vec<String>,
+    ) -> Result<()> {
+        self.helpers.redirect_call(session_id, status, contacts).await
     }
     
     /// Hangup a call
@@ -403,6 +437,33 @@ impl UnifiedCoordinator {
     /// Send NOTIFY message for REFER status (used after handling transfer)
     pub async fn send_refer_notify(&self, session_id: &SessionId, status_code: u16, reason: &str) -> Result<()> {
         self.dialog_adapter.send_refer_notify(session_id, status_code, reason).await
+    }
+
+    /// Send REFER with a pre-built `Replaces` header value (RFC 3891).
+    ///
+    /// Primitive for attended-transfer orchestration: a caller managing two
+    /// sessions (original + consultation) constructs the Replaces value from
+    /// the consultation session's [`DialogIdentity`] and passes it here for
+    /// the original session to send.
+    pub async fn send_refer_with_replaces(
+        &self,
+        session_id: &SessionId,
+        target_uri: &str,
+        replaces: &str,
+    ) -> Result<()> {
+        self.dialog_adapter
+            .send_refer_with_replaces(session_id, target_uri, replaces)
+            .await
+    }
+
+    /// Fetch the SIP-level identity (`Call-ID`, local/remote tags) of a
+    /// session's dialog. Returns `None` if the dialog isn't established
+    /// yet or has already been cleaned up.
+    pub async fn dialog_identity(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<crate::api::types::DialogIdentity>> {
+        self.dialog_adapter.dialog_identity(session_id).await
     }
 
     // ===== DTMF Operations =====

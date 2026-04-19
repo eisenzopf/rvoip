@@ -96,6 +96,22 @@ path = "examples/callbackpeer/custom/server.rs"
 name = "callbackpeer_custom_client"
 path = "examples/callbackpeer/custom/client.rs"
 
+# CANCEL / 487 integration test fixtures
+[[example]]
+name = "streampeer_cancel_alice"
+path = "examples/streampeer/cancel/alice.rs"
+[[example]]
+name = "streampeer_cancel_bob"
+path = "examples/streampeer/cancel/bob.rs"
+
+# 491 glare retry integration test fixtures (RFC 3261 §14.1)
+[[example]]
+name = "streampeer_glare_retry_alice"
+path = "examples/streampeer/glare_retry/alice.rs"
+[[example]]
+name = "streampeer_glare_retry_bob"
+path = "examples/streampeer/glare_retry/bob.rs"
+
 # Advanced / multi-peer scenarios
 [[example]]
 name = "advanced_concurrent_calls_server"

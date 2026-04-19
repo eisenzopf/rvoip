@@ -36,6 +36,7 @@ use rvoip_infra_common::events::{
 use crate::state_table::types::{SessionId, DialogId};
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
+use crate::api::types::DialogIdentity;
 
 /// Minimal dialog adapter - just translates between dialog-core and state machine
 pub struct DialogAdapter {
@@ -57,9 +58,14 @@ pub struct DialogAdapter {
     
     /// Global event coordinator for publishing events
     pub(crate) global_coordinator: Arc<GlobalEventCoordinator>,
-    
-    /// State machine reference for triggering events (needed for REGISTER response handling)
-    pub(crate) state_machine: Option<Arc<crate::state_machine::StateMachine>>,
+
+    /// State machine reference for triggering events (needed for REGISTER
+    /// response handling). Wired post-construction via
+    /// [`DialogAdapter::init_state_machine`] because the `StateMachine`
+    /// transitively depends on this adapter — classic circular init. The
+    /// `OnceLock` makes the initialization soundly observable by any task
+    /// without requiring `&mut self`.
+    pub(crate) state_machine: Arc<std::sync::OnceLock<Arc<crate::state_machine::StateMachine>>>,
 }
 
 impl DialogAdapter {
@@ -77,13 +83,18 @@ impl DialogAdapter {
             callid_to_session: Arc::new(DashMap::new()),
             outgoing_invite_tx: Arc::new(DashMap::new()),
             global_coordinator,
-            state_machine: None,  // Will be set after StateMachine is created
+            state_machine: Arc::new(std::sync::OnceLock::new()),
         }
     }
-    
-    /// Set the state machine reference (called after construction)
-    pub fn set_state_machine(&mut self, state_machine: Arc<crate::state_machine::StateMachine>) {
-        self.state_machine = Some(state_machine);
+
+    /// Wire the state machine after construction. Idempotent — subsequent
+    /// calls are silently ignored (returns `Err` if already set, which
+    /// callers may choose to ignore or treat as a programming error).
+    pub fn init_state_machine(
+        &self,
+        state_machine: Arc<crate::state_machine::StateMachine>,
+    ) -> std::result::Result<(), Arc<crate::state_machine::StateMachine>> {
+        self.state_machine.set(state_machine)
     }
     
     // ===== Direct Dialog Operations =====
@@ -330,6 +341,30 @@ impl DialogAdapter {
         self.send_response(session_id, code.as_u16(), None).await
     }
     
+    /// Send a 3xx redirect response with one or more `Contact:` URIs
+    /// (RFC 3261 §8.1.3.4). Thin wrapper over
+    /// `UnifiedDialogApi::send_redirect_response_for_session`.
+    pub async fn send_redirect_response(
+        &self,
+        session_id: &SessionId,
+        status: u16,
+        contacts: Vec<String>,
+    ) -> Result<()> {
+        tracing::info!(
+            "DialogAdapter sending {} redirect for session {} with {} contact(s)",
+            status,
+            session_id.0,
+            contacts.len()
+        );
+        self.dialog_api
+            .send_redirect_response_for_session(&session_id.0, status, contacts)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to send redirect for session {}: {}", session_id.0, e);
+                SessionError::DialogError(format!("Failed to send redirect: {}", e))
+            })
+    }
+
     /// Send response (for UAS)
     pub async fn send_response(
         &self,
@@ -421,30 +456,67 @@ impl DialogAdapter {
         Ok(())
     }
     
-    /// Send REFER with Replaces for attended transfer (for state machine)
-    pub async fn send_refer_with_replaces(&self, session_id: &SessionId, consultation_session_id: &SessionId) -> Result<()> {
+    /// Send REFER with a pre-built `Replaces` header value (RFC 3891).
+    ///
+    /// This is the attended-transfer primitive: the caller is responsible for
+    /// constructing the Replaces value from the target dialog's Call-ID,
+    /// to-tag, and from-tag (accessible via `SessionHandle::call_id()` etc.
+    /// on the consultation session). Linking original + consultation sessions
+    /// is an orchestration concern that lives outside this crate.
+    ///
+    /// The emitted header is:
+    /// `Refer-To: <sip:target?Replaces=<url-encoded-replaces>>`
+    pub async fn send_refer_with_replaces(
+        &self,
+        session_id: &SessionId,
+        target_uri: &str,
+        replaces: &str,
+    ) -> Result<()> {
         let dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
 
-        // Get consultation dialog ID to build Replaces header
-        let consultation_dialog_id = self.session_to_dialog.get(consultation_session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(consultation_session_id.0.clone()))?
-            .clone();
-
-        // For now, send REFER with the consultation session marked as "attended"
-        // The dialog-core layer should construct proper Replaces header from the dialog ID
-        // Format: Refer-To: <sip:target@domain?Replaces=call-id%3Bto-tag%3Dtag1%3Bfrom-tag%3Dtag2>
-        let refer_to = format!("dialog:{}", consultation_dialog_id.0);
+        // The target URI in the Refer-To header needs a URI-escaped Replaces
+        // query parameter. Semicolons and equals signs must be percent-encoded
+        // so the URI parses as a single unit (RFC 3891 §3).
+        let encoded_replaces = url_escape_replaces(replaces);
+        let refer_to = format!("<{}?Replaces={}>", target_uri, encoded_replaces);
 
         self.dialog_api
-            .send_refer(&dialog_id, refer_to, Some("attended".to_string()))
+            .send_refer(&dialog_id, refer_to, None)
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send REFER with Replaces: {}", e)))?;
 
-        tracing::info!("Sent REFER with Replaces for session {} using consultation dialog {}",
-                       session_id.0, consultation_dialog_id.0);
+        tracing::info!(
+            session = %session_id.0,
+            target = %target_uri,
+            "Sent REFER with Replaces"
+        );
         Ok(())
+    }
+
+    /// Fetch the SIP-level dialog identity (`Call-ID`, `local_tag`, `remote_tag`)
+    /// for a session. Returns `None` if the session has no dialog yet
+    /// (e.g., the INVITE hasn't been sent) or the dialog was lost.
+    ///
+    /// Callers use this to construct a Replaces header value when driving
+    /// attended transfer from a higher layer.
+    pub async fn dialog_identity(&self, session_id: &SessionId) -> Result<Option<DialogIdentity>> {
+        let dialog_id = match self.session_to_dialog.get(session_id) {
+            Some(entry) => entry.clone(),
+            None => return Ok(None),
+        };
+
+        let dialog = match self.dialog_api.get_dialog_info(&dialog_id).await {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+
+        Ok(Some(DialogIdentity {
+            call_id: dialog.call_id,
+            local_tag: dialog.local_tag,
+            remote_tag: dialog.remote_tag,
+        }))
     }
     
     /// Send a re-INVITE for hold/resume or mid-call SDP updates.
@@ -616,7 +688,7 @@ impl DialogAdapter {
                         response.status_code(),
                         session_id.0,
                     );
-                    if let Some(state_machine) = &self.state_machine {
+                    if let Some(state_machine) = self.state_machine.get() {
                         // Box::pin: AuthRequired → SendREGISTERWithAuth →
                         // send_register forms an async recursion the compiler
                         // can't size inline.
@@ -941,5 +1013,36 @@ impl Clone for DialogAdapter {
             global_coordinator: self.global_coordinator.clone(),
             state_machine: self.state_machine.clone(),
         }
+    }
+}
+
+// Percent-encode the characters in a Replaces header value that would
+// otherwise terminate the URI header embedded in Refer-To. Per RFC 3891
+// §3 + RFC 3261 §19.1.1, reserved/delimiter characters (`;`, `=`, `?`)
+// must be escaped when a header value is carried as a URI header
+// parameter. Space and `@` are escaped too since they may appear in
+// pathological but still valid tag values.
+fn url_escape_replaces(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b';' | b'=' | b'?' | b' ' | b'@' | b'&' | b'#' | b'<' | b'>' | b'"' | b'%' => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+            _ => out.push(b as char),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escapes_replaces_header_value() {
+        let replaces = "abc@host;to-tag=xyz;from-tag=pqr";
+        let escaped = url_escape_replaces(replaces);
+        assert_eq!(escaped, "abc%40host%3Bto-tag%3Dxyz%3Bfrom-tag%3Dpqr");
     }
 }

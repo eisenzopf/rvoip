@@ -309,6 +309,34 @@ transitions:
       - "CallRejected"
     description: "Reject incoming call"
 
+  # UAS redirects call — status + contacts come from the RedirectCall event
+  # (RFC 3261 §8.1.3.4 / §21.3). Valid from Ringing and EarlyMedia.
+  - role: "UAS"
+    state: "Ringing"
+    event:
+      type: "RedirectCall"
+    next_state: "Terminated"
+    actions:
+      - type: "SendRedirectResponse"
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallRejected"
+    description: "Redirect incoming call with 3xx + Contact header"
+
+  - role: "UAS"
+    state: "EarlyMedia"
+    event:
+      type: "RedirectCall"
+    next_state: "Terminated"
+    actions:
+      - type: "SendRedirectResponse"
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallRejected"
+    description: "Redirect after early media"
+
   # Both sides can hangup from Active
   - role: "Both"
     state: "Active"
@@ -571,6 +599,96 @@ transitions:
       - "MessageReceived"
     description: "Receive SIP MESSAGE"
 
+  # --------------------------------------------------------------------
+  # UAS-side re-INVITE / UPDATE (RFC 3261 §14, RFC 3311, RFC 4028 §9)
+  # --------------------------------------------------------------------
+  # Ordering note: the glare (491) transitions use a HasPendingReinvite
+  # guard and MUST appear before the unguarded 200 OK transitions for
+  # the same (state, event) pair — the state table is scanned top-down
+  # and the first matching transition wins.
+
+  # RFC 3261 §14.1 — UAS-side glare. Peer sent us a re-INVITE while our
+  # own re-INVITE is in flight. Reply 491 Request Pending so the peer
+  # backs off; we keep the state unchanged and wait for our response.
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "ReinviteReceived"
+    guards:
+      - "HasPendingReinvite"
+    next_state: "Active"
+    actions:
+      - type: "SendSIPResponse"
+        code: 491
+        reason: "Request Pending"
+    description: "UAS-side glare: 491 Request Pending while our re-INVITE is in flight (Active)"
+
+  # Being in Resuming implies we have a re-INVITE in flight (the resume
+  # one). Any inbound re-INVITE is by definition glare — no guard needed.
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "ReinviteReceived"
+    next_state: "Resuming"
+    actions:
+      - type: "SendSIPResponse"
+        code: 491
+        reason: "Request Pending"
+    description: "UAS-side glare: 491 while resuming (always pending)"
+
+  # RFC 3261 §14 — UAS receives re-INVITE on an established dialog, no
+  # pending outgoing re-INVITE. Answer 200 OK with a negotiated SDP.
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "ReinviteReceived"
+    next_state: "Active"
+    actions:
+      - type: "NegotiateSDPAsUAS"
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+    description: "UAS answers incoming re-INVITE (hold/resume/renegotiation)"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "ReinviteReceived"
+    next_state: "OnHold"
+    actions:
+      - type: "NegotiateSDPAsUAS"
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+    description: "UAS answers re-INVITE while on hold (peer-initiated resume)"
+
+  # RFC 3311 / RFC 4028 §9 — UPDATE for session-timer refresh carries no
+  # SDP, so we skip NegotiateSDPAsUAS. If a future UPDATE body is
+  # present for mid-dialog modification, the executor has already
+  # stashed it into session.remote_sdp; extending this transition to
+  # renegotiate is a future enhancement.
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "UpdateReceived"
+    next_state: "Active"
+    actions:
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+    description: "UAS answers UPDATE (session-timer refresh) while Active"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "UpdateReceived"
+    next_state: "OnHold"
+    actions:
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+    description: "UAS answers UPDATE while on hold"
+
   # RFC 3261 §14.1 — 491 Request Pending on a re-INVITE (glare).
   # Sleep a random interval and retry the pending hold/resume/SDP-update.
   # Transition stays in Active / OnHold so the dialog isn't torn down.
@@ -681,6 +799,54 @@ transitions:
     publish:
       - "CallCancelled"
     description: "Cancel ringing call"
+
+  # `SessionHandle::hangup()` is the single user-facing "stop this call"
+  # API. It fires `HangupCall`; this block routes it to the CANCEL wire
+  # path when appropriate, following RFC 3261 §9.1: CANCEL is only sent
+  # once a provisional response has been received. Before that, there's
+  # nothing to cancel on the wire — tear down locally and let Timer B
+  # abort the INVITE transaction if the peer was unreachable.
+
+  # Note: `UAC/Initiating/HangupCall` intentionally has NO transition.
+  # Before any provisional response has arrived, the user's hangup is
+  # a no-op at the state-machine level — the INVITE client transaction
+  # in dialog-core continues retransmitting (Timer A) and ultimately
+  # aborts on Timer B, at which point the existing
+  # `Initiating/DialogTimeout → Failed` transition fires. Handling
+  # hangup here in a DWIM way ran into an unresolved tokio-shutdown
+  # hang when tests dropped sessions immediately after `make_call`
+  # (see `tests/unified_api_tests.rs::test_multiple_calls`).
+  # Applications that want a hard local abort before 18x should wait
+  # for the callee's 180 or use the INVITE-level timeout instead.
+
+  # Ringing (180 or reliable 18x received): CANCEL is RFC-correct.
+  - role: "UAC"
+    state: "Ringing"
+    event:
+      type: "HangupCall"
+    next_state: "Cancelled"
+    actions:
+      - type: "SendCANCEL"
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallCancelled"
+    description: "Hangup while ringing — sends CANCEL"
+
+  # EarlyMedia (reliable 183 path): provisional already received, dialog
+  # still in Early state — CANCEL is appropriate.
+  - role: "UAC"
+    state: "EarlyMedia"
+    event:
+      type: "HangupCall"
+    next_state: "Cancelled"
+    actions:
+      - type: "SendCANCEL"
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallCancelled"
+    description: "Hangup during early media — sends CANCEL"
 
   # Receive CANCEL for incoming call
   - role: "UAS"

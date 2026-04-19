@@ -2004,7 +2004,9 @@ impl TransactionManager {
         }
     }
     
-    /// Find the matching INVITE transaction for a CANCEL request.
+    /// Find the matching client-side INVITE transaction for a CANCEL request.
+    ///
+    /// Used when *we* are sending CANCEL to cancel our outgoing INVITE.
     ///
     /// # Arguments
     /// * `cancel_request` - The CANCEL request
@@ -2015,7 +2017,7 @@ impl TransactionManager {
         if cancel_request.method() != Method::Cancel {
             return Err(Error::Other("Not a CANCEL request".to_string()));
         }
-        
+
         // Get all client transactions
         let client_txs = self.client_transactions.lock().await;
         let invite_tx_keys: Vec<TransactionKey> = client_txs.keys()
@@ -2023,14 +2025,65 @@ impl TransactionManager {
             .cloned()
             .collect();
         drop(client_txs);
-        
+
         // Use the utility to find the matching INVITE transaction
         let tx_id = crate::transaction::method::cancel::find_invite_transaction_for_cancel(
-            cancel_request, 
+            cancel_request,
             invite_tx_keys
         );
-        
+
         Ok(tx_id)
+    }
+
+    /// Find the matching server-side INVITE transaction for an inbound
+    /// CANCEL request.
+    ///
+    /// Used when a peer is cancelling an INVITE *they* sent us. The match
+    /// is by branch + sent-by per RFC 3261 §9.2 — the same algorithm as
+    /// the client-side search, just against the server transaction pool.
+    pub async fn find_invite_server_transaction_for_cancel(
+        &self,
+        cancel_request: &Request,
+    ) -> Result<Option<TransactionKey>> {
+        if cancel_request.method() != Method::Cancel {
+            return Err(Error::Other("Not a CANCEL request".to_string()));
+        }
+
+        let server_txs = self.server_transactions.lock().await;
+        let invite_tx_keys: Vec<TransactionKey> = server_txs
+            .keys()
+            .filter(|k| *k.method() == Method::Invite && k.is_server)
+            .cloned()
+            .collect();
+        drop(server_txs);
+
+        let tx_id = crate::transaction::method::cancel::find_invite_transaction_for_cancel(
+            cancel_request,
+            invite_tx_keys,
+        );
+
+        Ok(tx_id)
+    }
+
+    /// Retrieve the original request that created a server transaction.
+    ///
+    /// Mirrors the client-side `utils::get_transaction_request` helper.
+    /// Needed so the CANCEL handler can generate a 487 response based on
+    /// the pending INVITE.
+    pub async fn get_server_transaction_request(
+        &self,
+        tx_id: &TransactionKey,
+    ) -> Result<Request> {
+        let server_txs = self.server_transactions.lock().await;
+        if let Some(tx) = server_txs.get(tx_id) {
+            if let Some(req) = tx.original_request().await {
+                return Ok(req);
+            }
+        }
+        Err(Error::transaction_not_found(
+            tx_id.clone(),
+            "get_server_transaction_request - transaction not found",
+        ))
     }
 
     /// Creates an ACK request for a 2xx response to an INVITE.
@@ -2119,18 +2172,32 @@ impl TransactionManager {
                 if let Err(e) = cancel::validate_cancel_request(&request) {
                     warn!(method = %request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
                 }
-                
-                // For CANCEL, try to find the target INVITE transaction
+
+                // For CANCEL, try to find the target INVITE transaction.
+                // Search BOTH client and server transactions — on the UAC
+                // side the matching INVITE is a client transaction (we
+                // sent the INVITE), and on the UAS side it's a server
+                // transaction (peer sent the INVITE to us). Before this
+                // fix, only client transactions were searched, which
+                // meant UAS-side CANCELs never notified the TU.
                 let mut target_invite_tx_id = None;
-                
-                // Look for a matching INVITE transaction using the method utility
-                let client_txs = self.client_transactions.lock().await;
-                let invite_tx_keys: Vec<TransactionKey> = client_txs.keys()
-                    .filter(|k| k.method() == &Method::Invite && !k.is_server)
-                    .cloned()
-                    .collect();
-                drop(client_txs);
-                
+
+                let mut invite_tx_keys: Vec<TransactionKey> = {
+                    let client_txs = self.client_transactions.lock().await;
+                    client_txs.keys()
+                        .filter(|k| k.method() == &Method::Invite && !k.is_server)
+                        .cloned()
+                        .collect()
+                };
+                let server_invite_keys: Vec<TransactionKey> = {
+                    let server_txs = self.server_transactions.lock().await;
+                    server_txs.keys()
+                        .filter(|k| k.method() == &Method::Invite && k.is_server)
+                        .cloned()
+                        .collect()
+                };
+                invite_tx_keys.extend(server_invite_keys);
+
                 if let Some(invite_tx_id) = cancel::find_matching_invite_transaction(&request, invite_tx_keys) {
                     target_invite_tx_id = Some(invite_tx_id);
                     debug!(method=%request.method(), "Found matching INVITE transaction for CANCEL");

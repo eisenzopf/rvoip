@@ -134,43 +134,91 @@ impl ProtocolHandlers for DialogManager {
         ByeHandler::handle_bye_method(self, request).await
     }
     
-    /// Handle CANCEL requests (not yet moved to specialized module)
+    /// UAS-side CANCEL handler (RFC 3261 §9.2).
+    ///
+    /// An inbound CANCEL targets a pending *server* INVITE transaction. We
+    /// must:
+    /// 1. Respond 200 OK on the CANCEL transaction itself.
+    /// 2. Respond 487 Request Terminated on the pending INVITE server
+    ///    transaction.
+    /// 3. Terminate the associated dialog and emit a `CallCancelled`
+    ///    session-coordination event.
+    ///
+    /// If there is no matching server INVITE (or the INVITE is ours, i.e.
+    /// a client-side transaction — a peer can't cancel one of our outgoing
+    /// calls), we respond 481 Call/Transaction Does Not Exist.
     async fn handle_cancel_method(&self, request: Request) -> DialogResult<()> {
         debug!("Processing CANCEL request");
-        
-        // Find the INVITE transaction this CANCEL is for
-        let invite_tx_id = self.transaction_manager
-            .find_invite_transaction_for_cancel(&request)
+
+        // Always create a server transaction for the CANCEL first so we
+        // have a handle to respond on (either 200 OK or 481).
+        let source = SourceExtractor::extract_from_request(&request);
+        let cancel_tx = self.transaction_manager
+            .create_server_transaction(request.clone(), source)
             .await
             .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to find INVITE transaction for CANCEL: {}", e),
+                message: format!("Failed to create server transaction for CANCEL: {}", e),
             })?;
-        
-        if let Some(invite_tx_id) = invite_tx_id {
-            self.cancel_invite_transaction_with_dialog(&invite_tx_id).await?;
-            debug!("CANCEL processed for INVITE transaction {}", invite_tx_id);
-            Ok(())
-        } else {
-            // No matching INVITE found, send 481
-            let source = SourceExtractor::extract_from_request(&request);
-            let server_transaction = self.transaction_manager
-                .create_server_transaction(request.clone(), source)
-                .await
-                .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to create server transaction for CANCEL: {}", e),
-                })?;
-            
-            let transaction_id = server_transaction.id().clone();
-            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
-            
-            self.transaction_manager.send_response(&transaction_id, response).await
+        let cancel_tx_id = cancel_tx.id().clone();
+
+        // Look up the matching INVITE server transaction.
+        let invite_tx_id = self.transaction_manager
+            .find_invite_server_transaction_for_cancel(&request)
+            .await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to find INVITE server transaction for CANCEL: {}", e),
+            })?;
+
+        let Some(invite_tx_id) = invite_tx_id else {
+            // No matching INVITE — 481.
+            let response = crate::transaction::utils::response_builders::create_response(
+                &request,
+                StatusCode::CallOrTransactionDoesNotExist,
+            );
+            self.transaction_manager.send_response(&cancel_tx_id, response).await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to CANCEL: {}", e),
                 })?;
-            
             debug!("CANCEL processed with 481 response (no matching INVITE)");
-            Ok(())
-        }
+            return Ok(());
+        };
+
+        // 200 OK to the CANCEL transaction.
+        let ok = crate::transaction::utils::response_builders::create_response(
+            &request,
+            StatusCode::Ok,
+        );
+        self.transaction_manager.send_response(&cancel_tx_id, ok).await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to send 200 OK to CANCEL: {}", e),
+            })?;
+
+        // 487 Request Terminated to the pending INVITE server transaction.
+        // Fetch the original INVITE so `create_response` can copy its From,
+        // To, Call-ID, CSeq, and Via headers.
+        let original_invite = self.transaction_manager
+            .get_server_transaction_request(&invite_tx_id)
+            .await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to fetch pending INVITE for 487: {}", e),
+            })?;
+        let terminated = crate::transaction::utils::response_builders::create_response(
+            &original_invite,
+            StatusCode::RequestTerminated,
+        );
+        self.transaction_manager.send_response(&invite_tx_id, terminated).await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to send 487 Request Terminated: {}", e),
+            })?;
+
+        // Terminate the dialog and notify the session layer.
+        self.terminate_dialog_for_tx(&invite_tx_id, "CANCEL received").await;
+
+        debug!(
+            "CANCEL processed for INVITE server transaction {} (200 CANCEL, 487 INVITE sent)",
+            invite_tx_id
+        );
+        Ok(())
     }
     
     /// Handle ACK requests (related to INVITE processing)

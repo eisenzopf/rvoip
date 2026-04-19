@@ -126,6 +126,10 @@ pub enum EventType {
     IncomingCall { from: String, sdp: Option<String> },
     AcceptCall,
     RejectCall { status: u16, reason: String },
+    /// RFC 3261 §8.1.3.4 — UAS-side redirect. Send a 3xx response with one
+    /// or more `Contact:` URIs so the UAC can retarget. Valid from Ringing
+    /// and EarlyMedia on the UAS role.
+    RedirectCall { status: u16, contacts: Vec<String> },
     /// RFC 3262 — emit a reliable 183 Session Progress with early-media SDP.
     /// `sdp: Some(_)` uses caller-supplied SDP verbatim; `None` triggers
     /// `negotiate_sdp_as_uas` against the stored remote offer.
@@ -175,6 +179,11 @@ pub enum EventType {
     DialogError(String),
     DialogStateChanged { old_state: String, new_state: String },
     ReinviteReceived { sdp: Option<String> },
+    /// UPDATE received (RFC 3311 / RFC 4028). Distinct from re-INVITE so
+    /// the state table can route them to different transitions —
+    /// session-timer refresh over UPDATE carries no SDP, media renegotiation
+    /// over re-INVITE does.
+    UpdateReceived { sdp: Option<String> },
     TransferRequested { refer_to: String, transfer_type: String, transaction_id: String }, // Kept for callback system
     
     // Media events (from media-core)
@@ -259,6 +268,7 @@ impl EventType {
             EventType::MakeCall { .. } => EventType::MakeCall { target: String::new() },
             EventType::IncomingCall { .. } => EventType::IncomingCall { from: String::new(), sdp: None },
             EventType::RejectCall { .. } => EventType::RejectCall { status: 0, reason: String::new() },
+            EventType::RedirectCall { .. } => EventType::RedirectCall { status: 0, contacts: Vec::new() },
             EventType::SendEarlyMedia { .. } => EventType::SendEarlyMedia { sdp: None },
             EventType::AuthRequired { .. } => EventType::AuthRequired {
                 status_code: 0,
@@ -291,6 +301,11 @@ impl EventType {
                 status: 0,
                 targets: Vec::new(),
             },
+
+            // Mid-dialog re-INVITE / UPDATE — strip the SDP body so the
+            // state table can match on variant regardless of SDP contents.
+            EventType::ReinviteReceived { .. } => EventType::ReinviteReceived { sdp: None },
+            EventType::UpdateReceived { .. } => EventType::UpdateReceived { sdp: None },
 
             // Registration events - normalize status codes
             EventType::RegistrationFailed(_) => EventType::RegistrationFailed(0),
@@ -347,6 +362,10 @@ pub enum Guard {
     IsRegistered,
     IsSubscribed,
     HasActiveSubscription,
+    /// True when the session has an outgoing re-INVITE in flight.
+    /// Used by the RFC 3261 §14.1 glare path to send 491 Request Pending
+    /// in response to a UAS-side re-INVITE while our own is pending.
+    HasPendingReinvite,
     Custom(String),
 }
 
@@ -363,6 +382,11 @@ pub enum Action {
     /// chosen status code (e.g. 403 Forbidden, 404 Not Found) is preserved
     /// instead of being replaced by a hardcoded value.
     SendRejectResponse,
+    /// RFC 3261 §8.1.3.4 — send a 3xx redirect response with one or more
+    /// `Contact:` URIs. Status + contacts come from
+    /// `session.redirect_response_{status,contacts}`, set by the executor on
+    /// `EventType::RedirectCall`.
+    SendRedirectResponse,
     SendINVITE,
     SendACK,
     SendBYE,

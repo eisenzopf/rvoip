@@ -40,10 +40,22 @@ pub async fn execute_action(
             info!("Created media session ID: {:?}", media_id);
         }
         Action::GenerateLocalSDP => {
-            info!("Action::GenerateLocalSDP for session {}", session.session_id);
-            let sdp = media_adapter.generate_local_sdp(&session.session_id).await?;
-            session.local_sdp = Some(sdp.clone());
-            info!("Generated SDP with {} bytes", sdp.len());
+            // Skip generation if a caller-supplied SDP is already in place
+            // (e.g. `UnifiedCoordinator::accept_call_with_sdp` populated it
+            // before dispatching `AcceptCall`). This lets b2bua hand the
+            // outbound-leg answer SDP through to the inbound-leg 200 OK
+            // without us re-negotiating against the local media stack.
+            if session.sdp_negotiated && session.local_sdp.is_some() {
+                info!(
+                    "Action::GenerateLocalSDP for session {}: using pre-set SDP",
+                    session.session_id
+                );
+            } else {
+                info!("Action::GenerateLocalSDP for session {}", session.session_id);
+                let sdp = media_adapter.generate_local_sdp(&session.session_id).await?;
+                session.local_sdp = Some(sdp.clone());
+                info!("Generated SDP with {} bytes", sdp.len());
+            }
         }
         Action::SendRejectResponse => {
             let status = session.reject_status.unwrap_or(486);
@@ -52,6 +64,26 @@ pub async fn execute_action(
                 session.session_id, status
             );
             dialog_adapter.send_response(&session.session_id, status, None).await?;
+        }
+        Action::SendRedirectResponse => {
+            let status = session.redirect_response_status.unwrap_or(302);
+            let contacts = session.redirect_response_contacts.clone();
+            info!(
+                "Action::SendRedirectResponse for session {} with status {} and {} contact(s)",
+                session.session_id,
+                status,
+                contacts.len()
+            );
+            if contacts.is_empty() {
+                return Err(format!(
+                    "SendRedirectResponse for session {} with no contacts",
+                    session.session_id
+                )
+                .into());
+            }
+            dialog_adapter
+                .send_redirect_response(&session.session_id, status, contacts)
+                .await?;
         }
         Action::SendSIPResponse(code, _reason) => {
             dialog_adapter.send_response(&session.session_id, *code, session.local_sdp.clone()).await?;
@@ -261,7 +293,15 @@ pub async fn execute_action(
             }
         }
         Action::NegotiateSDPAsUAS => {
-            if let Some(remote_sdp) = &session.remote_sdp {
+            // Skip negotiation when caller supplied the answer SDP ahead of
+            // time via `accept_call_with_sdp`. Same reasoning as
+            // `GenerateLocalSDP` above.
+            if session.sdp_negotiated && session.local_sdp.is_some() {
+                info!(
+                    "Action::NegotiateSDPAsUAS for session {}: using pre-set SDP",
+                    session.session_id
+                );
+            } else if let Some(remote_sdp) = &session.remote_sdp {
                 let (local_sdp, config) = media_adapter
                     .negotiate_sdp_as_uas(&session.session_id, remote_sdp)
                     .await?;
@@ -899,10 +939,24 @@ pub async fn execute_action(
             }
         }
         Action::CleanupMedia => {
-            debug!("Cleaning up media for session {}", session.session_id);
-            if session.media_session_id.is_some() {
-                media_adapter.cleanup_session(&session.session_id).await?;
-            }
+            debug!(
+                "Cleaning up media for session {} (media_session_id={:?})",
+                session.session_id, session.media_session_id
+            );
+            // Always call cleanup_session — the adapter is idempotent and
+            // media-core may still have state even when our `media_session_id`
+            // field looks empty (e.g. a previous cleanup cleared the field
+            // but stop_media hasn't landed yet).
+            media_adapter.cleanup_session(&session.session_id).await?;
+            // Reset field so the subsequent CreateMediaSession (in a redirect
+            // transition) doesn't trip the idempotency guard that now lives
+            // in GenerateLocalSDP / NegotiateSDPAsUAS (added for
+            // accept_call_with_sdp).
+            session.media_session_id = None;
+            session.media_session_ready = false;
+            session.sdp_negotiated = false;
+            session.local_sdp = None;
+            session.negotiated_config = None;
         }
 
         // ===== REFER Response Action =====

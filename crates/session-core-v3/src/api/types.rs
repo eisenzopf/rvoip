@@ -585,6 +585,40 @@ impl AudioStreamConfig {
 /// 
 /// This is a handle that allows receiving decoded audio frames from a specific session.
 /// Use this to get audio data that should be played on speakers.
+/// SIP-level identity of a dialog: the three values required to construct
+/// a `Replaces` header (RFC 3891) for attended-transfer orchestration.
+///
+/// Obtain one via [`SessionHandle::dialog_identity`]. To drive attended
+/// transfer from an orchestrator, read the identity of the consultation
+/// session and pass its formatted form to
+/// [`SessionHandle::transfer_attended`] on the original session.
+#[derive(Debug, Clone)]
+pub struct DialogIdentity {
+    /// SIP `Call-ID` header value.
+    pub call_id: String,
+    /// From-tag on our side of the dialog. `None` until the dialog is
+    /// fully established.
+    pub local_tag: Option<String>,
+    /// To-tag from the remote side. `None` until a 2xx (or reliable 1xx)
+    /// has been received and dialog is confirmed.
+    pub remote_tag: Option<String>,
+}
+
+impl DialogIdentity {
+    /// Format as a `Replaces` header *value* (no percent-encoding applied).
+    /// Pass this to [`SessionHandle::transfer_attended`], which handles
+    /// URI-escaping when embedding it in the Refer-To target.
+    ///
+    /// Returns `None` if either tag is missing (dialog not yet confirmed).
+    pub fn to_replaces_value(&self) -> Option<String> {
+        let (local, remote) = (self.local_tag.as_ref()?, self.remote_tag.as_ref()?);
+        // RFC 3891 §3: `call-id;to-tag=<remote>;from-tag=<local>` — from the
+        // transferee's perspective the "to-tag" is the *remote* party's tag
+        // in the dialog being replaced.
+        Some(format!("{};to-tag={};from-tag={}", self.call_id, remote, local))
+    }
+}
+
 #[derive(Debug)]
 pub struct AudioFrameSubscriber {
     /// The session ID this subscriber is associated with

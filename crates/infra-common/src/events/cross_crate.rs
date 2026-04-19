@@ -417,10 +417,13 @@ pub enum DialogToSessionEvent {
         new_state: DialogState,
     },
     
-    /// Re-INVITE received
+    /// Re-INVITE or UPDATE received (mid-dialog request). `method` is the
+    /// uppercase SIP method string ("INVITE" or "UPDATE"); session-core
+    /// uses it to dispatch to the correct state-table event.
     ReinviteReceived {
         session_id: String,
         sdp: Option<String>,
+        method: String,
     },
     
     /// Transfer requested

@@ -121,6 +121,37 @@ impl SessionCrossCrateEventHandler {
         )
     }
     
+    /// Publish a terminal app-level event, then release the session from the
+    /// store + registry.
+    ///
+    /// Terminal events are `CallEnded`, `CallFailed`, `CallCancelled`. Publish
+    /// runs first so any subscriber that queries session state in response to
+    /// the event still sees a populated entry; the release then happens in the
+    /// same spawned task after publish returns. Without this, long-running
+    /// peers (and especially b2bua, which multiplies sessions) would leak
+    /// `SessionStore` entries indefinitely.
+    async fn publish_and_release_session(
+        &self,
+        api_event: crate::api::events::Event,
+        session_id: SessionId,
+    ) {
+        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+        let coordinator = self.global_coordinator.clone();
+        let store = self.state_machine.store.clone();
+        let registry = self.registry.clone();
+        tokio::spawn(async move {
+            if let Err(e) = coordinator.publish(wrapped).await {
+                tracing::warn!("Failed to publish terminal event to global coordinator: {}", e);
+            }
+            if let Err(e) = store.remove_session(&session_id).await {
+                // Not-found is expected if another terminal path got there
+                // first — log at debug only.
+                tracing::debug!("remove_session({}) during terminal cleanup: {}", session_id, e);
+            }
+            registry.remove_session(&session_id).await;
+        });
+    }
+
     /// Start event processing loops.
     ///
     /// Background tasks will stop when `shutdown_rx` receives `true`.
@@ -672,19 +703,15 @@ impl SessionCrossCrateEventHandler {
             error!("Failed to process CallFailed({}) for session {}: {}", status, session_id, e);
         }
 
-        // Publish app-level CallFailed for any StreamPeer/CallbackPeer subscribers.
+        // Publish app-level CallFailed for any StreamPeer/CallbackPeer subscribers,
+        // then release the session from the store + registry. Publish runs first
+        // so subscribers receive the terminal event before the session vanishes.
         let api_event = crate::api::events::Event::CallFailed {
             call_id: session_id.clone(),
             status_code: status,
             reason: reason.clone(),
         };
-        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-        let coordinator = self.global_coordinator.clone();
-        tokio::spawn(async move {
-            if let Err(e) = coordinator.publish(wrapped).await {
-                tracing::warn!("Failed to publish CallFailed to global coordinator: {}", e);
-            }
-        });
+        self.publish_and_release_session(api_event, session_id.clone()).await;
 
         Ok(())
     }
@@ -878,17 +905,12 @@ impl SessionCrossCrateEventHandler {
             error!("Failed to process CallCancelled for session {}: {}", session_id, e);
         }
 
-        // Publish app-level CallCancelled for StreamPeer/CallbackPeer subscribers.
+        // Publish app-level CallCancelled for StreamPeer/CallbackPeer
+        // subscribers, then release the session from the store + registry.
         let api_event = crate::api::events::Event::CallCancelled {
             call_id: session_id.clone(),
         };
-        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-        let coordinator = self.global_coordinator.clone();
-        tokio::spawn(async move {
-            if let Err(e) = coordinator.publish(wrapped).await {
-                tracing::warn!("Failed to publish CallCancelled to global coordinator: {}", e);
-            }
-        });
+        self.publish_and_release_session(api_event, session_id.clone()).await;
 
         Ok(())
     }
@@ -943,20 +965,15 @@ impl SessionCrossCrateEventHandler {
                         info!("✅ [handle_call_terminated] DialogTerminated processed successfully for {}", session_id);
                     }
             
-            // Publish CallEnded event to the global coordinator's "session_to_app" channel.
+            // Publish CallEnded to the global coordinator's "session_to_app"
+            // channel, then release the session from the store + registry.
             {
                 info!("🔔 [handle_call_terminated] Publishing CallEnded for session {}", session_id);
                 let api_event = crate::api::events::Event::CallEnded {
                     call_id: session_id.clone(),
                     reason: reason.clone(),
                 };
-                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-                let coordinator = self.global_coordinator.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = coordinator.publish(wrapped).await {
-                        tracing::warn!("Failed to publish CallEnded to global coordinator: {}", e);
-                    }
-                });
+                self.publish_and_release_session(api_event, session_id.clone()).await;
             }
         } else {
             warn!("⚠️ [handle_call_terminated] Failed to extract session_id, cannot forward CallEnded event");
@@ -1048,8 +1065,20 @@ impl SessionCrossCrateEventHandler {
             if !self.is_our_session(&sid).await { return Ok(()); }
             let sdp = self.extract_field(event_str, "sdp: Some(\"")
                 .map(|s| s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\\"", "\""));
-            if let Err(e) = self.state_machine.process_event(&sid, EventType::ReinviteReceived { sdp }).await {
-                error!("Failed to process ReinviteReceived: {}", e);
+            // `method` is an uppercase SIP method string emitted by
+            // dialog-core's cross-crate conversion ("INVITE" or "UPDATE").
+            // Default to re-INVITE for backward compat if the field is
+            // missing — INVITE is the historic payload of this event.
+            let method = self.extract_field(event_str, "method: \"")
+                .unwrap_or_else(|| "INVITE".to_string());
+            let event = if method.eq_ignore_ascii_case("UPDATE") {
+                EventType::UpdateReceived { sdp }
+            } else {
+                EventType::ReinviteReceived { sdp }
+            };
+            if let Err(e) = self.state_machine.process_event(&sid, event).await {
+                error!("Failed to process {} (method {}): {}",
+                    "ReinviteReceived/UpdateReceived", method, e);
             }
         }
         Ok(())

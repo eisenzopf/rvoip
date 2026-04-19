@@ -442,6 +442,27 @@ impl StreamPeer {
         self.control.coordinator.register_with(reg).await
     }
 
+    /// Query whether a registration handle is currently registered.
+    ///
+    /// Returns `true` once the registrar has replied 200 OK to the REGISTER
+    /// (including after a 423 Interval Too Brief retry or 401 auth retry),
+    /// and `false` if the registration was rejected, unregistered, or has
+    /// not yet completed.
+    pub async fn is_registered(
+        &self,
+        handle: &crate::api::unified::RegistrationHandle,
+    ) -> Result<bool> {
+        self.control.coordinator.is_registered(handle).await
+    }
+
+    /// Unregister (sends REGISTER with `Expires: 0`).
+    pub async fn unregister(
+        &self,
+        handle: &crate::api::unified::RegistrationHandle,
+    ) -> Result<()> {
+        self.control.coordinator.unregister(handle).await
+    }
+
     /// Graceful shutdown — stops background tasks and drops resources.
     ///
     /// Previously `SimplePeer::shutdown()` called `process::exit(0)`. This version
@@ -453,6 +474,30 @@ impl StreamPeer {
         self.control.coordinator.shutdown();
         drop(self);
         Ok(())
+    }
+
+    /// Return a cloneable handle that can signal shutdown from another task.
+    ///
+    /// Mirrors [`CallbackPeer::shutdown_handle`]. Useful when the peer is owned
+    /// by an event loop and a supervisor task needs to stop it:
+    ///
+    /// ```rust,no_run
+    /// # async fn demo() -> rvoip_session_core_v3::Result<()> {
+    /// use rvoip_session_core_v3::StreamPeer;
+    /// let peer = StreamPeer::new("alice").await?;
+    /// let stop = peer.shutdown_handle();
+    /// tokio::spawn(async move {
+    ///     // ... do some work ...
+    ///     stop.shutdown();
+    /// });
+    /// // peer.run_event_loop().await;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [`CallbackPeer::shutdown_handle`]: crate::api::callback_peer::CallbackPeer::shutdown_handle
+    pub fn shutdown_handle(&self) -> crate::api::callback_peer::ShutdownHandle {
+        self.control.coordinator.shutdown_handle()
     }
 
     /// Start building a new `StreamPeer` with configuration options.

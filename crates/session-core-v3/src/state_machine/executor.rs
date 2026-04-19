@@ -175,6 +175,10 @@ impl StateMachine {
                 session.reject_status = Some(*status);
                 session.reject_reason = Some(reason.clone());
             }
+            EventType::RedirectCall { status, contacts } => {
+                session.redirect_response_status = Some(*status);
+                session.redirect_response_contacts = contacts.clone();
+            }
             EventType::SendEarlyMedia { sdp } => {
                 if let Some(sdp_data) = sdp {
                     session.early_media_sdp = Some(sdp_data.clone());
@@ -201,6 +205,26 @@ impl StateMachine {
                 debug!("Set transfer target from REFER: {}, type: {:?}, transaction: {}", refer_to, transfer_type, transaction_id);
             }
             // StartAttendedTransfer event removed
+            EventType::ReinviteReceived { sdp } => {
+                // Stash the peer's new SDP offer so NegotiateSDPAsUAS
+                // picks it up when it fires later in this transition.
+                // Force renegotiation — the peer's offer supersedes any
+                // previously negotiated remote SDP.
+                if let Some(sdp_data) = sdp {
+                    session.remote_sdp = Some(sdp_data.clone());
+                    session.sdp_negotiated = false;
+                }
+            }
+            EventType::UpdateReceived { sdp } => {
+                // RFC 4028 UPDATE for session-timer refresh carries no SDP,
+                // but if a peer sends an UPDATE body (RFC 3311 session
+                // modification), record it so a future transition with
+                // NegotiateSDPAsUAS can act on it.
+                if let Some(sdp_data) = sdp {
+                    session.remote_sdp = Some(sdp_data.clone());
+                    session.sdp_negotiated = false;
+                }
+            }
             _ => {}
         }
         
