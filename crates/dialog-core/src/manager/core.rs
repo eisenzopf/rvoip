@@ -852,6 +852,86 @@ impl DialogManager {
     pub async fn send_request(&self, dialog_id: &DialogId, method: Method, body: Option<bytes::Bytes>) -> DialogResult<TransactionKey> {
         <Self as super::transaction_integration::TransactionIntegration>::send_request_in_dialog(self, dialog_id, method, body).await
     }
+
+    /// Send a BYE request carrying a `Reason:` header (RFC 3326).
+    ///
+    /// Used by the session-timer refresh-failure path (RFC 4028 §10) to
+    /// communicate `Reason: SIP ;cause=408 ;text="Session expired"` on the
+    /// BYE so peer observability is RFC-correct. Mirrors the transport
+    /// plumbing of `send_request` for BYE but threads a typed `Reason`
+    /// header through `bye_for_dialog`'s `extra_headers` param.
+    pub async fn send_bye_with_reason(
+        &self,
+        dialog_id: &DialogId,
+        reason: rvoip_sip_core::types::reason::Reason,
+    ) -> DialogResult<TransactionKey> {
+        use rvoip_sip_core::types::TypedHeader;
+        use crate::transaction::dialog::quick as dialog_quick;
+
+        debug!("Sending BYE with Reason header for dialog {}", dialog_id);
+
+        let (destination, request) = {
+            let mut dialog = self.get_dialog_mut(dialog_id)?;
+
+            let destination = dialog.get_remote_target_address().await
+                .ok_or_else(|| DialogError::routing_error(
+                    "No remote target address available",
+                ))?;
+
+            let template = dialog.create_request_template(Method::Bye);
+
+            let local_tag = match template.local_tag {
+                Some(tag) if !tag.is_empty() => tag,
+                _ => {
+                    let new_tag = dialog.generate_local_tag();
+                    dialog.local_tag = Some(new_tag.clone());
+                    new_tag
+                }
+            };
+
+            let remote_tag = template.remote_tag
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| DialogError::protocol_error(
+                    "BYE requires remote tag in established dialog",
+                ))?;
+
+            let request = dialog_quick::bye_for_dialog(
+                &template.call_id,
+                &template.local_uri.to_string(),
+                &local_tag,
+                &template.remote_uri.to_string(),
+                &remote_tag,
+                template.cseq_number,
+                self.local_address,
+                if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                Some(vec![TypedHeader::Reason(reason)]),
+            ).map_err(|e| DialogError::InternalError {
+                message: format!("Failed to build BYE request: {}", e),
+                context: None,
+            })?;
+
+            (destination, request)
+        };
+
+        let transaction_id = self.transaction_manager
+            .create_non_invite_client_transaction(request, destination)
+            .await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to create BYE transaction: {}", e),
+            })?;
+
+        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
+        debug!("Associated BYE-with-Reason transaction {} with dialog {}", transaction_id, dialog_id);
+
+        self.transaction_manager
+            .send_request(&transaction_id)
+            .await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to send BYE: {}", e),
+            })?;
+
+        Ok(transaction_id)
+    }
     
     pub async fn send_response(&self, transaction_id: &TransactionKey, response: Response) -> DialogResult<()> {
         <Self as super::transaction_integration::TransactionIntegration>::send_transaction_response(self, transaction_id, response).await

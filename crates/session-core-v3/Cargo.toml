@@ -57,6 +57,12 @@ path = "examples/streampeer/session_timer/alice.rs"
 [[example]]
 name = "streampeer_session_timer_bob"
 path = "examples/streampeer/session_timer/bob.rs"
+[[example]]
+name = "streampeer_session_timer_failure_alice"
+path = "examples/streampeer/session_timer_failure/alice.rs"
+[[example]]
+name = "streampeer_session_timer_failure_bob"
+path = "examples/streampeer/session_timer_failure/bob.rs"
 
 # CallbackPeer examples (reactive / server-side)
 [[example]]

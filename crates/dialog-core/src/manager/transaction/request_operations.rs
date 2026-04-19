@@ -261,7 +261,8 @@ impl DialogManager {
                     &remote_tag,
                     template.cseq_number,
                     self.local_address,
-                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                    None,
                 )
             },
             
@@ -401,7 +402,8 @@ impl DialogManager {
                     &template_struct,
                     method.clone(),
                     body_string,
-                    None // Auto-detect content type
+                    None, // Auto-detect content type
+                    None,
                 )
             }
         }.map_err(|e| crate::errors::DialogError::InternalError {

@@ -266,7 +266,30 @@ pub struct TransactionManager {
 // Define RFC3261 Branch magic cookie
 pub const RFC3261_BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
 
+/// Build default `TimerSettings`, with an opt-in test hook that lets
+/// integration tests shorten Timer F (non-INVITE transaction timeout) so
+/// they don't have to wait the full 32 s for a dead peer to surface as a
+/// timeout. Reads `RVOIP_TEST_TRANSACTION_TIMEOUT_MS` once at construction;
+/// production callers are unaffected unless the env var is explicitly set
+/// in the child process environment.
+fn build_timer_settings() -> TimerSettings {
+    let mut settings = TimerSettings::default();
+    if let Ok(raw) = std::env::var("RVOIP_TEST_TRANSACTION_TIMEOUT_MS") {
+        if let Ok(ms) = raw.parse::<u64>() {
+            settings.transaction_timeout = std::time::Duration::from_millis(ms);
+        }
+    }
+    settings
+}
+
 impl TransactionManager {
+    /// Returns the timer settings in effect for this manager. Session-timer
+    /// refresh logic needs this to pick a deadline for awaiting UPDATE /
+    /// re-INVITE responses.
+    pub fn timer_settings(&self) -> &TimerSettings {
+        &self.timer_settings
+    }
+
     /// Creates a new transaction manager with default settings.
     ///
     /// This async constructor sets up the transaction manager with default timer settings
@@ -332,7 +355,7 @@ impl TransactionManager {
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(Mutex::new(false));
         
-        let timer_settings = TimerSettings::default();
+        let timer_settings = build_timer_settings();
         
         // Setup timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
@@ -565,7 +588,7 @@ impl TransactionManager {
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(Mutex::new(false));
         
-        let timer_settings = TimerSettings::default();
+        let timer_settings = build_timer_settings();
         
         // Setup timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
@@ -697,7 +720,7 @@ impl TransactionManager {
         let server_transactions = Arc::new(Mutex::new(HashMap::new()));
         
         // Setup timer manager
-        let timer_settings = TimerSettings::default();
+        let timer_settings = build_timer_settings();
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
         

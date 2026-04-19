@@ -46,11 +46,12 @@ use super::{DialogRequestTemplate, DialogTransactionContext, request_builder_fro
 ///     "call-123",
 ///     "sip:alice@example.com",
 ///     "alice-tag",
-///     "sip:bob@example.com", 
+///     "sip:bob@example.com",
 ///     "bob-tag",
 ///     3,
 ///     local_addr,
-///     None
+///     None,
+///     None,
 /// )?;
 /// # Ok(())
 /// # }
@@ -63,7 +64,8 @@ pub fn bye_for_dialog(
     to_tag: impl Into<String>,
     cseq: u32,
     local_address: SocketAddr,
-    route_set: Option<Vec<Uri>>
+    route_set: Option<Vec<Uri>>,
+    extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
     let template = DialogRequestTemplate {
@@ -78,8 +80,8 @@ pub fn bye_for_dialog(
         route_set: route_set.unwrap_or_default(),
         contact: None,
     };
-    
-    request_builder_from_dialog_template(&template, Method::Bye, None, None)
+
+    request_builder_from_dialog_template(&template, Method::Bye, None, None, extra_headers)
 }
 
 /// Quick REFER request creation for call transfer
@@ -150,10 +152,11 @@ pub fn refer_for_dialog(
     
     // Build the REFER request without a body - we'll add the Refer-To header separately
     let mut request = request_builder_from_dialog_template(
-        &template, 
-        Method::Refer, 
+        &template,
+        Method::Refer,
         None,  // No body - Refer-To is a header, not body content
-        None   // No content type needed
+        None,  // No content type needed
+        None,
     )?;
     
     // Add the Refer-To header using the proper SIP type
@@ -258,7 +261,7 @@ pub fn update_for_dialog(
         None
     };
     
-    request_builder_from_dialog_template(&template, Method::Update, sdp_content, content_type)
+    request_builder_from_dialog_template(&template, Method::Update, sdp_content, content_type, None)
 }
 
 /// Quick INFO request creation for mid-dialog information
@@ -329,7 +332,7 @@ pub fn info_for_dialog(
     };
     
     let ct = content_type.unwrap_or_else(|| "application/info".to_string());
-    request_builder_from_dialog_template(&template, Method::Info, Some(content.into()), Some(ct))
+    request_builder_from_dialog_template(&template, Method::Info, Some(content.into()), Some(ct), None)
 }
 
 /// Quick NOTIFY request creation for event notifications
@@ -493,7 +496,7 @@ pub fn message_for_dialog(
     };
     
     let ct = content_type.unwrap_or_else(|| "text/plain".to_string());
-    request_builder_from_dialog_template(&template, Method::Message, Some(message_content.into()), Some(ct))
+    request_builder_from_dialog_template(&template, Method::Message, Some(message_content.into()), Some(ct), None)
 }
 
 /// Quick re-INVITE request creation for session modification
@@ -563,7 +566,7 @@ pub fn reinvite_for_dialog(
         contact,
     };
     
-    request_builder_from_dialog_template(&template, Method::Invite, Some(sdp_offer.into()), Some("application/sdp".to_string()))
+    request_builder_from_dialog_template(&template, Method::Invite, Some(sdp_offer.into()), Some("application/sdp".to_string()), None)
 }
 
 /// Quick PRACK request creation (RFC 3262 §7.2)
@@ -612,6 +615,7 @@ pub fn prack_for_dialog(
     let mut request = request_builder_from_dialog_template(
         &template,
         Method::Prack,
+        None,
         None,
         None,
     )?;
@@ -715,7 +719,8 @@ mod tests {
             "bob-tag",
             3,
             local_addr,
-            None
+            None,
+            None,
         ).expect("Failed to create BYE");
         
         assert_eq!(bye_request.method(), Method::Bye);

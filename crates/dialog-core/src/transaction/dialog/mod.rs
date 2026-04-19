@@ -95,7 +95,7 @@ pub struct DialogTransactionContext {
 ///     contact: None,
 /// };
 /// 
-/// let request = request_builder_from_dialog_template(&template, Method::Bye, None, None)?;
+/// let request = request_builder_from_dialog_template(&template, Method::Bye, None, None, None)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -103,9 +103,10 @@ pub fn request_builder_from_dialog_template(
     template: &DialogRequestTemplate,
     method: Method,
     body: Option<String>,
-    content_type: Option<String>
+    content_type: Option<String>,
+    extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
-    match method {
+    let mut request = match method {
         Method::Invite => {
             let mut builder = InviteBuilder::from_dialog_enhanced(
                 &template.call_id,
@@ -121,17 +122,17 @@ pub fn request_builder_from_dialog_template(
                 template.route_set.clone(),
                 template.contact.clone()
             );
-            
+
             if let Some(sdp_content) = body {
                 builder = builder.with_sdp(sdp_content);
             }
-            
+
             // Add Contact header if specified in template
             if let Some(contact_uri) = &template.contact {
                 use rvoip_sip_core::types::contact::{Contact, ContactParamInfo};
                 use rvoip_sip_core::types::address::Address;
                 use rvoip_sip_core::types::uri::Uri;
-                
+
                 // Parse the contact URI and create a Contact header
                 if let Ok(contact_uri_parsed) = contact_uri.parse::<Uri>() {
                     let contact_addr = Address::new(contact_uri_parsed);
@@ -140,10 +141,10 @@ pub fn request_builder_from_dialog_template(
                     builder = builder.header(TypedHeader::Contact(contact_header));
                 }
             }
-            
-            builder.build()
+
+            builder.build()?
         },
-        
+
         Method::Bye => {
             ByeBuilder::from_dialog_enhanced(
                 &template.call_id,
@@ -155,9 +156,9 @@ pub fn request_builder_from_dialog_template(
                 template.cseq,
                 template.local_address,
                 template.route_set.clone()
-            ).build()
+            ).build()?
         },
-        
+
         _ => {
             // Use InDialogRequestBuilder for other methods
             let mut builder = InDialogRequestBuilder::new(method)
@@ -172,13 +173,13 @@ pub fn request_builder_from_dialog_template(
                     template.local_address,
                     template.route_set.clone()
                 );
-            
+
             // Add Contact header if specified in template
             if let Some(contact_uri) = &template.contact {
                 use rvoip_sip_core::types::contact::{Contact, ContactParamInfo};
                 use rvoip_sip_core::types::address::Address;
                 use rvoip_sip_core::types::uri::Uri;
-                
+
                 // Parse the contact URI and create a Contact header
                 if let Ok(contact_uri_parsed) = contact_uri.parse::<Uri>() {
                     let contact_addr = Address::new(contact_uri_parsed);
@@ -187,18 +188,26 @@ pub fn request_builder_from_dialog_template(
                     builder = builder.header(TypedHeader::Contact(contact_header));
                 }
             }
-            
+
             if let Some(request_body) = body {
                 builder = builder.with_body(request_body);
             }
-            
+
             if let Some(ct) = content_type {
                 builder = builder.with_content_type(ct);
             }
-            
-            builder.build()
+
+            builder.build()?
+        }
+    };
+
+    if let Some(headers) = extra_headers {
+        for hdr in headers {
+            request.headers.push(hdr);
         }
     }
+
+    Ok(request)
 }
 
 /// Create a response builder with dialog transaction context
@@ -459,7 +468,8 @@ mod tests {
             &template,
             Method::Bye,
             None,
-            None
+            None,
+            None,
         ).expect("Failed to create BYE from template");
         
         assert_eq!(bye_request.method(), Method::Bye);
@@ -513,9 +523,9 @@ pub mod helpers {
     
     /// Quick BYE request creation from dialog template
     pub fn quick_bye_from_template(template: &DialogRequestTemplate) -> Result<Request> {
-        request_builder_from_dialog_template(template, Method::Bye, None, None)
+        request_builder_from_dialog_template(template, Method::Bye, None, None, None)
     }
-    
+
     /// Quick REFER request creation from dialog template
     pub fn quick_refer_from_template(
         template: &DialogRequestTemplate,
@@ -525,10 +535,11 @@ pub mod helpers {
             template,
             Method::Refer,
             Some(format!("Refer-To: {}\r\n", target_uri)),
-            Some("message/sipfrag".to_string())
+            Some("message/sipfrag".to_string()),
+            None,
         )
     }
-    
+
     /// Quick UPDATE request creation from dialog template
     pub fn quick_update_from_template(
         template: &DialogRequestTemplate,
@@ -539,10 +550,10 @@ pub mod helpers {
         } else {
             None
         };
-        
-        request_builder_from_dialog_template(template, Method::Update, sdp, content_type)
+
+        request_builder_from_dialog_template(template, Method::Update, sdp, content_type, None)
     }
-    
+
     /// Quick INFO request creation from dialog template
     pub fn quick_info_from_template(
         template: &DialogRequestTemplate,
@@ -552,7 +563,8 @@ pub mod helpers {
             template,
             Method::Info,
             Some(content.to_string()),
-            Some("application/info".to_string())
+            Some("application/info".to_string()),
+            None,
         )
     }
     

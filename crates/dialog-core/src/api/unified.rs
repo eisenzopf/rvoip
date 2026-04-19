@@ -806,24 +806,65 @@ impl UnifiedDialogApi {
             .clone();
         
         debug!("Found dialog {} for session {}", dialog_id, session_id);
-        
-        // Find the transaction for this dialog
-        let transaction_id = self.manager.core()
+
+        // Find the *pending* server transaction for this dialog.
+        //
+        // `transaction_to_dialog` is many-to-one: an established dialog has
+        // one INVITE server-tx (retained for retransmission) plus any later
+        // mid-dialog UAS-tx such as UPDATE/re-INVITE. Responding to the
+        // first match is wrong the moment there's more than one — it can
+        // pick the already-completed INVITE-tx and build a stale 200 OK
+        // that confuses the UAC (seen as a pre-existing bug under
+        // session-timer refresh once the refresh path started awaiting a
+        // real response).
+        //
+        // The right pick is the server-side transaction still in a state
+        // that expects a response (Trying/Proceeding for NonInviteServer,
+        // Proceeding for InviteServer). Filter on server-kind + open state;
+        // prefer a non-INVITE tx when available so an in-dialog UPDATE/
+        // re-INVITE response doesn't get misrouted to the original INVITE.
+        let tx_mgr = self.manager.core().transaction_manager();
+        let candidates: Vec<crate::transaction::TransactionKey> = self.manager.core()
             .transaction_to_dialog
             .iter()
-            .find(|entry| entry.value() == &dialog_id)
+            .filter(|entry| entry.value() == &dialog_id && entry.key().is_server())
             .map(|entry| entry.key().clone())
+            .collect();
+
+        let mut pending_non_invite: Option<crate::transaction::TransactionKey> = None;
+        let mut pending_invite: Option<crate::transaction::TransactionKey> = None;
+        let mut any_server: Option<crate::transaction::TransactionKey> = None;
+        for key in candidates.into_iter() {
+            let state = tx_mgr.transaction_state(&key).await.ok();
+            let awaiting_response = matches!(
+                state,
+                Some(crate::transaction::TransactionState::Initial)
+                    | Some(crate::transaction::TransactionState::Trying)
+                    | Some(crate::transaction::TransactionState::Proceeding)
+            );
+            if awaiting_response {
+                if *key.method() == rvoip_sip_core::Method::Invite {
+                    pending_invite.get_or_insert(key.clone());
+                } else {
+                    pending_non_invite.get_or_insert(key.clone());
+                }
+            }
+            any_server.get_or_insert(key);
+        }
+
+        let transaction_id = pending_non_invite
+            .or(pending_invite)
+            .or(any_server)
             .ok_or_else(|| {
-                error!("No transaction found for dialog {} (session {})", dialog_id, session_id);
-                // List all transaction mappings for debugging
+                error!("No server transaction found for dialog {} (session {})", dialog_id, session_id);
                 for entry in self.manager.core().transaction_to_dialog.iter() {
                     debug!("Transaction {} -> Dialog {}", entry.key(), entry.value());
                 }
-                ApiError::Dialog { 
-                    message: format!("No transaction found for dialog {}", dialog_id) 
+                ApiError::Dialog {
+                    message: format!("No transaction found for dialog {}", dialog_id)
                 }
             })?;
-        
+
         debug!("Found transaction {} for dialog {}", transaction_id, dialog_id);
         
         // Build the response

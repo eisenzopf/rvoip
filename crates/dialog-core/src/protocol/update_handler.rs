@@ -91,15 +91,22 @@ impl DialogManager {
             })?;
         
         let transaction_id = server_transaction.id().clone();
-        
+
+        // Associate the new UAS transaction with the dialog so the session
+        // layer's `send_response_for_session` can route its 200 OK (or 4xx)
+        // back to *this* UPDATE, not to the stale INVITE-server-tx kept
+        // around for retransmission. Required because UPDATE responses must
+        // echo the UPDATE's Via/branch per RFC 3261 §17.2.
+        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
+
         let event = SessionCoordinationEvent::ReInvite {
             dialog_id: dialog_id.clone(),
             transaction_id,
             request: request.clone(),
         };
-        
+
         self.notify_session_layer(event).await?;
         debug!("UPDATE processed for dialog {}", dialog_id);
         Ok(())
     }
-} 
+}

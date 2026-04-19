@@ -27,19 +27,22 @@ are listed at the end so we stop re-litigating them.
 - 🟡 In progress
 - ✅ Done (merged + tested)
 
-## Summary (2026-04-18)
+## Summary (2026-04-19)
 
-Tier 1 and Tier 3 (excluding 3.5) complete; Tier 2.1 + 2.2 complete with
-new integration tests. Two items deferred with clear reasons: 2.3
-(session-timer refresh-failure e2e) and 3.5 (BYE Reason header) — both
-need multi-hour dialog-core refactors that are disproportionate to their
-operational value given the event-level surface already in place.
+All Tier 1, Tier 2, and Tier 3 items complete. The last two deferred
+items (2.3 session-timer refresh-failure e2e and 3.5 BYE Reason header)
+closed together in one pass along with a pre-existing dialog-core bug
+exposed by the new await-the-response code path (UAS mid-dialog response
+routing to the wrong server transaction when both an INVITE-server and a
+later UPDATE-server were live for the same dialog).
 
 The single-session control plane is now leak-free (T1.2 auto-cleanup),
 unsafe-free (T1.1 OnceLock), shutdown-clean (T1.3 JoinSet), API-symmetric
 for b2bua needs (T3.1 SDP pass-through, T3.2 proper 3xx, T3.3 handle-level
-transfer primitives, T3.4 shutdown-handle symmetry), and covered by new
-tests for redirect-follow and glare-retry.
+transfer primitives, T3.4 shutdown-handle symmetry), covered by new
+multi-binary integration tests for redirect-follow, glare-retry, and
+session-timer refresh-failure, and RFC 4028 §10 compliant with a proper
+`Reason: SIP ;cause=408` header on the refresh-failure BYE.
 
 ---
 
@@ -125,25 +128,32 @@ receive a peer re-INVITE while our own is in flight; the existing
 Alice and Bob simultaneously invoke `hold()`, each side sends 491 to the
 other's re-INVITE, the production retry path converges on OnHold.
 
-### 2.3 ⬜ Session-timer refresh-failure BYE test — *still deferred (revised reason)*
+### 2.3 ✅ Session-timer refresh-failure BYE test
 
-**What exists**: Wire-level BYE-on-timeout + `SessionRefreshFailed` event
-publishing are implemented.
+`dialog-core/src/manager/session_timer.rs` was rewritten to subscribe to
+the refresh transaction's outcome via
+`TransactionManager::subscribe_to_transaction` (plus a `last_response`
+peek to handle the race where the peer answers before we subscribe).
+`SessionRefreshed` now fires only on a 2xx; anything else (4xx/5xx/6xx,
+timeout, transport error) falls through to the RFC 4028 §9 re-INVITE
+fallback, and if that also fails the dialog is torn down with a BYE
+carrying `Reason: SIP ;cause=408 ;text="Session expired"` (item 3.5).
+Covered by `tests/session_timer_failure_integration.rs` +
+`examples/streampeer/session_timer_failure/{alice,bob}.rs`: Bob accepts
+the call then exits at t≈1.5 s; Alice observes `SessionRefreshFailed`
+within 15 s with the UPDATE-timed-out + re-INVITE-transport-error cause
+string.
 
-**Why still blocked**: Investigation during the re-INVITE wiring work
-revealed that `dialog-core/src/manager/session_timer.rs` fires
-`SessionRefreshed` optimistically the moment `send_request(UPDATE)`
-returns — it does not subscribe to the UPDATE transaction's response or
-timeout events. So a dead peer doesn't surface as a failure: Alice's
-UDP send "succeeds," `refresh_ok = true`, and `SessionRefreshFailed`
-never fires. The failure path only exists today for cases where the
-transaction-manager itself rejects the send (e.g., no remote target).
-
-**What it needs**: session_timer.rs to hold the `TransactionKey` after
-sending, subscribe to its `SuccessResponse`/`FailureResponse`/`Timeout`
-events, and drive `SessionRefreshFailed` from the timeout path. That's
-a dialog-core refactor disproportionate to this hardening pass; track it
-as a follow-on when the session-timer gets its own round.
+The rewrite also fixed a pre-existing dialog-core bug exposed by the new
+await path: UAS mid-dialog responses (`send_response_for_session`) were
+picking an arbitrary server transaction for the dialog instead of the
+one currently awaiting a response, so UPDATE 200 OKs were being built
+with the INVITE's Via/branch — invisible under the old optimistic
+behaviour, hard failure under the new one. Fixed by filtering candidate
+transactions on `is_server()` + open state (Initial/Trying/Proceeding)
+and preferring non-INVITE when both are live, and by associating the
+UAS UPDATE transaction with its dialog in `process_update_in_dialog`
+(the re-INVITE path already did this).
 
 ---
 
@@ -189,13 +199,16 @@ delegation.
 **Fix**: Add `StreamPeer::shutdown_handle() -> ShutdownHandle` paralleling
 `CallbackPeer`.
 
-### 3.5 ⬜ Session-timer BYE `Reason:` header — *deferred*
+### 3.5 ✅ Session-timer BYE `Reason:` header
 
-Wire-level header on the session-timer BYE is still missing; the
-`SessionRefreshFailed` event already carries the 408 cause string which
-apps consume. Adding the header requires threading extra-headers support
-into `DialogManager::send_request_in_dialog` or a parallel BYE builder —
-out of scope for this hardening pass.
+`request_builder_from_dialog_template` and `bye_for_dialog` now take an
+`extra_headers: Option<Vec<TypedHeader>>` parameter. A new
+`DialogManager::send_bye_with_reason(dialog_id, Reason)` method is the
+high-level entry point; `session_timer.rs` calls it on refresh failure
+with `Reason::new("SIP", 408, Some("Session expired"))` per RFC 4028 §10.
+Wire coverage: `tests/session_timer_failure_integration.rs` drives the
+full path; apps additionally still see the cause surfaced via the
+`SessionRefreshFailed` event string.
 
 ---
 
@@ -227,8 +240,14 @@ out of scope for this hardening pass.
 | `src/state_machine/actions.rs` | 3.2, 3.5 | SendRedirectResponse, BYE Reason |
 | `state_tables/default.yaml` | 3.2 | Redirect transition |
 | `tests/redirect_follow.rs` | 2.1 | New file |
-| `tests/glare_retry.rs` | 2.2 | New file |
-| `tests/session_timer_failure.rs` | 2.3 | New file |
+| `tests/glare_retry_integration.rs` | 2.2 | New file |
+| `tests/session_timer_failure_integration.rs` | 2.3 | New file |
+| `examples/streampeer/session_timer_failure/{alice,bob}.rs` | 2.3 | New peer binaries |
+| `dialog-core/src/manager/session_timer.rs` | 2.3 | Await transaction outcomes; tear down with 408 Reason |
+| `dialog-core/src/protocol/update_handler.rs` | 2.3 | Associate UPDATE server-tx with dialog |
+| `dialog-core/src/api/unified.rs` | 2.3 | `send_response_for_session` picks pending server-tx |
+| `dialog-core/src/manager/core.rs` | 3.5 | `send_bye_with_reason` |
+| `dialog-core/src/transaction/dialog/{mod,quick}.rs` | 3.5 | `extra_headers` plumbing |
 | `tests/early_media_tests.rs` | 3.1 | Custom-SDP assertion |
 
 ---
