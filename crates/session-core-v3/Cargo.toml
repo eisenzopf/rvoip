@@ -180,6 +180,7 @@ tracing-subscriber = "0.3"
 rvoip-sip-transport = { path = "../sip-transport" }
 rvoip-registrar-core = { path = "../registrar-core" }
 serial_test = { workspace = true }
+tempfile = "3.14"
 
 [features]
 default = []
