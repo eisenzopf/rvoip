@@ -8,7 +8,10 @@ use std::net::{IpAddr, SocketAddr};
 use tokio::sync::mpsc;
 use dashmap::DashMap;
 use rvoip_media_core::{
-    relay::controller::{MediaSessionController, MediaConfig, MediaSessionInfo},
+    relay::controller::{
+        MediaSessionController, MediaConfig, MediaSessionInfo,
+        AudioSource, BridgeError, BridgeHandle,
+    },
     DialogId,
     types::MediaSessionId,
 };
@@ -342,6 +345,73 @@ impl MediaAdapter {
         Ok(())
     }
     
+    /// Swap the audio source on the running transmitter for a session.
+    /// Used by early-media flows to replace silence with a ringback tone,
+    /// hold announcement, or custom samples during `EarlyMedia`.
+    ///
+    /// The media session must already have an active transmitter — callers
+    /// typically invoke this right after `send_early_media` (which has
+    /// `PrepareEarlyMediaSDP` + `establish_media_flow` set one up).
+    pub async fn set_audio_source(
+        &self,
+        session_id: &SessionId,
+        source: AudioSource,
+    ) -> Result<()> {
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::MediaError(format!(
+                "No media session for {}",
+                session_id.0
+            )))?
+            .clone();
+
+        self.controller
+            .set_audio_source(&dialog_id, source)
+            .await
+            .map_err(|e| SessionError::MediaError(format!("Failed to set audio source: {}", e)))
+    }
+
+    /// Bridge the RTP streams of two sessions at the media-core layer.
+    ///
+    /// Resolves each `SessionId` to its underlying `DialogId` and delegates
+    /// to `MediaSessionController::bridge_sessions`. Transparent packet-level
+    /// relay — both legs must have negotiated the same codec and reached the
+    /// `Active` state (remote RTP address known).
+    ///
+    /// Dropping the returned [`BridgeHandle`] tears the bridge down.
+    pub async fn bridge_rtp_sessions(
+        &self,
+        session_a: &SessionId,
+        session_b: &SessionId,
+    ) -> std::result::Result<BridgeHandle, BridgeError> {
+        let dialog_a = self
+            .session_to_dialog
+            .get(session_a)
+            .ok_or_else(|| BridgeError::SessionNotFound(session_a.0.clone()))?
+            .clone();
+        let dialog_b = self
+            .session_to_dialog
+            .get(session_b)
+            .ok_or_else(|| BridgeError::SessionNotFound(session_b.0.clone()))?
+            .clone();
+
+        let handle = self.controller.bridge_sessions(dialog_a, dialog_b).await?;
+
+        // Keep the legacy session-store `bridged_to` pointers in sync so
+        // anything that queries session state sees the pairing.
+        if let Ok(mut a_state) = self.store.get_session(session_a).await {
+            a_state.bridged_to = Some(session_b.clone());
+            let _ = self.store.update_session(a_state).await;
+        }
+        if let Ok(mut b_state) = self.store.get_session(session_b).await {
+            b_state.bridged_to = Some(session_a.clone());
+            let _ = self.store.update_session(b_state).await;
+        }
+
+        Ok(handle)
+    }
+
     /// Destroy a media bridge
     pub async fn destroy_bridge(&self, session_id: &SessionId) -> Result<()> {
         // Get the bridged session

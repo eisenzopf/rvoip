@@ -12,8 +12,10 @@ use std::net::SocketAddr;
 use rvoip_rtp_core::{
     MediaTransportClient, ClientFactory, ClientConfig, ClientConfigBuilder,
     MediaFrame, MediaFrameType, MediaTransportEvent,
-    RtpPacket, PayloadType
+    RtpPacket,
 };
+// PayloadType moved into media-core when RTP payload handling was split out.
+use rvoip_media_core::rtp_processing::payload::PayloadType;
 
 // Import media-core types  
 use rvoip_media_core::{

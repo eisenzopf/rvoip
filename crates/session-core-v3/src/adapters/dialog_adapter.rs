@@ -440,6 +440,40 @@ impl DialogAdapter {
         Ok(())
     }
     
+    /// Send an in-dialog INFO request (RFC 6086) with a caller-chosen
+    /// `Content-Type`. Used for SIP-INFO DTMF (`application/dtmf-relay`),
+    /// fax flow control (`application/sipfrag`), and other application-level
+    /// mid-dialog signalling.
+    pub async fn send_info(
+        &self,
+        session_id: &SessionId,
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<()> {
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+
+        self.dialog_api
+            .send_info_with_content_type(
+                &dialog_id,
+                content_type.to_string(),
+                bytes::Bytes::copy_from_slice(body),
+            )
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send INFO: {}", e)))?;
+
+        tracing::debug!(
+            session = %session_id.0,
+            content_type = %content_type,
+            body_len = body.len(),
+            "Sent INFO"
+        );
+        Ok(())
+    }
+
     /// Send REFER for blind transfer (for state machine)
     pub async fn send_refer_session(&self, session_id: &SessionId, refer_to: &str) -> Result<()> {
         let dialog_id = self.session_to_dialog.get(session_id)

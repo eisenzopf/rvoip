@@ -156,6 +156,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::AuthRequired { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallRedirected { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::ReinviteGlare { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::SessionIntervalTooSmall { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DtmfReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogError { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogCreated { .. } => None, // No session_id in DialogCreated
@@ -389,6 +390,23 @@ pub enum DialogToSessionEvent {
     /// generic CallFailed path.
     ReinviteGlare {
         session_id: String,
+    },
+
+    /// RFC 4028 §6 — 422 Session Interval Too Small on INVITE. The UAS
+    /// requires a longer session interval than the UAC offered; its
+    /// `Min-SE:` header (extracted into `min_se_secs`) carries the required
+    /// floor. The UAC should resend the INVITE with a `Session-Expires`
+    /// bumped to at least `min_se_secs`.
+    ///
+    /// session-core-v3 handles this transparently with a two-retry cap
+    /// mirroring the 423 REGISTER-retry pattern. If the response is
+    /// missing a parseable `Min-SE` header the event falls through to
+    /// generic `CallFailed`.
+    SessionIntervalTooSmall {
+        session_id: String,
+        /// Required minimum session interval, in seconds, parsed from the
+        /// server's `Min-SE:` header.
+        min_se_secs: u32,
     },
 
     /// DTMF tones received

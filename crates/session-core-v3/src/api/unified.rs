@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, RwLock};
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 
 pub use rvoip_dialog_core::api::RelUsage;
+pub use rvoip_media_core::relay::controller::{AudioSource, BridgeError, BridgeHandle};
 
 /// Configuration for the unified coordinator
 #[derive(Debug, Clone)]
@@ -281,6 +282,61 @@ impl UnifiedCoordinator {
             ))
     }
 
+    /// Return a typed, unfiltered [`EventReceiver`] that yields
+    /// [`crate::api::events::Event`] values across all sessions.
+    ///
+    /// Use when a single consumer needs every session API event (b2bua
+    /// coordinator, activity log). For per-leg logic prefer
+    /// [`events_for_session`][Self::events_for_session].
+    ///
+    /// The returned receiver already handles the downcast from the raw
+    /// cross-crate broadcast and exposes filtering helpers like
+    /// [`EventReceiver::next_dtmf`], [`EventReceiver::next_incoming`], and
+    /// [`EventReceiver::next_transfer`].
+    pub async fn events(&self) -> Result<crate::api::stream_peer::EventReceiver> {
+        let rx = self.subscribe_events().await?;
+        Ok(crate::api::stream_peer::EventReceiver::new(rx))
+    }
+
+    /// Return an [`EventReceiver`] that only yields events whose
+    /// `call_id` matches `id`. Per-session filtering happens in the
+    /// receiver's `next()` loop.
+    ///
+    /// Intended for b2bua-style consumers that need to watch both legs of
+    /// a bridged call independently:
+    ///
+    /// ```no_run
+    /// # use rvoip_session_core_v3::{Event, SessionId, UnifiedCoordinator};
+    /// # async fn example(coord: &UnifiedCoordinator, inbound: &SessionId, outbound: &SessionId) {
+    /// let mut inbound_events = coord.events_for_session(inbound).await.unwrap();
+    /// let mut outbound_events = coord.events_for_session(outbound).await.unwrap();
+    /// tokio::select! {
+    ///     Some(Event::CallEnded { .. }) = inbound_events.next() => {
+    ///         // inbound leg ended — tear down the outbound leg
+    ///     }
+    ///     Some(Event::CallEnded { .. }) = outbound_events.next() => {
+    ///         // outbound leg ended — tear down the inbound leg
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// **Caller contract:** open the receiver *before* any event of
+    /// interest fires. Events are lost if no subscriber is attached at
+    /// publish time. For incoming calls the safe pattern is:
+    /// 1. Wait for an `IncomingCall` event on the unfiltered
+    ///    [`events()`][Self::events] receiver.
+    /// 2. Open `events_for_session(&id)` with the new `SessionId`.
+    /// 3. Call `accept_call_with_sdp()` (post-acceptance events then
+    ///    reach the filtered receiver).
+    pub async fn events_for_session(
+        &self,
+        id: &SessionId,
+    ) -> Result<crate::api::stream_peer::EventReceiver> {
+        let rx = self.subscribe_events().await?;
+        Ok(crate::api::stream_peer::EventReceiver::filtered(rx, id.clone()))
+    }
+
     // ===== Simple Call Operations =====
 
     /// Make an outgoing call. If the `Config.credentials` default is set,
@@ -352,6 +408,32 @@ impl UnifiedCoordinator {
         self.helpers.hangup(session_id).await
     }
 
+    /// Bridge the RTP streams of two active sessions at the media layer.
+    ///
+    /// Transparent packet-level relay: inbound RTP from session A is
+    /// forwarded as outbound RTP on session B and vice versa, without
+    /// transcoding. Intended for b2bua-style consumers that need to connect
+    /// two SIP legs without shuffling AudioFrames through app code.
+    ///
+    /// # Preconditions
+    ///
+    /// - Both sessions must exist and be in `CallState::Active` (i.e. have
+    ///   a negotiated remote RTP address).
+    /// - Both sessions must have negotiated the same codec payload type.
+    ///   Codec mismatch returns [`BridgeError::CodecMismatch`].
+    /// - Neither session may already be bridged.
+    ///
+    /// Dropping the returned [`BridgeHandle`] tears the bridge down. DTMF
+    /// (RFC 2833) rides the RTP stream and is forwarded transparently;
+    /// RTCP is not bridged — each leg keeps generating its own reports.
+    pub async fn bridge(
+        &self,
+        session_a: &SessionId,
+        session_b: &SessionId,
+    ) -> std::result::Result<BridgeHandle, BridgeError> {
+        self.media_adapter.bridge_rtp_sessions(session_a, session_b).await
+    }
+
     /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).
     ///
     /// - `sdp: Some(body)` sends the supplied SDP verbatim.
@@ -371,6 +453,26 @@ impl UnifiedCoordinator {
             return Err(SessionError::UnreliableProvisionalsNotSupported);
         }
         self.helpers.send_early_media(session_id, sdp).await
+    }
+
+    /// Swap the audio source on the running transmitter for a session.
+    ///
+    /// Typical use: after [`send_early_media`][Self::send_early_media] has
+    /// put the session into `EarlyMedia` (which starts a pass-through
+    /// transmitter by default), call this to replace silence with a
+    /// ringback tone, a "please hold" WAV, or any other
+    /// [`AudioSource`][crate::api::unified::AudioSource] variant.
+    ///
+    /// On transition to `Active` (after `accept_call`), the source keeps
+    /// playing. To switch back to normal bidirectional audio, call this
+    /// again with `AudioSource::PassThrough`. Auto-switching on state
+    /// transitions is deferred — see the Item 3 follow-up.
+    pub async fn set_audio_source(
+        &self,
+        session_id: &SessionId,
+        source: AudioSource,
+    ) -> Result<()> {
+        self.media_adapter.set_audio_source(session_id, source).await
     }
     
     /// Put a call on hold
@@ -432,6 +534,28 @@ impl UnifiedCoordinator {
     /// Send REFER message to initiate transfer (this will trigger callback on recipient)
     pub async fn send_refer(&self, session_id: &SessionId, refer_to: &str) -> Result<()> {
         self.dialog_adapter.send_refer_session(session_id, refer_to).await
+    }
+
+    /// Send an in-dialog INFO request (RFC 6086) with a caller-chosen
+    /// `Content-Type`.
+    ///
+    /// Used for SIP-INFO DTMF (`application/dtmf-relay` — some carriers
+    /// prefer this over in-band RFC 2833), fax flow control
+    /// (`application/sipfrag`), and other application-level mid-dialog
+    /// signalling.
+    ///
+    /// The call must already be in an established dialog (past `Active`).
+    /// The supplied `body` is sent verbatim; the method does not transcode
+    /// or validate it against the declared content type.
+    pub async fn send_info(
+        &self,
+        session_id: &SessionId,
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<()> {
+        self.dialog_adapter
+            .send_info(session_id, content_type, body)
+            .await
     }
     
     /// Send NOTIFY message for REFER status (used after handling transfer)

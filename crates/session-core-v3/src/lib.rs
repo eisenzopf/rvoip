@@ -43,7 +43,7 @@ pub use api::audio::{AudioStream, AudioSender, AudioReceiver};
 
 // Configuration & registration
 pub use api::{UnifiedCoordinator, Config, RegistrationHandle};
-pub use api::unified::{Registration, RelUsage};
+pub use api::unified::{AudioSource, BridgeError, BridgeHandle, Registration, RelUsage};
 
 // Events
 pub use api::events::Event;

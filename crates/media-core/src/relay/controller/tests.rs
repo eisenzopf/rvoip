@@ -38,33 +38,6 @@ mod tests {
     }
     
     #[tokio::test]
-    async fn test_create_relay() {
-        let controller = MediaSessionController::new();
-        
-        let config_a = MediaConfig {
-            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
-            remote_addr: None,
-            preferred_codec: None,
-            parameters: HashMap::new(),
-        };
-        
-        let config_b = MediaConfig {
-            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
-            remote_addr: None,
-            preferred_codec: None,
-            parameters: HashMap::new(),
-        };
-        
-        // Start both sessions
-        controller.start_media(DialogId::new("dialog1"), config_a).await.unwrap();
-        controller.start_media(DialogId::new("dialog2"), config_b).await.unwrap();
-        
-        // Create relay should succeed but not actually create relay since no MediaRelay is configured
-        let result = controller.create_relay("dialog1".to_string(), "dialog2".to_string()).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
     async fn test_dynamic_port_allocation() {
         println!("🧪 Testing dynamic port allocation integration");
         

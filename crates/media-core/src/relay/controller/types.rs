@@ -21,7 +21,6 @@ use crate::performance::{
     simd::SimdProcessor,
 };
 use rvoip_rtp_core::{RtpSession, session::RtpSessionStats};
-use super::super::RelayStats;
 
 /// Media configuration for a session
 #[derive(Debug, Clone)]
@@ -56,16 +55,12 @@ pub enum MediaSessionStatus {
 pub struct MediaSessionInfo {
     /// Dialog ID this session is associated with
     pub dialog_id: DialogId,
-    /// Media relay session IDs (if this is a relay session)
-    pub relay_session_ids: Option<(String, String)>,
     /// Current status
     pub status: MediaSessionStatus,
     /// Media configuration
     pub config: MediaConfig,
     /// RTP port allocated for this session
     pub rtp_port: Option<u16>,
-    /// Session statistics
-    pub stats: Option<RelayStats>,
     /// RTP/RTCP statistics (if available)
     pub rtp_stats: Option<RtpSessionStats>,
     /// Last statistics update time
@@ -78,7 +73,6 @@ impl Default for MediaSessionInfo {
     fn default() -> Self {
         Self {
             dialog_id: DialogId::new(""),
-            relay_session_ids: None,
             status: MediaSessionStatus::Creating,
             config: MediaConfig {
                 local_addr: SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -87,7 +81,6 @@ impl Default for MediaSessionInfo {
                 parameters: HashMap::new(),
             },
             rtp_port: None,
-            stats: None,
             rtp_stats: None,
             stats_updated_at: None,
             created_at: Instant::now(),

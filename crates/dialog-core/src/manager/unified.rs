@@ -652,7 +652,7 @@ impl UnifiedDialogManager {
         body: Option<bytes::Bytes>
     ) -> ApiResult<TransactionKey> {
         debug!("Sending {} request in dialog {}", method, dialog_id);
-        
+
         let method_str = method.to_string(); // Convert to string before move
         self.core.send_request(dialog_id, method, body).await
             .map_err(|e| {
@@ -664,6 +664,24 @@ impl UnifiedDialogManager {
                 }
                 ApiError::from(e)
             })
+    }
+
+    /// Send an INFO request with a caller-chosen `Content-Type` (RFC 6086).
+    ///
+    /// The generic `send_request_in_dialog` path always tags INFO bodies as
+    /// `application/info`. This method lets the caller specify the type —
+    /// e.g. `application/dtmf-relay` for DTMF-over-INFO, `application/sipfrag`
+    /// for fax flow control.
+    pub async fn send_info_with_content_type(
+        &self,
+        dialog_id: &DialogId,
+        content_type: String,
+        body: bytes::Bytes,
+    ) -> ApiResult<TransactionKey> {
+        self.core
+            .send_info_with_content_type(dialog_id, content_type, body)
+            .await
+            .map_err(ApiError::from)
     }
     
     /// Send a response to a transaction

@@ -60,8 +60,6 @@ use rvoip_rtp_core::transport::{GlobalPortAllocator, PortAllocator, PortAllocato
 use rvoip_rtp_core as rtp_core;
 use rvoip_rtp_core::{RtpPacket, RtpHeader};
 
-use super::{MediaRelay, RelaySessionConfig, RelayEvent, RelayStats, generate_session_id, create_relay_config};
-
 // Sub-modules
 pub mod types;
 pub mod audio_generation;
@@ -70,9 +68,9 @@ pub mod statistics;
 pub mod advanced_processing;
 pub mod conference;
 pub mod zero_copy;
-pub mod relay;
 pub mod codec_detection;
 pub mod codec_fallback;
+pub mod bridge;
 
 #[cfg(test)]
 mod tests;
@@ -82,14 +80,14 @@ pub use types::{
     MediaConfig, MediaSessionStatus, MediaSessionInfo, MediaSessionEvent,
     AdvancedProcessorConfig, AdvancedProcessorSet
 };
+pub use bridge::{BridgeError, BridgeHandle};
+pub use audio_generation::{AudioSource, AudioTransmitterConfig};
 
 use types::RtpSessionWrapper;
 use audio_generation::{AudioGenerator, AudioTransmitter};
 
 /// Media Session Controller for managing media sessions and conference audio mixing
 pub struct MediaSessionController {
-    /// Underlying media relay (optional)
-    relay: Option<Arc<MediaRelay>>,
     /// Active media sessions indexed by dialog ID
     pub(super) sessions: RwLock<HashMap<DialogId, MediaSessionInfo>>,
     /// Active RTP sessions indexed by dialog ID
@@ -138,9 +136,14 @@ pub struct MediaSessionController {
     
     /// Codec mapper for payload type resolution
     pub(super) codec_mapper: Arc<CodecMapper>,
-    
+
     /// RTP bridge for processing incoming packets
     pub(super) rtp_bridge: Arc<RtpBridge>,
+
+    /// Bidirectional partner map for sessions bridged at the RTP layer.
+    /// Both directions are stored so lookup is O(1) from either end. Cleared
+    /// on `BridgeHandle` drop or `stop_media` of a bridged session.
+    pub(super) bridge_partners: Arc<DashMap<DialogId, DialogId>>,
 }
 
 impl MediaSessionController {
@@ -196,7 +199,6 @@ impl MediaSessionController {
         ));
         
         Self {
-            relay: None,
             sessions: RwLock::new(HashMap::new()),
             rtp_sessions: RwLock::new(HashMap::new()),
             event_tx,
@@ -221,9 +223,10 @@ impl MediaSessionController {
             audio_frame_callbacks: Arc::new(RwLock::new(HashMap::new())),
             codec_mapper,
             rtp_bridge,
+            bridge_partners: Arc::new(DashMap::new()),
         }
     }
-    
+
     /// Register an RTP event callback with the RTP bridge
     /// This allows external subscribers (like session-core) to receive RTP events
     pub async fn add_rtp_event_callback(&self, callback: RtpEventCallback) {
@@ -351,7 +354,6 @@ impl MediaSessionController {
         let port_allocator = Some(Arc::new(PortAllocator::with_config(port_config)));
         
         Ok(Self {
-            relay: None,
             sessions: RwLock::new(HashMap::new()),
             rtp_sessions: RwLock::new(HashMap::new()),
             event_tx,
@@ -376,6 +378,7 @@ impl MediaSessionController {
             audio_frame_callbacks: Arc::new(RwLock::new(HashMap::new())),
             codec_mapper,
             rtp_bridge,
+            bridge_partners: Arc::new(DashMap::new()),
         })
     }
     
@@ -456,8 +459,6 @@ impl MediaSessionController {
             status: MediaSessionStatus::Active,
             config: config.clone(),
             rtp_port: Some(rtp_port),
-            relay_session_ids: None,
-            stats: None,
             rtp_stats: None,
             stats_updated_at: None,
             created_at: std::time::Instant::now(),
@@ -496,6 +497,11 @@ impl MediaSessionController {
     pub async fn stop_media(&self, dialog_id: &DialogId) -> Result<()> {
         info!("Stopping media session for dialog: {}", dialog_id);
 
+        // If the session is bridged, clear the partnership so the partner's
+        // forwarder task can exit cleanly rather than sending to a dead
+        // session. Does nothing when no bridge is active.
+        self.clear_bridge_partner(dialog_id);
+
         // Remove session and get info for cleanup
         let session_info = {
             let mut sessions = self.sessions.write().await;
@@ -511,13 +517,6 @@ impl MediaSessionController {
                 let mut rtp_session = rtp_wrapper.session.lock().await;
                 let _ = rtp_session.close().await;
                 info!("✅ Stopped RTP session for dialog: {}", dialog_id);
-            }
-        }
-
-        // Clean up relay if exists
-        if let Some((session_a, session_b)) = &session_info.relay_session_ids {
-            if let Some(relay) = &self.relay {
-                let _ = relay.remove_session_pair(session_a, session_b).await;
             }
         }
 

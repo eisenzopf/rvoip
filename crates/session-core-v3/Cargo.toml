@@ -64,6 +64,17 @@ path = "examples/streampeer/session_timer_failure/alice.rs"
 name = "streampeer_session_timer_failure_bob"
 path = "examples/streampeer/session_timer_failure/bob.rs"
 
+# 3-peer bridge / b2bua scenario (UnifiedCoordinator::bridge + events_for_session)
+[[example]]
+name = "streampeer_bridge_alice"
+path = "examples/streampeer/bridge/alice.rs"
+[[example]]
+name = "streampeer_bridge_carol"
+path = "examples/streampeer/bridge/carol.rs"
+[[example]]
+name = "streampeer_bridge_peer"
+path = "examples/streampeer/bridge/bridge_peer.rs"
+
 # CallbackPeer examples (reactive / server-side)
 [[example]]
 name = "callbackpeer_auto_answer_server"

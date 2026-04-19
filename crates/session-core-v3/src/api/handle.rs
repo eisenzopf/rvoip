@@ -147,6 +147,18 @@ impl SessionHandle {
         self.coordinator.send_dtmf(&self.call_id, digit).await
     }
 
+    /// Send a SIP INFO request (RFC 6086) with caller-chosen `Content-Type`.
+    ///
+    /// Typical uses: `application/dtmf-relay` for out-of-band DTMF when a
+    /// carrier prefers SIP-INFO over RFC 2833, `application/sipfrag` for
+    /// fax (T.38) flow control, or `application/media_control+xml` for
+    /// video FIR/PLI requests. The body is sent verbatim.
+    pub async fn send_info(&self, content_type: &str, body: &[u8]) -> Result<()> {
+        self.coordinator
+            .send_info(&self.call_id, content_type, body)
+            .await
+    }
+
     // ===== Audio =====
 
     /// Get a duplex audio stream for this session.

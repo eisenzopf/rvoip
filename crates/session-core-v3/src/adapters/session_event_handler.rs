@@ -265,6 +265,11 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                     // Check BEFORE CallFailed — both could otherwise match via
                     // substring on future enrichment.
                     self.handle_auth_required(&event_str).await?;
+                } else if event_str.contains("SessionIntervalTooSmall") {
+                    // RFC 4028 §6 — 422 retry with bumped Session-Expires.
+                    // Check BEFORE CallFailed so a substring match on
+                    // "Failed" (future enrichment) won't swallow it.
+                    self.handle_session_interval_too_small(&event_str).await?;
                 } else if event_str.contains("CallFailed") {
                     self.handle_call_failed(&event_str).await?;
                 } else if event_str.contains("CallStateChanged") {
@@ -784,6 +789,75 @@ impl SessionCrossCrateEventHandler {
         {
             error!("Failed to process CallRedirected for session {}: {}", session_id, e);
         }
+
+        Ok(())
+    }
+
+    /// Handle RFC 4028 §6 — 422 Session Interval Too Small. The UAS requires
+    /// a session interval larger than we offered; its `Min-SE:` header
+    /// (surfaced as `min_se_secs`) carries the floor.
+    ///
+    /// Current behaviour is observability-only: the event is logged with the
+    /// required Min-SE and then routed through the standard
+    /// `Dialog4xxFailure(422)` path so the app sees a terminal `CallFailed`.
+    /// Apps that care can retry by calling `coordinator.make_call` with an
+    /// adjusted config (or tune `Config.session_timer_secs` up-front).
+    ///
+    /// TODO (roadmap Item 5 follow-up): auto-retry with bumped Session-Expires
+    /// (two-retry cap, mirror of the 423 REGISTER-retry pattern). Requires
+    /// a per-session session-timer override plumbed through dialog-core —
+    /// currently `dialog-core::inject_session_timer_headers` reads from
+    /// config only. Tracked separately.
+    async fn handle_session_interval_too_small(&self, event_str: &str) -> Result<()> {
+        let Some(session_id_str) = self.extract_session_id(event_str) else {
+            warn!("Could not extract session_id from SessionIntervalTooSmall event");
+            return Ok(());
+        };
+        let session_id = SessionId(session_id_str);
+
+        if !self.is_our_session(&session_id).await {
+            debug!(
+                "Ignoring SessionIntervalTooSmall for session {} - not in our store",
+                session_id
+            );
+            return Ok(());
+        }
+
+        let min_se_secs = self
+            .extract_field(event_str, "min_se_secs: ")
+            .and_then(|s| {
+                s.split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|n| n.parse::<u32>().ok())
+            })
+            .unwrap_or(0);
+
+        warn!(
+            "⏱️  [422 Session Interval Too Small] session={} requires Min-SE={}s \
+             (auto-retry not yet implemented; surfacing as CallFailed)",
+            session_id, min_se_secs
+        );
+
+        // Route through the generic 4xx failure path so the existing state
+        // machine + CallFailed publication runs — the session terminates
+        // cleanly and the app can observe the 422 status code.
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::Dialog4xxFailure(422))
+            .await
+        {
+            error!(
+                "Failed to process 422 SessionIntervalTooSmall for session {}: {}",
+                session_id, e
+            );
+        }
+
+        let api_event = crate::api::events::Event::CallFailed {
+            call_id: session_id.clone(),
+            status_code: 422,
+            reason: format!("Session Interval Too Small (required Min-SE: {}s)", min_se_secs),
+        };
+        self.publish_and_release_session(api_event, session_id.clone()).await;
 
         Ok(())
     }

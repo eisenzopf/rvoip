@@ -102,8 +102,6 @@ pub use session::{
 pub use integration::{
     RtpBridge,
     RtpBridgeConfig,
-    SessionBridge,
-    SessionBridgeConfig,
     IntegrationEvent,
     IntegrationEventType,
     RtpEvent,

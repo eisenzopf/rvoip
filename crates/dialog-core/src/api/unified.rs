@@ -620,6 +620,23 @@ impl UnifiedDialogApi {
     ) -> ApiResult<TransactionKey> {
         self.manager.send_request_in_dialog(dialog_id, method, body).await
     }
+
+    /// Send an INFO request (RFC 6086) with a caller-chosen `Content-Type`.
+    ///
+    /// The generic `send_request_in_dialog` path stamps INFO bodies with
+    /// `application/info`. This method lets the caller specify the type —
+    /// e.g. `application/dtmf-relay` for DTMF-over-INFO,
+    /// `application/sipfrag` for fax flow control.
+    pub async fn send_info_with_content_type(
+        &self,
+        dialog_id: &DialogId,
+        content_type: String,
+        body: bytes::Bytes,
+    ) -> ApiResult<TransactionKey> {
+        self.manager
+            .send_info_with_content_type(dialog_id, content_type, body)
+            .await
+    }
     
     /// RFC 3261 §22.2 — resend an INVITE with digest auth after a 401/407
     /// challenge. Session-core-v3 uses this to transparently retry call setup

@@ -252,6 +252,35 @@ impl MediaSessionController {
         Ok(())
     }
     
+    /// Set an arbitrary [`AudioSource`] on the running transmitter for this
+    /// dialog. Used by session-core-v3 early-media flows to swap silence
+    /// for a caller-chosen ringback tone / hold announcement after
+    /// `start_audio_transmission_with_config` has already established the
+    /// transmitter.
+    ///
+    /// Errors if no transmitter is active for the dialog — call
+    /// [`start_audio_transmission`](Self::start_audio_transmission) or
+    /// [`establish_media_flow`](Self::establish_media_flow) first.
+    pub async fn set_audio_source(&self, dialog_id: &DialogId, source: AudioSource) -> Result<()> {
+        info!("🎵 Setting audio source for dialog: {}", dialog_id);
+
+        let rtp_sessions = self.rtp_sessions.read().await;
+        let wrapper = rtp_sessions
+            .get(dialog_id)
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
+        if let Some(transmitter) = &wrapper.audio_transmitter {
+            transmitter.set_audio_source(source).await;
+            debug!("✅ Audio source updated for dialog: {}", dialog_id);
+            Ok(())
+        } else {
+            Err(Error::config(format!(
+                "Audio transmission not active for dialog {} — call start_audio_transmission first",
+                dialog_id
+            )))
+        }
+    }
+
     /// Enable pass-through mode for a dialog (no audio generation)
     pub async fn set_pass_through_mode(&self, dialog_id: &DialogId) -> Result<()> {
         info!("🔄 Setting pass-through mode for dialog: {}", dialog_id);

@@ -113,6 +113,41 @@ impl IncomingCall {
         self.coordinator.send_early_media(&self.call_id, sdp).await
     }
 
+    /// Send a reliable 183 Session Progress and immediately swap the
+    /// session's RTP transmitter to `source`. Lets the UAS play a ringback
+    /// tone / "please hold" announcement during the `EarlyMedia` state.
+    ///
+    /// The source plays until the session is accepted, the caller calls
+    /// [`coordinator.set_audio_source`][crate::api::unified::UnifiedCoordinator::set_audio_source]
+    /// to change it, or the dialog terminates. For bidirectional audio
+    /// after accept, explicitly reset to
+    /// [`AudioSource::PassThrough`][crate::api::unified::AudioSource::PassThrough]
+    /// once 200 OK has been sent.
+    ///
+    /// Same 100rel precondition as [`send_early_media`][Self::send_early_media].
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use rvoip_session_core_v3::{AudioSource, IncomingCall};
+    /// # async fn demo(incoming: IncomingCall) -> rvoip_session_core_v3::Result<()> {
+    /// incoming.send_early_media_with_source(
+    ///     None,
+    ///     AudioSource::Tone { frequency: 440.0, amplitude: 0.5 },
+    /// ).await?;
+    /// // Ringback plays; later call accept() to answer.
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn send_early_media_with_source(
+        &self,
+        sdp: Option<String>,
+        source: crate::api::unified::AudioSource,
+    ) -> Result<()> {
+        self.coordinator.send_early_media(&self.call_id, sdp).await?;
+        self.coordinator.set_audio_source(&self.call_id, source).await
+    }
+
     /// Reject the call immediately with an explicit SIP status code and reason.
     pub fn reject(mut self, status: u16, reason: &str) {
         self.resolved = true;

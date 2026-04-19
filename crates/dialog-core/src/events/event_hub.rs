@@ -316,6 +316,37 @@ impl DialogEventHub {
                                 DialogToSessionEvent::ReinviteGlare { session_id }
                             ))
                         }
+                        422 => {
+                            // RFC 4028 §6 — Session Interval Too Small. The UAS's
+                            // Min-SE: header carries the required floor. Pass
+                            // that value up so session-core-v3 can bump
+                            // Session-Expires and retry. If Min-SE is missing or
+                            // unparseable, fall through to generic CallFailed.
+                            use rvoip_sip_core::types::headers::HeaderAccess;
+                            let min_se = response
+                                .raw_header_value(
+                                    &rvoip_sip_core::types::header::HeaderName::Other(
+                                        "Min-SE".to_string(),
+                                    ),
+                                )
+                                .and_then(|s| s.trim().parse::<u32>().ok());
+                            if let Some(min_se_secs) = min_se {
+                                Some(RvoipCrossCrateEvent::DialogToSession(
+                                    DialogToSessionEvent::SessionIntervalTooSmall {
+                                        session_id,
+                                        min_se_secs,
+                                    },
+                                ))
+                            } else {
+                                Some(RvoipCrossCrateEvent::DialogToSession(
+                                    DialogToSessionEvent::CallFailed {
+                                        session_id,
+                                        status_code: 422,
+                                        reason_phrase: response.reason_phrase().to_string(),
+                                    },
+                                ))
+                            }
+                        }
                         code if (300..400).contains(&code) => {
                             // RFC 3261 §8.1.3.4 / §21.3 — redirect. Extract Contact
                             // URIs with q-values so the UAC can retry. Any 3xx
