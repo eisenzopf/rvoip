@@ -22,6 +22,7 @@
 //!
 //! ```rust
 //! use rvoip_sip_core::prelude::*;
+//! use rvoip_sip_core::types::RAck;
 //! use std::str::FromStr;
 //!
 //! // Build: acknowledge RSeq=1 for CSeq=101 INVITE
