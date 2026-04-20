@@ -34,10 +34,10 @@ use super::super::config::ServerConfig;
 ///     // Create server with simple configuration
 ///     let server = DialogServer::new("0.0.0.0:5060").await?;
 ///     
-///     // Set up session coordination
-///     let (session_tx, session_rx) = mpsc::channel(100);
-///     server.set_session_coordinator(session_tx).await?;
-///     
+///     // Session coordination events now flow via GlobalEventCoordinator
+///     // (wired up by `with_global_events(...)`); no per-server channel
+///     // setup is required here.
+///
 ///     // Start processing SIP messages
 ///     server.start().await?;
 ///     

@@ -364,10 +364,11 @@ mod tests {
     #[test]
     fn test_poor_quality() {
         let mut monitor = MediaQualityMonitor::new();
-        let stats = create_test_stream_stats(0.1, 50.0, Some(300.0)); // 10% loss, high jitter, high RTT
-        
+        // 5% loss, 20ms jitter, 150ms RTT → weighted score ≈ 55 → Poor band (40–60).
+        let stats = create_test_stream_stats(0.05, 20.0, Some(150.0));
+
         let metrics = monitor.update_stream_quality(12345, &stats);
-        
+
         assert_eq!(metrics.quality_level, MediaQualityLevel::Poor);
         assert!(metrics.mos < 2.5);
         assert!(metrics.quality_score < 60.0);

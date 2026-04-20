@@ -85,9 +85,10 @@
 //! # let transaction_manager = std::sync::Arc::new(unimplemented!());
 //! let api = UnifiedDialogApi::new(transaction_manager, config).await?;
 //!
-//! // Set up session coordination
-//! let (session_tx, mut session_rx) = tokio::sync::mpsc::channel(100);
-//! api.set_session_coordinator(session_tx).await?;
+//! // Session coordination events now flow via GlobalEventCoordinator;
+//! // the channel below is illustrative only.
+//! let (_session_tx, mut session_rx) =
+//!     tokio::sync::mpsc::channel::<SessionCoordinationEvent>(100);
 //! api.start().await?;
 //!
 //! // Handle incoming calls
@@ -413,48 +414,11 @@ impl UnifiedDialogApi {
     // ========================================
     // SESSION COORDINATION
     // ========================================
-    
-    /// Set session coordinator
-    ///
-    /// Establishes communication with session-core for session management.
-    /// This is essential for media coordination and call lifecycle management.
-    ///
-    /// # Arguments
-    /// * `sender` - Channel sender for session coordination events
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// use rvoip_dialog_core::api::unified::UnifiedDialogApi;
-    /// use rvoip_dialog_core::events::SessionCoordinationEvent;
-    ///
-    /// # async fn example(api: UnifiedDialogApi) -> Result<(), Box<dyn std::error::Error>> {
-    /// let (session_tx, session_rx) = tokio::sync::mpsc::channel(100);
-    /// api.set_session_coordinator(session_tx).await?;
-    ///
-    /// // Handle session events
-    /// tokio::spawn(async move {
-    ///     // Process session coordination events
-    /// });
-    /// # Ok(())
-    /// # }
-    /// ```
-    // REMOVED: Channel-based communication - use GlobalEventCoordinator instead
-    // pub async fn set_session_coordinator(&self, sender: mpsc::Sender<SessionCoordinationEvent>) -> ApiResult<()> {
-    //     debug!("Setting session coordinator");
-    //     self.manager.set_session_coordinator(sender).await
-    // }
-    
-    /// Set dialog event sender
-    ///
-    /// Establishes dialog event communication for external consumers.
-    // REMOVED: Channel-based communication - use GlobalEventCoordinator instead  
-    // pub async fn set_dialog_event_sender(&self, sender: mpsc::Sender<DialogEvent>) -> ApiResult<()> {
-    //     debug!("Setting dialog event sender");
-    //     self.manager.set_dialog_event_sender(sender).await
-    // }
-    
-    // REMOVED: subscribe_to_dialog_events() - Use GlobalEventCoordinator instead
+    //
+    // REMOVED: set_session_coordinator() / set_dialog_event_sender() /
+    // subscribe_to_dialog_events() — use GlobalEventCoordinator instead.
+    // Wire the coordinator via `with_global_events(...)` at construction time
+    // and receive events through the coordinator's broadcast channels.
     
     // ========================================
     // CLIENT-MODE OPERATIONS

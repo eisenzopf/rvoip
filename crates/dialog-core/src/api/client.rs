@@ -99,11 +99,12 @@
 //! # let (tx_mgr, config) = setup_dependencies().await?;
 //! let client = DialogClient::with_dependencies(tx_mgr, config).await?;
 //! 
-//! // Set up session coordination
-//! let (session_tx, mut session_rx) = mpsc::channel(100);
-//! client.set_session_coordinator(session_tx).await?;
+//! // Session coordination events now flow via GlobalEventCoordinator
+//! // (configured in `with_global_events(...)`); the channel below is
+//! // illustrative only.
+//! let (_session_tx, mut session_rx) = mpsc::channel::<SessionCoordinationEvent>(100);
 //! client.start().await?;
-//! 
+//!
 //! // Handle session events
 //! tokio::spawn(async move {
 //!     while let Some(event) = session_rx.recv().await {
@@ -292,9 +293,9 @@
 //! use rvoip_dialog_core::events::SessionCoordinationEvent;
 //!
 //! # async fn media_integration(client: DialogClient) -> Result<(), Box<dyn std::error::Error>> {
-//! // Set up session coordination for media management
-//! let (session_tx, mut session_rx) = tokio::sync::mpsc::channel(100);
-//! client.set_session_coordinator(session_tx).await?;
+//! // Session coordination events now flow via GlobalEventCoordinator;
+//! // the channel below is illustrative only.
+//! let (_session_tx, mut session_rx) = tokio::sync::mpsc::channel::<SessionCoordinationEvent>(100);
 //!
 //! // Handle media-related events
 //! tokio::spawn(async move {
@@ -543,9 +544,9 @@ use super::{
 /// use tokio::sync::mpsc;
 ///
 /// # async fn session_integration(client: DialogClient) -> Result<(), Box<dyn std::error::Error>> {
-/// // Set up session coordination for media management
-/// let (session_tx, mut session_rx) = mpsc::channel(100);
-/// client.set_session_coordinator(session_tx).await?;
+/// // Session coordination events now flow via GlobalEventCoordinator;
+/// // the channel below is illustrative only.
+/// let (_session_tx, mut session_rx) = mpsc::channel::<SessionCoordinationEvent>(100);
 /// client.start().await?;
 ///
 /// // Handle session events from the client

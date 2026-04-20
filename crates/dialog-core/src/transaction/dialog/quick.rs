@@ -369,6 +369,7 @@ pub fn info_for_dialog(
 ///     "bob-tag",
 ///     "dialog",
 ///     Some("Dialog state information".to_string()),
+///     Some("active".to_string()), // subscription_state (RFC 6665)
 ///     2,
 ///     local_addr,
 ///     None

@@ -45,27 +45,47 @@ impl Drop for ChildGuard {
     }
 }
 
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
+/// Resolve the pre-built example binary path.
+///
+/// Examples must be built before this test runs — invoking `cargo` from
+/// inside a `#[test]` contends with the outer `cargo test`'s target-dir
+/// lock and stalls behind first-time dev-dep compilation (registrar-core
+/// pulls in reqwest/oauth2). CI and local dev should run
+/// `cargo build -p rvoip-session-core --examples` (or
+/// `cargo test --examples`) as a prerequisite.
+fn example_bin(name: &str) -> PathBuf {
+    // Respect CARGO_TARGET_DIR if set; otherwise the workspace default is
+    // `<workspace-root>/target`, two levels up from this crate's manifest.
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("target")
+        });
+    // Mirror the parent cargo's profile. `cargo test` sets PROFILE=debug
+    // for dev builds and PROFILE=release for `--release`.
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    target_dir.join(profile).join("examples").join(name)
 }
 
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args([
-        "run",
-        "--quiet",
-        "-p",
-        "rvoip-session-core",
-        "--example",
+    let bin = example_bin(name);
+    assert!(
+        bin.is_file(),
+        "example binary {} not found at {} — run `cargo build -p rvoip-session-core --examples` first",
         name,
-    ]);
+        bin.display()
+    );
+    let mut cmd = Command::new(&bin);
     for (k, v) in envs {
         cmd.env(k, v);
     }
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
     let child = cmd
         .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn {}: {}", name, e));
+        .unwrap_or_else(|e| panic!("failed to spawn {}: {}", bin.display(), e));
     ChildGuard(child)
 }
 
@@ -101,21 +121,6 @@ fn read_wav(path: &PathBuf) -> Vec<i16> {
 
 #[test]
 fn audio_roundtrip_delivers_peer_tone() {
-    let build_status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-session-core",
-            "--example",
-            "streampeer_audio_alice",
-            "--example",
-            "streampeer_audio_bob",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(build_status.success(), "cargo build failed");
-
     let tmp = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp.path().to_string_lossy().to_string();
 

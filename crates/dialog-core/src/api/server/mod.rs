@@ -67,10 +67,10 @@
 //!     // Create and configure server
 //!     let server = DialogServer::with_dependencies(tx_mgr, config).await?;
 //!     
-//!     // Set up session coordination for call handling
-//!     let (session_tx, mut session_rx) = mpsc::channel(100);
-//!     server.set_session_coordinator(session_tx).await?;
-//!     
+//!     // Session coordination events now flow via GlobalEventCoordinator;
+//!     // the channel below is illustrative only.
+//!     let (_session_tx, mut session_rx) = mpsc::channel::<SessionCoordinationEvent>(100);
+//!
 //!     // Start the server
 //!     server.start().await?;
 //!     println!("✅ SIP server listening on 0.0.0.0:5060");
@@ -114,9 +114,9 @@
 //! # let (tx_mgr, config) = setup_dependencies().await?;
 //! let server = DialogServer::with_dependencies(tx_mgr, config).await?;
 //! 
-//! // Set up call handling
-//! let (session_tx, mut session_rx) = mpsc::channel(100);
-//! server.set_session_coordinator(session_tx).await?;
+//! // Session coordination events now flow via GlobalEventCoordinator;
+//! // the channel below is illustrative only.
+//! let (_session_tx, mut session_rx) = mpsc::channel::<SessionCoordinationEvent>(100);
 //! server.start().await?;
 //! 
 //! // Simple call handler
@@ -153,8 +153,9 @@
 //! use std::collections::HashMap;
 //!
 //! # async fn advanced_server(server: DialogServer) -> Result<(), Box<dyn std::error::Error>> {
-//! let (session_tx, mut session_rx) = mpsc::channel(100);
-//! server.set_session_coordinator(session_tx).await?;
+//! // Session coordination events now flow via GlobalEventCoordinator;
+//! // the channel below is illustrative only.
+//! let (_session_tx, mut session_rx) = mpsc::channel::<SessionCoordinationEvent>(100);
 //! server.start().await?;
 //!
 //! // Advanced call processing with routing logic
@@ -350,8 +351,9 @@
 //! # async fn media_integration() -> Result<(), Box<dyn std::error::Error>> {
 //! # let (tx_mgr, config) = setup_dependencies().await?;
 //! let server = DialogServer::with_dependencies(tx_mgr, config).await?;
-//! let (session_tx, mut session_rx) = mpsc::channel(100);
-//! server.set_session_coordinator(session_tx).await?;
+//! // Session coordination events now flow via GlobalEventCoordinator;
+//! // the channel below is illustrative only.
+//! let (_session_tx, mut session_rx) = mpsc::channel::<SessionCoordinationEvent>(100);
 //! server.start().await?;
 //!
 //! tokio::spawn(async move {
@@ -408,8 +410,10 @@
 //! let call_counter = Arc::new(AtomicU64::new(0));
 //! let max_calls = 1000; // Server capacity limit
 //!
-//! let (session_tx, mut session_rx) = tokio::sync::mpsc::channel(100);
-//! server.set_session_coordinator(session_tx).await?;
+//! // Session coordination events now flow via GlobalEventCoordinator;
+//! // the channel below is illustrative only.
+//! let (_session_tx, mut session_rx) =
+//!     tokio::sync::mpsc::channel::<rvoip_dialog_core::events::SessionCoordinationEvent>(100);
 //! server.start().await?;
 //!
 //! let counter_clone = call_counter.clone();

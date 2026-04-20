@@ -58,10 +58,10 @@
 //!         server_config
 //!     ).await?;
 //!     
-//!     // Set up session coordination (connects to session-core)
-//!     let (session_tx, _session_rx) = tokio::sync::mpsc::channel(100);
-//!     server.set_session_coordinator(session_tx).await?;
-//!     
+//!     // Session coordination events now flow via GlobalEventCoordinator
+//!     // (wired up by `with_global_events(...)` above); no per-server
+//!     // channel setup is required here.
+//!
 //!     // Start processing
 //!     server.start().await?;
 //!     
