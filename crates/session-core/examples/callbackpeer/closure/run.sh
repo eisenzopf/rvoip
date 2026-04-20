@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Closure handler example: accepts friend@, rejects others.
+set -euo pipefail
+cd "$(dirname "$0")/../../.."   # crate root
+
+GREEN='\033[0;32m'; CYAN='\033[0;36m'; RED='\033[0;31m'; NC='\033[0m'
+cleanup() { pkill -P $$ 2>/dev/null || true; wait 2>/dev/null || true; }
+trap cleanup EXIT
+
+echo -e "${GREEN}Building...${NC}"
+cargo build -p rvoip-session-core \
+  --example callbackpeer_closure_server \
+  --example callbackpeer_closure_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+
+echo -e "${GREEN}[SERVER]${NC} Starting"
+cargo run -p rvoip-session-core --example callbackpeer_closure_server --quiet \
+  2>&1 | sed "s/^/$(printf '\033[0;32m')[SERVER]$(printf '\033[0m') /" &
+sleep 2
+
+echo -e "${CYAN}[CLIENT]${NC} Starting"
+cargo run -p rvoip-session-core --example callbackpeer_closure_client --quiet \
+  2>&1 | sed "s/^/$(printf '\033[0;36m')[CLIENT]$(printf '\033[0m') /"
+CLIENT_EXIT=$?
+
+sleep 1
+if [ $CLIENT_EXIT -eq 0 ]; then
+  echo -e "\n${GREEN}=== Example complete ===${NC}"
+else
+  echo -e "\n${RED}=== Client failed (exit $CLIENT_EXIT) ===${NC}"
+  exit 1
+fi

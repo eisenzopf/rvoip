@@ -2,7 +2,7 @@
 //!
 //! Hosts the [`controller::MediaSessionController`] — the owner of per-dialog
 //! RTP sessions and the [`controller::bridge`] primitive used by
-//! session-core-v3 and b2bua-style consumers.
+//! session-core and b2bua-style consumers.
 //!
 //! Also defines the G.711 passthrough codec wrappers used by the codec
 //! registry in `crate::codec`.

@@ -254,7 +254,7 @@ async fn test_register_with_real_server() {
     
     // Now send with proper authentication
     // For this test, we'd need to compute the digest response
-    // (This is done in session-core-v3, so we'll skip the actual auth computation here)
+    // (This is done in session-core, so we'll skip the actual auth computation here)
     
     tracing::info!("✅ REGISTER flow test passed (401 challenge received)");
 }

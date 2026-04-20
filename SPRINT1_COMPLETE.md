@@ -14,7 +14,7 @@
 auth-core (digest authentication): 5/5 passed
 registrar-core (user store): 4/4 passed  
 dialog-core (REGISTER sending): 6/6 passed, 1 ignored
-session-core-v3 (client registration): 4/4 passed
+session-core (client registration): 4/4 passed
 ```
 
 **Total: 18 unit tests - 100% passing**
@@ -59,7 +59,7 @@ coordinator.unregister(&handle).await?;
 **auth-core** - Following SIP industry best practices:
 - Server-side: `DigestAuthenticator`
 - Client-side: `DigestClient`
-- Used by both registrar-core and session-core-v3
+- Used by both registrar-core and session-core
 - No code duplication (200 lines saved)
 
 ### 3. Registrar Server Library ✅
@@ -68,7 +68,7 @@ coordinator.unregister(&handle).await?;
 - User credential storage
 - Digest authentication validation
 - Example server application
-- Standalone library (not tied to session-core-v3)
+- Standalone library (not tied to session-core)
 
 ### 4. Example Applications ✅
 
@@ -79,7 +79,7 @@ cd crates/registrar-core
 cargo run --example registrar_server
 
 # Terminal 2: Run client
-cd crates/session-core-v3  
+cd crates/session-core  
 cargo run --example register_demo
 ```
 
@@ -96,7 +96,7 @@ Server: ✅ User alice registered
 ### Separate, Peer Libraries:
 
 ```
-session-core-v3 (SIP Client)
+session-core (SIP Client)
   ↓ (uses)
   auth-core (shared)
   ↓
@@ -112,7 +112,7 @@ Both communicate over SIP/UDP
 (Not nested, not dependent on each other)
 ```
 
-**No dependency between session-core-v3 and registrar-core** ✅  
+**No dependency between session-core and registrar-core** ✅  
 **Both use shared auth-core** ✅  
 **Follows SIP industry pattern (PJSIP, Sofia-SIP, Asterisk)** ✅
 
@@ -125,7 +125,7 @@ Both communicate over SIP/UDP
 | auth-core | 450 | 1 new, 3 mod | 5 |
 | registrar-core | 470 | 2 new, 4 mod | 4 |
 | dialog-core | 260 | 1 new, 2 mod | 7 |
-| session-core-v3 | 1,100 | 5 new, 10 mod | 4 |
+| session-core | 1,100 | 5 new, 10 mod | 4 |
 | infra-common | 30 | 0 new, 1 mod | 0 |
 | **TOTAL** | **2,310** | **9 new, 20 mod** | **20** |
 
@@ -150,8 +150,8 @@ Both communicate over SIP/UDP
 ## What's NOT Included (By Design)
 
 ### Server-Side REGISTER Handling:
-Making session-core-v3 ACT AS a registrar server was intentionally excluded because:
-- session-core-v3 is for building SIP **clients**
+Making session-core ACT AS a registrar server was intentionally excluded because:
+- session-core is for building SIP **clients**
 - registrar-core is for building SIP **servers**
 - Architectural separation is correct
 - Not needed for Sprint 2 (PolicyPeer, CallbackPeer, EventStreamPeer)
@@ -190,15 +190,15 @@ All three use the working `coordinator.register()` we just built!
 
 ### Documentation:
 - `/SPRINT1_FINAL_STATUS.md` - Overall status
-- `session-core-v3/REGISTRATION_DEFERRED_FEATURES.md` - Future enhancements
-- `session-core-v3/SERVER_SIDE_REGISTRATION_PLAN.md` - Server-side work (if needed)
+- `session-core/REGISTRATION_DEFERRED_FEATURES.md` - Future enhancements
+- `session-core/SERVER_SIDE_REGISTRATION_PLAN.md` - Server-side work (if needed)
 
 ### Examples:
 - `registrar-core/examples/registrar_server.rs` - Working server
-- `session-core-v3/examples/register_demo/` - Working client
+- `session-core/examples/register_demo/` - Working client
 
 ### Tests:
-- All test files in auth-core, registrar-core, dialog-core, session-core-v3
+- All test files in auth-core, registrar-core, dialog-core, session-core
 
 ---
 

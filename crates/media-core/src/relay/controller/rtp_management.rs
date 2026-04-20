@@ -253,7 +253,7 @@ impl MediaSessionController {
     }
     
     /// Set an arbitrary [`AudioSource`] on the running transmitter for this
-    /// dialog. Used by session-core-v3 early-media flows to swap silence
+    /// dialog. Used by session-core early-media flows to swap silence
     /// for a caller-chosen ringback tone / hold announcement after
     /// `start_audio_transmission_with_config` has already established the
     /// transmitter.

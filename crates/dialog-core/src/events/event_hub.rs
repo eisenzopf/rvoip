@@ -319,7 +319,7 @@ impl DialogEventHub {
                         422 => {
                             // RFC 4028 §6 — Session Interval Too Small. The UAS's
                             // Min-SE: header carries the required floor. Pass
-                            // that value up so session-core-v3 can bump
+                            // that value up so session-core can bump
                             // Session-Expires and retry. If Min-SE is missing or
                             // unparseable, fall through to generic CallFailed.
                             //
@@ -419,7 +419,7 @@ impl DialogEventHub {
                             // RFC 3261 §22.2 — digest auth challenge. If the
                             // response carries a WWW-Authenticate (401) or
                             // Proxy-Authenticate (407) header, surface it as
-                            // `AuthRequired` so session-core-v3 can compute a
+                            // `AuthRequired` so session-core can compute a
                             // digest response and retry. Method-agnostic:
                             // this path fires for INVITE, REGISTER, and any
                             // future auth-challenged request. Malformed 401/
@@ -809,7 +809,7 @@ impl DialogEventHub {
 
 /// Extract the `realm="..."` parameter from a `Digest` challenge header value,
 /// for logging / app-level routing. The authoritative parse happens in
-/// session-core-v3 via `auth-core::DigestAuthenticator::parse_challenge`, so
+/// session-core via `auth-core::DigestAuthenticator::parse_challenge`, so
 /// this helper deliberately does the minimum needed to populate the optional
 /// `realm` field on `AuthRequired`. Returns `None` for non-digest schemes.
 fn extract_digest_realm(challenge: &str) -> Option<String> {

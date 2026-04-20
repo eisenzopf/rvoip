@@ -19,7 +19,7 @@
 //! gate flips synchronously and partner entries are removed, with forwarder
 //! tasks aborted asynchronously.
 //!
-//! See `crates/session-core-v3/docs/PRE_B2BUA_ROADMAP.md` Item 2 for the
+//! See `crates/session-core/docs/PRE_B2BUA_ROADMAP.md` Item 2 for the
 //! b2bua use case driving this primitive.
 
 use std::sync::Arc;

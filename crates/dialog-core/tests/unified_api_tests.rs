@@ -451,7 +451,7 @@ async fn test_unified_api_session_coordination() -> Result<(), Box<dyn std::erro
     // APIs were removed in favour of the global `GlobalEventCoordinator` bus.
     // This test now only verifies that the server-mode API starts and stops
     // cleanly under that new model; cross-layer event delivery is covered by
-    // session-core-v3 integration tests.
+    // session-core integration tests.
     let env = UnifiedTestEnvironment::new().await?;
 
     let config = DialogManagerConfig::server(env.local_address)

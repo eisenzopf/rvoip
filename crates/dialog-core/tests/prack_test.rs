@@ -6,7 +6,7 @@
 //! - `prack_for_dialog` — build a PRACK request with a valid `RAck` header
 //!
 //! Full end-to-end auto-PRACK behaviour (dialog lookup + transaction send) is
-//! covered by integration tests in session-core-v3.
+//! covered by integration tests in session-core.
 
 use rvoip_dialog_core::api::config::RelUsage;
 use rvoip_dialog_core::dialog::Dialog;

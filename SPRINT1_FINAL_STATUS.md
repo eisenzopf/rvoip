@@ -25,7 +25,7 @@
    - Real REGISTER sent over UDP
    - Response handling
 
-4. **session-core-v3** (3/3 tests - unit, 4 ignored - integration) ✅
+4. **session-core** (3/3 tests - unit, 4 ignored - integration) ✅
    - Client registration API
    - Digest auth integration
    - State machine
@@ -116,15 +116,15 @@ PolicyPeer, CallbackPeer, and EventStreamPeer are all **client** APIs. They need
 - registrar-core/src/registrar/user_store.rs (~150 lines)
 - registrar-core/examples/registrar_server.rs (~270 lines)
 - dialog-core/tests/register_flow_test.rs (~200 lines)
-- session-core-v3/src/auth/mod.rs (12 lines - uses shared auth-core)
-- session-core-v3/examples/register_demo/* (~250 lines)
-- session-core-v3/tests/registration_test.rs (~230 lines)
+- session-core/src/auth/mod.rs (12 lines - uses shared auth-core)
+- session-core/examples/register_demo/* (~250 lines)
+- session-core/tests/registration_test.rs (~230 lines)
 - Multiple planning docs
 
 ### Partially Complete:
 - infra-common: Event definitions added ✅
 - dialog-core: Event emission added ✅
-- session-core-v3/registration_adapter.rs: Created but has bugs ⚠️
+- session-core/registration_adapter.rs: Created but has bugs ⚠️
 
 **Total functional code:** ~2,300 lines  
 **Total including partial work:** ~2,500 lines

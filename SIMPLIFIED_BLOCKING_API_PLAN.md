@@ -51,7 +51,7 @@ alice.run().await?;  // Simple event loop
 
 ### Phase 1: Simplify SimplePeer Structure (1 hour)
 
-**File: `crates/session-core-v3/src/api/simple.rs`**
+**File: `crates/session-core/src/api/simple.rs`**
 
 1. **Remove complex async callback infrastructure**:
    - Remove `AsyncEventHandler` type
@@ -79,7 +79,7 @@ pub struct SimplePeer {
 
 ### Phase 2: Implement Simple Handler Registration (30 min)
 
-**File: `crates/session-core-v3/src/api/simple.rs`**
+**File: `crates/session-core/src/api/simple.rs`**
 
 ```rust
 impl SimplePeer {
@@ -108,7 +108,7 @@ impl SimplePeer {
 
 ### Phase 3: Implement Simple Event Loop (30 min)
 
-**File: `crates/session-core-v3/src/api/simple.rs`**
+**File: `crates/session-core/src/api/simple.rs`**
 
 ```rust
 impl SimplePeer {
@@ -141,7 +141,7 @@ impl SimplePeer {
 
 ### Phase 4: Add Audio Helper Methods (1 hour)
 
-**File: `crates/session-core-v3/src/api/simple.rs`**
+**File: `crates/session-core/src/api/simple.rs`**
 
 ```rust
 impl SimplePeer {
@@ -202,7 +202,7 @@ impl SimplePeer {
 
 ### Phase 5: Rewrite Examples (1 hour)
 
-**File: `crates/session-core-v3/examples/blind_transfer/peer1_caller.rs`** (~40 lines)
+**File: `crates/session-core/examples/blind_transfer/peer1_caller.rs`** (~40 lines)
 
 ```rust
 #[tokio::main]
@@ -236,7 +236,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-**File: `crates/session-core-v3/examples/blind_transfer/peer2_transferor.rs`** (~35 lines)
+**File: `crates/session-core/examples/blind_transfer/peer2_transferor.rs`** (~35 lines)
 
 ```rust
 #[tokio::main]

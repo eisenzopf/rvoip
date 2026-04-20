@@ -30,7 +30,7 @@ test result: ok. 4 passed; 0 failed; 0 ignored
 dialog-core (register_flow_test):
 test result: ok. 6 passed; 0 failed; 1 ignored
 
-session-core-v3 (auth tests):
+session-core (auth tests):
 test result: ok. 3 passed; 0 failed; 0 ignored
 ```
 
@@ -56,7 +56,7 @@ Test users added: alice, bob, charlie
 
 ### 2. Run the Registration Client
 ```bash
-cd crates/session-core-v3
+cd crates/session-core
 cargo run --example register_demo
 ```
 
@@ -70,7 +70,7 @@ Registering with sip:127.0.0.1:5060
 
 ### 3. Use in Your Code
 ```rust
-use rvoip_session_core_v3::{UnifiedCoordinator, api::unified::Config};
+use rvoip_session_core::{UnifiedCoordinator, api::unified::Config};
 
 let coordinator = UnifiedCoordinator::new(Config::default()).await?;
 
@@ -126,7 +126,7 @@ coordinator.unregister(&handle).await?;
 - Non-dialog transaction handling
 - 7 tests (6 passing, 1 for integration)
 
-**4. session-core-v3** - Client Registration API
+**4. session-core** - Client Registration API
 - Full registration state machine
 - `register()`, `unregister()`, `refresh()` API
 - Digest authentication integration
@@ -233,23 +233,23 @@ The three high-level API implementations can now be built:
 ## Files to Review
 
 ### Implementation Plans
-- `crates/session-core-v3/SPRINT1_IMPLEMENTATION_PLAN.md` - Original plan
-- `crates/session-core-v3/REGISTRATION_COMPLETION_PLAN.md` - Completion work
-- `crates/session-core-v3/REGISTRATION_COMPLETE.md` - Detailed status
-- `crates/session-core-v3/FINAL_STATUS.md` - Overall summary
-- `crates/session-core-v3/SPRINT1_TRULY_COMPLETE.md` - Test results
+- `crates/session-core/SPRINT1_IMPLEMENTATION_PLAN.md` - Original plan
+- `crates/session-core/REGISTRATION_COMPLETION_PLAN.md` - Completion work
+- `crates/session-core/REGISTRATION_COMPLETE.md` - Detailed status
+- `crates/session-core/FINAL_STATUS.md` - Overall summary
+- `crates/session-core/SPRINT1_TRULY_COMPLETE.md` - Test results
 
 ### Example Code
 - `crates/registrar-core/examples/registrar_server.rs` - Server
-- `crates/session-core-v3/examples/register_demo/main.rs` - Client
-- `crates/session-core-v3/examples/register_demo/README.md` - Guide
+- `crates/session-core/examples/register_demo/main.rs` - Client
+- `crates/session-core/examples/register_demo/README.md` - Guide
 
 ### Test Code
 - `crates/auth-core/src/sip_digest.rs` - Unit tests (5)
 - `crates/registrar-core/src/registrar/user_store.rs` - Unit tests (4)
 - `crates/dialog-core/tests/register_flow_test.rs` - Integration tests (7)
-- `crates/session-core-v3/tests/registration_test.rs` - Integration tests (7)
-- `crates/session-core-v3/src/auth/digest.rs` - Unit tests (3)
+- `crates/session-core/tests/registration_test.rs` - Integration tests (7)
+- `crates/session-core/src/auth/digest.rs` - Unit tests (3)
 
 ---
 
@@ -260,7 +260,7 @@ The three high-level API implementations can now be built:
 | SIP Digest Auth | 10-14h | 6h | ✅ Ahead |
 | Registrar Server | 8-12h | 4h | ✅ Ahead |
 | dialog-core Support | 4-6h | 1.5h | ✅ Ahead |
-| session-core-v3 Integration | 12-16h | 8h | ✅ Ahead |
+| session-core Integration | 12-16h | 8h | ✅ Ahead |
 | Testing & Examples | 4-6h | 1.5h | ✅ Ahead |
 | **TOTAL** | **48-58h** | **21h** | **✅ 64% Faster** |
 

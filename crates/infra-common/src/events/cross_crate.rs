@@ -358,7 +358,7 @@ pub enum DialogToSessionEvent {
     /// 401 Unauthorized or 407 Proxy Authentication Required that carries a
     /// parseable challenge header. Method-agnostic: INVITE, REGISTER, and
     /// future auth-challenged requests all route through this variant. If
-    /// the caller has credentials on file, session-core-v3 computes the
+    /// the caller has credentials on file, session-core computes the
     /// digest response and retries; otherwise this converts to a final
     /// `CallFailed` / `RegistrationFailed` at the app level.
     AuthRequired {
@@ -398,7 +398,7 @@ pub enum DialogToSessionEvent {
     /// floor. The UAC should resend the INVITE with a `Session-Expires`
     /// bumped to at least `min_se_secs`.
     ///
-    /// session-core-v3 handles this transparently with a two-retry cap
+    /// session-core handles this transparently with a two-retry cap
     /// mirroring the 423 REGISTER-retry pattern. If the response is
     /// missing a parseable `Min-SE` header the event falls through to
     /// generic `CallFailed`.
