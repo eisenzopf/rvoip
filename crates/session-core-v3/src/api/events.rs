@@ -51,8 +51,12 @@ impl CallHandle {
     /// 
     /// # Example
     /// ```rust,no_run
+    /// # use rvoip_session_core_v3::api::events::CallHandle;
+    /// # async fn example(mut call_handle: CallHandle) -> rvoip_session_core_v3::Result<()> {
     /// let samples = vec![100, 200, 300]; // Simple audio data
     /// call_handle.send_audio(samples).await?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn send_audio(&mut self, samples: Vec<i16>) -> Result<()> {
         self.audio_tx.send(samples).await
@@ -68,10 +72,13 @@ impl CallHandle {
     /// 
     /// # Example
     /// ```rust,no_run
+    /// # use rvoip_session_core_v3::api::events::CallHandle;
+    /// # async fn example(mut call_handle: CallHandle) {
     /// if let Some(samples) = call_handle.recv_audio().await {
     ///     // Play or process the received audio
     ///     println!("Received {} audio samples", samples.len());
     /// }
+    /// # }
     /// ```
     pub async fn recv_audio(&mut self) -> Option<Vec<i16>> {
         self.audio_rx.recv().await

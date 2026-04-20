@@ -20,7 +20,7 @@ use crate::session_registry::SessionRegistry;
 use crate::types::DialogId;
 use tracing::{debug, info, error, warn};
 
-/// Handler for processing cross-crate events in session-core-v2
+/// Handler for processing cross-crate events in session-core-v3
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct SessionCrossCrateEventHandler {

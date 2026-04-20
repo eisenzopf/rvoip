@@ -215,7 +215,7 @@ impl<H: CallHandler> CallbackPeer<H> {
     ///
     /// ```rust,no_run
     /// # async fn example() -> rvoip_session_core_v3::Result<()> {
-    /// use rvoip_session_core_v3::{CallbackPeer, Config, Credentials};
+    /// use rvoip_session_core_v3::{CallbackPeer, Config, types::Credentials};
     /// use rvoip_session_core_v3::api::handlers::AutoAnswerHandler;
     ///
     /// let config = Config {

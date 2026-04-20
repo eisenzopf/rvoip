@@ -1,6 +1,6 @@
-//! Core types for session-core-v2
+//! Core types for session-core-v3
 //!
-//! This module defines the fundamental types used throughout the session-core-v2 crate.
+//! This module defines the fundamental types used throughout the session-core-v3 crate.
 //! It includes identifiers, events, and common data structures.
 
 use serde::{Deserialize, Serialize};

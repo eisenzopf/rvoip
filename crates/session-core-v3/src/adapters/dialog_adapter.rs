@@ -1,4 +1,4 @@
-//! Simplified Dialog Adapter for session-core-v2
+//! Simplified Dialog Adapter for session-core-v3
 //!
 //! Thin translation layer between dialog-core and state machine.
 //! Focuses only on essential dialog operations and events.

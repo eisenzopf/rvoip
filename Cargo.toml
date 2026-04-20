@@ -8,15 +8,14 @@ members = [
     "crates/dialog-core",
     "crates/rtp-core",
     "crates/media-core",
-    "crates/session-core",
-    "crates/session-core-v2",
+    # session-core (v1) and session-core-v2 have been archived to
+    # session-core_old / session-core-v2_dead and are no longer workspace
+    # members. session-core-v3 is the current session layer. Downstream
+    # crates that still depend on v1 (audio-core, call-engine, client-core,
+    # sip-client, rvoip) are temporarily out-of-workspace until they're
+    # migrated to v3.
     "crates/session-core-v3",
-    "crates/call-engine",
-    "crates/client-core",
     "crates/codec-core",
-    "crates/audio-core",
-    "crates/sip-client",
-    "crates/rvoip",
     "crates/infra-common",
     "crates/registrar-core", "crates/users-core",
 ]
@@ -30,13 +29,8 @@ default-members = [
     "crates/dialog-core",
     "crates/rtp-core",
     "crates/media-core",
-    "crates/session-core",
-    "crates/call-engine",
-    "crates/client-core",
+    "crates/session-core-v3",
     "crates/codec-core",
-    "crates/audio-core",
-    "crates/sip-client",
-    "crates/rvoip",
     "crates/infra-common",
     "crates/registrar-core",
 ]

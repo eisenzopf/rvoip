@@ -1,4 +1,4 @@
-//! Simplified Media Adapter for session-core-v2
+//! Simplified Media Adapter for session-core-v3
 //!
 //! Thin translation layer between media-core and state machine.
 //! Focuses only on essential media operations and events.
