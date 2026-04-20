@@ -17,11 +17,16 @@ track. Synthesised from:
   observable end-to-end.
 - ✅ Audio roundtrip regression test locks in the full RTP+PCMU media
   path.
-- ⬜ Two gaps block b2bua cleanly: per-call event streams and a media
-  bridge primitive.
-- ⬜ Several small RFC items are cheap and worth closing now.
+- ✅ Per-call event streams and media-core bridge primitive landed —
+  both b2bua blockers cleared.
+- ✅ RFC-polish items landed — `INFO` helper, early-media `AudioSource`
+  wiring (with automatic switchback to `PassThrough` on
+  `EarlyMedia → Active`), and 422 Session Interval Too Small with both
+  observability and auto-retry (two-retry cap).
+- 🟢 **b2bua crate (`crates/b2bua`) is unblocked** — `UnifiedCoordinator`
+  now exposes every primitive a b2bua wrapper needs.
 - ⬜ Carrier-facing transport (TLS/TCP, Contact rewrite, SRV) is a
-  separate multi-day track.
+  separate multi-day track, still unchanged.
 
 ---
 
@@ -64,20 +69,23 @@ methods; that's per-item and not on the critical path for b2bua.
 
 ## Recommended sequencing
 
-| # | Item | Est. | Blocks b2bua? | Blocks clients? |
-|---|------|------|---------------|-----------------|
-| 1 | Event-stream API with per-call filtering | 1–2 d | **Yes** | Makes IVR / multi-call better |
-| 2 | Media-core bridge primitive (RTP relay) | 1–2 d | **Yes** | No |
-| 3 | Early-media `AudioSource` wiring | ~½ d | No | IVR / voicemail ringback |
-| 4 | Outbound `INFO` helper | ~½ d | No | Fax / DTMF interop |
-| 5 | UAC-side 422 Session Interval Too Small retry | ~½ d | No | RFC 4028 completeness |
-| 6 | **Start b2bua crate** on top of (1)+(2) | — | — | — |
-| P | Carrier track in parallel: TLS → Contact rewrite → RFC 3263 → SIP Outbound → STUN | weeks | No | **Yes, for cloud carriers** |
+| # | Item | Est. | Blocks b2bua? | Blocks clients? | Status |
+|---|------|------|---------------|-----------------|--------|
+| 1 | Event-stream API with per-call filtering | 1–2 d | **Yes** | Makes IVR / multi-call better | ✅ Landed — `UnifiedCoordinator::events`, `events_for_session` |
+| 2 | Media-core bridge primitive (RTP relay) | 1–2 d | **Yes** | No | ✅ Landed — `UnifiedCoordinator::bridge` (+ dead `MediaRelay` / `PacketForwarder` cleanup) |
+| 3 | Early-media `AudioSource` wiring | ~½ d | No | IVR / voicemail ringback | ✅ Landed — `IncomingCall::send_early_media_with_source`, `UnifiedCoordinator::set_audio_source` |
+| 4 | Outbound `INFO` helper | ~½ d | No | Fax / DTMF interop | ✅ Landed — `SessionHandle::send_info(content_type, body)` |
+| 5 | UAC-side 422 Session Interval Too Small retry | ~½ d | No | RFC 4028 completeness | ✅ Landed — observability + auto-retry with 2-retry cap (`tests/session_422_retry.rs`) |
+| 6 | **Start b2bua crate** on top of (1)+(2) | — | — | — | 🟢 Unblocked — ready to start `crates/b2bua` |
+| P | Carrier track in parallel: TLS → Contact rewrite → RFC 3263 → SIP Outbound → STUN | weeks | No | **Yes, for cloud carriers** | ⬜ Unchanged |
 
-Items 1-5 land in `session-core-v3` / `media-core`. The b2bua crate (6) is
-the next repo-level milestone and consumes them. Carrier track (P) runs
-alongside and doesn't block b2bua — LAN / Asterisk / FreeSWITCH setups
-work today.
+Items 1–5 landed in `session-core-v3`, `media-core`, `dialog-core`, and
+`infra-common`. The b2bua crate (6) is now the next repo-level
+milestone; its 3-peer shape is already exercised by
+`tests/bridge_roundtrip_integration.rs` with
+`examples/streampeer/bridge/bridge_peer.rs` as the skeleton. Carrier
+track (P) runs alongside and doesn't block b2bua — LAN / Asterisk /
+FreeSWITCH setups work today.
 
 ---
 
@@ -154,6 +162,27 @@ impl UnifiedCoordinator {
 - Extend `TELCO_USE_CASE_ANALYSIS.md` with a worked B2BUA sketch using
   the new API.
 
+### Landed
+
+- `UnifiedCoordinator::events() -> EventReceiver` (unfiltered) and
+  `UnifiedCoordinator::events_for_session(&SessionId) -> EventReceiver`
+  (pre-filtered by `call_id`), both in
+  `crates/session-core-v3/src/api/unified.rs`.
+- DTMF / incoming-call / transfer streams are accessible via existing
+  `EventReceiver::next_dtmf` / `next_incoming` / `next_transfer`
+  helpers in `crates/session-core-v3/src/api/stream_peer.rs`. The
+  roadmap's four-method sketch collapsed to two methods on
+  `UnifiedCoordinator` + reuse of the existing filter helpers — no
+  new stream types were needed.
+- `EventReceiver` is publicly re-exported from the crate root so any
+  peer type (or b2bua) can consume it directly.
+- Tests: `crates/session-core-v3/tests/event_stream_filtering_tests.rs`
+  — per-session isolation, unfiltered-sees-all, DTMF helper end-to-end.
+- Used in production-shape by
+  `examples/streampeer/bridge/bridge_peer.rs`, which uses
+  `events_for_session` to observe the outbound leg's `CallAnswered`
+  before accepting the inbound leg.
+
 ---
 
 ## 2. Media-core bridge primitive
@@ -197,6 +226,41 @@ where `BridgeHandle` teardown unwires the relay.
   calls B2BUA-peer, B2BUA-peer calls Carol, bridge the two legs. Assert
   Alice's tone shows up at Carol's WAV and vice versa.
 
+### Landed
+
+- `UnifiedCoordinator::bridge(&SessionId, &SessionId) -> Result<BridgeHandle, BridgeError>`
+  in `crates/session-core-v3/src/api/unified.rs`.
+- Underlying primitive: `MediaSessionController::bridge_sessions` at
+  `crates/media-core/src/relay/controller/bridge.rs` — transparent
+  packet-level relay (no transcoding), `DashMap<DialogId, DialogId>`
+  partner-map tracking, `BridgeHandle::drop()` flips an atomic cancel
+  gate synchronously and aborts forwarder tasks asynchronously.
+- Preconditions enforced at call time:
+  - Both sessions must have a remote RTP address →
+    `BridgeError::SessionNotActive`.
+  - Negotiated payload types must match →
+    `BridgeError::CodecMismatch { a_pt, b_pt }`.
+  - Neither session may already be bridged →
+    `BridgeError::AlreadyBridged`.
+- DTMF (RFC 2833) rides the relay transparently. RTCP is not bridged —
+  each leg keeps generating its own reports (RFC 3550 §7.2).
+- **Dead-code cleanup bundled**: deleted
+  `crates/media-core/src/relay/packet_forwarder.rs`,
+  `crates/media-core/src/relay/controller/relay.rs`, and
+  `crates/media-core/src/integration/session_bridge.rs` (all were
+  unfinished skeletons not wired into session-core-v3). Trimmed
+  `MediaRelay`, `RelaySessionConfig`, `RelayEvent`, `RelayStats`,
+  `create_relay_config`, `generate_session_id`, and the
+  `relay: Option<Arc<MediaRelay>>` field on `MediaSessionController`.
+  G.711 passthrough codecs preserved at their live locations.
+- Tests: 6 unit tests in `bridge.rs` (preconditions, handle lifecycle,
+  partner-map bookkeeping, `stop_media` cleanup) — all in-process,
+  millisecond-fast. End-to-end 3-peer SIP test at
+  `crates/session-core-v3/tests/bridge_roundtrip_integration.rs` with
+  new examples under `examples/streampeer/bridge/` (`alice.rs`,
+  `carol.rs`, `bridge_peer.rs`, `run.sh`). Goertzel-asserts tones cross
+  the relay in both directions; full run ≈42 s.
+
 ---
 
 ## 3. Early-media `AudioSource` wiring
@@ -235,6 +299,28 @@ impl IncomingCall {
   existing `audio_roundtrip_integration` pattern that Alice hears the
   tone *before* 200 OK.
 
+### Landed (API level)
+
+- `IncomingCall::send_early_media_with_source(sdp, source)` in
+  `crates/session-core-v3/src/api/incoming.rs` — wraps
+  `send_early_media` + `set_audio_source`.
+- `UnifiedCoordinator::set_audio_source(session_id, source)` delegates
+  through `MediaAdapter::set_audio_source` to
+  `MediaSessionController::set_audio_source` (new — wraps the existing
+  `AudioTransmitter::set_audio_source`).
+- `AudioSource` re-exported from the crate root. **Followed the
+  existing enum rather than trait-ifying it**: the enum already covers
+  Tone / CustomSamples / PassThrough; promoting to a trait would be a
+  bigger refactor and isn't needed to unblock b2bua.
+- **Follow-up deferred**: auto-switchback to `PassThrough` on the
+  `EarlyMedia → Active` transition. Today the app must explicitly call
+  `set_audio_source(PassThrough)` after `accept_call` if it wants
+  bidirectional audio to replace the tone. Automating requires either
+  a new state-table action (`SwitchToPassThroughOnActive`) or changing
+  `start_audio_transmission_with_config` so it replaces an existing
+  transmitter's source instead of no-oping on re-entry.
+  See *Follow-ups carved off* below.
+
 ---
 
 ## 4. Outbound `INFO` helper
@@ -268,6 +354,23 @@ Wrap the existing `DialogManager::send_request(Method::Info, ...)`. Tiny.
 - Unit test that asserts the request built carries the correct
   `Content-Type` header + body. Optional: wire into the DTMF example.
 
+### Landed
+
+- `SessionHandle::send_info(content_type: &str, body: &[u8])` in
+  `crates/session-core-v3/src/api/handle.rs`.
+- `UnifiedCoordinator::send_info(session_id, content_type, body)` in
+  `crates/session-core-v3/src/api/unified.rs`.
+- `DialogAdapter::send_info` plumbs the content-type all the way down
+  through a new dialog-core entry point
+  `DialogManager::send_info_with_content_type(dialog_id, content_type, body)`
+  (mirrors the `send_bye_with_reason` pattern). The generic
+  `send_request_in_dialog` path always stamped INFO bodies as
+  `application/info`; the new path lets callers pick
+  `application/dtmf-relay` (SIP-INFO DTMF), `application/sipfrag` (fax
+  flow control), `application/media_control+xml` (video FIR/PLI), etc.
+- Verification today is type-level and by downstream build-through;
+  wire-level tests land with the first real DTMF/fax interop consumer.
+
 ---
 
 ## 5. UAC-side 422 retry (RFC 4028 §6)
@@ -296,34 +399,88 @@ Two-retry cap matching the 423 path.
 - `tests/session_422_retry.rs` — in-process raw-UDP mock UAS returns
   422 + Min-SE, asserts retry carries the bumped value.
 
+### Landed (observability only)
+
+What shipped:
+
+- New cross-crate event
+  `DialogToSessionEvent::SessionIntervalTooSmall { session_id, min_se_secs }`
+  in `crates/infra-common/src/events/cross_crate.rs`.
+- dialog-core emits it from the 422 arm of the UAC response translator
+  at `crates/dialog-core/src/events/event_hub.rs`; parses `Min-SE:`
+  from the response. Falls through to generic `CallFailed` when the
+  header is missing or unparseable.
+- session-core-v3 dispatches to `handle_session_interval_too_small` in
+  `src/adapters/session_event_handler.rs` (checked **before**
+  `CallFailed` to avoid substring collisions). The handler logs Min-SE
+  at WARN, drives the existing `Dialog4xxFailure(422)` transition, and
+  publishes
+  `Event::CallFailed { status_code: 422, reason: "Session Interval Too Small (required Min-SE: Xs)" }`
+  so apps can read the required floor out of the reason string.
+
+What's deferred (see *Follow-ups carved off* below):
+
+- Auto-retry with a bumped `Session-Expires`, two-retry cap, mirroring
+  the 423 REGISTER pattern at `dialog_adapter.rs:722-783`.
+- Blocker: dialog-core's `inject_session_timer_headers` reads
+  Session-Expires / Min-SE from the global `DialogManagerConfig`, not
+  per-session. A per-session override requires a new dialog-core entry
+  point `DialogManager::send_invite_with_session_timer_override(dialog_id, sdp, secs, min_se)`
+  parallel to `send_bye_with_reason`.
+- Estimated 4–6 focused hours including an integration test modeled
+  on `crates/session-core-v3/tests/register_423_retry.rs`.
+
 ---
 
 ## 6. Start the b2bua crate
 
-Only after (1) + (2) land. A sketch of the shape:
+Both blockers (Items 1 + 2) have landed — b2bua is unblocked. A working
+skeleton already exists at
+`crates/session-core-v3/examples/streampeer/bridge/bridge_peer.rs`
+(~100 LOC). The production shape, lifted into `crates/b2bua`, looks
+like:
 
 ```rust
-pub struct B2bua { inner: UnifiedCoordinator, links: DashMap<SessionId, SessionId> }
+pub struct B2bua { inner: Arc<UnifiedCoordinator>, links: DashMap<SessionId, SessionId> }
 
 impl B2bua {
     pub async fn bridge_incoming(
-        &self, inbound: IncomingCall, outbound_uri: &str,
+        &self, inbound_id: SessionId, outbound_uri: &str,
     ) -> Result<BridgedCall> {
-        let outbound = self.inner.call(outbound_uri).await?;
-        let outbound_sdp = self.inner.wait_for_sdp(&outbound).await?;
-        let inbound_id = inbound.accept_with_sdp(outbound_sdp).await?;
-        self.inner.bridge(&inbound_id, &outbound).await?; // from Item 2
-        self.links.insert(inbound_id.clone(), outbound.clone());
-        self.links.insert(outbound.clone(), inbound_id.clone());
-        // Use Item 1 per-session event streams to tear down partner on hangup.
-        self.watch_pair(inbound_id, outbound);
+        let outbound_id = self.inner.make_call(self.local_uri(), outbound_uri).await?;
+
+        // Item 1: watch the outbound leg until CallAnswered.
+        let mut outbound_events = self.inner.events_for_session(&outbound_id).await?;
+        loop {
+            match outbound_events.next().await {
+                Some(Event::CallAnswered { .. }) => break,
+                Some(Event::CallEnded { .. }) | Some(Event::CallFailed { .. }) => {
+                    return Err("outbound leg terminated before answering".into());
+                }
+                Some(_) => continue,
+                None => return Err("event stream closed".into()),
+            }
+        }
+        self.inner.accept_call(&inbound_id).await?;
+
+        // Item 2: transparent RTP relay between the two legs.
+        let handle = self.inner.bridge(&inbound_id, &outbound_id).await?;
+
+        self.links.insert(inbound_id.clone(), outbound_id.clone());
+        self.links.insert(outbound_id.clone(), inbound_id.clone());
+
+        // Tear the partner down when either leg ends — uses per-call
+        // event streams from Item 1.
+        self.watch_pair(inbound_id, outbound_id, handle);
         Ok(BridgedCall { /* ... */ })
     }
 }
 ```
 
-This is a separate crate (`crates/b2bua`) — it doesn't modify
-session-core-v3.
+The `bridge_peer` example exercises this exact sequence end-to-end in
+`tests/bridge_roundtrip_integration.rs`, so lifting it into the b2bua
+crate is mechanical. This is a separate crate (`crates/b2bua`) — it
+doesn't modify session-core-v3.
 
 ---
 
@@ -364,33 +521,78 @@ apps.
 
 ---
 
-## Open questions / decisions
+## Open questions / decisions (resolved)
 
 1. **Event-stream API (Item 1) — extend `StreamPeer` or introduce
-   `EventStreamPeer`?** `TELCO_USE_CASE_ANALYSIS.md` assumes two
-   distinct types. Extending avoids API proliferation; a separate type
-   is cleaner for users writing reactive-only code. Recommendation:
-   extend `StreamPeer` with the new stream methods, since `StreamPeer`
-   already implies async/stream semantics.
+   `EventStreamPeer`?** — **Resolved: did neither.** Landed on
+   `UnifiedCoordinator` only, per the *Wrapper discipline* principle
+   at the top of this doc. `EventReceiver` is publicly re-exported
+   from the crate root, so any peer type can wrap it with thin shims
+   later if a specific consumer asks for them.
 
 2. **Media bridge mode (Item 2) — transparent RTP relay vs transcoded
-   bridge?** Start transparent; transcoded bridge is a future upgrade
-   when codec-mismatch use cases arrive. Document the limitation.
+   bridge?** — **Resolved: transparent relay only.** Codec-mismatch
+   returns `BridgeError::CodecMismatch { a_pt, b_pt }` rather than
+   silently transcoding. Transcoded bridge remains a future upgrade
+   for when codec-mismatch use cases actually arrive.
 
-3. **`UnifiedCoordinator::bridge` return type** — should it be a
-   `BridgeHandle` whose Drop unwires the relay, or a fire-and-forget
-   tied to session lifetimes? `BridgeHandle` matches the rest of the
-   crate's RAII idiom. Pick that.
+3. **`UnifiedCoordinator::bridge` return type.** — **Resolved:
+   `BridgeHandle` with RAII `Drop`.** `Drop` synchronously flips an
+   atomic cancel gate (so partner-map entries disappear immediately)
+   and spawns an async cleanup that aborts the forwarder tasks.
 
-4. **Should Item 5 (422 retry) be bundled with Item 4 (INFO helper) as
-   "small RFC wins"?** Yes — same PR.
+4. **Bundle Item 5 (422 retry) with Item 4 (INFO helper)?** —
+   **Eventually yes.** Both landed in the same session; observability for
+   422 shipped first, then the auto-retry half was completed as a
+   separate hardening pass that added a per-session session-timer
+   override in dialog-core.
+
+---
+
+## Follow-ups — all landed
+
+Both deferred follow-ups have shipped:
+
+- **Item 3 follow-up: auto-switchback to `PassThrough` on
+  EarlyMedia → Active.** ✅ Landed. New state-machine action
+  `SwitchToPassThroughOnActive` wired into the three transitions that
+  lead into `Active` (UAS `Answering → DialogACK → Active`, UAC
+  `Initiating → Dialog200OK → Active`, UAC `Ringing → Dialog200OK →
+  Active`). Idempotent for calls that never set a source — the
+  transmitter is already in `PassThrough`. Swallows the "transmitter
+  not active" error so pre-negotiated-SDP flows (e.g.
+  `accept_call_with_sdp`) are unaffected. State-table wiring verified
+  by `tests/early_media_tests.rs::dialog_ack_auto_switches_transmitter_to_passthrough`
+  and its UAC counterpart.
+
+- **Item 5 follow-up: auto-retry on 422 with bumped `Session-Expires`.**
+  ✅ Landed. New dialog-core entry point
+  `UnifiedDialogApi::send_invite_with_session_timer_override(dialog_id, sdp, session_secs, min_se)`
+  bypasses `DialogManagerConfig`'s global timer values and injects the
+  per-call overrides (mirrors `send_bye_with_reason`). Session-core-v3
+  routes 422 Min-SE through a new `SessionIntervalTooSmall` state
+  event and a `SendINVITEWithBumpedSessionExpires` action with a
+  2-retry cap. Malformed 422s (no Min-SE, or unparseable) fall through
+  to the existing terminal `CallFailed(422, "… Min-SE: Xs")` path —
+  backwards-compatible with apps that observe the reason string.
+  Integration test: `tests/session_422_retry.rs` covers both the
+  success-after-retry path and the 2-retry cap exhaustion.
 
 ---
 
 ## TL;DR
 
-Five small items (1–5, roughly a week of focused work combined) close
-the API+RFC gap to start the b2bua crate cleanly. Carrier track (P1–P7)
-is multi-week and runs in parallel; LAN / Asterisk / FreeSWITCH
-deployments work today without any of it. TLS (P1) is the single
-highest-leverage carrier item — it unblocks every major cloud provider.
+The five-item pre-b2bua gate and both carved-off follow-ups are cleared.
+`UnifiedCoordinator` exposes per-call event streams, a transparent RTP
+bridge primitive, early-media audio-source injection with automatic
+switchback to `PassThrough` on answer, an outbound INFO helper with
+custom content types, and full RFC 4028 §6 422 handling (observability
++ auto-retry with 2-retry cap). The `crates/b2bua` crate is unblocked —
+a working skeleton already lives at
+`examples/streampeer/bridge/bridge_peer.rs` and is CI-exercised by
+`tests/bridge_roundtrip_integration.rs`.
+
+Carrier track (P1–P7) is multi-week and runs in parallel; LAN /
+Asterisk / FreeSWITCH deployments work today without any of it. TLS
+(P1) is the single highest-leverage carrier item — it unblocks every
+major cloud provider.

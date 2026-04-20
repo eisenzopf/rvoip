@@ -954,6 +954,25 @@ impl UnifiedDialogManager {
             .await
             .map_err(ApiError::from)
     }
+
+    /// RFC 4028 §6 — resend an INVITE with a per-call `Session-Expires` /
+    /// `Min-SE` override after a 422 Session Interval Too Small. The timer
+    /// headers on the retry bypass [`DialogManagerConfig`]'s global values
+    /// and use the supplied overrides instead — typically derived from the
+    /// UAS's Min-SE header on the 422 response.
+    pub async fn send_invite_with_session_timer_override(
+        &self,
+        dialog_id: &DialogId,
+        sdp: Option<String>,
+        session_secs: u32,
+        min_se: u32,
+    ) -> ApiResult<TransactionKey> {
+        let body = sdp.map(bytes::Bytes::from);
+        self.core
+            .send_invite_with_session_timer_override(dialog_id, body, session_secs, min_se)
+            .await
+            .map_err(ApiError::from)
+    }
     
     /// Send CANCEL request to cancel a pending INVITE
     ///

@@ -322,14 +322,47 @@ impl DialogEventHub {
                             // that value up so session-core-v3 can bump
                             // Session-Expires and retry. If Min-SE is missing or
                             // unparseable, fall through to generic CallFailed.
+                            //
+                            // Try the typed `TypedHeader::MinSE(MinSE)` first
+                            // (produced by sip-core's parser for "Min-SE: <n>"
+                            // lines), then fall back to untyped lookups for
+                            // `HeaderName::MinSE` and `HeaderName::Other("Min-SE")`
+                            // so we handle peers whose headers were stored as
+                            // opaque types too.
                             use rvoip_sip_core::types::headers::HeaderAccess;
                             let min_se = response
-                                .raw_header_value(
-                                    &rvoip_sip_core::types::header::HeaderName::Other(
-                                        "Min-SE".to_string(),
-                                    ),
-                                )
-                                .and_then(|s| s.trim().parse::<u32>().ok());
+                                .headers
+                                .iter()
+                                .find_map(|h| match h {
+                                    rvoip_sip_core::TypedHeader::MinSE(m) => Some(m.delta_seconds),
+                                    _ => None,
+                                })
+                                .or_else(|| {
+                                    response
+                                        .raw_header_value(
+                                            &rvoip_sip_core::types::header::HeaderName::MinSE,
+                                        )
+                                        .and_then(|s| {
+                                            s.trim()
+                                                .split(|c: char| !c.is_ascii_digit())
+                                                .next()
+                                                .and_then(|n| n.parse::<u32>().ok())
+                                        })
+                                })
+                                .or_else(|| {
+                                    response
+                                        .raw_header_value(
+                                            &rvoip_sip_core::types::header::HeaderName::Other(
+                                                "Min-SE".to_string(),
+                                            ),
+                                        )
+                                        .and_then(|s| {
+                                            s.trim()
+                                                .split(|c: char| !c.is_ascii_digit())
+                                                .next()
+                                                .and_then(|n| n.parse::<u32>().ok())
+                                        })
+                                });
                             if let Some(min_se_secs) = min_se {
                                 Some(RvoipCrossCrateEvent::DialogToSession(
                                     DialogToSessionEvent::SessionIntervalTooSmall {

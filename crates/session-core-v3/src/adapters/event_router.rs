@@ -354,7 +354,9 @@ impl EventRouter {
             Action::CleanupDialog |
             Action::CleanupMedia |
             Action::PrepareEarlyMediaSDP |
+            Action::SwitchToPassThroughOnActive |
             Action::SendINVITEWithAuth |
+            Action::SendINVITEWithBumpedSessionExpires |
             Action::SendReferAccepted => {
                 tracing::debug!("Advanced action {:?} for session {} - handled by state machine", action, session_id);
             }

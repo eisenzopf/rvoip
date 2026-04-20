@@ -141,6 +141,13 @@ pub enum EventType {
     /// INVITE (`Initiating`) and REGISTER (`Registering`) retries — the
     /// current state disambiguates which request to re-send.
     AuthRequired { status_code: u16, challenge: String },
+    /// RFC 4028 §6 — UAS replied 422 Session Interval Too Small. `min_se_secs`
+    /// is the peer's required floor, parsed from the `Min-SE` response header.
+    /// The state machine caches it onto the session and fires
+    /// `SendINVITEWithBumpedSessionExpires` to retry with the bumped values;
+    /// the 2-retry cap lives in the action, and on exhaustion the session
+    /// falls through to the generic `Dialog4xxFailure` failure path.
+    SessionIntervalTooSmall { min_se_secs: u32 },
     HangupCall,
     HoldCall,
     ResumeCall,
@@ -273,6 +280,9 @@ impl EventType {
             EventType::AuthRequired { .. } => EventType::AuthRequired {
                 status_code: 0,
                 challenge: String::new(),
+            },
+            EventType::SessionIntervalTooSmall { .. } => EventType::SessionIntervalTooSmall {
+                min_se_secs: 0,
             },
             // BlindTransfer and AttendedTransfer events removed
             
@@ -411,6 +421,15 @@ pub enum Action {
     
     // Media actions
     StartMediaSession,
+    /// Switch the RTP audio transmitter back to `PassThrough` on the
+    /// `EarlyMedia → Active` transition so bidirectional audio replaces any
+    /// early-media ringback / announcement source the app installed during
+    /// `EarlyMedia`. Idempotent: for calls that never set an early-media
+    /// source the transmitter is already in `PassThrough` (set by
+    /// `establish_media_flow`), so the action is a no-op swap. Swallows
+    /// "transmitter not active" errors because pre-negotiated-SDP flows
+    /// (e.g. `accept_call_with_sdp`) don't start a transmitter until later.
+    SwitchToPassThroughOnActive,
     NegotiateSDPAsUAC,
     NegotiateSDPAsUAS,
     /// RFC 3262 — prepare SDP for a reliable 183. Uses caller-supplied SDP
@@ -425,6 +444,12 @@ pub enum Action {
     /// the INVITE via `DialogAdapter::resend_invite_with_auth`. Bumps
     /// `session.invite_auth_retry_count`; errors if the cap is exceeded.
     SendINVITEWithAuth,
+    /// RFC 4028 §6 — resend the INVITE with a bumped `Session-Expires` /
+    /// `Min-SE` header derived from `session.session_timer_min_se` after a
+    /// 422 Session Interval Too Small. Bumps `session.session_timer_retry_count`;
+    /// errors if the 2-retry cap is exceeded so the upstream failure path
+    /// surfaces a clean `CallFailed(422)`.
+    SendINVITEWithBumpedSessionExpires,
     PlayAudioFile(String),
     StartRecordingMedia,
     StopRecordingMedia,

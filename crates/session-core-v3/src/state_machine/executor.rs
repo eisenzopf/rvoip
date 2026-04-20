@@ -187,6 +187,16 @@ impl StateMachine {
             EventType::AuthRequired { status_code, challenge } => {
                 session.pending_auth = Some((*status_code, challenge.clone()));
             }
+            EventType::SessionIntervalTooSmall { min_se_secs } => {
+                // RFC 4028 §6 — stash the peer's required floor for the
+                // retry action to consume. Normalize 0 / missing to None so
+                // the action's "no Min-SE cached" guard fires cleanly.
+                session.session_timer_min_se = if *min_se_secs > 0 {
+                    Some(*min_se_secs)
+                } else {
+                    None
+                };
+            }
             EventType::Dialog3xxRedirect { targets, .. } => {
                 // Append to any existing targets (keeps earlier hops' fallbacks
                 // reachable in case the newly-suggested target also redirects).

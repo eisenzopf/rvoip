@@ -129,6 +129,22 @@ transitions:
       - type: "SendINVITEWithAuth"
     description: "INVITE auth retry (RFC 3261 §22.2)"
 
+  # RFC 4028 §6 — UAS replied 422 Session Interval Too Small with a required
+  # Min-SE header. Self-loop keeps us in Initiating while the retry action
+  # re-issues the INVITE with bumped Session-Expires / Min-SE headers. The
+  # 2-retry cap lives in SendINVITEWithBumpedSessionExpires; on exhaustion
+  # the executor surfaces an error and the session_event_handler falls
+  # through to the generic Dialog4xxFailure path. Mirrors the 423 REGISTER
+  # pattern at `adapters/dialog_adapter.rs:756-800`.
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "SessionIntervalTooSmall"
+    next_state: "Initiating"
+    actions:
+      - type: "SendINVITEWithBumpedSessionExpires"
+    description: "422 Session Interval Too Small retry (RFC 4028 §6)"
+
   # UAC receives 183 Session Progress (early media)
   - role: "UAC"
     state: "Initiating"
@@ -153,6 +169,7 @@ transitions:
       - type: "NegotiateSDPAsUAC"
       - type: "SendACK"
       - type: "StartMediaSession"
+      - type: "SwitchToPassThroughOnActive"
     conditions:
       dialog_established: true
       sdp_negotiated: true
@@ -171,6 +188,7 @@ transitions:
       - type: "NegotiateSDPAsUAC"
       - type: "SendACK"
       - type: "StartMediaSession"
+      - type: "SwitchToPassThroughOnActive"
     conditions:
       dialog_established: true
       sdp_negotiated: true
@@ -263,6 +281,7 @@ transitions:
     next_state: "Active"
     actions:
       - type: "StartMediaSession"
+      - type: "SwitchToPassThroughOnActive"
     conditions:
       dialog_established: true
       sdp_negotiated: true

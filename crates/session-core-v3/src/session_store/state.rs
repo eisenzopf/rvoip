@@ -120,6 +120,14 @@ pub struct SessionState {
     pub pending_reinvite: Option<PendingReinvite>,
     pub reinvite_retry_attempts: u8,
 
+    // RFC 4028 §6 — 422 Session Interval Too Small retry state. Peer's
+    // required `Min-SE` floor is stashed here by the 422 event handler; the
+    // retry action reads it to build the bumped `Session-Expires`. Retry
+    // counter is capped at 2 to avoid loops when a broken UAS keeps sending
+    // 422 regardless of what we pick.
+    pub session_timer_min_se: Option<u32>,
+    pub session_timer_retry_count: u8,
+
     // Transfer tracking (blind transfer + REFER-with-Replaces primitive for
     // higher-layer attended-transfer orchestrators). Per-session state only;
     // linking two sessions (consultation + original) is an orchestration
@@ -187,6 +195,8 @@ impl SessionState {
             redirect_attempts: 0,
             pending_reinvite: None,
             reinvite_retry_attempts: 0,
+            session_timer_min_se: None,
+            session_timer_retry_count: 0,
             transfer_state: TransferState::None,
             transfer_notify_dialog: None,
             replaces_header: None,

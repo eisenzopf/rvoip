@@ -273,6 +273,33 @@ pub async fn execute_action(
             session.media_session_ready = true;
             info!("Media session started and marked as ready for session {}", session.session_id);
         }
+        Action::SwitchToPassThroughOnActive => {
+            // On EarlyMedia → Active, make sure any app-installed
+            // ringback / announcement source gets replaced by PassThrough so
+            // bidirectional audio flows. For calls that never set a source
+            // the transmitter is already in PassThrough (established by
+            // `establish_media_flow`), so this is a benign no-op swap.
+            //
+            // Swallow errors — the transmitter may not be active yet on
+            // pre-negotiated-SDP flows (e.g. `accept_call_with_sdp`), and in
+            // that case there's nothing to switch. The normal PassThrough
+            // setup will happen when media flow is established later.
+            use crate::api::unified::AudioSource;
+            if let Err(e) = media_adapter
+                .set_audio_source(&session.session_id, AudioSource::PassThrough)
+                .await
+            {
+                debug!(
+                    "SwitchToPassThroughOnActive: no-op for session {} ({})",
+                    session.session_id, e
+                );
+            } else {
+                debug!(
+                    "SwitchToPassThroughOnActive: transmitter switched for session {}",
+                    session.session_id
+                );
+            }
+        }
         Action::NegotiateSDPAsUAC => {
             if let Some(remote_sdp) = &session.remote_sdp {
                 let config = media_adapter
@@ -882,6 +909,45 @@ pub async fn execute_action(
             );
         }
         
+        Action::SendINVITEWithBumpedSessionExpires => {
+            // RFC 4028 §6 — on 422 Session Interval Too Small the UAS's
+            // `Min-SE` header dictates the required floor. Bump the retry
+            // counter, enforce the 2-attempt cap, and re-issue the INVITE
+            // with the peer's Min-SE as both our Session-Expires and Min-SE.
+            // Mirrors the 423 REGISTER retry at
+            // `adapters/dialog_adapter.rs:756-800` but goes through the state
+            // machine (INVITE interacts with call state in ways REGISTER
+            // doesn't). Errors out when the cap is exceeded so the failure
+            // path surfaces a clean `CallFailed(422)` to the app.
+            const CAP: u8 = 2;
+            if session.session_timer_retry_count >= CAP {
+                return Err(format!(
+                    "422 session-timer retry cap ({}) exceeded for session {}",
+                    CAP, session.session_id
+                ).into());
+            }
+
+            let min_se = session.session_timer_min_se.ok_or_else(|| format!(
+                "SendINVITEWithBumpedSessionExpires: no Min-SE cached on session {}",
+                session.session_id
+            ))?;
+
+            session.session_timer_retry_count += 1;
+            info!(
+                "🔄 422 Session Interval Too Small — retrying INVITE for session {} with Session-Expires={}s / Min-SE={}s (attempt {}/{})",
+                session.session_id, min_se, min_se,
+                session.session_timer_retry_count, CAP
+            );
+
+            dialog_adapter
+                .resend_invite_with_session_timer_override(
+                    &session.session_id,
+                    session.local_sdp.clone(),
+                    min_se,
+                    min_se,
+                )
+                .await?;
+        }
         Action::ProcessRegistrationResponse => {
             debug!("Processing registration response for session {}", session.session_id);
             // Response processing is handled by events from dialog adapter

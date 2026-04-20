@@ -97,6 +97,61 @@ fn early_media_accept_skips_renegotiation() {
 }
 
 #[test]
+fn dialog_ack_auto_switches_transmitter_to_passthrough() {
+    // Follow-up A: on `Answering → Active` (DialogACK) the state machine
+    // must emit `SwitchToPassThroughOnActive` after `StartMediaSession`, so
+    // any ringback source an app installed via `send_early_media_with_source`
+    // gets replaced by bidirectional audio without a manual reset call.
+    //
+    // The action itself is idempotent for calls that never set a source —
+    // the transmitter is already in PassThrough — so this is safe for every
+    // incoming call, not just early-media ones.
+    let table = load();
+    let t = table
+        .get(&key(Role::UAS, CallState::Answering, EventType::DialogACK))
+        .expect("UAS Answering + DialogACK transition must exist");
+
+    assert_eq!(t.next_state, Some(CallState::Active));
+
+    let start_idx = t
+        .actions
+        .iter()
+        .position(|a| matches!(a, Action::StartMediaSession))
+        .expect("StartMediaSession must be present on DialogACK → Active");
+    let switch_idx = t
+        .actions
+        .iter()
+        .position(|a| matches!(a, Action::SwitchToPassThroughOnActive))
+        .expect("SwitchToPassThroughOnActive must be present on DialogACK → Active");
+
+    assert!(
+        switch_idx > start_idx,
+        "SwitchToPassThroughOnActive must run after StartMediaSession so the transmitter exists when we swap its source"
+    );
+}
+
+#[test]
+fn uac_200ok_auto_switches_transmitter_to_passthrough() {
+    // Symmetric check for the UAC side — apps can call `set_audio_source`
+    // on a UAC session too (e.g., comfort-tone while ringing), so the
+    // Active transition must swap back for both roles. Covers both the
+    // fast-answer path (Initiating → Active) and the normal path
+    // (Ringing → Active).
+    let table = load();
+    for state in [CallState::Initiating, CallState::Ringing] {
+        let t = table
+            .get(&key(Role::UAC, state, EventType::Dialog200OK))
+            .unwrap_or_else(|| panic!("UAC {:?} + Dialog200OK transition missing", state));
+        assert_eq!(t.next_state, Some(CallState::Active));
+        assert!(
+            t.actions.contains(&Action::SwitchToPassThroughOnActive),
+            "UAC {:?} → Active must include SwitchToPassThroughOnActive",
+            state
+        );
+    }
+}
+
+#[test]
 fn send_early_media_normalizes_for_lookup() {
     // The state table is keyed on normalized EventType — passing an SDP
     // payload on the event must still resolve to the same transition.

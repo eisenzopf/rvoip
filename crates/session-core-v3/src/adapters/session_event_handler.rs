@@ -797,17 +797,19 @@ impl SessionCrossCrateEventHandler {
     /// a session interval larger than we offered; its `Min-SE:` header
     /// (surfaced as `min_se_secs`) carries the floor.
     ///
-    /// Current behaviour is observability-only: the event is logged with the
-    /// required Min-SE and then routed through the standard
-    /// `Dialog4xxFailure(422)` path so the app sees a terminal `CallFailed`.
-    /// Apps that care can retry by calling `coordinator.make_call` with an
-    /// adjusted config (or tune `Config.session_timer_secs` up-front).
+    /// RFC 4028 §6 — UAS replied 422 Session Interval Too Small. Two paths:
     ///
-    /// TODO (roadmap Item 5 follow-up): auto-retry with bumped Session-Expires
-    /// (two-retry cap, mirror of the 423 REGISTER-retry pattern). Requires
-    /// a per-session session-timer override plumbed through dialog-core —
-    /// currently `dialog-core::inject_session_timer_headers` reads from
-    /// config only. Tracked separately.
+    /// 1. **Auto-retry** (usual path): if the response carries a parseable
+    ///    `Min-SE` and the session's retry counter is below the cap, dispatch
+    ///    `SessionIntervalTooSmall { min_se_secs }` to the state machine.
+    ///    `SendINVITEWithBumpedSessionExpires` re-issues the INVITE with the
+    ///    peer's floor and the 2-retry cap lives in that action.
+    ///
+    /// 2. **Terminal fallback**: when `Min-SE` is missing/zero or the retry
+    ///    cap has already been hit, route through the generic
+    ///    `Dialog4xxFailure(422)` path and publish a terminal `CallFailed`
+    ///    so the app can observe the 422 status. Mirrors how dialog-core's
+    ///    `event_hub.rs` already degrades gracefully on malformed 422s.
     async fn handle_session_interval_too_small(&self, event_str: &str) -> Result<()> {
         let Some(session_id_str) = self.extract_session_id(event_str) else {
             warn!("Could not extract session_id from SessionIntervalTooSmall event");
@@ -823,31 +825,75 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
-        let min_se_secs = self
-            .extract_field(event_str, "min_se_secs: ")
-            .and_then(|s| {
-                s.split(|c: char| !c.is_ascii_digit())
-                    .next()
-                    .and_then(|n| n.parse::<u32>().ok())
+        // Numeric fields in the Debug output aren't quoted, so extract_field
+        // (which expects `"…"`-wrapped string values) returns None. Pull the
+        // digits off manually — find "min_se_secs: ", then take the leading
+        // run of ASCII digits that follows.
+        let min_se_secs = event_str
+            .find("min_se_secs: ")
+            .and_then(|idx| {
+                let start = idx + "min_se_secs: ".len();
+                let digits: String = event_str[start..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
+                digits.parse::<u32>().ok()
             })
             .unwrap_or(0);
 
-        warn!(
-            "⏱️  [422 Session Interval Too Small] session={} requires Min-SE={}s \
-             (auto-retry not yet implemented; surfacing as CallFailed)",
-            session_id, min_se_secs
-        );
+        // Read the retry counter before the state machine runs so we can
+        // decide between auto-retry and terminal failure in one place.
+        const CAP: u8 = 2;
+        let current_retries = self
+            .state_machine
+            .store
+            .get_session(&session_id)
+            .await
+            .map(|s| s.session_timer_retry_count)
+            .unwrap_or(CAP);
+        let can_retry = min_se_secs > 0 && current_retries < CAP;
 
-        // Route through the generic 4xx failure path so the existing state
-        // machine + CallFailed publication runs — the session terminates
-        // cleanly and the app can observe the 422 status code.
+        if can_retry {
+            info!(
+                "⏱️  [422 Session Interval Too Small] session={} requires Min-SE={}s — retrying (attempt {}/{})",
+                session_id, min_se_secs, current_retries + 1, CAP
+            );
+            if let Err(e) = self
+                .state_machine
+                .process_event(
+                    &session_id,
+                    EventType::SessionIntervalTooSmall { min_se_secs },
+                )
+                .await
+            {
+                // Retry dispatch failed — surface as terminal 422. No
+                // `CallFailed` publish needed; the error path below does it.
+                error!(
+                    "Failed to dispatch SessionIntervalTooSmall retry for session {}: {}",
+                    session_id, e
+                );
+            } else {
+                // Successful retry dispatched — don't publish CallFailed.
+                // The retry will either succeed (Dialog200OK) or re-enter
+                // this handler on a second 422.
+                return Ok(());
+            }
+        } else {
+            warn!(
+                "⏱️  [422 Session Interval Too Small] session={} — giving up (min_se={}s, retries={}/{}), surfacing as CallFailed",
+                session_id, min_se_secs, current_retries, CAP
+            );
+        }
+
+        // Terminal path: route through generic 4xx failure + publish
+        // CallFailed so the session cleans up and the app observes the 422.
         if let Err(e) = self
             .state_machine
             .process_event(&session_id, EventType::Dialog4xxFailure(422))
             .await
         {
             error!(
-                "Failed to process 422 SessionIntervalTooSmall for session {}: {}",
+                "Failed to process 422 SessionIntervalTooSmall fallback for session {}: {}",
                 session_id, e
             );
         }

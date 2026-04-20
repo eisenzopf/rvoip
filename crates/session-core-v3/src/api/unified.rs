@@ -463,10 +463,12 @@ impl UnifiedCoordinator {
     /// ringback tone, a "please hold" WAV, or any other
     /// [`AudioSource`][crate::api::unified::AudioSource] variant.
     ///
-    /// On transition to `Active` (after `accept_call`), the source keeps
-    /// playing. To switch back to normal bidirectional audio, call this
-    /// again with `AudioSource::PassThrough`. Auto-switching on state
-    /// transitions is deferred — see the Item 3 follow-up.
+    /// On transition to `Active` (after `accept_call`), the state machine
+    /// automatically swaps the transmitter back to `AudioSource::PassThrough`
+    /// so bidirectional audio flows without further action from the app.
+    /// Apps that want a *different* source after answer (e.g., continued
+    /// announcement playback over an active call) should call this method
+    /// again *after* the `CallEstablished` event fires.
     pub async fn set_audio_source(
         &self,
         session_id: &SessionId,

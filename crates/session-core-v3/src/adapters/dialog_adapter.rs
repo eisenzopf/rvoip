@@ -229,6 +229,49 @@ impl DialogAdapter {
         Ok(())
     }
 
+    /// RFC 4028 §6 — resend an INVITE with a bumped `Session-Expires` /
+    /// `Min-SE` after a 422 Session Interval Too Small. The UAS's Min-SE
+    /// floor is supplied by the caller (parsed from the 422 response by
+    /// dialog-core). The timer headers bypass [`DialogManagerConfig`]'s
+    /// global values and use these overrides verbatim.
+    pub async fn resend_invite_with_session_timer_override(
+        &self,
+        session_id: &SessionId,
+        sdp: Option<String>,
+        session_secs: u32,
+        min_se: u32,
+    ) -> Result<()> {
+        // Fast-RTT race: when the UAS answers 422 on a loopback socket the
+        // response can be processed before the initial `make_call_for_session`
+        // call has returned and inserted the s2d mapping (see
+        // `send_invite_with_details` below — the insert happens after the
+        // await). Poll briefly for the mapping to appear. Cap at 1s; a
+        // timeout here propagates as `SessionNotFound` which the retry
+        // action's error path converts into a terminal `CallFailed`.
+        use tokio::time::{Duration, Instant};
+        let start = Instant::now();
+        let dialog_id = loop {
+            if let Some(entry) = self.session_to_dialog.get(session_id) {
+                break entry.value().clone();
+            }
+            if start.elapsed() >= Duration::from_secs(1) {
+                return Err(SessionError::SessionNotFound(session_id.0.clone()));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        self.dialog_api
+            .send_invite_with_session_timer_override(&dialog_id, sdp, session_secs, min_se)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!(
+                    "resend_invite_with_session_timer_override failed for session {}: {}",
+                    session_id.0, e
+                ))
+            })?;
+        Ok(())
+    }
+
     /// Does the remote peer support RFC 3262 100rel? Used to gate
     /// `send_early_media` — we only emit a reliable 183 when the caller
     /// advertised `Supported: 100rel` (or `Require: 100rel`) on the INVITE.

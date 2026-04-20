@@ -117,12 +117,16 @@ impl IncomingCall {
     /// session's RTP transmitter to `source`. Lets the UAS play a ringback
     /// tone / "please hold" announcement during the `EarlyMedia` state.
     ///
-    /// The source plays until the session is accepted, the caller calls
+    /// The source plays until the dialog transitions to `Active` (after
+    /// `accept()`), at which point the state machine automatically swaps
+    /// back to [`AudioSource::PassThrough`][crate::api::unified::AudioSource::PassThrough]
+    /// so bidirectional audio flows without further action. Apps that want
+    /// a *different* source during the active call (hold music, continued
+    /// announcement) can call
     /// [`coordinator.set_audio_source`][crate::api::unified::UnifiedCoordinator::set_audio_source]
-    /// to change it, or the dialog terminates. For bidirectional audio
-    /// after accept, explicitly reset to
-    /// [`AudioSource::PassThrough`][crate::api::unified::AudioSource::PassThrough]
-    /// once 200 OK has been sent.
+    /// again after observing `Event::CallEstablished`.
+    ///
+    /// See `docs/AUDIO_MODES.md` for the endpoint-vs-bridge comparison.
     ///
     /// Same 100rel precondition as [`send_early_media`][Self::send_early_media].
     ///

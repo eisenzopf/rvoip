@@ -525,6 +525,12 @@ impl YamlTableLoader {
                 status_code: 0,
                 challenge: String::new(),
             }),
+            // RFC 4028 §6 — 422 Session Interval Too Small. Field-less YAML
+            // name maps to a default `min_se_secs: 0`; the runtime event
+            // carries the actual floor from dialog-core's parser.
+            "SessionIntervalTooSmall" => Ok(EventType::SessionIntervalTooSmall {
+                min_se_secs: 0,
+            }),
             // RFC 3261 §22.2 — backward-compat alias. The dedicated
             // Registration401 path has been retired in favor of the shared
             // AuthRequired event, but externally-authored state tables may
@@ -725,8 +731,10 @@ impl YamlTableLoader {
             "NegotiateSDPAsUAC" => Ok(Action::NegotiateSDPAsUAC),
             "NegotiateSDPAsUAS" => Ok(Action::NegotiateSDPAsUAS),
             "PrepareEarlyMediaSDP" => Ok(Action::PrepareEarlyMediaSDP),
+            "SwitchToPassThroughOnActive" => Ok(Action::SwitchToPassThroughOnActive),
             "StoreAuthChallenge" => Ok(Action::StoreAuthChallenge),
             "SendINVITEWithAuth" => Ok(Action::SendINVITEWithAuth),
+            "SendINVITEWithBumpedSessionExpires" => Ok(Action::SendINVITEWithBumpedSessionExpires),
             "SendREGISTERWithAuth" => Ok(Action::SendREGISTERWithAuth),
             "SuspendMedia" => Ok(Action::Custom("SuspendMedia".to_string())),
             "ResumeMedia" => Ok(Action::Custom("ResumeMedia".to_string())),

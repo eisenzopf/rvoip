@@ -728,6 +728,137 @@ impl DialogManager {
         debug!("Auth-retry INVITE sent for dialog {} (tx {})", dialog_id, transaction_id);
         Ok(transaction_id)
     }
+
+    /// RFC 4028 §6 — resend an INVITE with a per-call `Session-Expires` /
+    /// `Min-SE` override after the peer replied 422 Session Interval Too
+    /// Small. The peer's `Min-SE` header dictates the required floor; callers
+    /// pass it here together with the desired `Session-Expires` (typically
+    /// set to `min_se` so the retry passes the first check).
+    ///
+    /// Mirrors [`send_invite_with_auth`] — reuses the original dialog's
+    /// `Call-ID` + `From` tag, rebuilds as an initial INVITE (422 was a final
+    /// response that did *not* establish a dialog), bumps CSeq via
+    /// `Dialog::create_request_template`. The timer headers use the supplied
+    /// overrides instead of the global [`DialogManagerConfig`] values.
+    pub async fn send_invite_with_session_timer_override(
+        &self,
+        dialog_id: &DialogId,
+        body: Option<bytes::Bytes>,
+        session_secs: u32,
+        min_se: u32,
+    ) -> DialogResult<TransactionKey> {
+        use crate::transaction::client::builders::InviteBuilder;
+
+        debug!(
+            "Resending INVITE with session-timer override (SE={}, Min-SE={}) for dialog {}",
+            session_secs, min_se, dialog_id
+        );
+
+        let (destination, request) = {
+            let mut dialog = self.get_dialog_mut(dialog_id)?;
+
+            let destination = dialog.get_remote_target_address().await
+                .ok_or_else(|| crate::errors::DialogError::routing_error(
+                    "No remote target address available for 422 retry",
+                ))?;
+
+            let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
+
+            let template = dialog.create_request_template(Method::Invite);
+            dialog.invite_cseq = Some(template.cseq_number);
+
+            let local_tag = match template.local_tag.clone() {
+                Some(tag) if !tag.is_empty() => tag,
+                _ => {
+                    let new_tag = dialog.generate_local_tag();
+                    dialog.local_tag = Some(new_tag.clone());
+                    new_tag
+                }
+            };
+
+            let mut invite_builder = InviteBuilder::new()
+                .from_detailed(
+                    Some("User"),
+                    template.local_uri.to_string(),
+                    Some(&local_tag),
+                )
+                .to_detailed(
+                    Some("User"),
+                    template.remote_uri.to_string(),
+                    None,
+                )
+                .call_id(&template.call_id)
+                .cseq(template.cseq_number)
+                .request_uri(template.target_uri.to_string())
+                .local_address(self.local_address);
+
+            for route in &template.route_set {
+                invite_builder = invite_builder.add_route(route.clone());
+            }
+
+            if let Some(sdp_content) = body_string {
+                invite_builder = invite_builder.with_sdp(sdp_content);
+            }
+
+            let mut request = invite_builder.build().map_err(|e| {
+                crate::errors::DialogError::InternalError {
+                    message: format!("Failed to build 422-retry INVITE: {}", e),
+                    context: None,
+                }
+            })?;
+
+            // Re-inject policy headers. 100rel follows the global config (the
+            // peer's 100rel preference didn't change); session-timer headers
+            // use the per-call overrides so the retry carries the peer's
+            // required Min-SE floor.
+            inject_100rel_policy(&mut request, self.config_100rel_policy());
+            inject_session_timer_headers(&mut request, session_secs, min_se);
+
+            (destination, request)
+        };
+
+        let transaction_id = self.transaction_manager
+            .create_invite_client_transaction(request, destination)
+            .await
+            .map_err(|e| crate::errors::DialogError::TransactionError {
+                message: format!("Failed to create 422-retry INVITE transaction: {}", e),
+            })?;
+
+        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
+        debug!(
+            "Associated 422-retry INVITE transaction {} with dialog {}",
+            transaction_id, dialog_id
+        );
+
+        // RFC 3261 §17.1.1.3 — INVITE client transactions terminate after
+        // 2xx + ACK. On a fast local loop the 200 OK + automatic ACK arrive
+        // and terminate the transaction before `send_request.await` returns,
+        // so transaction-core surfaces "Transaction terminated after timeout"
+        // even though the SIP flow succeeded. The existing `make_call` path
+        // in `unified.rs:477-482` swallows the same condition; mirror that
+        // here so callers see a clean success.
+        if let Err(e) = self.transaction_manager.send_request(&transaction_id).await {
+            let msg = e.to_string();
+            if msg.contains("Transaction terminated after timeout")
+                || msg.contains("Transaction terminated")
+            {
+                debug!(
+                    "422-retry INVITE transaction terminated normally after 2xx (RFC 3261 §17.1.1.3): {}",
+                    e
+                );
+            } else {
+                return Err(crate::errors::DialogError::TransactionError {
+                    message: format!("Failed to send 422-retry INVITE: {}", e),
+                });
+            }
+        }
+
+        debug!(
+            "422-retry INVITE sent for dialog {} (tx {}, SE={}, Min-SE={})",
+            dialog_id, transaction_id, session_secs, min_se
+        );
+        Ok(transaction_id)
+    }
 }
 
 /// A response qualifies for RFC 3262 reliable-provisional wrapping when it
