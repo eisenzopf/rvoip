@@ -1657,6 +1657,8 @@ impl SimpleResponseBuilder {
             TypedHeader::WwwAuthenticate(_) |
             TypedHeader::ProxyAuthenticate(_) |
             TypedHeader::AuthenticationInfo(_) |
+            TypedHeader::PAssertedIdentity(_) |   // RFC 3325 — appendable list
+            TypedHeader::PPreferredIdentity(_) |  // RFC 3325 — appendable list
             TypedHeader::Reason(_) => {
                 // No retain logic, these headers are appended.
             }

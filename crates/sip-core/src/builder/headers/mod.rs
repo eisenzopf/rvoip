@@ -97,6 +97,7 @@ pub mod event;
 pub mod min_se;
 pub mod rseq;
 pub mod retry_after;
+pub mod p_asserted_identity;
 
 // Re-export all header builders for convenient imports
 pub use authorization::AuthorizationExt;
@@ -148,4 +149,5 @@ pub use event::EventBuilderExt;
 pub use min_se::MinSEBuilderExt;
 pub use rseq::RSeqBuilderExt;
 pub use retry_after::RetryAfterBuilderExt;
+pub use p_asserted_identity::{PAssertedIdentityBuilderExt, PPreferredIdentityBuilderExt};
 

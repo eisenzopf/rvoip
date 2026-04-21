@@ -63,6 +63,14 @@ pub struct Config {
     /// `None`, a 401/407 on INVITE surfaces as `CallFailed` instead of
     /// retrying. Default: `None`.
     pub credentials: Option<crate::types::Credentials>,
+
+    /// Default `P-Asserted-Identity` URI (RFC 3325 §9.1) to attach to every
+    /// outgoing INVITE. Carrier trunks (Twilio, Vonage, Bandwidth, most PBX
+    /// trunks) require PAI for caller-ID assertion on outbound trunk calls;
+    /// without it the call is often hard-rejected or stripped of caller ID.
+    /// `None` (the default) suppresses the header entirely. Per-call override
+    /// is available via [`UnifiedCoordinator::make_call_with_pai`].
+    pub pai_uri: Option<String>,
 }
 
 impl Config {
@@ -87,6 +95,7 @@ impl Config {
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
+            pai_uri: None,
         }
     }
 
@@ -110,6 +119,7 @@ impl Config {
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
+            pai_uri: None,
         }
     }
 }
@@ -342,10 +352,17 @@ impl UnifiedCoordinator {
     /// Make an outgoing call. If the `Config.credentials` default is set,
     /// those credentials are applied to the session before dispatch so the
     /// state machine can transparently retry on a 401/407 INVITE challenge
-    /// (RFC 3261 §22.2).
+    /// (RFC 3261 §22.2). Likewise, if `Config.pai_uri` is set, a typed
+    /// `P-Asserted-Identity` (RFC 3325) header is attached to the very
+    /// first INVITE.
     pub async fn make_call(&self, from: &str, to: &str) -> Result<SessionId> {
         self.helpers
-            .make_call_with_credentials(from, to, self.config.credentials.clone())
+            .make_call_with_credentials_and_pai(
+                from,
+                to,
+                self.config.credentials.clone(),
+                self.config.pai_uri.clone(),
+            )
             .await
     }
 
@@ -359,7 +376,32 @@ impl UnifiedCoordinator {
         credentials: crate::types::Credentials,
     ) -> Result<SessionId> {
         self.helpers
-            .make_call_with_credentials(from, to, Some(credentials))
+            .make_call_with_credentials_and_pai(
+                from,
+                to,
+                Some(credentials),
+                self.config.pai_uri.clone(),
+            )
+            .await
+    }
+
+    /// Make an outgoing call attaching a per-call `P-Asserted-Identity` URI
+    /// (RFC 3325 §9.1), overriding `Config::pai_uri`. Useful for
+    /// multi-tenant trunking where each call asserts a different identity.
+    /// Pass `None` for `pai` to suppress the header for this call only.
+    pub async fn make_call_with_pai(
+        &self,
+        from: &str,
+        to: &str,
+        pai: Option<String>,
+    ) -> Result<SessionId> {
+        self.helpers
+            .make_call_with_credentials_and_pai(
+                from,
+                to,
+                self.config.credentials.clone(),
+                pai,
+            )
             .await
     }
 

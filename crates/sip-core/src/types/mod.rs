@@ -399,6 +399,7 @@ pub mod sip_etag;
 pub mod sip_if_match;
 pub mod allow_events;
 pub mod pidf;
+pub mod p_asserted_identity;
 pub use accept::Accept;
 pub use accept_language::AcceptLanguage;
 pub use address::Address;
@@ -450,6 +451,7 @@ pub use allow_events::AllowEvents;
 pub use rseq::RSeq;
 pub use rack::RAck;
 pub use pidf::{PidfDocument, BasicStatus, Status, Tuple, Presence};
+pub use p_asserted_identity::{PAssertedIdentity, PPreferredIdentity};
 
 // Add AsRef implementations for Message
 impl AsRef<Message> for Message {

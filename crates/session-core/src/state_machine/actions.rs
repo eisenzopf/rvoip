@@ -101,9 +101,50 @@ pub async fn execute_action(
             let to = session.remote_uri.clone()
                 .ok_or_else(|| "remote_uri not set for session".to_string())?;
             info!("Sending INVITE from {} to {} with SDP: {}", from, to, session.local_sdp.is_some());
-            
+
+            // Build any extra typed headers that travel with the very first
+            // INVITE. Today only `P-Asserted-Identity` (RFC 3325 §9.1) lands
+            // here — when `SessionState.pai_uri` is set the typed header is
+            // constructed and routed through dialog-core's
+            // `make_call_with_extra_headers_for_session` entry point.
+            let mut extras: Vec<rvoip_sip_core::types::TypedHeader> = Vec::new();
+            if let Some(pai) = session.pai_uri.as_ref() {
+                use std::str::FromStr;
+                use rvoip_sip_core::types::{
+                    p_asserted_identity::PAssertedIdentity,
+                    uri::Uri,
+                    TypedHeader,
+                };
+                match Uri::from_str(pai) {
+                    Ok(uri) => {
+                        extras.push(TypedHeader::PAssertedIdentity(
+                            PAssertedIdentity::with_uri(uri),
+                        ));
+                    }
+                    Err(e) => {
+                        // Reject upstream rather than silently dropping — the
+                        // app set a malformed PAI and would otherwise wonder
+                        // why the carrier rejects with 403.
+                        return Err(format!(
+                            "SessionState.pai_uri ({}) is not a valid URI: {}",
+                            pai, e
+                        ).into());
+                    }
+                }
+            }
+
             // This will create the real dialog in dialog-core
-            dialog_adapter.send_invite_with_details(&session.session_id, &from, &to, session.local_sdp.clone()).await?;
+            if extras.is_empty() {
+                dialog_adapter.send_invite_with_details(&session.session_id, &from, &to, session.local_sdp.clone()).await?;
+            } else {
+                dialog_adapter.send_invite_with_extra_headers(
+                    &session.session_id,
+                    &from,
+                    &to,
+                    session.local_sdp.clone(),
+                    extras,
+                ).await?;
+            }
             
             // Now get the real dialog ID that was created
             if let Some(real_dialog_id) = dialog_adapter.session_to_dialog.get(&session.session_id) {

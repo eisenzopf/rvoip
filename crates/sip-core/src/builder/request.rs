@@ -1266,6 +1266,8 @@ impl SimpleRequestBuilder {
             TypedHeader::ProxyAuthorization(_) |
             TypedHeader::AuthenticationInfo(_) |
             TypedHeader::ReplyTo(_) |
+            TypedHeader::PAssertedIdentity(_) |     // RFC 3325 — appendable list
+            TypedHeader::PPreferredIdentity(_) |    // RFC 3325 — appendable list
             TypedHeader::Path(_) => {  // Path header for Path service
                 // For appendable headers, no special action is needed before pushing.
             }

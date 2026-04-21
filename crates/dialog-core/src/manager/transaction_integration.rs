@@ -889,6 +889,141 @@ impl DialogManager {
         );
         Ok(transaction_id)
     }
+
+    /// Send an *initial* INVITE on a freshly-created outgoing dialog, with
+    /// caller-supplied extra headers appended to the wire request.
+    ///
+    /// Mirrors [`send_invite_with_auth`] / [`send_invite_with_session_timer_override`]
+    /// in construction shape (rebuild the INVITE via `InviteBuilder`, inject
+    /// global policy headers, send via `create_invite_client_transaction`)
+    /// but is intended for the *first* transmission rather than a retry.
+    /// Callers go through [`crate::manager::unified::UnifiedManager::make_call_with_extra_headers`]
+    /// rather than calling this directly; this method is the layer that
+    /// actually puts the bytes on the wire.
+    ///
+    /// `extra_headers` is appended verbatim — typical contents:
+    /// - `TypedHeader::PAssertedIdentity(...)` (RFC 3325) for trunk identity
+    /// - `TypedHeader::PPreferredIdentity(...)` (RFC 3325) for asserted-identity preference
+    /// - any other carrier-specific headers (`P-Charging-Vector`, etc.) the
+    ///   application has already constructed.
+    pub async fn send_initial_invite_with_extra_headers(
+        &self,
+        dialog_id: &DialogId,
+        body: Option<bytes::Bytes>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> DialogResult<TransactionKey> {
+        use crate::transaction::client::builders::InviteBuilder;
+
+        debug!(
+            "Sending initial INVITE with {} extra header(s) for dialog {}",
+            extra_headers.len(),
+            dialog_id
+        );
+
+        let (destination, request) = {
+            let mut dialog = self.get_dialog_mut(dialog_id)?;
+
+            let destination = dialog.get_remote_target_address().await
+                .ok_or_else(|| crate::errors::DialogError::routing_error(
+                    "No remote target address available for initial INVITE",
+                ))?;
+
+            let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
+
+            let template = dialog.create_request_template(Method::Invite);
+            dialog.invite_cseq = Some(template.cseq_number);
+
+            let local_tag = match template.local_tag.clone() {
+                Some(tag) if !tag.is_empty() => tag,
+                _ => {
+                    let new_tag = dialog.generate_local_tag();
+                    dialog.local_tag = Some(new_tag.clone());
+                    new_tag
+                }
+            };
+
+            let mut invite_builder = InviteBuilder::new()
+                .from_detailed(
+                    Some("User"),
+                    template.local_uri.to_string(),
+                    Some(&local_tag),
+                )
+                .to_detailed(
+                    Some("User"),
+                    template.remote_uri.to_string(),
+                    None,
+                )
+                .call_id(&template.call_id)
+                .cseq(template.cseq_number)
+                .request_uri(template.target_uri.to_string())
+                .local_address(self.local_address);
+
+            for route in &template.route_set {
+                invite_builder = invite_builder.add_route(route.clone());
+            }
+
+            if let Some(sdp_content) = body_string {
+                invite_builder = invite_builder.with_sdp(sdp_content);
+            }
+
+            for hdr in extra_headers {
+                invite_builder = invite_builder.header(hdr);
+            }
+
+            let mut request = invite_builder.build().map_err(|e| {
+                crate::errors::DialogError::InternalError {
+                    message: format!("Failed to build initial-INVITE-with-extras: {}", e),
+                    context: None,
+                }
+            })?;
+
+            // Re-inject the negotiated policy headers (100rel, session-timer),
+            // mirroring `send_request_in_dialog`'s initial-INVITE arm.
+            inject_100rel_policy(&mut request, self.config_100rel_policy());
+            if let Some((secs, min_se)) = self.config_session_timer_settings() {
+                inject_session_timer_headers(&mut request, secs, min_se);
+            }
+
+            (destination, request)
+        };
+
+        let transaction_id = self.transaction_manager
+            .create_invite_client_transaction(request, destination)
+            .await
+            .map_err(|e| crate::errors::DialogError::TransactionError {
+                message: format!("Failed to create initial-INVITE transaction: {}", e),
+            })?;
+
+        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
+        debug!(
+            "Associated initial INVITE-with-extras transaction {} with dialog {}",
+            transaction_id, dialog_id
+        );
+
+        // RFC 3261 §17.1.1.3 normal termination after 2xx + ACK on fast loopback;
+        // mirror the suppression in the auth-retry / 422-retry / generic path.
+        if let Err(e) = self.transaction_manager.send_request(&transaction_id).await {
+            let msg = e.to_string();
+            if msg.contains("Transaction terminated after timeout")
+                || msg.contains("Transaction terminated")
+            {
+                debug!(
+                    "Initial INVITE-with-extras transaction terminated normally after 2xx (RFC 3261 §17.1.1.3): {}",
+                    e
+                );
+            } else {
+                return Err(crate::errors::DialogError::TransactionError {
+                    message: format!("Failed to send initial INVITE-with-extras: {}", e),
+                });
+            }
+        }
+
+        debug!(
+            "Initial INVITE-with-extras sent for dialog {} (tx {})",
+            dialog_id, transaction_id
+        );
+        Ok(transaction_id)
+    }
 }
 
 /// A response qualifies for RFC 3262 reliable-provisional wrapping when it

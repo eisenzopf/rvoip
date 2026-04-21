@@ -174,6 +174,10 @@ pub enum TypedHeader {
     SipETag(crate::types::sip_etag::SipETag), // Added SIP-ETag variant
     SipIfMatch(crate::types::sip_if_match::SipIfMatch), // Added SIP-If-Match variant
     AllowEvents(crate::types::allow_events::AllowEvents), // Added Allow-Events variant
+    /// P-Asserted-Identity (RFC 3325)
+    PAssertedIdentity(crate::types::p_asserted_identity::PAssertedIdentity),
+    /// P-Preferred-Identity (RFC 3325)
+    PPreferredIdentity(crate::types::p_asserted_identity::PPreferredIdentity),
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -240,6 +244,8 @@ impl TypedHeader {
             TypedHeader::SipETag(_) => HeaderName::SipETag,
             TypedHeader::SipIfMatch(_) => HeaderName::SipIfMatch,
             TypedHeader::AllowEvents(_) => HeaderName::AllowEvents,
+            TypedHeader::PAssertedIdentity(_) => HeaderName::PAssertedIdentity,
+            TypedHeader::PPreferredIdentity(_) => HeaderName::PPreferredIdentity,
             TypedHeader::Other(name, _) => name.clone(),
         }
     }
@@ -431,6 +437,8 @@ impl fmt::Display for TypedHeader {
             TypedHeader::SipETag(val) => write!(f, "{}: {}", HeaderName::SipETag, val),
             TypedHeader::SipIfMatch(val) => write!(f, "{}: {}", HeaderName::SipIfMatch, val),
             TypedHeader::AllowEvents(val) => write!(f, "{}: {}", HeaderName::AllowEvents, val),
+            TypedHeader::PAssertedIdentity(val) => write!(f, "{}: {}", HeaderName::PAssertedIdentity, val),
+            TypedHeader::PPreferredIdentity(val) => write!(f, "{}: {}", HeaderName::PPreferredIdentity, val),
             TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
     }
@@ -1203,6 +1211,18 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::AllowEvents => {
                 match all_consuming(parser::headers::parse_allow_events)(value_bytes) {
                     Ok((_, allow)) => Ok(TypedHeader::AllowEvents(allow)),
+                    Err(e) => Err(Error::from(e.to_owned())),
+                }
+            },
+            HeaderName::PAssertedIdentity => {
+                match all_consuming(parser::headers::parse_p_asserted_identity)(value_bytes) {
+                    Ok((_, pai)) => Ok(TypedHeader::PAssertedIdentity(pai)),
+                    Err(e) => Err(Error::from(e.to_owned())),
+                }
+            },
+            HeaderName::PPreferredIdentity => {
+                match all_consuming(parser::headers::parse_p_preferred_identity)(value_bytes) {
+                    Ok((_, ppi)) => Ok(TypedHeader::PPreferredIdentity(ppi)),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             },

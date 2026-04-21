@@ -388,6 +388,7 @@ impl UnifiedDialogManager {
             sdp_offer,
             call_id,
             Some(session_id.to_string()),
+            Vec::new(),
         )
         .await
     }
@@ -399,7 +400,46 @@ impl UnifiedDialogManager {
         sdp_offer: Option<String>,
         call_id: Option<String>,
     ) -> ApiResult<CallHandle> {
-        self.make_call_inner(from_uri, to_uri, sdp_offer, call_id, None).await
+        self.make_call_inner(from_uri, to_uri, sdp_offer, call_id, None, Vec::new()).await
+    }
+
+    /// Like [`make_call`](Self::make_call) but appends caller-supplied
+    /// extra headers to the outgoing INVITE. Intended for headers session-core
+    /// can't construct itself: P-Asserted-Identity / P-Preferred-Identity
+    /// (RFC 3325) for trunk auth, P-Charging-Vector / X-headers for carrier
+    /// integration, etc. Headers are appended verbatim — no validation is
+    /// performed against the SIP method or dialog state.
+    pub async fn make_call_with_extra_headers(
+        &self,
+        from_uri: &str,
+        to_uri: &str,
+        sdp_offer: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<CallHandle> {
+        self.make_call_inner(from_uri, to_uri, sdp_offer, None, None, extra_headers).await
+    }
+
+    /// `make_call_for_session` + extra headers. Use this from session-core
+    /// layers that need both the pre-registered session↔dialog mapping and
+    /// custom INVITE headers (the typical PAI use case).
+    pub async fn make_call_with_extra_headers_for_session(
+        &self,
+        session_id: &str,
+        from_uri: &str,
+        to_uri: &str,
+        sdp_offer: Option<String>,
+        call_id: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<CallHandle> {
+        self.make_call_inner(
+            from_uri,
+            to_uri,
+            sdp_offer,
+            call_id,
+            Some(session_id.to_string()),
+            extra_headers,
+        )
+        .await
     }
 
     async fn make_call_inner(
@@ -409,6 +449,7 @@ impl UnifiedDialogManager {
         sdp_offer: Option<String>,
         call_id: Option<String>,
         pre_register_session_id: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<CallHandle> {
         // Check if outgoing calls are supported
         if !self.config.supports_outgoing_calls() {
@@ -466,9 +507,19 @@ impl UnifiedDialogManager {
         // Emit dialog creation event
         self.core.emit_dialog_event(DialogEvent::Created { dialog_id: dialog_id.clone() }).await;
 
-        // Send INVITE request
+        // Send INVITE request. When the caller supplied extra headers
+        // (P-Asserted-Identity etc.), route through the dedicated
+        // `send_initial_invite_with_extra_headers` path so the headers ride
+        // on the very first wire INVITE; otherwise the generic path is fine.
         let body_bytes = sdp_offer.map(|s| bytes::Bytes::from(s));
-        let _transaction_key = match self.core.send_request(&dialog_id, Method::Invite, body_bytes).await {
+        let send_result = if extra_headers.is_empty() {
+            self.core.send_request(&dialog_id, Method::Invite, body_bytes).await
+        } else {
+            self.core
+                .send_initial_invite_with_extra_headers(&dialog_id, body_bytes, extra_headers)
+                .await
+        };
+        let _transaction_key = match send_result {
             Ok(tx_key) => tx_key,
             Err(e) => {
                 // RFC 3261 Section 17.1.1.3: INVITE client transactions terminate after 

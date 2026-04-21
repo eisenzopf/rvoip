@@ -57,6 +57,7 @@ pub mod rseq; // Added for RSeq header
 pub mod sip_etag; // Added for SIP-ETag header
 pub mod sip_if_match; // Added for SIP-If-Match header
 pub mod allow_events; // Added for Allow-Events header
+pub mod p_asserted_identity; // RFC 3325 — P-Asserted-Identity / P-Preferred-Identity
 
 // Keep internal modules private
 mod server_val;
@@ -121,6 +122,7 @@ pub use rseq::{parse_rseq, parse_rseq_header}; // Added for RSeq header parsing
 pub use sip_etag::parse_sip_etag; // Added for SIP-ETag header parsing
 pub use sip_if_match::parse_sip_if_match; // Added for SIP-If-Match header parsing
 pub use allow_events::parse_allow_events; // Added for Allow-Events header parsing
+pub use p_asserted_identity::{parse_p_asserted_identity, parse_p_preferred_identity}; // RFC 3325
 
 // Re-export shared auth components if needed directly
 // pub use auth::common::{auth_param, realm, nonce, ...};

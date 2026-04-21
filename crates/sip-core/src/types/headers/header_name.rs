@@ -149,6 +149,10 @@ pub enum HeaderName {
     SipIfMatch,
     /// Allow-Events: Supported event packages (RFC 6665)
     AllowEvents,
+    /// P-Asserted-Identity: Trusted-network asserted caller identity (RFC 3325)
+    PAssertedIdentity,
+    /// P-Preferred-Identity: Caller-preferred asserted identity (RFC 3325)
+    PPreferredIdentity,
 }
 
 impl HeaderName {
@@ -213,6 +217,8 @@ impl HeaderName {
             HeaderName::SipETag => "SIP-ETag",
             HeaderName::SipIfMatch => "SIP-If-Match",
             HeaderName::AllowEvents => "Allow-Events",
+            HeaderName::PAssertedIdentity => "P-Asserted-Identity",
+            HeaderName::PPreferredIdentity => "P-Preferred-Identity",
         }
     }
 }
@@ -291,6 +297,8 @@ impl FromStr for HeaderName {
             "sip-etag" => Ok(HeaderName::SipETag),
             "sip-if-match" => Ok(HeaderName::SipIfMatch),
             "allow-events" => Ok(HeaderName::AllowEvents),
+            "p-asserted-identity" => Ok(HeaderName::PAssertedIdentity),
+            "p-preferred-identity" => Ok(HeaderName::PPreferredIdentity),
             _ => Ok(HeaderName::Other(s.to_string())),
         }
     }

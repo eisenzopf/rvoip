@@ -360,10 +360,75 @@ impl DialogAdapter {
         
         // Don't update session store here - the state machine will handle updating the dialog ID
         tracing::debug!("Dialog {} created for session {}", dialog_id, session_id.0);
-        
+
         Ok(())
     }
-    
+
+    /// Like [`send_invite_with_details`] but appends caller-supplied extra
+    /// headers to the outgoing INVITE. Routes through dialog-core's
+    /// `make_call_with_extra_headers_for_session` so the extras (typically
+    /// `P-Asserted-Identity` per RFC 3325) ride on the very first wire
+    /// transmission rather than being added in a follow-up.
+    ///
+    /// Used by the `SendINVITE` action when `SessionState.pai_uri` is set;
+    /// the action handler builds the typed PAI header from the URI and
+    /// passes it through here.
+    pub async fn send_invite_with_extra_headers(
+        &self,
+        session_id: &SessionId,
+        from: &str,
+        to: &str,
+        sdp: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        let call_id = format!("{}@session-core", session_id.0);
+
+        self.callid_to_session.insert(call_id.clone(), session_id.clone());
+
+        let call_handle = self
+            .dialog_api
+            .make_call_with_extra_headers_for_session(
+                &session_id.0,
+                from,
+                to,
+                sdp,
+                Some(call_id.clone()),
+                extra_headers,
+            )
+            .await
+            .map_err(|e| SessionError::DialogError(format!(
+                "Failed to make call with extra headers: {}", e
+            )))?;
+
+        let dialog_id = call_handle.call_id().clone();
+
+        self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
+        self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
+
+        let event = SessionToDialogEvent::StoreDialogMapping {
+            session_id: session_id.0.clone(),
+            dialog_id: dialog_id.to_string(),
+        };
+        self.global_coordinator
+            .publish(Arc::new(RvoipCrossCrateEvent::SessionToDialog(event)))
+            .await
+            .map_err(|e| SessionError::InternalError(format!(
+                "Failed to publish StoreDialogMapping: {}", e
+            )))?;
+
+        tracing::info!(
+            "send_invite_with_extra_headers: published StoreDialogMapping for session {} -> dialog {} ({} extra header(s))",
+            session_id.0,
+            dialog_id,
+            self.session_to_dialog
+                .get(session_id)
+                .map(|_| "ok")
+                .unwrap_or("missing"),
+        );
+
+        Ok(())
+    }
+
     /// Send 200 OK response
     pub async fn send_200_ok(&self, session_id: &SessionId, sdp: Option<String>) -> Result<()> {
         self.send_response(session_id, 200, sdp).await

@@ -107,7 +107,38 @@ impl StateMachineHelpers {
         to: &str,
         credentials: Option<crate::types::Credentials>,
     ) -> Result<SessionId> {
-        self.make_call_inner(from, to, credentials, None).await
+        self.make_call_inner(from, to, credentials, None, None).await
+    }
+
+    /// Make an outgoing call attaching a `P-Asserted-Identity` URI
+    /// (RFC 3325 §9.1) to the very first INVITE. The URI lands on
+    /// `SessionState.pai_uri` *before* `MakeCall` is dispatched, so the
+    /// `SendINVITE` action picks it up and routes through dialog-core's
+    /// `make_call_with_extra_headers_for_session` path. `None` for `pai`
+    /// is equivalent to plain [`make_call`](Self::make_call).
+    ///
+    /// Per-call override of [`Config::pai_uri`].
+    pub async fn make_call_with_pai(
+        &self,
+        from: &str,
+        to: &str,
+        pai: Option<String>,
+    ) -> Result<SessionId> {
+        self.make_call_inner(from, to, None, None, pai).await
+    }
+
+    /// Combined entry point used by [`UnifiedCoordinator::make_call`] /
+    /// `make_call_with_auth` to apply both the digest credentials and the
+    /// `P-Asserted-Identity` from `Config` in a single dispatch. Either or
+    /// both of `credentials` / `pai` may be `None`.
+    pub async fn make_call_with_credentials_and_pai(
+        &self,
+        from: &str,
+        to: &str,
+        credentials: Option<crate::types::Credentials>,
+        pai: Option<String>,
+    ) -> Result<SessionId> {
+        self.make_call_inner(from, to, credentials, None, pai).await
     }
 
     /// Spawn an outbound leg that will carry RFC 3515 §2.4.5 progress
@@ -129,7 +160,7 @@ impl StateMachineHelpers {
         to: &str,
         transferor_session_id: &SessionId,
     ) -> Result<SessionId> {
-        self.make_call_inner(from, to, None, Some(transferor_session_id.clone())).await
+        self.make_call_inner(from, to, None, Some(transferor_session_id.clone()), None).await
     }
 
     /// Lower-level primitive: retroactively link an existing leg to a
@@ -155,6 +186,7 @@ impl StateMachineHelpers {
         to: &str,
         credentials: Option<crate::types::Credentials>,
         transferor_session_id: Option<SessionId>,
+        pai_uri: Option<String>,
     ) -> Result<SessionId> {
         let session_id = SessionId::new();
 
@@ -165,12 +197,12 @@ impl StateMachineHelpers {
             Role::UAC,
         ).await?;
 
-        // Fold any caller-supplied state (credentials, transfer linkage)
+        // Fold any caller-supplied state (credentials, transfer linkage, PAI)
         // into `SessionState` *before* the `MakeCall` event enters the
         // state machine — otherwise a fast loopback `Dialog180Ringing`
         // arriving mid-dispatch can beat the update and the state
         // machine sees stale state.
-        if credentials.is_some() || transferor_session_id.is_some() {
+        if credentials.is_some() || transferor_session_id.is_some() || pai_uri.is_some() {
             let mut session = self.state_machine.store.get_session(&session_id).await?;
             if let Some(creds) = credentials {
                 session.credentials = Some(creds);
@@ -178,6 +210,9 @@ impl StateMachineHelpers {
             if let Some(referor) = transferor_session_id {
                 session.transferor_session_id = Some(referor);
                 session.is_transfer_call = true;
+            }
+            if let Some(pai) = pai_uri {
+                session.pai_uri = Some(pai);
             }
             self.state_machine.store.update_session(session).await?;
         }

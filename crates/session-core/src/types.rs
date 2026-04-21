@@ -517,4 +517,11 @@ pub struct IncomingCallInfo {
     pub to: String,
     /// SIP Call-ID
     pub call_id: String,
+    /// `P-Asserted-Identity` header value (RFC 3325 §9.1) when the inbound
+    /// INVITE carried one — typical on calls coming from a carrier trunk
+    /// or trusted PBX. The string is the wire form of the header value
+    /// (e.g. `"\"Alice\" <sip:alice@example.com>, <tel:+14155551234>"`);
+    /// callers wanting structured access can re-parse with
+    /// `rvoip_sip_core::types::p_asserted_identity::PAssertedIdentity::from_str`.
+    pub p_asserted_identity: Option<String>,
 }

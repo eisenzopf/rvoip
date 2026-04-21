@@ -147,6 +147,12 @@ pub struct SessionState {
     pub registration_expires: Option<u32>, // Registration expiry in seconds
     pub registration_contact: Option<String>, // Contact URI for registration
     pub credentials: Option<crate::types::Credentials>, // User credentials for authentication
+    /// Optional `P-Asserted-Identity` URI (RFC 3325 §9.1) to attach to the
+    /// outgoing INVITE for this session. When `Some`, the `SendINVITE` action
+    /// routes through `dialog_adapter.send_invite_with_extra_headers` so the
+    /// header lands on the very first wire transmission. Carrier trunks
+    /// commonly require this for caller-ID assertion.
+    pub pai_uri: Option<String>,
     pub is_registered: bool, // Whether registration is complete
     pub auth_challenge: Option<crate::auth::DigestChallenge>, // Cached authentication challenge from 401
     pub registration_retry_count: u32, // Number of retries attempted (prevent infinite loops)
@@ -208,6 +214,7 @@ impl SessionState {
             registration_expires: None,
             registration_contact: None,
             credentials: None,
+            pai_uri: None,
             is_registered: false,
             auth_challenge: None,
             registration_retry_count: 0,

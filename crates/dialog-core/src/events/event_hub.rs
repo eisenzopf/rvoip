@@ -183,6 +183,21 @@ impl DialogEventHub {
                 // Include dialog_id in headers since IncomingCall doesn't have a dialog_id field
                 let mut headers = std::collections::HashMap::new();
                 headers.insert("X-Dialog-Id".to_string(), dialog_id.to_string());
+
+                // Surface RFC 3325 P-Asserted-Identity / P-Preferred-Identity
+                // verbatim so session-core can expose them on `IncomingCallInfo`
+                // for trunk-side caller-ID assertion.
+                for hdr in &request.headers {
+                    match hdr {
+                        rvoip_sip_core::types::TypedHeader::PAssertedIdentity(pai) => {
+                            headers.insert("P-Asserted-Identity".to_string(), pai.to_string());
+                        }
+                        rvoip_sip_core::types::TypedHeader::PPreferredIdentity(ppi) => {
+                            headers.insert("P-Preferred-Identity".to_string(), ppi.to_string());
+                        }
+                        _ => {}
+                    }
+                }
                 
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {

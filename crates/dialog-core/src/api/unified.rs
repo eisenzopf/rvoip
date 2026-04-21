@@ -500,6 +500,48 @@ impl UnifiedDialogApi {
             .make_call_for_session(session_id, from_uri, to_uri, sdp_offer, call_id)
             .await
     }
+
+    /// Send an INVITE with caller-supplied extra headers riding on the very
+    /// first wire transmission. Used for headers the dialog layer can't infer
+    /// from the dialog state alone — most commonly:
+    ///
+    /// - `TypedHeader::PAssertedIdentity(...)` (RFC 3325) for trunk-asserted identity
+    /// - `TypedHeader::PPreferredIdentity(...)` (RFC 3325) for caller preference
+    ///
+    /// Headers are appended verbatim — no validation against method/dialog state.
+    /// session-core constructs the typed PAI from `Config::pai_uri` and
+    /// reaches this entry point via `DialogAdapter::make_call_with_pai`.
+    pub async fn make_call_with_extra_headers(
+        &self,
+        from_uri: &str,
+        to_uri: &str,
+        sdp_offer: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<CallHandle> {
+        self.manager
+            .make_call_with_extra_headers(from_uri, to_uri, sdp_offer, extra_headers)
+            .await
+    }
+
+    /// `make_call_for_session` + extra headers. The session↔dialog mapping
+    /// is pre-registered before the INVITE goes on the wire (closes the
+    /// fast-RTT race for very fast localhost responses), and the supplied
+    /// extras (typically PAI) ride on the first transmission.
+    pub async fn make_call_with_extra_headers_for_session(
+        &self,
+        session_id: &str,
+        from_uri: &str,
+        to_uri: &str,
+        sdp_offer: Option<String>,
+        call_id: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<CallHandle> {
+        self.manager
+            .make_call_with_extra_headers_for_session(
+                session_id, from_uri, to_uri, sdp_offer, call_id, extra_headers,
+            )
+            .await
+    }
     
     /// Create an outgoing dialog without sending INVITE (Client/Hybrid modes only)
     ///

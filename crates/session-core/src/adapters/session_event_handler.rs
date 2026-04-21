@@ -398,10 +398,9 @@ impl SessionCrossCrateEventHandler {
         let session_id_str = self.extract_field(event_str, "session_id: \"").unwrap_or_else(|| format!("session-{}", uuid::Uuid::new_v4()));
 
         // Extract dialog_id from headers since IncomingCall doesn't have a dialog_id field directly
-        let dialog_id_str = if let Some(headers_start) = event_str.find("headers: {") {
-            // Look for X-Dialog-Id in headers
+        let (dialog_id_str, p_asserted_identity) = if let Some(headers_start) = event_str.find("headers: {") {
             let headers_section = &event_str[headers_start..];
-            if let Some(dialog_id_start) = headers_section.find("\"X-Dialog-Id\": \"") {
+            let dialog_id = if let Some(dialog_id_start) = headers_section.find("\"X-Dialog-Id\": \"") {
                 let start = dialog_id_start + "\"X-Dialog-Id\": \"".len();
                 if let Some(end) = headers_section[start..].find('"') {
                     headers_section[start..start+end].to_string()
@@ -410,9 +409,22 @@ impl SessionCrossCrateEventHandler {
                 }
             } else {
                 "unknown".to_string()
-            }
+            };
+            // RFC 3325 P-Asserted-Identity surfaced by dialog-core's
+            // event_hub when the inbound INVITE carries one.
+            let pai = if let Some(pai_start) = headers_section.find("\"P-Asserted-Identity\": \"") {
+                let start = pai_start + "\"P-Asserted-Identity\": \"".len();
+                if let Some(end) = headers_section[start..].find('"') {
+                    Some(headers_section[start..start+end].to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            (dialog_id, pai)
         } else {
-            "unknown".to_string()
+            ("unknown".to_string(), None)
         };
 
         // IMPORTANT: Check if this event is for OUR dialog instance.
@@ -482,6 +494,7 @@ impl SessionCrossCrateEventHandler {
                 to: to.clone(),
                         call_id: call_id.clone(),
                 dialog_id: DialogId(dialog_uuid),
+                p_asserted_identity: p_asserted_identity.clone(),
             }
         ).await;
         
@@ -544,6 +557,7 @@ impl SessionCrossCrateEventHandler {
                     to,
                     call_id,
                     dialog_id: DialogId(dialog_uuid),
+                    p_asserted_identity,
                 };
                 if let Err(e) = tx.send(call_info).await {
                     error!("Failed to send incoming call notification: {}", e);
