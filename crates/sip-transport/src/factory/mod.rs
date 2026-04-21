@@ -143,14 +143,18 @@ impl TransportFactory {
                     .ok_or_else(|| Error::InvalidState("TLS certificate path not provided".to_string()))?;
                 let key_path = self.config.tls_key_path.as_ref()
                     .ok_or_else(|| Error::InvalidState("TLS key path not provided".to_string()))?;
-                
-                let (transport, rx) = TlsTransport::bind(
+
+                use std::path::PathBuf;
+                let client_cfg = crate::transport::tls::TlsClientConfig {
+                    extra_ca_path: self.config.tls_ca_path.as_ref().map(PathBuf::from),
+                    insecure_skip_verify: false,
+                };
+                let (transport, rx) = TlsTransport::bind_with_client_config(
                     bind_addr,
-                    cert_path,
-                    key_path,
-                    self.config.tls_ca_path.as_deref(),
-                    Some(self.config.channel_capacity),
-                    Some(self.config.pool_config.clone()),
+                    std::path::Path::new(cert_path),
+                    std::path::Path::new(key_path),
+                    None,
+                    client_cfg,
                 ).await?;
                 Ok((Arc::new(transport), rx))
             },

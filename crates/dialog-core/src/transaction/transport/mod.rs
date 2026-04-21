@@ -7,7 +7,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::Message;
 use rvoip_sip_transport::{
-    Transport, TransportEvent, UdpTransport, 
+    Transport, TransportEvent, UdpTransport,
     TcpTransport, WebSocketTransport,
     error::{Error as TransportError, Result as TransportResult}
 };
@@ -15,6 +15,9 @@ use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::factory::{TransportFactory, TransportFactoryConfig};
 
 use crate::transaction::error::{Error, Result};
+
+pub mod multiplexed;
+pub use multiplexed::MultiplexedTransport;
 
 /// Configuration options for the TransportManager
 #[derive(Debug, Clone)]
@@ -35,6 +38,16 @@ pub struct TransportManagerConfig {
     pub tls_cert_path: Option<String>,
     /// TLS key path
     pub tls_key_path: Option<String>,
+    /// Optional path to a PEM-encoded CA bundle to *add to* the system
+    /// trust store on the client side. Useful for enterprise PKI /
+    /// private carriers.
+    pub tls_extra_ca_path: Option<String>,
+    /// **Dev only.** When `true`, server certificates are accepted
+    /// without identity verification. The TLS handshake still runs
+    /// end-to-end (encrypted), but a malicious peer can MITM. Required
+    /// for self-signed test certs; **must not** be enabled in
+    /// production builds.
+    pub tls_insecure_skip_verify: bool,
 }
 
 impl Default for TransportManagerConfig {
@@ -48,6 +61,8 @@ impl Default for TransportManagerConfig {
             default_channel_capacity: 100,
             tls_cert_path: None,
             tls_key_path: None,
+            tls_extra_ca_path: None,
+            tls_insecure_skip_verify: false,
         }
     }
 }
@@ -146,7 +161,14 @@ impl TransportManager {
                 }
             }
             
-            // Add TLS transport if enabled
+            // Add TLS transport if enabled. TLS is TCP-over-TLS — it
+            // takes a TCP-level port that can't conflict with the
+            // plain-TCP listener above. RFC 3261 standardises 5061 for
+            // `sips:` (a +1 offset from the default `sip:` port 5060).
+            // We mirror that: when explicit bind addresses are
+            // supplied, derive each TLS bind by adding 1 to its port,
+            // unless the caller already accounted for it via
+            // [`TransportManagerConfig::tls_bind_addresses`] (TODO).
             if self.config.enable_tls {
                 if self.config.tls_cert_path.is_none() || self.config.tls_key_path.is_none() {
                     warn!("TLS is enabled but certificate or key path is missing");
@@ -154,9 +176,23 @@ impl TransportManager {
                     let addresses = if self.config.bind_addresses.is_empty() {
                         vec!["0.0.0.0:5061".parse().unwrap()]
                     } else {
-                        self.config.bind_addresses.clone()
+                        self.config
+                            .bind_addresses
+                            .iter()
+                            .map(|addr| {
+                                let mut tls_addr = *addr;
+                                // Derive TLS port from TCP port (+1).
+                                // If the user picked port 0 (ephemeral)
+                                // keep it at 0 so the OS still picks a
+                                // free port.
+                                if tls_addr.port() != 0 {
+                                    tls_addr.set_port(tls_addr.port().saturating_add(1));
+                                }
+                                tls_addr
+                            })
+                            .collect::<Vec<_>>()
                     };
-                    
+
                     for addr in addresses {
                         match self.add_tcp_transport(addr, true).await {
                             Ok(_) => {
@@ -249,31 +285,73 @@ impl TransportManager {
         Ok(transport_arc)
     }
     
-    /// Adds a TCP transport to the manager
+    /// Adds a TCP transport — or, when `tls = true`, a TLS-over-TCP
+    /// transport — to the manager. The TLS path requires
+    /// `tls_cert_path` + `tls_key_path` to be set on the manager
+    /// config; honours `tls_extra_ca_path` and the dev-only
+    /// `tls_insecure_skip_verify` knob via `TlsClientConfig`.
     pub async fn add_tcp_transport(&self, bind_addr: SocketAddr, tls: bool) -> Result<Arc<dyn Transport>> {
-        // TLS is not fully implemented yet in this function
-        if tls {
-            return Err(Error::Transport("TLS transport is not fully implemented in this function".into()));
-        }
-        
-        let (transport, rx) = TcpTransport::bind(bind_addr, None, None)
+        let (transport_arc, key): (Arc<dyn Transport>, String) = if tls {
+            use rvoip_sip_transport::transport::tls::{TlsClientConfig, TlsTransport};
+            use std::path::{Path, PathBuf};
+
+            let cert_path = self.config.tls_cert_path.as_ref().ok_or_else(|| {
+                Error::Transport("TLS enabled but tls_cert_path is missing".into())
+            })?;
+            let key_path = self.config.tls_key_path.as_ref().ok_or_else(|| {
+                Error::Transport("TLS enabled but tls_key_path is missing".into())
+            })?;
+            let client_cfg = TlsClientConfig {
+                extra_ca_path: self.config.tls_extra_ca_path.as_ref().map(PathBuf::from),
+                insecure_skip_verify: self.config.tls_insecure_skip_verify,
+            };
+
+            // Pass the manager's combined event sender so TLS events
+            // (incoming SIP messages, errors) flow through the same
+            // pipeline as UDP/TCP — no separate forwarder task needed.
+            let (transport, _rx_unused) = TlsTransport::bind_with_client_config(
+                bind_addr,
+                Path::new(cert_path),
+                Path::new(key_path),
+                Some(self.event_tx.clone()),
+                client_cfg,
+            )
             .await
-            .map_err(|e| Error::Transport(format!("Failed to bind TCP transport to {}: {}", bind_addr, e)))?;
-        
-        let transport_arc = Arc::new(transport);
-        
-        // Store the transport
-        let key = format!("{}:{}", if tls { "tls" } else { "tcp" }, bind_addr);
+            .map_err(|e| Error::Transport(
+                format!("Failed to bind TLS transport to {}: {}", bind_addr, e)
+            ))?;
+            // `local_addr()` reports the OS-assigned port (important
+            // when `bind_addr` used port 0). Use the actual port in the
+            // registry key so MultiplexedTransport can find it.
+            let actual = transport.local_addr().map_err(|e| {
+                Error::Transport(format!("TLS bind: failed to read local_addr: {}", e))
+            })?;
+            let arc: Arc<dyn Transport> = Arc::new(transport);
+            (arc, format!("tls:{}", actual))
+        } else {
+            let (transport, rx) = TcpTransport::bind(bind_addr, None, None)
+                .await
+                .map_err(|e| Error::Transport(
+                    format!("Failed to bind TCP transport to {}: {}", bind_addr, e)
+                ))?;
+            let arc: Arc<dyn Transport> = Arc::new(transport);
+            // TCP path retains its own event channel; bridge it into
+            // the manager's combined channel.
+            self.clone().process_transport_events(arc.clone(), rx);
+            (arc, format!("tcp:{}", bind_addr))
+        };
+
         {
             let mut transports = self.transports.lock().await;
             transports.insert(key, transport_arc.clone());
         }
-        
-        // Process events from this transport
-        self.clone().process_transport_events(transport_arc.clone(), rx);
-        
-        info!("Added {} transport bound to {}", if tls { "TLS" } else { "TCP" }, bind_addr);
-        
+
+        info!(
+            "Added {} transport bound to {}",
+            if tls { "TLS" } else { "TCP" },
+            bind_addr
+        );
+
         Ok(transport_arc)
     }
     
@@ -340,6 +418,60 @@ impl TransportManager {
         // For now, we just return the UDP transport
         // In the future, we'll add URI-based transport selection
         self.udp_transport.clone()
+    }
+
+    /// Extract the active transports as a `TransportType`-keyed map.
+    ///
+    /// Used by [`MultiplexedTransport::new`] to build a URI-aware
+    /// dispatcher: the multiplexer holds one underlying `Transport` per
+    /// flavour and routes outbound requests by reading the Request-URI's
+    /// scheme + `transport=` parameter.
+    ///
+    /// Multiple transports of the same flavour bound to different
+    /// addresses collapse to whichever one the underlying HashMap
+    /// iteration sees first; this is acceptable today because session-core
+    /// only ever binds one address per flavour. When that assumption
+    /// breaks (multi-homed deployments), this helper should grow a
+    /// destination-aware variant.
+    pub async fn transports_by_flavour(&self) -> HashMap<TransportType, Arc<dyn Transport>> {
+        let transports = self.transports.lock().await;
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        for (key, transport) in transports.iter() {
+            let flavour = match key.split(':').next().unwrap_or("") {
+                "udp" => TransportType::Udp,
+                "tcp" => TransportType::Tcp,
+                "tls" => TransportType::Tls,
+                "ws" => TransportType::Ws,
+                "wss" => TransportType::Wss,
+                other => {
+                    warn!("transports_by_flavour: unrecognised key prefix '{}'", other);
+                    continue;
+                }
+            };
+            // First write wins — see doc above.
+            by_flavour.entry(flavour).or_insert_with(|| transport.clone());
+        }
+        by_flavour
+    }
+
+    /// Build a `MultiplexedTransport` over the manager's currently
+    /// registered transports, suitable for installing as the single
+    /// `Arc<dyn Transport>` that
+    /// [`crate::transaction::TransactionManager::with_transport_manager`]
+    /// stores. The default transport is reported via the multiplexer's
+    /// `local_addr()` and used as the fallback when no flavour-specific
+    /// transport is registered for an outbound request's URI scheme.
+    pub async fn build_multiplexed_transport(&self) -> Result<Arc<dyn Transport>> {
+        let default = self
+            .default_transport()
+            .await
+            .ok_or_else(|| Error::Transport(
+                "build_multiplexed_transport: TransportManager has no default transport".into()
+            ))?;
+        let by_flavour = self.transports_by_flavour().await;
+        let mux = MultiplexedTransport::new(default, by_flavour)
+            .map_err(|e| Error::Transport(format!("MultiplexedTransport: {}", e)))?;
+        Ok(Arc::new(mux))
     }
     
     /// Starts processing transport events

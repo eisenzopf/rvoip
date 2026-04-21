@@ -138,6 +138,132 @@ pub struct SsrcAttribute {
     pub value: Option<String>,
 }
 
+/// SDES crypto suites (RFC 4568 §6.2.1, RFC 6188 for SHA1_80/256 names).
+///
+/// Listed in rough order of carrier preference. The string forms below
+/// are the wire-format names used in `a=crypto:<tag> <suite> ...`. A
+/// peer may offer or accept any combination; a UAC typically lists its
+/// supported suites in preferred order so the answerer can pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CryptoSuite {
+    /// AES-128 counter mode + HMAC-SHA1 80-bit auth tag (RFC 4568 §6.2.1).
+    /// Default suite — accepted everywhere SDES is supported.
+    AesCm128HmacSha1_80,
+    /// AES-128 counter mode + HMAC-SHA1 32-bit auth tag (RFC 4568 §6.2.1).
+    /// Lower bandwidth overhead; a few legacy carriers prefer this.
+    AesCm128HmacSha1_32,
+    /// AES-256 counter mode + HMAC-SHA1 80-bit auth tag (RFC 6188 §6.1).
+    /// Stronger key; less commonly negotiated.
+    AesCm256HmacSha1_80,
+    /// AES-256 counter mode + HMAC-SHA1 32-bit auth tag (RFC 6188 §6.1).
+    AesCm256HmacSha1_32,
+}
+
+impl CryptoSuite {
+    /// Wire-format name used in `a=crypto:<tag> <suite> ...`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CryptoSuite::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
+            CryptoSuite::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
+            CryptoSuite::AesCm256HmacSha1_80 => "AES_CM_256_HMAC_SHA1_80",
+            CryptoSuite::AesCm256HmacSha1_32 => "AES_CM_256_HMAC_SHA1_32",
+        }
+    }
+}
+
+impl std::fmt::Display for CryptoSuite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for CryptoSuite {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "AES_CM_128_HMAC_SHA1_80" => Ok(CryptoSuite::AesCm128HmacSha1_80),
+            "AES_CM_128_HMAC_SHA1_32" => Ok(CryptoSuite::AesCm128HmacSha1_32),
+            "AES_CM_256_HMAC_SHA1_80" => Ok(CryptoSuite::AesCm256HmacSha1_80),
+            "AES_CM_256_HMAC_SHA1_32" => Ok(CryptoSuite::AesCm256HmacSha1_32),
+            other => Err(crate::error::Error::ParseError(format!(
+                "unknown SRTP crypto-suite: {}",
+                other
+            ))),
+        }
+    }
+}
+
+/// A single SDES `a=crypto:` attribute (RFC 4568 §9.1).
+///
+/// Wire format:
+/// ```text
+/// a=crypto:<tag> <crypto-suite> inline:<base64-key>[|<lifetime>][|<mki>:<mki_len>] [<session-params>]
+/// ```
+///
+/// - `tag` is a small integer (1..) that the answerer echoes back to
+///   indicate which offered suite it accepted.
+/// - `suite` is the chosen SRTP profile.
+/// - `key_inline` is the base64-encoded master key + master salt (30 bytes
+///   for AES-128, 46 bytes for AES-256). RFC 4568 §6.1.
+/// - `lifetime` and `mki` are optional rekeying knobs; most SIP carriers
+///   leave them off.
+/// - `session_params` is a free-form list of `KEY=value` pairs (e.g.
+///   `UNENCRYPTED_SRTCP`); rarely populated outside WebRTC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CryptoAttribute {
+    /// Crypto-suite tag (small positive integer, unique per `m=` section).
+    pub tag: u32,
+    /// Negotiated SRTP profile.
+    pub suite: CryptoSuite,
+    /// Base64-encoded inline key (master key + master salt concatenated).
+    /// The caller is responsible for generating and encoding the key — sip-core
+    /// stays out of the crypto path.
+    pub key_inline: String,
+    /// Optional `|lifetime` parameter (max packets a key may protect; most
+    /// senders omit this).
+    pub key_lifetime: Option<String>,
+    /// Optional `|MKI:MKI_LENGTH` parameter (master key identifier);
+    /// rarely populated outside WebRTC.
+    pub key_mki: Option<(u32, u32)>,
+    /// Optional session-params (e.g. `UNENCRYPTED_SRTP`,
+    /// `UNAUTHENTICATED_SRTP`, `UNENCRYPTED_SRTCP`, `KDR=N`).
+    pub session_params: Vec<String>,
+}
+
+impl CryptoAttribute {
+    /// Construct a minimal `a=crypto:` attribute carrying just a tag,
+    /// suite, and inline key. Lifetime, MKI, and session-params default
+    /// to absent — the common case for SIP-trunk SDES.
+    pub fn new(tag: u32, suite: CryptoSuite, key_inline: impl Into<String>) -> Self {
+        Self {
+            tag,
+            suite,
+            key_inline: key_inline.into(),
+            key_lifetime: None,
+            key_mki: None,
+            session_params: Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Display for CryptoAttribute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Wire format: a=crypto:<tag> <suite> inline:<key>[|<lifetime>][|<mki>:<mki_len>] [params...]
+        write!(f, "a=crypto:{} {} inline:{}", self.tag, self.suite, self.key_inline)?;
+        if let Some(lifetime) = &self.key_lifetime {
+            write!(f, "|{}", lifetime)?;
+        }
+        if let Some((mki, mki_len)) = self.key_mki {
+            write!(f, "|{}:{}", mki, mki_len)?;
+        }
+        for param in &self.session_params {
+            write!(f, " {}", param)?;
+        }
+        Ok(())
+    }
+}
+
 /// A parsed attribute, identified by its type
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum ParsedAttribute {
@@ -163,6 +289,11 @@ pub enum ParsedAttribute {
     Fingerprint(String, String),
     /// DTLS setup role, corresponds to a=setup:<role>
     Setup(String),
+    /// SDES crypto attribute (RFC 4568 §9.1) for SRTP key exchange,
+    /// corresponds to `a=crypto:<tag> <crypto-suite> <key-params> [<session-params>]`.
+    /// One per offered/accepted crypto-suite — typically 1–4 lines per `m=`
+    /// section, ranked by sender preference.
+    Crypto(CryptoAttribute),
     /// Media identification, corresponds to a=mid:<identification-tag>
     Mid(String),
     /// Media grouping, corresponds to a=group:<semantics> <id> <id> ...
@@ -832,6 +963,7 @@ impl fmt::Display for ParsedAttribute {
                 write!(f, "a=fingerprint:{} {}", hash, fingerprint)
             }
             ParsedAttribute::Setup(role) => write!(f, "a=setup:{}", role),
+            ParsedAttribute::Crypto(crypto) => write!(f, "{}", crypto),
             ParsedAttribute::Mid(id) => write!(f, "a=mid:{}", id),
             ParsedAttribute::Group(semantics, ids) => {
                 write!(f, "a=group:{}", semantics)?;

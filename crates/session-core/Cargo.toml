@@ -200,6 +200,8 @@ rvoip-sip-transport = { path = "../sip-transport" }
 rvoip-registrar-core = { path = "../registrar-core" }
 serial_test = { workspace = true }
 tempfile = "3.14"
+# Self-signed cert generation for the TLS-call integration test.
+rcgen = "0.12"
 
 [features]
 default = []

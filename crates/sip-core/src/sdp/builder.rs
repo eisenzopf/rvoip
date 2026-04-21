@@ -643,6 +643,56 @@ impl SdpBuilder {
         self
     }
 
+    /// Add a session-level SDES `a=crypto:` attribute (RFC 4568 §9.1).
+    ///
+    /// SDES is the SDP-based SRTP key-exchange mechanism used by carrier
+    /// SIP trunks (Asterisk / FreeSWITCH `srtp=mandatory`, Twilio /
+    /// Vonage / Bandwidth production tier). For per-`m=`-section attachment
+    /// (the more common placement) use [`MediaBuilder::crypto`] inside a
+    /// media section instead.
+    ///
+    /// # Parameters
+    ///
+    /// - `tag`: small positive integer, unique per `m=` section. Offerer
+    ///   ranks suites by listing multiple `a=crypto:` lines; the answerer
+    ///   echoes back exactly one with the chosen tag.
+    /// - `suite`: the SRTP profile being offered.
+    /// - `key_inline`: base64-encoded master key + master salt (the caller
+    ///   generates this — sip-core stays out of the crypto path).
+    ///
+    /// For optional `lifetime` / `MKI` / session-params, build a
+    /// [`CryptoAttribute`] manually and push it via
+    /// [`SdpBuilder::crypto_attribute`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rvoip_sip_core::sdp::SdpBuilder;
+    /// use rvoip_sip_core::types::sdp::CryptoSuite;
+    ///
+    /// let builder = SdpBuilder::new("Session")
+    ///     .crypto(1, CryptoSuite::AesCm128HmacSha1_80,
+    ///             "WVNfX19zZWNyZXRfa2V5X3RoaXJ0ZV9ieXRlcw==");
+    /// ```
+    pub fn crypto(
+        mut self,
+        tag: u32,
+        suite: crate::types::sdp::CryptoSuite,
+        key_inline: impl Into<String>,
+    ) -> Self {
+        let attr = crate::types::sdp::CryptoAttribute::new(tag, suite, key_inline);
+        self.session.generic_attributes.push(ParsedAttribute::Crypto(attr));
+        self
+    }
+
+    /// Add a session-level `a=crypto:` from a fully-built
+    /// [`CryptoAttribute`]. Use this when you need lifetime, MKI, or
+    /// session-params; otherwise [`SdpBuilder::crypto`] is more concise.
+    pub fn crypto_attribute(mut self, attr: crate::types::sdp::CryptoAttribute) -> Self {
+        self.session.generic_attributes.push(ParsedAttribute::Crypto(attr));
+        self
+    }
+
     /// Set group attribute (a=group)
     ///
     /// Sets a grouping attribute for bundling or lip synchronization.
@@ -1003,6 +1053,48 @@ impl<P> MediaBuilder<P> {
         self
     }
 
+    /// Add an `a=crypto:` attribute on this media section (RFC 4568 §9.1).
+    ///
+    /// Per-`m=` placement is the standard location for SDES — the
+    /// crypto context is per-stream, so each m-section has its own
+    /// crypto offer/answer. Multiple calls add multiple offers ranked
+    /// by `tag`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use rvoip_sip_core::sdp::SdpBuilder;
+    /// use rvoip_sip_core::types::sdp::CryptoSuite;
+    ///
+    /// let builder = SdpBuilder::new("Session")
+    ///     .media_audio(49170, "RTP/SAVP")
+    ///         .formats(&["0"])
+    ///         .rtpmap("0", "PCMU/8000")
+    ///         .crypto(1, CryptoSuite::AesCm128HmacSha1_80,
+    ///                 "WVNfX19zZWNyZXRfa2V5X3RoaXJ0ZV9ieXRlcw==")
+    ///         .crypto(2, CryptoSuite::AesCm128HmacSha1_32,
+    ///                 "WVNfX19zZWNyZXRfa2V5X3RoaXJ0ZV9ieXRlcw==")
+    ///         .done();
+    /// ```
+    pub fn crypto(
+        mut self,
+        tag: u32,
+        suite: crate::types::sdp::CryptoSuite,
+        key_inline: impl Into<String>,
+    ) -> Self {
+        let attr = crate::types::sdp::CryptoAttribute::new(tag, suite, key_inline);
+        self.media.generic_attributes.push(ParsedAttribute::Crypto(attr));
+        self
+    }
+
+    /// Add an `a=crypto:` from a fully-built [`CryptoAttribute`] on this
+    /// media section. Use this when you need lifetime, MKI, or
+    /// session-params; otherwise [`MediaBuilder::crypto`] is more concise.
+    pub fn crypto_attribute(mut self, attr: crate::types::sdp::CryptoAttribute) -> Self {
+        self.media.generic_attributes.push(ParsedAttribute::Crypto(attr));
+        self
+    }
+
     /// Add an extmap attribute
     pub fn extmap(mut self, id: u8, direction: Option<impl Into<String>>, 
                  uri: impl Into<String>, params: Option<impl Into<String>>) -> Self {
@@ -1316,5 +1408,149 @@ mod tests {
         if let Err(e) = result {
             assert!(e.to_string().contains("must have at least one format"));
         }
+    }
+
+    // ---------------- SDES `a=crypto:` builder coverage ---------------
+
+    #[test]
+    fn crypto_suite_wire_names_round_trip() {
+        use crate::types::sdp::CryptoSuite;
+        use std::str::FromStr;
+        for suite in [
+            CryptoSuite::AesCm128HmacSha1_80,
+            CryptoSuite::AesCm128HmacSha1_32,
+            CryptoSuite::AesCm256HmacSha1_80,
+            CryptoSuite::AesCm256HmacSha1_32,
+        ] {
+            let printed = suite.to_string();
+            let parsed = CryptoSuite::from_str(&printed).expect("round-trip");
+            assert_eq!(suite, parsed);
+        }
+    }
+
+    #[test]
+    fn crypto_suite_parser_rejects_unknown() {
+        use crate::types::sdp::CryptoSuite;
+        use std::str::FromStr;
+        assert!(CryptoSuite::from_str("AES_GCM_256").is_err());
+        assert!(CryptoSuite::from_str("").is_err());
+    }
+
+    #[test]
+    fn crypto_attribute_default_display() {
+        use crate::types::sdp::{CryptoAttribute, CryptoSuite};
+        let attr = CryptoAttribute::new(
+            1,
+            CryptoSuite::AesCm128HmacSha1_80,
+            "WVNfX19zZWNyZXRfa2V5X3RoaXJ0ZV9ieXRlcw==",
+        );
+        assert_eq!(
+            attr.to_string(),
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:WVNfX19zZWNyZXRfa2V5X3RoaXJ0ZV9ieXRlcw=="
+        );
+    }
+
+    #[test]
+    fn crypto_attribute_display_with_lifetime_and_mki() {
+        use crate::types::sdp::{CryptoAttribute, CryptoSuite};
+        let attr = CryptoAttribute {
+            tag: 2,
+            suite: CryptoSuite::AesCm128HmacSha1_32,
+            key_inline: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+            key_lifetime: Some("2^31".into()),
+            key_mki: Some((1, 4)),
+            session_params: vec!["UNENCRYPTED_SRTCP".into()],
+        };
+        assert_eq!(
+            attr.to_string(),
+            "a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|2^31|1:4 UNENCRYPTED_SRTCP"
+        );
+    }
+
+    #[test]
+    fn sdp_builder_session_level_crypto_lands_in_session() {
+        use crate::types::sdp::CryptoSuite;
+        let sdp = SdpBuilder::new("S")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .crypto(1, CryptoSuite::AesCm128HmacSha1_80, "AAAA==")
+            .media_audio(49170, "RTP/SAVP")
+                .formats(&["0"])
+                .rtpmap("0", "PCMU/8000")
+                .done()
+            .build()
+            .expect("Valid SDP");
+
+        let crypto_count = sdp
+            .generic_attributes
+            .iter()
+            .filter(|a| matches!(a, ParsedAttribute::Crypto(_)))
+            .count();
+        assert_eq!(crypto_count, 1, "session-level crypto must land in session attrs");
+        assert_eq!(
+            sdp.media_descriptions[0]
+                .generic_attributes
+                .iter()
+                .filter(|a| matches!(a, ParsedAttribute::Crypto(_)))
+                .count(),
+            0,
+            "session-level crypto must NOT leak into m-section attrs"
+        );
+    }
+
+    #[test]
+    fn sdp_builder_media_level_crypto_lands_in_m_section() {
+        use crate::types::sdp::CryptoSuite;
+        let sdp = SdpBuilder::new("S")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(49170, "RTP/SAVP")
+                .formats(&["0"])
+                .rtpmap("0", "PCMU/8000")
+                .crypto(1, CryptoSuite::AesCm128HmacSha1_80, "AAAA==")
+                .crypto(2, CryptoSuite::AesCm128HmacSha1_32, "BBBB==")
+                .done()
+            .build()
+            .expect("Valid SDP");
+
+        let m_attrs = &sdp.media_descriptions[0].generic_attributes;
+        let crypto_attrs: Vec<_> = m_attrs
+            .iter()
+            .filter_map(|a| match a {
+                ParsedAttribute::Crypto(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(crypto_attrs.len(), 2);
+        assert_eq!(crypto_attrs[0].tag, 1);
+        assert_eq!(crypto_attrs[1].tag, 2);
+    }
+
+    #[test]
+    fn sdp_with_crypto_serialises_to_wire_format() {
+        // End-to-end: build → to_string and assert the rendered SDP
+        // contains the expected `a=crypto:` line. Smoke-checks both the
+        // builder wiring and the Display impl simultaneously.
+        use crate::types::sdp::CryptoSuite;
+        let sdp = SdpBuilder::new("S")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(49170, "RTP/SAVP")
+                .formats(&["0"])
+                .rtpmap("0", "PCMU/8000")
+                .crypto(1, CryptoSuite::AesCm128HmacSha1_80, "AAAA==")
+                .done()
+            .build()
+            .expect("Valid SDP");
+
+        let wire = sdp.to_string();
+        assert!(
+            wire.contains("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAA=="),
+            "rendered SDP missing expected crypto line:\n{}",
+            wire
+        );
     }
 } 

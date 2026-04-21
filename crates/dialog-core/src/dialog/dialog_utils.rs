@@ -7,7 +7,7 @@
 //! - Helper functions for dialog operations
 
 use std::str::FromStr;
-use std::net::{SocketAddr, IpAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use rvoip_sip_core::Uri;
 use rvoip_sip_core::types::contact::ContactValue;
 use tracing::{warn, debug};
@@ -121,7 +121,11 @@ pub fn extract_uri_from_contact(contact: &ContactValue) -> Result<Uri, &'static 
     Uri::from_str("sip:unknown@example.com").map_err(|_| "Failed to create fallback URI")
 }
 
-/// Resolve a SIP URI to a socket address (convenience function)
+/// Resolve a SIP URI to a socket address (convenience function).
+///
+/// Uses typed URI accessors (`uri.host`, `uri.port`, `uri.scheme()`) and
+/// honours the RFC 3261 §19.1.2 default-port rules: `sips:` → 5061, `sip:`
+/// or any other scheme → 5060.
 pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
     uri_resolver::resolve_uri_to_socketaddr(uri).await
 }
@@ -129,46 +133,47 @@ pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
 /// URI resolution utilities
 pub mod uri_resolver {
     use super::*;
-    
-    /// Resolve a SIP URI to a socket address
-    pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
-        // Extract host and port by parsing the URI string
-        // This is a more robust approach that doesn't rely on specific URI methods
-        let uri_str = uri.to_string();
-        
-        // Find the host part - after @ symbol if present, or after sip: if not
-        let host_part = if let Some(at_pos) = uri_str.find('@') {
-            uri_str[at_pos + 1..].to_string()
-        } else if let Some(scheme_pos) = uri_str.find("sip:") {
-            uri_str[scheme_pos + 4..].to_string()
-        } else {
-            uri_str.clone()
-        };
-        
-        // Extract host and port
-        let parts: Vec<&str> = host_part.split(':').collect();
-        let host = parts[0];
-        let port = if parts.len() > 1 {
-            parts[1].parse::<u16>().unwrap_or(5060)
-        } else {
-            5060 // Default SIP port
-        };
-        
-        debug!("Resolving SIP URI: {} to host: {}, port: {}", uri_str, host, port);
-        
-        // Try to parse as IP address first
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            return Some(SocketAddr::new(ip, port));
+    use rvoip_sip_core::types::uri::{Host, Scheme};
+
+    /// Default SIP port for a given URI scheme per RFC 3261 §19.1.2.
+    fn default_port_for_scheme(scheme: &Scheme) -> u16 {
+        match scheme {
+            Scheme::Sips => 5061,
+            _ => 5060,
         }
-        
-        // Otherwise, try DNS resolution
-        let addr_string = format!("{}:{}", host, port);
-        
-        match addr_string.to_socket_addrs() {
-            Ok(mut addrs) => addrs.next(),
-            Err(e) => {
-                warn!("Failed to resolve {}: {}", addr_string, e);
-                None
+    }
+
+    /// Resolve a SIP URI to a socket address using the typed URI fields.
+    ///
+    /// Honours the URI scheme for the default port (`sips:` → 5061), and
+    /// uses A/AAAA DNS resolution via `tokio::net::lookup_host` for domain
+    /// hosts. RFC 3263 SRV/NAPTR is not yet implemented (roadmap P3).
+    pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
+        let port = uri
+            .port
+            .filter(|p| *p > 0)
+            .unwrap_or_else(|| default_port_for_scheme(uri.scheme()));
+
+        debug!(
+            "Resolving SIP URI: {} (scheme={:?}, host={:?}) → port {}",
+            uri, uri.scheme(), uri.host, port
+        );
+
+        match &uri.host {
+            Host::Address(ip) => Some(SocketAddr::new(*ip, port)),
+            Host::Domain(domain) => {
+                // Async A/AAAA lookup. Note: the previous impl used the
+                // blocking `to_socket_addrs`; switch to the async lookup so
+                // we don't block the runtime on slow DNS.
+                let addr_string = format!("{}:{}", domain, port);
+                let lookup_result = tokio::net::lookup_host(addr_string.clone()).await;
+                match lookup_result {
+                    Ok(mut addrs) => addrs.next(),
+                    Err(e) => {
+                        warn!("Failed to resolve {}: {}", addr_string, e);
+                        None
+                    }
+                }
             }
         }
     }

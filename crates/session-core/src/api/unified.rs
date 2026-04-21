@@ -71,6 +71,30 @@ pub struct Config {
     /// `None` (the default) suppresses the header entirely. Per-call override
     /// is available via [`UnifiedCoordinator::make_call_with_pai`].
     pub pai_uri: Option<String>,
+
+    /// Path to the PEM-encoded TLS server certificate (RFC 3261 §26.2 /
+    /// RFC 5630). Both this **and** [`Config::tls_key_path`] must be set
+    /// to enable TLS — when both are present, TLS is auto-enabled and
+    /// `sips:` URIs / `;transport=tls` URI parameters route through the
+    /// `MultiplexedTransport` to the TLS listener. `None` disables TLS.
+    pub tls_cert_path: Option<std::path::PathBuf>,
+
+    /// Path to the PEM-encoded PKCS#8 private key matching
+    /// [`Config::tls_cert_path`].
+    pub tls_key_path: Option<std::path::PathBuf>,
+
+    /// Optional path to a PEM-encoded CA bundle to *add to* the system
+    /// trust store on the client side. Used for enterprise PKI / private
+    /// carriers where the server cert is signed by a private CA not in
+    /// the system root store. Default: `None` (system roots only).
+    pub tls_extra_ca_path: Option<std::path::PathBuf>,
+
+    /// **Dev only.** When `true`, server certs are accepted without
+    /// identity verification. Required for self-signed test certs. The
+    /// TLS handshake still runs end-to-end (encrypted), but a malicious
+    /// peer can MITM. Default: `false`. **Must not** be enabled in
+    /// production.
+    pub tls_insecure_skip_verify: bool,
 }
 
 impl Config {
@@ -96,6 +120,10 @@ impl Config {
             session_timer_min_se: 90,
             credentials: None,
             pai_uri: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            tls_extra_ca_path: None,
+            tls_insecure_skip_verify: false,
         }
     }
 
@@ -120,6 +148,10 @@ impl Config {
             session_timer_min_se: 90,
             credentials: None,
             pai_uri: None,
+            tls_cert_path: None,
+            tls_key_path: None,
+            tls_extra_ca_path: None,
+            tls_insecure_skip_verify: false,
         }
     }
 }
@@ -858,13 +890,43 @@ impl UnifiedCoordinator {
         use rvoip_dialog_core::api::unified::UnifiedDialogApi;
         use rvoip_dialog_core::transaction::{TransactionManager, transport::{TransportManager, TransportManagerConfig}};
         
-        // Create transport manager first (dialog-core's own transport manager)
+        // Create transport manager first (dialog-core's own transport manager).
+        //
+        // TCP is enabled by default — the URI-aware
+        // `MultiplexedTransport` (`crates/dialog-core/src/transaction/transport/multiplexed.rs`)
+        // routes outbound INVITEs to the right flavour based on the
+        // Request-URI's scheme + `;transport=` parameter.
+        //
+        // TLS auto-enables when both `tls_cert_path` and `tls_key_path`
+        // are provided in the config. `sips:` URIs and
+        // `;transport=tls` URI hints route through the TLS listener.
+        // (See `crates/TLS_SIP_IMPLEMENTATION_PLAN.md` for the design.)
+        let enable_tls = config.tls_cert_path.is_some() && config.tls_key_path.is_some();
+        if config.tls_cert_path.is_some() ^ config.tls_key_path.is_some() {
+            tracing::warn!(
+                "session-core Config has tls_cert_path xor tls_key_path set; \
+                 TLS requires both — listener will not bind"
+            );
+        }
         let transport_config = TransportManagerConfig {
             enable_udp: true,
-            enable_tcp: false,
+            enable_tcp: true,
             enable_ws: false,
-            enable_tls: false,
+            enable_tls,
             bind_addresses: vec![config.bind_addr],
+            tls_cert_path: config
+                .tls_cert_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            tls_key_path: config
+                .tls_key_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            tls_extra_ca_path: config
+                .tls_extra_ca_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            tls_insecure_skip_verify: config.tls_insecure_skip_verify,
             ..Default::default()
         };
         

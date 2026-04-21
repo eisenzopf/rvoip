@@ -570,9 +570,15 @@ impl TransactionManager {
         transport_rx: mpsc::Receiver<TransportEvent>,
         capacity: Option<usize>,
     ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
-        // Get the default transport from the manager
-        let default_transport = transport_manager.default_transport().await
-            .ok_or_else(|| Error::Transport("No default transport available from TransportManager".into()))?;
+        // Wrap the manager's per-flavour registry behind a
+        // `MultiplexedTransport` so outbound requests get URI-aware
+        // transport selection (RFC 3261 §18.1.1, §26.2). When the
+        // manager only has a single flavour registered (typical
+        // UDP-only setup) the multiplexer transparently delegates to it.
+        let default_transport = transport_manager.build_multiplexed_transport().await
+            .map_err(|e| Error::Transport(
+                format!("Failed to build multiplexed transport from TransportManager: {}", e)
+            ))?;
         
         // Create the transaction manager using the default transport and event channel
         let events_capacity = capacity.unwrap_or(100);

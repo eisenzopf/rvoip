@@ -154,6 +154,20 @@ pub trait Transport: Send + Sync + fmt::Debug {
         // Default implementation
         if self.is_closed() { 0 } else { 1 }
     }
+
+    /// Whether this transport currently has a live connection to the
+    /// given remote address. Used by URI-aware multiplexers to route
+    /// outbound *responses* back through the connection-oriented
+    /// transport that originally received the request (RFC 3261
+    /// §17.2 / §18.2.2).
+    ///
+    /// The default `false` is correct for connectionless transports
+    /// (UDP) and conservative for connection-oriented transports that
+    /// haven't yet implemented the lookup — they'll just be skipped
+    /// and the multiplexer will try the next candidate.
+    fn has_connection_to(&self, _remote_addr: SocketAddr) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

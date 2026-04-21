@@ -34,8 +34,15 @@ tracing.workspace = true
 
 # TLS support
 tokio-rustls = { version = "0.24", optional = true }
-rustls = { version = "0.21", optional = true }
+# `dangerous_configuration` is required for the dev-only
+# `TlsClientConfig::insecure_skip_verify` cert verifier. Production
+# default validation does not depend on it.
+rustls = { version = "0.21", optional = true, features = ["dangerous_configuration"] }
 rustls-pemfile = { version = "1.0", optional = true }
+# Client cert verification: prefer system trust store, fall back to a
+# bundled root set. Both pinned to versions compatible with rustls 0.21.
+rustls-native-certs = { version = "0.6", optional = true }
+webpki-roots = { version = "0.25", optional = true }
 
 # WebSocket support
 tokio-tungstenite = { version = "0.19", optional = true }
@@ -47,10 +54,13 @@ futures-util = "0.3"
 [features]
 default = ["udp", "tcp", "tls", "ws"]
 udp = []
-tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile"]
+tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:rustls-native-certs", "dep:webpki-roots"]
 tcp = []
 ws = ["dep:tokio-tungstenite", "dep:http"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
-tracing-subscriber = { workspace = true } 
+tracing-subscriber = { workspace = true }
+# Generate self-signed certs in TLS handshake tests.
+rcgen = "0.12"
+tempfile = "3"
