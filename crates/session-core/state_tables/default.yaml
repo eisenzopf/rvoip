@@ -109,6 +109,12 @@ transitions:
     event:
       type: "Dialog180Ringing"
     next_state: "Ringing"
+    actions:
+      # RFC 3515 §2.4.5: if this UAC is a transfer leg
+      # (session.transferor_session_id.is_some()) fire a 180 progress
+      # NOTIFY back on the transferor's REFER subscription. No-op for
+      # non-transfer calls.
+      - type: "SendTransferNotifyRinging"
     publish:
       - "CallRinging"
     description: "Remote party is ringing"
@@ -170,6 +176,10 @@ transitions:
       - type: "SendACK"
       - type: "StartMediaSession"
       - type: "SwitchToPassThroughOnActive"
+      # RFC 3515 §2.4.5 — fires only for transfer legs; no-op otherwise.
+      # Ordered after media commit so a NOTIFY-send failure can't roll
+      # back call establishment.
+      - type: "SendTransferNotifySuccess"
     conditions:
       dialog_established: true
       sdp_negotiated: true
@@ -189,6 +199,10 @@ transitions:
       - type: "SendACK"
       - type: "StartMediaSession"
       - type: "SwitchToPassThroughOnActive"
+      # RFC 3515 §2.4.5 — transfer-leg final success NOTIFY. No-op for
+      # non-transfer calls. Placed after media commit for the same reason
+      # as the Initiating→Active path above.
+      - type: "SendTransferNotifySuccess"
     conditions:
       dialog_established: true
       sdp_negotiated: true
@@ -557,6 +571,11 @@ transitions:
       type: "TransferRequested"
     next_state: "Active"
     actions:
+      # RFC 3515 §2.4.5 — 100 Trying acknowledges the implicit
+      # subscription on REFER acceptance. Emitted on this session's own
+      # dialog (we're the REFER receiver), before 202 Accepted, so the
+      # transferor sees subscription confirmation immediately.
+      - type: "SendRefer100Trying"
       - type: "SendReferAccepted"
     description: "Handle REFER - always accept (SimplePeer gets event via SessionCrossCrateEventHandler)"
 
@@ -869,6 +888,10 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
+      # RFC 3515 §2.4.5 — on a transfer leg, surface the failure back to
+      # the transferor via a final sipfrag NOTIFY. No-op for
+      # non-transfer sessions.
+      - type: "SendTransferNotifyFailure"
     publish:
       - "CallFailed"
     description: "Call failed with 4xx error"
@@ -881,6 +904,7 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
+      - type: "SendTransferNotifyFailure"
     publish:
       - "CallFailed"
     description: "Call failed with 5xx error"

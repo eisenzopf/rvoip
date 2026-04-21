@@ -779,6 +779,12 @@ impl YamlTableLoader {
             // REFER response action (keep for proper REFER handling)
             "SendReferAccepted" => Ok(Action::SendReferAccepted),
 
+            // RFC 3515 §2.4.5 progress NOTIFYs.
+            "SendRefer100Trying" => Ok(Action::SendRefer100Trying),
+            "SendTransferNotifyRinging" => Ok(Action::SendTransferNotifyRinging),
+            "SendTransferNotifySuccess" => Ok(Action::SendTransferNotifySuccess),
+            "SendTransferNotifyFailure" => Ok(Action::SendTransferNotifyFailure),
+
             // Internal
             "CheckReadiness" => Ok(Action::Custom("CheckReadiness".to_string())),
 

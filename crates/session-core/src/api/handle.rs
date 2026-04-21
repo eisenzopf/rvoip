@@ -169,6 +169,33 @@ impl SessionHandle {
             .await
     }
 
+    /// Send a SIP NOTIFY request (RFC 6665) on this session's dialog.
+    ///
+    /// `event_package` populates the required `Event:` header (e.g. `dialog`,
+    /// `message-summary`, `presence`, `refer`). `subscription_state` is the
+    /// raw `Subscription-State:` header value (`"active;expires=3600"`,
+    /// `"terminated;reason=noresource"`, …). The body is sent verbatim with
+    /// dialog-core choosing the Content-Type (`message/sipfrag` for the
+    /// `refer` package, caller-supplied otherwise — see
+    /// `DialogAdapter::send_notify`).
+    ///
+    /// This helper targets general-purpose NOTIFY emission (custom event
+    /// packages, presence, ad-hoc telemetry). RFC 3515 §2.4.5 REFER
+    /// progress NOTIFYs are driven automatically by the state machine
+    /// when a session is linked as a transfer leg via
+    /// [`UnifiedCoordinator::make_transfer_leg`], so apps do not need to
+    /// call this helper for transfer progress.
+    pub async fn send_notify(
+        &self,
+        event_package: &str,
+        body: Option<String>,
+        subscription_state: Option<String>,
+    ) -> Result<()> {
+        self.coordinator
+            .send_notify(&self.call_id, event_package, body, subscription_state)
+            .await
+    }
+
     // ===== Audio =====
 
     /// Get a duplex audio stream for this session.

@@ -532,6 +532,19 @@ pub enum Action {
     // REFER response action (keep for proper REFER handling)
     SendReferAccepted,
 
+    // RFC 3515 §2.4.5 transfer-progress NOTIFYs.
+    //
+    // `SendRefer100Trying` fires on the REFER-receiver's own dialog when
+    // the REFER is accepted (alongside `SendReferAccepted`). The other
+    // three fire from the transfer-leg's UAC transitions and are no-ops
+    // when `session.transferor_session_id == None`, so appending them to
+    // shared `Dialog180Ringing` / `Dialog200OK` / `Dialog{4,5,6}xxFailure`
+    // rows is safe for non-transfer calls.
+    SendRefer100Trying,
+    SendTransferNotifyRinging,
+    SendTransferNotifySuccess,
+    SendTransferNotifyFailure,
+
     // Custom action for extension
     Custom(String),
 }

@@ -107,9 +107,57 @@ impl StateMachineHelpers {
         to: &str,
         credentials: Option<crate::types::Credentials>,
     ) -> Result<SessionId> {
+        self.make_call_inner(from, to, credentials, None).await
+    }
+
+    /// Spawn an outbound leg that will carry RFC 3515 §2.4.5 progress
+    /// NOTIFYs back to `transferor_session_id` as its dialog advances.
+    ///
+    /// Critical invariant: `transferor_session_id` is written to the new
+    /// leg's `SessionState` *before* the `MakeCall` event enters the
+    /// state machine. That ordering closes the race where
+    /// `Dialog180Ringing` (or a fast `Dialog200OK` on loopback) could
+    /// fire between `make_call` returning and the caller setting the
+    /// linkage — the `SendTransferNotify*` actions no-op when linkage is
+    /// absent, so early progress NOTIFYs would otherwise be lost.
+    ///
+    /// The b2bua wrapper crate will call this as its primary
+    /// REFER-forwarding entry point.
+    pub async fn make_transfer_leg(
+        &self,
+        from: &str,
+        to: &str,
+        transferor_session_id: &SessionId,
+    ) -> Result<SessionId> {
+        self.make_call_inner(from, to, None, Some(transferor_session_id.clone())).await
+    }
+
+    /// Lower-level primitive: retroactively link an existing leg to a
+    /// transferor session. Callers must accept the race — any dialog
+    /// event that fires before this call is silently dropped by the
+    /// no-op-on-`None` `SendTransferNotify*` actions. Prefer
+    /// [`make_transfer_leg`] for freshly-created legs.
+    pub async fn set_transferor_session(
+        &self,
+        leg_session_id: &SessionId,
+        transferor_session_id: &SessionId,
+    ) -> Result<()> {
+        let mut session = self.state_machine.store.get_session(leg_session_id).await?;
+        session.transferor_session_id = Some(transferor_session_id.clone());
+        session.is_transfer_call = true;
+        self.state_machine.store.update_session(session).await?;
+        Ok(())
+    }
+
+    async fn make_call_inner(
+        &self,
+        from: &str,
+        to: &str,
+        credentials: Option<crate::types::Credentials>,
+        transferor_session_id: Option<SessionId>,
+    ) -> Result<SessionId> {
         let session_id = SessionId::new();
 
-        // Create session
         self.create_session(
             session_id.clone(),
             from.to_string(),
@@ -117,13 +165,23 @@ impl StateMachineHelpers {
             Role::UAC,
         ).await?;
 
-        if let Some(creds) = credentials {
+        // Fold any caller-supplied state (credentials, transfer linkage)
+        // into `SessionState` *before* the `MakeCall` event enters the
+        // state machine — otherwise a fast loopback `Dialog180Ringing`
+        // arriving mid-dispatch can beat the update and the state
+        // machine sees stale state.
+        if credentials.is_some() || transferor_session_id.is_some() {
             let mut session = self.state_machine.store.get_session(&session_id).await?;
-            session.credentials = Some(creds);
+            if let Some(creds) = credentials {
+                session.credentials = Some(creds);
+            }
+            if let Some(referor) = transferor_session_id {
+                session.transferor_session_id = Some(referor);
+                session.is_transfer_call = true;
+            }
             self.state_machine.store.update_session(session).await?;
         }
 
-        // Send MakeCall event
         self.state_machine.process_event(
             &session_id,
             EventType::MakeCall { target: to.to_string() },

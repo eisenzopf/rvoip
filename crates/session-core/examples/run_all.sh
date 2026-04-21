@@ -21,6 +21,7 @@ SCRIPTS=(
   streampeer/glare_retry/run.sh
   streampeer/blind_transfer/run.sh
   streampeer/bridge/run.sh
+  streampeer/notify_send/run.sh
   callbackpeer/auto_answer/run.sh
   callbackpeer/closure/run.sh
   callbackpeer/custom/run.sh

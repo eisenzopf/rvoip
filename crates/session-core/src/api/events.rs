@@ -213,7 +213,27 @@ pub enum Event {
         status_code: u16,
         reason: String,
     },
-    
+
+    // ===== Subscription / NOTIFY =====
+
+    /// Inbound NOTIFY surfaced to the application (RFC 6665).
+    ///
+    /// Fires for every NOTIFY received on any event package — REFER
+    /// progress, dialog, presence, message-summary, etc. The session
+    /// layer does not interpret the body; if `event_package == "refer"`
+    /// and `content_type` is `message/sipfrag`, `TransferProgress` /
+    /// `TransferCompleted` / `TransferFailed` are also emitted with the
+    /// parsed status line.
+    NotifyReceived {
+        call_id: CallId,
+        event_package: String,
+        /// Raw `Subscription-State:` header value (unparsed).
+        subscription_state: Option<String>,
+        /// Raw `Content-Type:` header value.
+        content_type: Option<String>,
+        body: Option<String>,
+    },
+
     // ===== Call State Events =====
     
     /// Call was put on hold (re-INVITE with inactive SDP received)
@@ -315,6 +335,7 @@ impl Event {
             Event::CallUnmuted { call_id, .. } |
             Event::DtmfReceived { call_id, .. } |
             Event::MediaQualityChanged { call_id, .. } |
+            Event::NotifyReceived { call_id, .. } |
             Event::AuthenticationRequired { call_id, .. } => Some(call_id),
             Event::TransferCompleted { old_call_id, .. } => Some(old_call_id),
             Event::NetworkError { call_id, .. } => call_id.as_ref(),

@@ -363,7 +363,11 @@ impl EventRouter {
             Action::SwitchToPassThroughOnActive |
             Action::SendINVITEWithAuth |
             Action::SendINVITEWithBumpedSessionExpires |
-            Action::SendReferAccepted => {
+            Action::SendReferAccepted |
+            Action::SendRefer100Trying |
+            Action::SendTransferNotifyRinging |
+            Action::SendTransferNotifySuccess |
+            Action::SendTransferNotifyFailure => {
                 tracing::debug!("Advanced action {:?} for session {} - handled by state machine", action, session_id);
             }
         }

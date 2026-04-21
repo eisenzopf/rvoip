@@ -1058,10 +1058,10 @@ pub async fn execute_action(
 
         Action::SendReferAccepted => {
             debug!("Sending 202 Accepted for REFER request");
-            
+
             let transaction_id = session.refer_transaction_id.clone()
                 .unwrap_or_else(|| "unknown".to_string());
-            
+
             // Send ReferResponse event back to dialog-core via global event bus
             let refer_response = rvoip_infra_common::events::cross_crate::SessionToDialogEvent::ReferResponse {
                 transaction_id,
@@ -1069,9 +1069,9 @@ pub async fn execute_action(
                 status_code: 202,
                 reason: "Accepted".to_string(),
             };
-            
+
             let event = rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::SessionToDialog(refer_response);
-            
+
             // Get global coordinator from dialog adapter
             if let Err(e) = dialog_adapter.global_coordinator.publish(Arc::new(event)).await {
                 error!("Failed to publish ReferResponse event: {}", e);
@@ -1079,7 +1079,148 @@ pub async fn execute_action(
                 debug!("Published ReferResponse (202 Accepted) event to dialog-core");
             }
         }
+
+        // ===== RFC 3515 §2.4.5 Transfer-Progress NOTIFYs =====
+
+        Action::SendRefer100Trying => {
+            // Fires on the REFER-receiving session's OWN dialog (not via
+            // transferor linkage — the receiver and transferor are the
+            // same session in this arm). RFC 3515 §2.4.5: "The transferee
+            // SHOULD send a NOTIFY with a `message/sipfrag` body of
+            // `SIP/2.0 100 Trying` upon accepting the REFER" — this is
+            // the acceptance ack of the implicit subscription, not a
+            // dialog-progress NOTIFY, so it has no linkage dependency.
+            debug!("SendRefer100Trying on session {}", session.session_id);
+            if let Err(e) = dialog_adapter
+                .send_refer_notify(&session.session_id, 100, "Trying")
+                .await
+            {
+                warn!(
+                    "Failed to send 100 Trying NOTIFY on session {}: {}",
+                    session.session_id, e
+                );
+            }
+        }
+
+        Action::SendTransferNotifyRinging => {
+            if let Some(transferor) = session.transferor_session_id.clone() {
+                debug!(
+                    "SendTransferNotifyRinging: leg {} -> transferor {}",
+                    session.session_id, transferor
+                );
+                if let Err(e) = dialog_adapter
+                    .send_refer_notify(&transferor, 180, "Ringing")
+                    .await
+                {
+                    warn!(
+                        "Failed to send 180 Ringing NOTIFY to transferor {}: {}",
+                        transferor, e
+                    );
+                }
+                publish_transfer_event(
+                    dialog_adapter,
+                    Event::TransferProgress {
+                        call_id: transferor,
+                        status_code: 180,
+                        reason: "Ringing".to_string(),
+                    },
+                );
+            } else {
+                debug!(
+                    "SendTransferNotifyRinging on non-transfer session {} — no-op",
+                    session.session_id
+                );
+            }
+        }
+
+        Action::SendTransferNotifySuccess => {
+            if let Some(transferor) = session.transferor_session_id.clone() {
+                debug!(
+                    "SendTransferNotifySuccess: leg {} -> transferor {}",
+                    session.session_id, transferor
+                );
+                if let Err(e) = dialog_adapter
+                    .send_refer_notify(&transferor, 200, "OK")
+                    .await
+                {
+                    warn!(
+                        "Failed to send 200 OK NOTIFY to transferor {}: {}",
+                        transferor, e
+                    );
+                }
+                publish_transfer_event(
+                    dialog_adapter,
+                    Event::TransferCompleted {
+                        old_call_id: transferor.clone(),
+                        new_call_id: transferor,
+                        target: session
+                            .remote_uri
+                            .clone()
+                            .unwrap_or_default(),
+                    },
+                );
+            } else {
+                debug!(
+                    "SendTransferNotifySuccess on non-transfer session {} — no-op",
+                    session.session_id
+                );
+            }
+        }
+
+        Action::SendTransferNotifyFailure => {
+            if let Some(transferor) = session.transferor_session_id.clone() {
+                // We don't currently stash the non-2xx status code on
+                // `SessionState` mid-failure, so the progress NOTIFY
+                // carries a coarse 500. The transferor still gets a
+                // terminal `TransferFailed` signal; the b2bua crate can
+                // narrow the reason once SessionState grows a
+                // `last_failure_status` field.
+                let status_code: u16 = 500;
+                let reason = "Transfer leg failed".to_string();
+                debug!(
+                    "SendTransferNotifyFailure: leg {} -> transferor {} ({} {})",
+                    session.session_id, transferor, status_code, reason
+                );
+                if let Err(e) = dialog_adapter
+                    .send_refer_notify(&transferor, status_code, &reason)
+                    .await
+                {
+                    warn!(
+                        "Failed to send {} {} NOTIFY to transferor {}: {}",
+                        status_code, reason, transferor, e
+                    );
+                }
+                publish_transfer_event(
+                    dialog_adapter,
+                    Event::TransferFailed {
+                        call_id: transferor,
+                        reason,
+                        status_code,
+                    },
+                );
+            } else {
+                debug!(
+                    "SendTransferNotifyFailure on non-transfer session {} — no-op",
+                    session.session_id
+                );
+            }
+        }
     }
-    
+
     Ok(())
+}
+
+/// Publish an app-level `Event` to the global coordinator's session-to-app
+/// channel, using the same fire-and-forget spawn pattern as
+/// `session_event_handler::publish_api_event`. Errors are logged, not
+/// propagated — a progress-NOTIFY transport failure should not roll back
+/// the dialog transition that triggered it.
+fn publish_transfer_event(dialog_adapter: &Arc<DialogAdapter>, api_event: Event) {
+    let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+    let coordinator = dialog_adapter.global_coordinator.clone();
+    tokio::spawn(async move {
+        if let Err(e) = coordinator.publish(wrapped).await {
+            tracing::warn!("Failed to publish Transfer* event: {}", e);
+        }
+    });
 }

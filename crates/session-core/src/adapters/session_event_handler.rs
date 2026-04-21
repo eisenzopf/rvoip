@@ -288,6 +288,8 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                     self.handle_ack_sent(&event_str).await?;
                 } else if event_str.contains("AckReceived") {
                     self.handle_ack_received(&event_str).await?;
+                } else if event_str.contains("NotifyReceived") {
+                    self.handle_notify_received(&event_str).await?;
                 } else {
                     debug!("Unhandled dialog-to-session event: {}", event_str);
                 }
@@ -734,6 +736,43 @@ impl SessionCrossCrateEventHandler {
                 session_id, status
             );
             return Ok(());
+        }
+
+        // RFC 3515 §2.4.5 — if this session is a transfer leg, surface
+        // the failure back to the transferor via a final sipfrag NOTIFY
+        // and publish `Event::TransferFailed`. Done here rather than in
+        // the state-machine action because the YAML `Dialog4xxFailure`
+        // transitions on `Initiating` don't fire at runtime (the yaml
+        // loader maps the name to `MediaEvent` — see yaml_loader.rs).
+        // The adapter-level path below reliably runs for every terminal
+        // failure routed through `handle_call_failed`.
+        if let Ok(sess) = self.state_machine.store.get_session(&session_id).await {
+            if let Some(transferor) = sess.transferor_session_id.clone() {
+                let dialog_adapter = self.dialog_adapter.clone();
+                let coordinator = self.global_coordinator.clone();
+                let reason_for_task = reason.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = dialog_adapter
+                        .send_refer_notify(&transferor, status, &reason_for_task)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to send transfer-failure NOTIFY to transferor {}: {}",
+                            transferor,
+                            e
+                        );
+                    }
+                    let api_event = crate::api::events::Event::TransferFailed {
+                        call_id: transferor,
+                        reason: reason_for_task,
+                        status_code: status,
+                    };
+                    let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+                    if let Err(e) = coordinator.publish(wrapped).await {
+                        tracing::warn!("Failed to publish TransferFailed event: {}", e);
+                    }
+                });
+            }
         }
 
         // Publish app-level CallFailed for any StreamPeer/CallbackPeer subscribers,
@@ -1408,6 +1447,113 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
+    /// Handle `DialogToSessionEvent::NotifyReceived` (RFC 6665) — the
+    /// cross-crate event dialog-core publishes after validating and
+    /// 200-OK'ing an inbound NOTIFY.
+    ///
+    /// Always emits `Event::NotifyReceived` on the public event stream.
+    /// For `event_package == "refer"` with a `message/sipfrag` body
+    /// (RFC 3515 §2.4.5) additionally parses the sipfrag status line and
+    /// emits `Event::TransferProgress` / `TransferCompleted` /
+    /// `TransferFailed` so transferor apps (including b2bua wrappers)
+    /// can observe the transferee's progress.
+    async fn handle_notify_received(&self, event_str: &str) -> Result<()> {
+        let Some(session_id_str) = self.extract_session_id(event_str) else {
+            warn!("Could not extract session_id from NotifyReceived event");
+            return Ok(());
+        };
+        let session_id = SessionId(session_id_str);
+        if !self.is_our_session(&session_id).await {
+            debug!("Ignoring NotifyReceived for session {} — not in our store", session_id);
+            return Ok(());
+        }
+
+        let event_package = self
+            .extract_field(event_str, "event_package: \"")
+            .unwrap_or_default();
+        let subscription_state = self.extract_optional_field(event_str, "subscription_state: ");
+        let content_type = self.extract_optional_field(event_str, "content_type: ");
+        let body = self.extract_optional_field(event_str, "body: ");
+
+        // Always surface the raw NOTIFY as a public event.
+        let api_event = crate::api::events::Event::NotifyReceived {
+            call_id: session_id.clone(),
+            event_package: event_package.clone(),
+            subscription_state: subscription_state.clone(),
+            content_type: content_type.clone(),
+            body: body.clone(),
+        };
+        publish_api_event(&self.global_coordinator, api_event);
+
+        // RFC 3515 §2.4.5 progress NOTIFYs carry a `message/sipfrag` body
+        // containing the final-response status line of the transferee's
+        // INVITE. Parse it so the transferor sees progress events
+        // symmetric to what a transferee emits on the send side.
+        if event_package.eq_ignore_ascii_case("refer") {
+            let is_sipfrag = content_type
+                .as_deref()
+                .map(|ct| ct.to_ascii_lowercase().contains("message/sipfrag"))
+                .unwrap_or(false);
+            if is_sipfrag {
+                if let Some(body) = body {
+                    if let Some((status_code, reason)) = parse_sipfrag_status_line(&body) {
+                        let transfer_event = match status_code {
+                            100..=199 => Some(crate::api::events::Event::TransferProgress {
+                                call_id: session_id.clone(),
+                                status_code,
+                                reason,
+                            }),
+                            200..=299 => Some(crate::api::events::Event::TransferCompleted {
+                                old_call_id: session_id.clone(),
+                                new_call_id: session_id.clone(),
+                                target: String::new(),
+                            }),
+                            300..=699 => Some(crate::api::events::Event::TransferFailed {
+                                call_id: session_id.clone(),
+                                reason,
+                                status_code,
+                            }),
+                            _ => None,
+                        };
+                        if let Some(ev) = transfer_event {
+                            publish_api_event(&self.global_coordinator, ev);
+                        }
+                    } else {
+                        debug!(
+                            "NOTIFY sipfrag body for session {} was not a parseable status line; skipping Transfer* emission",
+                            session_id
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Extract the inner value of a `field: None` / `field: Some("value")`
+    /// pattern from a `{:?}` debug string. Used for optional string fields
+    /// on `DialogToSessionEvent::NotifyReceived`.
+    fn extract_optional_field(&self, event_str: &str, prefix: &str) -> Option<String> {
+        let start = event_str.find(prefix)? + prefix.len();
+        let rest = &event_str[start..];
+        if rest.starts_with("None") {
+            return None;
+        }
+        // "Some(\"...\")" — step past `Some("` and take up to the next `"`
+        // not escaped. Mirrors the quick-and-dirty parsing used by the
+        // other extract_* helpers on this struct; close-enough for debug
+        // output roundtrip.
+        let some_prefix = "Some(\"";
+        if let Some(rel) = rest.find(some_prefix) {
+            let val_start = rel + some_prefix.len();
+            if let Some(end_rel) = rest[val_start..].find("\")") {
+                return Some(rest[val_start..val_start + end_rel].to_string());
+            }
+        }
+        None
+    }
+
     async fn handle_packet_loss_threshold_exceeded(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let sid = SessionId(session_id);
@@ -1421,5 +1567,67 @@ impl SessionCrossCrateEventHandler {
             }
         }
         Ok(())
+    }
+}
+
+/// Publish a non-terminal app-level event to the global coordinator's
+/// `session_to_app` channel. Terminal events (`CallEnded` / `CallFailed` /
+/// `CallCancelled`) go through `publish_and_release_session` instead,
+/// which also frees the session-store entry after publish.
+fn publish_api_event(
+    coordinator: &Arc<GlobalEventCoordinator>,
+    api_event: crate::api::events::Event,
+) {
+    let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+    let coordinator = coordinator.clone();
+    tokio::spawn(async move {
+        if let Err(e) = coordinator.publish(wrapped).await {
+            tracing::warn!("Failed to publish app-level event: {}", e);
+        }
+    });
+}
+
+/// Parse an RFC 3515 §2.4.5 sipfrag status line of the form
+/// `SIP/2.0 NNN Reason\r\n...` into `(status_code, reason)`. Returns
+/// `None` on any deviation (missing version, non-numeric status, empty
+/// reason phrase).
+fn parse_sipfrag_status_line(body: &str) -> Option<(u16, String)> {
+    let first_line = body.lines().next()?.trim();
+    let rest = first_line.strip_prefix("SIP/2.0")?.trim_start();
+    let mut parts = rest.splitn(2, char::is_whitespace);
+    let code_part = parts.next()?;
+    let reason = parts.next().unwrap_or("").trim().to_string();
+    let status_code: u16 = code_part.parse().ok()?;
+    if !(100..=699).contains(&status_code) {
+        return None;
+    }
+    Some((status_code, reason))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_sipfrag_status_line;
+
+    #[test]
+    fn sipfrag_parses_progress_and_final() {
+        assert_eq!(
+            parse_sipfrag_status_line("SIP/2.0 180 Ringing\r\n"),
+            Some((180, "Ringing".into()))
+        );
+        assert_eq!(
+            parse_sipfrag_status_line("SIP/2.0 200 OK"),
+            Some((200, "OK".into()))
+        );
+        assert_eq!(
+            parse_sipfrag_status_line("SIP/2.0 486 Busy Here\r\n"),
+            Some((486, "Busy Here".into()))
+        );
+    }
+
+    #[test]
+    fn sipfrag_rejects_malformed_input() {
+        assert!(parse_sipfrag_status_line("HTTP/1.1 200 OK").is_none());
+        assert!(parse_sipfrag_status_line("SIP/2.0 notanumber Ringing").is_none());
+        assert!(parse_sipfrag_status_line("").is_none());
     }
 }

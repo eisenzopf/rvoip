@@ -480,10 +480,24 @@ pub enum DialogToSessionEvent {
         status_code: u16,
     },
 
-    /// NOTIFY received
+    /// NOTIFY received.
+    ///
+    /// Published by dialog-core after validating an inbound NOTIFY and
+    /// sending the 200 OK (RFC 6665). Session-core uses this to surface
+    /// `Event::NotifyReceived` on the public event stream; for REFER
+    /// subscriptions (`event_package == "refer"`) with a
+    /// `message/sipfrag` body it also parses the sipfrag status line
+    /// into `Event::TransferProgress` / `TransferCompleted` / `TransferFailed`
+    /// so the transferor (including b2bua wrappers) can observe the
+    /// transferee's progress.
     NotifyReceived {
         session_id: String,
         event_package: String,
+        /// Raw `Subscription-State:` header value (unparsed), e.g.
+        /// `"active;expires=3600"` or `"terminated;reason=noresource"`.
+        subscription_state: Option<String>,
+        /// Raw `Content-Type:` header value, e.g. `"message/sipfrag"`.
+        content_type: Option<String>,
         body: Option<String>,
     },
 

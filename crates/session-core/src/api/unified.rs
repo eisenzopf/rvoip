@@ -362,6 +362,39 @@ impl UnifiedCoordinator {
             .make_call_with_credentials(from, to, Some(credentials))
             .await
     }
+
+    /// Spawn an outbound leg linked to a transferor session for RFC 3515
+    /// §2.4.5 progress reporting. The new leg's `SessionState` carries
+    /// `transferor_session_id = Some(..)` before the state machine
+    /// dispatches `MakeCall`, so every subsequent `Dialog180Ringing` /
+    /// `Dialog200OK` / failure fires a progress NOTIFY back on the
+    /// transferor's REFER subscription. This is the b2bua wrapper crate's
+    /// primary REFER-forwarding entry point.
+    pub async fn make_transfer_leg(
+        &self,
+        from: &str,
+        to: &str,
+        transferor_session_id: &SessionId,
+    ) -> Result<SessionId> {
+        self.helpers
+            .make_transfer_leg(from, to, transferor_session_id)
+            .await
+    }
+
+    /// Retroactively link an existing session as a transfer leg of
+    /// `transferor_session_id`. Prefer [`make_transfer_leg`] — this
+    /// lower-level primitive accepts a race window in which dialog
+    /// events fired before the linkage is set silently drop their
+    /// corresponding progress NOTIFY.
+    pub async fn set_transferor_session(
+        &self,
+        leg_session_id: &SessionId,
+        transferor_session_id: &SessionId,
+    ) -> Result<()> {
+        self.helpers
+            .set_transferor_session(leg_session_id, transferor_session_id)
+            .await
+    }
     
     /// Accept an incoming call
     pub async fn accept_call(&self, session_id: &SessionId) -> Result<()> {
@@ -559,7 +592,29 @@ impl UnifiedCoordinator {
             .send_info(session_id, content_type, body)
             .await
     }
-    
+
+    /// Send a general-purpose NOTIFY request (RFC 6665) on an established
+    /// dialog. `event_package` populates the `Event:` header; the raw
+    /// `subscription_state` string is forwarded verbatim to dialog-core,
+    /// which parses it into a typed `Subscription-State:` header.
+    ///
+    /// RFC 3515 §2.4.5 REFER progress NOTIFYs are emitted automatically
+    /// by the state machine for transfer legs created through
+    /// [`UnifiedCoordinator::make_transfer_leg`]. This method is the
+    /// escape hatch for other event packages (dialog, message-summary,
+    /// presence, custom) and for non-standard REFER orchestration.
+    pub async fn send_notify(
+        &self,
+        session_id: &SessionId,
+        event_package: &str,
+        body: Option<String>,
+        subscription_state: Option<String>,
+    ) -> Result<()> {
+        self.dialog_adapter
+            .send_notify(session_id, event_package, body, subscription_state)
+            .await
+    }
+
     /// Send NOTIFY message for REFER status (used after handling transfer)
     pub async fn send_refer_notify(&self, session_id: &SessionId, status_code: u16, reason: &str) -> Result<()> {
         self.dialog_adapter.send_refer_notify(session_id, status_code, reason).await

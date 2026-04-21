@@ -129,6 +129,14 @@ path = "examples/streampeer/glare_retry/alice.rs"
 name = "streampeer_glare_retry_bob"
 path = "examples/streampeer/glare_retry/bob.rs"
 
+# NOTIFY send integration test fixtures (RFC 6665)
+[[example]]
+name = "streampeer_notify_send_alice"
+path = "examples/streampeer/notify_send/alice.rs"
+[[example]]
+name = "streampeer_notify_send_bob"
+path = "examples/streampeer/notify_send/bob.rs"
+
 # Advanced / multi-peer scenarios
 [[example]]
 name = "advanced_concurrent_calls_server"

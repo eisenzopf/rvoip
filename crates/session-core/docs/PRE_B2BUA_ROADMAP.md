@@ -27,13 +27,11 @@ track. Synthesised from:
   correctness fix (see *Hardening pass — post-roadmap* below); all
   ERROR/WARN noise in the example suite resolved.
 - 🟢 **b2bua crate (`crates/b2bua`) is unblocked** — `UnifiedCoordinator`
-  now exposes every primitive a b2bua wrapper needs. **Open b2bua
-  prerequisite:** RFC 3515 NOTIFY transfer-progress reporting is still
-  stub-only (`transferor_session_id` field on `SessionState` and
-  `DialogAdapter::send_refer_notify()` helper exist, but no state-table
-  action fires them on `Dialog180Ringing` / `Dialog200OK` / failure
-  events for transfer sessions). See `docs/NOTIFY_SUPPORT_IMPLEMENTATION_PLAN.md`
-  for the design and the outstanding wiring work.
+  now exposes every primitive a b2bua wrapper needs, including the
+  final b2bua prerequisite: RFC 3515 §2.4.5 progress-NOTIFY wiring
+  (both directions) + public `send_notify` and
+  `make_transfer_leg` / `set_transferor_session`. See the *NOTIFY
+  support (RFC 6665 + RFC 3515 §2.4.5)* section below.
 - ⬜ Carrier-facing transport (TLS/TCP, Contact rewrite, SRV) is a
   separate multi-day track, still unchanged.
 
@@ -665,15 +663,99 @@ Both deferred follow-ups have shipped:
 
 ---
 
+## NOTIFY support (RFC 6665 + RFC 3515 §2.4.5) — landed
+
+Closes the last b2bua prerequisite flagged in the Status section.
+Covered by `docs/NOTIFY_SUPPORT_IMPLEMENTATION_PLAN.md` (now "landed"
+status).
+
+**Public API on `UnifiedCoordinator` / `SessionHandle`:**
+- `SessionHandle::send_notify(event_package, body, subscription_state)`
+  + `UnifiedCoordinator::send_notify(session_id, …)` — generic outbound
+  NOTIFY on any event package. Bypasses the state machine; delegates
+  to `DialogAdapter::send_notify` and on through
+  `UnifiedDialogApi::send_notify`.
+- `UnifiedCoordinator::make_transfer_leg(from, to, transferor_session_id)`
+  — atomic transfer-leg creation. Pre-populates
+  `SessionState.transferor_session_id` + `is_transfer_call = true`
+  before the `MakeCall` event dispatches, closing the race where a
+  fast loopback `Dialog180Ringing` arriving mid-dispatch would beat
+  a post-creation linkage update and cause the `SendTransferNotify*`
+  actions to no-op.
+- `UnifiedCoordinator::set_transferor_session(leg, transferor)` — the
+  lower-level primitive, for non-standard orchestration. Callers
+  accept the race window.
+
+**State-machine actions (`crates/session-core/src/state_table/types.rs`):**
+- `SendRefer100Trying` — fires on `Both + Active + TransferRequested`
+  alongside `SendReferAccepted`. Sends 100 Trying sipfrag NOTIFY on
+  the REFER-receiver's own dialog (the implicit-subscription ack).
+- `SendTransferNotifyRinging` / `SendTransferNotifySuccess` — appended
+  to `UAC + Initiating + Dialog180Ringing`, `UAC + Ringing +
+  Dialog200OK`, and `UAC + Initiating + Dialog200OK` (fast answer).
+  Each no-ops when `session.transferor_session_id.is_none()` so
+  non-transfer calls are unaffected.
+- `SendTransferNotifyFailure` — action exists for parity; at runtime
+  the failure-side NOTIFY actually fires from
+  `session_event_handler::handle_call_failed` when the failing
+  session carries `transferor_session_id`. Reason: the YAML loader's
+  `Dialog4xxFailure` / `5xxFailure` names fall through to
+  `MediaEvent(…)` (unmapped), so the Initiating-failure YAML
+  transitions don't match the runtime-dispatched events. The adapter
+  path is the reliable entry point.
+
+**Cross-crate event (`crates/infra-common/src/events/cross_crate.rs`):**
+- `DialogToSessionEvent::NotifyReceived` extended with
+  `subscription_state: Option<String>` and `content_type: Option<String>`
+  (on top of the pre-existing `event_package` + `body`). Dialog-core's
+  `handle_notify_method` now publishes it via the existing
+  `publish_cross_crate_event` path in both the SubscriptionManager and
+  fallback paths. The `SessionCoordinationEvent::ReInvite` wrapper
+  path (which would have filtered NOTIFY out at the conversion arm)
+  is no longer used for NOTIFY routing.
+
+**Public `Event::NotifyReceived` + sipfrag parsing:**
+- `session_event_handler::handle_notify_received` always publishes
+  `Event::NotifyReceived { call_id, event_package, subscription_state,
+  content_type, body }`.
+- For `event_package == "refer"` + `Content-Type: message/sipfrag`,
+  the sipfrag status line (`SIP/2.0 NNN Reason…`) is parsed into one
+  of `Event::TransferProgress` (1xx), `TransferCompleted` (2xx), or
+  `TransferFailed` (3xx–6xx). Symmetric with the send-side emissions,
+  so a b2bua listens uniformly regardless of direction.
+
+**Coverage:**
+- `tests/notify_send_integration.rs` — multi-binary end-to-end
+  `send_notify` → `Event::NotifyReceived` round trip.
+- `tests/transfer_notify_wiring_tests.rs` — 5 state-table structural
+  tests verifying the YAML wiring (100-Trying ordering, progress
+  actions on the right transitions, media-commit-before-NOTIFY
+  ordering, non-transfer `next_state` invariance).
+- `src/adapters/session_event_handler.rs::tests` — sipfrag
+  status-line parser unit tests (progress / final success / malformed
+  inputs).
+- **Deferred to the b2bua crate**: three-peer REFER-progress-send
+  fixture (Alice ↔ b2bua Bob ↔ Carol) asserting the full
+  `SendTransferNotify*` → wire NOTIFY → transferor sees
+  `TransferProgress` → `TransferCompleted` loop end-to-end, plus a
+  sipfrag-receive mock fixture for isolated transferor-side
+  verification. These need three-peer fixtures that belong with the
+  b2bua crate's own CI anyway.
+
+---
+
 ## TL;DR
 
-The five-item pre-b2bua gate and both carved-off follow-ups are cleared.
-`UnifiedCoordinator` exposes per-call event streams, a transparent RTP
-bridge primitive, early-media audio-source injection with automatic
-switchback to `PassThrough` on answer, an outbound INFO helper with
-custom content types, and full RFC 4028 §6 422 handling (observability
-+ auto-retry with 2-retry cap). The `crates/b2bua` crate is unblocked —
-a working skeleton already lives at
+The five-item pre-b2bua gate, both carved-off follow-ups, and the RFC
+3515 §2.4.5 NOTIFY prerequisite are all cleared. `UnifiedCoordinator`
+exposes per-call event streams, a transparent RTP bridge primitive,
+early-media audio-source injection with automatic switchback to
+`PassThrough` on answer, an outbound INFO helper with custom content
+types, full RFC 4028 §6 422 handling (observability + auto-retry with
+2-retry cap), a generic `send_notify`, and atomic
+`make_transfer_leg` for RFC 3515 §2.4.5 progress reporting in both
+directions. The `crates/b2bua` crate is unblocked on every known
+prerequisite — a working bridge skeleton already lives at
 `examples/streampeer/bridge/bridge_peer.rs` and is CI-exercised by
 `tests/bridge_roundtrip_integration.rs`.
 
