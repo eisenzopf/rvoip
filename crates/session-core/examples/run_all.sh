@@ -43,6 +43,10 @@ for s in "${SCRIPTS[@]}"; do
     exit 1
   fi
   PASSED+=("$s")
+  # Brief pause so any lingering cargo/rvoip-child processes release their
+  # SIP ports before the next script binds them. Without this the default
+  # SIP ports (5060/5061) can race between back-to-back scripts.
+  sleep 2
 done
 
 echo -e "\n${GREEN}══════════════════════════════════════════════════════════════${NC}"

@@ -23,10 +23,95 @@ track. Synthesised from:
   wiring (with automatic switchback to `PassThrough` on
   `EarlyMedia → Active`), and 422 Session Interval Too Small with both
   observability and auto-retry (two-retry cap).
+- ✅ **Post-roadmap hardening pass landed** — RFC 3261 §14.1 hold/resume
+  correctness fix (see *Hardening pass — post-roadmap* below); all
+  ERROR/WARN noise in the example suite resolved.
 - 🟢 **b2bua crate (`crates/b2bua`) is unblocked** — `UnifiedCoordinator`
-  now exposes every primitive a b2bua wrapper needs.
+  now exposes every primitive a b2bua wrapper needs. **Open b2bua
+  prerequisite:** RFC 3515 NOTIFY transfer-progress reporting is still
+  stub-only (`transferor_session_id` field on `SessionState` and
+  `DialogAdapter::send_refer_notify()` helper exist, but no state-table
+  action fires them on `Dialog180Ringing` / `Dialog200OK` / failure
+  events for transfer sessions). See `docs/NOTIFY_SUPPORT_IMPLEMENTATION_PLAN.md`
+  for the design and the outstanding wiring work.
 - ⬜ Carrier-facing transport (TLS/TCP, Contact rewrite, SRV) is a
   separate multi-day track, still unchanged.
+
+---
+
+## Hardening pass — post-roadmap
+
+The five-item roadmap cleared the b2bua *blockers*. A subsequent
+hardening pass — driven by auditing ERROR/WARN output of the full
+example suite — landed in a single session after the roadmap closed,
+and is the load-bearing RFC compliance work for anything that exercises
+mid-call re-INVITEs (hold, resume, session-timer refresh, SDP
+renegotiation).
+
+**Fixed — RFC 3261 §14.1 hold/resume correctness (the big one):**
+- New `CallState::HoldPending` intermediate state
+  (`src/types.rs`, `src/session_store/store.rs`, `src/state_table/types.rs`,
+  `src/state_table/yaml_loader.rs`).
+- State commit + media side-effects + `CallOnHold`/`CallResumed` publish
+  are now gated on `Dialog200OK` for both hold and resume
+  (`state_tables/default.yaml`).
+- Failure rollback transitions added: `HoldPending → Active` and
+  `Resuming → OnHold` on `Dialog4xxFailure` / `Dialog5xxFailure` /
+  `Dialog6xxFailure` / `DialogTimeout` (session parameters unchanged
+  per RFC 3261 §14.1).
+- `Action::SendReINVITE` (`src/state_machine/actions.rs:435-`) now
+  picks SDP direction from the committed target state and persists
+  `session.pending_reinvite` *before* the wire-send await so concurrent
+  `ReinviteGlare` handlers can read it.
+- New `Action::ClearPendingReinvite` resolves simultaneous-hold glare
+  by accepting the peer's re-INVITE (`HoldPending + ReinviteReceived
+  → OnHold`) and cancelling our scheduled retry — breaking what would
+  otherwise be a 491-loop-forever deadlock under the new RFC-strict
+  state gating.
+- `Action::ScheduleReinviteRetry` role-split backoff per RFC 3261 §14.1:
+  UAC (Call-ID owner) 2.1–4.0 s, UAS (non-owner) 0–2.0 s. Ensures the
+  non-owner retries first, breaking glare deterministically.
+- Executor race fix at `src/state_machine/executor.rs:440-456` —
+  Task A (hold caller) no longer clobbers Task B's concurrent
+  `Dialog200OK → OnHold` commit on its post-action save.
+- `handle_call_failed` (`src/adapters/session_event_handler.rs`) now
+  checks `call_state == HoldPending | Resuming` before publishing
+  terminal `CallFailed` + releasing the session. A non-2xx on a
+  mid-call re-INVITE is not terminal for the call.
+
+**Fixed — dialog-core RFC 3261 §17.1.1.3 false termination:**
+- `crates/dialog-core/src/manager/transaction_integration.rs:491-` —
+  `send_request_in_dialog` now suppresses "Transaction terminated after
+  timeout" for `Method::Invite`, mirroring the pre-existing 422-retry
+  and `unified.rs::make_call` suppression. Root cause: an INVITE client
+  transaction auto-terminates on 2xx+ACK, and on fast loopback the
+  termination races inside `send_request().await` before it returns,
+  causing the generic dialog path to surface the termination as a fatal
+  "transport error". Same fix applied to the auth-retry INVITE path.
+
+**Fixed — log-noise audit:**
+- `SessionHandle::hangup` (`src/api/handle.rs`) — false-positive
+  "background hangup failed" WARN demoted to `trace!` when the session
+  is already gone (new `SessionError::is_session_gone()` helper in
+  `src/errors.rs`). `SimplePeer::hangup` given the same treatment.
+- `handle_session_refresh_failed`
+  (`src/adapters/session_event_handler.rs`) — leftover
+  `warn!("🎯 [handle_session_refresh_failed]")` dev-print demoted to
+  `debug!` with the emoji removed.
+- `state_machine/helpers.rs::hangup` now early-returns
+  `SessionNotFound` without dispatching to the state machine when the
+  session is already gone, suppressing the upstream executor
+  `ERROR: Failed to get session …` log.
+
+**Tracking doc:** `docs/EXAMPLE_RUN_ERRORS_TRACKING.md` — per-cluster
+status (A/B/C/D) and verification. All four clusters **FIXED**.
+
+**Regression coverage:** all 27 `cargo test -p rvoip-session-core`
+binaries pass; all 19 `run_all.sh` examples pass with zero ERROR/WARN
+lines across every log.
+
+**Side-effect:** cleared the `glare_retry` example's previously-expected
+"ERROR lines during glare" — Cluster D is now silent as a bonus.
 
 ---
 

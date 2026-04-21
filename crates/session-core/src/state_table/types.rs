@@ -410,7 +410,13 @@ pub enum Action {
     /// sleep a random interval (owner: 2.1-4.0 s, non-owner: 0-2.0 s) and
     /// re-issue whatever re-INVITE kind was pending. Caps at 3 retries.
     ScheduleReinviteRetry,
-    
+    /// RFC 3261 §14.1 glare resolution: when the peer's re-INVITE arrives
+    /// while our own is pending and we accept theirs, cancel our scheduled
+    /// retry by clearing `pending_reinvite` + `reinvite_retry_attempts`.
+    /// Any sleeping retry noops at wake-up because `ScheduleReinviteRetry`
+    /// reads `pending_reinvite` and returns early when it's `None`.
+    ClearPendingReinvite,
+
     // Call control actions
     HoldCall,
     ResumeCall,

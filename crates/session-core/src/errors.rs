@@ -84,6 +84,21 @@ pub enum SessionError {
     Other(String),
 }
 
+impl SessionError {
+    /// True if this error means "the session is already gone from the
+    /// registry" — covers both the typed `SessionNotFound` variant and the
+    /// stringly-wrapped `Other("Session not found: …")` form that falls out
+    /// of the `From<Box<dyn Error>>` flatteners above.
+    ///
+    /// Useful for fire-and-forget teardown paths (e.g. `SessionHandle::hangup`)
+    /// that race against a natural call-ended cleanup: if the race is lost,
+    /// the goal is already achieved and the error should be silent.
+    pub fn is_session_gone(&self) -> bool {
+        matches!(self, SessionError::SessionNotFound(_))
+            || matches!(self, SessionError::Other(msg) if msg.starts_with("Session not found"))
+    }
+}
+
 impl From<Box<dyn std::error::Error>> for SessionError {
     fn from(err: Box<dyn std::error::Error>) -> Self {
         SessionError::Other(err.to_string())

@@ -134,6 +134,12 @@ impl EventRouter {
                     "event_router: ScheduleReinviteRetry is a no-op (handled by state_machine::actions)"
                 );
             }
+
+            Action::ClearPendingReinvite => {
+                tracing::debug!(
+                    "event_router: ClearPendingReinvite is a no-op (handled by state_machine::actions)"
+                );
+            }
             
             Action::SendACK => {
                 // Get the stored 200 OK response

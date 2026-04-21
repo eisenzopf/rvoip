@@ -131,10 +131,19 @@ impl SimplePeer {
         let coordinator = self.coordinator.clone();
         let call_id_clone = call_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = coordinator.hangup(&call_id_clone).await {
-                tracing::warn!("Background hangup failed for {}: {}", call_id_clone, e);
-            } else {
-                tracing::info!("[SimplePeer] Background hangup completed for {}", call_id_clone);
+            match coordinator.hangup(&call_id_clone).await {
+                Ok(()) => {
+                    tracing::info!("[SimplePeer] Background hangup completed for {}", call_id_clone);
+                }
+                Err(e) if e.is_session_gone() => {
+                    tracing::trace!(
+                        "[SimplePeer] session {} already cleaned up before background hangup ran",
+                        call_id_clone
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Background hangup failed for {}: {}", call_id_clone, e);
+                }
             }
         });
         

@@ -5,6 +5,14 @@
 # Pending. Both peers' ReinviteGlare transition schedules a retry with random
 # backoff; after retries resolve, both settle on OnHold.
 # See tests/glare_retry_integration.rs for the CI version.
+#
+# NOTE: this example deliberately produces ERROR-level log lines on the
+# first re-INVITE attempt ("Transaction terminated after timeout" →
+# "Failed to execute action SendReINVITE"). Those are the 491 Request
+# Pending handshake surfacing through the executor's generic
+# action-failure logger, NOT a bug. The ReinviteGlare transition schedules
+# a backoff retry and both peers converge to OnHold, which is the success
+# criterion. See docs/EXAMPLE_RUN_ERRORS_TRACKING.md (Cluster D).
 set -euo pipefail
 cd "$(dirname "$0")/../../.."   # crate root
 

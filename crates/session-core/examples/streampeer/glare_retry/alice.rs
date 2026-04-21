@@ -12,6 +12,14 @@
 //! Synchronization is via the `RVOIP_TEST_GLARE_START_MS` env var (a
 //! wall-clock epoch in milliseconds that both peers sleep until before
 //! calling `hold()`).
+//!
+//! NOTE on log output: the first `hold()` attempt deliberately produces
+//! ERROR-level lines ("Transaction terminated after timeout" → "Failed to
+//! execute action SendReINVITE"). That is the 491 Request Pending handshake
+//! surfacing through the executor's generic action-failure logger. The
+//! `ReinviteGlare` transition schedules a backoff retry and both peers
+//! converge to OnHold, which is the success criterion. See
+//! `docs/EXAMPLE_RUN_ERRORS_TRACKING.md` (Cluster D).
 
 use rvoip_session_core::{CallState, Config, StreamPeer};
 use tokio::time::{sleep, timeout, Duration, Instant as TokioInstant};

@@ -431,6 +431,7 @@ impl YamlTableLoader {
             "Answering" => Ok(CallState::Answering),
             "EarlyMedia" => Ok(CallState::EarlyMedia),
             "Active" => Ok(CallState::Active),
+            "HoldPending" => Ok(CallState::HoldPending),
             "OnHold" => Ok(CallState::OnHold),
             "Resuming" => Ok(CallState::Resuming),
             "Bridged" => Ok(CallState::Bridged),
@@ -718,6 +719,7 @@ impl YamlTableLoader {
             "SendRedirectResponse" => Ok(Action::SendRedirectResponse),
             "RetryWithContact" => Ok(Action::RetryWithContact),
             "ScheduleReinviteRetry" => Ok(Action::ScheduleReinviteRetry),
+            "ClearPendingReinvite" => Ok(Action::ClearPendingReinvite),
             "SendCANCEL" => Ok(Action::SendCANCEL),
             "SendReINVITE" => Ok(Action::SendReINVITE),
             

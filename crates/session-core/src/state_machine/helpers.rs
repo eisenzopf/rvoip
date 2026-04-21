@@ -211,6 +211,14 @@ impl StateMachineHelpers {
     
     /// Hangup a call
     pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
+        // Skip the state-machine dispatch if the session is already gone —
+        // a natural call-ended cleanup path may have won the race. Returning
+        // a typed `SessionNotFound` here lets fire-and-forget callers
+        // recognize it via `SessionError::is_session_gone()` while avoiding
+        // the general-purpose ERROR log in executor::process_event.
+        if self.state_machine.store.get_session(session_id).await.is_err() {
+            return Err(SessionError::SessionNotFound(session_id.to_string()));
+        }
         self.state_machine.process_event(
             session_id,
             EventType::HangupCall,

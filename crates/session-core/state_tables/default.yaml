@@ -393,31 +393,72 @@ transitions:
       - "CallTerminated"
     description: "Call cleanup"
 
-  # Hold call
+  # RFC 3261 §14.1 — Hold is a re-INVITE. Session parameters MUST NOT
+  # change until a 2xx response arrives. We enter an intermediate
+  # `HoldPending` state; actual OnHold commit and media suspend happen
+  # on `Dialog200OK`. Non-2xx / timeout roll back to `Active`.
   - role: "Both"
     state: "Active"
     event:
       type: "HoldCall"
+    next_state: "HoldPending"
+    actions:
+      - type: "SendReINVITE"
+    description: "Send hold re-INVITE; stay on current media until 2xx (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "Dialog200OK"
     next_state: "OnHold"
     actions:
+      - type: "SendACK"
       - type: "SuspendMedia"
-      - type: "SendReINVITE"
     publish:
       - "CallOnHold"
-    description: "Put call on hold"
+    description: "Hold confirmed by 2xx — commit OnHold and suspend media"
 
-  # Resume from hold
+  # RFC 3261 §14.1 — non-2xx / timeout on hold re-INVITE: session unchanged
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "Dialog4xxFailure"
+    next_state: "Active"
+    description: "Hold re-INVITE rejected — session parameters unchanged (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "Dialog5xxFailure"
+    next_state: "Active"
+    description: "Hold re-INVITE 5xx — session unchanged (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "Dialog6xxFailure"
+    next_state: "Active"
+    description: "Hold re-INVITE 6xx — session unchanged (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "DialogTimeout"
+    next_state: "Active"
+    description: "Hold re-INVITE Timer B expired — session unchanged (RFC 3261 §14.1)"
+
+  # Resume from hold — enter intermediate `Resuming` state; commit Active
+  # and resume media only on `Dialog200OK`. Non-2xx / timeout roll back
+  # to `OnHold`.
   - role: "Both"
     state: "OnHold"
     event:
       type: "ResumeCall"
     next_state: "Resuming"
     actions:
-      - type: "ResumeMedia"
       - type: "SendReINVITE"
-    description: "Resume from hold"
+    description: "Send resume re-INVITE; stay held until 2xx (RFC 3261 §14.1)"
 
-  # Resume completed
   - role: "Both"
     state: "Resuming"
     event:
@@ -425,9 +466,39 @@ transitions:
     next_state: "Active"
     actions:
       - type: "SendACK"
+      - type: "ResumeMedia"
     publish:
       - "CallResumed"
-    description: "Resume completed"
+    description: "Resume confirmed by 2xx — commit Active and resume media"
+
+  # RFC 3261 §14.1 — non-2xx / timeout on resume re-INVITE: stay held
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "Dialog4xxFailure"
+    next_state: "OnHold"
+    description: "Resume re-INVITE rejected — stay held (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "Dialog5xxFailure"
+    next_state: "OnHold"
+    description: "Resume re-INVITE 5xx — stay held (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "Dialog6xxFailure"
+    next_state: "OnHold"
+    description: "Resume re-INVITE 6xx — stay held (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "DialogTimeout"
+    next_state: "OnHold"
+    description: "Resume re-INVITE Timer B expired — stay held (RFC 3261 §14.1)"
 
   # Mute microphone
   - role: "Both"
@@ -655,6 +726,32 @@ transitions:
         reason: "Request Pending"
     description: "UAS-side glare: 491 while resuming (always pending)"
 
+  # RFC 3261 §14.1 glare resolution: if the peer sends us a hold re-INVITE
+  # while we're already in HoldPending (both sides wanted to hold
+  # simultaneously), accept their re-INVITE with 200 OK and transition to
+  # OnHold. Our own scheduled retry (if any) becomes a noop because the
+  # ScheduleReinviteRetry action checks `pending_reinvite`, which we clear
+  # on Dialog200OK's SuspendMedia path implicitly via the OnHold entry —
+  # and the stale re-INVITE that our retry sends after waking will be
+  # answered by OnHold's ReinviteReceived → 200 OK rule. This matches the
+  # pre-fix semantic where both peers converge to OnHold on simultaneous
+  # hold, now via RFC-compliant signalling rather than eager state commit.
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "ReinviteReceived"
+    next_state: "OnHold"
+    actions:
+      - type: "NegotiateSDPAsUAS"
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+      - type: "SuspendMedia"
+      - type: "ClearPendingReinvite"
+    publish:
+      - "CallOnHold"
+    description: "Simultaneous hold: accept peer's hold re-INVITE, commit OnHold"
+
   # RFC 3261 §14 — UAS receives re-INVITE on an established dialog, no
   # pending outgoing re-INVITE. Answer 200 OK with a negotiated SDP.
   - role: "Both"
@@ -737,6 +834,15 @@ transitions:
     actions:
       - type: "ScheduleReinviteRetry"
     description: "491 Request Pending — retry re-INVITE after backoff (Resuming)"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "ReinviteGlare"
+    next_state: "HoldPending"
+    actions:
+      - type: "ScheduleReinviteRetry"
+    description: "491 Request Pending — retry re-INVITE after backoff (HoldPending)"
 
   # RFC 3261 §8.1.3.4 — 3xx redirect. Tear down the in-flight dialog/media
   # and follow the next Contact URI via RetryWithContact. Max 5 hops is

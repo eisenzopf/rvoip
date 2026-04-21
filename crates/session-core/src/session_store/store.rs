@@ -277,6 +277,7 @@ impl SessionStore {
                 CallState::Answering => stats.ringing += 1,  // Still in setup phase
                 CallState::EarlyMedia => stats.active += 1,  // Count early media as active
                 CallState::Active => stats.active += 1,
+                CallState::HoldPending => stats.active += 1,  // Count hold-pending as active until 2xx commits
                 CallState::OnHold => stats.on_hold += 1,
                 CallState::Resuming => stats.active += 1,  // Count resuming as active
                 CallState::Bridged => stats.active += 1,  // Count bridged as active

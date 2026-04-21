@@ -60,6 +60,9 @@ pub enum CallState {
     Answering,        // UAS accepted call, sending 200 OK, waiting for ACK
     EarlyMedia,
     Active,
+    /// Sent a hold re-INVITE, awaiting 2xx (RFC 3261 §14.1). Session
+    /// parameters remain as they were in `Active` until the peer confirms.
+    HoldPending,
     OnHold,
     Resuming,
     Muted,
@@ -101,9 +104,10 @@ impl CallState {
     /// Check if the call is in progress
     pub fn is_in_progress(&self) -> bool {
         matches!(self, 
-            CallState::Initiating | 
-            CallState::Ringing | 
-            CallState::Active | 
+            CallState::Initiating |
+            CallState::Ringing |
+            CallState::Active |
+            CallState::HoldPending |
             CallState::OnHold |
             CallState::EarlyMedia |
             CallState::Resuming |
@@ -125,6 +129,7 @@ impl fmt::Display for CallState {
             CallState::Answering => write!(f, "Answering"),
             CallState::EarlyMedia => write!(f, "EarlyMedia"),
             CallState::Active => write!(f, "Active"),
+            CallState::HoldPending => write!(f, "HoldPending"),
             CallState::OnHold => write!(f, "OnHold"),
             CallState::Resuming => write!(f, "Resuming"),
             CallState::Muted => write!(f, "Muted"),

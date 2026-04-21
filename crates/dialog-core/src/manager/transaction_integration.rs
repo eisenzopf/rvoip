@@ -488,16 +488,35 @@ impl TransactionIntegration for DialogManager {
         self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
         debug!("✅ Associated {} transaction {} with dialog {}", method, transaction_id, dialog_id);
         
-        // Send the request using transaction-core
-        self.transaction_manager
-            .send_request(&transaction_id)
-            .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to send request: {}", e),
-            })?;
-        
+        // RFC 3261 §17.1.1.3 — an INVITE client transaction transitions from
+        // Proceeding to Terminated on receipt of a 2xx + automatic ACK. On a
+        // fast local loop the 200 OK can arrive and terminate the transaction
+        // inside `send_request().await`, so transaction-core surfaces
+        // "Transaction terminated after timeout" even though the SIP flow
+        // succeeded. Mirror the 422-retry path (below in this file) and the
+        // initial-INVITE path in `unified.rs::make_call` by swallowing the
+        // condition for INVITE — including re-INVITEs used for hold/resume.
+        // Non-INVITE methods keep the strict error path to avoid masking real
+        // transport failures on BYE / REFER / UPDATE / etc.
+        if let Err(e) = self.transaction_manager.send_request(&transaction_id).await {
+            let msg = e.to_string();
+            let benign_terminate = method == Method::Invite
+                && (msg.contains("Transaction terminated after timeout")
+                    || msg.contains("Transaction terminated"));
+            if benign_terminate {
+                debug!(
+                    "{} transaction {} terminated normally after 2xx (RFC 3261 §17.1.1.3): {}",
+                    method, transaction_id, e
+                );
+            } else {
+                return Err(crate::errors::DialogError::TransactionError {
+                    message: format!("Failed to send request: {}", e),
+                });
+            }
+        }
+
         debug!("Successfully sent {} request for dialog {} (transaction: {}) using Phase 3 dialog functions", method, dialog_id, transaction_id);
-        
+
         Ok(transaction_id)
     }
     
@@ -718,12 +737,23 @@ impl DialogManager {
             transaction_id, dialog_id
         );
 
-        self.transaction_manager
-            .send_request(&transaction_id)
-            .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to send auth-retry INVITE: {}", e),
-            })?;
+        // RFC 3261 §17.1.1.3 — suppress normal auto-termination after 2xx on
+        // fast loopback (see comment in `send_request_in_dialog` above).
+        if let Err(e) = self.transaction_manager.send_request(&transaction_id).await {
+            let msg = e.to_string();
+            if msg.contains("Transaction terminated after timeout")
+                || msg.contains("Transaction terminated")
+            {
+                debug!(
+                    "Auth-retry INVITE transaction terminated normally after 2xx (RFC 3261 §17.1.1.3): {}",
+                    e
+                );
+            } else {
+                return Err(crate::errors::DialogError::TransactionError {
+                    message: format!("Failed to send auth-retry INVITE: {}", e),
+                });
+            }
+        }
 
         debug!("Auth-retry INVITE sent for dialog {} (tx {})", dialog_id, transaction_id);
         Ok(transaction_id)

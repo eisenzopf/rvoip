@@ -691,7 +691,23 @@ impl SessionCrossCrateEventHandler {
             .extract_field(event_str, "reason_phrase: \"")
             .unwrap_or_else(|| "Failure".to_string());
 
-        info!("🎯 [handle_call_failed] session={} status={} reason={}", session_id, status, reason);
+        info!("[handle_call_failed] session={} status={} reason={}", session_id, status, reason);
+
+        // RFC 3261 §14.1 — a non-2xx response to a *re-INVITE* (e.g. during
+        // hold/resume) is NOT terminal for the call. The session parameters
+        // remain unchanged and the call continues. Check the state before
+        // the state-machine transition so we read the pre-rollback state;
+        // `HoldPending` / `Resuming` identify an in-flight re-INVITE.
+        let is_mid_call_reinvite_failure = self
+            .state_machine
+            .store
+            .get_session(&session_id)
+            .await
+            .map(|s| matches!(
+                s.call_state,
+                crate::types::CallState::HoldPending | crate::types::CallState::Resuming
+            ))
+            .unwrap_or(false);
 
         // Drive the existing Dialog{4,5,6}xxFailure state transitions. 3xx
         // currently maps onto the 4xx path because the default state table
@@ -706,6 +722,18 @@ impl SessionCrossCrateEventHandler {
 
         if let Err(e) = self.state_machine.process_event(&session_id, event_type).await {
             error!("Failed to process CallFailed({}) for session {}: {}", status, session_id, e);
+        }
+
+        if is_mid_call_reinvite_failure {
+            // Re-INVITE failed mid-call; state machine has already rolled
+            // us back to Active / OnHold. Don't publish a terminal
+            // `CallFailed` (the call is still alive) and don't release
+            // the session from the store.
+            debug!(
+                "session {} re-INVITE failed with {}; rolled back per RFC 3261 §14.1 — not releasing session",
+                session_id, status
+            );
+            return Ok(());
         }
 
         // Publish app-level CallFailed for any StreamPeer/CallbackPeer subscribers,
@@ -986,7 +1014,7 @@ impl SessionCrossCrateEventHandler {
         let reason = self
             .extract_field(event_str, "reason: \"")
             .unwrap_or_else(|| "Session expired".to_string());
-        warn!("🎯 [handle_session_refresh_failed] session={} reason={}", session_id, reason);
+        debug!("handle_session_refresh_failed: session={} reason={}", session_id, reason);
 
         let api_event = crate::api::events::Event::SessionRefreshFailed {
             call_id: session_id.clone(),

@@ -66,7 +66,17 @@ impl SessionHandle {
         let call_id = self.call_id.clone();
         tokio::spawn(async move {
             if let Err(e) = coordinator.hangup(&call_id).await {
-                tracing::warn!("[SessionHandle] background hangup failed for {}: {}", call_id, e);
+                if e.is_session_gone() {
+                    tracing::trace!(
+                        "[SessionHandle] session {} already cleaned up before background hangup ran",
+                        call_id
+                    );
+                } else {
+                    tracing::warn!(
+                        "[SessionHandle] background hangup failed for {}: {}",
+                        call_id, e
+                    );
+                }
             }
         });
         Ok(())

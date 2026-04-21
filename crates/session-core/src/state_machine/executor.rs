@@ -439,7 +439,23 @@ impl StateMachine {
 
         // 7. Apply condition updates
         session.apply_condition_updates(&transition.condition_updates);
-        
+
+        // Before saving, check whether a *concurrent* process_event (e.g.
+        // the Dialog200OK handler that fired during our own SendReINVITE
+        // await) has since committed a different `call_state`. If so,
+        // preserve its commit — overwriting would race-clobber the
+        // response-driven transition (e.g. HoldPending → OnHold).
+        if let Ok(current) = self.store.get_session(session_id).await {
+            if current.call_state != session.call_state {
+                debug!(
+                    "session {} call_state changed during action phase ({:?} -> {:?}); preserving store value",
+                    session_id, session.call_state, current.call_state
+                );
+                session.call_state = current.call_state;
+                session.entered_state_at = current.entered_state_at;
+            }
+        }
+
         // 8. Save updated session state
         self.store.update_session(session.clone()).await?;
         

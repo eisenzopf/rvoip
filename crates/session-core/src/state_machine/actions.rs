@@ -116,11 +116,23 @@ pub async fn execute_action(
                 info!("INVITE sent successfully");
             }
         }
+        Action::ClearPendingReinvite => {
+            session.pending_reinvite = None;
+            session.reinvite_retry_attempts = 0;
+            debug!(
+                "Cleared pending_reinvite for session {} (glare resolved by peer)",
+                session.session_id
+            );
+        }
         Action::ScheduleReinviteRetry => {
-            // RFC 3261 §14.1 — glare avoidance. We don't have a reliable way
-            // to distinguish "owner" from "non-owner" of the dialog at this
-            // layer, so we use the owner range (2.1–4.0 s). Cap retries.
+            // RFC 3261 §14.1 — glare avoidance. The "owner" of the Call-ID
+            // (the UAC that originated the dialog) waits 2.1–4.0 s; the
+            // non-owner waits 0–2.0 s. Splitting the ranges ensures the
+            // non-owner retries first on every round, breaking the glare
+            // deterministically instead of letting both sides keep racing
+            // until the retry cap trips.
             use crate::session_store::state::PendingReinvite;
+            use crate::state_table::types::Role;
             const MAX_GLARE_RETRIES: u8 = 3;
             if session.reinvite_retry_attempts >= MAX_GLARE_RETRIES {
                 session.pending_reinvite = None;
@@ -141,11 +153,13 @@ pub async fn execute_action(
             };
             session.reinvite_retry_attempts += 1;
 
-            // Random interval in [2.1s, 4.0s) — "owner" range. For a purely
-            // local stack without dialog-role awareness this is the safer
-            // pick: strictly longer than the non-owner range, so if both
-            // peers are running this implementation one will go first.
-            let millis: u64 = 2100 + (rand::random::<u64>() % 1900);
+            // UAC = Call-ID owner → 2.1–4.0 s. UAS = non-owner → 0–2.0 s.
+            // `Role::Both` is a table-wildcard never stored on a session;
+            // default to the owner range if it ever appears.
+            let millis: u64 = match session.role {
+                Role::UAS => rand::random::<u64>() % 2000,
+                Role::UAC | Role::Both => 2100 + (rand::random::<u64>() % 1900),
+            };
             let backoff = std::time::Duration::from_millis(millis);
             info!(
                 "⏳ 491 glare: sleeping {:?} before retrying {:?} for session {} (attempt {}/{})",
@@ -433,36 +447,51 @@ pub async fn execute_action(
         
         // New actions for extended functionality
         Action::SendReINVITE => {
-            debug!("Sending re-INVITE for session {}", session.session_id);
-            
-            // Generate SDP based on current state
-            let sdp = if session.call_state == crate::types::CallState::Active {
-                // Going to hold - use sendonly
-                session.local_sdp.as_ref().map(|sdp| {
-                    // Modify SDP to include sendonly attribute
-                    if sdp.contains("a=sendrecv") {
-                        sdp.replace("a=sendrecv", "a=sendonly")
-                    } else {
-                        format!("{}\na=sendonly\r\n", sdp.trim_end())
-                    }
-                })
-            } else {
-                // Resuming from hold - use sendrecv
-                session.local_sdp.as_ref().map(|sdp| {
-                    // Modify SDP to include sendrecv attribute
-                    if sdp.contains("a=sendonly") {
-                        sdp.replace("a=sendonly", "a=sendrecv")
-                    } else if !sdp.contains("a=sendrecv") {
-                        format!("{}\na=sendrecv\r\n", sdp.trim_end())
-                    } else {
-                        sdp.clone()
-                    }
-                })
+            use crate::session_store::state::PendingReinvite;
+            use crate::types::CallState;
+            // Pick SDP direction from the *target* state — the executor commits
+            // `next_state` before running actions, so `session.call_state`
+            // reflects the state we're entering. Also record `pending_reinvite`
+            // so RFC 3261 §14.1 glare retry (`ScheduleReinviteRetry`) can
+            // reissue the correct kind.
+            let (hold_direction, kind) = match session.call_state {
+                CallState::HoldPending => (true, PendingReinvite::Hold),
+                CallState::Resuming => (false, PendingReinvite::Resume),
+                other => {
+                    // SendReINVITE fired from an unexpected state. Default to
+                    // "preserve current direction" (sendrecv) to avoid lying
+                    // on the wire, but log — this indicates a YAML bug.
+                    warn!(
+                        "SendReINVITE dispatched from state {:?} for session {} — no hold/resume intent inferred",
+                        other, session.session_id
+                    );
+                    (false, PendingReinvite::Resume)
+                }
             };
-            
-            if let Some(sdp_data) = sdp {
-                dialog_adapter.send_reinvite_session(&session.session_id, sdp_data).await?;
-            }
+
+            let sdp = if hold_direction {
+                media_adapter
+                    .create_hold_sdp()
+                    .await
+                    .map_err(|e| format!("create_hold_sdp failed: {}", e))?
+            } else {
+                media_adapter
+                    .create_active_sdp()
+                    .await
+                    .map_err(|e| format!("create_active_sdp failed: {}", e))?
+            };
+            session.local_sdp = Some(sdp.clone());
+            session.pending_reinvite = Some(kind);
+            // Persist pending_reinvite before awaiting the wire send — the
+            // 491/ReinviteGlare response races with our await, and the glare
+            // handler's `ScheduleReinviteRetry` reads `pending_reinvite` from
+            // the store to know what kind of re-INVITE to reissue.
+            session_store
+                .update_session(session.clone())
+                .await
+                .map_err(|e| format!("persist pending_reinvite failed: {}", e))?;
+            debug!("Sending re-INVITE for session {} (hold={})", session.session_id, hold_direction);
+            dialog_adapter.send_reinvite_session(&session.session_id, sdp).await?;
         }
         
         Action::PlayAudioFile(file) => {
