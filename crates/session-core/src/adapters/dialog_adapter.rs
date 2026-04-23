@@ -758,12 +758,34 @@ impl DialogAdapter {
             None
         };
 
+        // RFC 3581 NAT discovery: if the dialog manager has learned a
+        // public address from a prior response's `Via:
+        // …;received=…;rport=…`, rewrite the host:port portion of the
+        // Contact URI so the registrar binds the new registration to
+        // the externally-routable address (RFC 5626 §5). First
+        // REGISTER goes out with the bind-address Contact; the
+        // response carries `received=`/`rport=` which populates the
+        // discovery cache; subsequent REGISTERs (refresh, auth retry)
+        // use the discovered address.
+        let rewritten_contact = if let Some(public) = self.dialog_api.discovered_public_addr().await {
+            let rewritten = rewrite_contact_host(contact_uri, public);
+            if rewritten != contact_uri {
+                tracing::info!(
+                    "RFC 3581/5626: rewriting REGISTER Contact {} → {} (NAT-discovered)",
+                    contact_uri, rewritten
+                );
+            }
+            rewritten
+        } else {
+            contact_uri.to_string()
+        };
+
         // Send REGISTER through dialog-core API and get response
         // dialog-core handles CSeq incrementing automatically
         let response = self.dialog_api.send_register(
             registrar_uri,
             from_uri,
-            contact_uri,
+            &rewritten_contact,
             expires,
             authorization,
         ).await
@@ -1187,4 +1209,94 @@ mod tests {
         let escaped = url_escape_replaces(replaces);
         assert_eq!(escaped, "abc%40host%3Bto-tag%3Dxyz%3Bfrom-tag%3Dpqr");
     }
+
+    // ---- NAT-aware Contact rewrite (Sprint 1.A3) -------------------
+
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn pub_addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 54321)
+    }
+
+    #[test]
+    fn rewrite_contact_swaps_host_port_after_user() {
+        // Standard `sip:user@host:port` form — host:port replaced.
+        let input = "sip:alice@192.168.1.10:5060";
+        assert_eq!(
+            rewrite_contact_host(input, pub_addr()),
+            "sip:alice@203.0.113.7:54321"
+        );
+    }
+
+    #[test]
+    fn rewrite_contact_preserves_uri_params() {
+        let input = "sip:alice@192.168.1.10:5060;transport=tcp";
+        assert_eq!(
+            rewrite_contact_host(input, pub_addr()),
+            "sip:alice@203.0.113.7:54321;transport=tcp"
+        );
+    }
+
+    #[test]
+    fn rewrite_contact_handles_no_port_in_input() {
+        let input = "sip:alice@192.168.1.10";
+        assert_eq!(
+            rewrite_contact_host(input, pub_addr()),
+            "sip:alice@203.0.113.7:54321"
+        );
+    }
+
+    #[test]
+    fn rewrite_contact_handles_no_user() {
+        // Some Contacts omit the user-part — rewrite host:port anyway.
+        let input = "sip:192.168.1.10:5060";
+        assert_eq!(
+            rewrite_contact_host(input, pub_addr()),
+            "sip:203.0.113.7:54321"
+        );
+    }
+
+    #[test]
+    fn rewrite_contact_passes_through_sips_scheme() {
+        let input = "sips:alice@192.168.1.10:5061;transport=tls";
+        assert_eq!(
+            rewrite_contact_host(input, pub_addr()),
+            "sips:alice@203.0.113.7:54321;transport=tls"
+        );
+    }
+}
+
+/// Rewrite the host (and port) portion of a SIP URI in a `Contact:`
+/// value with the supplied public address. Preserves the scheme,
+/// user-part (if any), and any URI parameters.
+///
+/// Used by `DialogAdapter::send_register` to redirect the registrar's
+/// stored binding to the NAT-discovered public address (RFC 5626 §5).
+/// Pure / sync so the rewrite is trivially testable without standing
+/// up the full adapter.
+///
+/// Format we handle: `<scheme>:[<user>@]<host>[:<port>][;<params>]`.
+/// We deliberately don't lean on a full URI parser here — the input
+/// is always a Contact value we built ourselves earlier in the
+/// pipeline, so the structure is predictable.
+pub(crate) fn rewrite_contact_host(input: &str, public: std::net::SocketAddr) -> String {
+    // Split off any URI params (`;name=value` after the host[:port]).
+    let (host_section, params_suffix) = match input.find(';') {
+        Some(idx) => (&input[..idx], &input[idx..]),
+        None => (input, ""),
+    };
+
+    // Split scheme: prefix (`sip:` or `sips:`).
+    let (scheme_prefix, after_scheme) = match host_section.find(':') {
+        Some(idx) => (&host_section[..=idx], &host_section[idx + 1..]),
+        None => return input.to_string(), // No `:` — not a SIP URI we recognise.
+    };
+
+    // Split optional `<user>@`.
+    let (user_at, _existing_host_port) = match after_scheme.find('@') {
+        Some(idx) => (&after_scheme[..=idx], &after_scheme[idx + 1..]),
+        None => ("", after_scheme),
+    };
+
+    format!("{}{}{}{}", scheme_prefix, user_at, public, params_suffix)
 }

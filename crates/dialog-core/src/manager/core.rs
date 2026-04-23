@@ -82,6 +82,24 @@ pub struct DialogManager {
     /// dialog. Aborted on dialog termination.
     pub(crate) session_refresh_tasks:
         Arc<DashMap<DialogId, tokio::task::AbortHandle>>,
+
+    /// Discovered public address from RFC 3581 `received=` / `rport=`
+    /// echoed back on responses.
+    ///
+    /// On every inbound response we peek at the top `Via` header; when
+    /// it carries `received=<ip>` plus a populated `rport=<port>` (set
+    /// because we put `;rport` on the outgoing Via per RFC 3581 §4),
+    /// we treat that as our externally-visible address as observed by
+    /// the immediate hop. This lets a UA behind NAT discover its
+    /// public address without STUN, then advertise it in subsequent
+    /// `Contact:` headers (RFC 5626 §5).
+    ///
+    /// `None` until the first qualifying response arrives. Most-
+    /// recent observation wins — if multiple peers see us through
+    /// different NAT mappings, the latest update is authoritative.
+    /// (Per-peer mapping would be a richer model; not yet justified
+    /// by real-world traffic.)
+    pub(crate) nat_discovered_addr: Arc<tokio::sync::RwLock<Option<SocketAddr>>>,
 }
 
 impl DialogManager {
@@ -133,6 +151,7 @@ impl DialogManager {
             subscription_manager: Some(Arc::new(subscription_manager)),
             reliable_provisional_tasks: Arc::new(DashMap::new()),
             session_refresh_tasks: Arc::new(DashMap::new()),
+            nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
         })
     }
     
@@ -186,8 +205,9 @@ impl DialogManager {
             subscription_manager: Some(Arc::new(subscription_manager)),
             reliable_provisional_tasks: Arc::new(DashMap::new()),
             session_refresh_tasks: Arc::new(DashMap::new()),
+            nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
         };
-        
+
         // Spawn global transaction event processor
         let event_processor = manager.clone();
         tokio::spawn(async move {
@@ -835,6 +855,22 @@ impl DialogManager {
         <Self as super::protocol_handlers::MethodHandler>::handle_notify_method(self, request, source).await
     }
     
+    /// Snapshot of the externally-visible address most recently
+    /// learned from an inbound response's `Via: …;received=…;rport=…`
+    /// (RFC 3581). Returns `None` until the first qualifying response
+    /// arrives — i.e. before the first request goes on the wire, or
+    /// when no NAT is in the path (in which case the discovered
+    /// address would equal the local bind and we suppress the
+    /// update).
+    ///
+    /// Callers can use this to rewrite outbound `Contact:` headers
+    /// (RFC 5626 §5) so a registrar's stored binding routes through
+    /// the discovered NAT mapping rather than the unreachable
+    /// private bind address.
+    pub async fn discovered_public_addr(&self) -> Option<SocketAddr> {
+        *self.nat_discovered_addr.read().await
+    }
+
     pub async fn handle_response(&self, response: Response, transaction_id: TransactionKey) -> DialogResult<()> {
         <Self as super::protocol_handlers::ProtocolHandlers>::handle_response_message(self, response, transaction_id).await
     }

@@ -1016,6 +1016,16 @@ impl UnifiedDialogApi {
     ///
     /// # Returns
     /// The SIP response (200 OK, 401 Unauthorized, etc.)
+    /// Snapshot of the most-recently-discovered public address, learned
+    /// from RFC 3581 `received=`/`rport=` echoed back on inbound
+    /// responses. Returns `None` until at least one qualifying
+    /// response arrives. Useful for rewriting outbound `Contact:`
+    /// headers in RE-registration / re-INVITE flows so a registrar's
+    /// binding stays reachable through NAT (RFC 5626 §5).
+    pub async fn discovered_public_addr(&self) -> Option<SocketAddr> {
+        self.manager.core().discovered_public_addr().await
+    }
+
     pub async fn send_register(
         &self,
         registrar_uri: &str,

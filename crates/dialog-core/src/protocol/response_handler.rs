@@ -42,11 +42,19 @@ pub trait ResponseHandler {
 /// Implementation of response handling for DialogManager
 impl ResponseHandler for DialogManager {
     /// Handle responses to client transactions
-    /// 
+    ///
     /// Processes responses and updates dialog state accordingly.
     async fn handle_response_message(&self, response: Response, transaction_id: TransactionKey) -> DialogResult<()> {
         debug!("Processing response {} for transaction {}", response.status_code(), transaction_id);
-        
+
+        // RFC 3581 NAT discovery — peek at the top Via for
+        // `received=`/`rport=` and update our cache. This applies to
+        // ALL inbound responses (dialog-bound or not), including
+        // REGISTER 2xx/4xx and INVITE provisionals — so the
+        // discovered address can populate before the first dialog is
+        // established.
+        record_nat_discovery_from_response(self, &response).await;
+
         // Find associated dialog
         if let Ok(dialog_id) = self.find_dialog_for_transaction(&transaction_id) {
             self.process_response_in_dialog(response, transaction_id, dialog_id).await
@@ -54,6 +62,143 @@ impl ResponseHandler for DialogManager {
             debug!("Response for transaction {} has no associated dialog", transaction_id);
             Ok(())
         }
+    }
+}
+
+/// Pure RFC 3581 §4 extraction — read `received=`/`rport=` from the
+/// top `Via` of an inbound response and return the discovered public
+/// `SocketAddr` if (a) both are present *and* (b) it differs from
+/// the local bind address. Returns `None` otherwise (no NAT signal,
+/// or NAT is a no-op).
+///
+/// Pure / sync so it's trivially unit-testable without standing up a
+/// full DialogManager.
+pub(crate) fn extract_nat_discovery(
+    local_addr: std::net::SocketAddr,
+    response: &Response,
+) -> Option<std::net::SocketAddr> {
+    use crate::manager::MessageExtensions;
+
+    let via = response.first_via()?;
+    let received_ip = via.received()?;
+    let rport = via.rport()??;
+
+    if received_ip == local_addr.ip() && rport == local_addr.port() {
+        // No NAT — discovered address matches what we already know.
+        return None;
+    }
+
+    Some(std::net::SocketAddr::new(received_ip, rport))
+}
+
+/// Inspect the top `Via` header of an inbound response. If it carries
+/// both `received=<ip>` and a populated `rport=<port>` (the carrier or
+/// NAT echoed our externally-visible address per RFC 3581 §4), update
+/// `DialogManager::nat_discovered_addr` with that observation.
+///
+/// Most-recent observation wins (single global slot — see field doc).
+/// Free function rather than `DialogManager` method so it stays close
+/// to the call site and doesn't pollute the manager's public surface.
+async fn record_nat_discovery_from_response(
+    manager: &DialogManager,
+    response: &Response,
+) {
+    let local_addr = manager.local_address;
+    let Some(new_addr) = extract_nat_discovery(local_addr, response) else { return };
+
+    let mut guard = manager.nat_discovered_addr.write().await;
+    let prev = guard.replace(new_addr);
+    if prev != Some(new_addr) {
+        info!(
+            "RFC 3581 NAT discovery: external address learned {} (local bind {})",
+            new_addr, local_addr
+        );
+    }
+}
+
+#[cfg(test)]
+mod nat_discovery_tests {
+    use super::extract_nat_discovery;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use rvoip_sip_core::types::{
+        param::Param, status::StatusCode, via::{Via, ViaHeader}, TypedHeader, headers::HeaderAccess,
+    };
+    use rvoip_sip_core::Response;
+
+    fn local() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)), 5060)
+    }
+
+    /// Build a 200 OK with a single `Via:` carrying the supplied
+    /// params. Doesn't bother with any other headers — the discovery
+    /// path only inspects Via.
+    fn response_with_via(via_params: Vec<Param>) -> Response {
+        let via = Via(vec![ViaHeader {
+            sent_protocol: rvoip_sip_core::types::via::SentProtocol {
+                name: "SIP".to_string(),
+                version: "2.0".to_string(),
+                transport: "UDP".to_string(),
+            },
+            sent_by_host: rvoip_sip_core::types::uri::Host::Address(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
+            sent_by_port: Some(5060),
+            params: via_params,
+        }]);
+        let mut response = Response::new(StatusCode::Ok);
+        response.headers.push(TypedHeader::Via(via));
+        response
+    }
+
+    #[test]
+    fn returns_some_when_received_and_rport_differ_from_local() {
+        // `Via::received()` / `Via::rport()` only recognise the typed
+        // variants (`Param::Received` / `Param::Rport`), not the
+        // generic `Param::Other("received", …)` form.
+        let response = response_with_via(vec![
+            Param::Received(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+            Param::Rport(Some(54321)),
+        ]);
+        let discovered = extract_nat_discovery(local(), &response);
+        assert_eq!(
+            discovered,
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 54321))
+        );
+    }
+
+    #[test]
+    fn returns_none_when_no_via() {
+        let response = Response::new(StatusCode::Ok);
+        assert_eq!(extract_nat_discovery(local(), &response), None);
+    }
+
+    #[test]
+    fn returns_none_when_via_lacks_received() {
+        let response = response_with_via(vec![Param::Rport(Some(54321))]);
+        assert_eq!(extract_nat_discovery(local(), &response), None);
+    }
+
+    #[test]
+    fn returns_none_when_via_lacks_rport_value() {
+        // RFC 3581 — the response MUST echo `rport=<port>` (not just
+        // a flag) for us to treat the discovery as actionable. A
+        // `;rport` with no value (the request-side request flag) is
+        // not enough.
+        let response = response_with_via(vec![
+            Param::Received(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))),
+            Param::Rport(None),
+        ]);
+        assert_eq!(extract_nat_discovery(local(), &response), None);
+    }
+
+    #[test]
+    fn suppresses_update_when_nat_is_noop() {
+        // Discovered address equals local bind → no NAT in path,
+        // suppress the update to avoid log churn.
+        let response = response_with_via(vec![
+            Param::Received(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
+            Param::Rport(Some(5060)),
+        ]);
+        assert_eq!(extract_nat_discovery(local(), &response), None);
     }
 }
 
