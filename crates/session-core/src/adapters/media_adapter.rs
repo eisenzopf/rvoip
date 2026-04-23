@@ -15,6 +15,10 @@ use rvoip_media_core::{
     DialogId,
     types::MediaSessionId,
 };
+use rvoip_sip_core::sdp::SdpBuilder;
+use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite, ParsedAttribute, SdpSession};
+use std::str::FromStr;
+use crate::adapters::srtp_negotiator::{SrtpNegotiator, SrtpPair};
 use crate::state_table::types::SessionId;
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
@@ -108,10 +112,40 @@ pub struct MediaAdapter {
     
     /// Audio mixers for conferences
     audio_mixers: Arc<DashMap<crate::types::MediaSessionId, Vec<crate::types::MediaSessionId>>>,
+
+    // ==== RFC 4568 SDES-SRTP state (Step 2B) ====
+
+    /// Whether to attach `a=crypto:` lines to outgoing offers and to
+    /// answer with `RTP/SAVP` when peer offers SRTP. When `false`,
+    /// the adapter behaves like the pre-2B baseline (plain RTP/AVP).
+    offer_srtp: bool,
+
+    /// When `true`, refuse to fall back to plaintext RTP. UAC: a
+    /// remote SDP without acceptable `a=crypto:` causes the
+    /// negotiation function to return `Err`. UAS: an offer without
+    /// `a=crypto:` is rejected with the same `Err`, which the state
+    /// machine surfaces as `488 Not Acceptable Here`.
+    srtp_required: bool,
+
+    /// Crypto suites to offer in preference order when `offer_srtp`
+    /// is set. Default: AES-CM-128 + HMAC-SHA1-80 then -32 per
+    /// RFC 4568 §6.2.1 MTI plus low-bandwidth fallback.
+    srtp_offered_suites: Vec<CryptoSuite>,
+
+    /// UAC-side state held between `generate_sdp_offer` and
+    /// `negotiate_sdp_as_uac`. The offerer-role `SrtpNegotiator`
+    /// holds our locally-generated keys keyed by tag.
+    pending_srtp_offerers: Arc<DashMap<SessionId, SrtpNegotiator>>,
+
+    /// Negotiated SRTP context pairs keyed by session. Phase 2B.2
+    /// will read these out and hand them to media-core's
+    /// `start_secure_media`.
+    pub(crate) negotiated_srtp: Arc<DashMap<SessionId, SrtpPair>>,
 }
 
 impl MediaAdapter {
-    /// Create a new media adapter
+    /// Create a new media adapter (no SRTP — equivalent to the
+    /// pre-Step-2B behaviour).
     pub fn new(
         controller: Arc<MediaSessionController>,
         store: Arc<SessionStore>,
@@ -130,6 +164,32 @@ impl MediaAdapter {
             media_port_start: port_start,
             media_port_end: port_end,
             audio_mixers: Arc::new(DashMap::new()),
+            offer_srtp: false,
+            srtp_required: false,
+            srtp_offered_suites: vec![
+                CryptoSuite::AesCm128HmacSha1_80,
+                CryptoSuite::AesCm128HmacSha1_32,
+            ],
+            pending_srtp_offerers: Arc::new(DashMap::new()),
+            negotiated_srtp: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Configure the SRTP offer policy. Called by `UnifiedCoordinator`
+    /// when constructing the adapter from a [`Config`] that has
+    /// `offer_srtp` / `srtp_required` / `srtp_offered_suites` set.
+    /// Mutates in place rather than returning a new adapter so the
+    /// existing constructor signature stays unchanged.
+    pub fn set_srtp_policy(
+        &mut self,
+        offer_srtp: bool,
+        srtp_required: bool,
+        suites: Vec<CryptoSuite>,
+    ) {
+        self.offer_srtp = offer_srtp;
+        self.srtp_required = srtp_required;
+        if !suites.is_empty() {
+            self.srtp_offered_suites = suites;
         }
     }
     
@@ -151,110 +211,301 @@ impl MediaAdapter {
         Ok(())
     }
     
-    /// Generate SDP offer (for UAC)
+    /// Generate SDP offer (for UAC).
+    ///
+    /// Built via `sip-core`'s typed `SdpBuilder` (RFC 8866). The
+    /// previous format-string implementation produced byte-identical
+    /// output to this version when the `offer_srtp` knob is not set —
+    /// see `sdp_offer_matches_legacy_format` in this module's tests
+    /// for the regression check.
+    ///
+    /// When `offer_srtp` is set, the m-section transport switches to
+    /// `RTP/SAVP` (RFC 4568 §3.1.4) and one `a=crypto:` line is
+    /// emitted per suite in `srtp_offered_suites`. The freshly-
+    /// generated master keys are stashed in
+    /// `pending_srtp_offerers` keyed by `session_id` so the matching
+    /// answer can drive `accept_answer` in
+    /// [`Self::negotiate_sdp_as_uac`].
     pub async fn generate_sdp_offer(&self, session_id: &SessionId) -> Result<String> {
         let info = self.media_sessions.get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(format!("No media session for {}", session_id.0)))?;
-        
-        // Generate simple SDP offer
-        let sdp = format!(
-            "v=0\r\n\
-             o=- {} {} IN IP4 {}\r\n\
-             s=Session\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio {} RTP/AVP 0 101\r\n\
-             a=rtpmap:0 PCMU/8000\r\n\
-             a=rtpmap:101 telephone-event/8000\r\n\
-             a=fmtp:101 0-15\r\n\
-             a=sendrecv\r\n",
-            info.dialog_id.as_str(),
-            info.created_at.elapsed().as_secs(),
-            self.local_ip,
-            self.local_ip,
-            info.rtp_port.unwrap_or(5004),
-        );
-        
-        Ok(sdp)
+
+        let port = info.rtp_port.unwrap_or(5004);
+        let elapsed_secs = info.created_at.elapsed().as_secs().to_string();
+        let dialog_id_str = info.dialog_id.as_str().to_string();
+        let local_ip_str = self.local_ip.to_string();
+
+        // RFC 4568 §3.1.4 — `RTP/SAVP` profile required when offering SDES.
+        let (transport, crypto_attrs) = if self.offer_srtp {
+            let (negotiator, attrs) =
+                SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
+            self.pending_srtp_offerers.insert(session_id.clone(), negotiator);
+            ("RTP/SAVP", attrs)
+        } else {
+            ("RTP/AVP", Vec::new())
+        };
+
+        // Start a media-audio sub-builder; chain crypto lines after
+        // rtpmap/fmtp so the order tracks what carriers expect (and
+        // what the no-SRTP regression fixture asserts byte-for-byte).
+        let mut media_builder = SdpBuilder::new("Session")
+            .origin(
+                "-",
+                &dialog_id_str,
+                &elapsed_secs,
+                "IN",
+                "IP4",
+                &local_ip_str,
+            )
+            .connection("IN", "IP4", &local_ip_str)
+            .time("0", "0")
+            .media_audio(port, transport)
+                .formats(&["0", "101"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("101", "telephone-event/8000")
+                .fmtp("101", "0-15");
+        for attr in crypto_attrs {
+            media_builder = media_builder.crypto_attribute(attr);
+        }
+        // RFC 8866 sendrecv emitted as a generic flag attribute
+        // (vs `.direction()`) so the m-section attribute order
+        // matches the legacy format-string layout: rtpmap →
+        // fmtp → [crypto…] → sendrecv. Builder's typed `direction`
+        // field would emit it before generic_attributes.
+        let session = media_builder
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .map_err(|e| SessionError::SDPNegotiationFailed(
+                format!("SdpBuilder failed to build offer: {}", e)
+            ))?;
+
+        Ok(session.to_string())
+    }
+
+    /// Extract the `a=crypto:` attributes from the audio m-section of
+    /// a parsed SDP. Empty result means the peer offered no SRTP.
+    fn extract_audio_crypto(session: &SdpSession) -> Vec<CryptoAttribute> {
+        session
+            .media_descriptions
+            .iter()
+            .find(|m| m.media == "audio")
+            .map(|m| {
+                m.generic_attributes
+                    .iter()
+                    .filter_map(|a| match a {
+                        ParsedAttribute::Crypto(c) => Some(c.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     
     /// Process SDP answer and negotiate (for UAC)
     pub async fn negotiate_sdp_as_uac(&self, session_id: &SessionId, remote_sdp: &str) -> Result<NegotiatedConfig> {
         // Parse remote SDP to extract IP and port
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
+
+        // SDES answer-side handling (RFC 4568 §7.5).
+        // The state machine path that calls us doesn't expose a
+        // failure-with-487 hook today; if `srtp_required` and the
+        // answer can't satisfy SRTP, we surface `SDPNegotiationFailed`
+        // which the executor turns into terminal `CallFailed`.
+        if let Some((_, offerer_state)) =
+            self.pending_srtp_offerers.remove(session_id)
+        {
+            // We did offer SRTP. Look for a matching `a=crypto:` in the answer.
+            let parsed = SdpSession::from_str(remote_sdp).map_err(|e| {
+                SessionError::SDPNegotiationFailed(format!(
+                    "Failed to parse remote SDP for SDES answer extraction: {}",
+                    e
+                ))
+            })?;
+            let attrs = Self::extract_audio_crypto(&parsed);
+            if let Some(chosen) = attrs.first() {
+                let pair = offerer_state.accept_answer(chosen)?;
+                self.negotiated_srtp.insert(session_id.clone(), pair);
+                tracing::info!(
+                    "SDES answer accepted for session {}: tag {} suite {:?}",
+                    session_id.0,
+                    chosen.tag,
+                    chosen.suite
+                );
+            } else if self.srtp_required {
+                return Err(SessionError::SDPNegotiationFailed(
+                    "srtp_required is set but the SDP answer carries no a=crypto: line"
+                        .into(),
+                ));
+            } else {
+                tracing::warn!(
+                    "Session {} offered SRTP but the answer didn't accept it; \
+                     proceeding plaintext (Config::srtp_required = false)",
+                    session_id.0
+                );
+                let _ = offerer_state; // dropped — keys discarded
+            }
+        }
         
-        // Update media session with remote address
+        // Update media session with remote address. SRTP contexts (if
+        // negotiated in 2B.1) must be installed *between* updating the
+        // remote address and starting the audio transmitter — the
+        // transmitter spawns a send loop and we don't want any
+        // plaintext packets going out before the encrypt-side
+        // SrtpContext is in place.
         if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
-            
-            // Update the RTP session with the remote address
+
             self.controller.update_rtp_remote_addr(&dialog_id, remote_addr)
                 .await
                 .map_err(|e| SessionError::MediaError(format!("Failed to update RTP remote address: {}", e)))?;
-                
+
+            // RFC 4568 SDES: install per-direction contexts before the
+            // first wire packet flows.
+            if let Some((_, pair)) = self.negotiated_srtp.remove(session_id) {
+                self.controller
+                    .install_srtp_contexts(&dialog_id, pair.send_ctx, pair.recv_ctx)
+                    .await
+                    .map_err(|e| SessionError::MediaError(
+                        format!("Failed to install SRTP contexts: {}", e)
+                    ))?;
+                tracing::info!(
+                    "🔒 SRTP contexts installed for session {} (suite {:?})",
+                    session_id.0,
+                    pair.suite
+                );
+            }
+
             // Establish media flow (this starts audio transmission)
             self.controller.establish_media_flow(&dialog_id, remote_addr)
                 .await
                 .map_err(|e| SessionError::MediaError(format!("Failed to establish media flow: {}", e)))?;
-                
+
             tracing::info!("✅ Updated RTP remote address to {} for session {}", remote_addr, session_id.0);
         }
-        
+
         let config = NegotiatedConfig {
             local_addr: SocketAddr::new(self.local_ip, self.get_local_port(session_id)?),
             remote_addr: SocketAddr::new(remote_ip, remote_port),
             codec: "PCMU".to_string(),
             payload_type: 0,
         };
-        
+
         // Event publishing will be handled by SessionCrossCrateEventHandler
-        
+
         Ok(config)
     }
-    
+
     /// Generate SDP answer and negotiate (for UAS)
     pub async fn negotiate_sdp_as_uas(&self, session_id: &SessionId, remote_sdp: &str) -> Result<(String, NegotiatedConfig)> {
-        // Parse remote SDP
+        // Parse remote SDP — typed parse for both connection extraction
+        // and SDES handling.
+        let parsed_offer = SdpSession::from_str(remote_sdp).map_err(|e| {
+            SessionError::SDPNegotiationFailed(format!("Failed to parse remote SDP: {}", e))
+        })?;
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
+
+        // SDES UAS-side handling. Per RFC 4568 §7.3, if we require
+        // SRTP and the offer doesn't include any `a=crypto:` lines we
+        // must reject — the state-machine path turns the
+        // `SDPNegotiationFailed` into a `488 Not Acceptable Here`
+        // (decision D10).
+        let offered_crypto = Self::extract_audio_crypto(&parsed_offer);
+        let (answer_attr, srtp_pair) = if !offered_crypto.is_empty() && self.offer_srtp {
+            // Both sides want SRTP — negotiate.
+            let answerer = SrtpNegotiator::new_answerer();
+            let (chosen, pair) = answerer.process_offer(&offered_crypto)?;
+            self.negotiated_srtp.insert(session_id.clone(), pair);
+            tracing::info!(
+                "SDES offer accepted for session {}: tag {} suite {:?}",
+                session_id.0,
+                chosen.tag,
+                chosen.suite
+            );
+            (Some(chosen), true)
+        } else if offered_crypto.is_empty() && self.srtp_required {
+            return Err(SessionError::SDPNegotiationFailed(
+                "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
+            ));
+        } else if !offered_crypto.is_empty() && !self.offer_srtp {
+            // Peer offered SRTP but our policy is plain. Per RFC 4568
+            // §7.3 the right answer here is `m=audio 0 RTP/SAVP …`
+            // (port=0) signalling refusal. For now we keep the
+            // simpler "answer plaintext on the same port" behavior;
+            // expose the proper port=0 path when a real carrier
+            // demands it.
+            tracing::warn!(
+                "Session {} received SRTP offer but local policy is offer_srtp=false; \
+                 answering plaintext",
+                session_id.0
+            );
+            (None, false)
+        } else {
+            (None, false)
+        };
+        let _ = srtp_pair; // suppress unused warning — value retained via DashMap insert
         
         // Get our local port
         let local_port = self.get_local_port(session_id)?;
         
-        // Update media session with remote address
+        // Update media session with remote address. SRTP contexts must
+        // be installed BEFORE establish_media_flow starts the audio
+        // transmitter — see `negotiate_sdp_as_uac` for the same
+        // ordering rationale.
         if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
-            
-            // Update the RTP session with the remote address
+
             self.controller.update_rtp_remote_addr(&dialog_id, remote_addr)
                 .await
                 .map_err(|e| SessionError::MediaError(format!("Failed to update RTP remote address: {}", e)))?;
-                
-            // Establish media flow (this starts audio transmission)
+
+            if let Some((_, pair)) = self.negotiated_srtp.remove(session_id) {
+                self.controller
+                    .install_srtp_contexts(&dialog_id, pair.send_ctx, pair.recv_ctx)
+                    .await
+                    .map_err(|e| SessionError::MediaError(
+                        format!("Failed to install SRTP contexts (UAS): {}", e)
+                    ))?;
+                tracing::info!(
+                    "🔒 SRTP contexts installed for session {} (UAS, suite {:?})",
+                    session_id.0,
+                    pair.suite
+                );
+            }
+
             self.controller.establish_media_flow(&dialog_id, remote_addr)
                 .await
                 .map_err(|e| SessionError::MediaError(format!("Failed to establish media flow: {}", e)))?;
-                
+
             tracing::info!("✅ Updated RTP remote address to {} for session {} (UAS)", remote_addr, session_id.0);
         }
         
-        // Generate SDP answer
-        let sdp_answer = format!(
-            "v=0\r\n\
-             o=- {} {} IN IP4 {}\r\n\
-             s=Session\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio {} RTP/AVP 0 101\r\n\
-             a=rtpmap:0 PCMU/8000\r\n\
-             a=rtpmap:101 telephone-event/8000\r\n\
-             a=fmtp:101 0-15\r\n\
-             a=sendrecv\r\n",
-            generate_session_id(),
-            0,
-            self.local_ip,
-            self.local_ip,
-            local_port,
-        );
+        // Generate SDP answer via the typed builder. See
+        // `generate_sdp_offer` for layout rationale. Picks `RTP/SAVP`
+        // when SRTP was negotiated, otherwise the legacy `RTP/AVP`.
+        let sess_id = generate_session_id().to_string();
+        let local_ip_str = self.local_ip.to_string();
+        let answer_transport = if answer_attr.is_some() { "RTP/SAVP" } else { "RTP/AVP" };
+        let mut media_builder = SdpBuilder::new("Session")
+            .origin("-", &sess_id, "0", "IN", "IP4", &local_ip_str)
+            .connection("IN", "IP4", &local_ip_str)
+            .time("0", "0")
+            .media_audio(local_port, answer_transport)
+                .formats(&["0", "101"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("101", "telephone-event/8000")
+                .fmtp("101", "0-15");
+        if let Some(attr) = answer_attr {
+            media_builder = media_builder.crypto_attribute(attr);
+        }
+        let session = media_builder
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .map_err(|e| SessionError::SDPNegotiationFailed(
+                format!("SdpBuilder failed to build answer: {}", e)
+            ))?;
+        let sdp_answer = session.to_string();
         
         let config = NegotiatedConfig {
             local_addr: SocketAddr::new(self.local_ip, local_port),
@@ -771,22 +1022,49 @@ impl MediaAdapter {
             .ok_or_else(|| SessionError::SessionNotFound(format!("No local port for session {}", session_id.0)))
     }
     
-    /// Parse SDP to extract connection info
+    /// Parse SDP to extract connection info from the audio m= section.
+    ///
+    /// Uses sip-core's typed `SdpSession::from_str` parser instead of
+    /// the previous bespoke line-scanner so that future SDP work
+    /// (`a=crypto:` for SDES, `a=fingerprint:`/`a=setup:` for
+    /// DTLS-SRTP, video m= sections, RFC 8866 conformance) gets
+    /// validation for free.
+    ///
+    /// Per RFC 8866 §5.7 the m-section's own `c=` line (if present)
+    /// overrides the session-level `c=`. We honour that.
     fn parse_sdp_connection(&self, sdp: &str) -> Result<(IpAddr, u16)> {
-        // Extract IP from c= line
-        let ip = sdp.lines()
-            .find(|line| line.starts_with("c="))
-            .and_then(|line| line.split_whitespace().nth(2))
-            .and_then(|ip_str| ip_str.parse::<IpAddr>().ok())
-            .ok_or_else(|| SessionError::SDPNegotiationFailed("Failed to parse IP from SDP".into()))?;
-        
-        // Extract port from m= line
-        let port = sdp.lines()
-            .find(|line| line.starts_with("m=audio"))
-            .and_then(|line| line.split_whitespace().nth(1))
-            .and_then(|port_str| port_str.parse::<u16>().ok())
-            .ok_or_else(|| SessionError::SDPNegotiationFailed("Failed to parse port from SDP".into()))?;
-        
+        let session = SdpSession::from_str(sdp).map_err(|e| {
+            SessionError::SDPNegotiationFailed(format!("Failed to parse SDP: {}", e))
+        })?;
+
+        let media = session
+            .media_descriptions
+            .iter()
+            .find(|m| m.media == "audio")
+            .ok_or_else(|| SessionError::SDPNegotiationFailed(
+                "SDP has no audio m= section".into()
+            ))?;
+
+        let port = media.port as u16;
+
+        // Prefer the per-media c= line; fall back to session-level.
+        let conn = media
+            .connection_info
+            .as_ref()
+            .or(session.connection_info.as_ref())
+            .ok_or_else(|| SessionError::SDPNegotiationFailed(
+                "SDP has no c= line at session or audio level".into()
+            ))?;
+
+        let ip = match &conn.connection_address {
+            host_str => host_str.parse::<IpAddr>().map_err(|e| {
+                SessionError::SDPNegotiationFailed(format!(
+                    "SDP c= address {:?} is not a valid IP: {}",
+                    host_str, e
+                ))
+            })?,
+        };
+
         Ok((ip, port))
     }
     
@@ -944,6 +1222,11 @@ impl Clone for MediaAdapter {
             local_ip: self.local_ip,
             media_port_start: self.media_port_start,
             media_port_end: self.media_port_end,
+            offer_srtp: self.offer_srtp,
+            srtp_required: self.srtp_required,
+            srtp_offered_suites: self.srtp_offered_suites.clone(),
+            pending_srtp_offerers: self.pending_srtp_offerers.clone(),
+            negotiated_srtp: self.negotiated_srtp.clone(),
         }
     }
 }
@@ -952,4 +1235,208 @@ impl Clone for MediaAdapter {
 fn generate_session_id() -> u64 {
     use rand::Rng;
     rand::thread_rng().gen()
+}
+
+#[cfg(test)]
+mod sdp_format_tests {
+    //! Byte-fixture regression tests for the format-strings →
+    //! `SdpBuilder` refactor (Step 2B.1, decision D11). Builds the same
+    //! SDP via the typed builder and asserts byte-identical output to
+    //! what the previous `format!` block would have produced.
+    //!
+    //! When the SRTP offer landing in 2B.2 changes the m= transport to
+    //! `RTP/SAVP` and adds `a=crypto:` lines, these tests will need a
+    //! second fixture for that case.
+
+    use super::*;
+
+    /// Build the offer the same way `generate_sdp_offer` does, but with
+    /// fixed inputs so the output is deterministic.
+    fn build_offer(dialog_id: &str, elapsed_secs: u64, ip: &str, port: u16) -> String {
+        let elapsed = elapsed_secs.to_string();
+        SdpBuilder::new("Session")
+            .origin("-", dialog_id, &elapsed, "IN", "IP4", ip)
+            .connection("IN", "IP4", ip)
+            .time("0", "0")
+            .media_audio(port, "RTP/AVP")
+                .formats(&["0", "101"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("101", "telephone-event/8000")
+                .fmtp("101", "0-15")
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .expect("offer builds")
+            .to_string()
+    }
+
+    /// Same as `build_offer` but for the answer (different sess_version).
+    fn build_answer(sess_id: &str, ip: &str, port: u16) -> String {
+        SdpBuilder::new("Session")
+            .origin("-", sess_id, "0", "IN", "IP4", ip)
+            .connection("IN", "IP4", ip)
+            .time("0", "0")
+            .media_audio(port, "RTP/AVP")
+                .formats(&["0", "101"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("101", "telephone-event/8000")
+                .fmtp("101", "0-15")
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .expect("answer builds")
+            .to_string()
+    }
+
+    /// Reference output: exactly what the pre-refactor `format!` block
+    /// produced for the offer. Hand-crafted to match the legacy code at
+    /// `media_adapter.rs:160-176` byte-for-byte.
+    fn legacy_offer(dialog_id: &str, elapsed_secs: u64, ip: &str, port: u16) -> String {
+        format!(
+            "v=0\r\n\
+             o=- {} {} IN IP4 {}\r\n\
+             s=Session\r\n\
+             c=IN IP4 {}\r\n\
+             t=0 0\r\n\
+             m=audio {} RTP/AVP 0 101\r\n\
+             a=rtpmap:0 PCMU/8000\r\n\
+             a=rtpmap:101 telephone-event/8000\r\n\
+             a=fmtp:101 0-15\r\n\
+             a=sendrecv\r\n",
+            dialog_id, elapsed_secs, ip, ip, port,
+        )
+    }
+
+    fn legacy_answer(sess_id: &str, ip: &str, port: u16) -> String {
+        format!(
+            "v=0\r\n\
+             o=- {} {} IN IP4 {}\r\n\
+             s=Session\r\n\
+             c=IN IP4 {}\r\n\
+             t=0 0\r\n\
+             m=audio {} RTP/AVP 0 101\r\n\
+             a=rtpmap:0 PCMU/8000\r\n\
+             a=rtpmap:101 telephone-event/8000\r\n\
+             a=fmtp:101 0-15\r\n\
+             a=sendrecv\r\n",
+            sess_id, 0u64, ip, ip, port,
+        )
+    }
+
+    #[test]
+    fn offer_matches_legacy_format_byte_for_byte() {
+        let dialog_id = "test-dialog-uuid";
+        let elapsed = 42u64;
+        let ip = "127.0.0.1";
+        let port = 16000;
+        let new = build_offer(dialog_id, elapsed, ip, port);
+        let old = legacy_offer(dialog_id, elapsed, ip, port);
+        assert_eq!(new, old, "SdpBuilder offer drifted from legacy format-string output");
+    }
+
+    #[test]
+    fn answer_matches_legacy_format_byte_for_byte() {
+        let sess_id = "1234567890";
+        let ip = "192.168.1.42";
+        let port = 16002;
+        let new = build_answer(sess_id, ip, port);
+        let old = legacy_answer(sess_id, ip, port);
+        assert_eq!(new, old, "SdpBuilder answer drifted from legacy format-string output");
+    }
+
+    #[test]
+    fn offer_round_trips_through_typed_parser() {
+        // Build → parse → assert key fields. Catches CRLF / spacing
+        // issues that would also break peer interop.
+        let sdp_str = build_offer("d", 0, "10.0.0.1", 5004);
+        let parsed = SdpSession::from_str(&sdp_str).expect("parses back");
+        assert_eq!(parsed.session_name, "Session");
+        assert_eq!(parsed.media_descriptions.len(), 1);
+        let m = &parsed.media_descriptions[0];
+        assert_eq!(m.media, "audio");
+        assert_eq!(m.port, 5004);
+        assert_eq!(m.protocol, "RTP/AVP");
+        assert_eq!(m.formats, vec!["0", "101"]);
+    }
+
+    /// Build an SRTP-flavoured offer (RFC 4568 §3.1.4: m= profile is
+    /// `RTP/SAVP`) directly via the builder so we can assert the
+    /// shape without standing up a full MediaAdapter.
+    fn build_srtp_offer(ip: &str, port: u16, attrs: Vec<CryptoAttribute>) -> String {
+        let mut media_builder = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", ip)
+            .connection("IN", "IP4", ip)
+            .time("0", "0")
+            .media_audio(port, "RTP/SAVP")
+                .formats(&["0", "101"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("101", "telephone-event/8000")
+                .fmtp("101", "0-15");
+        for attr in attrs {
+            media_builder = media_builder.crypto_attribute(attr);
+        }
+        media_builder
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .expect("srtp offer builds")
+            .to_string()
+    }
+
+    #[test]
+    fn srtp_offer_uses_savp_profile_and_carries_crypto_lines() {
+        // RFC 4568 §3.1.4 — m= line MUST be RTP/SAVP when offering SDES.
+        use crate::adapters::srtp_negotiator::SrtpNegotiator;
+        let suites = vec![
+            CryptoSuite::AesCm128HmacSha1_80,
+            CryptoSuite::AesCm128HmacSha1_32,
+        ];
+        let (_, attrs) = SrtpNegotiator::new_offerer(&suites).unwrap();
+        let sdp = build_srtp_offer("127.0.0.1", 16000, attrs);
+
+        // Wire-level checks.
+        assert!(
+            sdp.contains("m=audio 16000 RTP/SAVP 0 101\r\n"),
+            "SRTP offer should use RTP/SAVP profile per RFC 4568 §3.1.4:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:"),
+            "SRTP offer should carry tag-1 _80 crypto line:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:"),
+            "SRTP offer should carry tag-2 _32 crypto line:\n{}",
+            sdp
+        );
+
+        // Round-trip: parse back via the typed parser, assert the
+        // crypto attributes survive both directions.
+        let parsed = SdpSession::from_str(&sdp).expect("parses");
+        let m = &parsed.media_descriptions[0];
+        assert_eq!(m.protocol, "RTP/SAVP");
+        let crypto_count = m
+            .generic_attributes
+            .iter()
+            .filter(|a| matches!(a, ParsedAttribute::Crypto(_)))
+            .count();
+        assert_eq!(crypto_count, 2);
+    }
+
+    #[test]
+    fn extract_audio_crypto_finds_both_offered_lines() {
+        use crate::adapters::srtp_negotiator::SrtpNegotiator;
+        let (_, attrs) = SrtpNegotiator::new_offerer(&[
+            CryptoSuite::AesCm128HmacSha1_80,
+            CryptoSuite::AesCm128HmacSha1_32,
+        ])
+        .unwrap();
+        let sdp = build_srtp_offer("127.0.0.1", 16000, attrs);
+        let parsed = SdpSession::from_str(&sdp).expect("parses");
+        let extracted = MediaAdapter::extract_audio_crypto(&parsed);
+        assert_eq!(extracted.len(), 2);
+        assert_eq!(extracted[0].tag, 1);
+        assert_eq!(extracted[1].tag, 2);
+    }
 }

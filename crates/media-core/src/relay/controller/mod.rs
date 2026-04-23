@@ -493,6 +493,45 @@ impl MediaSessionController {
         Ok(())
     }
     
+    /// Install RFC 4568 SDES-SRTP contexts on the dialog's RTP
+    /// session, switching its transport from plain RTP to encrypted
+    /// SRTP for both directions.
+    ///
+    /// Must be called after [`Self::start_media`] (the RTP session
+    /// must already exist) and before audio transmission begins so
+    /// that no plaintext packets leak. The contexts are consumed —
+    /// each call replaces any previously-installed pair (allowing
+    /// re-keying after a session refresh, though that's not yet
+    /// driven from session-core).
+    pub async fn install_srtp_contexts(
+        &self,
+        dialog_id: &DialogId,
+        send_ctx: rvoip_rtp_core::srtp::SrtpContext,
+        recv_ctx: rvoip_rtp_core::srtp::SrtpContext,
+    ) -> Result<()> {
+        let rtp_sessions = self.rtp_sessions.read().await;
+        let wrapper = rtp_sessions
+            .get(dialog_id)
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
+        // RtpSession exposes its transport via a typed accessor; we
+        // need the UdpRtpTransport concrete type to reach
+        // `set_srtp_contexts`. Downcast once — the only transport
+        // type media-core constructs is UDP, so this is the
+        // architecturally-correct narrowing.
+        let session_guard = wrapper.session.lock().await;
+        let transport = session_guard.transport();
+        let udp_transport = transport
+            .as_any()
+            .downcast_ref::<rvoip_rtp_core::transport::UdpRtpTransport>()
+            .ok_or_else(|| Error::config(
+                "install_srtp_contexts: RTP session is not a UdpRtpTransport".to_string()
+            ))?;
+        udp_transport.set_srtp_contexts(send_ctx, recv_ctx).await;
+        info!("Installed SDES-SRTP contexts on dialog {}", dialog_id);
+        Ok(())
+    }
+
     /// Stop media session for a dialog
     pub async fn stop_media(&self, dialog_id: &DialogId) -> Result<()> {
         info!("Stopping media session for dialog: {}", dialog_id);

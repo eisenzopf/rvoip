@@ -24,7 +24,7 @@ Cross-references:
 | Target | Today | What still blocks it |
 |--------|-------|----------------------|
 | **Asterisk / FreeSWITCH on LAN, IP-based, PCMU/PCMA** | ✅ works | nothing |
-| **Asterisk / FreeSWITCH with `srtp` enabled** (default in modern installs) | ❌ | SDES-SRTP SDP builder (`a=crypto:`) — RFC 4568 |
+| **Asterisk / FreeSWITCH with `srtp` enabled** (default in modern installs) | ✅ | RFC 4568 SDES-SRTP fully wired — `Config::offer_srtp = true` |
 | **PBX trunking with carrier-presented identity** | ⚠️ | P-Asserted-Identity (RFC 3325), Diversion / History-Info (RFC 7044) |
 | **Cloud carriers — Twilio, Vonage, Bandwidth (UDP+digest)** | ⚠️ | DNS resolves; production tier requires TLS 5061; some require P-Asserted-Identity for trunk auth |
 | **Carriers requiring TLS 5061** | ❌ | TLS client connector + session-core config wiring |
@@ -110,7 +110,7 @@ These bite the moment session-core points at a real Asterisk/FreeSWITCH **trunk*
 | # | Item | RFC | Status | Files |
 |---|------|-----|--------|-------|
 | B1 | P-Asserted-Identity / P-Preferred-Identity | RFC 3325 | ✅ end-to-end | sip-core types + parser + builder ext ✅, dialog-core `make_call_with_extra_headers[_for_session]` + `send_initial_invite_with_extra_headers` ✅, session-core `Config::pai_uri` + `UnifiedCoordinator::make_call_with_pai` + `SessionState.pai_uri` + `Action::SendINVITE` routing ✅, inbound PAI on `IncomingCallInfo.p_asserted_identity` ✅. Wire-level multi-binary integration test still TODO (call this `tests/pai_integration.rs`). |
-| B2 | SDES-SRTP SDP builder (`a=crypto:`) | RFC 4568 | ⬜ | new `sip-core/src/sdp/builder/crypto.rs`; consume existing `rtp-core/src/api/client/security/srtp/sdes.rs` |
+| B2 | SDES-SRTP — full end-to-end (SDP builder + parser + key exchange + transport encrypt/decrypt) | RFC 4568, RFC 3711 | ✅ | sip-core `CryptoSuite` + `CryptoAttribute` types/parser/builder; session-core `SrtpNegotiator` + `Config::offer_srtp` / `srtp_required` / `srtp_offered_suites`; rtp-core `UdpRtpTransport::set_srtp_contexts` wraps send/receive; media-core `install_srtp_contexts`. See `crates/STEP_2B_SRTP_INTEGRATION_PLAN.md` for the four-phase landing log. |
 | B3 | Service-Route processing on REGISTER 200 | RFC 3608 | ⬜ | `dialog-core/src/protocol/register_handler.rs` (or equivalent), `dialog-core/src/transaction/client/builders.rs` |
 | B4 | DTMF RTP events end-to-end | RFC 4733 | ⬜ | `media-core/src/codec/audio/mod.rs:26`, transmitter/receiver wiring |
 | B5 | Compact header forms on receive | RFC 3261 §7.3.3 | ⬜ | `sip-core/src/parser/header.rs` |

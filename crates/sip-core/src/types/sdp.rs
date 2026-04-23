@@ -1109,11 +1109,13 @@ impl fmt::Display for MediaDescription {
             write!(f, "a=ptime:{}\r\n", ptime)?;
         }
          if let Some(ref direction) = self.direction {
+            // RFC 8866 §5 requires CRLF between SDP lines; `writeln!`
+            // would emit LF only, so use explicit `\r\n`.
             match direction {
-                MediaDirection::SendRecv => writeln!(f, "a=sendrecv")?,
-                MediaDirection::SendOnly => writeln!(f, "a=sendonly")?,
-                MediaDirection::RecvOnly => writeln!(f, "a=recvonly")?,
-                MediaDirection::Inactive => writeln!(f, "a=inactive")?,
+                MediaDirection::SendRecv => write!(f, "a=sendrecv\r\n")?,
+                MediaDirection::SendOnly => write!(f, "a=sendonly\r\n")?,
+                MediaDirection::RecvOnly => write!(f, "a=recvonly\r\n")?,
+                MediaDirection::Inactive => write!(f, "a=inactive\r\n")?,
             }
         }
 
@@ -1148,11 +1150,12 @@ impl fmt::Display for SdpSession {
         
         // Dedicated Session Attributes
          if let Some(ref direction) = self.direction {
+            // RFC 8866 §5 — see note in MediaDescription's Display.
              match direction {
-                MediaDirection::SendRecv => writeln!(f, "a=sendrecv")?,
-                MediaDirection::SendOnly => writeln!(f, "a=sendonly")?,
-                MediaDirection::RecvOnly => writeln!(f, "a=recvonly")?,
-                MediaDirection::Inactive => writeln!(f, "a=inactive")?,
+                MediaDirection::SendRecv => write!(f, "a=sendrecv\r\n")?,
+                MediaDirection::SendOnly => write!(f, "a=sendonly\r\n")?,
+                MediaDirection::RecvOnly => write!(f, "a=recvonly\r\n")?,
+                MediaDirection::Inactive => write!(f, "a=inactive\r\n")?,
             }
         }
         // Add other dedicated session attributes here...

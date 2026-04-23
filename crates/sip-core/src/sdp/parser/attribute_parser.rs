@@ -18,6 +18,8 @@
 //!
 //! Most attributes are categorized into either flag attributes (a=flag) or value attributes (a=key:value).
 
+use std::str::FromStr;
+
 use crate::error::{Error, Result};
 use crate::types::sdp::ParsedAttribute;
 use crate::sdp::attributes::MediaDirection;
@@ -142,6 +144,43 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
                 Ok(ParsedAttribute::Fingerprint(parts[0].to_string(), parts[1].to_string()))
             },
             "setup" => Ok(ParsedAttribute::Setup(val.to_string())),
+
+            // SDES-SRTP `a=crypto:` (RFC 4568 §9.1).
+            // Wire form: `<tag> <crypto-suite> inline:<base64-key>[|<lifetime>][|<MKI>:<MKI_LEN>] [<session-params>]`
+            "crypto" => {
+                use crate::types::sdp::{CryptoAttribute, CryptoSuite};
+                let mut parts = val.split_whitespace();
+                let tag = parts
+                    .next()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .ok_or_else(|| Error::SdpParsingError(
+                        "a=crypto: missing or non-numeric tag".to_string()
+                    ))?;
+                let suite_str = parts.next().ok_or_else(|| {
+                    Error::SdpParsingError("a=crypto: missing crypto-suite".to_string())
+                })?;
+                let suite = CryptoSuite::from_str(suite_str).map_err(|e| {
+                    Error::SdpParsingError(format!("a=crypto: {}", e))
+                })?;
+                let key_param = parts.next().ok_or_else(|| {
+                    Error::SdpParsingError("a=crypto: missing inline= parameter".to_string())
+                })?;
+                let key_inline = key_param.strip_prefix("inline:").ok_or_else(|| {
+                    Error::SdpParsingError(format!(
+                        "a=crypto: only `inline` key-method supported, got {}",
+                        key_param
+                    ))
+                })?;
+                // RFC 4568 §6.1 — lifetime + MKI ride along the
+                // inline= value separated by `|`. Strip them off the
+                // base64 key for the typed field but preserve the
+                // entire string verbatim so callers needing
+                // round-trip fidelity can parse them back themselves.
+                let mut attr = CryptoAttribute::new(tag, suite, key_inline.to_string());
+                // Remaining whitespace-delimited tokens are session-params.
+                attr.session_params = parts.map(|s| s.to_string()).collect();
+                Ok(ParsedAttribute::Crypto(attr))
+            },
             
             // Identification attributes
             "mid" => {

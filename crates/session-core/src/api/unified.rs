@@ -95,6 +95,68 @@ pub struct Config {
     /// peer can MITM. Default: `false`. **Must not** be enabled in
     /// production.
     pub tls_insecure_skip_verify: bool,
+
+    /// Offer RFC 4568 SDES-SRTP on outgoing INVITEs.
+    ///
+    /// When `true`:
+    ///
+    /// - The `m=audio` line in the offer uses `RTP/SAVP` (RFC 4568
+    ///   §3.1.4) instead of `RTP/AVP`.
+    /// - One `a=crypto:` line per suite in
+    ///   [`Config::srtp_offered_suites`] is attached, each with a
+    ///   freshly-generated master key (RFC 4568 §6.1).
+    /// - When the answer accepts SRTP, paired `SrtpContext`s are
+    ///   installed on the outgoing+incoming RTP transport before the
+    ///   first packet flows. All RTP payload is then AES-encrypted
+    ///   end-to-end per RFC 3711.
+    ///
+    /// Enable this when targeting:
+    /// - **Cloud SIP carriers** (Twilio, Vonage, Bandwidth, Telnyx)
+    ///   on production tier — they typically require `srtp=mandatory`.
+    /// - **Modern Asterisk / FreeSWITCH** trunks configured with
+    ///   `srtp=mandatory`.
+    /// - **Microsoft Teams Direct Routing** (which also requires TLS
+    ///   for signalling — see [`Config::tls_cert_path`]).
+    ///
+    /// Leave disabled (the default) for:
+    /// - LAN-only PBX deployments where carriers don't enforce SRTP.
+    /// - Dev / lab setups exercising the RTP path without crypto
+    ///   overhead.
+    /// - Codec / RTP profile experiments where SRTP would obscure
+    ///   the wire bytes.
+    ///
+    /// See [`Config::srtp_required`] for the strict-mode variant.
+    pub offer_srtp: bool,
+
+    /// Refuse to fall back to plaintext RTP when SRTP can't be
+    /// negotiated.
+    ///
+    /// - **UAC**: a remote SDP answer without an acceptable
+    ///   `a=crypto:` line causes the call to surface as
+    ///   [`Event::CallFailed`](crate::api::events::Event::CallFailed)
+    ///   rather than silently downgrading.
+    /// - **UAS**: an offer without `a=crypto:` is rejected with
+    ///   `488 Not Acceptable Here`.
+    ///
+    /// Mirrors the RFC 3261 `Require:` header semantic — fail
+    /// loudly rather than silently downgrade a security guarantee.
+    /// Pair with [`Config::offer_srtp`] = `true` for the canonical
+    /// "I require encrypted media" stance.
+    ///
+    /// Default: `false` — soft-prefer SRTP but accept plaintext.
+    pub srtp_required: bool,
+
+    /// SRTP crypto suites to advertise on outgoing offers, in
+    /// preference order. The answerer picks the first suite it
+    /// supports.
+    ///
+    /// Default:
+    /// `[AesCm128HmacSha1_80, AesCm128HmacSha1_32]` —
+    /// RFC 4568 §6.2.1 MTI suite first (`_80`, ubiquitous), then
+    /// `_32` (smaller auth tag for bandwidth-conscious carriers).
+    /// Modify when a specific carrier requires a non-default
+    /// preference.
+    pub srtp_offered_suites: Vec<rvoip_sip_core::types::sdp::CryptoSuite>,
 }
 
 impl Config {
@@ -124,6 +186,12 @@ impl Config {
             tls_key_path: None,
             tls_extra_ca_path: None,
             tls_insecure_skip_verify: false,
+            offer_srtp: false,
+            srtp_required: false,
+            srtp_offered_suites: vec![
+                rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80,
+                rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_32,
+            ],
         }
     }
 
@@ -152,6 +220,12 @@ impl Config {
             tls_key_path: None,
             tls_extra_ca_path: None,
             tls_insecure_skip_verify: false,
+            offer_srtp: false,
+            srtp_required: false,
+            srtp_offered_suites: vec![
+                rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80,
+                rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_32,
+            ],
         }
     }
 }
@@ -209,13 +283,20 @@ impl UnifiedCoordinator {
         ));
         
         let media_controller = Self::create_media_controller(&config, global_coordinator.clone()).await?;
-        let media_adapter = Arc::new(MediaAdapter::new(
+        let mut media_adapter_inner = MediaAdapter::new(
             media_controller,
             store.clone(),
             config.local_ip,
             config.media_port_start,
             config.media_port_end,
-        ));
+        );
+        // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
+        media_adapter_inner.set_srtp_policy(
+            config.offer_srtp,
+            config.srtp_required,
+            config.srtp_offered_suites.clone(),
+        );
+        let media_adapter = Arc::new(media_adapter_inner);
         
         // Load state table based on config
         let state_table = Arc::new(
