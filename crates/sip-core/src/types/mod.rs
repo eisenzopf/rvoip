@@ -375,6 +375,7 @@ pub mod warning;
 pub mod multipart;
 pub mod path;
 pub mod service_route;
+pub mod outbound;
 pub mod proxy_require;
 pub mod rack;
 pub mod rseq;
@@ -430,6 +431,10 @@ pub use content_language::ContentLanguage;
 pub use accept_encoding::AcceptEncoding;
 pub use path::Path;
 pub use service_route::ServiceRoute;
+pub use outbound::{
+    GruuContactParams, OutboundContactParams, mark_uri_as_outbound, read_gruu_contact_params,
+    read_outbound_contact_params, set_gruu_contact_params, set_outbound_contact_params,
+};
 pub use proxy_require::ProxyRequire;
 
 // Add missing pub use * directives

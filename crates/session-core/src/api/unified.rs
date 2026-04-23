@@ -72,6 +72,23 @@ pub struct Config {
     /// is available via [`UnifiedCoordinator::make_call_with_pai`].
     pub pai_uri: Option<String>,
 
+    /// Outbound proxy URI (RFC 3261 §8.1.2). When set, a `Route:
+    /// <outbound-proxy-uri;lr>` header is pre-loaded as the first Route on
+    /// every outgoing INVITE this UA originates, forcing the dialog-
+    /// initiating request through the specified proxy. Typical values:
+    /// `sip:sbc.example.com;lr`, `sips:sbc.example.com:5061;lr`.
+    ///
+    /// The URI should carry the `;lr` parameter to signal a loose-routing
+    /// proxy (RFC 3261 §16.12.1.1). Session-core does **not** auto-add `;lr`
+    /// — set it explicitly in the URI string.
+    ///
+    /// **Current scope**: applied to outgoing INVITEs via the `extra_headers`
+    /// path. Outbound REGISTER is not yet routed through this proxy; the
+    /// RFC 5626 SIP Outbound work (A5) will integrate REGISTER + keep-alive
+    /// flow-tokens separately. `None` (the default) suppresses the header
+    /// entirely. Per-INVITE override is not yet exposed.
+    pub outbound_proxy_uri: Option<String>,
+
     /// Path to the PEM-encoded TLS server certificate (RFC 3261 §26.2 /
     /// RFC 5630). Both this **and** [`Config::tls_key_path`] must be set
     /// to enable TLS — when both are present, TLS is auto-enabled and
@@ -182,6 +199,7 @@ impl Config {
             session_timer_min_se: 90,
             credentials: None,
             pai_uri: None,
+            outbound_proxy_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
@@ -216,6 +234,7 @@ impl Config {
             session_timer_min_se: 90,
             credentials: None,
             pai_uri: None,
+            outbound_proxy_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
@@ -276,10 +295,29 @@ impl UnifiedCoordinator {
         
         // Create adapters
         let dialog_api = Self::create_dialog_api(&config, global_coordinator.clone()).await?;
+
+        // E4: parse the outbound proxy URI once up-front so a malformed
+        // config fails loudly at coordinator boot, not per-call.
+        let outbound_proxy_uri = if let Some(s) = config.outbound_proxy_uri.as_ref() {
+            use std::str::FromStr;
+            match rvoip_sip_core::types::uri::Uri::from_str(s) {
+                Ok(u) => Some(u),
+                Err(e) => {
+                    return Err(crate::errors::SessionError::ConfigurationError(format!(
+                        "Config.outbound_proxy_uri ({}) is not a valid SIP URI: {}",
+                        s, e
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+
         let dialog_adapter = Arc::new(DialogAdapter::new(
             dialog_api,
             store.clone(),
             global_coordinator.clone(),
+            outbound_proxy_uri,
         ));
         
         let media_controller = Self::create_media_controller(&config, global_coordinator.clone()).await?;

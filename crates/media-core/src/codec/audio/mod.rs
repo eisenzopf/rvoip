@@ -5,6 +5,7 @@ pub mod common;
 pub mod g711;  // G.711 codec implementation
 pub mod opus;  // Opus codec implementation
 pub mod g729;  // Add G.729 codec
+pub mod dtmf;  // RFC 4733 DTMF telephone-event codec
 
 pub use common::*;
 
@@ -33,4 +34,7 @@ pub use g711::G711Codec;
 pub use opus::{OpusCodec, OpusConfig, OpusApplication};
 
 // Re-export G.729 codec types
-pub use g729::{G729Codec, G729Config, G729Annexes}; 
+pub use g729::{G729Codec, G729Config, G729Annexes};
+
+// Re-export DTMF codec types
+pub use dtmf::{DtmfEvent, TelephoneEvent};

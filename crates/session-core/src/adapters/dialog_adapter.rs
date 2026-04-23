@@ -66,14 +66,26 @@ pub struct DialogAdapter {
     /// `OnceLock` makes the initialization soundly observable by any task
     /// without requiring `&mut self`.
     pub(crate) state_machine: Arc<std::sync::OnceLock<Arc<crate::state_machine::StateMachine>>>,
+
+    /// RFC 3261 §8.1.2 outbound proxy URI, validated at construction. When
+    /// `Some`, `send_invite_with_extra_headers` prepends a `Route:
+    /// <proxy-uri;lr>` header so dialog-initiating requests traverse the
+    /// configured proxy. `None` → no Route pre-loading. Populated from
+    /// [`crate::Config::outbound_proxy_uri`] during coordinator setup.
+    pub(crate) outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
 }
 
 impl DialogAdapter {
-    /// Create a new dialog adapter
+    /// Create a new dialog adapter.
+    ///
+    /// `outbound_proxy_uri` is the RFC 3261 §8.1.2 outbound proxy, if any.
+    /// Pass `None` for no pre-loaded Route. When `Some`, the URI MUST parse
+    /// as a valid SIP URI — typically `sip:sbc.example.com;lr`.
     pub fn new(
         dialog_api: Arc<UnifiedDialogApi>,
         store: Arc<SessionStore>,
         global_coordinator: Arc<GlobalEventCoordinator>,
+        outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
     ) -> Self {
         Self {
             dialog_api,
@@ -84,6 +96,7 @@ impl DialogAdapter {
             outgoing_invite_tx: Arc::new(DashMap::new()),
             global_coordinator,
             state_machine: Arc::new(std::sync::OnceLock::new()),
+            outbound_proxy_uri,
         }
     }
 
@@ -385,6 +398,20 @@ impl DialogAdapter {
 
         self.callid_to_session.insert(call_id.clone(), session_id.clone());
 
+        // E4 / RFC 3261 §8.1.2: when an outbound proxy is configured, pre-load
+        // it as the first Route header on the INVITE so the request traverses
+        // the proxy regardless of the Request-URI target. We preserve caller-
+        // supplied extras (e.g. `P-Asserted-Identity` from B1) by prepending,
+        // not replacing.
+        let headers =
+            prepend_outbound_proxy_route(extra_headers, self.outbound_proxy_uri.as_ref());
+        if self.outbound_proxy_uri.is_some() {
+            tracing::debug!(
+                "E4 outbound proxy: prepended Route to INVITE for session {}",
+                session_id.0
+            );
+        }
+
         let call_handle = self
             .dialog_api
             .make_call_with_extra_headers_for_session(
@@ -393,7 +420,7 @@ impl DialogAdapter {
                 to,
                 sdp,
                 Some(call_id.clone()),
-                extra_headers,
+                headers,
             )
             .await
             .map_err(|e| SessionError::DialogError(format!(
@@ -1176,6 +1203,7 @@ impl Clone for DialogAdapter {
             outgoing_invite_tx: self.outgoing_invite_tx.clone(),
             global_coordinator: self.global_coordinator.clone(),
             state_machine: self.state_machine.clone(),
+            outbound_proxy_uri: self.outbound_proxy_uri.clone(),
         }
     }
 }
@@ -1264,6 +1292,50 @@ mod tests {
             "sips:alice@203.0.113.7:54321;transport=tls"
         );
     }
+
+    // ---- E4 outbound proxy pre-loaded Route ---------------------------
+
+    use rvoip_sip_core::types::{uri::Uri, TypedHeader};
+    use std::str::FromStr;
+
+    #[test]
+    fn prepend_outbound_proxy_route_with_proxy_adds_first_route() {
+        let proxy = Uri::from_str("sip:sbc.example.com;lr").unwrap();
+        let headers = prepend_outbound_proxy_route(Vec::new(), Some(&proxy));
+        assert_eq!(headers.len(), 1);
+        match &headers[0] {
+            TypedHeader::Route(route) => {
+                assert_eq!(route.len(), 1);
+                assert_eq!(route[0].0.uri.to_string(), "sip:sbc.example.com;lr");
+            }
+            other => panic!("expected TypedHeader::Route, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn prepend_outbound_proxy_route_without_proxy_is_identity() {
+        let pai_uri = Uri::from_str("sip:alice@pai.example.com").unwrap();
+        let existing = vec![TypedHeader::PAssertedIdentity(
+            rvoip_sip_core::types::p_asserted_identity::PAssertedIdentity::with_uri(pai_uri),
+        )];
+        let headers = prepend_outbound_proxy_route(existing.clone(), None);
+        assert_eq!(headers.len(), existing.len());
+        assert!(matches!(headers[0], TypedHeader::PAssertedIdentity(_)));
+    }
+
+    #[test]
+    fn prepend_outbound_proxy_route_preserves_existing_before_route() {
+        // Route goes FIRST, caller extras preserved after.
+        let proxy = Uri::from_str("sip:sbc.example.com;lr").unwrap();
+        let pai_uri = Uri::from_str("sip:alice@pai.example.com").unwrap();
+        let existing = vec![TypedHeader::PAssertedIdentity(
+            rvoip_sip_core::types::p_asserted_identity::PAssertedIdentity::with_uri(pai_uri),
+        )];
+        let headers = prepend_outbound_proxy_route(existing, Some(&proxy));
+        assert_eq!(headers.len(), 2);
+        assert!(matches!(headers[0], TypedHeader::Route(_)));
+        assert!(matches!(headers[1], TypedHeader::PAssertedIdentity(_)));
+    }
 }
 
 /// Rewrite the host (and port) portion of a SIP URI in a `Contact:`
@@ -1299,4 +1371,23 @@ pub(crate) fn rewrite_contact_host(input: &str, public: std::net::SocketAddr) ->
     };
 
     format!("{}{}{}{}", scheme_prefix, user_at, public, params_suffix)
+}
+
+/// E4 / RFC 3261 §8.1.2: produce the full `extra_headers` list for an
+/// outgoing INVITE, prepending a pre-loaded `Route` header when an outbound
+/// proxy is configured on the `DialogAdapter`.
+///
+/// Pure so the "which headers travel on the wire" decision can be validated
+/// without constructing a dialog_api / transport stack. Callers:
+/// `DialogAdapter::send_invite_with_extra_headers`.
+pub(crate) fn prepend_outbound_proxy_route(
+    extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    outbound_proxy_uri: Option<&rvoip_sip_core::types::uri::Uri>,
+) -> Vec<rvoip_sip_core::types::TypedHeader> {
+    let mut headers = extra_headers;
+    if let Some(uri) = outbound_proxy_uri {
+        use rvoip_sip_core::types::{route::Route, TypedHeader};
+        headers.insert(0, TypedHeader::Route(Route::with_uri(uri.clone())));
+    }
+    headers
 }

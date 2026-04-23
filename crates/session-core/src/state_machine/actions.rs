@@ -133,8 +133,13 @@ pub async fn execute_action(
                 }
             }
 
-            // This will create the real dialog in dialog-core
-            if extras.is_empty() {
+            // This will create the real dialog in dialog-core.
+            // Route through `send_invite_with_extra_headers` whenever we have
+            // extras OR an outbound proxy is configured (E4 — that path
+            // injects the pre-loaded Route header at the adapter layer).
+            let use_extra_path =
+                !extras.is_empty() || dialog_adapter.outbound_proxy_uri.is_some();
+            if !use_extra_path {
                 dialog_adapter.send_invite_with_details(&session.session_id, &from, &to, session.local_sdp.clone()).await?;
             } else {
                 dialog_adapter.send_invite_with_extra_headers(

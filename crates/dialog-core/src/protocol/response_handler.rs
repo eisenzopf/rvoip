@@ -171,6 +171,52 @@ pub(crate) fn extract_service_route(
 /// Inspect the response. If it's a 2xx to a REGISTER, capture the
 /// registrar-returned Service-Route set into `DialogManager::service_route_by_aor`,
 /// keyed by the AoR (To URI).
+/// Format the `reason` string for a `CallTerminated` event triggered by a
+/// non-2xx final response. For RFC 3261 §21.3 Redirect responses (3xx) that
+/// carry alternate `Contact:` URIs, the URIs are appended so the
+/// session-core / application layer can act on them (retry via
+/// `make_call(alternate)`, surface to UI, etc.). For non-3xx failures, the
+/// behaviour is unchanged: just `"<status> <reason>"`.
+pub(crate) fn format_redirect_or_terminate_reason(response: &Response) -> String {
+    use rvoip_sip_core::types::TypedHeader;
+
+    let base = format!(
+        "{} {}",
+        response.status_code(),
+        response.reason_phrase()
+    );
+
+    // Only redirect status codes carry load-bearing Contact URIs per §21.3.
+    // (300 Multiple Choices, 301 Moved Permanently, 302 Moved Temporarily,
+    // 305 Use Proxy, 380 Alternative Service.)
+    let is_redirect = matches!(
+        response.status_code(),
+        300 | 301 | 302 | 305 | 380
+    );
+    if !is_redirect {
+        return base;
+    }
+
+    let alternates: Vec<String> = response
+        .headers
+        .iter()
+        .filter_map(|h| {
+            if let TypedHeader::Contact(contact) = h {
+                Some(contact.addresses().map(|a| a.uri.to_string()).collect::<Vec<_>>())
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
+
+    if alternates.is_empty() {
+        base
+    } else {
+        format!("{} (alternate: {})", base, alternates.join(", "))
+    }
+}
+
 async fn record_service_route_from_response(
     manager: &DialogManager,
     response: &Response,
@@ -410,6 +456,90 @@ mod service_route_tests {
     fn _use_param(_: Param) {}
 }
 
+#[cfg(test)]
+mod redirect_reason_tests {
+    use super::format_redirect_or_terminate_reason;
+    use rvoip_sip_core::types::{
+        address::Address,
+        contact::{Contact, ContactParamInfo, ContactValue},
+        status::StatusCode,
+        uri::Uri,
+        TypedHeader,
+    };
+    use rvoip_sip_core::Response;
+    use std::str::FromStr;
+
+    fn response_with_contacts(status: StatusCode, contact_uris: &[&str]) -> Response {
+        let mut response = Response::new(status);
+        if !contact_uris.is_empty() {
+            let params: Vec<ContactParamInfo> = contact_uris
+                .iter()
+                .map(|u| {
+                    let addr = Address::new(Uri::from_str(u).unwrap());
+                    ContactParamInfo { address: addr }
+                })
+                .collect();
+            let contact = Contact(vec![ContactValue::Params(params)]);
+            response.headers.push(TypedHeader::Contact(contact));
+        }
+        response
+    }
+
+    #[test]
+    fn non_redirect_status_is_unchanged() {
+        let response = response_with_contacts(StatusCode::NotFound, &["sip:alt@ignored.example.com"]);
+        // 404 is not a redirect — Contact must NOT be surfaced.
+        let reason = format_redirect_or_terminate_reason(&response);
+        assert_eq!(reason, "404 Not Found");
+    }
+
+    #[test]
+    fn redirect_without_contact_is_plain() {
+        let response = response_with_contacts(StatusCode::UseProxy, &[]);
+        let reason = format_redirect_or_terminate_reason(&response);
+        assert_eq!(reason, "305 Use Proxy");
+    }
+
+    #[test]
+    fn redirect_305_appends_single_contact() {
+        let response = response_with_contacts(
+            StatusCode::UseProxy,
+            &["sip:proxy.example.com;lr"],
+        );
+        let reason = format_redirect_or_terminate_reason(&response);
+        assert_eq!(
+            reason,
+            "305 Use Proxy (alternate: sip:proxy.example.com;lr)"
+        );
+    }
+
+    #[test]
+    fn redirect_380_appends_single_contact() {
+        let response = response_with_contacts(
+            StatusCode::AlternativeService,
+            &["sip:failover.example.com"],
+        );
+        let reason = format_redirect_or_terminate_reason(&response);
+        assert_eq!(
+            reason,
+            "380 Alternative Service (alternate: sip:failover.example.com)"
+        );
+    }
+
+    #[test]
+    fn redirect_302_appends_multiple_contacts() {
+        let response = response_with_contacts(
+            StatusCode::MovedTemporarily,
+            &["sip:bob@alt1.example.com", "sip:bob@alt2.example.com"],
+        );
+        let reason = format_redirect_or_terminate_reason(&response);
+        assert_eq!(
+            reason,
+            "302 Moved Temporarily (alternate: sip:bob@alt1.example.com, sip:bob@alt2.example.com)"
+        );
+    }
+}
+
 /// Response-specific helper methods for DialogManager
 impl DialogManager {
     /// Process response within a dialog
@@ -482,9 +612,16 @@ impl DialogManager {
                 session_answer: response.body_string().unwrap_or_default(),
             }
         } else if response.status_code() >= 300 {
+            // E5: RFC 3261 §21.3 Redirect responses (300/301/302/305/380) carry
+            // `Contact:` URIs naming alternate targets. Embed them in the
+            // termination reason so the application can parse and optionally
+            // retry via `make_call(alternate)`. Without this, 305 Use Proxy
+            // and 380 Alternative Service are indistinguishable from an
+            // ordinary call failure at the session-core layer.
+            let reason = format_redirect_or_terminate_reason(&response);
             SessionCoordinationEvent::CallTerminated {
                 dialog_id: dialog_id.clone(),
-                reason: format!("{} {}", response.status_code(), response.reason_phrase()),
+                reason,
             }
         } else {
             SessionCoordinationEvent::CallProgress {
