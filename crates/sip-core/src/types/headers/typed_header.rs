@@ -164,6 +164,7 @@ pub enum TypedHeader {
     AlertInfo(crate::types::alert_info::AlertInfoHeader), // Use our AlertInfoHeader type
     CallInfo(CallInfo), // Use our new CallInfo type
     Path(crate::types::path::Path), // Add Path header variant
+    ServiceRoute(crate::types::service_route::ServiceRoute), // Service-Route (RFC 3608)
     Reason(crate::types::reason::Reason), // Add Reason header variant
     SessionExpires(SessionExpires), // Added SessionExpires variant
     MinSE(MinSE),
@@ -236,6 +237,7 @@ impl TypedHeader {
             TypedHeader::Event(_) => HeaderName::Event,
             TypedHeader::SubscriptionState(_) => HeaderName::SubscriptionState,
             TypedHeader::Path(_) => HeaderName::Path, // Add Path header case
+            TypedHeader::ServiceRoute(_) => HeaderName::ServiceRoute,
             TypedHeader::Reason(_) => HeaderName::Reason, // Add Reason header case
             TypedHeader::SessionExpires(_) => HeaderName::SessionExpires, // Added SessionExpires case
             TypedHeader::MinSE(_) => HeaderName::MinSE,
@@ -429,6 +431,9 @@ impl fmt::Display for TypedHeader {
             TypedHeader::Path(path) => {
                 write!(f, "{}: {}", HeaderName::Path, path)
             },
+            TypedHeader::ServiceRoute(sr) => {
+                write!(f, "{}: {}", HeaderName::ServiceRoute, sr)
+            },
             TypedHeader::Reason(reason) => write!(f, "{}: {}", HeaderName::Reason, reason),
             TypedHeader::SessionExpires(session_expires) => write!(f, "{}: {}", HeaderName::SessionExpires, session_expires),
             TypedHeader::MinSE(val) => write!(f, "{}: {}", HeaderName::MinSE, val),
@@ -527,6 +532,7 @@ impl From<&TypedHeader> for HeaderName {
             TypedHeader::ContentEncoding(_) => HeaderName::ContentEncoding,
             TypedHeader::ContentLanguage(_) => HeaderName::ContentLanguage,
             TypedHeader::Path(_) => HeaderName::Path,
+            TypedHeader::ServiceRoute(_) => HeaderName::ServiceRoute,
             TypedHeader::MinSE(_) => HeaderName::MinSE,
             _ => header.name(),
         }
@@ -1161,6 +1167,22 @@ impl TryFrom<Header> for TypedHeader {
                     Ok(TypedHeader::Path(crate::types::path::Path(entries.clone())))
                 } else {
                     Err(Error::InvalidHeader(format!("Invalid Path header")))
+                }
+            },
+            HeaderName::ServiceRoute => {
+                if let HeaderValue::Raw(bytes) = &header.value {
+                    if let Ok(s) = std::str::from_utf8(bytes) {
+                        let sr = crate::types::service_route::ServiceRoute::from_str(s.trim())?;
+                        Ok(TypedHeader::ServiceRoute(sr))
+                    } else {
+                        Err(Error::InvalidHeader(format!("Invalid UTF-8 in Service-Route header")))
+                    }
+                } else if let HeaderValue::Route(entries) = &header.value {
+                    Ok(TypedHeader::ServiceRoute(
+                        crate::types::service_route::ServiceRoute(entries.clone()),
+                    ))
+                } else {
+                    Err(Error::InvalidHeader(format!("Invalid Service-Route header")))
                 }
             },
             HeaderName::Reason => all_consuming(parser::headers::parse_reason)(value_bytes)

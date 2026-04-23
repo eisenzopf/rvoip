@@ -100,6 +100,22 @@ pub struct DialogManager {
     /// (Per-peer mapping would be a richer model; not yet justified
     /// by real-world traffic.)
     pub(crate) nat_discovered_addr: Arc<tokio::sync::RwLock<Option<SocketAddr>>>,
+
+    /// Registrar-returned Service-Route (RFC 3608) keyed by AoR.
+    ///
+    /// Populated on successful REGISTER 2xx responses: the registrar
+    /// echoes the ordered list of URIs that the UA MUST pre-load as
+    /// Route headers for subsequent out-of-dialog requests within the
+    /// registration binding. The key is the AoR (To URI, which for a
+    /// UAC-originated REGISTER equals the From URI) normalized to its
+    /// string form.
+    ///
+    /// Most recent REGISTER 2xx wins per AoR. Empty `Vec` means "we
+    /// saw a REGISTER 2xx without Service-Route" (distinct from "no
+    /// registration yet"); callers that care about the distinction
+    /// should use `service_route_for_aor` and match on `None`.
+    pub(crate) service_route_by_aor:
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<rvoip_sip_core::types::uri::Uri>>>>,
 }
 
 impl DialogManager {
@@ -152,6 +168,7 @@ impl DialogManager {
             reliable_provisional_tasks: Arc::new(DashMap::new()),
             session_refresh_tasks: Arc::new(DashMap::new()),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
+            service_route_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         })
     }
     
@@ -206,6 +223,7 @@ impl DialogManager {
             reliable_provisional_tasks: Arc::new(DashMap::new()),
             session_refresh_tasks: Arc::new(DashMap::new()),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
+            service_route_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         };
 
         // Spawn global transaction event processor
@@ -869,6 +887,22 @@ impl DialogManager {
     /// private bind address.
     pub async fn discovered_public_addr(&self) -> Option<SocketAddr> {
         *self.nat_discovered_addr.read().await
+    }
+
+    /// Returns the registrar-provided Service-Route (RFC 3608) for the
+    /// given AoR, if a REGISTER 2xx has populated the cache. The
+    /// returned URIs MUST be pre-loaded as Route headers on subsequent
+    /// out-of-dialog requests from the UA for that AoR, in the order
+    /// returned.
+    ///
+    /// `None` → no REGISTER 2xx observed for this AoR yet.
+    /// `Some(empty vec)` → REGISTER 2xx observed, registrar declined to
+    /// set a Service-Route (caller should not pre-load any Route).
+    pub async fn service_route_for_aor(
+        &self,
+        aor: &str,
+    ) -> Option<Vec<rvoip_sip_core::types::uri::Uri>> {
+        self.service_route_by_aor.read().await.get(aor).cloned()
     }
 
     pub async fn handle_response(&self, response: Response, transaction_id: TransactionKey) -> DialogResult<()> {

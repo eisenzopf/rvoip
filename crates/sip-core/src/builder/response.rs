@@ -1652,6 +1652,7 @@ impl SimpleResponseBuilder {
             TypedHeader::ContentDisposition(_) |
             TypedHeader::InReplyTo(_) |     // Less common in responses
             TypedHeader::Path(_) |          // For Path service
+            TypedHeader::ServiceRoute(_) |  // RFC 3608 — returned in REGISTER 2xx
             TypedHeader::Authorization(_) | // Typically in requests, but handle if set
             TypedHeader::ProxyAuthorization(_) | // Typically in requests
             TypedHeader::WwwAuthenticate(_) |
@@ -1673,7 +1674,8 @@ impl SimpleResponseBuilder {
                     HeaderName::AcceptEncoding | HeaderName::AcceptLanguage |
                     HeaderName::AlertInfo | HeaderName::ErrorInfo | HeaderName::ContentEncoding |
                     HeaderName::ContentLanguage | HeaderName::ContentDisposition |
-                    HeaderName::InReplyTo | HeaderName::Path | HeaderName::Authorization |
+                    HeaderName::InReplyTo | HeaderName::Path | HeaderName::ServiceRoute |
+                    HeaderName::Authorization |
                     HeaderName::ProxyAuthorization | HeaderName::WwwAuthenticate | HeaderName::ProxyAuthenticate |
                     HeaderName::AuthenticationInfo | HeaderName::Reason
                 );

@@ -1026,6 +1026,22 @@ impl UnifiedDialogApi {
         self.manager.core().discovered_public_addr().await
     }
 
+    /// Snapshot of the registrar-provided Service-Route (RFC 3608) for
+    /// the given AoR, learned from a previous REGISTER 2xx. Callers
+    /// that originate out-of-dialog requests within the registration
+    /// binding SHOULD pre-load these URIs as Route headers, in order.
+    ///
+    /// Returns `None` if no REGISTER 2xx has been observed for this AoR
+    /// yet. Returns `Some(empty vec)` if a 2xx was observed but the
+    /// registrar set no Service-Route — callers should not pre-load a
+    /// Route in that case.
+    pub async fn service_route_for_aor(
+        &self,
+        aor: &str,
+    ) -> Option<Vec<rvoip_sip_core::types::uri::Uri>> {
+        self.manager.core().service_route_for_aor(aor).await
+    }
+
     pub async fn send_register(
         &self,
         registrar_uri: &str,

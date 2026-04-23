@@ -374,6 +374,7 @@ pub mod to;
 pub mod warning;
 pub mod multipart;
 pub mod path;
+pub mod service_route;
 pub mod proxy_require;
 pub mod rack;
 pub mod rseq;
@@ -428,6 +429,7 @@ pub use content_encoding::ContentEncoding;
 pub use content_language::ContentLanguage;
 pub use accept_encoding::AcceptEncoding;
 pub use path::Path;
+pub use service_route::ServiceRoute;
 pub use proxy_require::ProxyRequire;
 
 // Add missing pub use * directives

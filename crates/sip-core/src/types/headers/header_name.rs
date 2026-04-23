@@ -135,6 +135,8 @@ pub enum HeaderName {
     Unsupported,
     /// Path: Path header (RFC 3327) for registration routing
     Path,
+    /// Service-Route: Registrar-provided outbound route set (RFC 3608)
+    ServiceRoute,
     /// Reason: Provides reasons for specific events (RFC 3326)
     Reason,
     /// Session-Expires: Session expiration information (RFC 4028)
@@ -209,6 +211,7 @@ impl HeaderName {
             HeaderName::Server => "Server",
             HeaderName::Unsupported => "Unsupported",
             HeaderName::Path => "Path",
+            HeaderName::ServiceRoute => "Service-Route",
             HeaderName::Reason => "Reason",
             HeaderName::SessionExpires => "Session-Expires",
             HeaderName::Other(s) => s,
@@ -288,15 +291,16 @@ impl FromStr for HeaderName {
             "call-info" => Ok(HeaderName::CallInfo),
             "error-info" | "error" => Ok(HeaderName::ErrorInfo),
             "proxy-require" => Ok(HeaderName::ProxyRequire),
-            "unsupported" | "u" => Ok(HeaderName::Unsupported),
+            "unsupported" => Ok(HeaderName::Unsupported),
             "path" => Ok(HeaderName::Path),
+            "service-route" => Ok(HeaderName::ServiceRoute),
             "reason" => Ok(HeaderName::Reason),
             "session-expires" | "x" => Ok(HeaderName::SessionExpires),
             "min-se" => Ok(HeaderName::MinSE),
             "rseq" => Ok(HeaderName::RSeq),
             "sip-etag" => Ok(HeaderName::SipETag),
             "sip-if-match" => Ok(HeaderName::SipIfMatch),
-            "allow-events" => Ok(HeaderName::AllowEvents),
+            "allow-events" | "u" => Ok(HeaderName::AllowEvents),
             "p-asserted-identity" => Ok(HeaderName::PAssertedIdentity),
             "p-preferred-identity" => Ok(HeaderName::PPreferredIdentity),
             _ => Ok(HeaderName::Other(s.to_string())),
@@ -327,4 +331,49 @@ mod tests {
         assert_eq!(HeaderName::from_str("session-expires").unwrap(), HeaderName::SessionExpires);
         assert_eq!(HeaderName::from_str("x").unwrap(), HeaderName::SessionExpires);
     }
-} 
+
+    #[test]
+    fn test_compact_header_forms_rfc3261_and_later() {
+        // RFC 3261 §7.3.3 / §20 table
+        let rfc3261 = [
+            ("i", HeaderName::CallId),
+            ("m", HeaderName::Contact),
+            ("e", HeaderName::ContentEncoding),
+            ("l", HeaderName::ContentLength),
+            ("c", HeaderName::ContentType),
+            ("f", HeaderName::From),
+            ("s", HeaderName::Subject),
+            ("k", HeaderName::Supported),
+            ("t", HeaderName::To),
+            ("v", HeaderName::Via),
+        ];
+        // Later-RFC compact forms registered at IANA.
+        let later = [
+            ("o", HeaderName::Event),           // RFC 6665
+            ("u", HeaderName::AllowEvents),     // RFC 6665 (previously mis-mapped to Unsupported)
+            ("r", HeaderName::ReferTo),         // RFC 3515
+            ("b", HeaderName::ReferredBy),      // RFC 3892
+            ("x", HeaderName::SessionExpires),  // RFC 4028
+        ];
+        for (compact, expected) in rfc3261.iter().chain(later.iter()) {
+            // Case-insensitive lookup — try lower and upper.
+            assert_eq!(
+                HeaderName::from_str(compact).unwrap(),
+                *expected,
+                "compact form {:?} should map to {:?}",
+                compact,
+                expected
+            );
+            assert_eq!(
+                HeaderName::from_str(&compact.to_uppercase()).unwrap(),
+                *expected,
+                "compact form {:?} (uppercase) should map to {:?}",
+                compact,
+                expected
+            );
+        }
+
+        // Unsupported has no compact form — bare "u" must not land there.
+        assert_ne!(HeaderName::from_str("u").unwrap(), HeaderName::Unsupported);
+    }
+}

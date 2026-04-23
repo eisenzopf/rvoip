@@ -1268,7 +1268,8 @@ impl SimpleRequestBuilder {
             TypedHeader::ReplyTo(_) |
             TypedHeader::PAssertedIdentity(_) |     // RFC 3325 — appendable list
             TypedHeader::PPreferredIdentity(_) |    // RFC 3325 — appendable list
-            TypedHeader::Path(_) => {  // Path header for Path service
+            TypedHeader::Path(_) |
+            TypedHeader::ServiceRoute(_) => {  // RFC 3327 / RFC 3608 — appendable list of URIs
                 // For appendable headers, no special action is needed before pushing.
             }
             TypedHeader::Other(name, _value) => {
@@ -1285,8 +1286,9 @@ impl SimpleRequestBuilder {
                     HeaderName::Accept | HeaderName::AcceptEncoding | HeaderName::AcceptLanguage |
                     HeaderName::AlertInfo | HeaderName::ErrorInfo | HeaderName::ContentEncoding |
                     HeaderName::ContentLanguage | HeaderName::ContentDisposition |
-                    HeaderName::InReplyTo | HeaderName::Path | HeaderName::Authorization |
-                    HeaderName::ProxyAuthorization | HeaderName::WwwAuthenticate | 
+                    HeaderName::InReplyTo | HeaderName::Path | HeaderName::ServiceRoute |
+                    HeaderName::Authorization |
+                    HeaderName::ProxyAuthorization | HeaderName::WwwAuthenticate |
                     HeaderName::ProxyAuthenticate | HeaderName::AuthenticationInfo
                 );
                 if !is_known_appendable {

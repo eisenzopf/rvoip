@@ -55,6 +55,11 @@ impl ResponseHandler for DialogManager {
         // established.
         record_nat_discovery_from_response(self, &response).await;
 
+        // RFC 3608 — capture Service-Route from a REGISTER 2xx into the
+        // per-AoR cache. Caller-facing surface is
+        // `DialogManager::service_route_for_aor`.
+        record_service_route_from_response(self, &response).await;
+
         // Find associated dialog
         if let Ok(dialog_id) = self.find_dialog_for_transaction(&transaction_id) {
             self.process_response_in_dialog(response, transaction_id, dialog_id).await
@@ -113,6 +118,80 @@ async fn record_nat_discovery_from_response(
             "RFC 3581 NAT discovery: external address learned {} (local bind {})",
             new_addr, local_addr
         );
+    }
+}
+
+/// RFC 3608 §5.1 extraction: for a 2xx response to a REGISTER, return
+/// `(aor_key, service_route_uris)` where the AoR key is the To URI and
+/// `service_route_uris` is the ordered list the registrar echoed on
+/// `Service-Route:` headers (possibly empty if the registrar set no
+/// route).
+///
+/// Returns `None` for any non-REGISTER response and for non-2xx.
+/// Pure/sync so it's unit-testable without spinning up a manager.
+pub(crate) fn extract_service_route(
+    response: &Response,
+) -> Option<(String, Vec<rvoip_sip_core::types::uri::Uri>)> {
+    use rvoip_sip_core::types::{method::Method, TypedHeader};
+
+    if !(200..300).contains(&response.status_code()) {
+        return None;
+    }
+
+    // Only REGISTER responses carry Service-Route meaningfully (RFC 3608 §2).
+    let is_register = response.headers.iter().any(|h| match h {
+        TypedHeader::CSeq(cseq) => *cseq.method() == Method::Register,
+        _ => false,
+    });
+    if !is_register {
+        return None;
+    }
+
+    let aor_uri = response.to()?.uri().clone();
+    let aor_key = aor_uri.to_string();
+
+    // Collect every Service-Route header in order; a single logical list
+    // MAY be split across multiple header instances per RFC 3261 §7.3.
+    let uris: Vec<_> = response
+        .headers
+        .iter()
+        .filter_map(|h| {
+            if let TypedHeader::ServiceRoute(sr) = h {
+                Some(sr.uris())
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .collect();
+
+    Some((aor_key, uris))
+}
+
+/// Inspect the response. If it's a 2xx to a REGISTER, capture the
+/// registrar-returned Service-Route set into `DialogManager::service_route_by_aor`,
+/// keyed by the AoR (To URI).
+async fn record_service_route_from_response(
+    manager: &DialogManager,
+    response: &Response,
+) {
+    let Some((aor_key, uris)) = extract_service_route(response) else { return };
+
+    let mut guard = manager.service_route_by_aor.write().await;
+    let prev = guard.insert(aor_key.clone(), uris.clone());
+    if prev.as_ref() != Some(&uris) {
+        if uris.is_empty() {
+            info!(
+                "RFC 3608: registrar cleared Service-Route for AoR {}",
+                aor_key
+            );
+        } else {
+            info!(
+                "RFC 3608: Service-Route learned for AoR {} ({} hop(s))",
+                aor_key,
+                uris.len()
+            );
+        }
     }
 }
 
@@ -200,6 +279,135 @@ mod nat_discovery_tests {
         ]);
         assert_eq!(extract_nat_discovery(local(), &response), None);
     }
+}
+
+#[cfg(test)]
+mod service_route_tests {
+    use super::extract_service_route;
+    use rvoip_sip_core::types::{
+        address::Address,
+        cseq::CSeq,
+        from::From as FromHdr,
+        method::Method,
+        param::Param,
+        service_route::ServiceRoute,
+        status::StatusCode,
+        to::To,
+        uri::Uri,
+        TypedHeader,
+    };
+    use rvoip_sip_core::Response;
+    use std::str::FromStr;
+
+    fn make_response(
+        status: StatusCode,
+        cseq_method: Method,
+        to_uri: &str,
+        service_routes: Option<Vec<&str>>,
+    ) -> Response {
+        let mut response = Response::new(status);
+        response
+            .headers
+            .push(TypedHeader::CSeq(CSeq::new(1, cseq_method)));
+        let to_addr = Address::new(Uri::from_str(to_uri).unwrap());
+        response
+            .headers
+            .push(TypedHeader::To(To::new(to_addr)));
+        // Also need From to satisfy a typical response shape (not consulted
+        // by the helper but keeps the fixture realistic).
+        let from_addr = Address::new(Uri::from_str(to_uri).unwrap())
+            .with_tag("abcd");
+        response.headers.push(TypedHeader::From(FromHdr::new(from_addr)));
+        if let Some(uris) = service_routes {
+            let mut sr = ServiceRoute::empty();
+            for u in uris {
+                sr.add_uri(Uri::from_str(u).unwrap());
+            }
+            response.headers.push(TypedHeader::ServiceRoute(sr));
+        }
+        response
+    }
+
+    #[test]
+    fn extracts_service_route_on_register_200() {
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Register,
+            "sip:alice@example.com",
+            Some(vec![
+                "sip:orig1.example.com;lr",
+                "sip:orig2.example.com;lr",
+            ]),
+        );
+        let extracted = extract_service_route(&response).unwrap();
+        assert_eq!(extracted.0, "sip:alice@example.com");
+        assert_eq!(extracted.1.len(), 2);
+        assert_eq!(extracted.1[0].to_string(), "sip:orig1.example.com;lr");
+        assert_eq!(extracted.1[1].to_string(), "sip:orig2.example.com;lr");
+    }
+
+    #[test]
+    fn returns_empty_vec_when_register_200_has_no_service_route() {
+        // RFC 3608: registrar declined to set a Service-Route. Distinct
+        // from "no registration yet" — callers use `Some(empty)` vs
+        // `None` on the manager to tell these apart.
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Register,
+            "sip:alice@example.com",
+            None,
+        );
+        let extracted = extract_service_route(&response).unwrap();
+        assert!(extracted.1.is_empty());
+    }
+
+    #[test]
+    fn ignores_non_2xx_register_responses() {
+        let response = make_response(
+            StatusCode::Unauthorized,
+            Method::Register,
+            "sip:alice@example.com",
+            Some(vec!["sip:orig.example.com;lr"]),
+        );
+        assert!(extract_service_route(&response).is_none());
+    }
+
+    #[test]
+    fn ignores_non_register_responses() {
+        // Service-Route carried on an INVITE 200 is out-of-spec; we
+        // should not cache it as if it were a registrar-supplied set.
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Invite,
+            "sip:bob@example.com",
+            Some(vec!["sip:orig.example.com;lr"]),
+        );
+        assert!(extract_service_route(&response).is_none());
+    }
+
+    #[test]
+    fn concatenates_multiple_service_route_headers() {
+        // RFC 3261 §7.3 allows a logical list to be split across
+        // multiple header instances. Concatenate in order.
+        let mut response = make_response(
+            StatusCode::Ok,
+            Method::Register,
+            "sip:alice@example.com",
+            Some(vec!["sip:orig1.example.com;lr"]),
+        );
+        let mut sr2 = ServiceRoute::empty();
+        sr2.add_uri(Uri::from_str("sip:orig2.example.com;lr").unwrap());
+        response.headers.push(TypedHeader::ServiceRoute(sr2));
+
+        let extracted = extract_service_route(&response).unwrap();
+        assert_eq!(extracted.1.len(), 2);
+        assert_eq!(extracted.1[0].to_string(), "sip:orig1.example.com;lr");
+        assert_eq!(extracted.1[1].to_string(), "sip:orig2.example.com;lr");
+    }
+
+    // Silence unused-import warnings when Param isn't needed in this mod.
+    #[allow(dead_code)]
+    fn _use_param(_: Param) {}
 }
 
 /// Response-specific helper methods for DialogManager
