@@ -194,9 +194,33 @@ use super::{ApiResult, ApiError, DialogStats, common::{DialogHandle, CallHandle}
 pub struct UnifiedDialogApi {
     /// Underlying unified dialog manager
     manager: Arc<UnifiedDialogManager>,
-    
+
     /// Configuration for this API instance
     config: DialogManagerConfig,
+}
+
+/// Build a RFC 5626 outbound-aware Contact header from a raw URI string and
+/// the supplied outbound parameters. The URI receives the `;ob` flag per
+/// §5.4; the Contact receives `+sip.instance` + `reg-id` per §4.1/4.2.
+///
+/// Pure / sync so it's trivially unit-testable against the Contact's
+/// rendered string form.
+pub(crate) fn build_outbound_contact(
+    contact_uri: &str,
+    outbound_params: &rvoip_sip_core::types::outbound::OutboundContactParams,
+) -> Result<rvoip_sip_core::types::contact::Contact, rvoip_sip_core::error::Error> {
+    use rvoip_sip_core::types::{
+        contact::{Contact, ContactParamInfo},
+        outbound::{mark_uri_as_outbound, set_outbound_contact_params},
+        uri::Uri,
+        Address,
+    };
+    use std::str::FromStr;
+    let uri = Uri::from_str(contact_uri)?;
+    let mut address = Address::new(uri);
+    mark_uri_as_outbound(&mut address);
+    set_outbound_contact_params(&mut address, outbound_params);
+    Ok(Contact::new_params(vec![ContactParamInfo { address }]))
 }
 
 impl UnifiedDialogApi {
@@ -1050,25 +1074,91 @@ impl UnifiedDialogApi {
         expires: u32,
         authorization: Option<String>,
     ) -> ApiResult<Response> {
+        self.send_register_impl(
+            registrar_uri,
+            from_uri,
+            contact_uri,
+            expires,
+            authorization,
+            None,
+        )
+        .await
+    }
+
+    /// Send REGISTER with RFC 5626 SIP Outbound Contact parameters.
+    ///
+    /// Attaches `+sip.instance="<urn>"` and `reg-id=N` Contact-header
+    /// parameters and adds the `;ob` URI flag to the Contact URI. Use this
+    /// variant when the registrar / carrier expects RFC 5626 Outbound
+    /// semantics (most modern carrier infrastructure does).
+    ///
+    /// Semantically equivalent to [`Self::send_register`] for request
+    /// routing; the only difference is the Contact header's shape.
+    pub async fn send_register_with_outbound_contact(
+        &self,
+        registrar_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        outbound_params: &rvoip_sip_core::types::outbound::OutboundContactParams,
+        expires: u32,
+        authorization: Option<String>,
+    ) -> ApiResult<Response> {
+        self.send_register_impl(
+            registrar_uri,
+            from_uri,
+            contact_uri,
+            expires,
+            authorization,
+            Some(outbound_params),
+        )
+        .await
+    }
+
+    async fn send_register_impl(
+        &self,
+        registrar_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        expires: u32,
+        authorization: Option<String>,
+        outbound_params: Option<&rvoip_sip_core::types::outbound::OutboundContactParams>,
+    ) -> ApiResult<Response> {
         use rvoip_sip_core::builder::SimpleRequestBuilder;
         use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::header::HeaderName;
-        
+
         // Determine CSeq based on whether this is a retry (has authorization)
         let cseq = if authorization.is_some() { 2 } else { 1 };
-        
-        debug!("Building REGISTER request to {} (expires={}, cseq={}, auth={})", 
-               registrar_uri, expires, cseq, authorization.is_some());
-        
+
+        debug!(
+            "Building REGISTER request to {} (expires={}, cseq={}, auth={}, outbound={})",
+            registrar_uri,
+            expires,
+            cseq,
+            authorization.is_some(),
+            outbound_params.is_some()
+        );
+
         // Build REGISTER request
         let mut builder = SimpleRequestBuilder::register(registrar_uri)
             .map_err(|e| ApiError::protocol(e.to_string()))?
             .from("", from_uri, None)
-            .to("", from_uri, None)  // To same as From for self-registration
-            .contact(contact_uri, None)
-            .expires(expires)
-            .cseq(cseq);  // CSeq=1 for initial, CSeq=2 for authenticated retry
-        
+            .to("", from_uri, None); // To same as From for self-registration
+
+        // Build Contact header — either plain URI (legacy) or with RFC 5626
+        // outbound params (Phase 2a).
+        builder = match outbound_params {
+            None => builder.contact(contact_uri, None),
+            Some(params) => {
+                let contact = build_outbound_contact(contact_uri, params).map_err(|e| {
+                    ApiError::protocol(format!("Invalid outbound Contact URI {}: {}", contact_uri, e))
+                })?;
+                builder.header(TypedHeader::Contact(contact))
+            }
+        };
+
+        builder = builder.expires(expires).cseq(cseq);
+
         // Build the request
         let mut request = builder.build();
         
@@ -1520,4 +1610,67 @@ impl UnifiedDialogApi {
         debug!("Received response {} for non-dialog request", response.status_code());
         Ok(response)
     }
-} 
+}
+
+#[cfg(test)]
+mod outbound_contact_tests {
+    use super::build_outbound_contact;
+    use rvoip_sip_core::types::outbound::OutboundContactParams;
+
+    #[test]
+    fn builds_contact_with_instance_regid_and_ob_flag() {
+        let params = OutboundContactParams {
+            instance_urn: "urn:uuid:00000000-0000-1000-8000-AABBCCDDEEFF".into(),
+            reg_id: 1,
+        };
+        let contact = build_outbound_contact("sip:alice@192.168.1.10:5060", &params).unwrap();
+        let s = contact.to_string();
+        assert!(s.contains(";ob"), "Contact missing ;ob URI flag: {}", s);
+        assert!(
+            s.contains("+sip.instance=\"<urn:uuid:00000000-0000-1000-8000-AABBCCDDEEFF>\""),
+            "Contact missing +sip.instance: {}",
+            s
+        );
+        assert!(s.contains("reg-id=1"), "Contact missing reg-id: {}", s);
+    }
+
+    #[test]
+    fn ob_flag_goes_on_uri_params_section() {
+        // RFC 5626 §5.4: `;ob` is a URI parameter, inside the `<>`.
+        // Contact-header params (`+sip.instance`, `reg-id`) go after the
+        // URI's `>`. Validate the ordering by finding `;ob` before `>`.
+        let params = OutboundContactParams {
+            instance_urn: "urn:uuid:x".into(),
+            reg_id: 1,
+        };
+        let s = build_outbound_contact("sip:alice@host:5060", &params)
+            .unwrap()
+            .to_string();
+        let ob_pos = s.find(";ob").expect("missing ;ob");
+        let angle_pos = s.find('>').expect("Contact missing closing angle bracket");
+        assert!(
+            ob_pos < angle_pos,
+            "`;ob` must sit inside the URI angle brackets, got: {}",
+            s
+        );
+    }
+
+    #[test]
+    fn invalid_uri_returns_error() {
+        let params = OutboundContactParams {
+            instance_urn: "urn:uuid:x".into(),
+            reg_id: 1,
+        };
+        assert!(build_outbound_contact("not a uri", &params).is_err());
+    }
+
+    #[test]
+    fn reg_id_value_propagates() {
+        let params = OutboundContactParams {
+            instance_urn: "urn:uuid:x".into(),
+            reg_id: 7,
+        };
+        let s = build_outbound_contact("sip:alice@host", &params).unwrap().to_string();
+        assert!(s.contains("reg-id=7"), "reg-id value not propagated: {}", s);
+    }
+}

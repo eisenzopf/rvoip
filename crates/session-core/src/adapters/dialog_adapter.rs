@@ -73,6 +73,13 @@ pub struct DialogAdapter {
     /// configured proxy. `None` → no Route pre-loading. Populated from
     /// [`crate::Config::outbound_proxy_uri`] during coordinator setup.
     pub(crate) outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
+
+    /// RFC 5626 §4 outbound registration params (`+sip.instance` URN +
+    /// `reg-id`) applied to REGISTER Contact headers, together with the
+    /// `;ob` URI flag. `None` → pre-5626 behaviour. Populated at
+    /// construction from
+    /// [`crate::Config::sip_outbound_enabled`]+[`crate::Config::sip_instance`].
+    pub(crate) outbound_contact_params: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
 }
 
 impl DialogAdapter {
@@ -81,11 +88,16 @@ impl DialogAdapter {
     /// `outbound_proxy_uri` is the RFC 3261 §8.1.2 outbound proxy, if any.
     /// Pass `None` for no pre-loaded Route. When `Some`, the URI MUST parse
     /// as a valid SIP URI — typically `sip:sbc.example.com;lr`.
+    ///
+    /// `outbound_contact_params` is the RFC 5626 §4 instance + reg-id pair
+    /// attached to REGISTER Contact headers when outbound registration is
+    /// enabled. Pass `None` for pre-5626 REGISTER Contact shape.
     pub fn new(
         dialog_api: Arc<UnifiedDialogApi>,
         store: Arc<SessionStore>,
         global_coordinator: Arc<GlobalEventCoordinator>,
         outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
+        outbound_contact_params: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
     ) -> Self {
         Self {
             dialog_api,
@@ -97,6 +109,7 @@ impl DialogAdapter {
             global_coordinator,
             state_machine: Arc::new(std::sync::OnceLock::new()),
             outbound_proxy_uri,
+            outbound_contact_params,
         }
     }
 
@@ -807,15 +820,27 @@ impl DialogAdapter {
             contact_uri.to_string()
         };
 
-        // Send REGISTER through dialog-core API and get response
-        // dialog-core handles CSeq incrementing automatically
-        let response = self.dialog_api.send_register(
-            registrar_uri,
-            from_uri,
-            &rewritten_contact,
-            expires,
-            authorization,
-        ).await
+        // Send REGISTER through dialog-core API and get response.
+        // dialog-core handles CSeq incrementing automatically.
+        // A5 Phase 2a: when the coordinator is configured for RFC 5626 SIP
+        // Outbound, route through the outbound-aware REGISTER so the Contact
+        // carries `+sip.instance` + `reg-id` + `;ob`.
+        let response = if let Some(ref outbound) = self.outbound_contact_params {
+            self.dialog_api
+                .send_register_with_outbound_contact(
+                    registrar_uri,
+                    from_uri,
+                    &rewritten_contact,
+                    outbound,
+                    expires,
+                    authorization,
+                )
+                .await
+        } else {
+            self.dialog_api
+                .send_register(registrar_uri, from_uri, &rewritten_contact, expires, authorization)
+                .await
+        }
         .map_err(|e| SessionError::DialogError(format!("Failed to send REGISTER: {}", e)))?;
         
         tracing::info!("REGISTER response received: {} for session {}", response.status_code(), session_id.0);
@@ -1204,6 +1229,7 @@ impl Clone for DialogAdapter {
             global_coordinator: self.global_coordinator.clone(),
             state_machine: self.state_machine.clone(),
             outbound_proxy_uri: self.outbound_proxy_uri.clone(),
+            outbound_contact_params: self.outbound_contact_params.clone(),
         }
     }
 }

@@ -89,6 +89,52 @@ pub struct Config {
     /// entirely. Per-INVITE override is not yet exposed.
     pub outbound_proxy_uri: Option<String>,
 
+    /// Enable RFC 5626 "SIP Outbound" behaviour on outgoing REGISTERs.
+    ///
+    /// When `true` and [`Config::sip_instance`] is set, the REGISTER Contact
+    /// carries the outbound-aware parameters:
+    ///
+    /// - `+sip.instance="<urn:...>"` (RFC 5626 §4.1) — UA-stable instance
+    ///   URN, so the registrar can associate a binding with a specific
+    ///   physical device across flow failures.
+    /// - `reg-id=1` (RFC 5626 §4.2) — flow identifier. Multi-flow support
+    ///   will bump this; today we always register flow 1.
+    /// - The Contact URI gets a `;ob` flag (RFC 5626 §5.4) signalling that
+    ///   the UA wants the registrar to preserve the flow association.
+    ///
+    /// Enable this for carriers and SBCs that assume RFC 5626 — most
+    /// modern carrier infra does. Default: `false` (pre-5626 REGISTER
+    /// behaviour for backwards compatibility).
+    ///
+    /// **Current scope** (A5 Phase 2a): only REGISTER Contact is rewritten.
+    /// The RFC 5626 §4.4 flow-failure state machine + §5.1 CRLFCRLF
+    /// keep-alive ping are tracked as A5 Phase 2b/2c follow-ups and have
+    /// no effect today.
+    pub sip_outbound_enabled: bool,
+
+    /// UA-stable instance URN advertised on outbound REGISTERs (RFC 5626
+    /// §4.1). Typically a `urn:uuid:<uuid>` generated once per device and
+    /// persisted across process restarts. Without this, the registrar
+    /// cannot tell a restarted UA apart from a different device with the
+    /// same AoR — flow stickiness breaks.
+    ///
+    /// When [`Config::sip_outbound_enabled`] is `true` and this is `None`,
+    /// a warning is logged and outbound-aware parameters are suppressed
+    /// on the REGISTER (falling back to pre-5626 behaviour). Callers
+    /// SHOULD supply a stable URN explicitly; leaving it `None` is only
+    /// appropriate for single-shot dev / lab usage.
+    pub sip_instance: Option<String>,
+
+    /// Interval in seconds between RFC 5626 §5.1 CRLFCRLF keep-alive pings
+    /// on long-lived TCP / TLS flows. Default 25 s per the RFC
+    /// recommendation (ping every 25 s, flow declared dead after 30 s
+    /// without a response).
+    ///
+    /// **Current scope** (A5 Phase 2a): this value is parsed and stored
+    /// but has no effect yet. Keep-alive plumbing lands in A5 Phase 2b
+    /// (transport-layer hook).
+    pub outbound_keepalive_interval_secs: u64,
+
     /// Path to the PEM-encoded TLS server certificate (RFC 3261 §26.2 /
     /// RFC 5630). Both this **and** [`Config::tls_key_path`] must be set
     /// to enable TLS — when both are present, TLS is auto-enabled and
@@ -200,6 +246,9 @@ impl Config {
             credentials: None,
             pai_uri: None,
             outbound_proxy_uri: None,
+            sip_outbound_enabled: false,
+            sip_instance: None,
+            outbound_keepalive_interval_secs: 25,
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
@@ -235,6 +284,9 @@ impl Config {
             credentials: None,
             pai_uri: None,
             outbound_proxy_uri: None,
+            sip_outbound_enabled: false,
+            sip_instance: None,
+            outbound_keepalive_interval_secs: 25,
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
@@ -313,11 +365,34 @@ impl UnifiedCoordinator {
             None
         };
 
+        // A5 Phase 2a: build outbound Contact params from config. Require
+        // both the `sip_outbound_enabled` flag AND a stable `sip_instance`
+        // URN — enabling outbound without an instance URN means a restarted
+        // UA would look like a different device and defeat the purpose.
+        let outbound_contact_params = if config.sip_outbound_enabled {
+            if let Some(instance) = config.sip_instance.as_ref() {
+                Some(rvoip_sip_core::types::outbound::OutboundContactParams {
+                    instance_urn: instance.clone(),
+                    reg_id: 1,
+                })
+            } else {
+                tracing::warn!(
+                    "Config.sip_outbound_enabled is true but sip_instance is None; \
+                     falling back to pre-5626 REGISTER Contact. Provide a stable \
+                     urn:uuid:<uuid> in Config.sip_instance to enable RFC 5626."
+                );
+                None
+            }
+        } else {
+            None
+        };
+
         let dialog_adapter = Arc::new(DialogAdapter::new(
             dialog_api,
             store.clone(),
             global_coordinator.clone(),
             outbound_proxy_uri,
+            outbound_contact_params,
         ));
         
         let media_controller = Self::create_media_controller(&config, global_coordinator.clone()).await?;
