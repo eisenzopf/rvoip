@@ -25,6 +25,7 @@ pub mod dialog_id;
 pub mod dialog_impl;
 pub mod dialog_state;
 pub mod dialog_utils;
+pub mod dns_resolver;
 pub mod subscription_state;
 
 // Re-export main types

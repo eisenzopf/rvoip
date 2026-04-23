@@ -176,6 +176,7 @@ x509-parser = "0.15"
 webpki-roots = "0.25"
 serial_test = "3.1"
 fastrand = "2.0"
+hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime", "system-config"] }
 tracing-appender = "0.2"
 env_logger = "0.11"
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -597,8 +597,10 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
 /// # Returns
 /// * `Option<SocketAddr>` - Resolved socket address if successful
 async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
-    let port = uri.port.unwrap_or(5060);
-    resolve_host_to_socketaddr(&uri.host, port).await
+    // Delegate to the shared RFC 3263 resolver. Preserves the ACK
+    // destination semantics (`sips:`→5061 default, `transport=` / scheme
+    // honoured) while picking up SRV / weighted selection.
+    crate::dialog::dns_resolver::resolve_uri_to_socketaddr(uri).await
 }
 
 /// Helper to resolve Host enum to SocketAddr for network addressing.

@@ -123,60 +123,21 @@ pub fn extract_uri_from_contact(contact: &ContactValue) -> Result<Uri, &'static 
 
 /// Resolve a SIP URI to a socket address (convenience function).
 ///
-/// Uses typed URI accessors (`uri.host`, `uri.port`, `uri.scheme()`) and
-/// honours the RFC 3261 §19.1.2 default-port rules: `sips:` → 5061, `sip:`
-/// or any other scheme → 5060.
+/// RFC 3263 §4 — walks NAPTR/SRV/A as appropriate (see
+/// `crate::dialog::dns_resolver`). Back-compat alias: returns just the
+/// `SocketAddr`. Callers that also need the resolved transport should use
+/// `dns_resolver::resolve_uri` directly.
 pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
-    uri_resolver::resolve_uri_to_socketaddr(uri).await
+    crate::dialog::dns_resolver::resolve_uri_to_socketaddr(uri).await
 }
 
-/// URI resolution utilities
+/// URI resolution utilities (historical module path).
+///
+/// Kept as an alias to `crate::dialog::dns_resolver` so existing callers
+/// continue to compile. New code should import from `dns_resolver`
+/// directly.
 pub mod uri_resolver {
-    use super::*;
-    use rvoip_sip_core::types::uri::{Host, Scheme};
-
-    /// Default SIP port for a given URI scheme per RFC 3261 §19.1.2.
-    fn default_port_for_scheme(scheme: &Scheme) -> u16 {
-        match scheme {
-            Scheme::Sips => 5061,
-            _ => 5060,
-        }
-    }
-
-    /// Resolve a SIP URI to a socket address using the typed URI fields.
-    ///
-    /// Honours the URI scheme for the default port (`sips:` → 5061), and
-    /// uses A/AAAA DNS resolution via `tokio::net::lookup_host` for domain
-    /// hosts. RFC 3263 SRV/NAPTR is not yet implemented (roadmap P3).
-    pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
-        let port = uri
-            .port
-            .filter(|p| *p > 0)
-            .unwrap_or_else(|| default_port_for_scheme(uri.scheme()));
-
-        debug!(
-            "Resolving SIP URI: {} (scheme={:?}, host={:?}) → port {}",
-            uri, uri.scheme(), uri.host, port
-        );
-
-        match &uri.host {
-            Host::Address(ip) => Some(SocketAddr::new(*ip, port)),
-            Host::Domain(domain) => {
-                // Async A/AAAA lookup. Note: the previous impl used the
-                // blocking `to_socket_addrs`; switch to the async lookup so
-                // we don't block the runtime on slow DNS.
-                let addr_string = format!("{}:{}", domain, port);
-                let lookup_result = tokio::net::lookup_host(addr_string.clone()).await;
-                match lookup_result {
-                    Ok(mut addrs) => addrs.next(),
-                    Err(e) => {
-                        warn!("Failed to resolve {}: {}", addr_string, e);
-                        None
-                    }
-                }
-            }
-        }
-    }
+    pub use crate::dialog::dns_resolver::{resolve_uri, resolve_uri_to_socketaddr, ResolvedTarget};
 }
 
 #[cfg(test)]

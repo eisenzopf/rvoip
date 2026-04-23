@@ -41,6 +41,8 @@ thiserror.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 rand.workspace = true
+hickory-resolver.workspace = true
+fastrand.workspace = true
 
 # Crate-specific dependencies not in workspace
 http = "0.2"
