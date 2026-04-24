@@ -116,6 +116,30 @@ pub struct DialogManager {
     /// should use `service_route_for_aor` and match on `None`.
     pub(crate) service_route_by_aor:
         Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<rvoip_sip_core::types::uri::Uri>>>>,
+
+    /// Abort handles for RFC 5626 §3.5.1 CRLFCRLF keep-alive tasks,
+    /// keyed by `(AoR, reg-id, instance-id)` per RFC 5626 §4.2.
+    ///
+    /// Each successful outbound-aware REGISTER 2xx spawns one task that
+    /// pings the established flow every
+    /// [`outbound_keepalive_interval`](Self::outbound_keepalive_interval)
+    /// seconds by calling `Transport::send_raw(dest, "\r\n\r\n")`. The
+    /// task silently exits on the first send failure (flow gone) —
+    /// this is the Phase 2b-min "stateless ping" shape; Phase 2c will
+    /// upgrade it into a stateful `OutboundFlow` with pong-timeout
+    /// tracking and failure-driven re-registration.
+    ///
+    /// Idempotent: starting a ping task for a key that already has one
+    /// aborts the previous task and replaces it.
+    pub(crate) outbound_ping_tasks:
+        Arc<DashMap<(String, u32, String), tokio::task::AbortHandle>>,
+
+    /// Keep-alive interval for RFC 5626 outbound ping tasks, threaded
+    /// from `session-core::Config::outbound_keepalive_interval_secs`.
+    /// `None` disables keep-alive entirely — `start_outbound_ping`
+    /// becomes a no-op.
+    pub(crate) outbound_keepalive_interval:
+        Arc<std::sync::RwLock<Option<std::time::Duration>>>,
 }
 
 impl DialogManager {
@@ -169,9 +193,115 @@ impl DialogManager {
             session_refresh_tasks: Arc::new(DashMap::new()),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
             service_route_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            outbound_ping_tasks: Arc::new(DashMap::new()),
+            outbound_keepalive_interval: Arc::new(std::sync::RwLock::new(None)),
         })
     }
-    
+
+    /// Configure the RFC 5626 §3.5.1 keep-alive interval for this
+    /// DialogManager. `None` (or not calling this at all) disables
+    /// outbound keep-alive; subsequent REGISTER 2xx responses will not
+    /// spawn ping tasks. The session-core coordinator wires this from
+    /// its `outbound_keepalive_interval_secs` config at boot.
+    pub fn set_outbound_keepalive_interval(&self, interval: Option<std::time::Duration>) {
+        if let Ok(mut guard) = self.outbound_keepalive_interval.write() {
+            *guard = interval;
+        }
+    }
+
+    /// Read the currently-configured RFC 5626 keep-alive interval.
+    pub fn outbound_keepalive_interval(&self) -> Option<std::time::Duration> {
+        self.outbound_keepalive_interval
+            .read()
+            .ok()
+            .and_then(|g| *g)
+    }
+
+    /// Spawn (or replace) a RFC 5626 §3.5.1 CRLFCRLF keep-alive ping
+    /// task targeting `destination` via the DialogManager's transport.
+    ///
+    /// `flow_key = (AoR, reg-id, instance-id)` is the outbound flow
+    /// identity per RFC 5626 §4.2; a second call for the same key
+    /// aborts and replaces the prior task (idempotent refresh on
+    /// re-REGISTER).
+    ///
+    /// This is the Phase 2b-min **stateless** shape: the task pings at
+    /// the configured interval and silently terminates on the first
+    /// send failure. Phase 2c will replace this with an `OutboundFlow`
+    /// state machine that tracks pong timeouts and emits flow-failure
+    /// events.
+    ///
+    /// No-op when `outbound_keepalive_interval` is `None`.
+    pub fn start_outbound_ping(
+        &self,
+        flow_key: (String, u32, String),
+        destination: SocketAddr,
+    ) {
+        let Some(interval) = self.outbound_keepalive_interval() else {
+            return;
+        };
+        if interval.is_zero() {
+            return;
+        }
+
+        // Pull the transport out of the transaction manager. `send_raw`
+        // bypasses transaction retransmit logic by design — keep-alive
+        // frames are not SIP messages.
+        let transport = self.transaction_manager.transport().clone();
+        let dest = destination;
+        let key_for_log = flow_key.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            // First tick fires immediately; skip so the first ping goes
+            // out at `interval` after REGISTER success, not right away.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                match transport
+                    .send_raw(dest, bytes::Bytes::from_static(b"\r\n\r\n"))
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::trace!(
+                            flow_key = ?key_for_log,
+                            dest = %dest,
+                            "RFC 5626 keep-alive ping sent"
+                        );
+                    }
+                    Err(e) => {
+                        // Flow gone (connection closed or never existed).
+                        // Phase 2b-min stops here; Phase 2c will emit a
+                        // FlowFailed event that triggers re-REGISTER.
+                        tracing::debug!(
+                            flow_key = ?key_for_log,
+                            dest = %dest,
+                            error = %e,
+                            "RFC 5626 keep-alive send failed; stopping ping task"
+                        );
+                        return;
+                    }
+                }
+            }
+        })
+        .abort_handle();
+
+        // Replace any prior task for this key (idempotent on re-REGISTER).
+        if let Some((_, prior)) = self.outbound_ping_tasks.remove(&flow_key) {
+            prior.abort();
+        }
+        self.outbound_ping_tasks.insert(flow_key, handle);
+    }
+
+    /// Stop (and forget) the RFC 5626 keep-alive task for this flow
+    /// key, if any. Used by explicit unregistration paths and by
+    /// DialogManager shutdown.
+    pub fn stop_outbound_ping(&self, flow_key: &(String, u32, String)) {
+        if let Some((_, handle)) = self.outbound_ping_tasks.remove(flow_key) {
+            handle.abort();
+        }
+    }
+
     /// Create a new dialog manager with global transaction events (RECOMMENDED)
     /// 
     /// This constructor follows the working pattern from transaction-core examples
@@ -224,6 +354,8 @@ impl DialogManager {
             session_refresh_tasks: Arc::new(DashMap::new()),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
             service_route_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            outbound_ping_tasks: Arc::new(DashMap::new()),
+            outbound_keepalive_interval: Arc::new(std::sync::RwLock::new(None)),
         };
 
         // Spawn global transaction event processor

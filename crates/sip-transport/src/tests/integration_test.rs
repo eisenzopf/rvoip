@@ -144,6 +144,10 @@ impl SimplifiedTransactionCore {
                     | TransportEvent::ShutdownReady
                     | TransportEvent::ShutdownNow
                     | TransportEvent::ShutdownComplete => {}
+                    // RFC 5626 keep-alive / per-connection lifecycle: not
+                    // translated to transaction events by this bridge.
+                    TransportEvent::KeepAlivePongReceived { .. }
+                    | TransportEvent::ConnectionClosed { .. } => {}
                 }
             }
         });

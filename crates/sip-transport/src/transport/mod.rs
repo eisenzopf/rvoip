@@ -2,6 +2,7 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use rvoip_sip_core::Message;
 use crate::error::Result;
 
@@ -55,10 +56,34 @@ pub enum TransportEvent {
         /// Error description
         error: String,
     },
-    
+
     /// Transport has been closed
     Closed,
-    
+
+    /// RFC 5626 §3.5.1 keep-alive pong (single CRLF) received from peer.
+    /// Emitted by connection-oriented transports (TCP/TLS) when a bare
+    /// `\r\n` arrives at the start of a receive buffer. The bytes are
+    /// consumed by the transport layer and never handed to the SIP
+    /// parser.
+    KeepAlivePongReceived {
+        /// The remote address that sent the pong
+        source: SocketAddr,
+        /// The local address that received the pong
+        destination: SocketAddr,
+    },
+
+    /// A connection-oriented transport lost a live connection to `remote_addr`.
+    /// Emitted on EOF or error on the read side, before the per-remote
+    /// entry is removed from any connection pool / registry, so observers
+    /// can correlate the drop with in-flight flow state (e.g., RFC 5626
+    /// OutboundFlow).
+    ConnectionClosed {
+        /// The remote address whose connection was lost
+        remote_addr: SocketAddr,
+        /// The transport type that owned the dropped connection
+        transport_type: TransportType,
+    },
+
     // ========== GRACEFUL SHUTDOWN EVENTS ==========
     
     /// Shutdown request received from transaction layer
@@ -167,6 +192,18 @@ pub trait Transport: Send + Sync + fmt::Debug {
     /// and the multiplexer will try the next candidate.
     fn has_connection_to(&self, _remote_addr: SocketAddr) -> bool {
         false
+    }
+
+    /// Sends raw bytes over an existing connection to `destination`.
+    /// Used for RFC 5626 §3.5.1 CRLFCRLF keep-alive pings — the bytes
+    /// are written verbatim without any SIP framing. Connection-oriented
+    /// transports (TCP, TLS) must override. UDP has no connection to
+    /// keep alive this way (RFC 5626 UDP path uses STUN — out of scope
+    /// here) and returns `NotImplemented`.
+    async fn send_raw(&self, _destination: SocketAddr, _data: Bytes) -> Result<()> {
+        Err(crate::error::Error::NotImplemented(
+            "send_raw is not supported on this transport".to_string(),
+        ))
     }
 }
 

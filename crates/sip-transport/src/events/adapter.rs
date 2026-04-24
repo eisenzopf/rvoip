@@ -229,6 +229,12 @@ impl TransportEventAdapter {
                 // These are internal coordination events, not cross-crate
                 None
             }
+
+            // RFC 5626 keep-alive and per-connection lifecycle events are
+            // consumed locally by the dialog-core outbound flow layer;
+            // they have no cross-crate dialog-layer counterpart.
+            TransportEvent::KeepAlivePongReceived { .. }
+            | TransportEvent::ConnectionClosed { .. } => None,
         }
     }
     

@@ -1220,6 +1220,19 @@ impl TransactionManager {
         self.transport.clone()
     }
 
+    /// Look up the destination `SocketAddr` a given transaction's
+    /// request was originally sent to. Used by dialog-layer features
+    /// that need to talk to the same peer outside the transaction
+    /// envelope — e.g., RFC 5626 §3.5.1 CRLFCRLF keep-alive pings
+    /// target the REGISTER's destination.
+    pub async fn transaction_destination(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<SocketAddr> {
+        let dest_map = self.transaction_destinations.lock().await;
+        dest_map.get(transaction_id).copied()
+    }
+
     /// Subscribe to events from all transactions.
     ///
     /// This method creates a new subscription to all transaction events.

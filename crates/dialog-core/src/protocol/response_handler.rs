@@ -60,6 +60,14 @@ impl ResponseHandler for DialogManager {
         // `DialogManager::service_route_for_aor`.
         record_service_route_from_response(self, &response).await;
 
+        // RFC 5626 §3.5.1 — on a successful outbound-aware REGISTER,
+        // spawn a CRLFCRLF keep-alive ping task targeting the
+        // transaction's destination (the registrar we just reached).
+        // Parsing the echoed Contact for `+sip.instance`/`reg-id`/`;ob`
+        // is the load-bearing check; non-outbound registrations fall
+        // through as a no-op.
+        record_outbound_flow_from_response(self, &response, &transaction_id).await;
+
         // Find associated dialog
         if let Ok(dialog_id) = self.find_dialog_for_transaction(&transaction_id) {
             self.process_response_in_dialog(response, transaction_id, dialog_id).await
@@ -239,6 +247,84 @@ async fn record_service_route_from_response(
             );
         }
     }
+}
+
+/// RFC 5626 §4 extraction: for a 2xx response to REGISTER, scan the
+/// echoed `Contact:` headers for one that carries both `+sip.instance`
+/// and `reg-id` (the outbound-flow pair). Returns
+/// `(aor, OutboundContactParams)` where `aor` is the To URI string.
+///
+/// Returns `None` for non-REGISTER or non-2xx responses, and for
+/// REGISTER 2xx that didn't echo outbound params (legacy / non-5626
+/// registrations). Pure/sync for unit-testability.
+pub(crate) fn extract_outbound_flow(
+    response: &Response,
+) -> Option<(String, rvoip_sip_core::types::outbound::OutboundContactParams)> {
+    use rvoip_sip_core::types::{method::Method, TypedHeader};
+
+    if !(200..300).contains(&response.status_code()) {
+        return None;
+    }
+
+    let is_register = response.headers.iter().any(|h| match h {
+        TypedHeader::CSeq(cseq) => *cseq.method() == Method::Register,
+        _ => false,
+    });
+    if !is_register {
+        return None;
+    }
+
+    let aor_key = response.to()?.uri().clone().to_string();
+
+    // Any Contact entry with both outbound params wins. RFC 5626 echoes
+    // the UA-supplied Contact back verbatim, so the params the UA sent
+    // are what we'll read here.
+    for contact in response.headers.iter().filter_map(|h| match h {
+        TypedHeader::Contact(c) => Some(c),
+        _ => None,
+    }) {
+        for address in contact.addresses() {
+            if let Some(params) = rvoip_sip_core::types::outbound::read_outbound_contact_params(address) {
+                return Some((aor_key, params));
+            }
+        }
+    }
+
+    None
+}
+
+/// On REGISTER 2xx with outbound params echoed back, spawn (or refresh)
+/// the RFC 5626 §3.5.1 CRLFCRLF keep-alive task targeting the
+/// transaction's destination. No-op for non-outbound REGISTER
+/// responses and when keep-alive is disabled in config.
+async fn record_outbound_flow_from_response(
+    manager: &DialogManager,
+    response: &Response,
+    transaction_id: &TransactionKey,
+) {
+    let Some((aor, params)) = extract_outbound_flow(response) else { return };
+
+    // Destination to ping is wherever we sent the REGISTER. The
+    // transaction-destinations map in TransactionManager captured that
+    // at send time.
+    let Some(dest) = manager
+        .transaction_manager
+        .transaction_destination(transaction_id)
+        .await
+    else {
+        debug!(
+            "RFC 5626: REGISTER 2xx for AoR {} but no stored destination for transaction {}; skipping keep-alive",
+            aor, transaction_id
+        );
+        return;
+    };
+
+    let key = (aor.clone(), params.reg_id, params.instance_urn.clone());
+    manager.start_outbound_ping(key, dest);
+    info!(
+        "RFC 5626: keep-alive ping started for AoR {} (reg-id={}, instance={}) → {}",
+        aor, params.reg_id, params.instance_urn, dest
+    );
 }
 
 #[cfg(test)]
@@ -454,6 +540,132 @@ mod service_route_tests {
     // Silence unused-import warnings when Param isn't needed in this mod.
     #[allow(dead_code)]
     fn _use_param(_: Param) {}
+}
+
+#[cfg(test)]
+mod outbound_flow_tests {
+    use super::extract_outbound_flow;
+    use rvoip_sip_core::types::{
+        address::Address,
+        contact::{Contact, ContactParamInfo, ContactValue},
+        cseq::CSeq,
+        method::Method,
+        outbound::{mark_uri_as_outbound, set_outbound_contact_params, OutboundContactParams},
+        status::StatusCode,
+        to::To,
+        uri::Uri,
+        TypedHeader,
+    };
+    use rvoip_sip_core::Response;
+    use std::str::FromStr;
+
+    fn make_response(
+        status: StatusCode,
+        cseq_method: Method,
+        to_uri: &str,
+        contact_addr: Option<Address>,
+    ) -> Response {
+        let mut response = Response::new(status);
+        response.headers.push(TypedHeader::CSeq(CSeq::new(1, cseq_method)));
+        response
+            .headers
+            .push(TypedHeader::To(To::new(Address::new(
+                Uri::from_str(to_uri).unwrap(),
+            ))));
+        if let Some(addr) = contact_addr {
+            let contact = Contact(vec![ContactValue::Params(vec![ContactParamInfo { address: addr }])]);
+            response.headers.push(TypedHeader::Contact(contact));
+        }
+        response
+    }
+
+    fn outbound_address(user_host: &str, instance_urn: &str, reg_id: u32) -> Address {
+        let mut addr = Address::new(Uri::from_str(user_host).unwrap());
+        mark_uri_as_outbound(&mut addr);
+        set_outbound_contact_params(
+            &mut addr,
+            &OutboundContactParams {
+                instance_urn: instance_urn.to_string(),
+                reg_id,
+            },
+        );
+        addr
+    }
+
+    #[test]
+    fn extracts_outbound_flow_on_register_200_with_outbound_contact() {
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Register,
+            "sip:alice@example.com",
+            Some(outbound_address(
+                "sip:alice@192.168.1.10:5060",
+                "urn:uuid:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                1,
+            )),
+        );
+        let (aor, params) = extract_outbound_flow(&response).expect("outbound flow");
+        assert_eq!(aor, "sip:alice@example.com");
+        assert_eq!(params.reg_id, 1);
+        assert_eq!(
+            params.instance_urn,
+            "urn:uuid:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        );
+    }
+
+    #[test]
+    fn returns_none_when_register_200_contact_lacks_outbound_params() {
+        // Legacy (pre-5626) REGISTER — Contact without +sip.instance / reg-id.
+        let contact = Address::new(Uri::from_str("sip:alice@192.168.1.10:5060").unwrap());
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Register,
+            "sip:alice@example.com",
+            Some(contact),
+        );
+        assert!(extract_outbound_flow(&response).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_non_register_responses() {
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Invite,
+            "sip:bob@example.com",
+            Some(outbound_address(
+                "sip:bob@192.168.1.20:5060",
+                "urn:uuid:bbbbbbbb",
+                1,
+            )),
+        );
+        assert!(extract_outbound_flow(&response).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_non_2xx_register() {
+        let response = make_response(
+            StatusCode::Unauthorized,
+            Method::Register,
+            "sip:alice@example.com",
+            Some(outbound_address(
+                "sip:alice@192.168.1.10:5060",
+                "urn:uuid:a",
+                1,
+            )),
+        );
+        assert!(extract_outbound_flow(&response).is_none());
+    }
+
+    #[test]
+    fn returns_none_when_no_contact_header() {
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Register,
+            "sip:alice@example.com",
+            None,
+        );
+        assert!(extract_outbound_flow(&response).is_none());
+    }
 }
 
 #[cfg(test)]

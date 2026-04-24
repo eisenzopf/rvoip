@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use bytes::{BytesMut, Buf, BufMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::Mutex;
 use tracing::{debug, error, trace, warn};
 
@@ -16,10 +17,43 @@ use rvoip_sip_core::builder::ContentLengthBuilderExt;
 const INITIAL_BUFFER_SIZE: usize = 8192;
 const MAX_MESSAGE_SIZE: usize = 65535;
 
-/// TCP connection for SIP messages
+/// A frame pulled off a stream-oriented SIP connection. RFC 5626 §3.5.1
+/// introduces two non-SIP frames the wire may carry — a single CRLF
+/// pong and a CRLFCRLF ping — both only legal at the start of the
+/// receive buffer (never embedded between messages). Anything else is a
+/// regular SIP message.
+#[derive(Debug)]
+pub enum ReceivedFrame {
+    /// A parsed SIP message.
+    Message(Message),
+    /// RFC 5626 §3.5.1 keep-alive pong — a single `\r\n` received.
+    KeepAlivePong,
+    /// RFC 5626 §3.5.1 server-initiated ping — `\r\n\r\n` at offset 0
+    /// of the buffer. The receiver should answer with a single CRLF.
+    KeepAlivePing,
+}
+
+/// TCP connection for SIP messages.
+///
+/// The underlying `TcpStream` is split into owned read and write halves
+/// (`tokio::net::TcpStream::into_split`) so concurrent reads (the
+/// per-connection reader task) and writes (outbound `send_message` /
+/// `send_raw_bytes`) never contend on a single mutex. Required for
+/// bidirectional SIP-over-TCP and for RFC 5626 §3.5.1 keep-alive,
+/// where a ping task writes while the reader simultaneously awaits a
+/// pong.
 pub struct TcpConnection {
-    /// The TCP stream for this connection
-    stream: Mutex<TcpStream>,
+    /// Owned write half. Held under a mutex so concurrent senders
+    /// serialise their writes (RFC 3261 §7.5 requires atomic message
+    /// delivery over stream transports).
+    write_half: Mutex<OwnedWriteHalf>,
+    /// Owned read half. Expected to be consumed by a single reader
+    /// task; concurrent `receive_frame` callers serialise via the
+    /// mutex but that usage pattern is not recommended.
+    read_half: Mutex<OwnedReadHalf>,
+    /// Cached local address (captured at construction; doesn't change
+    /// once the socket is bound).
+    local_addr: SocketAddr,
     /// The peer's address
     peer_addr: SocketAddr,
     /// Whether the connection is closed
@@ -34,36 +68,31 @@ impl TcpConnection {
         let stream = TcpStream::connect(addr)
             .await
             .map_err(|e| Error::ConnectFailed(addr, e))?;
-        
-        Ok(Self {
-            stream: Mutex::new(stream),
-            peer_addr: addr,
-            closed: AtomicBool::new(false),
-            recv_buffer: Mutex::new(BytesMut::with_capacity(INITIAL_BUFFER_SIZE)),
-        })
+        Self::from_stream(stream, addr)
     }
-    
+
     /// Creates a TCP connection from an existing stream
     pub fn from_stream(stream: TcpStream, peer_addr: SocketAddr) -> Result<Self> {
+        let local_addr = stream.local_addr().map_err(Error::LocalAddrFailed)?;
+        let (read_half, write_half) = stream.into_split();
         Ok(Self {
-            stream: Mutex::new(stream),
+            write_half: Mutex::new(write_half),
+            read_half: Mutex::new(read_half),
+            local_addr,
             peer_addr,
             closed: AtomicBool::new(false),
             recv_buffer: Mutex::new(BytesMut::with_capacity(INITIAL_BUFFER_SIZE)),
         })
     }
-    
+
     /// Returns the peer address of the connection
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
-    
+
     /// Returns the local address of the connection
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        let stream = self.stream.try_lock()
-            .map_err(|_| Error::InvalidState("Failed to acquire stream lock".to_string()))?;
-        
-        stream.local_addr().map_err(|e| Error::LocalAddrFailed(e))
+        Ok(self.local_addr)
     }
     
     /// Sends a SIP message over the connection
@@ -71,15 +100,11 @@ impl TcpConnection {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
-        
-        // Convert message to bytes
+
         let message_bytes = message.to_bytes();
-        
-        // Acquire lock on the stream
-        let mut stream = self.stream.lock().await;
-        
-        // Send the message
-        stream.write_all(&message_bytes).await
+        let mut writer = self.write_half.lock().await;
+
+        writer.write_all(&message_bytes).await
             .map_err(|e| {
                 if e.kind() == io::ErrorKind::BrokenPipe || e.kind() == io::ErrorKind::ConnectionReset {
                     self.closed.store(true, Ordering::Relaxed);
@@ -88,67 +113,135 @@ impl TcpConnection {
                     Error::SendFailed(self.peer_addr, e)
                 }
             })?;
-        
-        // Flush the stream to ensure all data is sent
-        stream.flush().await
+
+        writer.flush().await
             .map_err(|e| Error::SendFailed(self.peer_addr, e))?;
-        
+
         trace!("Sent {} bytes to {}", message_bytes.len(), self.peer_addr);
         Ok(())
     }
-    
-    /// Receives a SIP message from the connection
-    pub async fn receive_message(&self) -> Result<Option<Message>> {
+
+    /// Writes raw bytes over the connection without any SIP framing.
+    /// Used for RFC 5626 §3.5.1 CRLFCRLF keep-alive pings / CRLF pongs.
+    /// Mirrors `send_message` for error handling — a broken pipe marks
+    /// the connection closed so the next send fails fast.
+    pub async fn send_raw_bytes(&self, data: &[u8]) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
-        
-        // Acquire locks for the buffer and stream
-        let mut recv_buffer = self.recv_buffer.lock().await;
-        let mut stream = self.stream.lock().await;
-        
-        // Loop until we have a complete message or error
-        loop {
-            // Try to parse a message from the buffer
-            if let Some(message) = self.try_parse_message(&mut recv_buffer)? {
-                return Ok(Some(message));
+
+        let mut writer = self.write_half.lock().await;
+
+        writer.write_all(data).await.map_err(|e| {
+            if e.kind() == io::ErrorKind::BrokenPipe || e.kind() == io::ErrorKind::ConnectionReset {
+                self.closed.store(true, Ordering::Relaxed);
+                Error::ConnectionReset
+            } else {
+                Error::SendFailed(self.peer_addr, e)
             }
-            
-            // No complete message, read more data
+        })?;
+
+        writer
+            .flush()
+            .await
+            .map_err(|e| Error::SendFailed(self.peer_addr, e))?;
+
+        trace!("Sent {} raw bytes to {}", data.len(), self.peer_addr);
+        Ok(())
+    }
+    
+    /// Receives a SIP message from the connection.
+    ///
+    /// Legacy accessor retained for callers that only care about SIP
+    /// messages (e.g. existing unit tests). RFC 5626 keep-alive frames
+    /// (CRLF pong, CRLFCRLF server ping) are silently consumed and
+    /// skipped — use [`receive_frame`](Self::receive_frame) to observe
+    /// them.
+    pub async fn receive_message(&self) -> Result<Option<Message>> {
+        loop {
+            match self.receive_frame().await? {
+                Some(ReceivedFrame::Message(m)) => return Ok(Some(m)),
+                Some(ReceivedFrame::KeepAlivePong) | Some(ReceivedFrame::KeepAlivePing) => {
+                    // Silently skip — legacy callers aren't aware of
+                    // RFC 5626 frames. New code should call
+                    // `receive_frame` directly.
+                    continue;
+                }
+                None => return Ok(None),
+            }
+        }
+    }
+
+    /// Receives a frame from the connection. A frame is either a
+    /// parsed SIP message or one of the RFC 5626 §3.5.1 keep-alive
+    /// frames (CRLF pong, CRLFCRLF server-initiated ping).
+    ///
+    /// The CRLF / CRLFCRLF frames are only recognised at the *start* of
+    /// the receive buffer — embedded CRLF sequences between stacked SIP
+    /// messages are treated as ordinary message framing (existing RFC
+    /// 3261 §18.3 Content-Length behaviour, unchanged).
+    pub async fn receive_frame(&self) -> Result<Option<ReceivedFrame>> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+
+        // Acquire locks for the buffer and read half
+        let mut recv_buffer = self.recv_buffer.lock().await;
+        let mut reader = self.read_half.lock().await;
+
+        loop {
+            // RFC 5626 §3.5.1: keep-alive frames only legal at buffer
+            // offset 0 (a SIP message must start with a request- or
+            // status-line, never CRLF). `\r\n\r\n` is a server ping,
+            // bare `\r\n` is a pong. TCP doesn't split these atomic
+            // writes in practice, so when the buffer begins with CRLF
+            // we treat it as a complete frame right away — the only
+            // genuine ambiguity (buffer is exactly 2 bytes of CRLF)
+            // resolves itself correctly: we emit a pong, and if the
+            // peer actually sent a ping the next 2 bytes arrive, get
+            // classified as a second pong, and no caller cares because
+            // we don't act on server-initiated pings anyway.
+            if recv_buffer.len() >= 4 && &recv_buffer[0..4] == b"\r\n\r\n" {
+                recv_buffer.advance(4);
+                return Ok(Some(ReceivedFrame::KeepAlivePing));
+            }
+            if recv_buffer.len() >= 2 && &recv_buffer[0..2] == b"\r\n" {
+                recv_buffer.advance(2);
+                return Ok(Some(ReceivedFrame::KeepAlivePong));
+            }
+            if let Some(frame) = self.try_parse_message(&mut recv_buffer)? {
+                return Ok(Some(ReceivedFrame::Message(frame)));
+            }
+
+            // No complete frame, read more data
             let mut temp_buffer = vec![0; 8192];
-            
-            match stream.read(&mut temp_buffer).await {
+
+            match reader.read(&mut temp_buffer).await {
                 Ok(0) => {
                     // End of stream
                     if recv_buffer.is_empty() {
-                        // Clean EOF
                         self.closed.store(true, Ordering::Relaxed);
                         return Ok(None);
                     } else {
-                        // Partial message left in buffer
                         self.closed.store(true, Ordering::Relaxed);
                         return Err(Error::StreamClosed);
                     }
                 }
                 Ok(n) => {
                     trace!("Read {} bytes from {}", n, self.peer_addr);
-                    
-                    // Check buffer capacity
+
                     if recv_buffer.len() + n > MAX_MESSAGE_SIZE {
                         return Err(Error::MessageTooLarge(recv_buffer.len() + n));
                     }
-                    
-                    // Append read data to the buffer
+
                     recv_buffer.put_slice(&temp_buffer[0..n]);
                 }
                 Err(e) => {
                     if e.kind() == io::ErrorKind::WouldBlock {
-                        // No data available yet, try again
                         continue;
                     } else {
-                        // Connection error
                         self.closed.store(true, Ordering::Relaxed);
-                        
+
                         if e.kind() == io::ErrorKind::BrokenPipe || e.kind() == io::ErrorKind::ConnectionReset {
                             return Err(Error::ConnectionReset);
                         } else {
@@ -247,17 +340,16 @@ impl TcpConnection {
             // Already closed
             return Ok(());
         }
-        
-        let mut stream = self.stream.lock().await;
-        
-        // Shutdown the stream
-        if let Err(e) = stream.shutdown().await {
+
+        // Shutting down the write half closes the socket from both
+        // directions (read half will return EOF on its next poll).
+        let mut writer = self.write_half.lock().await;
+        if let Err(e) = writer.shutdown().await {
             if e.kind() != io::ErrorKind::NotConnected {
-                // Only report errors if they're not due to the socket already being closed
                 return Err(Error::IoError(e));
             }
         }
-        
+
         Ok(())
     }
     
@@ -430,4 +522,118 @@ mod tests {
         // Clean up
         connection.close().await.unwrap();
     }
-} 
+
+    /// RFC 5626 §3.5.1: a bare `\r\n` at buffer offset 0 is a keep-alive
+    /// pong. It must be consumed as a `KeepAlivePong` frame, not handed
+    /// to the SIP parser (which would reject it).
+    #[tokio::test]
+    async fn keepalive_pong_at_offset_0_is_recognised_as_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        // Server: accept then write a single CRLF (pong) and nothing else.
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+            socket.flush().await.unwrap();
+            // Hold the socket open briefly so the client reads the bytes
+            // before seeing EOF.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+
+        let connection = TcpConnection::connect(server_addr).await.unwrap();
+        let frame = connection.receive_frame().await.unwrap();
+        assert!(matches!(frame, Some(ReceivedFrame::KeepAlivePong)));
+    }
+
+    /// RFC 5626 §3.5.1: a `\r\n\r\n` at buffer offset 0 is a server-
+    /// initiated ping. A SIP message *never* starts with CRLFCRLF (must
+    /// start with request- or status-line), so the detection is
+    /// unambiguous.
+    #[tokio::test]
+    async fn keepalive_ping_at_offset_0_is_recognised_as_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.write_all(b"\r\n\r\n").await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+
+        let connection = TcpConnection::connect(server_addr).await.unwrap();
+        let frame = connection.receive_frame().await.unwrap();
+        assert!(matches!(frame, Some(ReceivedFrame::KeepAlivePing)));
+    }
+
+    /// RFC 5626 keep-alive frames must not disturb subsequent SIP
+    /// message parsing. The pong is stripped; the SIP message that
+    /// follows in the same TCP read is parsed cleanly with no spurious
+    /// parse errors.
+    #[tokio::test]
+    async fn keepalive_pong_followed_by_sip_message_parses_both() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let req = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
+                .unwrap()
+                .from("alice", "sip:alice@example.com", Some("tag1"))
+                .to("bob", "sip:bob@example.com", None)
+                .call_id("after-pong@example.com")
+                .cseq(1)
+                .content_length(0)
+                .build();
+
+            let mut combined = BytesMut::new();
+            combined.extend_from_slice(b"\r\n"); // pong
+            combined.extend_from_slice(&Message::Request(req).to_bytes());
+            socket.write_all(&combined).await.unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+
+        let connection = TcpConnection::connect(server_addr).await.unwrap();
+        // First frame is the pong.
+        let first = connection.receive_frame().await.unwrap();
+        assert!(matches!(first, Some(ReceivedFrame::KeepAlivePong)));
+        // Second frame is the SIP message — must parse cleanly.
+        let second = connection.receive_frame().await.unwrap();
+        match second {
+            Some(ReceivedFrame::Message(Message::Request(req))) => {
+                assert_eq!(req.method(), Method::Register);
+                assert_eq!(
+                    req.call_id().unwrap().to_string(),
+                    "after-pong@example.com"
+                );
+            }
+            other => panic!("Expected SIP request after pong, got {:?}", other),
+        }
+    }
+
+    /// `send_raw_bytes` writes bytes verbatim with no framing.
+    #[tokio::test]
+    async fn send_raw_bytes_round_trip() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16];
+            let n = socket.read(&mut buf).await.unwrap();
+            buf.truncate(n);
+            tx.send(buf).await.unwrap();
+        });
+
+        let connection = TcpConnection::connect(server_addr).await.unwrap();
+        connection.send_raw_bytes(b"\r\n\r\n").await.unwrap();
+
+        let received = rx.recv().await.unwrap();
+        assert_eq!(received, b"\r\n\r\n");
+
+        connection.close().await.unwrap();
+    }
+}

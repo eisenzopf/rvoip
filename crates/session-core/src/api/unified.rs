@@ -387,6 +387,17 @@ impl UnifiedCoordinator {
             None
         };
 
+        // A5 Phase 2b-min: thread the RFC 5626 keep-alive interval into
+        // the DialogManager so REGISTER 2xx responses can spawn CRLFCRLF
+        // ping tasks. Only honoured when outbound is actually enabled —
+        // without a stable instance URN there is no meaningful flow to
+        // keep alive.
+        if outbound_contact_params.is_some() && config.outbound_keepalive_interval_secs > 0 {
+            dialog_api.dialog_manager().core().set_outbound_keepalive_interval(
+                Some(std::time::Duration::from_secs(config.outbound_keepalive_interval_secs)),
+            );
+        }
+
         let dialog_adapter = Arc::new(DialogAdapter::new(
             dialog_api,
             store.clone(),

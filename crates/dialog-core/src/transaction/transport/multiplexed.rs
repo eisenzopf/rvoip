@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use rvoip_sip_core::{Message, Request};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
@@ -229,6 +230,43 @@ impl Transport for MultiplexedTransport {
     fn default_transport_type(&self) -> TransportType {
         self.default.default_transport_type()
     }
+
+    fn has_connection_to(&self, remote_addr: SocketAddr) -> bool {
+        // A multiplexed transport "has a connection" if any of its
+        // connection-oriented children does.
+        for kind in [TransportType::Tls, TransportType::Tcp, TransportType::Wss, TransportType::Ws] {
+            if let Some(transport) = self.transports.get(&kind) {
+                if transport.has_connection_to(remote_addr) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    async fn send_raw(&self, destination: SocketAddr, data: Bytes) -> TransportResult<()> {
+        // RFC 5626 §3.5.1 keep-alive: probe connection-oriented
+        // transports for an existing flow to `destination` and dispatch
+        // bare bytes on the first that matches. UDP is never asked —
+        // RFC 5626 UDP keep-alive uses STUN, out of scope here.
+        for kind in [TransportType::Tls, TransportType::Tcp, TransportType::Wss, TransportType::Ws] {
+            if let Some(transport) = self.transports.get(&kind) {
+                if transport.has_connection_to(destination) {
+                    trace!(
+                        "MultiplexedTransport::send_raw routing {} bytes to {} via {}",
+                        data.len(),
+                        destination,
+                        kind
+                    );
+                    return transport.send_raw(destination, data).await;
+                }
+            }
+        }
+        Err(TransportError::InvalidState(format!(
+            "No connection-oriented transport has a live connection to {} for send_raw",
+            destination
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -284,12 +322,17 @@ mod tests {
 
     /// Counts each `send_message` invocation. Distinguishes call sites
     /// by an injected label so we can assert which mock transport the
-    /// multiplexer dispatched to.
+    /// multiplexer dispatched to. Also counts `send_raw` so we can
+    /// assert RFC 5626 keep-alive dispatch.
     #[derive(Debug)]
     struct CountingTransport {
         label: &'static str,
         addr: SocketAddr,
         sends: AtomicUsize,
+        raw_sends: AtomicUsize,
+        /// Whether this transport reports as having a connection to any
+        /// destination. Used to drive `send_raw` / response-path probes.
+        has_conn: std::sync::atomic::AtomicBool,
     }
 
     impl CountingTransport {
@@ -298,11 +341,21 @@ mod tests {
                 label,
                 addr: "127.0.0.1:0".parse().unwrap(),
                 sends: AtomicUsize::new(0),
+                raw_sends: AtomicUsize::new(0),
+                has_conn: std::sync::atomic::AtomicBool::new(false),
             })
         }
 
         fn count(&self) -> usize {
             self.sends.load(Ordering::SeqCst)
+        }
+
+        fn raw_count(&self) -> usize {
+            self.raw_sends.load(Ordering::SeqCst)
+        }
+
+        fn set_has_connection(&self, v: bool) {
+            self.has_conn.store(v, Ordering::SeqCst);
         }
     }
 
@@ -318,6 +371,15 @@ mod tests {
             _destination: SocketAddr,
         ) -> TransportResult<()> {
             self.sends.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send_raw(
+            &self,
+            _destination: SocketAddr,
+            _data: Bytes,
+        ) -> TransportResult<()> {
+            self.raw_sends.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -339,6 +401,10 @@ mod tests {
 
         fn supports_tls(&self) -> bool {
             self.label == "tls"
+        }
+
+        fn has_connection_to(&self, _remote_addr: SocketAddr) -> bool {
+            self.has_conn.load(Ordering::SeqCst)
         }
     }
 
@@ -416,6 +482,85 @@ mod tests {
         mux.send_message(msg, dest).await.unwrap();
         assert_eq!(udp.count(), 1, "sip: URI with no transport= must default to UDP");
         assert_eq!(tcp.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn send_raw_routes_to_transport_with_live_connection() {
+        let udp = CountingTransport::new("udp");
+        let tcp = CountingTransport::new("tcp");
+        let tls = CountingTransport::new("tls");
+
+        // Only TCP reports a live connection to the destination.
+        tcp.set_has_connection(true);
+
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
+        by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
+        by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
+
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+
+        let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+        mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
+            .await
+            .unwrap();
+
+        assert_eq!(tcp.raw_count(), 1, "send_raw must route to TCP (live connection)");
+        assert_eq!(tls.raw_count(), 0);
+        assert_eq!(udp.raw_count(), 0, "UDP is never used for send_raw (RFC 5626 UDP uses STUN)");
+    }
+
+    #[tokio::test]
+    async fn send_raw_errors_when_no_live_connection_exists() {
+        let udp = CountingTransport::new("udp");
+        let tcp = CountingTransport::new("tcp");
+        // No transport reports a live connection.
+
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
+        by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
+
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+
+        let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+        let result = mux
+            .send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
+            .await;
+        assert!(
+            result.is_err(),
+            "send_raw must error when no connection-oriented transport has a live flow"
+        );
+        assert_eq!(tcp.raw_count(), 0);
+        assert_eq!(udp.raw_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn send_raw_prefers_tls_over_tcp_when_both_live() {
+        let udp = CountingTransport::new("udp");
+        let tcp = CountingTransport::new("tcp");
+        let tls = CountingTransport::new("tls");
+        tcp.set_has_connection(true);
+        tls.set_has_connection(true);
+
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
+        by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
+        by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
+
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+
+        let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
+        mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
+            .await
+            .unwrap();
+
+        // TLS is tried first in the probe order — matches the
+        // response-routing order in `pick_transport`.
+        assert_eq!(tls.raw_count(), 1);
+        assert_eq!(tcp.raw_count(), 0);
     }
 
     #[tokio::test]

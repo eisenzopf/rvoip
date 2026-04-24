@@ -19,7 +19,7 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent};
+use crate::transport::{Transport, TransportEvent, TransportType};
 
 /// Builder-friendly TLS client configuration. Mirrors the knobs we
 /// expect to expose through `session-core::Config` once Step 1C wires
@@ -236,25 +236,54 @@ impl TlsTransport {
             }
         });
 
-        // Buffered read loop with RFC 3261 §18.3 Content-Length framing.
-        // TLS records can split a single SIP message across reads (or
-        // bundle several into one), so we accumulate into a `BytesMut`
-        // and pull off complete messages with `try_parse_one`.
+        // Buffered read loop with RFC 3261 §18.3 Content-Length framing,
+        // plus RFC 5626 §3.5.1 keep-alive frame detection at buffer
+        // offset 0. TLS records can split a single SIP message across
+        // reads (or bundle several into one), so we accumulate into a
+        // `BytesMut` and pull frames off the front.
         let mut buffer = BytesMut::with_capacity(8192);
         let mut tmp = vec![0u8; 8192];
+        let tx_for_pong = tx.clone();
         loop {
             match reader.read(&mut tmp).await {
                 Ok(0) => break,
                 Ok(n) => {
                     buffer.extend_from_slice(&tmp[..n]);
-                    while let Some(message) = try_parse_one(&mut buffer) {
-                        let _ = event_tx
-                            .send(TransportEvent::MessageReceived {
-                                message,
-                                source: remote_addr,
-                                destination: local_addr,
-                            })
-                            .await;
+                    // Drain all complete frames (keep-alive or SIP).
+                    // RFC 5626 frames are only recognised at offset 0;
+                    // `try_consume_keepalive_frame` strips them, then we
+                    // fall through to `try_parse_one` for stacked SIP
+                    // messages.
+                    loop {
+                        match try_consume_keepalive_frame(&mut buffer) {
+                            Some(KeepAliveFrame::Pong) => {
+                                let _ = event_tx
+                                    .send(TransportEvent::KeepAlivePongReceived {
+                                        source: remote_addr,
+                                        destination: local_addr,
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            Some(KeepAliveFrame::Ping) => {
+                                // RFC 5626 §3.5.1: reply with CRLF pong.
+                                let _ = tx_for_pong.send(Bytes::from_static(b"\r\n")).await;
+                                continue;
+                            }
+                            None => {}
+                        }
+                        match try_parse_one(&mut buffer) {
+                            Some(message) => {
+                                let _ = event_tx
+                                    .send(TransportEvent::MessageReceived {
+                                        message,
+                                        source: remote_addr,
+                                        destination: local_addr,
+                                    })
+                                    .await;
+                            }
+                            None => break,
+                        }
                     }
                 }
                 Err(e) => {
@@ -265,6 +294,17 @@ impl TlsTransport {
         }
 
         write_task.abort();
+
+        // Emit ConnectionClosed *before* the registry eviction so any
+        // observer (e.g. RFC 5626 OutboundFlow) sees the lifecycle
+        // event before a subsequent `has_connection_to` query returns
+        // false.
+        let _ = event_tx
+            .send(TransportEvent::ConnectionClosed {
+                remote_addr,
+                transport_type: TransportType::Tls,
+            })
+            .await;
 
         {
             let mut connections_guard = connections.lock().await;
@@ -434,6 +474,55 @@ impl Transport for TlsTransport {
             Err(_) => false,
         }
     }
+
+    async fn send_raw(&self, destination: SocketAddr, data: Bytes) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+
+        // RFC 5626 keep-alive: only reuse an existing TLS connection.
+        // A fresh dial would defeat the purpose — the flow we'd keep
+        // alive is already gone.
+        let connections_guard = self.connections.lock().await;
+        let Some((_, tx)) = connections_guard.iter().find(|(a, _)| *a == destination)
+        else {
+            return Err(Error::InvalidState(format!(
+                "No active TLS connection to {} for send_raw",
+                destination
+            )));
+        };
+        tx.send(data).await.map_err(|_| {
+            Error::Other(format!(
+                "Failed to push raw bytes to TLS write channel for {}",
+                destination
+            ))
+        })
+    }
+}
+
+/// A keep-alive frame pulled off the front of a TLS receive buffer.
+#[derive(Debug)]
+enum KeepAliveFrame {
+    /// CRLF received — server pong.
+    Pong,
+    /// CRLFCRLF received — server-initiated ping.
+    Ping,
+}
+
+/// Strip a leading RFC 5626 §3.5.1 keep-alive frame (pong / ping) off
+/// `buffer` if present. Mirrors the logic in
+/// `transport::tcp::connection::TcpConnection::receive_frame` so TCP
+/// and TLS see the same semantics.
+fn try_consume_keepalive_frame(buffer: &mut BytesMut) -> Option<KeepAliveFrame> {
+    if buffer.len() >= 4 && &buffer[0..4] == b"\r\n\r\n" {
+        buffer.advance(4);
+        return Some(KeepAliveFrame::Ping);
+    }
+    if buffer.len() >= 2 && &buffer[0..2] == b"\r\n" {
+        buffer.advance(2);
+        return Some(KeepAliveFrame::Pong);
+    }
+    None
 }
 
 /// Build a rustls `ClientConfig` honouring the supplied

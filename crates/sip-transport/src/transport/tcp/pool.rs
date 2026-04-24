@@ -98,9 +98,21 @@ impl ConnectionPool {
     /// Removes a connection from the pool
     pub async fn remove_connection(&self, addr: &SocketAddr) {
         let mut connections = self.connections.lock().await;
-        
+
         if connections.remove(addr).is_some() {
             trace!("Removed connection to {} from pool (size: {})", addr, connections.len());
+        }
+    }
+
+    /// Non-blocking check for whether the pool currently holds a
+    /// connection to `addr`. Used by `TcpTransport::has_connection_to`
+    /// and the URI-aware multiplexer's response-routing path (RFC 3261
+    /// §17.2 / §18.2.2). Returns `false` conservatively when the pool
+    /// lock is busy — the multiplexer will just try the next candidate.
+    pub fn has_connection(&self, addr: &SocketAddr) -> bool {
+        match self.connections.try_lock() {
+            Ok(guard) => guard.contains_key(addr),
+            Err(_) => false,
         }
     }
     
