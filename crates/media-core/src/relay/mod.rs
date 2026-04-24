@@ -14,6 +14,7 @@ pub mod controller;
 
 // Re-export controller types for convenience
 pub use controller::{
+    DtmfNotification,
     MediaSessionController,
     MediaConfig,
     MediaSessionStatus,

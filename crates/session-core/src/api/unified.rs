@@ -421,6 +421,11 @@ impl UnifiedCoordinator {
             config.srtp_offered_suites.clone(),
         );
         let media_adapter = Arc::new(media_adapter_inner);
+        // RFC 4733 DTMF bridge: adapter publishes `Event::DtmfReceived`
+        // onto the API bus whenever media-core signals a DTMF event.
+        media_adapter
+            .set_global_coordinator(global_coordinator.clone())
+            .await;
         
         // Load state table based on config
         let state_table = Arc::new(

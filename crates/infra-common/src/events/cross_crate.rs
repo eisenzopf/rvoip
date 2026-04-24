@@ -172,6 +172,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::MessageDelivered { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::MessageFailed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::IncomingRegister { .. } => None, // No session_id yet for incoming REGISTER
+                DialogToSessionEvent::OutboundFlowFailed { .. } => None, // Flow-level, not session-level
             },
             RvoipCrossCrateEvent::SessionToMedia(event) => match event {
                 SessionToMediaEvent::StartMediaStream { session_id, .. } => Some(session_id),
@@ -521,6 +522,27 @@ pub enum DialogToSessionEvent {
         expires: u32,
         authorization: Option<String>,  // Authorization header if present
         call_id: String,
+    },
+
+    /// RFC 5626 outbound flow has failed — the keep-alive ping either
+    /// timed out, saw a transport-level connection close, or hit an
+    /// unrecoverable send error. Session-core debounces this event per
+    /// AoR and triggers a fresh REGISTER to re-establish the flow
+    /// without waiting for registration expiry (§4.4.1 flow recovery).
+    ///
+    /// Flow-level, not session-level: `session_id()` returns `None`.
+    OutboundFlowFailed {
+        /// AoR (To URI of the REGISTER that established the flow,
+        /// normalized to string form).
+        aor: String,
+        /// RFC 5626 §4.2 `reg-id` of the failed flow.
+        reg_id: u32,
+        /// RFC 5626 §4.1 instance URN of the UA.
+        instance: String,
+        /// Human-readable failure cause (`"PongTimeout"`,
+        /// `"ConnectionClosed"`, or `"SendError"`) — used for
+        /// telemetry and log correlation.
+        reason: String,
     },
 }
 

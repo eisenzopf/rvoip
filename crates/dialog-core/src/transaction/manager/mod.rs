@@ -261,6 +261,14 @@ pub struct TransactionManager {
     timer_manager: Arc<TimerManager>,
     /// Timer factory
     timer_factory: TimerFactory,
+    /// Optional forwarder for transport-side events that dialog-core's
+    /// RFC 5626 outbound-flow monitor needs to observe
+    /// (`KeepAlivePongReceived`, `ConnectionClosed`). Installed by
+    /// `DialogManager::with_global_events` at boot; `None` keeps the
+    /// transaction manager transport-agnostic when no dialog layer is
+    /// wired up (bare transaction tests, examples).
+    flow_event_sender:
+        Arc<tokio::sync::RwLock<Option<mpsc::Sender<crate::manager::outbound_flow::FlowTransportEvent>>>>,
 }
 
 // Define RFC3261 Branch magic cookie
@@ -288,6 +296,18 @@ impl TransactionManager {
     /// re-INVITE responses.
     pub fn timer_settings(&self) -> &TimerSettings {
         &self.timer_settings
+    }
+
+    /// Install a forwarder for transport-side events (pong received,
+    /// connection closed) that the RFC 5626 outbound-flow monitor in
+    /// dialog-core needs to observe. Called by
+    /// `DialogManager::with_global_events` once the consumer task is
+    /// wired up; leaves the manager in a no-op state otherwise.
+    pub async fn set_flow_event_sender(
+        &self,
+        sender: mpsc::Sender<crate::manager::outbound_flow::FlowTransportEvent>,
+    ) {
+        *self.flow_event_sender.write().await = Some(sender);
     }
 
     /// Creates a new transaction manager with default settings.
@@ -378,6 +398,7 @@ impl TransactionManager {
             timer_settings,
             timer_manager,
             timer_factory,
+            flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
         };
         
         // Start the message processing loop
@@ -483,6 +504,7 @@ impl TransactionManager {
             timer_settings,
             timer_manager,
             timer_factory,
+            flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
         };
         
         // Start the message processing loop
@@ -617,6 +639,7 @@ impl TransactionManager {
             timer_settings,
             timer_manager,
             timer_factory,
+            flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
         };
         
         // Start the message processing loop
@@ -698,6 +721,7 @@ impl TransactionManager {
             timer_settings,
             timer_manager,
             timer_factory,
+            flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
@@ -748,6 +772,7 @@ impl TransactionManager {
             client_transactions,
             server_transactions,
             timer_factory,
+            flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             timer_manager,
             timer_settings,
             running,

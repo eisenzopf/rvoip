@@ -228,17 +228,51 @@ pub enum SessionCoordinationEvent {
     TransferRequest {
         /// Dialog ID for the call being transferred
         dialog_id: DialogId,
-        
+
         /// Transaction ID for the REFER request
         transaction_id: TransactionKey,
-        
+
         /// The parsed Refer-To header (target of transfer)
         refer_to: ReferTo,
-        
+
         /// Optional Referred-By header (who initiated transfer)
         referred_by: Option<String>,
-        
+
         /// Optional Replaces header (for attended transfer)
         replaces: Option<String>,
     },
-} 
+
+    /// RFC 5626 outbound flow has failed — the keep-alive ping either
+    /// timed out waiting for a pong, saw a transport-level connection
+    /// close, or hit an unrecoverable send error. The session layer
+    /// should trigger a fresh REGISTER for the identified AoR so the
+    /// UA re-establishes a flow without waiting for registration
+    /// expiry (RFC 5626 §4.4.1 flow recovery).
+    OutboundFlowFailed {
+        /// AoR (To URI of the originating REGISTER, normalized) whose
+        /// flow has failed.
+        aor: String,
+        /// RFC 5626 §4.2 `reg-id` of the failed flow.
+        reg_id: u32,
+        /// RFC 5626 §4.1 instance URN of the UA.
+        instance: String,
+        /// Underlying cause of the failure (for telemetry + debouncing).
+        reason: FlowFailureReason,
+    },
+}
+
+/// Cause of an RFC 5626 outbound flow failure, reported alongside
+/// [`SessionCoordinationEvent::OutboundFlowFailed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowFailureReason {
+    /// Keep-alive ping (CRLFCRLF) was sent but no pong (CRLF) arrived
+    /// within the configured pong-timeout window.
+    PongTimeout,
+    /// Transport layer reported the connection closed (TCP FIN/RST, TLS
+    /// close_notify, etc.) before the flow could be explicitly torn
+    /// down.
+    ConnectionClosed,
+    /// Transport-level send on the keep-alive ping itself returned an
+    /// unrecoverable error (e.g. socket gone).
+    SendError,
+}

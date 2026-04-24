@@ -261,6 +261,21 @@ impl DialogEventHub {
                 })
             }
 
+            SessionCoordinationEvent::OutboundFlowFailed { aor, reg_id, instance, reason } => {
+                // RFC 5626 flow-level event: no session_id association
+                // (registrations can be coordinator-global, not tied to a
+                // single dialog). Session-core locates the registration
+                // session by matching the AoR in the handler.
+                Some(RvoipCrossCrateEvent::DialogToSession(
+                    DialogToSessionEvent::OutboundFlowFailed {
+                        aor,
+                        reg_id,
+                        instance,
+                        reason: format!("{:?}", reason),
+                    },
+                ))
+            }
+
             SessionCoordinationEvent::ResponseReceived { dialog_id, response, .. } => {
                 // Try to get session ID from stored mapping first
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {

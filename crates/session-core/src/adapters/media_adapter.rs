@@ -141,6 +141,13 @@ pub struct MediaAdapter {
     /// will read these out and hand them to media-core's
     /// `start_secure_media`.
     pub(crate) negotiated_srtp: Arc<DashMap<SessionId, SrtpPair>>,
+
+    /// Global event coordinator for publishing RFC 4733 DTMF events
+    /// onto the session-core API event bus. Populated at boot via
+    /// [`Self::set_global_coordinator`]; `None` in tests that bypass
+    /// the full wiring.
+    pub(crate) global_coordinator:
+        Arc<tokio::sync::RwLock<Option<Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>>>>,
 }
 
 impl MediaAdapter {
@@ -172,7 +179,18 @@ impl MediaAdapter {
             ],
             pending_srtp_offerers: Arc::new(DashMap::new()),
             negotiated_srtp: Arc::new(DashMap::new()),
+            global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
         }
+    }
+
+    /// Install the global event coordinator so the adapter can publish
+    /// RFC 4733 DTMF events onto the session-core API event stream.
+    /// Idempotent — a later call replaces any prior coordinator.
+    pub async fn set_global_coordinator(
+        &self,
+        coordinator: Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
+    ) {
+        *self.global_coordinator.write().await = Some(coordinator);
     }
 
     /// Configure the SRTP offer policy. Called by `UnifiedCoordinator`
@@ -756,15 +774,21 @@ impl MediaAdapter {
         self.controller.start_media(dialog_id.clone(), media_config)
             .await
             .map_err(|e| SessionError::MediaError(format!("Failed to start media session: {}", e)))?;
-            
+
+        // Install RFC 4733 DTMF callback so incoming PT 101 frames
+        // surface as `Event::DtmfReceived` on the public API bus.
+        // Fires once per digit (media-core dedupes the three §2.5.1.3
+        // retransmits) so app consumers don't see duplicate digits.
+        self.install_dtmf_callback(session_id.clone(), dialog_id.clone()).await;
+
         // Get and store session info
         if let Some(info) = self.controller.get_session_info(&dialog_id).await {
             self.media_sessions.insert(session_id.clone(), info.clone());
-            
+
             // Store mapping with media controller
             let media_id = crate::types::MediaSessionId(dialog_id.to_string());
             self.controller.store_session_mapping(session_id.0.clone(), MediaSessionId::from_dialog(&dialog_id));
-            
+
             tracing::info!("✅ Media session created successfully for dialog {}", dialog_id);
             return Ok(media_id);
         }
@@ -815,6 +839,58 @@ impl MediaAdapter {
         Ok(sdp)
     }
     
+    /// Install the RFC 4733 DTMF bridge: registers a callback with
+    /// media-core so PT 101 packets (already deduped to one-per-digit
+    /// on the first end-of-event frame) are published as
+    /// `Event::DtmfReceived { call_id, digit }` on the session-core
+    /// public API event stream. No-op if the global coordinator has
+    /// not been installed yet (e.g. isolated unit tests).
+    async fn install_dtmf_callback(&self, session_id: SessionId, dialog_id: DialogId) {
+        let Some(coordinator) = self.global_coordinator.read().await.clone() else {
+            tracing::debug!(
+                "DTMF callback install skipped for session {}: no global coordinator yet",
+                session_id.0
+            );
+            return;
+        };
+
+        let (tx, mut rx) = mpsc::channel::<rvoip_media_core::DtmfNotification>(32);
+        if let Err(e) = self.controller.set_dtmf_callback(dialog_id.clone(), tx).await {
+            tracing::warn!(
+                "Failed to register DTMF callback for session {} (dialog {}): {}",
+                session_id.0, dialog_id, e
+            );
+            return;
+        }
+
+        // Consumer task: forwards each DTMF notification from media-core
+        // onto the session-core API event bus. Exits cleanly when the
+        // sender end of the channel is dropped (media session stopped).
+        let sid = session_id.clone();
+        let did = dialog_id.clone();
+        tokio::spawn(async move {
+            while let Some(notification) = rx.recv().await {
+                let api_event = crate::api::events::Event::DtmfReceived {
+                    call_id: sid.clone(),
+                    digit: notification.digit,
+                };
+                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+                if let Err(e) = coordinator.publish(wrapped).await {
+                    tracing::warn!(
+                        "Failed to publish DtmfReceived for session {}: {}",
+                        sid.0, e
+                    );
+                } else {
+                    tracing::info!(
+                        "📢 Published DtmfReceived digit='{}' for session {}",
+                        notification.digit, sid.0
+                    );
+                }
+            }
+            tracing::debug!("DTMF bridge task exited for session {} (dialog {})", sid.0, did);
+        });
+    }
+
     /// Subscribe to receive decoded audio frames from RTP
     /// This is the equivalent of the old session-core's MediaControl::subscribe_to_audio_frames()
     pub async fn subscribe_to_audio_frames(&self, session_id: &SessionId) -> Result<crate::types::AudioFrameSubscriber> {
@@ -910,10 +986,52 @@ impl MediaAdapter {
         Ok(sdp)
     }
     
-    /// Send DTMF digit
-    pub async fn send_dtmf(&self, media_id: crate::types::MediaSessionId, digit: char) -> Result<()> {
-        // TODO: Implement DTMF sending
-        tracing::debug!("Sending DTMF digit {} for media session {:?}", digit, media_id);
+    /// Send DTMF digit (legacy `media_id` signature used by the state
+    /// machine's CallController path). Delegates to
+    /// [`Self::send_dtmf_rfc4733`] with a 100 ms duration.
+    pub async fn send_dtmf(
+        &self,
+        media_id: crate::types::MediaSessionId,
+        digit: char,
+    ) -> Result<()> {
+        // The state machine stores `media_id` as the stringified
+        // dialog id, so we can reconstruct the media-core DialogId
+        // directly rather than doing a mapping lookup.
+        let dialog_id = DialogId::new(media_id.0.clone());
+        self.controller
+            .send_dtmf_packet(&dialog_id, digit, 100)
+            .await
+            .map_err(|e| SessionError::MediaError(format!("DTMF send failed: {}", e)))?;
+        tracing::debug!("☎️  Queued DTMF '{}' for media_id {:?}", digit, dialog_id);
+        Ok(())
+    }
+
+    /// Send RFC 4733 DTMF by session id — preferred public API, used
+    /// by [`UnifiedCoordinator::send_dtmf`].
+    pub async fn send_dtmf_rfc4733(
+        &self,
+        session_id: &SessionId,
+        digit: char,
+        duration_ms: u32,
+    ) -> Result<()> {
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(format!(
+                "No media session for {}",
+                session_id.0
+            )))?
+            .clone();
+
+        self.controller
+            .send_dtmf_packet(&dialog_id, digit, duration_ms)
+            .await
+            .map_err(|e| SessionError::MediaError(format!("DTMF send failed: {}", e)))?;
+
+        tracing::info!(
+            "☎️  Queued DTMF '{}' for session {} (dialog {}, duration={}ms)",
+            digit, session_id.0, dialog_id, duration_ms
+        );
         Ok(())
     }
     
@@ -1227,6 +1345,7 @@ impl Clone for MediaAdapter {
             srtp_offered_suites: self.srtp_offered_suites.clone(),
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
             negotiated_srtp: self.negotiated_srtp.clone(),
+            global_coordinator: self.global_coordinator.clone(),
         }
     }
 }

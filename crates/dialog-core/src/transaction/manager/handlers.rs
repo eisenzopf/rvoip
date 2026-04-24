@@ -699,8 +699,30 @@ impl TransactionManager {
                 debug!("Received message from {}", source);
                 self.handle_message(message, source, destination).await
             },
+            TransportEvent::KeepAlivePongReceived { source, .. } => {
+                // RFC 5626 §3.5.1 pong arrived on a connection-oriented
+                // transport. Forward to dialog-core's outbound-flow
+                // monitor if it's subscribed; no-op otherwise.
+                if let Some(sender) = self.flow_event_sender.read().await.as_ref() {
+                    let _ = sender
+                        .try_send(crate::manager::outbound_flow::FlowTransportEvent::PongReceived { source });
+                }
+                Ok(())
+            }
+            TransportEvent::ConnectionClosed { remote_addr, .. } => {
+                // Connection-oriented transport lost its flow. Forward
+                // so outbound-flow monitor can emit OutboundFlowFailed
+                // and trigger re-REGISTER.
+                if let Some(sender) = self.flow_event_sender.read().await.as_ref() {
+                    let _ = sender.try_send(
+                        crate::manager::outbound_flow::FlowTransportEvent::ConnectionClosed { remote_addr },
+                    );
+                }
+                Ok(())
+            }
             _ => {
-                // We don't care about other transport events for now
+                // Other transport events (Error, shutdown variants) are
+                // handled elsewhere or deliberately ignored.
                 Ok(())
             }
         }

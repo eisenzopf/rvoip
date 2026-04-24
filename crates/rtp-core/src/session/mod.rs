@@ -156,9 +156,28 @@ pub enum RtpSessionEvent {
     RtcpReceiverReport {
         /// SSRC of the receiver
         ssrc: RtpSsrc,
-        
+
         /// Report blocks
         report_blocks: Vec<crate::packet::rtcp::RtcpReportBlock>,
+    },
+
+    /// RFC 4733 telephone-event (DTMF / fax / modem tone) received.
+    /// Forwarded verbatim from the transport-level `RtpEvent::DtmfEvent`.
+    /// Consumers should forward the digit up to the application only on
+    /// the frame where `end_of_event == true` — RFC 4733 §2.5.1.3
+    /// requires three final retransmissions so the last three frames
+    /// of each tone all set the `E` bit.
+    DtmfReceived {
+        /// Event code (0-15 for DTMF).
+        event: u8,
+        /// End-of-event `E` bit.
+        end_of_event: bool,
+        /// -dBm0 volume (0-63).
+        volume: u8,
+        /// Duration in RTP timestamp units.
+        duration: u16,
+        /// SSRC that sent the event.
+        ssrc: RtpSsrc,
     },
 }
 
@@ -594,6 +613,26 @@ impl RtpSession {
                         error!("Transport error: {}", e);
                         let _ = event_tx_recv.send(RtpSessionEvent::Error(e));
                     }
+                    Ok(crate::traits::RtpEvent::DtmfEvent {
+                        event,
+                        end_of_event,
+                        volume,
+                        duration,
+                        ssrc,
+                        ..
+                    }) => {
+                        // RFC 4733: forward as a typed session event so
+                        // media-core's RTP handler can bubble the digit
+                        // up to session-core without re-parsing the
+                        // 4-byte body.
+                        let _ = event_tx_recv.send(RtpSessionEvent::DtmfReceived {
+                            event,
+                            end_of_event,
+                            volume,
+                            duration,
+                            ssrc,
+                        });
+                    }
                     Err(e) => {
                         debug!("Transport event channel error: {}", e);
                     }
@@ -702,25 +741,35 @@ impl RtpSession {
     
     /// Send an RTP packet with payload
     pub async fn send_packet(&mut self, timestamp: RtpTimestamp, payload: Bytes, marker: bool) -> Result<()> {
-        // Create RTP header
+        self.send_packet_with_pt(timestamp, payload, marker, self.config.payload_type).await
+    }
+
+    /// Send an RTP packet overriding the configured payload type.
+    ///
+    /// Needed for RFC 4733 telephone-event (DTMF) transmission — the
+    /// session's `config.payload_type` is the audio codec PT (0/8/etc),
+    /// but DTMF rides on a distinct PT (typically 101). All other
+    /// fields (SSRC, marker, timestamp) follow the same rules as
+    /// [`send_packet`](Self::send_packet).
+    pub async fn send_packet_with_pt(
+        &mut self,
+        timestamp: RtpTimestamp,
+        payload: Bytes,
+        marker: bool,
+        payload_type: u8,
+    ) -> Result<()> {
         let mut header = RtpHeader::new(
-            self.config.payload_type,
+            payload_type,
             0, // Sequence number will be set by scheduler
             timestamp,
             self.ssrc,
         );
-        
-        // Set marker bit if needed
         header.marker = marker;
-        
-        // Create packet
         let packet = RtpPacket::new(header, payload);
-        
-        // If using scheduler, schedule the packet
+
         if let Some(scheduler) = &mut self.scheduler {
             scheduler.schedule_packet(packet)
         } else {
-            // Otherwise send directly
             self.sender.send(packet)
                 .await
                 .map_err(|_| Error::SessionError("Failed to send packet".to_string()))

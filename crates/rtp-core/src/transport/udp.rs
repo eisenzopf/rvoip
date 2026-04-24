@@ -278,11 +278,45 @@ impl UdpRtpTransport {
                                            packet.header.ssrc,
                                            packet.header.sequence_number,
                                            packet.header.timestamp);
-                                    
+
                                     // Debug: Log SSRC demultiplexing info
                                     debug!("SSRC demultiplexing: Forwarding packet with SSRC={:08x}, seq={}, payload size={} bytes",
                                            packet.header.ssrc, packet.header.sequence_number, packet.payload.len());
-                                    
+
+                                    // RFC 4733: PT 101 (by default) is `telephone-event` —
+                                    // DTMF tones carried as RTP events rather than audio
+                                    // samples. Decode the 4-byte body inline and emit a
+                                    // typed `DtmfEvent` instead of a generic
+                                    // `MediaReceived`, so the media layer doesn't have
+                                    // to re-parse and doesn't try to feed the bytes to
+                                    // a PCMU/PCMA/Opus decoder. Oversized payloads are
+                                    // tolerated per RFC 4733's forward-compat clause
+                                    // (read only first 4 bytes).
+                                    if packet.header.payload_type == 101 && packet.payload.len() >= 4 {
+                                        let p = &packet.payload[..4];
+                                        let event = p[0];
+                                        let byte1 = p[1];
+                                        let end_of_event = (byte1 & 0b1000_0000) != 0;
+                                        let volume = byte1 & 0b0011_1111;
+                                        let duration = u16::from_be_bytes([p[2], p[3]]);
+                                        let dtmf = RtpEvent::DtmfEvent {
+                                            event,
+                                            end_of_event,
+                                            volume,
+                                            duration,
+                                            source: addr,
+                                            ssrc: packet.header.ssrc,
+                                        };
+                                        if event_tx.receiver_count() > 0 {
+                                            if let Err(e) = event_tx.send(dtmf) {
+                                                warn!("Failed to send DTMF event: {}", e);
+                                            }
+                                        } else {
+                                            let _ = event_tx.send(dtmf);
+                                        }
+                                        continue;
+                                    }
+
                                     // Create RTP event
                                     let event = RtpEvent::MediaReceived {
                                         payload_type: packet.header.payload_type,
@@ -878,6 +912,73 @@ mod tests {
         }
     }
     
+    #[tokio::test]
+    async fn test_pt101_dispatch_as_dtmf_event() {
+        // RFC 4733: payload-type 101 should surface as `RtpEvent::DtmfEvent`
+        // rather than a generic `MediaReceived`, so media-core doesn't
+        // try to feed DTMF bytes through a PCMU/Opus decoder.
+        let config1 = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some("dtmf_sender".to_string()),
+            use_port_allocator: false,
+        };
+        let config2 = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some("dtmf_receiver".to_string()),
+            use_port_allocator: false,
+        };
+        let sender = UdpRtpTransport::new(config1).await.unwrap();
+        let receiver = UdpRtpTransport::new(config2).await.unwrap();
+
+        let mut events = receiver.subscribe();
+
+        // Build a 4-byte RFC 4733 telephone-event payload encoding
+        // digit '5' (event=5), end-of-event=true, volume=10, duration=800.
+        let payload = Bytes::from_static(&[
+            0x05,            // event=5 ('5')
+            0x80 | 0x0A,     // E=1 | volume=10 (R bit = 0)
+            0x03, 0x20,      // duration=800
+        ]);
+        let header = RtpHeader::new(101, 1000, 0xAABBCCDD, 0x12345678);
+        let packet = RtpPacket::new(header, payload);
+
+        let recv_addr = receiver.local_rtp_addr().unwrap();
+        sender.send_rtp(&packet, recv_addr).await.unwrap();
+
+        // Expect DtmfEvent, not MediaReceived.
+        let evt = tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            events.recv(),
+        )
+        .await
+        .expect("event must arrive")
+        .expect("broadcast channel open");
+
+        match evt {
+            RtpEvent::DtmfEvent {
+                event,
+                end_of_event,
+                volume,
+                duration,
+                ssrc,
+                ..
+            } => {
+                assert_eq!(event, 5);
+                assert!(end_of_event, "E bit set");
+                assert_eq!(volume, 10);
+                assert_eq!(duration, 800);
+                assert_eq!(ssrc, 0x12345678);
+            }
+            other => panic!("expected DtmfEvent, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn test_separate_rtcp_socket_creation() {
         let config = RtpTransportConfig {

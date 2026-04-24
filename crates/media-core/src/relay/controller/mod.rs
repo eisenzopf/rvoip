@@ -86,6 +86,22 @@ pub use audio_generation::{AudioSource, AudioTransmitterConfig};
 use types::RtpSessionWrapper;
 use audio_generation::{AudioGenerator, AudioTransmitter};
 
+/// RFC 4733 DTMF event delivered from media-core to session-core.
+#[derive(Debug, Clone, Copy)]
+pub struct DtmfNotification {
+    /// Decoded digit character ('0'-'9', '*', '#', 'A'-'D'). Unknown
+    /// event codes (reserved for future use / fax / modem tones) are
+    /// mapped to `'?'` so the callback consumer can choose to ignore.
+    pub digit: char,
+    /// Duration of the event at the time we observed `E=1`, converted
+    /// from RTP timestamp units to milliseconds assuming the standard
+    /// 8 kHz telephone-event clock.
+    pub duration_ms: u32,
+    /// Sending SSRC — for b2bua disambiguation when multiple streams
+    /// share a socket.
+    pub ssrc: u32,
+}
+
 /// Media Session Controller for managing media sessions and conference audio mixing
 pub struct MediaSessionController {
     /// Active media sessions indexed by dialog ID
@@ -133,6 +149,12 @@ pub struct MediaSessionController {
     
     /// Audio frame callbacks for sending decoded frames to session-core
     pub(super) audio_frame_callbacks: Arc<RwLock<HashMap<DialogId, mpsc::Sender<AudioFrame>>>>,
+
+    /// RFC 4733 DTMF callbacks for sending decoded digits to
+    /// session-core. Fired once per digit (on the first observed
+    /// end-of-event frame), deduping the two extra RFC 4733 §2.5.1.3
+    /// retransmissions on the sender side.
+    pub(super) dtmf_callbacks: Arc<RwLock<HashMap<DialogId, mpsc::Sender<DtmfNotification>>>>,
     
     /// Codec mapper for payload type resolution
     pub(super) codec_mapper: Arc<CodecMapper>,
@@ -221,6 +243,7 @@ impl MediaSessionController {
             g711_codec,
             simd_processor,
             audio_frame_callbacks: Arc::new(RwLock::new(HashMap::new())),
+            dtmf_callbacks: Arc::new(RwLock::new(HashMap::new())),
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::new()),
@@ -376,6 +399,7 @@ impl MediaSessionController {
             g711_codec,
             simd_processor,
             audio_frame_callbacks: Arc::new(RwLock::new(HashMap::new())),
+            dtmf_callbacks: Arc::new(RwLock::new(HashMap::new())),
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::new()),
@@ -749,12 +773,31 @@ impl MediaSessionController {
         info!("🔊 Set audio frame callback for dialog: {}", dialog_id);
         Ok(())
     }
-    
+
     /// Remove audio frame callback for a dialog
     pub async fn remove_audio_frame_callback(&self, dialog_id: &DialogId) -> Result<()> {
         let mut callbacks = self.audio_frame_callbacks.write().await;
         if callbacks.remove(dialog_id).is_some() {
             debug!("🔇 Removed audio frame callback for dialog: {}", dialog_id);
+        }
+        Ok(())
+    }
+
+    /// Set RFC 4733 DTMF callback for a dialog. The callback fires once
+    /// per digit (on the first observed `E=1` frame), so session-core
+    /// can surface `Event::DtmfReceived` without dedup logic.
+    pub async fn set_dtmf_callback(&self, dialog_id: DialogId, sender: mpsc::Sender<DtmfNotification>) -> Result<()> {
+        let mut callbacks = self.dtmf_callbacks.write().await;
+        callbacks.insert(dialog_id.clone(), sender);
+        info!("☎️  Set DTMF callback for dialog: {}", dialog_id);
+        Ok(())
+    }
+
+    /// Remove RFC 4733 DTMF callback for a dialog.
+    pub async fn remove_dtmf_callback(&self, dialog_id: &DialogId) -> Result<()> {
+        let mut callbacks = self.dtmf_callbacks.write().await;
+        if callbacks.remove(dialog_id).is_some() {
+            debug!("☎️  Removed DTMF callback for dialog: {}", dialog_id);
         }
         Ok(())
     }
@@ -780,7 +823,14 @@ impl MediaSessionController {
         expected_payload_type: u8,
     ) {
         let audio_frame_callbacks = self.audio_frame_callbacks.clone();
+        let dtmf_callbacks = self.dtmf_callbacks.clone();
         let codec_mapper = self.codec_mapper.clone();
+
+        // RFC 4733 §2.5.1.3 sends three end-of-event retransmits per
+        // tone. Dedup here so the callback fires once per digit: track
+        // the (ssrc, duration) of the last delivered event per dialog,
+        // and suppress subsequent events that match.
+        let dtmf_last_delivered: Arc<RwLock<Option<(u32, u16)>>> = Arc::new(RwLock::new(None));
         
         // Create G.711 codecs outside the loop for efficiency
         let mut g711_ulaw = G711Codec::mu_law(8000, 1).expect("Failed to create μ-law codec");
@@ -883,6 +933,68 @@ impl MediaSessionController {
                             }
                             rtp_core::session::RtpSessionEvent::NewStreamDetected { ssrc, .. } => {
                                 info!("🎵 New RTP stream detected for dialog {}: SSRC={:08x}", dialog_id, ssrc);
+                            }
+                            rtp_core::session::RtpSessionEvent::DtmfReceived {
+                                event,
+                                end_of_event,
+                                duration,
+                                ssrc: dtmf_ssrc,
+                                ..
+                            } => {
+                                // RFC 4733 §2.5.1.3: fire up to the
+                                // application only on the first E=1
+                                // frame per digit; the two retransmits
+                                // share `(ssrc, duration)` with the
+                                // first, so we dedupe on that pair.
+                                if !end_of_event {
+                                    continue;
+                                }
+                                {
+                                    let mut last = dtmf_last_delivered.write().await;
+                                    if *last == Some((dtmf_ssrc, duration)) {
+                                        continue;
+                                    }
+                                    *last = Some((dtmf_ssrc, duration));
+                                }
+                                let digit = match event {
+                                    0..=9 => (b'0' + event) as char,
+                                    10 => '*',
+                                    11 => '#',
+                                    12..=15 => (b'A' + (event - 12)) as char,
+                                    _ => '?',
+                                };
+                                // RFC 4733 telephone-event clock is
+                                // 8 kHz by default; one timestamp tick
+                                // is 1/8 ms, hence / 8.
+                                let duration_ms = (duration as u32) / 8;
+                                let notification = DtmfNotification {
+                                    digit,
+                                    duration_ms,
+                                    ssrc: dtmf_ssrc,
+                                };
+                                let callbacks = dtmf_callbacks.read().await;
+                                if let Some(sender) = callbacks.get(&dialog_id) {
+                                    match sender.try_send(notification) {
+                                        Ok(_) => info!(
+                                            "☎️  Delivered DTMF '{}' (duration={}ms) for dialog {}",
+                                            digit, duration_ms, dialog_id
+                                        ),
+                                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                            warn!(
+                                                "DTMF callback buffer full for dialog {}; dropping '{}'",
+                                                dialog_id, digit
+                                            );
+                                        }
+                                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                                            debug!(
+                                                "DTMF callback channel closed for dialog {}; '{}' dropped",
+                                                dialog_id, digit
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    debug!("No DTMF callback registered for dialog {}; '{}' dropped", dialog_id, digit);
+                                }
                             }
                             _ => {
                                 // Other events we don't need to handle

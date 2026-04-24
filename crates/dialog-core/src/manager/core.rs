@@ -14,8 +14,9 @@ use rvoip_sip_core::{Request, Response, Method};
 
 use crate::dialog::{DialogId, Dialog, DialogState};
 use crate::errors::{DialogError, DialogResult};
-use crate::events::{DialogEvent, SessionCoordinationEvent};
+use crate::events::{DialogEvent, FlowFailureReason, SessionCoordinationEvent};
 use crate::config::DialogManagerConfig;
+use crate::manager::outbound_flow::OutboundFlow;
 use crate::subscription::SubscriptionManager;
 
 
@@ -117,27 +118,42 @@ pub struct DialogManager {
     pub(crate) service_route_by_aor:
         Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<rvoip_sip_core::types::uri::Uri>>>>,
 
-    /// Abort handles for RFC 5626 §3.5.1 CRLFCRLF keep-alive tasks,
-    /// keyed by `(AoR, reg-id, instance-id)` per RFC 5626 §4.2.
+    /// RFC 5626 §3.5.1 outbound-flow state machines, keyed by
+    /// `(AoR, reg-id, instance-id)` per RFC 5626 §4.2.
     ///
-    /// Each successful outbound-aware REGISTER 2xx spawns one task that
-    /// pings the established flow every
+    /// Each successful outbound-aware REGISTER 2xx spawns one task (see
+    /// [`Self::outbound_flow_tasks`]) that pings every
     /// [`outbound_keepalive_interval`](Self::outbound_keepalive_interval)
-    /// seconds by calling `Transport::send_raw(dest, "\r\n\r\n")`. The
-    /// task silently exits on the first send failure (flow gone) —
-    /// this is the Phase 2b-min "stateless ping" shape; Phase 2c will
-    /// upgrade it into a stateful `OutboundFlow` with pong-timeout
-    /// tracking and failure-driven re-registration.
+    /// and monitors the pong window. A pong timeout, `ConnectionClosed`
+    /// event, or send error flips the [`OutboundFlow`] into
+    /// `FlowState::Failed` and emits a
+    /// [`SessionCoordinationEvent::OutboundFlowFailed`] (once) so
+    /// session-core can trigger a fresh REGISTER (RFC 5626 §4.4.1).
     ///
-    /// Idempotent: starting a ping task for a key that already has one
-    /// aborts the previous task and replaces it.
-    pub(crate) outbound_ping_tasks:
+    /// Idempotent: starting a flow for a key that already has one stops
+    /// the prior flow first.
+    pub(crate) outbound_flows:
+        Arc<DashMap<(String, u32, String), Arc<OutboundFlow>>>,
+
+    /// Abort handles for the spawned ping/monitor task of each entry in
+    /// [`Self::outbound_flows`]. Split from the flow state so the state
+    /// can be inspected (e.g. by pong/close handlers) without touching
+    /// the task handle.
+    pub(crate) outbound_flow_tasks:
         Arc<DashMap<(String, u32, String), tokio::task::AbortHandle>>,
 
-    /// Keep-alive interval for RFC 5626 outbound ping tasks, threaded
-    /// from `session-core::Config::outbound_keepalive_interval_secs`.
-    /// `None` disables keep-alive entirely — `start_outbound_ping`
-    /// becomes a no-op.
+    /// Secondary index mapping destination `SocketAddr` →
+    /// `(aor, reg_id, instance)` flow keys, populated when
+    /// `start_outbound_ping` installs a flow. Lets transport-side events
+    /// (`KeepAlivePongReceived`, `ConnectionClosed`) — which arrive
+    /// keyed only by IP:port — locate the flow(s) to update in O(1).
+    pub(crate) flow_by_destination:
+        Arc<DashMap<SocketAddr, Vec<(String, u32, String)>>>,
+
+    /// Keep-alive interval for RFC 5626 outbound flows, threaded from
+    /// `session-core::Config::outbound_keepalive_interval_secs`. `None`
+    /// disables keep-alive entirely — `start_outbound_ping` becomes a
+    /// no-op.
     pub(crate) outbound_keepalive_interval:
         Arc<std::sync::RwLock<Option<std::time::Duration>>>,
 }
@@ -193,7 +209,9 @@ impl DialogManager {
             session_refresh_tasks: Arc::new(DashMap::new()),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
             service_route_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            outbound_ping_tasks: Arc::new(DashMap::new()),
+            outbound_flows: Arc::new(DashMap::new()),
+            outbound_flow_tasks: Arc::new(DashMap::new()),
+            flow_by_destination: Arc::new(DashMap::new()),
             outbound_keepalive_interval: Arc::new(std::sync::RwLock::new(None)),
         })
     }
@@ -217,19 +235,19 @@ impl DialogManager {
             .and_then(|g| *g)
     }
 
-    /// Spawn (or replace) a RFC 5626 §3.5.1 CRLFCRLF keep-alive ping
-    /// task targeting `destination` via the DialogManager's transport.
+    /// Spawn (or replace) a RFC 5626 §3.5.1 CRLFCRLF keep-alive flow
+    /// targeting `destination` via the DialogManager's transport.
     ///
     /// `flow_key = (AoR, reg-id, instance-id)` is the outbound flow
     /// identity per RFC 5626 §4.2; a second call for the same key
-    /// aborts and replaces the prior task (idempotent refresh on
-    /// re-REGISTER).
+    /// stops the prior flow first (idempotent refresh on re-REGISTER).
     ///
-    /// This is the Phase 2b-min **stateless** shape: the task pings at
-    /// the configured interval and silently terminates on the first
-    /// send failure. Phase 2c will replace this with an `OutboundFlow`
-    /// state machine that tracks pong timeouts and emits flow-failure
-    /// events.
+    /// Phase 2c: the spawned task drives an [`OutboundFlow`] state
+    /// machine — after each ping it arms a pong deadline, and on
+    /// pong-timeout / connection-closed / send-error it emits a single
+    /// [`SessionCoordinationEvent::OutboundFlowFailed`] so session-core
+    /// can trigger a fresh REGISTER without waiting for registration
+    /// expiry.
     ///
     /// No-op when `outbound_keepalive_interval` is `None`.
     pub fn start_outbound_ping(
@@ -244,62 +262,116 @@ impl DialogManager {
             return;
         }
 
-        // Pull the transport out of the transaction manager. `send_raw`
-        // bypasses transaction retransmit logic by design — keep-alive
-        // frames are not SIP messages.
+        // Replace any prior flow for this key (idempotent on re-REGISTER).
+        self.stop_outbound_ping(&flow_key);
+
+        let flow = Arc::new(OutboundFlow::new(flow_key.clone(), destination, interval));
         let transport = self.transaction_manager.transport().clone();
-        let dest = destination;
-        let key_for_log = flow_key.clone();
+        let manager = self.clone();
+        let flow_for_task = flow.clone();
 
         let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(interval);
-            // First tick fires immediately; skip so the first ping goes
-            // out at `interval` after REGISTER success, not right away.
-            ticker.tick().await;
-            loop {
-                ticker.tick().await;
-                match transport
-                    .send_raw(dest, bytes::Bytes::from_static(b"\r\n\r\n"))
-                    .await
-                {
-                    Ok(()) => {
-                        tracing::trace!(
-                            flow_key = ?key_for_log,
-                            dest = %dest,
-                            "RFC 5626 keep-alive ping sent"
-                        );
-                    }
-                    Err(e) => {
-                        // Flow gone (connection closed or never existed).
-                        // Phase 2b-min stops here; Phase 2c will emit a
-                        // FlowFailed event that triggers re-REGISTER.
-                        tracing::debug!(
-                            flow_key = ?key_for_log,
-                            dest = %dest,
-                            error = %e,
-                            "RFC 5626 keep-alive send failed; stopping ping task"
-                        );
-                        return;
-                    }
-                }
-            }
+            run_outbound_flow_loop(manager, flow_for_task, transport).await;
         })
         .abort_handle();
 
-        // Replace any prior task for this key (idempotent on re-REGISTER).
-        if let Some((_, prior)) = self.outbound_ping_tasks.remove(&flow_key) {
-            prior.abort();
-        }
-        self.outbound_ping_tasks.insert(flow_key, handle);
+        self.outbound_flows.insert(flow_key.clone(), flow);
+        self.outbound_flow_tasks.insert(flow_key.clone(), handle);
+        // Secondary index for transport-event lookups by destination.
+        self.flow_by_destination
+            .entry(destination)
+            .or_insert_with(Vec::new)
+            .push(flow_key);
     }
 
-    /// Stop (and forget) the RFC 5626 keep-alive task for this flow
-    /// key, if any. Used by explicit unregistration paths and by
-    /// DialogManager shutdown.
+    /// Stop (and forget) the RFC 5626 keep-alive flow for this key, if
+    /// any. Aborts the monitor task and tears down both the primary
+    /// flow map and the destination secondary index. Does **not** emit
+    /// an `OutboundFlowFailed` event — explicit teardown is not a flow
+    /// failure; callers that want the failure event must call
+    /// `mark_failed` on the `OutboundFlow` first.
     pub fn stop_outbound_ping(&self, flow_key: &(String, u32, String)) {
-        if let Some((_, handle)) = self.outbound_ping_tasks.remove(flow_key) {
+        if let Some((_, handle)) = self.outbound_flow_tasks.remove(flow_key) {
             handle.abort();
         }
+        if let Some((_, flow)) = self.outbound_flows.remove(flow_key) {
+            if let Some(mut entry) = self.flow_by_destination.get_mut(&flow.destination) {
+                entry.value_mut().retain(|k| k != flow_key);
+            }
+            // Drop empty destination buckets so the secondary index
+            // doesn't leak entries across many reg/dereg cycles.
+            self.flow_by_destination
+                .remove_if(&flow.destination, |_, v| v.is_empty());
+        }
+    }
+
+    /// Transport reported `KeepAlivePongReceived` from `source`. Update
+    /// every outbound flow that's aimed at that peer so the pong is
+    /// treated as an answer to the in-flight ping (if any). No-op when
+    /// no flow is registered for the address.
+    pub async fn on_pong_received(&self, source: SocketAddr) {
+        let keys: Vec<(String, u32, String)> = match self.flow_by_destination.get(&source) {
+            Some(entry) => entry.value().clone(),
+            None => return,
+        };
+        for key in keys {
+            if let Some(flow) = self.outbound_flows.get(&key).map(|e| e.value().clone()) {
+                flow.on_pong().await;
+                tracing::trace!(
+                    flow_key = ?key, src = %source,
+                    "RFC 5626 pong received — flow reset to Idle"
+                );
+            }
+        }
+    }
+
+    /// Transport reported `ConnectionClosed` to `remote_addr`. Every
+    /// outbound flow aimed at that peer is marked failed (once), emits
+    /// an `OutboundFlowFailed` event with `ConnectionClosed` reason,
+    /// and has its monitor task torn down. The peer reconnect is
+    /// session-core's problem (trigger re-REGISTER) — dialog-core only
+    /// reports the flow death.
+    pub async fn on_connection_closed(&self, remote_addr: SocketAddr) {
+        let keys: Vec<(String, u32, String)> = match self.flow_by_destination.get(&remote_addr) {
+            Some(entry) => entry.value().clone(),
+            None => return,
+        };
+        for key in keys {
+            let flow = match self.outbound_flows.get(&key).map(|e| e.value().clone()) {
+                Some(f) => f,
+                None => continue,
+            };
+            if flow.mark_failed().await {
+                tracing::info!(
+                    flow_key = ?key, dest = %remote_addr,
+                    "RFC 5626 connection closed — flow failed"
+                );
+                self.emit_outbound_flow_failed(&flow, FlowFailureReason::ConnectionClosed)
+                    .await;
+            }
+            // Explicit stop — the monitor task would have exited on its
+            // own once it noticed `Failed`, but we don't need to wait.
+            self.stop_outbound_ping(&key);
+        }
+    }
+
+    /// Emit `SessionCoordinationEvent::OutboundFlowFailed` for a flow
+    /// that just transitioned to `FlowState::Failed`. Callers are
+    /// responsible for the idempotency check — only the thread that
+    /// observed `mark_failed() == true` should call this.
+    pub(crate) async fn emit_outbound_flow_failed(
+        &self,
+        flow: &OutboundFlow,
+        reason: FlowFailureReason,
+    ) {
+        let (aor, reg_id, instance) = flow.key.clone();
+        self.emit_session_coordination_event(SessionCoordinationEvent::OutboundFlowFailed {
+            aor,
+            reg_id,
+            instance,
+            reason,
+        })
+        .await;
     }
 
     /// Create a new dialog manager with global transaction events (RECOMMENDED)
@@ -354,7 +426,9 @@ impl DialogManager {
             session_refresh_tasks: Arc::new(DashMap::new()),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
             service_route_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            outbound_ping_tasks: Arc::new(DashMap::new()),
+            outbound_flows: Arc::new(DashMap::new()),
+            outbound_flow_tasks: Arc::new(DashMap::new()),
+            flow_by_destination: Arc::new(DashMap::new()),
             outbound_keepalive_interval: Arc::new(std::sync::RwLock::new(None)),
         };
 
@@ -363,7 +437,33 @@ impl DialogManager {
         tokio::spawn(async move {
             event_processor.process_global_transaction_events(transaction_events).await;
         });
-        
+
+        // Wire up the RFC 5626 flow-event channel: the transaction
+        // manager forwards transport-side pong + connection-closed
+        // events into `flow_rx`; a dedicated consumer task then drives
+        // the per-flow state machines in the dialog manager. The
+        // channel is modest (64) — one event per flow per ping or
+        // close, and the consumer is lightweight.
+        let (flow_tx, mut flow_rx) =
+            mpsc::channel::<crate::manager::outbound_flow::FlowTransportEvent>(64);
+        manager.transaction_manager.set_flow_event_sender(flow_tx).await;
+        let flow_consumer = manager.clone();
+        tokio::spawn(async move {
+            while let Some(event) = flow_rx.recv().await {
+                match event {
+                    crate::manager::outbound_flow::FlowTransportEvent::PongReceived { source } => {
+                        flow_consumer.on_pong_received(source).await;
+                    }
+                    crate::manager::outbound_flow::FlowTransportEvent::ConnectionClosed {
+                        remote_addr,
+                    } => {
+                        flow_consumer.on_connection_closed(remote_addr).await;
+                    }
+                }
+            }
+            debug!("RFC 5626 flow-event consumer channel closed");
+        });
+
         Ok(manager)
     }
     
@@ -711,6 +811,18 @@ impl DialogManager {
     pub async fn stop(&self) -> DialogResult<()> {
         info!("DialogManager stopping gracefully - responding to shutdown event");
         
+        // Step 0: Abort all RFC 5626 outbound-flow monitor tasks so
+        // they don't try to emit `OutboundFlowFailed` against a
+        // transport that's about to be torn down.
+        let flow_keys: Vec<(String, u32, String)> = self
+            .outbound_flow_tasks
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        for key in flow_keys {
+            self.stop_outbound_ping(&key);
+        }
+
         // Step 1: Shutdown the transaction manager
         // Note: Transport should already be stopped by now via events
         info!("Shutting down transaction manager...");
@@ -1247,10 +1359,305 @@ impl DialogManager {
     
     pub async fn find_transaction_by_message(&self, message: &rvoip_sip_core::Message) -> DialogResult<Option<TransactionKey>> {
         debug!("Finding transaction for message using transaction-core");
-        
+
         self.transaction_manager.find_transaction_by_message(message).await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to find transaction by message: {}", e),
             })
     }
-} 
+}
+
+/// Drives a single [`OutboundFlow`] for its lifetime.
+///
+/// The loop alternates between sending CRLFCRLF pings on the keep-alive
+/// interval and waiting for the per-ping pong deadline. Transport-side
+/// events (`KeepAlivePongReceived`, `ConnectionClosed`) arrive out of
+/// band via [`DialogManager::on_pong_received`] /
+/// [`DialogManager::on_connection_closed`] and flip state on the shared
+/// [`OutboundFlow`]; this task observes the updates when it next wakes
+/// on the deadline arm.
+///
+/// The task exits — and cleans up its own registration in the manager's
+/// maps — when it observes failure or when the manager aborts it.
+async fn run_outbound_flow_loop(
+    manager: DialogManager,
+    flow: Arc<OutboundFlow>,
+    transport: Arc<dyn rvoip_sip_transport::Transport>,
+) {
+    use bytes::Bytes;
+
+    let mut ticker = tokio::time::interval(flow.interval);
+    // The first tick fires immediately; skip it so the first ping goes
+    // out at `interval` after REGISTER success, not right away (avoids
+    // a thundering herd on bulk re-REGISTER).
+    ticker.tick().await;
+
+    // Pong deadline. Parked far in the future when no ping is
+    // outstanding so the select arm effectively waits forever; reset to
+    // `now + pong_timeout` after every successful ping.
+    //
+    // 365 days is well below `Instant` overflow on every platform we
+    // support and low enough that pinning it here is harmless.
+    let far_future = || tokio::time::Instant::now() + std::time::Duration::from_secs(365 * 24 * 3600);
+    let sleep = tokio::time::sleep_until(far_future());
+    tokio::pin!(sleep);
+    let mut deadline_armed = false;
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                match transport
+                    .send_raw(flow.destination, Bytes::from_static(b"\r\n\r\n"))
+                    .await
+                {
+                    Ok(()) => {
+                        flow.record_ping_sent().await;
+                        tracing::trace!(
+                            flow_key = ?flow.key, dest = %flow.destination,
+                            "RFC 5626 keep-alive ping sent"
+                        );
+                        let when = tokio::time::Instant::now() + flow.pong_timeout;
+                        sleep.as_mut().reset(when);
+                        deadline_armed = true;
+                    }
+                    Err(e) => {
+                        tracing::debug!(
+                            flow_key = ?flow.key, dest = %flow.destination, error = %e,
+                            "RFC 5626 keep-alive send failed — marking flow failed"
+                        );
+                        if flow.mark_failed().await {
+                            manager
+                                .emit_outbound_flow_failed(&flow, FlowFailureReason::SendError)
+                                .await;
+                        }
+                        break;
+                    }
+                }
+            }
+            _ = &mut sleep, if deadline_armed => {
+                // Pong deadline fired. Re-check state under the flow's
+                // internal locks — if a pong arrived during the wait
+                // it already reset state to `Idle` and we just disarm.
+                if flow.is_pong_overdue().await {
+                    tracing::info!(
+                        flow_key = ?flow.key, dest = %flow.destination,
+                        pong_timeout_ms = flow.pong_timeout.as_millis() as u64,
+                        "RFC 5626 pong timeout — marking flow failed"
+                    );
+                    if flow.mark_failed().await {
+                        manager
+                            .emit_outbound_flow_failed(&flow, FlowFailureReason::PongTimeout)
+                            .await;
+                    }
+                    break;
+                }
+                sleep.as_mut().reset(far_future());
+                deadline_armed = false;
+            }
+        }
+    }
+
+    // Clean up both the primary flow and the secondary index so a
+    // future REGISTER 2xx for the same AoR can install a fresh flow.
+    // Safe if `stop_outbound_ping` already removed us concurrently.
+    manager.stop_outbound_ping(&flow.key);
+}
+
+#[cfg(test)]
+mod outbound_flow_handler_tests {
+    //! Tests for the `DialogManager` → `OutboundFlow` plumbing that
+    //! lives across `on_pong_received`, `on_connection_closed`, and the
+    //! `(outbound_flows, flow_by_destination)` pair. The state machine
+    //! itself is unit-tested in `super::outbound_flow::tests`; these
+    //! tests drive the handler entry points by pre-populating the maps
+    //! so we don't have to boot a real transport or spawn the ping
+    //! loop.
+    use super::*;
+    use crate::manager::outbound_flow::{FlowState, OutboundFlow};
+    use rvoip_sip_transport::error::Result as TransportResult;
+    use rvoip_sip_transport::{Transport, TransportEvent};
+    use std::net::SocketAddr;
+    use std::str::FromStr;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    struct NoopTransport {
+        addr: SocketAddr,
+        closed: AtomicBool,
+    }
+
+    impl NoopTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+                closed: AtomicBool::new(false),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for NoopTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(self.addr)
+        }
+        async fn send_message(
+            &self,
+            _m: rvoip_sip_core::Message,
+            _dst: SocketAddr,
+        ) -> TransportResult<()> {
+            Ok(())
+        }
+        async fn close(&self) -> TransportResult<()> {
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+    }
+
+    async fn make_manager() -> (DialogManager, mpsc::Receiver<SessionCoordinationEvent>) {
+        let transport = NoopTransport::new();
+        let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
+        let (tm, _events_rx) = TransactionManager::new(transport, transport_rx, Some(16))
+            .await
+            .expect("build TransactionManager");
+        let local = SocketAddr::from_str("127.0.0.1:5060").unwrap();
+        let manager = DialogManager::new(Arc::new(tm), local)
+            .await
+            .expect("build DialogManager");
+
+        // Install a legacy session-coordination channel so
+        // `emit_session_coordination_event` delivers into the test.
+        let (sc_tx, sc_rx) = mpsc::channel::<SessionCoordinationEvent>(16);
+        *manager.session_coordinator.write().await = Some(sc_tx);
+
+        (manager, sc_rx)
+    }
+
+    fn test_key(n: u8) -> (String, u32, String) {
+        (
+            format!("sip:alice{n}@example.com"),
+            1,
+            format!("urn:uuid:{n:032x}"),
+        )
+    }
+
+    fn dest_addr(port: u16) -> SocketAddr {
+        SocketAddr::from_str(&format!("127.0.0.1:{port}")).unwrap()
+    }
+
+    fn install_flow(
+        manager: &DialogManager,
+        key: (String, u32, String),
+        dest: SocketAddr,
+    ) -> Arc<OutboundFlow> {
+        let flow = Arc::new(OutboundFlow::new(key.clone(), dest, Duration::from_secs(25)));
+        manager.outbound_flows.insert(key.clone(), flow.clone());
+        manager
+            .flow_by_destination
+            .entry(dest)
+            .or_insert_with(Vec::new)
+            .push(key);
+        flow
+    }
+
+    #[tokio::test]
+    async fn on_pong_received_resets_existing_flow_state() {
+        let (manager, _rx) = make_manager().await;
+        let key = test_key(1);
+        let dest = dest_addr(5080);
+        let flow = install_flow(&manager, key.clone(), dest);
+        flow.record_ping_sent().await;
+        assert_eq!(flow.state().await, FlowState::AwaitingPong);
+
+        manager.on_pong_received(dest).await;
+
+        assert_eq!(flow.state().await, FlowState::Idle);
+    }
+
+    #[tokio::test]
+    async fn on_pong_received_is_noop_for_unknown_destination() {
+        let (manager, _rx) = make_manager().await;
+        let key = test_key(1);
+        let flow = install_flow(&manager, key.clone(), dest_addr(5081));
+        flow.record_ping_sent().await;
+
+        // A pong from a peer we don't have a flow for must not disturb
+        // the existing flow.
+        manager.on_pong_received(dest_addr(9999)).await;
+
+        assert_eq!(flow.state().await, FlowState::AwaitingPong);
+    }
+
+    #[tokio::test]
+    async fn on_connection_closed_emits_event_once_and_clears_maps() {
+        let (manager, mut rx) = make_manager().await;
+        let key = test_key(2);
+        let dest = dest_addr(5082);
+        let flow = install_flow(&manager, key.clone(), dest);
+
+        manager.on_connection_closed(dest).await;
+
+        // Exactly one OutboundFlowFailed for this key with
+        // `ConnectionClosed` reason.
+        let event = tokio::time::timeout(Duration::from_millis(200), rx.recv())
+            .await
+            .expect("event must arrive")
+            .expect("channel open");
+        match event {
+            SessionCoordinationEvent::OutboundFlowFailed {
+                aor,
+                reg_id,
+                instance,
+                reason,
+            } => {
+                assert_eq!(aor, key.0);
+                assert_eq!(reg_id, key.1);
+                assert_eq!(instance, key.2);
+                assert_eq!(reason, FlowFailureReason::ConnectionClosed);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        // Flow state flipped to Failed.
+        assert_eq!(flow.state().await, FlowState::Failed);
+
+        // Maps were cleared.
+        assert!(!manager.outbound_flows.contains_key(&key));
+        assert!(manager.flow_by_destination.get(&dest).is_none());
+
+        // Idempotent: a second close for the same destination must not
+        // emit another event (the flow is gone + state is Failed
+        // anyway).
+        manager.on_connection_closed(dest).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "no additional event after second close"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_outbound_ping_does_not_emit_failure_event() {
+        // Explicit teardown is not a flow failure; no event should fire.
+        let (manager, mut rx) = make_manager().await;
+        let key = test_key(3);
+        let dest = dest_addr(5083);
+        let _flow = install_flow(&manager, key.clone(), dest);
+
+        manager.stop_outbound_ping(&key);
+
+        assert!(!manager.outbound_flows.contains_key(&key));
+        assert!(manager.flow_by_destination.get(&dest).is_none());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), rx.recv())
+                .await
+                .is_err(),
+            "stop must not emit OutboundFlowFailed"
+        );
+    }
+}

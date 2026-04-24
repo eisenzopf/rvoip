@@ -458,6 +458,15 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                     crate::traits::RtpEvent::RtcpReceived { source, .. } => {
                         debug!("RtpEvent::RtcpReceived from {}", source);
                     },
+                    crate::traits::RtpEvent::DtmfEvent { source, event, end_of_event, .. } => {
+                        // RFC 4733 DTMF is surfaced on the transport
+                        // broadcast channel directly; the server-side
+                        // transport doesn't synthesize a MediaFrame.
+                        debug!(
+                            "RtpEvent::DtmfEvent from {} event={} end={}",
+                            source, event, end_of_event
+                        );
+                    },
                     crate::traits::RtpEvent::Error(e) => {
                         error!("Transport error: {}", e);
                     },

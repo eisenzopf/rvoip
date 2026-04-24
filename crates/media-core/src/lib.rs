@@ -111,6 +111,7 @@ pub use integration::{
 // Legacy exports (will be replaced in Phase 2)
 pub use codec::{Codec, CodecRegistry};
 pub use relay::{
+    DtmfNotification,
     MediaSessionController,
     MediaConfig,
     MediaSessionStatus,

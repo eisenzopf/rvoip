@@ -8,7 +8,9 @@
 //! NO OTHER MODULE should interact with the GlobalEventCoordinator directly.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use anyhow::Result;
+use dashmap::DashMap;
 use tokio::sync::mpsc;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::CrossCrateEvent;
@@ -19,6 +21,11 @@ use crate::adapters::{DialogAdapter, MediaAdapter};
 use crate::session_registry::SessionRegistry;
 use crate::types::DialogId;
 use tracing::{debug, info, error, warn};
+
+/// Window within which repeated RFC 5626 flow-failure events for the
+/// same AoR collapse to a single re-REGISTER. Matches the guidance in
+/// RFC 5626 §4.4.1 (flow recovery should not storm the registrar).
+const OUTBOUND_FLOW_REFRESH_DEBOUNCE: Duration = Duration::from_secs(1);
 
 /// Handler for processing cross-crate events in session-core
 #[derive(Clone)]
@@ -42,6 +49,13 @@ pub struct SessionCrossCrateEventHandler {
     /// Channel to send incoming call notifications
     incoming_call_tx: Option<mpsc::Sender<crate::types::IncomingCallInfo>>,
 
+    /// Last RFC 5626 `OutboundFlowFailed`-driven refresh per AoR, used
+    /// to debounce storms of pong-timeout / connection-closed events
+    /// (multiple transport signals can observe the same underlying
+    /// failure within a handful of milliseconds). Entries live
+    /// indefinitely — this map grows with the number of unique AoRs
+    /// the peer has ever registered, which in practice is 1.
+    outbound_flow_last_refresh: Arc<DashMap<String, Instant>>,
 }
 
 impl SessionCrossCrateEventHandler {
@@ -59,6 +73,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: None,
+            outbound_flow_last_refresh: Arc::new(DashMap::new()),
         }
     }
 
@@ -77,6 +92,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: Some(incoming_call_tx),
+            outbound_flow_last_refresh: Arc::new(DashMap::new()),
         }
     }
 
@@ -290,6 +306,11 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                     self.handle_ack_received(&event_str).await?;
                 } else if event_str.contains("NotifyReceived") {
                     self.handle_notify_received(&event_str).await?;
+                } else if event_str.contains("OutboundFlowFailed") {
+                    // RFC 5626 §4.4.1: keep-alive flow died — trigger a
+                    // fresh REGISTER for the AoR so the UA re-establishes
+                    // the flow without waiting for registration expiry.
+                    self.handle_outbound_flow_failed(&event_str).await?;
                 } else {
                     debug!("Unhandled dialog-to-session event: {}", event_str);
                 }
@@ -1052,6 +1073,83 @@ impl SessionCrossCrateEventHandler {
                 tracing::warn!("Failed to publish SessionRefreshed: {}", e);
             }
         });
+        Ok(())
+    }
+
+    /// RFC 5626 §4.4.1 — handle an OutboundFlowFailed event by triggering
+    /// a fresh REGISTER against the matching session. Debounced per AoR
+    /// over a 1s window so storms of pong-timeout + connection-closed
+    /// events collapse to a single re-REGISTER, rather than hammering
+    /// the registrar.
+    async fn handle_outbound_flow_failed(&self, event_str: &str) -> Result<()> {
+        let Some(aor) = self.extract_field(event_str, "aor: \"") else {
+            warn!("Could not extract aor from OutboundFlowFailed event");
+            return Ok(());
+        };
+        let reason = self
+            .extract_field(event_str, "reason: \"")
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        // Debounce: drop if we already kicked off a refresh for this
+        // AoR within the last second. Otherwise stamp the refresh time
+        // *before* dispatching so a parallel event racing in on the
+        // same channel observes it.
+        let now = Instant::now();
+        if let Some(prev) = self
+            .outbound_flow_last_refresh
+            .get(&aor)
+            .map(|e| *e.value())
+        {
+            if now.duration_since(prev) < OUTBOUND_FLOW_REFRESH_DEBOUNCE {
+                debug!(
+                    "OutboundFlowFailed (aor={}, reason={}) debounced — prior refresh {}ms ago",
+                    aor,
+                    reason,
+                    now.duration_since(prev).as_millis()
+                );
+                return Ok(());
+            }
+        }
+        self.outbound_flow_last_refresh.insert(aor.clone(), now);
+
+        // Find the registration session whose local_uri matches the
+        // AoR. Registrations are rare and typically 1 per coordinator,
+        // so a linear scan is fine.
+        let matching_session_id = self
+            .state_machine
+            .store
+            .sessions
+            .iter()
+            .find_map(|entry| {
+                let state = entry.value();
+                match state.local_uri.as_deref() {
+                    Some(uri) if uri == aor.as_str() => Some(entry.key().clone()),
+                    _ => None,
+                }
+            });
+
+        let Some(session_id) = matching_session_id else {
+            warn!(
+                "OutboundFlowFailed (aor={}) but no registration session found — dropping",
+                aor
+            );
+            return Ok(());
+        };
+
+        info!(
+            "🔄 OutboundFlowFailed (aor={}, reason={}) — triggering re-REGISTER for session {}",
+            aor, reason, session_id
+        );
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::RefreshRegistration)
+            .await
+        {
+            warn!(
+                "Failed to dispatch RefreshRegistration for session {} after flow failure: {}",
+                session_id, e
+            );
+        }
         Ok(())
     }
 

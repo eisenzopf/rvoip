@@ -63,11 +63,37 @@ pub enum RtpEvent {
     RtcpReceived {
         /// RTCP data
         data: Bytes,
-        
+
         /// Source address
         source: SocketAddr,
     },
-    
+
+    /// RFC 4733 telephone-event received (DTMF / fax / modem tone).
+    ///
+    /// Emitted by the UDP receive loop whenever a packet arrives with
+    /// the negotiated telephone-event payload type (PT 101 by default).
+    /// Payload is pre-decoded into typed fields so the media layer
+    /// doesn't re-parse; dedup across redundant retransmits (RFC 4733
+    /// §2.5.1.3) is left to the consumer — the recommended shape is to
+    /// forward the digit up to the application only on the frame where
+    /// `end_of_event == true` (key-release semantics).
+    DtmfEvent {
+        /// Event code (0-15 for DTMF: 0-9 / `*` / `#` / A-D).
+        event: u8,
+        /// End-of-event bit (RFC 4733 §2.3 `E`). The last three frames
+        /// of a tone all have this set.
+        end_of_event: bool,
+        /// Volume in -dBm0 (0 = loudest, 63 = quietest). RFC 4733 6-bit.
+        volume: u8,
+        /// Duration in RTP timestamp units since event start.
+        duration: u16,
+        /// Source address.
+        source: SocketAddr,
+        /// SSRC — lets the consumer disambiguate simultaneous DTMF
+        /// streams on the same socket (rare, but possible for b2bua).
+        ssrc: u32,
+    },
+
     /// Transport error occurred
     Error(Error),
 }
