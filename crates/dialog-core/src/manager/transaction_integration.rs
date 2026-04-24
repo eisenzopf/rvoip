@@ -1391,16 +1391,17 @@ impl DialogManager {
         // Handle specific failure cases and emit appropriate events
         match response.status_code() {
             487 => {
-                // Request Terminated (CANCEL received)
+                // RFC 3261 §15.1.2 — 487 Request Terminated is a
+                // CANCEL-specific termination, distinct from a generic
+                // dialog teardown. Emit only `CallCancelled`; emitting
+                // `DialogEvent::Terminated` here too causes the event
+                // hub to publish both `DialogToSessionEvent::CallTerminated`
+                // and `DialogToSessionEvent::CallCancelled` for the same
+                // 487, which races in the session-core dispatcher and
+                // intermittently surfaces `Event::CallEnded` to the app
+                // instead of `Event::CallCancelled`.
                 info!("Call cancelled for dialog {}", dialog_id);
-                
-                // Emit dialog event
-                self.emit_dialog_event(DialogEvent::Terminated {
-                    dialog_id: dialog_id.clone(),
-                    reason: "Request terminated".to_string(),
-                }).await;
-                
-                // Emit session coordination event
+
                 self.emit_session_coordination_event(SessionCoordinationEvent::CallCancelled {
                     dialog_id: dialog_id.clone(),
                     reason: "Request terminated".to_string(),

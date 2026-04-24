@@ -138,12 +138,6 @@ pub fn create_cancel_request(invite_request: &Request, local_addr: &SocketAddr) 
         .ok_or_else(|| Error::Other("INVITE request missing CSeq header".to_string()))?
         .seq;
     
-    // Debug the original INVITE Via headers
-    println!("Original INVITE Via headers count: {}", invite_request.via_headers().len());
-    for (i, via) in invite_request.via_headers().iter().enumerate() {
-        println!("  Via[{}]: {}", i, via);
-    }
-    
     // Create a Request object from scratch with no headers at all
     let mut cancel_request = Request::new(Method::Cancel, request_uri);
     
@@ -437,19 +431,6 @@ pub fn validate_cancel_request(request: &Request) -> Result<()> {
     
     if request.cseq().is_none() {
         return Err(Error::Other("CANCEL request missing CSeq header".to_string()));
-    }
-    
-    // Debug the Via headers
-    println!("Validating CANCEL request Via headers:");
-    println!("  Via headers count: {}", request.via_headers().len());
-    for (i, via) in request.via_headers().iter().enumerate() {
-        println!("  Via[{}]: {}", i, via);
-    }
-    
-    // Print all headers for more detailed debugging
-    println!("All headers in CANCEL request:");
-    for (i, header) in request.headers.iter().enumerate() {
-        println!("  Header[{}]: {}", i, header);
     }
     
     // Check that there is exactly one Via header
