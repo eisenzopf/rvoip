@@ -75,8 +75,8 @@ pub enum RtpEvent {
     /// Payload is pre-decoded into typed fields so the media layer
     /// doesn't re-parse; dedup across redundant retransmits (RFC 4733
     /// §2.5.1.3) is left to the consumer — the recommended shape is to
-    /// forward the digit up to the application only on the frame where
-    /// `end_of_event == true` (key-release semantics).
+    /// key on `(ssrc, timestamp)` since retransmits of the same tone
+    /// share both while distinct tones get distinct timestamps.
     DtmfEvent {
         /// Event code (0-15 for DTMF: 0-9 / `*` / `#` / A-D).
         event: u8,
@@ -87,6 +87,10 @@ pub enum RtpEvent {
         volume: u8,
         /// Duration in RTP timestamp units since event start.
         duration: u16,
+        /// RTP packet timestamp. Distinct per tone; shared across the
+        /// three retransmissions of a single tone per RFC 4733 §2.5.1.3.
+        /// This is the stable dedup key on the consumer side.
+        timestamp: u32,
         /// Source address.
         source: SocketAddr,
         /// SSRC — lets the consumer disambiguate simultaneous DTMF

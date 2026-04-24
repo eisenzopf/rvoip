@@ -304,6 +304,7 @@ impl UdpRtpTransport {
                                             end_of_event,
                                             volume,
                                             duration,
+                                            timestamp: packet.header.timestamp,
                                             source: addr,
                                             ssrc: packet.header.ssrc,
                                         };
@@ -966,6 +967,7 @@ mod tests {
                 end_of_event,
                 volume,
                 duration,
+                timestamp,
                 ssrc,
                 ..
             } => {
@@ -973,6 +975,7 @@ mod tests {
                 assert!(end_of_event, "E bit set");
                 assert_eq!(volume, 10);
                 assert_eq!(duration, 800);
+                assert_eq!(timestamp, 0xAABBCCDD);
                 assert_eq!(ssrc, 0x12345678);
             }
             other => panic!("expected DtmfEvent, got {other:?}"),

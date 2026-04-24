@@ -796,26 +796,43 @@ impl MediaAdapter {
         Err(SessionError::MediaError("Failed to get session info after creation".to_string()))
     }
     
-    /// Generate local SDP offer
+    /// Generate local SDP offer. Dispatches to the SRTP-aware
+    /// [`Self::generate_sdp_offer`] when `offer_srtp` is enabled so the
+    /// state-machine `Action::GenerateLocalSDP` produces an offer that
+    /// matches the coordinator's SDES policy. Otherwise keeps the
+    /// plain-RTP/AVP format string that pre-dates the SRTP work.
     pub async fn generate_local_sdp(&self, session_id: &SessionId) -> Result<String> {
+        if self.offer_srtp {
+            // Ensure `self.media_sessions` is primed before the builder
+            // path reads `rtp_port` out of it — `generate_sdp_offer`
+            // expects the cached session info to already exist.
+            let dialog_id = self.session_to_dialog.get(session_id)
+                .ok_or_else(|| SessionError::SessionNotFound(format!("No dialog mapping for session {}", session_id.0)))?
+                .clone();
+            if let Some(info) = self.controller.get_session_info(&dialog_id).await {
+                self.media_sessions.insert(session_id.clone(), info);
+            }
+            return self.generate_sdp_offer(session_id).await;
+        }
+
         // Get the dialog ID for this session
         let dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(format!("No dialog mapping for session {}", session_id.0)))?
             .clone();
-            
+
         tracing::debug!("Generating SDP for session {} with dialog ID {}", session_id.0, dialog_id);
-            
+
         // Get session info (should exist now)
         let info = self.controller.get_session_info(&dialog_id).await
             .ok_or_else(|| SessionError::MediaError(format!("Failed to get session info for dialog {}", dialog_id)))?;
-        
+
         // Store session info
         self.media_sessions.insert(session_id.clone(), info.clone());
-        
+
         // The actual RTP port might not be in config.local_addr - it's in rtp_port
         let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
         tracing::debug!("Media session info - RTP port: {:?}, local_addr: {}", info.rtp_port, info.config.local_addr);
-        
+
         // Build SDP from actual media session info
         let sdp = format!(
             "v=0\r\n\
@@ -833,9 +850,9 @@ impl MediaAdapter {
             info.config.local_addr.ip(),
             local_port
         );
-        
+
         tracing::info!("✅ Generated SDP for session {} with local port {}", session_id.0, local_port);
-        
+
         Ok(sdp)
     }
     

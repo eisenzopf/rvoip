@@ -932,14 +932,20 @@ impl UnifiedCoordinator {
     }
 
     // ===== DTMF Operations =====
-    
-    /// Send DTMF digit
+
+    /// Send a single RFC 4733 DTMF digit over the active media session
+    /// at a 100 ms default duration (suitable for interactive softphone
+    /// use).
+    ///
+    /// Goes directly through [`MediaAdapter::send_dtmf_rfc4733`] rather
+    /// than the state machine: DTMF is an in-call side-effect, not a
+    /// state transition, and the state table does not (intentionally)
+    /// enumerate a SendDTMF transition. The media adapter resolves
+    /// `session_id → dialog_id`, encodes the RFC 4733 telephone-event
+    /// payload, and transmits with PT 101 over the existing RTP
+    /// session.
     pub async fn send_dtmf(&self, session_id: &SessionId, digit: char) -> Result<()> {
-        self.helpers.state_machine.process_event(
-            session_id,
-            EventType::SendDTMF { digits: digit.to_string() },
-        ).await?;
-        Ok(())
+        self.media_adapter.send_dtmf_rfc4733(session_id, digit, 100).await
     }
     
     // ===== Recording Operations =====

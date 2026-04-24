@@ -166,7 +166,8 @@ pub enum RtpSessionEvent {
     /// Consumers should forward the digit up to the application only on
     /// the frame where `end_of_event == true` — RFC 4733 §2.5.1.3
     /// requires three final retransmissions so the last three frames
-    /// of each tone all set the `E` bit.
+    /// of each tone all set the `E` bit — and dedup on `(ssrc, timestamp)`
+    /// which uniquely identifies a tone.
     DtmfReceived {
         /// Event code (0-15 for DTMF).
         event: u8,
@@ -176,6 +177,8 @@ pub enum RtpSessionEvent {
         volume: u8,
         /// Duration in RTP timestamp units.
         duration: u16,
+        /// RTP packet timestamp (dedup key for retransmits).
+        timestamp: u32,
         /// SSRC that sent the event.
         ssrc: RtpSsrc,
     },
@@ -618,6 +621,7 @@ impl RtpSession {
                         end_of_event,
                         volume,
                         duration,
+                        timestamp,
                         ssrc,
                         ..
                     }) => {
@@ -630,6 +634,7 @@ impl RtpSession {
                             end_of_event,
                             volume,
                             duration,
+                            timestamp,
                             ssrc,
                         });
                     }

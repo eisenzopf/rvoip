@@ -61,6 +61,10 @@ impl MediaSessionController {
     /// (UDP loss probability is low enough on modern networks that a
     /// single packet is usually sufficient).
     ///
+    /// Each call uses a distinct RTP timestamp derived from a wall-clock
+    /// 8 kHz tick so receive-side dedup on `(ssrc, rtp_timestamp)` can
+    /// tell successive tones apart.
+    ///
     /// Unknown digits fall back to `?` (event code 0) but are still
     /// transmitted — the peer MAY decode them or ignore them per the
     /// telephone-event decoder's discretion.
@@ -89,20 +93,24 @@ impl MediaSessionController {
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
         let mut session = rtp_session.lock().await;
 
-        // Use the session's current timestamp baseline + duration so
-        // the peer correlates this event with the audio flow. Without
-        // a direct "current RTP timestamp" accessor, we use
-        // `duration_samples` as a relative tick — most peers tolerate
-        // 0-based timestamps on DTMF.
-        let timestamp = 0u32;
+        // Unique RTP timestamp per call. The RFC 4733 receive-side
+        // dedup keys on `(ssrc, rtp_timestamp)` to collapse the three
+        // §2.5.1.3 retransmits of one tone while still firing on every
+        // distinct tone. Wall-clock ms → 8 kHz ticks gives monotonic,
+        // unique values (wrap is benign — u32 at 8 kHz lasts ~149
+        // hours before recycling, long after any user session).
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis().saturating_mul(8) as u32)
+            .unwrap_or(0);
         session
             .send_packet_with_pt(timestamp, Bytes::from(wire.to_vec()), true, 101)
             .await
             .map_err(|e| Error::config(format!("Failed to send DTMF packet: {}", e)))?;
 
         info!(
-            "☎️  Sent RFC 4733 DTMF '{}' (duration={}ms) for dialog {}",
-            digit, duration_ms, dialog_id
+            "☎️  Sent RFC 4733 DTMF '{}' (duration={}ms, ts={}) for dialog {}",
+            digit, duration_ms, timestamp, dialog_id
         );
         Ok(())
     }

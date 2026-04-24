@@ -25,6 +25,18 @@ path = "examples/streampeer/dtmf/server.rs"
 name = "streampeer_dtmf_client"
 path = "examples/streampeer/dtmf/client.rs"
 [[example]]
+name = "streampeer_tls_server"
+path = "examples/streampeer/tls/server.rs"
+[[example]]
+name = "streampeer_tls_client"
+path = "examples/streampeer/tls/client.rs"
+[[example]]
+name = "streampeer_srtp_server"
+path = "examples/streampeer/srtp/server.rs"
+[[example]]
+name = "streampeer_srtp_client"
+path = "examples/streampeer/srtp/client.rs"
+[[example]]
 name = "streampeer_hold_resume_server"
 path = "examples/streampeer/hold_resume/server.rs"
 [[example]]

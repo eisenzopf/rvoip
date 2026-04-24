@@ -827,10 +827,13 @@ impl MediaSessionController {
         let codec_mapper = self.codec_mapper.clone();
 
         // RFC 4733 §2.5.1.3 sends three end-of-event retransmits per
-        // tone. Dedup here so the callback fires once per digit: track
-        // the (ssrc, duration) of the last delivered event per dialog,
-        // and suppress subsequent events that match.
-        let dtmf_last_delivered: Arc<RwLock<Option<(u32, u16)>>> = Arc::new(RwLock::new(None));
+        // tone. All three share the same `(ssrc, rtp_timestamp)` —
+        // the timestamp is the tone's start time and does NOT advance
+        // across retransmits. Dedup on that pair so the callback
+        // fires once per digit even under the retransmit pattern,
+        // while still firing on every new tone (which gets a fresh
+        // timestamp).
+        let dtmf_last_delivered: Arc<RwLock<Option<(u32, u32)>>> = Arc::new(RwLock::new(None));
         
         // Create G.711 codecs outside the loop for efficiency
         let mut g711_ulaw = G711Codec::mu_law(8000, 1).expect("Failed to create μ-law codec");
@@ -938,23 +941,24 @@ impl MediaSessionController {
                                 event,
                                 end_of_event,
                                 duration,
+                                timestamp: dtmf_timestamp,
                                 ssrc: dtmf_ssrc,
                                 ..
                             } => {
                                 // RFC 4733 §2.5.1.3: fire up to the
                                 // application only on the first E=1
                                 // frame per digit; the two retransmits
-                                // share `(ssrc, duration)` with the
+                                // share `(ssrc, rtp_timestamp)` with the
                                 // first, so we dedupe on that pair.
                                 if !end_of_event {
                                     continue;
                                 }
                                 {
                                     let mut last = dtmf_last_delivered.write().await;
-                                    if *last == Some((dtmf_ssrc, duration)) {
+                                    if *last == Some((dtmf_ssrc, dtmf_timestamp)) {
                                         continue;
                                     }
-                                    *last = Some((dtmf_ssrc, duration));
+                                    *last = Some((dtmf_ssrc, dtmf_timestamp));
                                 }
                                 let digit = match event {
                                     0..=9 => (b'0' + event) as char,

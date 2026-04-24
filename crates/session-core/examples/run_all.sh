@@ -13,6 +13,8 @@ SCRIPTS=(
   streampeer/registration/run.sh
   streampeer/audio/run.sh
   streampeer/dtmf/run.sh
+  streampeer/tls/run.sh
+  streampeer/srtp/run.sh
   streampeer/hold_resume/run.sh
   streampeer/cancel/run.sh
   streampeer/prack/run.sh

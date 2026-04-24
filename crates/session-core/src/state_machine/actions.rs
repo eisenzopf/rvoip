@@ -311,10 +311,20 @@ pub async fn execute_action(
             dialog_adapter.send_refer_session(&session.session_id, target).await?;
         }
         Action::SendDTMF(digit) => {
-            // Send DTMF through media session
-            {
-                let media_id = crate::types::MediaSessionId::new();
+            // Send DTMF through the session's existing media session.
+            // Using a fresh `MediaSessionId::new()` would not map to any
+            // registered RTP session, so the packet would never go on
+            // the wire. Pre-B4, `MediaAdapter::send_dtmf` was a no-op
+            // stub that silently tolerated this; now that it actually
+            // transmits a PT 101 frame we need the real `media_id`.
+            if let Some(media_id) = session.media_session_id.clone() {
                 media_adapter.send_dtmf(media_id, *digit).await?;
+            } else {
+                tracing::warn!(
+                    "SendDTMF dispatched for session {} with no media_session_id; dropping '{}'",
+                    session.session_id,
+                    digit,
+                );
             }
         }
         Action::StartRecording => {
