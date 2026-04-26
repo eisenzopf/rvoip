@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
@@ -157,6 +158,15 @@ pub struct SessionState {
     pub auth_challenge: Option<crate::auth::DigestChallenge>, // Cached authentication challenge from 401
     pub registration_retry_count: u32, // Number of retries attempted (prevent infinite loops)
 
+    // RFC 7616 §3.4.5 — per-(realm, nonce) digest nonce-count cursor.
+    // Each successive request reusing the same nonce increments its
+    // entry; when a fresh challenge with a new nonce arrives, a new
+    // entry is inserted at 1. Carriers reject `nc` repeats as replays,
+    // so this map is the difference between working and broken auth on
+    // anything beyond the first 401 retry. Sessions are ephemeral —
+    // the map is not persisted across process restart on purpose.
+    pub digest_nc: HashMap<(String, String), u32>,
+
     // Timestamps
     pub created_at: Instant,
     
@@ -218,6 +228,7 @@ impl SessionState {
             is_registered: false,
             auth_challenge: None,
             registration_retry_count: 0,
+            digest_nc: HashMap::new(),
             created_at: now,
             history: None,
         }
@@ -291,5 +302,68 @@ impl SessionState {
     /// Get total session duration
     pub fn session_duration(&self) -> std::time::Duration {
         Instant::now() - self.created_at
+    }
+}
+
+#[cfg(test)]
+mod digest_nc_tests {
+    use super::*;
+    use crate::state_table::{Role, SessionId};
+
+    /// RFC 7616 §3.4.5 — repeated requests reusing the same nonce
+    /// must carry monotonically incrementing `nc`. The exact idiom
+    /// used at both call sites (`SendINVITEWithAuth` and REGISTER
+    /// auth) is exercised here to guard against drift.
+    #[test]
+    fn digest_nc_increments_for_same_realm_nonce() {
+        let mut session = SessionState::new(SessionId::new(), Role::UAC);
+        let key = ("example.com".to_string(), "shared-nonce".to_string());
+
+        let first = *session
+            .digest_nc
+            .entry(key.clone())
+            .and_modify(|n| *n += 1)
+            .or_insert(1);
+        let second = *session
+            .digest_nc
+            .entry(key.clone())
+            .and_modify(|n| *n += 1)
+            .or_insert(1);
+        let third = *session
+            .digest_nc
+            .entry(key.clone())
+            .and_modify(|n| *n += 1)
+            .or_insert(1);
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(third, 3);
+    }
+
+    /// A fresh challenge with a new nonce gets its own counter space.
+    /// The old entry stays in the map but is never read again — the
+    /// session's `auth_challenge` field has been overwritten with the
+    /// new nonce, so subsequent compute calls use the new key.
+    #[test]
+    fn digest_nc_keys_independent_per_nonce() {
+        let mut session = SessionState::new(SessionId::new(), Role::UAC);
+        let key_a = ("example.com".to_string(), "nonce-A".to_string());
+        let key_b = ("example.com".to_string(), "nonce-B".to_string());
+
+        for _ in 0..5 {
+            session
+                .digest_nc
+                .entry(key_a.clone())
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
+        }
+
+        let first_b = *session
+            .digest_nc
+            .entry(key_b.clone())
+            .and_modify(|n| *n += 1)
+            .or_insert(1);
+        assert_eq!(first_b, 1, "fresh nonce starts a new counter");
+        assert_eq!(*session.digest_nc.get(&key_a).unwrap(), 5);
     }
 }

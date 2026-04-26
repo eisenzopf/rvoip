@@ -64,6 +64,7 @@ use rvoip_rtp_core::{RtpPacket, RtpHeader};
 pub mod types;
 pub mod audio_generation;
 pub mod dtmf_transmitter;
+pub mod cn_transmitter;
 pub mod rtp_management;
 pub mod statistics;
 pub mod advanced_processing;

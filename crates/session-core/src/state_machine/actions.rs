@@ -920,19 +920,35 @@ pub async fn execute_action(
                 )
             })?;
 
-            let (response_hash, cnonce) = rvoip_auth_core::DigestClient::compute_response(
+            // RFC 7616 §3.4.5 — increment the per-(realm, nonce) NC
+            // counter before computing. A carrier reusing the same
+            // nonce across multiple requests rejects `nc` repeats as
+            // replays, so the counter must monotonically grow.
+            let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
+            let nc_value = *session
+                .digest_nc
+                .entry(nc_key)
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
+            // INVITE body is the local SDP offer — fold it into HA2
+            // when the server's challenge offers `qop=auth-int`. RFC
+            // 7616 §3.4.3.
+            let body_owned = session.local_sdp.clone();
+            let body_bytes = body_owned.as_deref().map(|s| s.as_bytes());
+            let computed = rvoip_auth_core::DigestClient::compute_response_with_state(
                 &creds.username,
                 &creds.password,
                 &challenge,
                 "INVITE",
                 &request_uri,
+                nc_value,
+                body_bytes,
             )?;
-            let header_value = rvoip_auth_core::DigestClient::format_authorization(
+            let header_value = rvoip_auth_core::DigestClient::format_authorization_with_state(
                 &creds.username,
                 &challenge,
                 &request_uri,
-                &response_hash,
-                cnonce.as_deref(),
+                &computed,
             );
 
             let (status, _) = session

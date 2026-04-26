@@ -147,6 +147,27 @@ pub struct MediaAdapter {
     /// the full wiring.
     pub(crate) global_coordinator:
         Arc<tokio::sync::RwLock<Option<Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>>>>,
+
+    /// Sprint 3 A6 — public RTP-side address advertised in SDP `c=` /
+    /// `o=` / `m=audio` lines. Set at coordinator boot from either
+    /// `Config::media_public_addr` (static override) or a successful
+    /// `Config::stun_server` probe. `None` falls back to `local_ip` +
+    /// the per-session local RTP port (today's behaviour).
+    public_rtp_addr: std::sync::RwLock<Option<SocketAddr>>,
+
+    /// Sprint 3 C1 — when `true`, generated offers and answers
+    /// advertise PT 13 (RFC 3389 Comfort Noise) alongside the
+    /// PCMU + PCMA + telephone-event format set. Set at coordinator
+    /// boot from `Config::comfort_noise_enabled`.
+    comfort_noise_enabled: bool,
+
+    /// Sprint 3.5 C2 swap — when `true` (default), the answer's
+    /// format list is the strict RFC 3264 §6 intersection of the
+    /// offered formats and our supported set, in offerer-preference
+    /// order. When `false`, the answer always advertises our full
+    /// supported set (legacy pre-Sprint-3.5 behaviour). Set at
+    /// coordinator boot from `Config::strict_codec_matching`.
+    strict_codec_matching: bool,
 }
 
 impl MediaAdapter {
@@ -179,7 +200,48 @@ impl MediaAdapter {
             pending_srtp_offerers: Arc::new(DashMap::new()),
             negotiated_srtp: Arc::new(DashMap::new()),
             global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
+            public_rtp_addr: std::sync::RwLock::new(None),
+            comfort_noise_enabled: false,
+            strict_codec_matching: true,
         }
+    }
+
+    /// Sprint 3 C1 — enable RFC 3389 Comfort Noise advertisement on
+    /// outgoing offers and answers. Wired from
+    /// `Config::comfort_noise_enabled` at coordinator boot. Mutates
+    /// in place, mirroring the `set_srtp_policy` shape.
+    pub fn set_comfort_noise(&mut self, enabled: bool) {
+        self.comfort_noise_enabled = enabled;
+    }
+
+    /// Sprint 3.5 C2 swap — enable strict RFC 3264 §6 SDP-answer
+    /// matching. Wired from `Config::strict_codec_matching` at
+    /// coordinator boot.
+    pub fn set_strict_codec_matching(&mut self, strict: bool) {
+        self.strict_codec_matching = strict;
+    }
+
+    /// Set the public RTP address advertised in SDP. Called at
+    /// coordinator boot from `Config::media_public_addr` (static
+    /// override) or a successful STUN probe. Idempotent — subsequent
+    /// calls overwrite. The IP address goes into `c=`/`o=` lines and
+    /// the port (when set) replaces `info.rtp_port` in `m=audio`.
+    pub fn set_public_rtp_addr(&self, addr: Option<SocketAddr>) {
+        if let Ok(mut guard) = self.public_rtp_addr.write() {
+            *guard = addr;
+        }
+    }
+
+    /// Read the current public RTP address override (used by tests
+    /// and by SDP generation).
+    pub(crate) fn public_rtp_addr(&self) -> Option<SocketAddr> {
+        self.public_rtp_addr.read().ok().and_then(|g| *g)
+    }
+
+    /// Local IP address bound by the adapter. Used by the Sprint 3
+    /// A6 STUN probe to bind its temp socket on the same interface.
+    pub fn local_ip(&self) -> IpAddr {
+        self.local_ip
     }
 
     /// Install the global event coordinator so the adapter can publish
@@ -438,18 +500,40 @@ impl MediaAdapter {
         // / Twilio) expect when accepting a downgraded offer, and the
         // peer is still free to discard codecs it did not list.
         let sess_id = generate_session_id().to_string();
-        let local_ip_str = self.local_ip.to_string();
+        // Sprint 3 A6 — same public-address override as the offer
+        // path, so answers carry the discovered/configured public
+        // mapping when one is set.
+        let public = self.public_rtp_addr();
+        let advertised_ip = public.map(|sa| sa.ip()).unwrap_or(self.local_ip);
+        let local_ip_str = advertised_ip.to_string();
+        let advertised_port = public
+            .filter(|sa| sa.port() != 0)
+            .map(|sa| sa.port())
+            .unwrap_or(local_port);
         let answer_transport = if answer_attr.is_some() { "RTP/SAVP" } else { "RTP/AVP" };
+        // Sprint 3 C1 — mirror the offer-side CN advertisement on
+        // answers when our config opts in. A peer that sent CN gets
+        // it back; one that didn't still sees it (which is RFC 3264
+        // §6 conservative — they're free to ignore unfamiliar PTs).
+        let formats: &[&str] = if self.comfort_noise_enabled {
+            &["0", "8", "13", "101"]
+        } else {
+            &["0", "8", "101"]
+        };
         let mut media_builder = SdpBuilder::new("Session")
             .origin("-", &sess_id, "0", "IN", "IP4", &local_ip_str)
             .connection("IN", "IP4", &local_ip_str)
             .time("0", "0")
-            .media_audio(local_port, answer_transport)
-                .formats(&["0", "8", "101"])
+            .media_audio(advertised_port, answer_transport)
+                .formats(formats)
                 .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000")
-                .rtpmap("101", "telephone-event/8000")
-                .fmtp("101", "0-15");
+                .rtpmap("8", "PCMA/8000");
+        if self.comfort_noise_enabled {
+            media_builder = media_builder.rtpmap("13", "CN/8000");
+        }
+        media_builder = media_builder
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15");
         if let Some(attr) = answer_attr {
             media_builder = media_builder.crypto_attribute(attr);
         }
@@ -772,10 +856,23 @@ impl MediaAdapter {
             .ok_or_else(|| SessionError::MediaError(format!("Failed to get session info for dialog {}", dialog_id)))?;
         self.media_sessions.insert(session_id.clone(), info.clone());
 
-        let port = info.rtp_port.unwrap_or(info.config.local_addr.port());
+        // Sprint 3 A6 — when a public RTP address has been configured
+        // (static override or STUN-discovered), advertise that in the
+        // SDP `c=` / `o=` / `m=audio` lines instead of the bind-address.
+        // The static override's port wins when set; otherwise we keep
+        // the per-session local RTP port (most NATs don't preserve
+        // ports across the binding, but absent better info the local
+        // port is our best guess and symmetric-RTP latching covers
+        // the rest).
+        let public = self.public_rtp_addr();
+        let port = public
+            .filter(|sa| sa.port() != 0)
+            .map(|sa| sa.port())
+            .unwrap_or_else(|| info.rtp_port.unwrap_or(info.config.local_addr.port()));
         let elapsed_secs = info.created_at.elapsed().as_secs().to_string();
         let dialog_id_str = info.dialog_id.as_str().to_string();
-        let local_ip_str = self.local_ip.to_string();
+        let advertised_ip = public.map(|sa| sa.ip()).unwrap_or(self.local_ip);
+        let local_ip_str = advertised_ip.to_string();
 
         // Profile + crypto. RFC 4568 §3.1.4 — `RTP/SAVP` is mandatory
         // when offering SDES.
@@ -789,9 +886,16 @@ impl MediaAdapter {
         };
 
         // Build the m-section. Always offer PCMU (0) + PCMA (8) +
-        // telephone-event (101). Crypto attrs follow rtpmap/fmtp so
-        // ordering matches what carriers expect; sendrecv goes last so
-        // the byte-fixture tests stay stable.
+        // telephone-event (101). Sprint 3 C1: append `13` + an
+        // `a=rtpmap:13 CN/8000` line when comfort noise is enabled.
+        // Crypto attrs follow rtpmap/fmtp so ordering matches what
+        // carriers expect; sendrecv goes last so the byte-fixture
+        // tests stay stable.
+        let formats: &[&str] = if self.comfort_noise_enabled {
+            &["0", "8", "13", "101"]
+        } else {
+            &["0", "8", "101"]
+        };
         let mut media_builder = SdpBuilder::new("Session")
             .origin(
                 "-",
@@ -804,11 +908,15 @@ impl MediaAdapter {
             .connection("IN", "IP4", &local_ip_str)
             .time("0", "0")
             .media_audio(port, transport)
-                .formats(&["0", "8", "101"])
+                .formats(formats)
                 .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000")
-                .rtpmap("101", "telephone-event/8000")
-                .fmtp("101", "0-15");
+                .rtpmap("8", "PCMA/8000");
+        if self.comfort_noise_enabled {
+            media_builder = media_builder.rtpmap("13", "CN/8000");
+        }
+        media_builder = media_builder
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15");
         for attr in crypto_attrs {
             media_builder = media_builder.crypto_attribute(attr);
         }
@@ -1332,6 +1440,9 @@ impl Clone for MediaAdapter {
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
             negotiated_srtp: self.negotiated_srtp.clone(),
             global_coordinator: self.global_coordinator.clone(),
+            public_rtp_addr: std::sync::RwLock::new(self.public_rtp_addr()),
+            comfort_noise_enabled: self.comfort_noise_enabled,
+            strict_codec_matching: self.strict_codec_matching,
         }
     }
 }
@@ -1580,5 +1691,142 @@ mod sdp_format_tests {
         assert_eq!(extracted.len(), 2);
         assert_eq!(extracted[0].tag, 1);
         assert_eq!(extracted[1].tag, 2);
+    }
+
+    /// Sprint 3 A6 — when a public RTP address is configured (static
+    /// or STUN-discovered), the offer's c=/o=/m= lines must advertise
+    /// it instead of the local interface IP/port. Mirrors what the
+    /// generate_local_sdp body does — `local_ip_str` resolves to
+    /// `public.ip()` when set, and `port` to `public.port()` when
+    /// non-zero, else falls back to the per-session local port.
+    #[test]
+    fn public_rtp_addr_override_replaces_local_ip_and_port_in_offer() {
+        let public: SocketAddr = "203.0.113.42:30000".parse().unwrap();
+        let local_fallback: std::net::IpAddr = "192.168.1.10".parse().unwrap();
+        let local_port_fallback: u16 = 16000;
+
+        // Replicate the override branch the way generate_local_sdp does it.
+        let public_opt = Some(public);
+        let advertised_ip = public_opt.map(|sa| sa.ip()).unwrap_or(local_fallback);
+        let port = public_opt
+            .filter(|sa| sa.port() != 0)
+            .map(|sa| sa.port())
+            .unwrap_or(local_port_fallback);
+
+        let sdp = build_offer("dlg", 0, &advertised_ip.to_string(), port);
+        assert!(
+            sdp.contains("c=IN IP4 203.0.113.42\r\n"),
+            "c= must carry public IP when override set:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("o=- dlg 0 IN IP4 203.0.113.42\r\n"),
+            "o= must carry public IP when override set:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("m=audio 30000 RTP/AVP"),
+            "m=audio must carry public port when override set:\n{}",
+            sdp
+        );
+    }
+
+    #[test]
+    fn public_rtp_addr_unset_falls_back_to_local_ip_and_local_port() {
+        let public_opt: Option<SocketAddr> = None;
+        let local_fallback: std::net::IpAddr = "192.168.1.10".parse().unwrap();
+        let local_port_fallback: u16 = 16000;
+
+        let advertised_ip = public_opt.map(|sa| sa.ip()).unwrap_or(local_fallback);
+        let port = public_opt
+            .filter(|sa| sa.port() != 0)
+            .map(|sa| sa.port())
+            .unwrap_or(local_port_fallback);
+
+        let sdp = build_offer("dlg", 0, &advertised_ip.to_string(), port);
+        assert!(
+            sdp.contains("c=IN IP4 192.168.1.10\r\n"),
+            "c= falls back to local_ip when no override:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("m=audio 16000 RTP/AVP"),
+            "m=audio falls back to local_port when no override:\n{}",
+            sdp
+        );
+    }
+
+    /// Sprint 3 C1 — when `comfort_noise_enabled` is set, the SDP
+    /// offer's `m=audio` line lists `13` and the body carries an
+    /// `a=rtpmap:13 CN/8000` line. The order must be `0 8 13 101` so
+    /// telephone-event remains last (Sprint 2.5 P2 fixture stability).
+    #[test]
+    fn cn_enabled_offer_advertises_pt13_and_rtpmap() {
+        let ip = "127.0.0.1";
+        let port = 16000;
+        let sdp = SdpBuilder::new("Session")
+            .origin("-", "dlg", "0", "IN", "IP4", ip)
+            .connection("IN", "IP4", ip)
+            .time("0", "0")
+            .media_audio(port, "RTP/AVP")
+                .formats(&["0", "8", "13", "101"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("8", "PCMA/8000")
+                .rtpmap("13", "CN/8000")
+                .rtpmap("101", "telephone-event/8000")
+                .fmtp("101", "0-15")
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+
+        assert!(
+            sdp.contains("m=audio 16000 RTP/AVP 0 8 13 101\r\n"),
+            "format list must include 13 between PCMA and telephone-event:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("a=rtpmap:13 CN/8000\r\n"),
+            "RFC 3389 CN rtpmap must appear:\n{}",
+            sdp
+        );
+        // Sanity: existing PTs still present in the right shape.
+        assert!(sdp.contains("a=rtpmap:0 PCMU/8000\r\n"));
+        assert!(sdp.contains("a=rtpmap:8 PCMA/8000\r\n"));
+        assert!(sdp.contains("a=rtpmap:101 telephone-event/8000\r\n"));
+    }
+
+    #[test]
+    fn cn_disabled_offer_omits_pt13_and_rtpmap() {
+        // The pre-Sprint-3 baseline shape — no `13`, no CN rtpmap.
+        let sdp = build_offer("dlg", 0, "127.0.0.1", 16000);
+        assert!(
+            sdp.contains("m=audio 16000 RTP/AVP 0 8 101\r\n"),
+            "default offer must keep the pre-Sprint-3 format set:\n{}",
+            sdp
+        );
+        assert!(!sdp.contains("CN/8000"), "default offer must not advertise CN: \n{}", sdp);
+    }
+
+    #[test]
+    fn public_rtp_addr_with_zero_port_keeps_local_port() {
+        // The override semantics: when `media_public_addr` carries an
+        // IP-only mapping (port 0), advertise the public IP but keep
+        // the per-session local port. Useful for SBC-fronted setups
+        // where the port doesn't change but the IP does.
+        let public: SocketAddr = "203.0.113.42:0".parse().unwrap();
+        let public_opt = Some(public);
+        let local_fallback: std::net::IpAddr = "192.168.1.10".parse().unwrap();
+        let local_port_fallback: u16 = 16000;
+
+        let advertised_ip = public_opt.map(|sa| sa.ip()).unwrap_or(local_fallback);
+        let port = public_opt
+            .filter(|sa| sa.port() != 0)
+            .map(|sa| sa.port())
+            .unwrap_or(local_port_fallback);
+
+        assert_eq!(advertised_ip.to_string(), "203.0.113.42");
+        assert_eq!(port, 16000, "zero port must defer to local_port_fallback");
     }
 }

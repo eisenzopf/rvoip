@@ -46,6 +46,7 @@ tracing = "0.1"
 
 # SIP Digest authentication
 md5 = "0.7"
+sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
 

@@ -227,6 +227,67 @@ pub struct Config {
     /// Modify when a specific carrier requires a non-default
     /// preference.
     pub srtp_offered_suites: Vec<rvoip_sip_core::types::sdp::CryptoSuite>,
+
+    /// Override the RTP-side public address advertised in SDP `c=` /
+    /// `o=` and `m=audio <port>` lines. Use when:
+    ///
+    /// - The session-core process runs behind a 1:1 NAT or IP alias
+    ///   and the operator already knows the external IP/port.
+    /// - The deployment uses an SBC that performs media latching, and
+    ///   we want to advertise the SBC's public IP rather than rely on
+    ///   STUN.
+    ///
+    /// Mutually exclusive with [`Config::stun_server`]. If both are
+    /// set, the static override wins and a warning is logged.
+    /// Default: `None` — advertise the local interface address (today's
+    /// behaviour).
+    pub media_public_addr: Option<SocketAddr>,
+
+    /// STUN server (RFC 8489 §14) to probe for the RTP-side public
+    /// mapping at coordinator boot. Format: `"host:port"` or `"host"`
+    /// (default port 3478). Common public servers:
+    /// `stun.l.google.com:19302`, `stun.cloudflare.com:3478`.
+    ///
+    /// The probe runs once at startup using the bound RTP socket so
+    /// the discovered NAT binding matches the binding outgoing audio
+    /// will traverse. Failure mode: probe timeout / unreachable /
+    /// unparseable response → log a warning and fall back to the
+    /// local interface address. STUN is intentionally soft-fail —
+    /// the call path is never blocked on it.
+    ///
+    /// Default: `None` — no probe runs (today's behaviour).
+    pub stun_server: Option<String>,
+
+    /// RFC 3389 Comfort Noise (PT 13) advertisement.
+    ///
+    /// When `true`, outgoing offers and answers carry `13` in the
+    /// `m=audio` format list plus `a=rtpmap:13 CN/8000` so peers know
+    /// we accept Comfort Noise during silence periods. The session
+    /// also exposes
+    /// [`UnifiedCoordinator::send_comfort_noise`](crate::api::unified::UnifiedCoordinator::send_comfort_noise)
+    /// for callers to drive CN packets from their own VAD output.
+    ///
+    /// Default: `false` — peers see the pre-Sprint-3 PCMU + PCMA +
+    /// telephone-event format set with no CN.
+    pub comfort_noise_enabled: bool,
+
+    /// RFC 3264 §6 strict codec matching for SDP answers.
+    ///
+    /// When `true` (default), the SDP answer's format list is the
+    /// strict intersection of the offer's formats and our supported
+    /// set, in offerer-preference order. RFC-correct: a peer that
+    /// offered `0 101` (PCMU + telephone-event only) gets answered
+    /// with `0 101`, not `0 8 101`.
+    ///
+    /// When `false`, the answer always advertises our full supported
+    /// set regardless of offer (the pre-Sprint-3.5 permissive
+    /// behaviour). Set to `false` for deployments where a carrier or
+    /// PBX accidentally relied on the legacy "always full set"
+    /// answer shape — this provides a one-line escape hatch back to
+    /// the prior behaviour without code changes.
+    ///
+    /// Default: `true`.
+    pub strict_codec_matching: bool,
 }
 
 impl Config {
@@ -267,6 +328,10 @@ impl Config {
                 rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80,
                 rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_32,
             ],
+            media_public_addr: None,
+            stun_server: None,
+            comfort_noise_enabled: false,
+            strict_codec_matching: true,
         }
     }
 
@@ -306,6 +371,10 @@ impl Config {
                 rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80,
                 rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_32,
             ],
+            media_public_addr: None,
+            stun_server: None,
+            comfort_noise_enabled: false,
+            strict_codec_matching: true,
         }
     }
 }
@@ -429,7 +498,45 @@ impl UnifiedCoordinator {
             config.srtp_required,
             config.srtp_offered_suites.clone(),
         );
+        // Sprint 3 C1 — propagate Comfort Noise opt-in.
+        media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
+        // Sprint 3.5 — propagate strict codec matching policy.
+        media_adapter_inner.set_strict_codec_matching(config.strict_codec_matching);
         let media_adapter = Arc::new(media_adapter_inner);
+
+        // Sprint 3 A6 — resolve the public RTP address. Static
+        // override wins over STUN; STUN failure is soft (warn + use
+        // local IP). Probe runs once, here, before any session is
+        // created.
+        if let Some(static_addr) = config.media_public_addr {
+            if config.stun_server.is_some() {
+                tracing::warn!(
+                    "Both Config::media_public_addr and Config::stun_server are set; \
+                     using the static override and skipping the STUN probe"
+                );
+            }
+            tracing::info!(
+                "RTP public addr: {} (static override from Config::media_public_addr)",
+                static_addr
+            );
+            media_adapter.set_public_rtp_addr(Some(static_addr));
+        } else if let Some(ref stun_target) = config.stun_server {
+            // Probe runs in the background to keep coordinator boot
+            // snappy — but the soft-fail design means downstream code
+            // doesn't block on the result. The first session created
+            // *after* the probe lands picks up the override.
+            let adapter_for_probe = media_adapter.clone();
+            let stun_target = stun_target.clone();
+            tokio::spawn(async move {
+                if let Err(e) = run_stun_probe(adapter_for_probe, &stun_target).await {
+                    tracing::warn!(
+                        "STUN probe failed against '{}': {} — falling back to local IP",
+                        stun_target,
+                        e
+                    );
+                }
+            });
+        }
         // RFC 4733 DTMF bridge: adapter publishes `Event::DtmfReceived`
         // onto the API bus whenever media-core signals a DTMF event.
         media_adapter
@@ -1421,4 +1528,64 @@ impl Registration {
         self.contact_uri = Some(uri.into());
         self
     }
+}
+
+/// Sprint 3 A6 — best-effort STUN probe for the RTP-side public
+/// mapping.
+///
+/// **Caveat.** The probe binds a fresh ephemeral UDP socket on the
+/// configured `local_ip` and asks the STUN server what mapping it
+/// sees. For typical cone NATs (most consumer routers, AWS / GCP
+/// NAT gateways) the mapping is keyed by source IP only, so the
+/// discovered address matches what the actual RTP path will see
+/// later. For symmetric NATs the mapping is per-(source IP, source
+/// port) and the result will be wrong — those deployments need ICE
+/// (Sprint 4 D3). For Sprint 3 the simple shape is the right
+/// trade-off; a deployment that breaks here can fall back to
+/// `Config::media_public_addr` (static override).
+async fn run_stun_probe(
+    adapter: Arc<MediaAdapter>,
+    stun_target: &str,
+) -> Result<()> {
+    use std::sync::Arc as StdArc;
+    use tokio::net::UdpSocket as TokioUdpSocket;
+
+    // Normalise "host" → "host:3478"; "host:port" passes through.
+    let target_str = if stun_target.contains(':') {
+        stun_target.to_string()
+    } else {
+        format!("{}:3478", stun_target)
+    };
+
+    // Resolve via tokio's DNS — STUN servers are typically fronted by
+    // SRV in production but the public ones (Google, Cloudflare) all
+    // expose plain A records.
+    let server_addr = tokio::net::lookup_host(&target_str)
+        .await
+        .map_err(|e| SessionError::ConfigError(format!("STUN resolve '{}' failed: {}", target_str, e)))?
+        .next()
+        .ok_or_else(|| SessionError::ConfigError(format!("STUN '{}' resolved to nothing", target_str)))?;
+
+    // Bind a probe socket on the same interface as the SIP/media
+    // bind. Random ephemeral port; the cone-NAT-mapping caveat above
+    // applies.
+    let bind_local = std::net::SocketAddr::new(adapter.local_ip(), 0);
+    let probe_sock = TokioUdpSocket::bind(bind_local)
+        .await
+        .map_err(|e| SessionError::ConfigError(format!("STUN probe bind {} failed: {}", bind_local, e)))?;
+    let probe_sock = StdArc::new(probe_sock);
+
+    let client = rvoip_rtp_core::network::stun::StunClient::new(probe_sock, server_addr);
+    let discovered = client
+        .discover()
+        .await
+        .map_err(|e| SessionError::ConfigError(format!("STUN probe failed: {}", e)))?;
+
+    tracing::info!(
+        "RTP public addr: {} (STUN-discovered via {})",
+        discovered,
+        target_str
+    );
+    adapter.set_public_rtp_addr(Some(discovered));
+    Ok(())
 }

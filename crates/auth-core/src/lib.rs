@@ -12,5 +12,6 @@ pub mod sip_digest;
 
 pub use error::{AuthError, Result};
 pub use sip_digest::{
-    DigestAuthenticator, DigestClient, DigestChallenge, DigestResponse, DigestAlgorithm
+    DigestAlgorithm, DigestAuthenticator, DigestChallenge, DigestClient, DigestComputed,
+    DigestResponse,
 };

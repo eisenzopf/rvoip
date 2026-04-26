@@ -762,32 +762,50 @@ impl DialogAdapter {
         // Build authorization header if credentials provided
         let authorization = if let Some(creds) = credentials {
             // Get challenge from session
-            let session = self.store.get_session(session_id).await?;
-            if let Some(ref challenge) = session.auth_challenge {
-                // Compute digest response using auth-core (shared module)
-                tracing::info!("🔍 CLIENT: Computing digest for user={}, realm={}, nonce={}, uri={}",
-                               creds.username, challenge.realm, challenge.nonce, registrar_uri);
-                
-                let (response, cnonce) = crate::auth::DigestAuth::compute_response(
+            let mut session = self.store.get_session(session_id).await?;
+            if let Some(challenge) = session.auth_challenge.clone() {
+                // RFC 7616 §3.4.5 — bump the per-(realm, nonce) NC
+                // counter before computing. REGISTER reuses one nonce
+                // across many refreshes, so this is exactly the path
+                // where carriers reject `nc=00000001` repeats.
+                let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
+                let nc_value = *session
+                    .digest_nc
+                    .entry(nc_key)
+                    .and_modify(|n| *n += 1)
+                    .or_insert(1);
+                self.store.update_session(session.clone()).await?;
+
+                tracing::info!(
+                    "🔍 CLIENT: Computing digest for user={}, realm={}, nonce={}, uri={}, nc={}",
+                    creds.username, challenge.realm, challenge.nonce, registrar_uri, nc_value
+                );
+
+                // REGISTER body is empty; pass `None` so the qop
+                // selector picks `auth` (or legacy if no qop offered)
+                // rather than `auth-int`.
+                let computed = crate::auth::DigestAuth::compute_response_with_state(
                     &creds.username,
                     &creds.password,
                     &challenge,
                     "REGISTER",
                     registrar_uri,
+                    nc_value,
+                    None,
                 )?;
-                
-                tracing::info!("🔍 CLIENT: Computed response hash: {} (cnonce: {:?})", response, cnonce);
-                
-                // Format authorization header using auth-core (shared module)
-                // Pass the same cnonce that was used in computation!
-                let auth_header = crate::auth::DigestAuth::format_authorization(
+
+                tracing::info!(
+                    "🔍 CLIENT: Computed response hash: {} (cnonce: {:?}, qop: {:?})",
+                    computed.response, computed.cnonce, computed.qop
+                );
+
+                let auth_header = crate::auth::DigestAuth::format_authorization_with_state(
                     &creds.username,
                     &challenge,
                     registrar_uri,
-                    &response,
-                    cnonce.as_deref(),  // Pass cnonce from computation
+                    &computed,
                 );
-                
+
                 tracing::debug!("Computed digest auth for user {}", creds.username);
                 Some(auth_header)
             } else {
