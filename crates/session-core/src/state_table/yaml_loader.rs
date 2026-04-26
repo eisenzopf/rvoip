@@ -770,9 +770,20 @@ impl YamlTableLoader {
             "SendMESSAGE" => Ok(Action::SendMESSAGE),
             "ProcessMESSAGE" => Ok(Action::ProcessMESSAGE),
 
+            // RFC 3903 PUBLISH — YAML transition is wired at
+            // `StartPublish → Publishing`, but no Rust caller dispatches
+            // `StartPublish` today and the send site is unimplemented.
+            // Intentionally state-machine-shaped per
+            // `docs/ARCHITECTURE_OVERVIEW.md#media-plane-side-effects`;
+            // promote from Custom to a real `Action::SendPUBLISH` variant
+            // when presence publishing lands.
+            "SendPUBLISH" => Ok(Action::Custom("SendPUBLISH".to_string())),
+
             // Bridge/Conference
             "CreateMediaBridge" => Ok(Action::Custom("CreateMediaBridge".to_string())),
+            "DestroyMediaBridge" => Ok(Action::Custom("DestroyMediaBridge".to_string())),
             "LinkSessions" => Ok(Action::Custom("LinkSessions".to_string())),
+            "UnlinkSessions" => Ok(Action::Custom("UnlinkSessions".to_string())),
             "HoldOriginalCall" | "HoldCurrentCall" => Ok(Action::HoldCurrentCall),
             "ResumeOriginalCall" => Ok(Action::RestoreMediaFlow),
 
@@ -788,11 +799,19 @@ impl YamlTableLoader {
             // Internal
             "CheckReadiness" => Ok(Action::Custom("CheckReadiness".to_string())),
 
-            // Default: treat as custom
-            _ => {
-                debug!("Unknown action '{}', treating as custom", name);
-                Ok(Action::Custom(name.to_string()))
-            }
+            // Unknown action — drift detection. Previously silently fell through
+            // to `Action::Custom(name)`, which masked dead YAML entries pointing
+            // at long-removed action variants. Now a hard error so additions
+            // and deletions stay synchronized between the YAML and the Rust
+            // `Action` enum. Intentional custom hooks (e.g. "SuspendMedia",
+            // "ResumeMedia", "CreateMediaBridge", "LinkSessions",
+            // "CheckReadiness") must be listed explicitly above.
+            _ => Err(SessionError::InternalError(format!(
+                "Unknown YAML action '{}': add a matching arm in \
+                 state_table/yaml_loader.rs::parse_action_by_name or remove \
+                 the YAML reference.",
+                name
+            ))),
         }
     }
     
@@ -898,5 +917,51 @@ transitions:
         
         let transition = table.get_transition(&key).expect("Transition not found");
         assert!(transition.condition_updates.dialog_established.unwrap_or(false));
+    }
+
+    /// The embedded `default.yaml` loads without hitting the
+    /// `UnknownAction` drift-detection arm. If this regresses, either the
+    /// YAML introduced a new action name or an `Action` variant was removed
+    /// without also deleting the corresponding YAML entry.
+    #[test]
+    fn default_yaml_loads_with_no_unknown_actions() {
+        // `load_embedded_default` constructs the loader + parses the
+        // embedded YAML + builds the `MasterStateTable`. An
+        // `Err(SessionError::InternalError("Unknown YAML action ..."))`
+        // at parse time is the failure mode we want to catch.
+        YamlTableLoader::load_embedded_default()
+            .expect("embedded default.yaml failed to load cleanly — \
+                     check for dead YAML action names or missing \
+                     parse_action_by_name arms");
+    }
+
+    /// Every `YamlAction::Simple` name that reaches `parse_action_by_name`
+    /// lands on a real variant rather than a `Custom` silent fallback
+    /// (unless explicitly allow-listed). The reverse direction — that every
+    /// `Action` variant is reachable from at least one YAML name — is
+    /// asserted by `default_yaml_loads_with_no_unknown_actions` together
+    /// with the CI expectation that new YAML names accompany every new
+    /// variant.
+    /// Compile-time invariant: session-core's `MediaSessionId` is the
+    /// same type as `rvoip_media_core::DialogId`. If this test stops
+    /// compiling the alias has been broken — see Sprint 2.5 P5
+    /// (`MEDIA_PLANE_LAYERING_FOLLOWUPS.md`).
+    #[test]
+    fn media_session_id_is_alias_of_media_core_dialog_id() {
+        let _: super::super::types::MediaSessionId = rvoip_media_core::DialogId::new_v4();
+    }
+
+    #[test]
+    fn parse_action_by_name_hard_errors_on_unknown_names() {
+        let loader = YamlTableLoader::new();
+        let err = loader
+            .parse_action_by_name("ThisNameDoesNotExist42")
+            .expect_err("unknown YAML action must be a hard error, not Custom fallback");
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("Unknown YAML action"),
+            "unexpected error for unknown action: {}",
+            msg,
+        );
     }
 }

@@ -65,6 +65,7 @@ where
     }
 }
 
+#[cfg(feature = "dev-insecure-tls")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sips_call_establishes_through_tls_transport() {
     let _ = tracing_subscriber::fmt::try_init();

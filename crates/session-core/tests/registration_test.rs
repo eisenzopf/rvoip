@@ -26,19 +26,9 @@ use tracing::info;
 
 /// Helper to create a test coordinator
 async fn create_test_coordinator(port: u16) -> Arc<UnifiedCoordinator> {
-    let config = Config {
-        local_ip: "127.0.0.1".parse().unwrap(),
-        sip_port: port,
-        bind_addr: format!("127.0.0.1:{}", port).parse().unwrap(),
-        local_uri: format!("sip:test@127.0.0.1:{}", port),
-        media_port_start: 16000 + port,
-        media_port_end: 17000 + port,
-        state_table_path: None,
-        use_100rel: Default::default(),
-        session_timer_secs: None,
-        session_timer_min_se: 90,
-        credentials: None,
-    };
+    let mut config = Config::local("test", port);
+    config.media_port_start = 16000 + port;
+    config.media_port_end = 17000 + port;
 
     UnifiedCoordinator::new(config).await.expect("Failed to create coordinator")
 }

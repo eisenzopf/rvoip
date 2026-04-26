@@ -13,7 +13,6 @@ use rvoip_media_core::{
         AudioSource, BridgeError, BridgeHandle,
     },
     DialogId,
-    types::MediaSessionId,
 };
 use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite, ParsedAttribute, SdpSession};
@@ -234,73 +233,6 @@ impl MediaAdapter {
     /// Built via `sip-core`'s typed `SdpBuilder` (RFC 8866). The
     /// previous format-string implementation produced byte-identical
     /// output to this version when the `offer_srtp` knob is not set —
-    /// see `sdp_offer_matches_legacy_format` in this module's tests
-    /// for the regression check.
-    ///
-    /// When `offer_srtp` is set, the m-section transport switches to
-    /// `RTP/SAVP` (RFC 4568 §3.1.4) and one `a=crypto:` line is
-    /// emitted per suite in `srtp_offered_suites`. The freshly-
-    /// generated master keys are stashed in
-    /// `pending_srtp_offerers` keyed by `session_id` so the matching
-    /// answer can drive `accept_answer` in
-    /// [`Self::negotiate_sdp_as_uac`].
-    pub async fn generate_sdp_offer(&self, session_id: &SessionId) -> Result<String> {
-        let info = self.media_sessions.get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(format!("No media session for {}", session_id.0)))?;
-
-        let port = info.rtp_port.unwrap_or(5004);
-        let elapsed_secs = info.created_at.elapsed().as_secs().to_string();
-        let dialog_id_str = info.dialog_id.as_str().to_string();
-        let local_ip_str = self.local_ip.to_string();
-
-        // RFC 4568 §3.1.4 — `RTP/SAVP` profile required when offering SDES.
-        let (transport, crypto_attrs) = if self.offer_srtp {
-            let (negotiator, attrs) =
-                SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
-            self.pending_srtp_offerers.insert(session_id.clone(), negotiator);
-            ("RTP/SAVP", attrs)
-        } else {
-            ("RTP/AVP", Vec::new())
-        };
-
-        // Start a media-audio sub-builder; chain crypto lines after
-        // rtpmap/fmtp so the order tracks what carriers expect (and
-        // what the no-SRTP regression fixture asserts byte-for-byte).
-        let mut media_builder = SdpBuilder::new("Session")
-            .origin(
-                "-",
-                &dialog_id_str,
-                &elapsed_secs,
-                "IN",
-                "IP4",
-                &local_ip_str,
-            )
-            .connection("IN", "IP4", &local_ip_str)
-            .time("0", "0")
-            .media_audio(port, transport)
-                .formats(&["0", "101"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("101", "telephone-event/8000")
-                .fmtp("101", "0-15");
-        for attr in crypto_attrs {
-            media_builder = media_builder.crypto_attribute(attr);
-        }
-        // RFC 8866 sendrecv emitted as a generic flag attribute
-        // (vs `.direction()`) so the m-section attribute order
-        // matches the legacy format-string layout: rtpmap →
-        // fmtp → [crypto…] → sendrecv. Builder's typed `direction`
-        // field would emit it before generic_attributes.
-        let session = media_builder
-                .attribute("sendrecv", None::<String>)
-                .done()
-            .build()
-            .map_err(|e| SessionError::SDPNegotiationFailed(
-                format!("SdpBuilder failed to build offer: {}", e)
-            ))?;
-
-        Ok(session.to_string())
-    }
-
     /// Extract the `a=crypto:` attributes from the audio m-section of
     /// a parsed SDP. Empty result means the peer offered no SRTP.
     fn extract_audio_crypto(session: &SdpSession) -> Vec<CryptoAttribute> {
@@ -498,9 +430,13 @@ impl MediaAdapter {
             tracing::info!("✅ Updated RTP remote address to {} for session {} (UAS)", remote_addr, session_id.0);
         }
         
-        // Generate SDP answer via the typed builder. See
-        // `generate_sdp_offer` for layout rationale. Picks `RTP/SAVP`
-        // when SRTP was negotiated, otherwise the legacy `RTP/AVP`.
+        // Generate SDP answer via the typed builder. Mirrors
+        // [`Self::generate_local_sdp`]: PCMU + PCMA + telephone-event,
+        // with `RTP/SAVP` when SRTP was negotiated. The full codec set
+        // is offered regardless of which of those the offer advertised
+        // — this matches what production callers (Asterisk / FreeSWITCH
+        // / Twilio) expect when accepting a downgraded offer, and the
+        // peer is still free to discard codecs it did not list.
         let sess_id = generate_session_id().to_string();
         let local_ip_str = self.local_ip.to_string();
         let answer_transport = if answer_attr.is_some() { "RTP/SAVP" } else { "RTP/AVP" };
@@ -509,8 +445,9 @@ impl MediaAdapter {
             .connection("IN", "IP4", &local_ip_str)
             .time("0", "0")
             .media_audio(local_port, answer_transport)
-                .formats(&["0", "101"])
+                .formats(&["0", "8", "101"])
                 .rtpmap("0", "PCMU/8000")
+                .rtpmap("8", "PCMA/8000")
                 .rtpmap("101", "telephone-event/8000")
                 .fmtp("101", "0-15");
         if let Some(attr) = answer_attr {
@@ -785,9 +722,18 @@ impl MediaAdapter {
         if let Some(info) = self.controller.get_session_info(&dialog_id).await {
             self.media_sessions.insert(session_id.clone(), info.clone());
 
-            // Store mapping with media controller
-            let media_id = crate::types::MediaSessionId(dialog_id.to_string());
-            self.controller.store_session_mapping(session_id.0.clone(), MediaSessionId::from_dialog(&dialog_id));
+            // `MediaSessionId` is a type alias for
+            // `rvoip_media_core::DialogId` (P5), so the value we hand
+            // back to session-core is identical to the controller's
+            // dialog id — no `from_dialog` reconstruction needed.
+            // `store_session_mapping` separately wants media-core's
+            // **internal** `MediaSessionId` type (still distinct), so
+            // that conversion stays.
+            let media_id = dialog_id.clone();
+            self.controller.store_session_mapping(
+                session_id.0.clone(),
+                rvoip_media_core::MediaSessionId::from_dialog(&dialog_id),
+            );
 
             tracing::info!("✅ Media session created successfully for dialog {}", dialog_id);
             return Ok(media_id);
@@ -796,63 +742,86 @@ impl MediaAdapter {
         Err(SessionError::MediaError("Failed to get session info after creation".to_string()))
     }
     
-    /// Generate local SDP offer. Dispatches to the SRTP-aware
-    /// [`Self::generate_sdp_offer`] when `offer_srtp` is enabled so the
-    /// state-machine `Action::GenerateLocalSDP` produces an offer that
-    /// matches the coordinator's SDES policy. Otherwise keeps the
-    /// plain-RTP/AVP format string that pre-dates the SRTP work.
+    /// Generate the local SDP offer. **Sole** SDP-offer generator — this
+    /// is the only entry point used by the state-machine's
+    /// `Action::GenerateLocalSDP`. Always uses `SdpBuilder`, always
+    /// advertises PCMU + PCMA + RFC 4733 telephone-event, and conditionally
+    /// attaches `a=crypto:` lines when [`Config::offer_srtp`](crate::api::unified::Config) is set.
+    ///
+    /// Profile selection per RFC 4568 §3.1.4: `RTP/SAVP` when offering
+    /// SDES, `RTP/AVP` otherwise. SRTP master keys are generated via
+    /// [`SrtpNegotiator::new_offerer`] and stashed in
+    /// `pending_srtp_offerers` keyed by `session_id` so
+    /// [`Self::negotiate_sdp_as_uac`] can drive `accept_answer` against
+    /// the matching answer.
+    ///
+    /// **DTMF advertisement (P2 fix).** Pre-Sprint 2.5 the non-SRTP path
+    /// silently omitted PT 101 / `a=fmtp:101 0-15`, leaving plaintext
+    /// callers unable to negotiate DTMF. The unified path always emits
+    /// the telephone-event rtpmap + fmtp regardless of profile —
+    /// `offer_advertises_telephone_event_on_plaintext` in the test
+    /// module locks this in.
     pub async fn generate_local_sdp(&self, session_id: &SessionId) -> Result<String> {
-        if self.offer_srtp {
-            // Ensure `self.media_sessions` is primed before the builder
-            // path reads `rtp_port` out of it — `generate_sdp_offer`
-            // expects the cached session info to already exist.
-            let dialog_id = self.session_to_dialog.get(session_id)
-                .ok_or_else(|| SessionError::SessionNotFound(format!("No dialog mapping for session {}", session_id.0)))?
-                .clone();
-            if let Some(info) = self.controller.get_session_info(&dialog_id).await {
-                self.media_sessions.insert(session_id.clone(), info);
-            }
-            return self.generate_sdp_offer(session_id).await;
-        }
-
-        // Get the dialog ID for this session
+        // Resolve dialog id and prime the cached session info. Both
+        // the SRTP and plaintext paths used to do this; doing it once
+        // up front lets the rest of the body share one shape.
         let dialog_id = self.session_to_dialog.get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(format!("No dialog mapping for session {}", session_id.0)))?
             .clone();
-
-        tracing::debug!("Generating SDP for session {} with dialog ID {}", session_id.0, dialog_id);
-
-        // Get session info (should exist now)
         let info = self.controller.get_session_info(&dialog_id).await
             .ok_or_else(|| SessionError::MediaError(format!("Failed to get session info for dialog {}", dialog_id)))?;
-
-        // Store session info
         self.media_sessions.insert(session_id.clone(), info.clone());
 
-        // The actual RTP port might not be in config.local_addr - it's in rtp_port
-        let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
-        tracing::debug!("Media session info - RTP port: {:?}, local_addr: {}", info.rtp_port, info.config.local_addr);
+        let port = info.rtp_port.unwrap_or(info.config.local_addr.port());
+        let elapsed_secs = info.created_at.elapsed().as_secs().to_string();
+        let dialog_id_str = info.dialog_id.as_str().to_string();
+        let local_ip_str = self.local_ip.to_string();
 
-        // Build SDP from actual media session info
-        let sdp = format!(
-            "v=0\r\n\
-             o=- {} {} IN IP4 {}\r\n\
-             s=RVoIP Session\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio {} RTP/AVP 0 8\r\n\
-             a=rtpmap:0 PCMU/8000\r\n\
-             a=rtpmap:8 PCMA/8000\r\n\
-             a=sendrecv\r\n",
-            session_id.0,
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-            info.config.local_addr.ip(),
-            info.config.local_addr.ip(),
-            local_port
-        );
+        // Profile + crypto. RFC 4568 §3.1.4 — `RTP/SAVP` is mandatory
+        // when offering SDES.
+        let (transport, crypto_attrs) = if self.offer_srtp {
+            let (negotiator, attrs) =
+                SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
+            self.pending_srtp_offerers.insert(session_id.clone(), negotiator);
+            ("RTP/SAVP", attrs)
+        } else {
+            ("RTP/AVP", Vec::new())
+        };
 
-        tracing::info!("✅ Generated SDP for session {} with local port {}", session_id.0, local_port);
+        // Build the m-section. Always offer PCMU (0) + PCMA (8) +
+        // telephone-event (101). Crypto attrs follow rtpmap/fmtp so
+        // ordering matches what carriers expect; sendrecv goes last so
+        // the byte-fixture tests stay stable.
+        let mut media_builder = SdpBuilder::new("Session")
+            .origin(
+                "-",
+                &dialog_id_str,
+                &elapsed_secs,
+                "IN",
+                "IP4",
+                &local_ip_str,
+            )
+            .connection("IN", "IP4", &local_ip_str)
+            .time("0", "0")
+            .media_audio(port, transport)
+                .formats(&["0", "8", "101"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("8", "PCMA/8000")
+                .rtpmap("101", "telephone-event/8000")
+                .fmtp("101", "0-15");
+        for attr in crypto_attrs {
+            media_builder = media_builder.crypto_attribute(attr);
+        }
+        let session = media_builder
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .map_err(|e| SessionError::SDPNegotiationFailed(
+                format!("SdpBuilder failed to build offer: {}", e)
+            ))?;
 
+        let sdp = session.to_string();
+        tracing::info!("✅ Generated SDP for session {} with local port {}", session_id.0, port);
         Ok(sdp)
     }
     
@@ -953,7 +922,7 @@ impl MediaAdapter {
     
     /// Create a media session
     pub async fn create_media_session(&self) -> Result<crate::types::MediaSessionId> {
-        let media_id = crate::types::MediaSessionId::new();
+        let media_id = crate::types::MediaSessionId::new_v4();
         Ok(media_id)
     }
     
@@ -1011,10 +980,10 @@ impl MediaAdapter {
         media_id: crate::types::MediaSessionId,
         digit: char,
     ) -> Result<()> {
-        // The state machine stores `media_id` as the stringified
-        // dialog id, so we can reconstruct the media-core DialogId
-        // directly rather than doing a mapping lookup.
-        let dialog_id = DialogId::new(media_id.0.clone());
+        // `MediaSessionId` is now a type alias for media-core's
+        // `DialogId` (P5), so the value passed in IS the dialog id we
+        // need — no reconstruction.
+        let dialog_id = media_id;
         self.controller
             .send_dtmf_packet(&dialog_id, digit, 100)
             .await
@@ -1077,7 +1046,7 @@ impl MediaAdapter {
     
     /// Create an audio mixer for a conference
     pub async fn create_audio_mixer(&self) -> Result<crate::types::MediaSessionId> {
-        let mixer_id = crate::types::MediaSessionId::new();
+        let mixer_id = crate::types::MediaSessionId::new_v4();
         self.audio_mixers.insert(mixer_id.clone(), Vec::new());
         tracing::info!("Created audio mixer {:?}", mixer_id);
         Ok(mixer_id)
@@ -1386,8 +1355,9 @@ mod sdp_format_tests {
 
     use super::*;
 
-    /// Build the offer the same way `generate_sdp_offer` does, but with
-    /// fixed inputs so the output is deterministic.
+    /// Build the offer the same way `generate_local_sdp` does, but with
+    /// fixed inputs so the output is deterministic. Mirrors the
+    /// production shape: PCMU + PCMA + telephone-event, RTP/AVP profile.
     fn build_offer(dialog_id: &str, elapsed_secs: u64, ip: &str, port: u16) -> String {
         let elapsed = elapsed_secs.to_string();
         SdpBuilder::new("Session")
@@ -1395,8 +1365,9 @@ mod sdp_format_tests {
             .connection("IN", "IP4", ip)
             .time("0", "0")
             .media_audio(port, "RTP/AVP")
-                .formats(&["0", "101"])
+                .formats(&["0", "8", "101"])
                 .rtpmap("0", "PCMU/8000")
+                .rtpmap("8", "PCMA/8000")
                 .rtpmap("101", "telephone-event/8000")
                 .fmtp("101", "0-15")
                 .attribute("sendrecv", None::<String>)
@@ -1413,8 +1384,9 @@ mod sdp_format_tests {
             .connection("IN", "IP4", ip)
             .time("0", "0")
             .media_audio(port, "RTP/AVP")
-                .formats(&["0", "101"])
+                .formats(&["0", "8", "101"])
                 .rtpmap("0", "PCMU/8000")
+                .rtpmap("8", "PCMA/8000")
                 .rtpmap("101", "telephone-event/8000")
                 .fmtp("101", "0-15")
                 .attribute("sendrecv", None::<String>)
@@ -1424,9 +1396,11 @@ mod sdp_format_tests {
             .to_string()
     }
 
-    /// Reference output: exactly what the pre-refactor `format!` block
-    /// produced for the offer. Hand-crafted to match the legacy code at
-    /// `media_adapter.rs:160-176` byte-for-byte.
+    /// Reference output for the unified offer (Sprint 2.5 P2): PCMU +
+    /// PCMA + telephone-event on every offer regardless of SRTP. Pre-P2
+    /// the non-SRTP path emitted only `0 8` (no DTMF) and the SRTP path
+    /// only `0 101` (no PCMA); both have been merged into the unified
+    /// shape below.
     fn legacy_offer(dialog_id: &str, elapsed_secs: u64, ip: &str, port: u16) -> String {
         format!(
             "v=0\r\n\
@@ -1434,8 +1408,9 @@ mod sdp_format_tests {
              s=Session\r\n\
              c=IN IP4 {}\r\n\
              t=0 0\r\n\
-             m=audio {} RTP/AVP 0 101\r\n\
+             m=audio {} RTP/AVP 0 8 101\r\n\
              a=rtpmap:0 PCMU/8000\r\n\
+             a=rtpmap:8 PCMA/8000\r\n\
              a=rtpmap:101 telephone-event/8000\r\n\
              a=fmtp:101 0-15\r\n\
              a=sendrecv\r\n",
@@ -1450,8 +1425,9 @@ mod sdp_format_tests {
              s=Session\r\n\
              c=IN IP4 {}\r\n\
              t=0 0\r\n\
-             m=audio {} RTP/AVP 0 101\r\n\
+             m=audio {} RTP/AVP 0 8 101\r\n\
              a=rtpmap:0 PCMU/8000\r\n\
+             a=rtpmap:8 PCMA/8000\r\n\
              a=rtpmap:101 telephone-event/8000\r\n\
              a=fmtp:101 0-15\r\n\
              a=sendrecv\r\n",
@@ -1492,20 +1468,49 @@ mod sdp_format_tests {
         assert_eq!(m.media, "audio");
         assert_eq!(m.port, 5004);
         assert_eq!(m.protocol, "RTP/AVP");
-        assert_eq!(m.formats, vec!["0", "101"]);
+        assert_eq!(m.formats, vec!["0", "8", "101"]);
+    }
+
+    /// Sprint 2.5 P2 regression: every plaintext (RTP/AVP) offer must
+    /// advertise PT 101 telephone-event + the RFC 4733 fmtp param
+    /// range. Pre-P2 the non-SRTP code path emitted `m=audio … RTP/AVP
+    /// 0 8` with no DTMF rtpmap, which silently broke DTMF negotiation
+    /// for any plaintext call. The unified `generate_local_sdp` emits
+    /// the full PCMU + PCMA + 101 set on every offer.
+    #[test]
+    fn offer_advertises_telephone_event_on_plaintext() {
+        let sdp = build_offer("d", 0, "127.0.0.1", 16000);
+        assert!(
+            sdp.contains("m=audio 16000 RTP/AVP 0 8 101\r\n"),
+            "plaintext offer must advertise PT 101 alongside PCMU + PCMA:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("a=rtpmap:101 telephone-event/8000\r\n"),
+            "plaintext offer must carry the RFC 4733 telephone-event rtpmap:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("a=fmtp:101 0-15\r\n"),
+            "plaintext offer must carry the RFC 4733 fmtp 0-15 range:\n{}",
+            sdp
+        );
     }
 
     /// Build an SRTP-flavoured offer (RFC 4568 §3.1.4: m= profile is
     /// `RTP/SAVP`) directly via the builder so we can assert the
-    /// shape without standing up a full MediaAdapter.
+    /// shape without standing up a full MediaAdapter. Mirrors the
+    /// unified `generate_local_sdp` shape — PCMU + PCMA + telephone-event
+    /// — with crypto lines appended.
     fn build_srtp_offer(ip: &str, port: u16, attrs: Vec<CryptoAttribute>) -> String {
         let mut media_builder = SdpBuilder::new("Session")
             .origin("-", "1", "0", "IN", "IP4", ip)
             .connection("IN", "IP4", ip)
             .time("0", "0")
             .media_audio(port, "RTP/SAVP")
-                .formats(&["0", "101"])
+                .formats(&["0", "8", "101"])
                 .rtpmap("0", "PCMU/8000")
+                .rtpmap("8", "PCMA/8000")
                 .rtpmap("101", "telephone-event/8000")
                 .fmtp("101", "0-15");
         for attr in attrs {
@@ -1532,8 +1537,9 @@ mod sdp_format_tests {
 
         // Wire-level checks.
         assert!(
-            sdp.contains("m=audio 16000 RTP/SAVP 0 101\r\n"),
-            "SRTP offer should use RTP/SAVP profile per RFC 4568 §3.1.4:\n{}",
+            sdp.contains("m=audio 16000 RTP/SAVP 0 8 101\r\n"),
+            "SRTP offer should use RTP/SAVP profile per RFC 4568 §3.1.4 \
+             with the unified PCMU+PCMA+telephone-event format set:\n{}",
             sdp
         );
         assert!(

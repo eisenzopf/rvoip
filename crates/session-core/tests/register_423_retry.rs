@@ -116,19 +116,11 @@ async fn register_423_retry_bumps_expires_and_succeeds() {
 
     // --- Session-core-v3 client ----------------------------------------------
 
-    let config = Config {
-        local_ip: "127.0.0.1".parse().unwrap(),
-        sip_port: CLIENT_PORT,
-        bind_addr: format!("127.0.0.1:{}", CLIENT_PORT).parse().unwrap(),
-        local_uri: format!("sip:alice@127.0.0.1:{}", CLIENT_PORT),
-        media_port_start: 40000,
-        media_port_end: 40100,
-        state_table_path: None,
-        use_100rel: Default::default(),
-        session_timer_secs: None,
-        session_timer_min_se: 90,
-        credentials: None,
-    };
+    // Use `Config::local` as the base — TLS / SRTP / PAI / outbound
+    // proxy etc. take their default-off values automatically.
+    let mut config = Config::local("alice", CLIENT_PORT);
+    config.media_port_start = 40000;
+    config.media_port_end = 40100;
 
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer

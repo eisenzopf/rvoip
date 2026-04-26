@@ -12,8 +12,13 @@
 //! MUST NOT be used against real carriers. For production, omit it and
 //! rely on `rustls-native-certs` + `webpki-roots`.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_tls_server
+//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_tls_server --features dev-insecure-tls
 //! Or with client:  ./examples/streampeer/tls/run.sh
+
+#[cfg(not(feature = "dev-insecure-tls"))]
+compile_error!(
+    "streampeer/tls example requires --features dev-insecure-tls (self-signed dev cert)"
+);
 
 use async_trait::async_trait;
 use rvoip_session_core::{

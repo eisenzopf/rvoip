@@ -18,8 +18,14 @@ pub use conference::*;
 // Re-export statistics types
 pub use stats::{MediaStatistics, MediaProcessingStats, QualityMetrics};
 
-/// Unique identifier for a SIP dialog (from session-core)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Unique identifier for a SIP dialog (from session-core).
+///
+/// Session-core's `MediaSessionId` is a type alias for this — see
+/// `crates/session-core/src/state_table/types.rs`. The two used to be
+/// distinct String wrappers, which forced
+/// `MediaSessionId::from_dialog(&dialog_id)` reconstruction at every
+/// boundary and caused a "fresh UUID" bug class.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DialogId(String);
 
 impl DialogId {
@@ -27,7 +33,15 @@ impl DialogId {
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
-    
+
+    /// Generate a fresh dialog id with a UUIDv4 suffix. Matches the
+    /// format `session-core::MediaSessionId::new()` historically emitted
+    /// (`media-<uuid>`). Use when constructing a media-side identifier
+    /// not derived from an existing dialog.
+    pub fn new_v4() -> Self {
+        Self(format!("media-{}", uuid::Uuid::new_v4()))
+    }
+
     /// Get the inner string
     pub fn as_str(&self) -> &str {
         &self.0

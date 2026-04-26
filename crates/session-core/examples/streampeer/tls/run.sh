@@ -37,18 +37,18 @@ openssl req -x509 -newkey rsa:2048 -nodes \
   >/dev/null 2>&1
 
 echo -e "${GREEN}Building…${NC}"
-cargo build -p rvoip-session-core \
+cargo build -p rvoip-session-core --features dev-insecure-tls \
   --example streampeer_tls_server \
   --example streampeer_tls_client 2>&1 \
   | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${GREEN}[SERVER]${NC} Starting TLS server on 5060 (+ sips:5061)"
-cargo run -p rvoip-session-core --example streampeer_tls_server --quiet > "$SERVER_LOG" 2>&1 &
+cargo run -p rvoip-session-core --features dev-insecure-tls --example streampeer_tls_server --quiet > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 sleep 2
 
 echo -e "${CYAN}[CLIENT]${NC} Starting TLS client"
-cargo run -p rvoip-session-core --example streampeer_tls_client --quiet \
+cargo run -p rvoip-session-core --features dev-insecure-tls --example streampeer_tls_client --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[CLIENT]$(printf '\033[0m') /"
 CLIENT_EXIT=$?
 

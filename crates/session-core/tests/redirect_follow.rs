@@ -120,19 +120,9 @@ async fn uac_follows_302_and_reissues_invite_to_new_contact() {
     });
 
     // --- Session-core-v3 client calls the redirector ---
-    let config = Config {
-        local_ip: "127.0.0.1".parse().unwrap(),
-        sip_port: CLIENT_PORT,
-        bind_addr: format!("127.0.0.1:{}", CLIENT_PORT).parse().unwrap(),
-        local_uri: format!("sip:alice@127.0.0.1:{}", CLIENT_PORT),
-        media_port_start: 40200,
-        media_port_end: 40300,
-        state_table_path: None,
-        use_100rel: Default::default(),
-        session_timer_secs: None,
-        session_timer_min_se: 90,
-        credentials: None,
-    };
+    let mut config = Config::local("alice", CLIENT_PORT);
+    config.media_port_start = 40200;
+    config.media_port_end = 40300;
 
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let _handle = peer

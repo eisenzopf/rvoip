@@ -57,6 +57,11 @@ udp = []
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:rustls-native-certs", "dep:webpki-roots"]
 tcp = []
 ws = ["dep:tokio-tungstenite", "dep:http"]
+# Dev-only: compile the accept-all-certs TLS client verifier. NEVER
+# enable in production — the `TlsClientConfig::insecure_skip_verify` flag
+# has no effect without it. Gated so production builds physically cannot
+# ship with cert validation disabled.
+dev-insecure-tls = ["tls"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

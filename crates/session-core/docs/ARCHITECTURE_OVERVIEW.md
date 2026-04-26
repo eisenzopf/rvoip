@@ -192,6 +192,67 @@ UpdateCallState    // Internal state update
 PublishEvent       // Notify listeners
 ```
 
+### Media-plane side effects
+
+Not every user-facing API is a state transition. Actions that are pure
+media-plane side effects — sending DTMF, muting a stream, pushing an
+audio frame, starting/stopping recording at the packet level — are
+invoked **directly** on the relevant adapter from `UnifiedCoordinator`
+rather than dispatched as an `EventType` through the state machine.
+
+**Rule of thumb.** If the action doesn't change any observable session
+state (the peer's SIP state machine wouldn't care that it happened), it
+bypasses the state machine.
+
+- **State-machine:** `INVITE`, `BYE`, `REFER`, re-`INVITE` (hold / resume),
+  `REGISTER`, 200 OK accept / reject — all change dialog state.
+- **Direct-call:** `send_dtmf` (RFC 4733), mute, audio push, recording
+  control — media-plane only.
+
+**Contract.** Every name referenced by `state_tables/*.yaml`'s
+`actions:` entries MUST have an explicit arm in
+`state_table/yaml_loader.rs::parse_action_by_name` — either mapping to a
+real `Action::*` variant or to `Action::Custom("Name")`. Unknown names
+are a hard error at load time
+(`state_table/yaml_loader.rs::default_yaml_loads_with_no_unknown_actions`
+asserts this).
+
+`Action::SendPUBLISH` (RFC 3903) is intentionally state-machine-shaped
+despite the current send site being unimplemented. When the YAML
+transition under `StartPublish → Publishing` gets wired up end-to-end,
+promote the `Action::Custom("SendPUBLISH")` mapping to a real variant.
+
+### Single SDP-offer entry point
+
+`MediaAdapter::generate_local_sdp` is the **sole** SDP-offer generator.
+The state-machine `Action::GenerateLocalSDP` calls it; nothing else
+should construct an offer SDP. The body uses
+[`SdpBuilder`](../../../sip-core/src/sdp/builder.rs) for every case and
+attaches optional attribute families conditionally on `Config` policy:
+
+- **Profile** — `RTP/SAVP` when `offer_srtp` is set (RFC 4568 §3.1.4),
+  `RTP/AVP` otherwise.
+- **Codecs** — always advertises PCMU (PT 0) + PCMA (PT 8) +
+  RFC 4733 telephone-event (PT 101). The DTMF rtpmap + `a=fmtp:101 0-15`
+  fire on every offer regardless of profile; pre-Sprint-2.5 the
+  plaintext path silently omitted them, breaking DTMF negotiation
+  on non-SRTP calls.
+- **`a=crypto:`** — one line per suite in `Config::srtp_offered_suites`,
+  each with a freshly-generated master key. Stashed in
+  `pending_srtp_offerers` keyed by `session_id` so
+  `negotiate_sdp_as_uac` can drive the matching `accept_answer`.
+- **Reserved extension points** for future Sprint 3/4 work — Comfort
+  Noise (Sprint 3 C1) becomes a `.rtpmap("13", "CN/8000")` branch, ICE
+  (Sprint 4 D3) appends candidate / ufrag / pwd attrs, DTLS-SRTP
+  (Sprint 4 D2) appends fingerprint + setup attrs.
+
+The answer-side path (`negotiate_sdp_as_uas`) mirrors the same shape so
+both directions stay symmetric. Both paths are locked by byte-fixture
+tests (`offer_matches_legacy_format_byte_for_byte`,
+`offer_advertises_telephone_event_on_plaintext`,
+`srtp_offer_uses_savp_profile_and_carries_crypto_lines`) — drift is
+caught at PR review time, not at peer-interop time.
+
 ### Transitions
 Transitions define how the system moves between states:
 

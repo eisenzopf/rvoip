@@ -157,6 +157,13 @@ pub struct Config {
     /// TLS handshake still runs end-to-end (encrypted), but a malicious
     /// peer can MITM. Default: `false`. **Must not** be enabled in
     /// production.
+    ///
+    /// Gated behind the `dev-insecure-tls` Cargo feature — production
+    /// builds physically cannot access this field. The matching
+    /// `InsecureCertVerifier` in `sip-transport` is also feature-gated,
+    /// so even with the feature enabled the verifier type only exists
+    /// in the dev-build binary.
+    #[cfg(feature = "dev-insecure-tls")]
     pub tls_insecure_skip_verify: bool,
 
     /// Offer RFC 4568 SDES-SRTP on outgoing INVITEs.
@@ -252,6 +259,7 @@ impl Config {
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
+            #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_required: false,
@@ -290,6 +298,7 @@ impl Config {
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
+            #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_required: false,
@@ -1142,7 +1151,13 @@ impl UnifiedCoordinator {
                 .tls_extra_ca_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
+            // Default build: `Config::tls_insecure_skip_verify` is not
+            // compiled, so we always pass `false`. Only the
+            // `dev-insecure-tls` build surfaces the field.
+            #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: config.tls_insecure_skip_verify,
+            #[cfg(not(feature = "dev-insecure-tls"))]
+            tls_insecure_skip_verify: false,
             ..Default::default()
         };
         

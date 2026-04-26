@@ -60,7 +60,7 @@ default = ["recovery", "events"]
 # Dialog recovery features
 recovery = []
 
-# Event system features  
+# Event system features
 events = []
 
 # Testing features
@@ -68,6 +68,11 @@ testing = []
 
 # Development features (additional debugging)
 dev = ["recovery", "events", "testing"]
+
+# Dev-only: forwards to sip-transport's `dev-insecure-tls` and exposes
+# `TlsClientConfig::insecure_skip_verify` through the `TransportManager`.
+# See `crates/sip-transport/Cargo.toml` for the production warning.
+dev-insecure-tls = ["rvoip-sip-transport/dev-insecure-tls"]
 
 [package.metadata.docs.rs]
 all-features = true

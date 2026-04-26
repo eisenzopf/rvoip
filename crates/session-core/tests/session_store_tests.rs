@@ -165,7 +165,7 @@ async fn test_call_id_index() {
 async fn test_media_id_index() {
     let store = SessionStore::new();
     let sid = SessionId::new();
-    let mid = MediaSessionId("media-xyz".into());
+    let mid = MediaSessionId::new("media-xyz");
 
     let mut s = store.create_session(sid.clone(), Role::UAC, false).await.unwrap();
     s.media_session_id = Some(mid.clone());
@@ -205,7 +205,7 @@ async fn test_remove_cleans_indexes() {
     let store = SessionStore::new();
     let sid = SessionId::new();
     let did = DialogId(uuid::Uuid::new_v4());
-    let mid = MediaSessionId("m1".into());
+    let mid = MediaSessionId::new("m1");
     let cid: String = "c1".into();
 
     let mut s = store.create_session(sid.clone(), Role::UAC, false).await.unwrap();

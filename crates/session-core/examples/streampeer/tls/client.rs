@@ -6,8 +6,13 @@
 //! `sips:` URI scheme and routes through the TLS listener instead of
 //! UDP.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_tls_client
+//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_tls_client --features dev-insecure-tls
 //! Or with server:  ./examples/streampeer/tls/run.sh
+
+#[cfg(not(feature = "dev-insecure-tls"))]
+compile_error!(
+    "streampeer/tls example requires --features dev-insecure-tls (self-signed dev cert)"
+);
 
 use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::{sleep, Duration};

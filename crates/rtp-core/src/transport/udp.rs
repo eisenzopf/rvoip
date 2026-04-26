@@ -5,13 +5,26 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::any::Any;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use dashmap::DashMap;
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc, broadcast};
 use tokio::task::JoinHandle;
 use bytes::Bytes;
 use tracing::{error, warn, debug, trace, info};
+
+/// RFC 4733 §2.5.1.3 — the sender emits up to three identical
+/// end-of-event frames for loss resilience. Each shares
+/// `(peer_addr, ssrc, rtp_timestamp)` with the first. A `DashMap`
+/// keyed on that triple lets the UDP receive loop suppress the two
+/// retransmits at the socket layer so downstream consumers (media-core,
+/// session-core) see one logical digit per tone.
+///
+/// 500 ms covers the worst-case spacing between the three retransmits
+/// while keeping the seen-set bounded under sustained DTMF traffic.
+const DTMF_DEDUP_TTL: Duration = Duration::from_millis(500);
 
 use crate::error::Error;
 use crate::Result;
@@ -72,6 +85,16 @@ pub struct UdpRtpTransport {
     /// (non-RTCP) is fed through `SrtpContext::unprotect`; auth
     /// failures are silently dropped per RFC 3711 §3.4.
     srtp_recv: Arc<Mutex<Option<crate::srtp::SrtpContext>>>,
+
+    /// RFC 4733 §2.5.1.3 retransmit dedup state, keyed on
+    /// `(peer_addr, ssrc, rtp_timestamp)`. The first end-of-event
+    /// frame per tone is forwarded; the two retransmits collide on
+    /// this key and are suppressed before they reach `event_tx`. See
+    /// [`DTMF_DEDUP_TTL`] for the per-entry lifetime. `peer_addr` is
+    /// part of the key because rtp-core has no dialog scope at the
+    /// socket layer — two simultaneous DTMF streams from different
+    /// peers must each fire independently.
+    dtmf_seen: Arc<DashMap<(SocketAddr, u32, u32), Instant>>,
 }
 
 impl UdpRtpTransport {
@@ -185,6 +208,7 @@ impl UdpRtpTransport {
             active: Arc::new(Mutex::new(false)),
             srtp_send: Arc::new(Mutex::new(None)),
             srtp_recv: Arc::new(Mutex::new(None)),
+            dtmf_seen: Arc::new(DashMap::new()),
         };
         
         // Start the receiver task
@@ -208,6 +232,7 @@ impl UdpRtpTransport {
         let event_tx = self.event_tx.clone();
         let active_state = self.active.clone();
         let srtp_recv = self.srtp_recv.clone();
+        let dtmf_seen = self.dtmf_seen.clone();
 
         let rtp_receiver = tokio::spawn(async move {
             let mut buffer = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
@@ -299,6 +324,26 @@ impl UdpRtpTransport {
                                         let end_of_event = (byte1 & 0b1000_0000) != 0;
                                         let volume = byte1 & 0b0011_1111;
                                         let duration = u16::from_be_bytes([p[2], p[3]]);
+
+                                        // RFC 4733 §2.5.1.3 retransmit dedup. The
+                                        // sender emits up to three identical E=1
+                                        // frames sharing `(ssrc, rtp_timestamp)`.
+                                        // Keyed by `(peer_addr, ssrc, ts)` so two
+                                        // simultaneous DTMF streams from
+                                        // different peers fire independently.
+                                        // Inline retain prunes stale entries on
+                                        // every fire — at one PT 101 frame per
+                                        // ~20 ms per active tone, this stays
+                                        // bounded.
+                                        if end_of_event {
+                                            let key = (addr, packet.header.ssrc, packet.header.timestamp);
+                                            let now = Instant::now();
+                                            dtmf_seen.retain(|_, seen_at| now.duration_since(*seen_at) < DTMF_DEDUP_TTL);
+                                            if dtmf_seen.insert(key, now).is_some() {
+                                                continue; // retransmit — suppress
+                                            }
+                                        }
+
                                         let dtmf = RtpEvent::DtmfEvent {
                                             event,
                                             end_of_event,
@@ -1252,6 +1297,128 @@ mod tests {
             "auth-failed packet must be silently dropped (got event {:?})",
             waited
         );
+    }
+
+    /// Build a 4-byte RFC 4733 telephone-event wire payload.
+    /// `event_code` is 0-15 for DTMF; `end_of_event` is the E bit;
+    /// `duration` is in 8 kHz timestamp units.
+    fn rfc4733_payload(event_code: u8, end_of_event: bool, volume: u8, duration: u16) -> Bytes {
+        let e_bit = if end_of_event { 0b1000_0000 } else { 0 };
+        let byte1 = e_bit | (volume & 0b0011_1111);
+        let dur = duration.to_be_bytes();
+        Bytes::copy_from_slice(&[event_code, byte1, dur[0], dur[1]])
+    }
+
+    /// RFC 4733 §2.5.1.3 retransmit dedup. Sender emits three identical
+    /// E=1 frames sharing `(ssrc, rtp_timestamp)` for loss resilience.
+    /// The transport must collapse them into one `RtpEvent::DtmfEvent`
+    /// before downstream consumers see them.
+    #[tokio::test]
+    async fn test_pt101_three_end_of_event_retransmits_dedup_to_one_event() {
+        let cfg1 = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some("dtmf-dedup-sender".to_string()),
+            use_port_allocator: false,
+        };
+        let cfg2 = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some("dtmf-dedup-receiver".to_string()),
+            use_port_allocator: false,
+        };
+        let sender = UdpRtpTransport::new(cfg1).await.unwrap();
+        let receiver = UdpRtpTransport::new(cfg2).await.unwrap();
+
+        let mut events = receiver.subscribe();
+        let receiver_addr = receiver.local_rtp_addr().unwrap();
+
+        // Three identical E=1 packets, same ssrc + ts (RFC 4733 §2.5.1.3
+        // retransmit shape).
+        let payload = rfc4733_payload(/*'1'*/ 1, /*end*/ true, /*vol*/ 10, /*dur*/ 800);
+        let header = RtpHeader::new(/*PT*/ 101, /*seq*/ 1, /*ts*/ 12345, /*ssrc*/ 0xdead_beef);
+        for _ in 0..3 {
+            let packet = RtpPacket::new(header.clone(), payload.clone());
+            sender.send_rtp(&packet, receiver_addr).await.unwrap();
+        }
+
+        // First packet → one DtmfEvent.
+        match tokio::time::timeout(tokio::time::Duration::from_millis(500), events.recv()).await {
+            Ok(Ok(RtpEvent::DtmfEvent { event, end_of_event, .. })) => {
+                assert_eq!(event, 1);
+                assert!(end_of_event);
+            }
+            other => panic!("expected first DtmfEvent, got {:?}", other),
+        }
+
+        // Subsequent retransmits must be suppressed — no further event.
+        let leftover = tokio::time::timeout(
+            tokio::time::Duration::from_millis(150),
+            events.recv(),
+        )
+        .await;
+        assert!(
+            leftover.is_err(),
+            "RFC 4733 retransmit must be deduped, got extra event {:?}",
+            leftover
+        );
+    }
+
+    /// Dedup keys on `(peer_addr, ssrc, ts)` because rtp-core has no
+    /// dialog scope. Two simultaneous DTMF streams from different peers
+    /// that happen to collide on `(ssrc, ts)` must each fire — they're
+    /// not retransmits of the same tone.
+    #[tokio::test]
+    async fn test_pt101_dedup_scoped_by_peer_addr() {
+        let mk_cfg = |session_id: &str| RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some(session_id.to_string()),
+            use_port_allocator: false,
+        };
+        let peer_a = UdpRtpTransport::new(mk_cfg("dtmf-peer-a")).await.unwrap();
+        let peer_b = UdpRtpTransport::new(mk_cfg("dtmf-peer-b")).await.unwrap();
+        let receiver = UdpRtpTransport::new(mk_cfg("dtmf-multi-peer-rx"))
+            .await
+            .unwrap();
+
+        let mut events = receiver.subscribe();
+        let receiver_addr = receiver.local_rtp_addr().unwrap();
+
+        // Same `(ssrc, ts)` from two distinct senders. Receiver must
+        // emit two events — once per peer.
+        let payload = rfc4733_payload(2, true, 10, 800);
+        let header = RtpHeader::new(101, 1, 22222, 0xdead_beef);
+        let pkt = RtpPacket::new(header.clone(), payload.clone());
+
+        peer_a.send_rtp(&pkt, receiver_addr).await.unwrap();
+        peer_b.send_rtp(&pkt, receiver_addr).await.unwrap();
+
+        let first =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), events.recv()).await;
+        let second =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), events.recv()).await;
+        match (first, second) {
+            (
+                Ok(Ok(RtpEvent::DtmfEvent { source: addr_first, .. })),
+                Ok(Ok(RtpEvent::DtmfEvent { source: addr_second, .. })),
+            ) => {
+                assert_ne!(
+                    addr_first, addr_second,
+                    "expected two DtmfEvents from distinct peer addresses"
+                );
+            }
+            other => panic!(
+                "expected two DtmfEvents (one per peer), got {:?}",
+                other
+            ),
+        }
     }
 
     #[tokio::test]

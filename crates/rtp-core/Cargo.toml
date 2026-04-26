@@ -36,6 +36,9 @@ futures = "0.3.30"
 hostname = "0.3"
 once_cell = "1.10"
 parking_lot = "0.12.1"
+# RFC 4733 §2.5.1.3 retransmit dedup keyed on (peer_addr, ssrc, ts);
+# sharded for the receive hot path.
+dashmap = { workspace = true }
 # Cryptographic dependencies for DTLS
 hmac = "0.12.1"
 sha1 = "0.10"

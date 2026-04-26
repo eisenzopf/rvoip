@@ -158,7 +158,7 @@ mod tests {
     async fn test_media_mapping() {
         let registry = SessionRegistry::new();
         let session_id = SessionId::new();
-        let media_id = MediaSessionId::new();
+        let media_id = MediaSessionId::new_v4();
 
         registry.map_media(session_id.clone(), media_id.clone()).await;
 
@@ -171,7 +171,7 @@ mod tests {
         let registry = SessionRegistry::new();
         let session_id = SessionId::new();
         let dialog_id = DialogId::new();
-        let media_id = MediaSessionId::new();
+        let media_id = MediaSessionId::new_v4();
 
         registry.map_dialog(session_id.clone(), dialog_id.clone()).await;
         registry.map_media(session_id.clone(), media_id.clone()).await;
@@ -208,7 +208,7 @@ mod tests {
         let session_id = SessionId::new();
 
         registry.map_dialog(session_id.clone(), DialogId::new()).await;
-        registry.map_media(session_id.clone(), MediaSessionId(uuid::Uuid::new_v4().to_string())).await;
+        registry.map_media(session_id.clone(), MediaSessionId::new_v4()).await;
 
         registry.clear().await;
 

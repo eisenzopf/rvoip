@@ -763,22 +763,28 @@ impl RtpSession {
         marker: bool,
         payload_type: u8,
     ) -> Result<()> {
-        let mut header = RtpHeader::new(
-            payload_type,
-            0, // Sequence number will be set by scheduler
-            timestamp,
-            self.ssrc,
-        );
+        // The whole point of this method is that the caller controls
+        // PT + timestamp explicitly — RFC 4733 telephone-event needs
+        // every packet of a tone to share the start timestamp, and
+        // the scheduler's `schedule_packet` would overwrite it with
+        // its audio-rate cursor. So we bypass the scheduler's
+        // queueing path and route directly to the sender channel.
+        // Sequence numbers still come from the scheduler (when
+        // present) so DTMF + audio share the seq-number space the
+        // peer expects.
+        let sequence = self
+            .scheduler
+            .as_mut()
+            .map(|s| s.next_sequence())
+            .unwrap_or(0);
+        let mut header = RtpHeader::new(payload_type, sequence, timestamp, self.ssrc);
         header.marker = marker;
         let packet = RtpPacket::new(header, payload);
 
-        if let Some(scheduler) = &mut self.scheduler {
-            scheduler.schedule_packet(packet)
-        } else {
-            self.sender.send(packet)
-                .await
-                .map_err(|_| Error::SessionError("Failed to send packet".to_string()))
-        }
+        self.sender
+            .send(packet)
+            .await
+            .map_err(|_| Error::SessionError("Failed to send packet".to_string()))
     }
     
     /// Receive an RTP packet
@@ -887,16 +893,50 @@ impl RtpSession {
             let now = std::time::SystemTime::now();
             let since_epoch = now.duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_else(|_| Duration::from_secs(0));
-            
+
             let secs = since_epoch.as_secs();
             let nanos = since_epoch.subsec_nanos();
-            
+
             // Convert to timestamp units (samples)
             let timestamp_secs = secs * (self.config.clock_rate as u64);
             let timestamp_fraction = ((nanos as u64) * (self.config.clock_rate as u64)) / 1_000_000_000;
-            
+
             (timestamp_secs + timestamp_fraction) as u32
         }
+    }
+
+    /// Current RTP timestamp cursor — the timestamp the next audio
+    /// packet would carry. Coherent with the audio stream's SSRC per
+    /// RFC 4733 §2.1: telephone-event packets share the start
+    /// timestamp of the surrounding audio so receivers can align
+    /// tones with the audio they overlay.
+    ///
+    /// The implementation derives the timestamp from wall-clock at
+    /// the configured clock rate rather than reading the scheduler's
+    /// internal `self.timestamp` field directly. This matters because:
+    ///
+    /// - When audio packets are flowing through the scheduler at the
+    ///   audio rate, wall-clock and scheduler cursor stay in lockstep
+    ///   (both advance at `clock_rate` Hz), so the returned value is
+    ///   audio-anchored as RFC 4733 expects.
+    /// - When no audio is flowing (e.g. the streampeer/dtmf example,
+    ///   which exercises only RTP-control with PT 101 and never
+    ///   pushes a PCMU audio source), the scheduler's `self.timestamp`
+    ///   is frozen. A frozen timestamp would collapse successive DTMF
+    ///   tones into one `(peer, ssrc, ts)` dedup key at the receiver,
+    ///   silently dropping every digit after the first. Wall-clock
+    ///   keeps successive tones distinct unconditionally.
+    pub fn current_timestamp(&self) -> RtpTimestamp {
+        let now = std::time::SystemTime::now();
+        let since_epoch = now
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_else(|_| Duration::from_secs(0));
+        let secs = since_epoch.as_secs();
+        let nanos = since_epoch.subsec_nanos();
+        let timestamp_secs = secs * (self.config.clock_rate as u64);
+        let timestamp_fraction =
+            ((nanos as u64) * (self.config.clock_rate as u64)) / 1_000_000_000;
+        (timestamp_secs + timestamp_fraction) as u32
     }
     
     /// Get the SSRC of this session

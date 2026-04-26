@@ -83,21 +83,18 @@ impl From<&DialogId> for rvoip_dialog_core::DialogId {
     }
 }
 
-/// Media session ID type  
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub struct MediaSessionId(pub String);
-
-impl MediaSessionId {
-    pub fn new() -> Self {
-        Self(format!("media-{}", uuid::Uuid::new_v4()))
-    }
-}
-
-impl std::fmt::Display for MediaSessionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+/// Session-core's identifier for a media session is exactly media-core's
+/// `DialogId`. Aliased so call sites can keep saying `MediaSessionId`
+/// where it reads better, while the underlying type is unified across
+/// the media boundary (eliminates `MediaSessionId::from_dialog(&...)`
+/// reconstruction and the "fresh UUID" bug class — see
+/// `crates/session-core/docs/MEDIA_PLANE_LAYERING_FOLLOWUPS.md` P5).
+///
+/// Note: this is **not** the same type as `state_table::DialogId`
+/// above — that one is a `Copy` Uuid newtype with bidirectional
+/// conversions to `rvoip_dialog_core::DialogId`, and is intentionally
+/// preserved (Sprint 2.5 Decision A).
+pub type MediaSessionId = rvoip_media_core::DialogId;
 
 /// Call ID type
 pub type CallId = String;
@@ -158,8 +155,8 @@ pub enum EventType {
     PlayAudio { file: String },
     StartRecording,
     StopRecording,
-    SendDTMF { digits: String },
-    
+
+
     // Dialog events (from dialog-core)
     DialogCreated { dialog_id: String, call_id: String },
     CallEstablished { session_id: String, sdp_answer: Option<String> },
@@ -288,7 +285,6 @@ impl EventType {
             
             // Media events - normalize
             EventType::PlayAudio { .. } => EventType::PlayAudio { file: String::new() },
-            EventType::SendDTMF { .. } => EventType::SendDTMF { digits: String::new() },
 
             // Conference events - normalize
             EventType::CreateConference { .. } => EventType::CreateConference { name: String::new() },
@@ -379,8 +375,14 @@ pub enum Guard {
     Custom(String),
 }
 
-/// Actions to execute during a transition
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Actions to execute during a transition.
+///
+/// `strum::VariantNames` reflects the variant names so the YAML loader's
+/// validation pass (see `yaml_loader.rs::parse_action_by_name` +
+/// `tests::action_variants_have_parse_mapping`) can prove every variant is
+/// reachable from at least one YAML action name. This catches drift when a
+/// new variant is added without a matching `parse_action_by_name` case.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::VariantNames)]
 pub enum Action {
     // Dialog actions
     CreateDialog,
@@ -421,7 +423,6 @@ pub enum Action {
     HoldCall,
     ResumeCall,
     TransferCall(String),
-    SendDTMF(char),
     StartRecording,
     StopRecording,
     
@@ -479,11 +480,6 @@ pub enum Action {
     // Hold/Resume actions (kept for single session)
     HoldCurrentCall,
 
-    // Audio control
-    MuteLocalAudio,
-    UnmuteLocalAudio,
-    SendDTMFTone,
-    
     // State updates
     SetCondition(Condition, bool),
     StoreLocalSDP,

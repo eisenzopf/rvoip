@@ -87,7 +87,18 @@ impl RtpScheduler {
     pub fn set_sender(&mut self, sender: mpsc::Sender<RtpPacket>) {
         self.sender = Some(sender);
     }
-    
+
+    /// Bump the sequence cursor and return the value the next outbound
+    /// packet should carry. Used by callers that want to bypass the
+    /// scheduler's queueing + timestamp overwrite (e.g. RFC 4733 DTMF,
+    /// where every packet of a tone must share the start timestamp)
+    /// while still cooperating with the audio sequence-number space.
+    pub fn next_sequence(&mut self) -> RtpSequenceNumber {
+        let s = self.sequence;
+        self.sequence = self.sequence.wrapping_add(1);
+        s
+    }
+
     /// Schedule a packet to be sent at the appropriate time
     pub fn schedule_packet(&mut self, mut packet: RtpPacket) -> Result<()> {
         if !self.running {

@@ -514,30 +514,6 @@ transitions:
     next_state: "OnHold"
     description: "Resume re-INVITE Timer B expired — stay held (RFC 3261 §14.1)"
 
-  # Mute microphone
-  - role: "Both"
-    state: "Active"
-    event:
-      type: "MuteMicrophone"
-    next_state: "Muted"
-    actions:
-      - type: "MuteLocalAudio"
-    publish:
-      - "MicrophoneMuted"
-    description: "Mute microphone"
-
-  # Unmute microphone
-  - role: "Both"
-    state: "Muted"
-    event:
-      type: "UnmuteMicrophone"
-    next_state: "Active"
-    actions:
-      - type: "UnmuteLocalAudio"
-    publish:
-      - "MicrophoneUnmuted"
-    description: "Unmute microphone"
-
   # Bridge two calls
   - role: "Both"
     state: "Active"

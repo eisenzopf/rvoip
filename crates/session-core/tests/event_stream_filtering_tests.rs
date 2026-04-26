@@ -15,19 +15,10 @@ use rvoip_session_core::{Event, SessionId};
 use tokio::time::timeout;
 
 fn test_config(port: u16) -> Config {
-    Config {
-        sip_port: port,
-        media_port_start: port + 1000,
-        media_port_end: port + 2000,
-        local_ip: "127.0.0.1".parse().unwrap(),
-        bind_addr: format!("127.0.0.1:{}", port).parse::<SocketAddr>().unwrap(),
-        state_table_path: None,
-        local_uri: format!("sip:test@127.0.0.1:{}", port),
-        use_100rel: Default::default(),
-        session_timer_secs: None,
-        session_timer_min_se: 90,
-        credentials: None,
-    }
+    let mut config = Config::local("test", port);
+    config.media_port_start = port + 1000;
+    config.media_port_end = port + 2000;
+    config
 }
 
 async fn publish_synthetic(event: Event) {

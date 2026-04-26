@@ -310,23 +310,6 @@ pub async fn execute_action(
             // Send REFER for blind transfer
             dialog_adapter.send_refer_session(&session.session_id, target).await?;
         }
-        Action::SendDTMF(digit) => {
-            // Send DTMF through the session's existing media session.
-            // Using a fresh `MediaSessionId::new()` would not map to any
-            // registered RTP session, so the packet would never go on
-            // the wire. Pre-B4, `MediaAdapter::send_dtmf` was a no-op
-            // stub that silently tolerated this; now that it actually
-            // transmits a PT 101 frame we need the real `media_id`.
-            if let Some(media_id) = session.media_session_id.clone() {
-                media_adapter.send_dtmf(media_id, *digit).await?;
-            } else {
-                tracing::warn!(
-                    "SendDTMF dispatched for session {} with no media_session_id; dropping '{}'",
-                    session.session_id,
-                    digit,
-                );
-            }
-        }
         Action::StartRecording => {
             // Start recording the media session
             media_adapter.start_recording(&session.session_id).await?;
@@ -650,40 +633,22 @@ pub async fn execute_action(
         
         // Additional call control
         // SendREFER and SendREFERWithReplaces actions removed
-        
-        Action::MuteLocalAudio => {
-            debug!("Muting local audio");
-            if let Some(media_id) = &session.media_session_id {
-                media_adapter.set_mute(media_id.clone(), true).await?;
-            }
-        }
-        
-        Action::UnmuteLocalAudio => {
-            debug!("Unmuting local audio");
-            if let Some(media_id) = &session.media_session_id {
-                media_adapter.set_mute(media_id.clone(), false).await?;
-            }
-        }
-        
-        // CreateConsultationCall action removed
-        
-        // TerminateConsultationCall action removed
-        
-        Action::SendDTMFTone => {
-            debug!("Sending DTMF tone");
-            if let Some(digits) = &session.dtmf_digits {
-                if let Some(media_id) = &session.media_session_id {
-                    for digit in digits.chars() {
-                        media_adapter.send_dtmf(media_id.clone(), digit).await?;
-                    }
-                }
-            }
-        }
-        
+
+        // Mute/Unmute actions previously lived here (Action::MuteLocalAudio /
+        // Action::UnmuteLocalAudio). They bypassed the state machine as
+        // direct MediaAdapter calls. Per the architectural rule in
+        // `docs/ARCHITECTURE_OVERVIEW.md#media-plane-side-effects`, media-plane
+        // side effects do not belong in the state-machine action set — they
+        // invoke the adapter directly from `UnifiedCoordinator`.
+
+        // SendDTMFTone previously lived here for the same reason. Outbound
+        // DTMF is dispatched through `UnifiedCoordinator::send_dtmf` →
+        // `MediaAdapter::send_dtmf_rfc4733` directly.
+
         Action::StartRecordingMixer => {
             debug!("Starting recording of conference mixer");
             if let Some(mixer_id) = &session.conference_mixer_id {
-                let mixer_session_id = SessionId(format!("mixer-{}", mixer_id.0));
+                let mixer_session_id = SessionId(format!("mixer-{}", mixer_id.as_str()));
                 media_adapter.start_recording(&mixer_session_id).await?;
             }
         }
@@ -691,7 +656,7 @@ pub async fn execute_action(
         Action::StopRecordingMixer => {
             debug!("Stopping recording of conference mixer");
             if let Some(mixer_id) = &session.conference_mixer_id {
-                let mixer_session_id = SessionId(format!("mixer-{}", mixer_id.0));
+                let mixer_session_id = SessionId(format!("mixer-{}", mixer_id.as_str()));
                 media_adapter.stop_recording(&mixer_session_id).await?;
             }
         }

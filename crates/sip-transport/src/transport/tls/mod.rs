@@ -287,7 +287,19 @@ impl TlsTransport {
                     }
                 }
                 Err(e) => {
-                    error!("Failed to read from TLS stream: {}", e);
+                    // `UnexpectedEof` is the normal close shape when
+                    // the peer hangs up (RFC 8446 §6.1 close_notify
+                    // followed by TCP FIN, or just TCP FIN against a
+                    // long-running listener). Log at debug so a clean
+                    // BYE → connection-close sequence doesn't look
+                    // like a transport failure. Anything else
+                    // (handshake-after-hello errors, broken pipe with
+                    // unflushed records, etc.) stays ERROR.
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                        debug!("TLS stream closed by peer ({})", remote_addr);
+                    } else {
+                        error!("Failed to read from TLS stream: {}", e);
+                    }
                     break;
                 }
             }
@@ -532,16 +544,26 @@ fn try_consume_keepalive_frame(buffer: &mut BytesMut) -> Option<KeepAliveFrame> 
 /// CA bundle (added to the same root store) and an insecure-skip mode
 /// (dev only — accepts any cert without identity verification).
 fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig> {
-    if cfg.insecure_skip_verify {
-        warn!(
-            "TLS client built with insecure_skip_verify=true — \
-             server certificates will NOT be validated. Dev only."
-        );
-        let cfg = ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
-            .with_no_client_auth();
-        return Ok(cfg);
+    #[cfg(feature = "dev-insecure-tls")]
+    {
+        if cfg.insecure_skip_verify {
+            warn!(
+                "TLS client built with insecure_skip_verify=true — \
+                 server certificates will NOT be validated. Dev only."
+            );
+            let cfg = ClientConfig::builder()
+                .with_safe_defaults()
+                .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
+                .with_no_client_auth();
+            return Ok(cfg);
+        }
+    }
+    #[cfg(not(feature = "dev-insecure-tls"))]
+    {
+        // Field exists (kept for API stability) but has no effect under
+        // the default build — the `InsecureCertVerifier` type isn't even
+        // compiled.
+        let _ = cfg.insecure_skip_verify;
     }
 
     let mut root_store = RootCertStore::empty();
@@ -606,9 +628,12 @@ fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig> {
 }
 
 /// Cert verifier that accepts every server cert. Dev only — gated
-/// behind `TlsClientConfig::insecure_skip_verify`.
+/// behind the `dev-insecure-tls` Cargo feature so production builds
+/// physically cannot bypass TLS validation.
+#[cfg(feature = "dev-insecure-tls")]
 struct InsecureCertVerifier;
 
+#[cfg(feature = "dev-insecure-tls")]
 impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
     fn verify_server_cert(
         &self,

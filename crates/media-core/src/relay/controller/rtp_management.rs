@@ -50,67 +50,44 @@ impl MediaSessionController {
         Ok(())
     }
 
-    /// Send a single RFC 4733 telephone-event packet for a DTMF digit.
+    /// Send a DTMF digit per RFC 4733 §2.5.
     ///
-    /// Emits one packet with the `E=1` bit set and duration matching
-    /// `duration_ms` converted to the 8 kHz telephone-event clock
-    /// (`duration_ms * 8` timestamp units). A compliant peer treats
-    /// this as a complete, self-contained tone; the RFC 4733 §2.5.1.3
-    /// three-retransmit pattern is skipped for simplicity and
-    /// network-resilience is delegated to the underlying transport
-    /// (UDP loss probability is low enough on modern networks that a
-    /// single packet is usually sufficient).
+    /// Spawns a [`DtmfTransmitter`] task that emits the full packet
+    /// schedule — start (E=0, marker=1) + 20 ms continuations
+    /// (incrementing duration, fixed timestamp) + three E=1
+    /// retransmits (RFC 4733 §2.5.1.3). The receive-side dedup at
+    /// `rtp-core::transport::udp` collapses the three retransmits
+    /// into one logical digit downstream.
     ///
-    /// Each call uses a distinct RTP timestamp derived from a wall-clock
-    /// 8 kHz tick so receive-side dedup on `(ssrc, rtp_timestamp)` can
-    /// tell successive tones apart.
+    /// Fire-and-forget: the spawned task is dropped, so the caller
+    /// returns as soon as the schedule is armed — critical for
+    /// softphone UX where a key-down handler should not block on the
+    /// full tone duration.
     ///
-    /// Unknown digits fall back to `?` (event code 0) but are still
-    /// transmitted — the peer MAY decode them or ignore them per the
-    /// telephone-event decoder's discretion.
+    /// Unknown digits fall back to event code 0 (DTMF '0' interpretation
+    /// is implementation-defined for non-DTMF events; receivers MAY
+    /// ignore).
     pub async fn send_dtmf_packet(
         &self,
         dialog_id: &DialogId,
         digit: char,
         duration_ms: u32,
     ) -> Result<()> {
-        use crate::codec::audio::dtmf::{DtmfEvent, TelephoneEvent};
+        use super::dtmf_transmitter::DtmfTransmitter;
 
-        let event_code = DtmfEvent::from_digit(digit)
-            .map(|d| d.0)
-            .unwrap_or(0);
-        // RFC 4733 clock is 8 kHz: 1 ms = 8 timestamp units.
-        let duration_samples = duration_ms.saturating_mul(8).min(u16::MAX as u32) as u16;
-        let tele = TelephoneEvent {
-            event: event_code,
-            end_of_event: true,
-            volume: 10, // Reasonable default (-10 dBm0)
-            duration: duration_samples,
-        };
-        let wire = tele.encode();
-
-        let rtp_session = self.get_rtp_session(dialog_id).await
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-        let mut session = rtp_session.lock().await;
-
-        // Unique RTP timestamp per call. The RFC 4733 receive-side
-        // dedup keys on `(ssrc, rtp_timestamp)` to collapse the three
-        // §2.5.1.3 retransmits of one tone while still firing on every
-        // distinct tone. Wall-clock ms → 8 kHz ticks gives monotonic,
-        // unique values (wrap is benign — u32 at 8 kHz lasts ~149
-        // hours before recycling, long after any user session).
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis().saturating_mul(8) as u32)
-            .unwrap_or(0);
-        session
-            .send_packet_with_pt(timestamp, Bytes::from(wire.to_vec()), true, 101)
+        let rtp_session = self
+            .get_rtp_session(dialog_id)
             .await
-            .map_err(|e| Error::config(format!("Failed to send DTMF packet: {}", e)))?;
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
+        let transmitter = DtmfTransmitter::new(rtp_session);
+        let _handle = transmitter.send_digit(digit, duration_ms);
+        // Drop the handle — fire-and-forget. The schedule runs to
+        // completion in the background and logs any wire-level send
+        // failures via the transmitter's tracing instrumentation.
         info!(
-            "☎️  Sent RFC 4733 DTMF '{}' (duration={}ms, ts={}) for dialog {}",
-            digit, duration_ms, timestamp, dialog_id
+            "☎️  RFC 4733 DTMF '{}' scheduled (duration={}ms) for dialog {}",
+            digit, duration_ms, dialog_id
         );
         Ok(())
     }

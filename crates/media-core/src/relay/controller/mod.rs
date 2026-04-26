@@ -63,6 +63,7 @@ use rvoip_rtp_core::{RtpPacket, RtpHeader};
 // Sub-modules
 pub mod types;
 pub mod audio_generation;
+pub mod dtmf_transmitter;
 pub mod rtp_management;
 pub mod statistics;
 pub mod advanced_processing;
@@ -826,15 +827,15 @@ impl MediaSessionController {
         let dtmf_callbacks = self.dtmf_callbacks.clone();
         let codec_mapper = self.codec_mapper.clone();
 
-        // RFC 4733 §2.5.1.3 sends three end-of-event retransmits per
-        // tone. All three share the same `(ssrc, rtp_timestamp)` —
-        // the timestamp is the tone's start time and does NOT advance
-        // across retransmits. Dedup on that pair so the callback
-        // fires once per digit even under the retransmit pattern,
-        // while still firing on every new tone (which gets a fresh
-        // timestamp).
-        let dtmf_last_delivered: Arc<RwLock<Option<(u32, u32)>>> = Arc::new(RwLock::new(None));
-        
+        // RFC 4733 §2.5.1.3 retransmit dedup formerly lived here as a
+        // `(ssrc, rtp_timestamp)` seen-set. Sprint 2.5 P4 moved it
+        // down to `rtp-core::transport::udp::UdpRtpTransport` (keyed
+        // by `(peer_addr, ssrc, ts)`) so this handler now sees one
+        // logical digit per tone — the upstream layer collapses the
+        // three E=1 retransmits before they are even decoded into a
+        // typed `DtmfEvent`.
+
+
         // Create G.711 codecs outside the loop for efficiency
         let mut g711_ulaw = G711Codec::mu_law(8000, 1).expect("Failed to create μ-law codec");
         let mut g711_alaw = G711Codec::a_law(8000, 1).expect("Failed to create A-law codec");
@@ -941,24 +942,19 @@ impl MediaSessionController {
                                 event,
                                 end_of_event,
                                 duration,
-                                timestamp: dtmf_timestamp,
                                 ssrc: dtmf_ssrc,
                                 ..
                             } => {
-                                // RFC 4733 §2.5.1.3: fire up to the
-                                // application only on the first E=1
-                                // frame per digit; the two retransmits
-                                // share `(ssrc, rtp_timestamp)` with the
-                                // first, so we dedupe on that pair.
+                                // Dedup is upstream now (Sprint 2.5 P4 —
+                                // moved to UDP transport). We still gate
+                                // on `end_of_event` because the sender
+                                // emits start (E=0) + continuations
+                                // (E=0) + 3× end (E=1); only the first
+                                // E=1 reaches us, marking the tone
+                                // boundary at which we fire the
+                                // callback.
                                 if !end_of_event {
                                     continue;
-                                }
-                                {
-                                    let mut last = dtmf_last_delivered.write().await;
-                                    if *last == Some((dtmf_ssrc, dtmf_timestamp)) {
-                                        continue;
-                                    }
-                                    *last = Some((dtmf_ssrc, dtmf_timestamp));
                                 }
                                 let digit = match event {
                                     0..=9 => (b'0' + event) as char,

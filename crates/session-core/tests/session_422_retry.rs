@@ -163,20 +163,14 @@ async fn run_mock_uas(sock: Arc<UdpSocket>, uas: Arc<MockUas>, uas_port: u16) {
 }
 
 fn client_config(client_port: u16) -> Config {
-    Config {
-        local_ip: "127.0.0.1".parse().unwrap(),
-        sip_port: client_port,
-        bind_addr: format!("127.0.0.1:{}", client_port).parse().unwrap(),
-        local_uri: format!("sip:alice@127.0.0.1:{}", client_port),
-        media_port_start: 41000,
-        media_port_end: 41100,
-        state_table_path: None,
-        use_100rel: Default::default(),
-        // Set Session-Expires below UAS's Min-SE so the first INVITE gets 422'd.
-        session_timer_secs: Some(CLIENT_SESSION_EXPIRES),
-        session_timer_min_se: 90,
-        credentials: None,
-    }
+    // Build on `Config::local` so newly-added fields (TLS / SRTP /
+    // PAI / outbound proxy / etc.) inherit defaults automatically.
+    let mut config = Config::local("alice", client_port);
+    config.media_port_start = 41000;
+    config.media_port_end = 41100;
+    // Set Session-Expires below UAS's Min-SE so the first INVITE gets 422'd.
+    config.session_timer_secs = Some(CLIENT_SESSION_EXPIRES);
+    config
 }
 
 #[tokio::test]
