@@ -4,13 +4,12 @@
 //! `Config::tls_cert_path` + `tls_key_path` and session-core auto-binds
 //! a TLS listener at `sip_port + 1` (RFC 3261 5060→5061 convention).
 //!
-//! The cert path and key path come from the env vars `TLS_CERT_PATH`
-//! and `TLS_KEY_PATH`; the run.sh harness generates a shared
-//! self-signed cert with `rcgen` and points both peers at it. Because
-//! the cert isn't in any system trust store we also set
-//! `tls_insecure_skip_verify = true` — this is a dev-only knob and
-//! MUST NOT be used against real carriers. For production, omit it and
-//! rely on `rustls-native-certs` + `webpki-roots`.
+//! The cert + key come from `TLS_CERT_PATH` / `TLS_KEY_PATH`; the
+//! run.sh harness generates a one-off CA and a server cert signed by
+//! it (with SAN=127.0.0.1) so both the insecure and secure client
+//! passes can validate the same cert chain. The server itself doesn't
+//! validate any inbound TLS cert in this one-way TLS setup, so no
+//! insecure-skip-verify knob is needed here.
 //!
 //! Run standalone:  cargo run -p rvoip-session-core --example streampeer_tls_server --features dev-insecure-tls
 //! Or with client:  ./examples/streampeer/tls/run.sh
@@ -60,10 +59,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::local("tls_server", 5060);
     config.tls_cert_path = Some(cert_path.into());
     config.tls_key_path = Some(key_path.into());
-    // Dev-only: accept the matching self-signed cert the client
-    // presents. Production code MUST leave this false and rely on the
-    // system trust store.
-    config.tls_insecure_skip_verify = true;
+    // Server side does no TLS validation in this one-way-TLS demo —
+    // it only presents its own cert. The client decides whether to
+    // validate it (the `streampeer_tls_client` example exercises both
+    // modes).
 
     let peer = CallbackPeer::new(TlsLogger, config).await?;
 

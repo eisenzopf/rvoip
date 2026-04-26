@@ -492,13 +492,16 @@ impl MediaAdapter {
             tracing::info!("✅ Updated RTP remote address to {} for session {} (UAS)", remote_addr, session_id.0);
         }
         
-        // Generate SDP answer via the typed builder. Mirrors
-        // [`Self::generate_local_sdp`]: PCMU + PCMA + telephone-event,
-        // with `RTP/SAVP` when SRTP was negotiated. The full codec set
-        // is offered regardless of which of those the offer advertised
-        // — this matches what production callers (Asterisk / FreeSWITCH
-        // / Twilio) expect when accepting a downgraded offer, and the
-        // peer is still free to discard codecs it did not list.
+        // Generate the SDP answer.
+        //
+        // Sprint 3.5 — `negotiate_sdp_as_uas` now consumes the
+        // generic RFC 3264 §6 matcher in
+        // `rvoip_dialog_core::sdp::match_offer`. The strict path
+        // (default) intersects offered formats with our supported
+        // set in offerer-preference order; the permissive path
+        // (`Config::strict_codec_matching = false`) preserves the
+        // pre-Sprint-3.5 "always answer with full set" behaviour
+        // for deployments that depend on it.
         let sess_id = generate_session_id().to_string();
         // Sprint 3 A6 — same public-address override as the offer
         // path, so answers carry the discovered/configured public
@@ -511,29 +514,44 @@ impl MediaAdapter {
             .map(|sa| sa.port())
             .unwrap_or(local_port);
         let answer_transport = if answer_attr.is_some() { "RTP/SAVP" } else { "RTP/AVP" };
-        // Sprint 3 C1 — mirror the offer-side CN advertisement on
-        // answers when our config opts in. A peer that sent CN gets
-        // it back; one that didn't still sees it (which is RFC 3264
-        // §6 conservative — they're free to ignore unfamiliar PTs).
-        let formats: &[&str] = if self.comfort_noise_enabled {
-            &["0", "8", "13", "101"]
-        } else {
-            &["0", "8", "101"]
-        };
+
+        let formats = compute_answer_formats(
+            &parsed_offer,
+            self.comfort_noise_enabled,
+            self.strict_codec_matching,
+            self.offer_srtp,
+            self.srtp_required,
+        )?;
+
+        let formats_str: Vec<&str> = formats.iter().map(|s| s.as_str()).collect();
         let mut media_builder = SdpBuilder::new("Session")
             .origin("-", &sess_id, "0", "IN", "IP4", &local_ip_str)
             .connection("IN", "IP4", &local_ip_str)
             .time("0", "0")
             .media_audio(advertised_port, answer_transport)
-                .formats(formats)
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000");
-        if self.comfort_noise_enabled {
-            media_builder = media_builder.rtpmap("13", "CN/8000");
+                .formats(&formats_str);
+        // Emit rtpmap/fmtp ONLY for the formats we kept. In the
+        // permissive branch this is the full set; in the strict
+        // branch the matcher's intersection has already filtered.
+        for fmt in &formats {
+            match fmt.as_str() {
+                "0" => {
+                    media_builder = media_builder.rtpmap("0", "PCMU/8000");
+                }
+                "8" => {
+                    media_builder = media_builder.rtpmap("8", "PCMA/8000");
+                }
+                "13" => {
+                    media_builder = media_builder.rtpmap("13", "CN/8000");
+                }
+                "101" => {
+                    media_builder = media_builder
+                        .rtpmap("101", "telephone-event/8000")
+                        .fmtp("101", "0-15");
+                }
+                _ => {}
+            }
         }
-        media_builder = media_builder
-            .rtpmap("101", "telephone-event/8000")
-            .fmtp("101", "0-15");
         if let Some(attr) = answer_attr {
             media_builder = media_builder.crypto_attribute(attr);
         }
@@ -1453,6 +1471,63 @@ fn generate_session_id() -> u64 {
     rand::thread_rng().gen()
 }
 
+/// Sprint 3.5 — compute the answer's `m=audio` format list from the
+/// offer + our policy flags. Pure (no `MediaAdapter` state) so unit
+/// tests can exercise the strict-vs-permissive logic without standing
+/// up a coordinator.
+///
+/// Returns the formats in the order they should appear on the wire.
+/// Caller is responsible for emitting the matching `a=rtpmap:` /
+/// `a=fmtp:` lines.
+///
+/// `Err(SDPNegotiationFailed)` when:
+/// - Strict mode + offer carries no overlap with our supported set
+///   → state machine surfaces this as `488 Not Acceptable Here`.
+/// - Strict mode + matcher rejects on SRTP policy (e.g. `require_srtp`
+///   set + offer is plain RTP/AVP).
+pub(crate) fn compute_answer_formats(
+    offer: &SdpSession,
+    comfort_noise_enabled: bool,
+    strict: bool,
+    offer_srtp: bool,
+    srtp_required: bool,
+) -> Result<Vec<String>> {
+    let mut supported = vec!["0".to_string(), "8".to_string()];
+    if comfort_noise_enabled {
+        supported.push("13".to_string());
+    }
+    supported.push("101".to_string());
+
+    if !strict {
+        // Permissive — answer with our full set regardless. Matches
+        // the pre-Sprint-3.5 shape.
+        return Ok(supported);
+    }
+
+    let caps = rvoip_dialog_core::sdp::AnswerCapabilities {
+        supported_formats: supported,
+        accept_srtp: offer_srtp,
+        require_srtp: srtp_required,
+    };
+    let m = rvoip_dialog_core::sdp::match_offer(offer, &caps)
+        .map_err(|e| SessionError::SDPNegotiationFailed(format!("{}", e)))?;
+    let line = m
+        .media_lines
+        .iter()
+        .find(|l| l.media == "audio")
+        .ok_or_else(|| {
+            SessionError::SDPNegotiationFailed(
+                "matcher returned no audio media line".into(),
+            )
+        })?;
+    if !line.accepted {
+        return Err(SessionError::SDPNegotiationFailed(
+            "no codec overlap with offer".into(),
+        ));
+    }
+    Ok(line.negotiated_formats.clone())
+}
+
 #[cfg(test)]
 mod sdp_format_tests {
     //! Byte-fixture regression tests for the format-strings →
@@ -1795,6 +1870,150 @@ mod sdp_format_tests {
         assert!(sdp.contains("a=rtpmap:0 PCMU/8000\r\n"));
         assert!(sdp.contains("a=rtpmap:8 PCMA/8000\r\n"));
         assert!(sdp.contains("a=rtpmap:101 telephone-event/8000\r\n"));
+    }
+
+    /// Sprint 3.5 — strict matching answers with the intersection
+    /// only. Offer = `0 101` (no PCMA); answer must carry `0 101`,
+    /// not the legacy full `0 8 101` set.
+    #[test]
+    fn strict_default_answers_with_intersection_only() {
+        let offer_sdp = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16000, "RTP/AVP")
+                .formats(&["0", "101"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("101", "telephone-event/8000")
+                .fmtp("101", "0-15")
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+        let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
+
+        let formats = compute_answer_formats(
+            &offer,
+            /*comfort_noise_enabled*/ false,
+            /*strict*/ true,
+            /*offer_srtp*/ false,
+            /*srtp_required*/ false,
+        )
+        .expect("strict-mode match succeeds");
+        assert_eq!(
+            formats,
+            vec!["0".to_string(), "101".to_string()],
+            "strict answer must drop PCMA when the offer didn't list it"
+        );
+    }
+
+    /// Sprint 3.5 — permissive mode preserves the legacy
+    /// pre-Sprint-3.5 "always full set" answer shape.
+    #[test]
+    fn permissive_mode_answers_with_full_set() {
+        let offer_sdp = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16000, "RTP/AVP")
+                .formats(&["0", "101"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("101", "telephone-event/8000")
+                .fmtp("101", "0-15")
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+        let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
+
+        let formats = compute_answer_formats(
+            &offer,
+            /*comfort_noise_enabled*/ false,
+            /*strict*/ false,
+            /*offer_srtp*/ false,
+            /*srtp_required*/ false,
+        )
+        .expect("permissive mode never errors on overlap");
+        assert_eq!(
+            formats,
+            vec!["0".to_string(), "8".to_string(), "101".to_string()],
+            "permissive answer keeps the full legacy set"
+        );
+    }
+
+    /// Sprint 3.5 — strict mode + zero overlap returns
+    /// `SDPNegotiationFailed`. The state machine turns this into
+    /// `488 Not Acceptable Here` (the same path `srtp_required`
+    /// already uses on a plain offer).
+    #[test]
+    fn strict_default_no_overlap_returns_negotiation_failed() {
+        let offer_sdp = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16000, "RTP/AVP")
+                .formats(&["97", "98"])
+                .rtpmap("97", "VP8/90000")
+                .rtpmap("98", "VP9/90000")
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+        let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
+
+        let err = compute_answer_formats(
+            &offer,
+            /*comfort_noise_enabled*/ false,
+            /*strict*/ true,
+            /*offer_srtp*/ false,
+            /*srtp_required*/ false,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, SessionError::SDPNegotiationFailed(_)),
+            "no overlap must surface as SDPNegotiationFailed → 488 NAH; got {:?}",
+            err
+        );
+    }
+
+    /// Sprint 3.5 — strict matching preserves CN advertisement
+    /// when both peers offer it. Offer `0 13 101`, our caps include
+    /// `13` (comfort_noise_enabled=true), answer carries `0 13 101`.
+    #[test]
+    fn strict_with_cn_enabled_keeps_cn_in_intersection() {
+        let offer_sdp = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16000, "RTP/AVP")
+                .formats(&["0", "13", "101"])
+                .rtpmap("0", "PCMU/8000")
+                .rtpmap("13", "CN/8000")
+                .rtpmap("101", "telephone-event/8000")
+                .fmtp("101", "0-15")
+                .attribute("sendrecv", None::<String>)
+                .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+        let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
+
+        let formats = compute_answer_formats(
+            &offer,
+            /*comfort_noise_enabled*/ true,
+            /*strict*/ true,
+            /*offer_srtp*/ false,
+            /*srtp_required*/ false,
+        )
+        .expect("CN-on-both-sides match succeeds");
+        assert_eq!(
+            formats,
+            vec!["0".to_string(), "13".to_string(), "101".to_string()],
+            "intersection must include 13 when both sides advertise it"
+        );
     }
 
     #[test]
