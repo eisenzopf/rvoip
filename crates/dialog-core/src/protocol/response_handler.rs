@@ -60,6 +60,11 @@ impl ResponseHandler for DialogManager {
         // `DialogManager::service_route_for_aor`.
         record_service_route_from_response(self, &response).await;
 
+        // RFC 5627 §5.3 — capture registrar-assigned GRUU URIs from the
+        // echoed Contact on a REGISTER 2xx. Caller-facing surface is
+        // `DialogManager::gruu_for_aor`.
+        record_gruu_from_response(self, &response).await;
+
         // RFC 5626 §3.5.1 — on a successful outbound-aware REGISTER,
         // spawn a CRLFCRLF keep-alive ping task targeting the
         // transaction's destination (the registrar we just reached).
@@ -246,6 +251,73 @@ async fn record_service_route_from_response(
                 uris.len()
             );
         }
+    }
+}
+
+/// RFC 5627 §5.3 extraction: for a 2xx response to REGISTER, scan the
+/// echoed `Contact:` headers for one that carries `pub-gruu` and/or
+/// `temp-gruu` parameters. Returns `(aor, GruuContactParams)` where
+/// `aor` is the To URI string. The struct's two fields are independent
+/// — a registrar may set only one.
+///
+/// Returns `None` for non-REGISTER, non-2xx, no Contact, or a Contact
+/// with neither GRUU parameter present (legacy registration).
+/// Pure/sync for unit-testability.
+pub(crate) fn extract_gruu(
+    response: &Response,
+) -> Option<(String, rvoip_sip_core::types::outbound::GruuContactParams)> {
+    use rvoip_sip_core::types::{method::Method, TypedHeader};
+
+    if !(200..300).contains(&response.status_code()) {
+        return None;
+    }
+
+    let is_register = response.headers.iter().any(|h| match h {
+        TypedHeader::CSeq(cseq) => *cseq.method() == Method::Register,
+        _ => false,
+    });
+    if !is_register {
+        return None;
+    }
+
+    let aor_key = response.to()?.uri().clone().to_string();
+
+    // Any Contact entry that carries at least one GRUU param wins.
+    // RFC 5627 §5.3 echoes the registrar-supplied URIs back on the
+    // UA's own Contact, so we walk Contacts in order.
+    for contact in response.headers.iter().filter_map(|h| match h {
+        TypedHeader::Contact(c) => Some(c),
+        _ => None,
+    }) {
+        for address in contact.addresses() {
+            let params = rvoip_sip_core::types::outbound::read_gruu_contact_params(address);
+            if params.pub_gruu.is_some() || params.temp_gruu.is_some() {
+                return Some((aor_key, params));
+            }
+        }
+    }
+
+    None
+}
+
+/// Inspect the response. If it's a 2xx to a REGISTER and the echoed
+/// Contact carries pub-gruu/temp-gruu, capture into
+/// `DialogManager::gruu_by_aor` keyed by the AoR (To URI).
+async fn record_gruu_from_response(
+    manager: &DialogManager,
+    response: &Response,
+) {
+    let Some((aor_key, params)) = extract_gruu(response) else { return };
+
+    let mut guard = manager.gruu_by_aor.write().await;
+    let prev = guard.insert(aor_key.clone(), params.clone());
+    if prev.as_ref() != Some(&params) {
+        info!(
+            "RFC 5627: GRUU learned for AoR {} (pub-gruu={}, temp-gruu={})",
+            aor_key,
+            params.pub_gruu.as_deref().unwrap_or("<none>"),
+            params.temp_gruu.as_deref().unwrap_or("<none>"),
+        );
     }
 }
 
@@ -665,6 +737,156 @@ mod outbound_flow_tests {
             None,
         );
         assert!(extract_outbound_flow(&response).is_none());
+    }
+}
+
+#[cfg(test)]
+mod gruu_tests {
+    use super::extract_gruu;
+    use rvoip_sip_core::types::{
+        address::Address,
+        contact::{Contact, ContactParamInfo, ContactValue},
+        cseq::CSeq,
+        method::Method,
+        outbound::{set_gruu_contact_params, GruuContactParams},
+        status::StatusCode,
+        to::To,
+        uri::Uri,
+        TypedHeader,
+    };
+    use rvoip_sip_core::Response;
+    use std::str::FromStr;
+
+    fn make_response(
+        status: StatusCode,
+        cseq_method: Method,
+        to_uri: &str,
+        contact_addr: Option<Address>,
+    ) -> Response {
+        let mut response = Response::new(status);
+        response.headers.push(TypedHeader::CSeq(CSeq::new(1, cseq_method)));
+        response
+            .headers
+            .push(TypedHeader::To(To::new(Address::new(
+                Uri::from_str(to_uri).unwrap(),
+            ))));
+        if let Some(addr) = contact_addr {
+            let contact = Contact(vec![ContactValue::Params(vec![ContactParamInfo {
+                address: addr,
+            }])]);
+            response.headers.push(TypedHeader::Contact(contact));
+        }
+        response
+    }
+
+    fn gruu_address(user_host: &str, pub_gruu: Option<&str>, temp_gruu: Option<&str>) -> Address {
+        let mut addr = Address::new(Uri::from_str(user_host).unwrap());
+        set_gruu_contact_params(
+            &mut addr,
+            &GruuContactParams {
+                pub_gruu: pub_gruu.map(str::to_string),
+                temp_gruu: temp_gruu.map(str::to_string),
+            },
+        );
+        addr
+    }
+
+    #[test]
+    fn extracts_both_gruu_on_register_200() {
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Register,
+            "sip:alice@example.com",
+            Some(gruu_address(
+                "sip:alice@192.168.1.10:5060",
+                Some("sip:alice@example.com;gr=urn:uuid:abc"),
+                Some("sip:tgruu.7hs43@example.com;gr"),
+            )),
+        );
+        let (aor, params) = extract_gruu(&response).expect("gruu extraction");
+        assert_eq!(aor, "sip:alice@example.com");
+        assert_eq!(
+            params.pub_gruu.as_deref(),
+            Some("sip:alice@example.com;gr=urn:uuid:abc")
+        );
+        assert_eq!(
+            params.temp_gruu.as_deref(),
+            Some("sip:tgruu.7hs43@example.com;gr")
+        );
+    }
+
+    #[test]
+    fn extracts_pub_only_when_temp_absent() {
+        // Registrars MAY assign only pub-gruu — temp-gruu is independent
+        // and a UA that didn't request privacy may not get one.
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Register,
+            "sip:alice@example.com",
+            Some(gruu_address(
+                "sip:alice@192.168.1.10:5060",
+                Some("sip:alice@example.com;gr=urn:uuid:abc"),
+                None,
+            )),
+        );
+        let (_, params) = extract_gruu(&response).expect("gruu extraction");
+        assert!(params.pub_gruu.is_some());
+        assert!(params.temp_gruu.is_none());
+    }
+
+    #[test]
+    fn returns_none_when_contact_lacks_gruu() {
+        // Pre-RFC-5627 Contact with no GRUU params — distinct from
+        // "no Contact at all".
+        let contact = Address::new(Uri::from_str("sip:alice@192.168.1.10:5060").unwrap());
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Register,
+            "sip:alice@example.com",
+            Some(contact),
+        );
+        assert!(extract_gruu(&response).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_non_register_responses() {
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Invite,
+            "sip:bob@example.com",
+            Some(gruu_address(
+                "sip:bob@192.168.1.20:5060",
+                Some("sip:bob@example.com;gr=urn:uuid:xyz"),
+                None,
+            )),
+        );
+        assert!(extract_gruu(&response).is_none());
+    }
+
+    #[test]
+    fn returns_none_for_non_2xx_register() {
+        let response = make_response(
+            StatusCode::Unauthorized,
+            Method::Register,
+            "sip:alice@example.com",
+            Some(gruu_address(
+                "sip:alice@192.168.1.10:5060",
+                Some("sip:alice@example.com;gr=urn:uuid:abc"),
+                None,
+            )),
+        );
+        assert!(extract_gruu(&response).is_none());
+    }
+
+    #[test]
+    fn returns_none_when_no_contact_header() {
+        let response = make_response(
+            StatusCode::Ok,
+            Method::Register,
+            "sip:alice@example.com",
+            None,
+        );
+        assert!(extract_gruu(&response).is_none());
     }
 }
 

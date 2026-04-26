@@ -118,6 +118,20 @@ pub struct DialogManager {
     pub(crate) service_route_by_aor:
         Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<rvoip_sip_core::types::uri::Uri>>>>,
 
+    /// Registrar-assigned GRUU URIs (RFC 5627 §5.3) keyed by AoR.
+    ///
+    /// Populated on successful REGISTER 2xx responses when the
+    /// registrar echoes the Contact with `pub-gruu="..."` and/or
+    /// `temp-gruu="..."` parameters. Most recent REGISTER 2xx wins
+    /// per AoR. `None` from
+    /// [`Self::gruu_for_aor`](crate::manager::DialogManager::gruu_for_aor)
+    /// means "no REGISTER 2xx with GRUU observed yet" (distinct from
+    /// "registrar didn't assign a GRUU on this binding"). A registrar
+    /// may assign only `pub-gruu` or only `temp-gruu` — the cached
+    /// `GruuContactParams` carries `Option`s for each independently.
+    pub(crate) gruu_by_aor:
+        Arc<tokio::sync::RwLock<std::collections::HashMap<String, rvoip_sip_core::types::outbound::GruuContactParams>>>,
+
     /// RFC 5626 §3.5.1 outbound-flow state machines, keyed by
     /// `(AoR, reg-id, instance-id)` per RFC 5626 §4.2.
     ///
@@ -209,6 +223,7 @@ impl DialogManager {
             session_refresh_tasks: Arc::new(DashMap::new()),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
             service_route_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            gruu_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             outbound_flows: Arc::new(DashMap::new()),
             outbound_flow_tasks: Arc::new(DashMap::new()),
             flow_by_destination: Arc::new(DashMap::new()),
@@ -426,6 +441,7 @@ impl DialogManager {
             session_refresh_tasks: Arc::new(DashMap::new()),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
             service_route_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            gruu_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             outbound_flows: Arc::new(DashMap::new()),
             outbound_flow_tasks: Arc::new(DashMap::new()),
             flow_by_destination: Arc::new(DashMap::new()),
@@ -1147,6 +1163,19 @@ impl DialogManager {
         aor: &str,
     ) -> Option<Vec<rvoip_sip_core::types::uri::Uri>> {
         self.service_route_by_aor.read().await.get(aor).cloned()
+    }
+
+    /// Returns the registrar-assigned GRUU URIs (RFC 5627 §5.3) for
+    /// the given AoR, if a REGISTER 2xx has populated the cache.
+    /// Either `pub_gruu` or `temp_gruu` may be `None` independently —
+    /// a registrar may assign only one. `None` from this accessor
+    /// means no REGISTER 2xx with GRUU has been observed for this AoR
+    /// yet (or the registrar declined to assign either GRUU).
+    pub async fn gruu_for_aor(
+        &self,
+        aor: &str,
+    ) -> Option<rvoip_sip_core::types::outbound::GruuContactParams> {
+        self.gruu_by_aor.read().await.get(aor).cloned()
     }
 
     pub async fn handle_response(&self, response: Response, transaction_id: TransactionKey) -> DialogResult<()> {

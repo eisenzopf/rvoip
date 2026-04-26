@@ -412,7 +412,77 @@ impl MediaSessionController {
         } else {
             pcm_samples
         };
-        
+
+        // Sprint 3.6 C1 follow-up — RFC 3389 Comfort Noise gating.
+        // When CN is enabled at the controller level, run the
+        // per-dialog VAD over the outgoing PCM frame and decide
+        // whether to send the audio normally, suppress it (a recent
+        // CN packet already covers this silence run), or emit one PT
+        // 13 CN packet now and then suppress.
+        if self
+            .comfort_noise_enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            // Build (or retrieve) the per-dialog gate. The gate's
+            // CnTransmitter shares this dialog's RtpSession arc so PT
+            // 13 packets ride the existing SSRC + timestamp cursor.
+            let gate_arc = if let Some(existing) = self.cn_gate_state.get(dialog_id) {
+                existing.value().clone()
+            } else {
+                let session_arc = {
+                    let rtp_sessions = self.rtp_sessions.read().await;
+                    rtp_sessions
+                        .get(dialog_id)
+                        .map(|w| w.session.clone())
+                        .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?
+                };
+                let gate =
+                    crate::relay::controller::cn_gate::CnGate::new(session_arc)?;
+                let gate_arc = Arc::new(tokio::sync::Mutex::new(gate));
+                self.cn_gate_state
+                    .insert(dialog_id.clone(), gate_arc.clone());
+                gate_arc
+            };
+
+            let frame = crate::types::AudioFrame::new(
+                pcm_samples.clone(),
+                8000,
+                1,
+                timestamp,
+            );
+            let decision = {
+                let mut gate = gate_arc.lock().await;
+                gate.process_frame(&frame)
+            };
+            use crate::relay::controller::cn_gate::CnGateDecision;
+            match decision {
+                CnGateDecision::SendAudio => {
+                    // Fall through to normal encode-and-send.
+                }
+                CnGateDecision::SuppressAudio => {
+                    debug!(
+                        "RFC 3389 CN gate: suppressing audio for dialog {} (silence ongoing)",
+                        dialog_id
+                    );
+                    return Ok(());
+                }
+                CnGateDecision::EmitCnThenSuppress { level } => {
+                    debug!(
+                        "RFC 3389 CN gate: emitting CN packet for dialog {} (level={} -dBov)",
+                        dialog_id, level
+                    );
+                    let gate = gate_arc.lock().await;
+                    if let Err(e) = gate.emit_cn_now(level).await {
+                        warn!(
+                            "RFC 3389 CN gate: emit_cn_now failed for dialog {}: {}",
+                            dialog_id, e
+                        );
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         // Get session info to determine codec
         let codec_payload_type = {
             let sessions = self.sessions.read().await;

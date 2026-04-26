@@ -210,8 +210,16 @@ impl MediaAdapter {
     /// outgoing offers and answers. Wired from
     /// `Config::comfort_noise_enabled` at coordinator boot. Mutates
     /// in place, mirroring the `set_srtp_policy` shape.
+    ///
+    /// Sprint 3.6 follow-up: also propagates the toggle into the
+    /// underlying `MediaSessionController` so the VAD-driven
+    /// `CnGate` activates on the audio TX path. With this wired,
+    /// outbound PCM frames that VAD classifies as silence stop
+    /// becoming G.711 packets and are replaced by periodic CN
+    /// (PT 13) packets per RFC 3389 §4.1.
     pub fn set_comfort_noise(&mut self, enabled: bool) {
         self.comfort_noise_enabled = enabled;
+        self.controller.set_comfort_noise_enabled(enabled);
     }
 
     /// Sprint 3.5 C2 swap — enable strict RFC 3264 §6 SDP-answer

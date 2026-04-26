@@ -1066,6 +1066,23 @@ impl UnifiedDialogApi {
         self.manager.core().service_route_for_aor(aor).await
     }
 
+    /// Snapshot of the registrar-assigned GRUU URIs (RFC 5627 §5.3)
+    /// for the given AoR, learned from the echoed Contact on a previous
+    /// REGISTER 2xx. UAs that want to advertise a stable identity to
+    /// peers should populate Contact with `pub_gruu` (or, for privacy,
+    /// `temp_gruu`) on outbound out-of-dialog requests.
+    ///
+    /// Returns `None` if no REGISTER 2xx with GRUU has been observed
+    /// for this AoR. The two fields of the returned struct are
+    /// independent — a registrar may assign only `pub_gruu` or only
+    /// `temp_gruu`.
+    pub async fn gruu_for_aor(
+        &self,
+        aor: &str,
+    ) -> Option<rvoip_sip_core::types::outbound::GruuContactParams> {
+        self.manager.core().gruu_for_aor(aor).await
+    }
+
     pub async fn send_register(
         &self,
         registrar_uri: &str,

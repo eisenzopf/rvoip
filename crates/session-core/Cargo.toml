@@ -27,9 +27,11 @@ path = "examples/streampeer/dtmf/client.rs"
 [[example]]
 name = "streampeer_tls_server"
 path = "examples/streampeer/tls/server.rs"
+required-features = ["dev-insecure-tls"]
 [[example]]
 name = "streampeer_tls_client"
 path = "examples/streampeer/tls/client.rs"
+required-features = ["dev-insecure-tls"]
 [[example]]
 name = "streampeer_srtp_server"
 path = "examples/streampeer/srtp/server.rs"

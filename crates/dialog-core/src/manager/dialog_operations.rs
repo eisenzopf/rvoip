@@ -135,15 +135,41 @@ impl DialogStore for DialogManager {
         });
         
         // Create outgoing dialog (UAC perspective)
-        let dialog = Dialog::new_early(
+        let mut dialog = Dialog::new_early(
             call_id.clone(),  // Clone call_id for later use
-            local_uri,  // local_uri (we are the UAC)
+            local_uri.clone(),  // local_uri (we are the UAC)
             remote_uri, // remote_uri (they are the UAS)
             None,       // local_tag (will be generated when we send request)
             None,       // remote_tag (will be set from response)
             true,       // is_initiator = true (we're UAC)
         );
-        
+
+        // RFC 3608 §5.2 preload: if a prior REGISTER 2xx populated the
+        // Service-Route cache for this AoR (the From URI of the
+        // outgoing request equals the AoR), pre-populate the dialog's
+        // route_set so that subsequent in-dialog and out-of-dialog
+        // requests within this registration binding traverse the
+        // registrar-prescribed path. Per-dialog Record-Route entries
+        // learned from the response will overlay this when the dialog
+        // is confirmed.
+        let aor_key = local_uri.to_string();
+        if let Some(service_route) = self
+            .service_route_by_aor
+            .read()
+            .await
+            .get(&aor_key)
+            .cloned()
+        {
+            if !service_route.is_empty() {
+                debug!(
+                    "RFC 3608 preload: prepending {} Service-Route hop(s) to outbound dialog route_set for AoR {}",
+                    service_route.len(),
+                    aor_key
+                );
+                dialog.route_set = service_route;
+            }
+        }
+
         let dialog_id = dialog.id.clone();
         self.store_dialog(dialog).await?;
         

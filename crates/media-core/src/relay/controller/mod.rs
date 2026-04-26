@@ -65,6 +65,7 @@ pub mod types;
 pub mod audio_generation;
 pub mod dtmf_transmitter;
 pub mod cn_transmitter;
+pub mod cn_gate;
 pub mod rtp_management;
 pub mod statistics;
 pub mod advanced_processing;
@@ -168,6 +169,26 @@ pub struct MediaSessionController {
     /// Both directions are stored so lookup is O(1) from either end. Cleared
     /// on `BridgeHandle` drop or `stop_media` of a bridged session.
     pub(super) bridge_partners: Arc<DashMap<DialogId, DialogId>>,
+
+    /// Sprint 3.6 C1 follow-up — RFC 3389 comfort-noise gate state per
+    /// dialog. Lazily populated on first audio frame for sessions
+    /// whose controller has [`comfort_noise_enabled`] set; the gate
+    /// runs the simple energy/ZCR VAD over each outbound frame and
+    /// returns `Send`/`Suppress`/`EmitCnThenSuppress`. Cleared on
+    /// `stop_media` alongside the rest of the per-dialog state.
+    ///
+    /// [`comfort_noise_enabled`]: Self::comfort_noise_enabled
+    pub(super) cn_gate_state:
+        Arc<DashMap<DialogId, Arc<tokio::sync::Mutex<crate::relay::controller::cn_gate::CnGate>>>>,
+
+    /// Sprint 3.6 C1 follow-up — global toggle. When `true`,
+    /// `encode_and_send_audio_frame` consults the per-dialog
+    /// [`cn_gate_state`](Self::cn_gate_state) to decide whether to
+    /// send the audio packet, suppress it, or emit one PT 13 CN
+    /// packet first. Wired from
+    /// `session-core::Config::comfort_noise_enabled` via
+    /// [`Self::set_comfort_noise_enabled`].
+    pub(super) comfort_noise_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MediaSessionController {
@@ -249,6 +270,26 @@ impl MediaSessionController {
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::new()),
+            cn_gate_state: Arc::new(DashMap::new()),
+            comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    /// Toggle RFC 3389 Comfort Noise gating on the audio TX path.
+    /// When enabled, [`encode_and_send_audio_frame`](Self::encode_and_send_audio_frame)
+    /// runs a per-dialog VAD over each outbound PCM frame and either
+    /// sends the audio normally, suppresses it (silence already
+    /// covered), or emits one PT 13 CN packet then suppresses
+    /// (speech→silence transition / §4.1 refresh). Wired from
+    /// `session-core::Config::comfort_noise_enabled` at coordinator
+    /// boot via the media adapter.
+    pub fn set_comfort_noise_enabled(&self, enabled: bool) {
+        self.comfort_noise_enabled
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        if !enabled {
+            // Drop any per-dialog gate state — next time CN is
+            // re-enabled the gate will rebuild fresh.
+            self.cn_gate_state.clear();
         }
     }
 
@@ -405,6 +446,8 @@ impl MediaSessionController {
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::new()),
+            cn_gate_state: Arc::new(DashMap::new()),
+            comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
     

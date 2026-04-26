@@ -13,7 +13,9 @@ use anyhow::Result;
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
-use rvoip_infra_common::events::cross_crate::CrossCrateEvent;
+use rvoip_infra_common::events::cross_crate::{
+    CrossCrateEvent, DialogToSessionEvent, RvoipCrossCrateEvent,
+};
 use crate::state_table::types::{SessionId, EventType, Role};
 use crate::state_machine::StateMachine as StateMachineExecutor;
 use crate::errors::{SessionError, Result as SessionResult};
@@ -243,14 +245,39 @@ impl SessionCrossCrateEventHandler {
 impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
     async fn handle(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
         debug!("Handling cross-crate event: {}", event.event_type());
-        
-        // Note: Downcasting Arc<dyn CrossCrateEvent> to concrete types would require
-        // additional trait bounds (like Any) and type registration. For now, we use
-        // string parsing of the debug representation as a pragmatic workaround.
-        // This is acceptable because:
-        // 1. Events are internal to the system (not user-facing)
-        // 2. Debug representations are stable within our codebase
-        // 3. Performance impact is minimal (events are not high-frequency)
+
+        // E5: typed fast path. `CrossCrateEvent::as_any()` lets us
+        // downcast to the concrete `RvoipCrossCrateEvent` enum and
+        // dispatch typed variants without going through debug-string
+        // parsing. The legacy string-match branches further down are
+        // still in place for variants that haven't been migrated yet —
+        // new typed dispatches go here. Returning early avoids
+        // double-handling.
+        if let Some(typed) = event.as_any().downcast_ref::<RvoipCrossCrateEvent>() {
+            if let RvoipCrossCrateEvent::DialogToSession(
+                DialogToSessionEvent::CallRedirected {
+                    session_id,
+                    status_code,
+                    targets,
+                    q_values,
+                },
+            ) = typed
+            {
+                self.handle_call_redirected_typed(
+                    session_id,
+                    *status_code,
+                    targets,
+                    q_values,
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+
+        // Legacy fallback: stringify and match on substrings. The
+        // outstanding migration is tracked as part of E5's follow-up
+        // — variants are moved into the typed path above one at a
+        // time as their consumers are touched.
         let event_str = format!("{:?}", event);
         
         match event.event_type() {
@@ -266,8 +293,6 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                     self.handle_call_established(&event_str).await?;
                 } else if event_str.contains("CallCancelled") {
                     self.handle_call_cancelled(&event_str).await?;
-                } else if event_str.contains("CallRedirected") {
-                    self.handle_call_redirected(&event_str).await?;
                 } else if event_str.contains("ReinviteGlare") {
                     self.handle_reinvite_glare(&event_str).await?;
                 } else if event_str.contains("SessionRefreshFailed") {
@@ -823,60 +848,42 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
-    /// Handle a 3xx redirect response (RFC 3261 §8.1.3.4). Parses the
-    /// `targets: [...]` list from the debug-formatted event and passes it
-    /// to the state machine's `Dialog3xxRedirect` transition, which runs
-    /// `RetryWithContact` to re-send INVITE to the first URI.
-    async fn handle_call_redirected(&self, event_str: &str) -> Result<()> {
-        let Some(session_id_str) = self.extract_session_id(event_str) else {
-            warn!("Could not extract session_id from CallRedirected event");
-            return Ok(());
-        };
-        let session_id = SessionId(session_id_str);
+    /// Handle a 3xx redirect response (RFC 3261 §8.1.3.4) with the
+    /// typed cross-crate event payload. Bypasses the legacy debug-
+    /// string parser: `status_code` and `targets` arrive as already-
+    /// structured fields from `DialogToSessionEvent::CallRedirected`,
+    /// which dialog-core's event hub builds straight from typed
+    /// Contact headers (with q-values per RFC 3261 §20.10).
+    async fn handle_call_redirected_typed(
+        &self,
+        session_id_str: &str,
+        status_code: u16,
+        targets: &[String],
+        _q_values: &[f32],
+    ) -> Result<()> {
+        let session_id = SessionId(session_id_str.to_string());
 
         if !self.is_our_session(&session_id).await {
-            debug!("Ignoring CallRedirected for session {} - not in our store", session_id);
+            debug!(
+                "Ignoring CallRedirected for session {} - not in our store",
+                session_id
+            );
             return Ok(());
         }
 
-        let status = self
-            .extract_field(event_str, "status_code: ")
-            .and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next().and_then(|n| n.parse::<u16>().ok()))
-            .unwrap_or(302);
-
-        // targets comes across as `targets: ["sip:a@...", "sip:b@..."]`. Pull
-        // the first balanced `[...]` out, then extract the quoted URIs.
-        let targets: Vec<String> = if let Some(start) = event_str.find("targets: [") {
-            let after = &event_str[start + "targets: [".len()..];
-            if let Some(end) = after.find(']') {
-                let inner = &after[..end];
-                inner
-                    .split(',')
-                    .filter_map(|frag| {
-                        let f = frag.trim();
-                        f.strip_prefix('"')
-                            .and_then(|s| s.strip_suffix('"'))
-                            .map(|s| s.to_string())
-                    })
-                    .collect()
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
-
         info!(
             "🔀 [handle_call_redirected] session={} status={} targets={:?}",
-            session_id, status, targets
+            session_id, status_code, targets
         );
 
         if targets.is_empty() {
-            // No usable contacts — treat as a 4xx failure.
+            // No usable Contact URIs in the 3xx — fall back to the
+            // generic failure path so the state machine tears the call
+            // down cleanly instead of hanging waiting for a retry.
             warn!("3xx response with no Contact URIs — treating as failure");
             let _ = self
                 .state_machine
-                .process_event(&session_id, EventType::Dialog4xxFailure(status))
+                .process_event(&session_id, EventType::Dialog4xxFailure(status_code))
                 .await;
             return Ok(());
         }
@@ -885,11 +892,17 @@ impl SessionCrossCrateEventHandler {
             .state_machine
             .process_event(
                 &session_id,
-                EventType::Dialog3xxRedirect { status, targets },
+                EventType::Dialog3xxRedirect {
+                    status: status_code,
+                    targets: targets.to_vec(),
+                },
             )
             .await
         {
-            error!("Failed to process CallRedirected for session {}: {}", session_id, e);
+            error!(
+                "Failed to process CallRedirected for session {}: {}",
+                session_id, e
+            );
         }
 
         Ok(())
