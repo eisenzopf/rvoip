@@ -25,7 +25,7 @@ use rvoip_session_core::api::events::Event;
 #[cfg(feature = "dev-insecure-tls")]
 use rvoip_session_core::api::stream_peer::EventReceiver;
 #[cfg(feature = "dev-insecure-tls")]
-use rvoip_session_core::api::unified::{Config, UnifiedCoordinator};
+use rvoip_session_core::api::unified::{Config, SipTlsMode, UnifiedCoordinator};
 
 #[cfg(feature = "dev-insecure-tls")]
 fn write_self_signed_localhost_cert() -> (tempfile::TempDir, PathBuf, PathBuf) {
@@ -80,28 +80,31 @@ async fn sips_call_establishes_through_tls_transport() {
 
     let (_cert_dir, cert_path, key_path) = write_self_signed_localhost_cert();
 
-    // Use distinct ports per side; TLS is auto-bound to `sip_port + 1`
-    // by `TransportManager::initialize` (mirrors the RFC 3261 5060→5061
-    // convention). Spread the two peers far enough apart that no
-    // port-pair collides.
+    // Use distinct ports per side and configure explicit TLS listener
+    // addresses. The legacy `sip_port + 1` fallback remains supported,
+    // but explicit TLS bind/contact addresses model reachable-contact
+    // SIP TLS deployments and avoid ambiguity in dialog routing.
     let alice_sip_port = 36061;
     let bob_sip_port = 36071;
-    // Bob's TLS listener lands at `bob_sip_port + 1`; that's where the
-    // sips: URI must point.
+    let alice_tls_port = alice_sip_port + 1;
     let bob_tls_port = bob_sip_port + 1;
 
     let mut alice_cfg = Config::local("alice", alice_sip_port);
+    alice_cfg.sip_tls_mode = SipTlsMode::ClientAndServer;
+    alice_cfg.tls_bind_addr = Some(format!("127.0.0.1:{}", alice_tls_port).parse().unwrap());
     alice_cfg.tls_cert_path = Some(cert_path.clone());
     alice_cfg.tls_key_path = Some(key_path.clone());
     alice_cfg.contact_uri = Some(format!(
         "sips:alice@127.0.0.1:{};transport=tls",
-        alice_sip_port + 1
+        alice_tls_port
     ));
     // Self-signed cert isn't in the system trust store; allow it for
     // this test only.
     alice_cfg.tls_insecure_skip_verify = true;
 
     let mut bob_cfg = Config::local("bob", bob_sip_port);
+    bob_cfg.sip_tls_mode = SipTlsMode::ClientAndServer;
+    bob_cfg.tls_bind_addr = Some(format!("127.0.0.1:{}", bob_tls_port).parse().unwrap());
     bob_cfg.tls_cert_path = Some(cert_path.clone());
     bob_cfg.tls_key_path = Some(key_path.clone());
     bob_cfg.contact_uri = Some(format!(
@@ -130,7 +133,10 @@ async fn sips_call_establishes_through_tls_transport() {
     // the TLS listener rather than UDP.
     let target = format!("sips:bob@127.0.0.1:{}", bob_tls_port);
     let _alice_session = alice
-        .make_call("sips:alice@127.0.0.1", &target)
+        .make_call(
+            &format!("sips:alice@127.0.0.1:{};transport=tls", alice_tls_port),
+            &target,
+        )
         .await
         .expect("alice make_call");
 

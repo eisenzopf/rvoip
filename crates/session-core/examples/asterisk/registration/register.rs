@@ -6,7 +6,7 @@
 //!   cp .env.example .env       # edit values for your PBX
 //!   ./registration/run.sh
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use std::path::PathBuf;
@@ -18,7 +18,6 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-#[cfg(feature = "dev-insecure-tls")]
 fn env_bool(key: &str, default: bool) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
     match std::env::var(key) {
         Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
@@ -36,6 +35,36 @@ fn optional_path(key: &str) -> Option<PathBuf> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+fn required_path(key: &str) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let value =
+        std::env::var(key).map_err(|_| format!("{} must be set for SIP TLS listener mode", key))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{} must not be empty", key).into());
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn tls_reachable_contact_mode() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    if env_bool("ASTERISK_TLS_FLOW_REUSE", false)? {
+        return Ok(false);
+    }
+
+    match env_or("ASTERISK_TLS_CONTACT_MODE", "reachable-contact")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "reachable-contact" | "reachable" | "listener" | "uas" => Ok(true),
+        "registered-flow" | "flow" | "flow-reuse" | "client-only" => Ok(false),
+        other => Err(format!(
+            "ASTERISK_TLS_CONTACT_MODE must be reachable-contact or registered-flow, got '{}'",
+            other
+        )
+        .into()),
+    }
 }
 
 #[tokio::main]
@@ -63,6 +92,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let password = env_or("SIP_PASSWORD", "password123");
     let local_ip: IpAddr = env_or("LOCAL_IP", "0.0.0.0").parse()?;
     let local_port: u16 = env_or("LOCAL_PORT", "5070").parse()?;
+    let endpoint_tls_port_key = format!("ENDPOINT_{}_TLS_LOCAL_PORT", username);
+    let tls_local_port: u16 = std::env::var(&endpoint_tls_port_key)
+        .unwrap_or_else(|_| local_port.saturating_add(1).to_string())
+        .parse()?;
     let advertised_ip: IpAddr = match std::env::var("ADVERTISED_IP") {
         Ok(value) => value.parse()?,
         Err(_) if !local_ip.is_unspecified() => local_ip,
@@ -79,7 +112,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "tls" => ";transport=tls",
         _ => "",
     };
-    let contact_port = local_port;
+    let use_tls_listener = is_tls && tls_reachable_contact_mode()?;
+    let contact_port = if use_tls_listener {
+        tls_local_port
+    } else {
+        local_port
+    };
     let registrar_uri = format!("{}:{}:{}{}", scheme, sip_server, sip_port, transport_suffix);
     let aor_uri = format!("{}:{}@{}", scheme, username, sip_server);
     let contact_uri = format!(
@@ -94,7 +132,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     config.contact_uri = Some(contact_uri.clone());
     config.credentials = Some(Credentials::new(&auth_user, &password));
     if is_tls {
-        config.sip_tls_mode = SipTlsMode::ClientOnly;
+        if use_tls_listener {
+            config.sip_tls_mode = SipTlsMode::ClientAndServer;
+            config.tls_bind_addr = Some(SocketAddr::new(local_ip, tls_local_port));
+            config.tls_cert_path = Some(required_path("TLS_CERT_PATH")?);
+            config.tls_key_path = Some(required_path("TLS_KEY_PATH")?);
+        } else {
+            config.sip_tls_mode = SipTlsMode::ClientOnly;
+        }
         config.tls_extra_ca_path = optional_path("TLS_CA_PATH");
         config.tls_client_cert_path = optional_path("TLS_CLIENT_CERT_PATH");
         config.tls_client_key_path = optional_path("TLS_CLIENT_KEY_PATH");
@@ -105,6 +150,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     println!("[registration] Local bind: {}:{}", local_ip, local_port);
+    if is_tls {
+        println!(
+            "[registration] TLS mode:   {}{}",
+            if use_tls_listener {
+                "reachable-contact"
+            } else {
+                "registered-flow"
+            },
+            if use_tls_listener {
+                format!(" (listener {}:{})", local_ip, tls_local_port)
+            } else {
+                String::new()
+            }
+        );
+    }
     println!("[registration] AOR:        {}", aor_uri);
     println!("[registration] Contact:    {}", contact_uri);
     println!("[registration] Registrar:  {}", registrar_uri);

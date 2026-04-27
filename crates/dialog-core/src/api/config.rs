@@ -195,6 +195,11 @@ pub struct DialogConfig {
     #[serde(default)]
     pub local_contact_uri: Option<String>,
 
+    /// Optional local address for SIP TLS sent-by and fallback Contact
+    /// construction. When unset, TLS requests use `local_address`.
+    #[serde(default)]
+    pub tls_local_address: Option<SocketAddr>,
+
     /// User agent string to include in SIP messages
     ///
     /// This appears in the User-Agent header of outgoing SIP requests
@@ -261,6 +266,7 @@ impl Default for DialogConfig {
         Self {
             local_address: "0.0.0.0:5060".parse().unwrap(),
             local_contact_uri: None,
+            tls_local_address: None,
             user_agent: Some("RVOIP-Dialog/1.0".to_string()),
             dialog_timeout: Duration::from_secs(180), // 3 minutes
             max_dialogs: Some(10000),

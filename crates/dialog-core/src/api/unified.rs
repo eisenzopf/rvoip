@@ -1016,7 +1016,10 @@ impl UnifiedDialogApi {
             if original_request.method() == rvoip_sip_core::Method::Invite {
                 // Use special response builder for 200 OK to INVITE that adds To tag
                 use crate::transaction::utils::response_builders;
-                let local_addr = self.manager.core().local_address;
+                let local_addr = self
+                    .manager
+                    .core()
+                    .local_address_for_uri(original_request.uri());
                 let mut response =
                     if let Some(contact_uri) = self.manager.core().local_contact_uri() {
                         response_builders::create_ok_response_with_contact_uri(
@@ -1256,12 +1259,18 @@ impl UnifiedDialogApi {
             options.outbound_contact.is_some()
         );
 
+        let registrar = options
+            .registrar_uri
+            .parse::<rvoip_sip_core::Uri>()
+            .map_err(|e| ApiError::protocol(format!("Invalid REGISTER registrar URI: {}", e)))?;
+        let local_addr = self.manager.core().local_address_for_uri(&registrar);
+
         let mut builder = RegisterBuilder::new()
             .registrar(&options.registrar_uri)
             .aor(&options.aor_uri)
             .user_info(&options.aor_uri, "")
             .contact(&options.contact_uri)
-            .local_address(self.manager.core().local_address())
+            .local_address(local_addr)
             .expires(options.expires)
             .cseq(cseq);
 
@@ -1324,7 +1333,10 @@ impl UnifiedDialogApi {
         event_package: &str,
         expires: u32,
     ) -> ApiResult<Response> {
-        let local_addr = self.manager.core().local_address();
+        let dest_uri = target_uri
+            .parse::<rvoip_sip_core::Uri>()
+            .map_err(|e| ApiError::protocol(format!("Invalid SUBSCRIBE target URI: {}", e)))?;
+        let local_addr = self.manager.core().local_address_for_uri(&dest_uri);
         let request = crate::transaction::dialog::subscribe_out_of_dialog(
             target_uri,
             from_uri,
@@ -1336,9 +1348,6 @@ impl UnifiedDialogApi {
         )
         .map_err(|e| ApiError::protocol(format!("Failed to build SUBSCRIBE request: {}", e)))?;
 
-        let dest_uri = target_uri
-            .parse::<rvoip_sip_core::Uri>()
-            .map_err(|e| ApiError::protocol(format!("Invalid SUBSCRIBE target URI: {}", e)))?;
         let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
             .await
             .ok_or_else(|| {
@@ -1359,15 +1368,15 @@ impl UnifiedDialogApi {
         from_uri: &str,
         body: String,
     ) -> ApiResult<Response> {
-        let local_addr = self.manager.core().local_address();
+        let dest_uri = target_uri
+            .parse::<rvoip_sip_core::Uri>()
+            .map_err(|e| ApiError::protocol(format!("Invalid MESSAGE target URI: {}", e)))?;
+        let local_addr = self.manager.core().local_address_for_uri(&dest_uri);
         let request = crate::transaction::dialog::message_out_of_dialog(
             target_uri, from_uri, body, 1, local_addr,
         )
         .map_err(|e| ApiError::protocol(format!("Failed to build MESSAGE request: {}", e)))?;
 
-        let dest_uri = target_uri
-            .parse::<rvoip_sip_core::Uri>()
-            .map_err(|e| ApiError::protocol(format!("Invalid MESSAGE target URI: {}", e)))?;
         let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
             .await
             .ok_or_else(|| {

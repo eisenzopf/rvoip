@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,6 +25,45 @@ pub const MIN_RECEIVED_SAMPLES: usize = 12_000;
 pub const DOMINANCE_RATIO: f32 = 5.0;
 pub const DEFAULT_POST_REGISTER_SETTLE_SECS: u64 = 5;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsContactMode {
+    ReachableContact,
+    RegisteredFlow,
+}
+
+impl TlsContactMode {
+    fn from_env() -> ExampleResult<Self> {
+        if env_bool("ASTERISK_TLS_FLOW_REUSE", false)? {
+            return Ok(Self::RegisteredFlow);
+        }
+
+        match env_string("ASTERISK_TLS_CONTACT_MODE", "reachable-contact")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "reachable-contact" | "reachable" | "listener" | "uas" => Ok(Self::ReachableContact),
+            "registered-flow" | "flow" | "flow-reuse" | "client-only" => Ok(Self::RegisteredFlow),
+            other => Err(format!(
+                "ASTERISK_TLS_CONTACT_MODE must be reachable-contact or registered-flow, got '{}'",
+                other
+            )
+            .into()),
+        }
+    }
+
+    fn uses_listener(self) -> bool {
+        self == Self::ReachableContact
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReachableContact => "reachable-contact",
+            Self::RegisteredFlow => "registered-flow",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EndpointConfig {
     pub username: String,
@@ -36,6 +75,8 @@ pub struct EndpointConfig {
     pub local_ip: IpAddr,
     pub advertised_ip: IpAddr,
     pub local_port: u16,
+    pub tls_local_port: Option<u16>,
+    pub tls_contact_mode: TlsContactMode,
     pub media_port_start: u16,
     pub media_port_end: u16,
     pub output_dir: PathBuf,
@@ -118,7 +159,17 @@ impl EndpointConfig {
         }
 
         let mut config = self.stream_config();
-        config.sip_tls_mode = SipTlsMode::ClientOnly;
+        if self.tls_contact_mode.uses_listener() {
+            let tls_port = self.tls_local_port.ok_or_else(|| {
+                "TLS reachable-contact mode requires ENDPOINT_<user>_TLS_LOCAL_PORT".to_string()
+            })?;
+            config.sip_tls_mode = SipTlsMode::ClientAndServer;
+            config.tls_bind_addr = Some(SocketAddr::new(self.local_ip, tls_port));
+            config.tls_cert_path = Some(required_path("TLS_CERT_PATH")?);
+            config.tls_key_path = Some(required_path("TLS_KEY_PATH")?);
+        } else {
+            config.sip_tls_mode = SipTlsMode::ClientOnly;
+        }
         config.tls_extra_ca_path = optional_path("TLS_CA_PATH");
         config.tls_client_cert_path = optional_path("TLS_CLIENT_CERT_PATH");
         config.tls_client_key_path = optional_path("TLS_CLIENT_KEY_PATH");
@@ -150,7 +201,12 @@ impl EndpointConfig {
     }
 
     fn contact_port(&self) -> u16 {
-        self.local_port
+        if self.is_tls() && self.tls_contact_mode.uses_listener() {
+            self.tls_local_port
+                .unwrap_or(self.local_port.saturating_add(1))
+        } else {
+            self.local_port
+        }
     }
 }
 
@@ -203,6 +259,15 @@ pub fn endpoint_config(
         }
     };
     let local_port = env_u16(&format!("{}_LOCAL_PORT", prefix), default_local_port)?;
+    let tls_contact_mode = TlsContactMode::from_env()?;
+    let tls_local_port = if transport == "tls" {
+        Some(env_u16(
+            &format!("{}_TLS_LOCAL_PORT", prefix),
+            default_local_port.saturating_add(1),
+        )?)
+    } else {
+        None
+    };
     let media_port_start = env_u16(&format!("{}_MEDIA_PORT_START", prefix), default_media_start)?;
     let media_port_end = env_u16(&format!("{}_MEDIA_PORT_END", prefix), default_media_end)?;
     let output_dir = std::env::var("AUDIO_OUTPUT_DIR")
@@ -219,6 +284,8 @@ pub fn endpoint_config(
         local_ip,
         advertised_ip,
         local_port,
+        tls_local_port,
+        tls_contact_mode,
         media_port_start,
         media_port_end,
         output_dir,
@@ -240,6 +307,16 @@ pub async fn register_endpoint(
         "[{}] Local bind: {}:{}",
         cfg.username, cfg.local_ip, cfg.local_port
     );
+    if cfg.is_tls() {
+        println!(
+            "[{}] TLS mode:   {}{}",
+            cfg.username,
+            cfg.tls_contact_mode.label(),
+            cfg.tls_local_port
+                .map(|port| format!(" (listener {}:{})", cfg.local_ip, port))
+                .unwrap_or_default()
+        );
+    }
     println!("[{}] AOR:        {}", cfg.username, cfg.aor_uri());
     println!("[{}] Contact:    {}", cfg.username, cfg.contact_uri());
     println!("[{}] Registrar:  {}", cfg.username, cfg.registrar_uri());

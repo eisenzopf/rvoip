@@ -157,7 +157,8 @@ pub fn create_update_request(
     update = update.with_header(TypedHeader::From(from));
     update = update.with_header(TypedHeader::CSeq(CSeq::new(new_cseq_num, Method::Update)));
 
-    // Create a Via header with a new branch parameter
+    // Create a Via header with a new branch parameter. Preserve the
+    // dialog transport when the existing dialog request provides it.
     let branch = format!(
         "z9hG4bK{}",
         uuid::Uuid::new_v4().to_string().replace("-", "")
@@ -165,13 +166,29 @@ pub fn create_update_request(
     let host = local_addr.ip().to_string();
     let port = Some(local_addr.port());
     let params = vec![rvoip_sip_core::types::Param::branch(branch)];
-    let via = rvoip_sip_core::types::via::Via::new("SIP", "2.0", "UDP", &host, port, params)?;
+    let via_transport = dialog_request.first_via_transport().unwrap_or_else(|| {
+        if dialog_request.uri().scheme() == &rvoip_sip_core::types::uri::Scheme::Sips {
+            "TLS"
+        } else {
+            "UDP"
+        }
+    });
+    let via =
+        rvoip_sip_core::types::via::Via::new("SIP", "2.0", via_transport, &host, port, params)?;
     update = update.with_header(TypedHeader::Via(via));
 
     // Create a Contact header - recommended for UPDATE
-    let contact_uri = format!("sip:{}:{}", local_addr.ip(), local_addr.port());
+    let contact_uri = if via_transport.eq_ignore_ascii_case("TLS") {
+        format!(
+            "sips:{}:{};transport=tls",
+            local_addr.ip(),
+            local_addr.port()
+        )
+    } else {
+        format!("sip:{}:{}", local_addr.ip(), local_addr.port())
+    };
     let contact_addr = rvoip_sip_core::types::address::Address::new(
-        rvoip_sip_core::types::uri::Uri::sip(format!("{}:{}", local_addr.ip(), local_addr.port())),
+        rvoip_sip_core::types::uri::Uri::from_str(&contact_uri)?,
     );
     let contact_param = rvoip_sip_core::types::contact::ContactParamInfo {
         address: contact_addr,

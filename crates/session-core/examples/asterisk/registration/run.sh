@@ -15,6 +15,9 @@ if [ -f "$ASTERISK_DIR/.env" ]; then
   set +a
 fi
 
+# shellcheck disable=SC1091
+. "$ASTERISK_DIR/tls_cert.sh"
+
 run_registration() {
   label=$1
   transport=$2
@@ -33,6 +36,8 @@ run_registration() {
 }
 
 cd "$WORKSPACE_ROOT"
+
+ensure_asterisk_tls_listener_cert "$SCRIPT_DIR/output/tls"
 
 echo "Building Asterisk registration example..."
 cargo build -p rvoip-session-core --features dev-insecure-tls \

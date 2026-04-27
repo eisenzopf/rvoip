@@ -9,8 +9,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+use crate::transaction::transport::multiplexed::select_transport_for_uri;
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
-use rvoip_sip_core::{Method, Request, Response};
+use rvoip_sip_core::{Method, Request, Response, Uri};
+use rvoip_sip_transport::transport::TransportType;
 
 use crate::config::DialogManagerConfig;
 use crate::dialog::{Dialog, DialogId, DialogState};
@@ -732,6 +734,26 @@ impl DialogManager {
             g.as_ref()
                 .and_then(|c| c.local_contact_uri().map(str::to_string))
         })
+    }
+
+    /// Configured SIP TLS local address, if the application supplied
+    /// one.
+    pub fn tls_local_address(&self) -> Option<SocketAddr> {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|c| c.tls_local_address()))
+    }
+
+    /// Local sent-by address for an outbound request targeting `uri`.
+    /// TLS requests use the configured TLS local address when present;
+    /// other transports use the dialog manager's base local address.
+    pub fn local_address_for_uri(&self, uri: &Uri) -> SocketAddr {
+        if select_transport_for_uri(uri) == TransportType::Tls {
+            self.tls_local_address().unwrap_or(self.local_address)
+        } else {
+            self.local_address
+        }
     }
 
     // REMOVED: set_session_coordinator() - Use GlobalEventCoordinator instead

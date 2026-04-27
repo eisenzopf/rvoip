@@ -242,6 +242,8 @@ impl TransactionIntegration for DialogManager {
                 _ => None,
             };
 
+            let local_address = self.local_address_for_uri(&template.target_uri);
+
             // Build request using Phase 3 dialog quick functions (MUCH simpler!)
             let request = match method {
                 Method::Invite => {
@@ -262,7 +264,7 @@ impl TransactionIntegration for DialogManager {
                                 &remote_tag,
                                 &sdp_content,
                                 template.cseq_number,
-                                self.local_address,
+                                local_address,
                                 if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
                                 self.local_contact_uri()
                             )
@@ -285,7 +287,7 @@ impl TransactionIntegration for DialogManager {
                                 .call_id(&template.call_id)
                                 .cseq(template.cseq_number)
                                 .request_uri(template.target_uri.to_string())
-                                .local_address(self.local_address);
+                                .local_address(local_address);
 
                             // Add route set if present
                             for route in &template.route_set {
@@ -319,7 +321,7 @@ impl TransactionIntegration for DialogManager {
                         &template.remote_uri.to_string(),
                         &remote_tag,
                         template.cseq_number,
-                        self.local_address,
+                        local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
                         None,
                     )
@@ -352,7 +354,7 @@ impl TransactionIntegration for DialogManager {
                         &remote_tag,
                         &target_uri,
                         template.cseq_number,
-                        self.local_address,
+                        local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                     )
                 },
@@ -371,7 +373,7 @@ impl TransactionIntegration for DialogManager {
                         &remote_tag,
                         body_string.clone(),
                         template.cseq_number,
-                        self.local_address,
+                        local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                     )
                 },
@@ -392,7 +394,7 @@ impl TransactionIntegration for DialogManager {
                         &content,
                         Some("application/info".to_string()),
                         template.cseq_number,
-                        self.local_address,
+                        local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                     )
                 },
@@ -413,7 +415,7 @@ impl TransactionIntegration for DialogManager {
                         body_string,
                         notify_subscription_state.clone(),
                         template.cseq_number,
-                        self.local_address,
+                        local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                     )
                 },
@@ -434,7 +436,7 @@ impl TransactionIntegration for DialogManager {
                         &content,
                         Some("text/plain".to_string()),
                         template.cseq_number,
-                        self.local_address,
+                        local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                     )
                 },
@@ -454,7 +456,7 @@ impl TransactionIntegration for DialogManager {
                         to_tag: remote_tag,
                         request_uri: template.target_uri.to_string(),
                         cseq: template.cseq_number,
-                        local_address: self.local_address,
+                        local_address,
                         route_set: template.route_set.clone(),
                         contact: None,
                     };
@@ -709,6 +711,7 @@ impl DialogManager {
             // The challenge was a final response on the original INVITE, so no
             // remote tag was established. Rebuild as an initial INVITE with
             // the same Call-ID (dialog.create_request_template carries it).
+            let local_address = self.local_address_for_uri(&template.target_uri);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
                     Some("User"),
@@ -719,7 +722,7 @@ impl DialogManager {
                 .call_id(&template.call_id)
                 .cseq(template.cseq_number)
                 .request_uri(template.target_uri.to_string())
-                .local_address(self.local_address);
+                .local_address(local_address);
 
             for route in &template.route_set {
                 invite_builder = invite_builder.add_route(route.clone());
@@ -853,6 +856,7 @@ impl DialogManager {
                 }
             };
 
+            let local_address = self.local_address_for_uri(&template.target_uri);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
                     Some("User"),
@@ -863,7 +867,7 @@ impl DialogManager {
                 .call_id(&template.call_id)
                 .cseq(template.cseq_number)
                 .request_uri(template.target_uri.to_string())
-                .local_address(self.local_address);
+                .local_address(local_address);
 
             for route in &template.route_set {
                 invite_builder = invite_builder.add_route(route.clone());
@@ -993,6 +997,7 @@ impl DialogManager {
                 }
             };
 
+            let local_address = self.local_address_for_uri(&template.target_uri);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
                     Some("User"),
@@ -1003,7 +1008,7 @@ impl DialogManager {
                 .call_id(&template.call_id)
                 .cseq(template.cseq_number)
                 .request_uri(template.target_uri.to_string())
-                .local_address(self.local_address);
+                .local_address(local_address);
 
             for route in &template.route_set {
                 invite_builder = invite_builder.add_route(route.clone());
@@ -2033,7 +2038,9 @@ impl DialogManager {
             let route_set = dialog.route_set.clone();
             let call_id = dialog.call_id.clone();
             let local_uri = dialog.local_uri.to_string();
+            let target_uri = dialog.remote_uri.clone();
             let remote_uri = dialog.remote_uri.to_string();
+            let local_address = self.local_address_for_uri(&target_uri);
 
             let request = crate::transaction::dialog::prack_for_dialog(
                 call_id,
@@ -2044,7 +2051,7 @@ impl DialogManager {
                 rseq,
                 invite_cseq,
                 prack_cseq,
-                self.local_address,
+                local_address,
                 if route_set.is_empty() {
                     None
                 } else {

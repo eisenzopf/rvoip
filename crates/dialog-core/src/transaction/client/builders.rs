@@ -412,6 +412,20 @@ impl Default for InviteBuilder {
 }
 
 fn via_transport_for_uri(uri: &str) -> String {
+    use crate::transaction::transport::multiplexed::select_transport_for_uri;
+    use rvoip_sip_transport::transport::TransportType;
+
+    if let Ok(parsed) = Uri::from_str(uri) {
+        return match select_transport_for_uri(&parsed) {
+            TransportType::Tls => "TLS",
+            TransportType::Tcp => "TCP",
+            TransportType::Wss => "WSS",
+            TransportType::Ws => "WS",
+            TransportType::Udp => "UDP",
+        }
+        .to_string();
+    }
+
     let lower = uri.to_ascii_lowercase();
     if lower.starts_with("sips:") || lower.contains(";transport=tls") {
         "TLS".to_string()
@@ -489,6 +503,26 @@ mod invite_builder_tests {
             request.raw_header_value(&HeaderName::Contact).unwrap(),
             "<sips:1001@192.0.2.10:5070;transport=tls>"
         );
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
+    }
+
+    #[test]
+    fn bye_builder_uses_tls_via_for_sips_dialog() {
+        let request = ByeBuilder::new()
+            .from_dialog(
+                "call-tls-bye",
+                "sips:1001@pbx.example.com",
+                "from-tag",
+                "sips:1002@pbx.example.com",
+                "to-tag",
+            )
+            .request_uri("sips:1002@pbx.example.com;transport=tls")
+            .local_address("192.0.2.10:5071".parse().unwrap())
+            .cseq(2)
+            .build()
+            .unwrap();
+
+        assert_eq!(request.first_via_transport(), Some("TLS"));
         rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
     }
 }
@@ -1452,6 +1486,11 @@ pub mod quick {
             .to("User", target_uri, None)
             .call_id(&format!("options-{}", Uuid::new_v4()))
             .cseq(1)
+            .via(
+                &local_addr.to_string(),
+                &via_transport_for_uris(target_uri, Some(from_uri)),
+                Some(&generate_branch()),
+            )
             .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
             .header(TypedHeader::ContentLength(ContentLength::new(0)))
             .build();
@@ -1483,6 +1522,11 @@ pub mod quick {
             .to("User", target_uri, None)
             .call_id(&format!("message-{}", Uuid::new_v4()))
             .cseq(1)
+            .via(
+                &local_addr.to_string(),
+                &via_transport_for_uris(target_uri, Some(from_uri)),
+                Some(&generate_branch()),
+            )
             .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
             .header(TypedHeader::ContentType(
                 ContentType::from_str("text/plain").unwrap(),

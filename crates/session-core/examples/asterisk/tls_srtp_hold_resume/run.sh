@@ -5,6 +5,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ASTERISK_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 WORKSPACE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../.." && pwd)
 OUT_DIR="$SCRIPT_DIR/output"
 LOG_1001="$OUT_DIR/1001.log"
@@ -89,9 +90,22 @@ cd "$WORKSPACE_ROOT"
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
+if [ -f "$ASTERISK_DIR/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ASTERISK_DIR/.env"
+  set +a
+fi
+
+# shellcheck disable=SC1091
+. "$ASTERISK_DIR/tls_cert.sh"
+
 export SIP_TRANSPORT=TLS
 export SIP_TLS_PORT="${SIP_TLS_PORT:-5061}"
+export ASTERISK_TLS_CONTACT_MODE="${ASTERISK_TLS_CONTACT_MODE:-reachable-contact}"
 export ASTERISK_TLS_SRTP_REQUIRED="${ASTERISK_TLS_SRTP_REQUIRED:-1}"
+
+ensure_asterisk_tls_listener_cert "$OUT_DIR/tls"
 
 echo "Building Asterisk TLS/SRTP hold/resume endpoint examples..."
 cargo build -p rvoip-session-core --features dev-insecure-tls \
@@ -135,6 +149,7 @@ wait_for_child "$PID_ANALYZE" "ANALYZE"
 
 assert_log_contains "sips:" "TLS/SIPS URI"
 assert_log_contains "transport=tls" "TLS transport URI parameter"
+assert_log_contains "SIP/2.0/TLS" "TLS Via transport"
 assert_log_contains "RTP/SAVP" "SRTP media profile"
 assert_log_contains "a=crypto" "SDES-SRTP crypto attribute"
 if grep -R -q "proceeding plaintext" "$OUT_DIR"; then

@@ -21,6 +21,44 @@ use rvoip_sip_core::types::TypedHeader;
 use rvoip_sip_core::{Method, Request, Response, StatusCode, Uri};
 use std::net::SocketAddr;
 
+fn via_transport_for_uri(uri: &str) -> &'static str {
+    use crate::transaction::transport::multiplexed::select_transport_for_uri;
+    use rvoip_sip_transport::transport::TransportType;
+    use std::str::FromStr;
+
+    if let Ok(parsed) = Uri::from_str(uri) {
+        return match select_transport_for_uri(&parsed) {
+            TransportType::Tls => "TLS",
+            TransportType::Tcp => "TCP",
+            TransportType::Wss => "WSS",
+            TransportType::Ws => "WS",
+            TransportType::Udp => "UDP",
+        };
+    }
+
+    let lower = uri.to_ascii_lowercase();
+    if lower.starts_with("sips:") || lower.contains(";transport=tls") {
+        "TLS"
+    } else if lower.contains(";transport=tcp") {
+        "TCP"
+    } else if lower.contains(";transport=wss") {
+        "WSS"
+    } else if lower.contains(";transport=ws") {
+        "WS"
+    } else {
+        "UDP"
+    }
+}
+
+fn via_transport_for_uris(request_uri: &str, local_uri: &str) -> &'static str {
+    let request_transport = via_transport_for_uri(request_uri);
+    if request_transport != "UDP" {
+        request_transport
+    } else {
+        via_transport_for_uri(local_uri)
+    }
+}
+
 /// Quick BYE request creation for dialog termination
 ///
 /// Creates a BYE request from dialog context in a single function call.
@@ -666,6 +704,7 @@ pub fn subscribe_out_of_dialog(
     let contact_uri = contact_uri.into();
     let event_package = event_package.into();
     let branch = crate::transaction::utils::dialog_utils::generate_branch();
+    let via_transport = via_transport_for_uris(&target_uri, &from_uri);
 
     let request = rvoip_sip_core::builder::SimpleRequestBuilder::subscribe(
         &target_uri,
@@ -681,7 +720,7 @@ pub fn subscribe_out_of_dialog(
     .to("", &target_uri, None)
     .call_id(&format!("sub-{}", uuid::Uuid::new_v4()))
     .cseq(cseq)
-    .via(&local_address.to_string(), "UDP", Some(&branch))
+    .via(&local_address.to_string(), via_transport, Some(&branch))
     .max_forwards(70)
     .contact(&contact_uri, None)
     .build();
@@ -701,6 +740,7 @@ pub fn message_out_of_dialog(
     let from_uri = from_uri.into();
     let body = body.into();
     let branch = crate::transaction::utils::dialog_utils::generate_branch();
+    let via_transport = via_transport_for_uris(&target_uri, &from_uri);
 
     let request = rvoip_sip_core::builder::SimpleRequestBuilder::new(Method::Message, &target_uri)
         .map_err(|e| Error::Other(format!("Failed to build MESSAGE request: {}", e)))?
@@ -712,7 +752,7 @@ pub fn message_out_of_dialog(
         .to("", &target_uri, None)
         .call_id(&format!("msg-{}", uuid::Uuid::new_v4()))
         .cseq(cseq)
-        .via(&local_address.to_string(), "UDP", Some(&branch))
+        .via(&local_address.to_string(), via_transport, Some(&branch))
         .max_forwards(70)
         .content_type("text/plain")
         .body(bytes::Bytes::from(body))
@@ -884,6 +924,42 @@ mod tests {
         assert_eq!(update_request.call_id().unwrap().value(), "call-789");
         assert_eq!(update_request.cseq().unwrap().seq, 4);
         assert_eq!(update_request.body(), sdp_content.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn out_of_dialog_subscribe_uses_tls_via_for_sips_target() {
+        let local_addr: SocketAddr = "192.0.2.10:5071".parse().unwrap();
+
+        let request = subscribe_out_of_dialog(
+            "sips:events@pbx.example.com;transport=tls",
+            "sips:1001@pbx.example.com",
+            "sips:1001@192.0.2.10:5071;transport=tls",
+            "dialog",
+            3600,
+            1,
+            local_addr,
+        )
+        .expect("SUBSCRIBE");
+
+        assert_eq!(request.first_via_transport(), Some("TLS"));
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
+    }
+
+    #[tokio::test]
+    async fn out_of_dialog_message_uses_tls_via_for_sips_target() {
+        let local_addr: SocketAddr = "192.0.2.10:5071".parse().unwrap();
+
+        let request = message_out_of_dialog(
+            "sips:1002@pbx.example.com;transport=tls",
+            "sips:1001@pbx.example.com",
+            "hello",
+            1,
+            local_addr,
+        )
+        .expect("MESSAGE");
+
+        assert_eq!(request.first_via_transport(), Some("TLS"));
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
     }
 
     #[tokio::test]

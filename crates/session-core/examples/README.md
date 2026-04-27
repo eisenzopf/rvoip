@@ -68,12 +68,21 @@ users share the single `SIP_PASSWORD` value from `.env`; endpoint auth
 usernames default to the endpoint number.
 
 For the TLS/SRTP Asterisk example, configure Asterisk PJSIP with a TLS
-transport and endpoint media encryption set to mandatory SDES/SRTP. The RVOIP
-endpoints run as SIP TLS clients: Asterisk presents the server certificate, and
-the endpoints verify it with system roots, `TLS_CA_PATH`, or dev-only
-`TLS_INSECURE=1`. Endpoint `TLS_CERT_PATH`/`TLS_KEY_PATH` values are only needed
-for direct-UAS/listener TLS or mutual-TLS deployments, not for the normal
-Asterisk registered-client flow.
+transport and endpoint media encryption set to mandatory SDES/SRTP. The default
+example mode is a reachable TLS Contact: RVOIP registers over TLS and also
+listens on `ENDPOINT_1001_TLS_LOCAL_PORT` / `ENDPOINT_1002_TLS_LOCAL_PORT` so
+Asterisk can open TLS connections to the registered Contacts for `INVITE`,
+`OPTIONS`, `BYE`, and re-INVITEs. That listener requires `TLS_CERT_PATH` and
+`TLS_KEY_PATH`; if they are unset, `run.sh` generates a short-lived self-signed
+certificate/key under the test output directory. If your Asterisk TLS policy
+verifies the endpoint listener certificate, configure Asterisk to trust that
+certificate or provide a trusted pair explicitly. Outbound verification of
+Asterisk uses system roots, `TLS_CA_PATH`, or dev-only `TLS_INSECURE=1`.
+
+Registered-flow mode is also available for Asterisk configurations using
+`rewrite_contact` / `symmetric_transport`: set
+`ASTERISK_TLS_CONTACT_MODE=registered-flow`. In that mode RVOIP keeps the
+outbound TLS flow open and does not need a listener certificate/key.
 
 ## Running peers individually
 

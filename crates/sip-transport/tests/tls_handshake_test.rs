@@ -27,12 +27,17 @@ use tempfile::tempdir;
 /// live for the test) and the two paths.
 fn write_self_signed_localhost_cert() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)
 {
+    write_self_signed_cert_for_names(vec!["localhost".to_string()])
+}
+
+fn write_self_signed_cert_for_names(
+    names: Vec<String>,
+) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let dir = tempdir().expect("tempdir");
     let cert_path = dir.path().join("server.crt");
     let key_path = dir.path().join("server.key");
 
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-        .expect("rcgen self-signed");
+    let cert = rcgen::generate_simple_self_signed(names).expect("rcgen self-signed");
     let cert_pem = cert.serialize_pem().expect("cert PEM");
     let key_pem = cert.serialize_private_key_pem();
 
@@ -151,5 +156,97 @@ async fn tls_client_default_validation_rejects_self_signed_cert() {
         result.is_err(),
         "default validation accepted a self-signed cert: {:?}",
         result
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_client_uses_request_uri_host_for_sni_and_certificate_validation() {
+    let (_dir, cert_path, key_path) =
+        write_self_signed_cert_for_names(vec!["pbx.example.test".to_string()]);
+
+    let (server_tx, mut server_events) = tokio::sync::mpsc::channel(16);
+    let (server_transport, _server_rx) =
+        TlsTransport::bind(loopback_addr(0), &cert_path, &key_path, Some(server_tx))
+            .await
+            .expect("server bind");
+    let server_actual = server_transport.local_addr().expect("server local addr");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (client_transport, _client_rx) = TlsTransport::client_only(
+        loopback_addr(0),
+        None,
+        TlsClientConfig {
+            extra_ca_path: Some(cert_path.clone()),
+            insecure_skip_verify: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("client config");
+
+    let request =
+        SimpleRequestBuilder::new(Method::Register, "sips:pbx.example.test;transport=tls")
+            .unwrap()
+            .from("alice", "sips:alice@example.test", Some("tag-tls-sni"))
+            .to("alice", "sips:alice@example.test", None)
+            .call_id("tls-sni-test")
+            .cseq(1)
+            .build();
+
+    client_transport
+        .send_message(rvoip_sip_core::Message::Request(request), server_actual)
+        .await
+        .expect("client send via TLS with URI-host SNI");
+
+    let received = tokio::time::timeout(Duration::from_secs(5), server_events.recv())
+        .await
+        .expect("server timed out waiting for URI-host SNI request")
+        .expect("server event channel closed");
+
+    match received {
+        TransportEvent::MessageReceived { message, .. } => match message {
+            rvoip_sip_core::Message::Request(req) => {
+                assert_eq!(req.method(), Method::Register);
+                assert_eq!(req.uri().to_string(), "sips:pbx.example.test;transport=tls");
+            }
+            other => panic!("expected request, got {:?}", other),
+        },
+        other => panic!("unexpected event: {:?}", other),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_server_only_refuses_new_outbound_connections() {
+    let (_dir, cert_path, key_path) = write_self_signed_localhost_cert();
+
+    let (server_transport, _server_rx) = TlsTransport::bind_server_only_with_client_config(
+        loopback_addr(0),
+        &cert_path,
+        &key_path,
+        None,
+        TlsClientConfig::default(),
+    )
+    .await
+    .expect("server-only bind");
+
+    let request = SimpleRequestBuilder::new(Method::Options, "sips:pbx.example.test;transport=tls")
+        .unwrap()
+        .from("alice", "sips:alice@example.test", Some("tag-server-only"))
+        .to("pbx", "sips:pbx.example.test", None)
+        .call_id("tls-server-only-test")
+        .cseq(1)
+        .build();
+
+    let result = server_transport
+        .send_message(
+            rvoip_sip_core::Message::Request(request),
+            loopback_addr(65000),
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "server-only TLS transport unexpectedly opened an outbound connection"
     );
 }

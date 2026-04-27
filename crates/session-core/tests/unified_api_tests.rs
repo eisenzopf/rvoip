@@ -59,6 +59,19 @@ async fn tls_listener_modes_require_endpoint_certificates() {
 }
 
 #[tokio::test]
+async fn tls_client_and_server_mode_requires_endpoint_certificates() {
+    let mut config = test_config(15231);
+    config.sip_tls_mode = SipTlsMode::ClientAndServer;
+    config.tls_bind_addr = Some("127.0.0.1:15232".parse().unwrap());
+
+    let coordinator = UnifiedCoordinator::new(config).await;
+    assert!(
+        coordinator.is_err(),
+        "client-and-server SIP TLS mode must require tls_cert_path/tls_key_path"
+    );
+}
+
+#[tokio::test]
 async fn inbound_options_gets_dialog_core_200_without_session_state() {
     let port = 15228;
     let coordinator = UnifiedCoordinator::new(test_config(port)).await.unwrap();

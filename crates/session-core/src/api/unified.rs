@@ -152,13 +152,19 @@ pub struct Config {
     /// recommendation (ping every 25 s, flow declared dead after 30 s
     /// without a response).
     ///
-    /// **Current scope** (A5 Phase 2a): this value is parsed and stored
-    /// but has no effect yet. Keep-alive plumbing lands in A5 Phase 2b
-    /// (transport-layer hook).
+    /// This is honored when outbound registration flow support is
+    /// enabled with a stable [`Config::sip_instance`].
     pub outbound_keepalive_interval_secs: u64,
 
     /// SIP TLS signalling mode.
     pub sip_tls_mode: SipTlsMode,
+
+    /// Optional local SIP TLS listener address. Used for
+    /// [`SipTlsMode::ServerOnly`] and [`SipTlsMode::ClientAndServer`].
+    /// When unset, dialog-core retains its legacy default of deriving the
+    /// TLS listener address from [`Config::bind_addr`] by adding 1 to the
+    /// port.
+    pub tls_bind_addr: Option<SocketAddr>,
 
     /// Optional Contact URI override used by dialog-core for
     /// dialog-creating and target-refresh requests. Registrations can
@@ -356,6 +362,7 @@ impl Config {
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
             sip_tls_mode: SipTlsMode::Disabled,
+            tls_bind_addr: None,
             contact_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -403,6 +410,7 @@ impl Config {
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
             sip_tls_mode: SipTlsMode::Disabled,
+            tls_bind_addr: None,
             contact_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -1385,6 +1393,7 @@ impl UnifiedCoordinator {
             enable_tls,
             tls_role,
             bind_addresses: vec![config.bind_addr],
+            tls_bind_addresses: config.tls_bind_addr.into_iter().collect(),
             tls_cert_path: config
                 .tls_cert_path
                 .as_ref()
@@ -1414,6 +1423,21 @@ impl UnifiedCoordinator {
             tls_insecure_skip_verify: false,
             ..Default::default()
         };
+
+        let dialog_tls_local_address = config.tls_bind_addr.or_else(|| {
+            if matches!(
+                effective_tls_mode,
+                SipTlsMode::ServerOnly | SipTlsMode::ClientAndServer
+            ) {
+                let mut tls_addr = config.bind_addr;
+                if tls_addr.port() != 0 {
+                    tls_addr.set_port(tls_addr.port().saturating_add(1));
+                }
+                Some(tls_addr)
+            } else {
+                None
+            }
+        });
 
         let (mut transport_manager, transport_event_rx) =
             TransportManager::new(transport_config).await.map_err(|e| {
@@ -1447,6 +1471,7 @@ impl UnifiedCoordinator {
             .with_min_se(config.session_timer_min_se)
             .with_dialog_config(|mut dialog| {
                 dialog.local_contact_uri = config.contact_uri.clone();
+                dialog.tls_local_address = dialog_tls_local_address;
                 dialog
             })
             .build();

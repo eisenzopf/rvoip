@@ -171,14 +171,25 @@ impl TransportFactory {
                         let key_path = self.config.tls_key_path.as_ref().ok_or_else(|| {
                             Error::InvalidState("TLS key path not provided".to_string())
                         })?;
-                        TlsTransport::bind_with_client_config(
-                            bind_addr,
-                            std::path::Path::new(cert_path),
-                            std::path::Path::new(key_path),
-                            None,
-                            client_cfg,
-                        )
-                        .await?
+                        if self.config.tls_role == TlsRole::ServerOnly {
+                            TlsTransport::bind_server_only_with_client_config(
+                                bind_addr,
+                                std::path::Path::new(cert_path),
+                                std::path::Path::new(key_path),
+                                None,
+                                client_cfg,
+                            )
+                            .await?
+                        } else {
+                            TlsTransport::bind_with_client_config(
+                                bind_addr,
+                                std::path::Path::new(cert_path),
+                                std::path::Path::new(key_path),
+                                None,
+                                client_cfg,
+                            )
+                            .await?
+                        }
                     }
                 };
                 Ok((Arc::new(transport), rx))

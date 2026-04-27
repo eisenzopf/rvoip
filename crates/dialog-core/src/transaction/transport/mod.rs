@@ -35,6 +35,10 @@ pub struct TransportManagerConfig {
     pub tls_role: TlsRole,
     /// Local addresses to bind to (if empty, will bind to all interfaces)
     pub bind_addresses: Vec<SocketAddr>,
+    /// Explicit local addresses for SIP TLS listeners. When empty,
+    /// listener-capable TLS roles retain the legacy behavior of deriving
+    /// TLS ports from `bind_addresses` by adding 1.
+    pub tls_bind_addresses: Vec<SocketAddr>,
     /// Default event channel capacity
     pub default_channel_capacity: usize,
     /// TLS certificate path
@@ -66,6 +70,7 @@ impl Default for TransportManagerConfig {
             enable_tls: false,
             tls_role: TlsRole::ClientAndServer,
             bind_addresses: vec![],
+            tls_bind_addresses: vec![],
             default_channel_capacity: 100,
             tls_cert_path: None,
             tls_key_path: None,
@@ -172,56 +177,54 @@ impl TransportManager {
                     }
                 }
             }
+        }
 
-            // Add TLS transport if enabled. TLS is TCP-over-TLS — it
-            // takes a TCP-level port that can't conflict with the
-            // plain-TCP listener above. RFC 3261 standardises 5061 for
-            // `sips:` (a +1 offset from the default `sip:` port 5060).
-            // We mirror that: when explicit bind addresses are
-            // supplied, derive each TLS bind by adding 1 to its port,
-            // unless the caller already accounted for it via
-            // [`TransportManagerConfig::tls_bind_addresses`] (TODO).
-            if self.config.enable_tls {
-                if self.config.tls_role != TlsRole::ClientOnly
-                    && (self.config.tls_cert_path.is_none() || self.config.tls_key_path.is_none())
-                {
-                    warn!("TLS is enabled but certificate or key path is missing");
+        // Add TLS transport if enabled. TLS is TCP-over-TLS, but it is
+        // configured independently from the plain TCP listener. Listener
+        // roles may supply explicit TLS bind addresses; otherwise retain
+        // the legacy `bind_addr.port() + 1` behavior for compatibility.
+        if self.config.enable_tls {
+            if self.config.tls_role != TlsRole::ClientOnly
+                && (self.config.tls_cert_path.is_none() || self.config.tls_key_path.is_none())
+            {
+                warn!("TLS is enabled but certificate or key path is missing");
+            } else {
+                let base_addresses = if self.config.bind_addresses.is_empty() {
+                    vec!["0.0.0.0:5061".parse().unwrap()]
                 } else {
-                    let base_addresses = if self.config.bind_addresses.is_empty() {
-                        vec!["0.0.0.0:5061".parse().unwrap()]
-                    } else {
-                        self.config.bind_addresses.clone()
-                    };
-                    let addresses = if self.config.tls_role == TlsRole::ClientOnly {
-                        base_addresses
-                    } else if self.config.bind_addresses.is_empty() {
+                    self.config.bind_addresses.clone()
+                };
+                let addresses = if self.config.tls_role == TlsRole::ClientOnly {
+                    if self.config.tls_bind_addresses.is_empty() {
                         base_addresses
                     } else {
-                        self.config
-                            .bind_addresses
-                            .iter()
-                            .map(|addr| {
-                                let mut tls_addr = *addr;
-                                // Derive TLS port from TCP port (+1).
-                                // If the user picked port 0 (ephemeral)
-                                // keep it at 0 so the OS still picks a
-                                // free port.
-                                if tls_addr.port() != 0 {
-                                    tls_addr.set_port(tls_addr.port().saturating_add(1));
-                                }
-                                tls_addr
-                            })
-                            .collect::<Vec<_>>()
-                    };
+                        self.config.tls_bind_addresses.clone()
+                    }
+                } else if !self.config.tls_bind_addresses.is_empty() {
+                    self.config.tls_bind_addresses.clone()
+                } else if self.config.bind_addresses.is_empty() {
+                    base_addresses
+                } else {
+                    self.config
+                        .bind_addresses
+                        .iter()
+                        .map(|addr| {
+                            let mut tls_addr = *addr;
+                            if tls_addr.port() != 0 {
+                                tls_addr.set_port(tls_addr.port().saturating_add(1));
+                            }
+                            tls_addr
+                        })
+                        .collect::<Vec<_>>()
+                };
 
-                    for addr in addresses {
-                        match self.add_tcp_transport(addr, true).await {
-                            Ok(_) => {
-                                initialized = true;
-                            }
-                            Err(e) => {
-                                error!("Failed to initialize TLS transport on {}: {}", addr, e);
-                            }
+                for addr in addresses {
+                    match self.add_tcp_transport(addr, true).await {
+                        Ok(_) => {
+                            initialized = true;
+                        }
+                        Err(e) => {
+                            error!("Failed to initialize TLS transport on {}: {}", addr, e);
                         }
                     }
                 }
@@ -356,15 +359,26 @@ impl TransportManager {
                     let key_path = self.config.tls_key_path.as_ref().ok_or_else(|| {
                         Error::Transport("TLS enabled but tls_key_path is missing".into())
                     })?;
-                    TlsTransport::bind_with_client_config(
-                        bind_addr,
-                        Path::new(cert_path),
-                        Path::new(key_path),
-                        Some(self.event_tx.clone()),
-                        client_cfg,
-                    )
-                    .await
-                    .map_err(|e| {
+                    let result = if self.config.tls_role == TlsRole::ServerOnly {
+                        TlsTransport::bind_server_only_with_client_config(
+                            bind_addr,
+                            Path::new(cert_path),
+                            Path::new(key_path),
+                            Some(self.event_tx.clone()),
+                            client_cfg,
+                        )
+                        .await
+                    } else {
+                        TlsTransport::bind_with_client_config(
+                            bind_addr,
+                            Path::new(cert_path),
+                            Path::new(key_path),
+                            Some(self.event_tx.clone()),
+                            client_cfg,
+                        )
+                        .await
+                    };
+                    result.map_err(|e| {
                         Error::Transport(format!(
                             "Failed to bind TLS transport to {}: {}",
                             bind_addr, e

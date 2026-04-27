@@ -2272,11 +2272,27 @@ impl TransactionManager {
         let invite_request =
             utils::get_transaction_request(&self.client_transactions, invite_tx_id).await?;
 
-        // Get the local address for the Via header
-        let local_addr = self
-            .transport
-            .local_addr()
-            .map_err(|e| Error::transport_error(e, "Failed to get local address"))?;
+        // Use the original INVITE top Via sent-by for the ACK's sent-by
+        // address. With multiplexed transports, `transport.local_addr()`
+        // reports the default transport address, which may be UDP even
+        // when the original INVITE was sent over TLS.
+        let local_addr = invite_request
+            .first_via()
+            .and_then(|via| match via.0.first() {
+                Some(via_header) => match via_header.host() {
+                    Host::Address(ip) => {
+                        Some(SocketAddr::new(*ip, via_header.port().unwrap_or(5060)))
+                    }
+                    Host::Domain(_) => None,
+                },
+                None => None,
+            })
+            .map(Ok)
+            .unwrap_or_else(|| {
+                self.transport
+                    .local_addr()
+                    .map_err(|e| Error::transport_error(e, "Failed to get local address"))
+            })?;
 
         // Create the ACK request using our utility
         let ack_request = crate::transaction::method::ack::create_ack_for_2xx(

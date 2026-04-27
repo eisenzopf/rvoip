@@ -122,7 +122,11 @@ impl MultiplexedTransport {
     ///   connection to `destination`. The first match wins; otherwise
     ///   fall through to the default (UDP — connectionless, can send
     ///   anywhere).
-    fn pick_transport(&self, message: &Message, destination: SocketAddr) -> Arc<dyn Transport> {
+    fn pick_transport(
+        &self,
+        message: &Message,
+        destination: SocketAddr,
+    ) -> TransportResult<Arc<dyn Transport>> {
         match message {
             Message::Request(request) => {
                 let want = select_transport_for_request(request);
@@ -132,14 +136,20 @@ impl MultiplexedTransport {
                         request.method(),
                         want
                     );
-                    transport.clone()
+                    Ok(transport.clone())
+                } else if want == TransportType::Tls {
+                    Err(TransportError::UnsupportedTransport(format!(
+                        "{} requires TLS by Request-URI {}, but no TLS transport is registered",
+                        request.method(),
+                        request.uri()
+                    )))
                 } else {
                     debug!(
                         "MultiplexedTransport: no {} transport registered for {}; falling back to default",
                         want,
                         request.method()
                     );
-                    self.default.clone()
+                    Ok(self.default.clone())
                 }
             }
             Message::Response(response) => {
@@ -161,7 +171,7 @@ impl MultiplexedTransport {
                                 destination,
                                 kind
                             );
-                            return transport.clone();
+                            return Ok(transport.clone());
                         }
                     }
                 }
@@ -169,7 +179,7 @@ impl MultiplexedTransport {
                     "MultiplexedTransport: no connection-oriented transport has {}; routing response via default",
                     destination
                 );
-                self.default.clone()
+                Ok(self.default.clone())
             }
         }
     }
@@ -182,7 +192,7 @@ impl Transport for MultiplexedTransport {
     }
 
     async fn send_message(&self, message: Message, destination: SocketAddr) -> TransportResult<()> {
-        let transport = self.pick_transport(&message, destination);
+        let transport = self.pick_transport(&message, destination)?;
         transport.send_message(message, destination).await
     }
 
@@ -600,5 +610,26 @@ mod tests {
         // dispatcher delivered to both registry-UDP and default-UDP — we
         // expect exactly one delivery (registry hit OR default fallback).
         assert_eq!(udp.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_fails_when_tls_required_but_unavailable() {
+        let udp = CountingTransport::new("udp");
+
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
+
+        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+
+        let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
+        let result = mux
+            .send_message(make_invite("sips:bob@example.com"), dest)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(TransportError::UnsupportedTransport(_))
+        ));
+        assert_eq!(udp.count(), 0, "sips: must not fall back to UDP");
     }
 }

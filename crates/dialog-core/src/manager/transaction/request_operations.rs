@@ -188,6 +188,7 @@ impl DialogManager {
         event_package: Option<&str>,
         subscription_state: Option<&crate::dialog::subscription_state::SubscriptionState>,
     ) -> DialogResult<Request> {
+        let local_address = self.local_address_for_uri(&template.target_uri);
         let request = match method {
             Method::Invite => {
                 // Distinguish between initial INVITE and re-INVITE based on remote tag
@@ -207,7 +208,7 @@ impl DialogManager {
                             &remote_tag,
                             &sdp_content,
                             template.cseq_number,
-                            self.local_address,
+                            local_address,
                             if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
                             self.local_contact_uri()
                         )
@@ -230,7 +231,7 @@ impl DialogManager {
                             .call_id(&template.call_id)
                             .cseq(template.cseq_number)
                             .request_uri(template.target_uri.to_string())
-                            .local_address(self.local_address);
+                            .local_address(local_address);
 
                         // Add route set if present
                         for route in &template.route_set {
@@ -264,7 +265,7 @@ impl DialogManager {
                     &template.remote_uri.to_string(),
                     &remote_tag,
                     template.cseq_number,
-                    self.local_address,
+                    local_address,
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
                     None,
                 )
@@ -285,7 +286,7 @@ impl DialogManager {
                     &remote_tag,
                     &target_uri,
                     template.cseq_number,
-                    self.local_address,
+                    local_address,
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                 )
             },
@@ -304,7 +305,7 @@ impl DialogManager {
                     &remote_tag,
                     body_string, // SDP content
                     template.cseq_number,
-                    self.local_address,
+                    local_address,
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                 )
             },
@@ -325,7 +326,7 @@ impl DialogManager {
                     &content,
                     Some("application/info".to_string()),
                     template.cseq_number,
-                    self.local_address,
+                    local_address,
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                 )
             },
@@ -356,7 +357,7 @@ impl DialogManager {
                     body_string,
                     sub_state_str,
                     template.cseq_number,
-                    self.local_address,
+                    local_address,
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                 )
             },
@@ -377,7 +378,7 @@ impl DialogManager {
                     &content,
                     Some("text/plain".to_string()),
                     template.cseq_number,
-                    self.local_address,
+                    local_address,
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                 )
             },
@@ -397,7 +398,7 @@ impl DialogManager {
                     to_tag: remote_tag,
                     request_uri: template.target_uri.to_string(),
                     cseq: template.cseq_number,
-                    local_address: self.local_address,
+                    local_address,
                     route_set: template.route_set.clone(),
                     contact: self.local_contact_uri(),
                 };

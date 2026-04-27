@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Buf, Bytes, BytesMut};
+use rvoip_sip_core::types::uri::Host;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -64,6 +65,11 @@ pub enum TlsRole {
 /// [`TlsTransport::connect`] (or implicitly through `send_message` —
 /// missing connections are auto-dialed).
 pub struct TlsTransport {
+    /// Socket role for this transport. Server-only transports may send
+    /// on accepted connections but must not open new outbound TLS
+    /// connections.
+    role: TlsRole,
+
     /// Local address the server side listens on.
     local_addr: SocketAddr,
 
@@ -93,6 +99,7 @@ pub struct TlsTransport {
 impl fmt::Debug for TlsTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TlsTransport")
+            .field("role", &self.role)
             .field("local_addr", &self.local_addr)
             .field("has_acceptor", &self.acceptor.is_some())
             .field("connections", &self.connections)
@@ -130,6 +137,46 @@ impl TlsTransport {
         event_tx: Option<mpsc::Sender<TransportEvent>>,
         client_cfg: TlsClientConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_role_and_client_config(
+            local_addr,
+            cert_path,
+            key_path,
+            event_tx,
+            client_cfg,
+            TlsRole::ClientAndServer,
+        )
+        .await
+    }
+
+    /// Bind a TLS listener that does not open new outbound TLS
+    /// connections. Replies over already-accepted TLS connections remain
+    /// valid.
+    pub async fn bind_server_only_with_client_config(
+        local_addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        client_cfg: TlsClientConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_role_and_client_config(
+            local_addr,
+            cert_path,
+            key_path,
+            event_tx,
+            client_cfg,
+            TlsRole::ServerOnly,
+        )
+        .await
+    }
+
+    async fn bind_with_role_and_client_config(
+        local_addr: SocketAddr,
+        cert_path: &Path,
+        key_path: &Path,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        client_cfg: TlsClientConfig,
+        role: TlsRole,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         // Server-side config (for incoming TLS connections).
         let cert = load_certs(cert_path)?;
         let key = load_private_key(key_path)?;
@@ -160,6 +207,7 @@ impl TlsTransport {
         info!("TLS transport listening on {}", actual_addr);
 
         let transport = Self {
+            role,
             local_addr: actual_addr,
             acceptor: Some(acceptor),
             connector,
@@ -212,6 +260,7 @@ impl TlsTransport {
 
         Ok((
             Self {
+                role: TlsRole::ClientOnly,
                 local_addr,
                 acceptor: None,
                 connector,
@@ -391,11 +440,14 @@ impl TlsTransport {
     }
 
     /// Send data to a specific remote address. Auto-dials if no
-    /// connection exists yet, using the destination's IP literal as the
-    /// SNI server name. Hostname-aware dialing should go through
-    /// [`TlsTransport::connect_with_server_name`] before the send so the
-    /// caller can supply the URI's host instead of an IP.
-    async fn send_to_addr(&self, data: Bytes, addr: SocketAddr) -> Result<()> {
+    /// connection exists yet. Request sends supply SNI from the next-hop
+    /// URI host; response/raw sends fall back to destination-address SNI.
+    async fn send_to_addr(
+        &self,
+        data: Bytes,
+        addr: SocketAddr,
+        server_name: Option<ServerName>,
+    ) -> Result<()> {
         // Fast path: existing connection. Clone the bytes for the fast
         // path send so we still have the original on hand for the
         // auto-dial fallback when the channel is closed.
@@ -409,8 +461,18 @@ impl TlsTransport {
             }
         }
 
+        if self.role == TlsRole::ServerOnly {
+            return Err(Error::InvalidState(format!(
+                "TLS server-only transport has no existing connection to {}; outbound auto-dial is disabled",
+                addr
+            )));
+        }
+
         // Auto-dial.
-        self.connect(addr).await?;
+        match server_name {
+            Some(server_name) => self.connect_with_server_name(addr, server_name).await?,
+            None => self.connect(addr).await?,
+        }
 
         let connections_guard = self.connections.lock().await;
         let (_, tx) = connections_guard
@@ -534,8 +596,10 @@ impl Transport for TlsTransport {
         // `to_string()` is for display/debug only and omits the final
         // separator, which then breaks Content-Length framing on the
         // peer's read side.
+        let server_name = tls_server_name_for_message(&message, destination);
         let bytes = message.to_bytes();
-        self.send_to_addr(bytes.into(), destination).await
+        self.send_to_addr(bytes.into(), destination, server_name)
+            .await
     }
 
     fn local_addr(&self) -> Result<SocketAddr> {
@@ -587,6 +651,20 @@ impl Transport for TlsTransport {
                 destination
             ))
         })
+    }
+}
+
+fn tls_server_name_for_message(
+    message: &rvoip_sip_core::Message,
+    destination: SocketAddr,
+) -> Option<ServerName> {
+    let rvoip_sip_core::Message::Request(request) = message else {
+        return Some(ip_to_server_name(destination));
+    };
+
+    match &request.uri().host {
+        Host::Domain(domain) => ServerName::try_from(domain.as_str()).ok(),
+        Host::Address(_) => Some(ip_to_server_name(destination)),
     }
 }
 
