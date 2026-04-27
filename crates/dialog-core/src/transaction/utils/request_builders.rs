@@ -59,6 +59,8 @@ pub fn create_ack_from_invite(original_request: &Request, response: &Response) -
         ));
     }
 
+    ack_builder = ack_builder.header(TypedHeader::MaxForwards(MaxForwards::new(70)));
+
     // Add Via header from original request (top Via only)
     if let Some(via) = original_request.typed_header::<Via>() {
         ack_builder = ack_builder.header(TypedHeader::Via(via.clone()));

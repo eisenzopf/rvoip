@@ -8,7 +8,7 @@ use crate::errors::{Result, SessionError};
 use crate::session_registry::SessionRegistry;
 use crate::session_store::SessionStore;
 use crate::state_machine::{StateMachine, StateMachineHelpers};
-use crate::state_table::types::{EventType, SessionId};
+use crate::state_table::types::{Action, EventType, SessionId};
 use crate::types::CallState;
 use crate::types::{IncomingCallInfo, SessionInfo};
 // Callback system removed - using event-driven approach
@@ -1503,7 +1503,7 @@ impl UnifiedCoordinator {
     /// Sends REGISTER with expires=0 to remove registration
     pub async fn unregister(&self, handle: &RegistrationHandle) -> Result<()> {
         // Trigger unregistration via state machine
-        let _result = self
+        let result = self
             .helpers
             .state_machine
             .process_event(
@@ -1514,6 +1514,22 @@ impl UnifiedCoordinator {
             .map_err(|e| {
                 SessionError::InternalError(format!("Failed to trigger unregistration: {}", e))
             })?;
+        if result.transition.is_none() {
+            return Err(SessionError::InvalidTransition(format!(
+                "Cannot unregister session {} from state {:?}",
+                handle.session_id.0, result.old_state
+            )));
+        }
+        if !result
+            .actions_executed
+            .iter()
+            .any(|action| matches!(action, Action::SendUnREGISTER))
+        {
+            return Err(SessionError::InternalError(format!(
+                "Unregistration transition for session {} did not send REGISTER Expires: 0",
+                handle.session_id.0
+            )));
+        }
         Ok(())
     }
 

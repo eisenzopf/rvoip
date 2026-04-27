@@ -651,6 +651,76 @@ pub fn prack_for_dialog(
     Ok(request)
 }
 
+/// Create an out-of-dialog SUBSCRIBE request.
+pub fn subscribe_out_of_dialog(
+    target_uri: impl Into<String>,
+    from_uri: impl Into<String>,
+    contact_uri: impl Into<String>,
+    event_package: impl Into<String>,
+    expires: u32,
+    cseq: u32,
+    local_address: SocketAddr,
+) -> Result<Request> {
+    let target_uri = target_uri.into();
+    let from_uri = from_uri.into();
+    let contact_uri = contact_uri.into();
+    let event_package = event_package.into();
+    let branch = crate::transaction::utils::dialog_utils::generate_branch();
+
+    let request = rvoip_sip_core::builder::SimpleRequestBuilder::subscribe(
+        &target_uri,
+        &event_package,
+        expires,
+    )
+    .map_err(|e| Error::Other(format!("Failed to build SUBSCRIBE request: {}", e)))?
+    .from(
+        "",
+        &from_uri,
+        Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
+    )
+    .to("", &target_uri, None)
+    .call_id(&format!("sub-{}", uuid::Uuid::new_v4()))
+    .cseq(cseq)
+    .via(&local_address.to_string(), "UDP", Some(&branch))
+    .max_forwards(70)
+    .contact(&contact_uri, None)
+    .build();
+
+    Ok(request)
+}
+
+/// Create an out-of-dialog MESSAGE request.
+pub fn message_out_of_dialog(
+    target_uri: impl Into<String>,
+    from_uri: impl Into<String>,
+    body: impl Into<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+) -> Result<Request> {
+    let target_uri = target_uri.into();
+    let from_uri = from_uri.into();
+    let body = body.into();
+    let branch = crate::transaction::utils::dialog_utils::generate_branch();
+
+    let request = rvoip_sip_core::builder::SimpleRequestBuilder::new(Method::Message, &target_uri)
+        .map_err(|e| Error::Other(format!("Failed to build MESSAGE request: {}", e)))?
+        .from(
+            "",
+            &from_uri,
+            Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
+        )
+        .to("", &target_uri, None)
+        .call_id(&format!("msg-{}", uuid::Uuid::new_v4()))
+        .cseq(cseq)
+        .via(&local_address.to_string(), "UDP", Some(&branch))
+        .max_forwards(70)
+        .content_type("text/plain")
+        .body(bytes::Bytes::from(body))
+        .build();
+
+    Ok(request)
+}
+
 /// Quick response creation for dialog transactions
 ///
 /// Creates an appropriate response for a dialog transaction with automatic

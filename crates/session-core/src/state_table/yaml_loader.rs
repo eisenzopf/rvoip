@@ -649,6 +649,9 @@ impl YamlTableLoader {
             // binding here; the alias intentionally takes priority.
             "RetryRegistration" => Ok(EventType::RetryRegistration),
             "RegistrationFailed" => Ok(EventType::RegistrationFailed(0)),
+            "StartUnregistration" => Ok(EventType::StartUnregistration),
+            "Unregistration200OK" => Ok(EventType::Unregistration200OK),
+            "UnregistrationFailed" => Ok(EventType::UnregistrationFailed),
             "UnregisterRequest" => Ok(EventType::UnregisterRequest),
             "RegistrationExpired" => Ok(EventType::RegistrationExpired),
 

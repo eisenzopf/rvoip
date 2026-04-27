@@ -242,6 +242,10 @@ rcgen = "0.12"
 default = []
 event-history = []
 persistence = ["sqlx"]
+generated-validation = [
+    "rvoip-dialog-core/generated-validation",
+    "rvoip-sip-core/generated-validation",
+]
 # Dev-only: exposes `Config::tls_insecure_skip_verify` and forwards to
 # dialog-core's matching feature (which in turn forwards to
 # sip-transport's). Production builds must omit this feature so `rustls`
@@ -249,6 +253,11 @@ persistence = ["sqlx"]
 # session-core only depends on sip-transport as a dev-dependency, and
 # feature chains via dev-deps don't participate in regular builds.
 dev-insecure-tls = ["rvoip-dialog-core/dev-insecure-tls"]
+
+[[test]]
+name = "generated_sip_compliance"
+path = "tests/generated_sip_compliance.rs"
+required-features = ["generated-validation"]
 
 [dependencies.sqlx]
 version = "0.7"

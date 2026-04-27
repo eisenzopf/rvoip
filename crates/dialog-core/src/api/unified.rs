@@ -1310,26 +1310,17 @@ impl UnifiedDialogApi {
         event_package: &str,
         expires: u32,
     ) -> ApiResult<Response> {
-        use rvoip_sip_core::builder::SimpleRequestBuilder;
-        use rvoip_sip_core::types::{ContentLength, TypedHeader};
-
         let local_addr = self.manager.core().local_address();
-        let branch = crate::transaction::utils::dialog_utils::generate_branch();
-        let request = SimpleRequestBuilder::subscribe(target_uri, event_package, expires)
-            .map_err(|e| ApiError::protocol(format!("Failed to build SUBSCRIBE request: {}", e)))?
-            .from(
-                "",
-                from_uri,
-                Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
-            )
-            .to("", target_uri, None)
-            .call_id(&format!("sub-{}", uuid::Uuid::new_v4()))
-            .cseq(1)
-            .via(&local_addr.to_string(), "UDP", Some(&branch))
-            .max_forwards(70)
-            .contact(contact_uri, None)
-            .header(TypedHeader::ContentLength(ContentLength::new(0)))
-            .build();
+        let request = crate::transaction::dialog::subscribe_out_of_dialog(
+            target_uri,
+            from_uri,
+            contact_uri,
+            event_package,
+            expires,
+            1,
+            local_addr,
+        )
+        .map_err(|e| ApiError::protocol(format!("Failed to build SUBSCRIBE request: {}", e)))?;
 
         let dest_uri = target_uri
             .parse::<rvoip_sip_core::Uri>()
@@ -1354,25 +1345,11 @@ impl UnifiedDialogApi {
         from_uri: &str,
         body: String,
     ) -> ApiResult<Response> {
-        use rvoip_sip_core::builder::SimpleRequestBuilder;
-
         let local_addr = self.manager.core().local_address();
-        let branch = crate::transaction::utils::dialog_utils::generate_branch();
-        let request = SimpleRequestBuilder::new(rvoip_sip_core::Method::Message, target_uri)
-            .map_err(|e| ApiError::protocol(format!("Failed to build MESSAGE request: {}", e)))?
-            .from(
-                "",
-                from_uri,
-                Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
-            )
-            .to("", target_uri, None)
-            .call_id(&format!("msg-{}", uuid::Uuid::new_v4()))
-            .cseq(1)
-            .via(&local_addr.to_string(), "UDP", Some(&branch))
-            .max_forwards(70)
-            .content_type("text/plain")
-            .body(bytes::Bytes::from(body))
-            .build();
+        let request = crate::transaction::dialog::message_out_of_dialog(
+            target_uri, from_uri, body, 1, local_addr,
+        )
+        .map_err(|e| ApiError::protocol(format!("Failed to build MESSAGE request: {}", e)))?;
 
         let dest_uri = target_uri
             .parse::<rvoip_sip_core::Uri>()

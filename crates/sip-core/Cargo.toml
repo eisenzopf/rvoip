@@ -22,6 +22,7 @@ workspace = true
 # Features
 [features]
 default = ["sdp"]  # Include sdp in the default features
+generated-validation = []  # Heavy generated-message serialize/strict-parse verifier for tests/dev diagnostics
 lenient_parsing = []  # More lenient parsing for torture tests
 sdp = []  # Session Description Protocol support
 
@@ -59,3 +60,8 @@ required-features = ["lenient_parsing"]
 [[test]]
 name = "parser"
 path = "tests/parser_tests.rs"
+
+[[test]]
+name = "generated_message_compliance"
+path = "tests/generated_message_compliance.rs"
+required-features = ["generated-validation"]

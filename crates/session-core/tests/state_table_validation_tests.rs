@@ -6,7 +6,9 @@
 //! - Defines transitions for common scenarios
 //! - Is compatible with the current state table loader
 
-use rvoip_session_core::state_table::{EventType, Role, StateKey, StateTable, YamlTableLoader};
+use rvoip_session_core::state_table::{
+    Action, EventType, Role, StateKey, StateTable, YamlTableLoader,
+};
 use rvoip_session_core::types::CallState;
 use std::path::Path;
 
@@ -196,6 +198,32 @@ fn test_registration_transitions() {
 
     let has_register_ok = table.has_transition(&register_ok_key);
     assert!(has_register_ok, "Missing registration success transition");
+
+    let unregister_key = StateKey {
+        role: Role::UAC,
+        state: CallState::Registered,
+        event: EventType::StartUnregistration,
+    };
+    let unregister_transition = table
+        .get(&unregister_key)
+        .expect("Missing UAC unregistration transition");
+    assert!(
+        unregister_transition
+            .actions
+            .iter()
+            .any(|action| matches!(action, Action::SendUnREGISTER)),
+        "Unregistration transition must send REGISTER with Expires: 0"
+    );
+
+    let unregister_ok_key = StateKey {
+        role: Role::UAC,
+        state: CallState::Unregistering,
+        event: EventType::Unregistration200OK,
+    };
+    assert!(
+        table.has_transition(&unregister_ok_key),
+        "Missing UAC unregistration success transition"
+    );
 }
 
 #[test]

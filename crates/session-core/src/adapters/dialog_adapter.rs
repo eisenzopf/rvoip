@@ -992,20 +992,43 @@ impl DialogAdapter {
         // The state machine will query the session state to determine next transition
         match response.status_code() {
             200..=299 => {
-                // Registration successful!
+                // Registration or unregistration successful.
+                let is_unregister = expires == 0;
                 let mut session = self.store.get_session(session_id).await?;
-                session.is_registered = true;
+                session.is_registered = !is_unregister;
                 self.store.update_session(session).await?;
-                tracing::info!(
-                    "✅ Registration successful - session {} marked as registered",
-                    session_id.0
-                );
 
-                // Don't trigger state machine events here to avoid recursion
-                // State machine can query is_registered flag if needed
-                tracing::debug!(
-                    "Session marked as registered, state machine can check is_registered flag"
-                );
+                if is_unregister {
+                    tracing::info!(
+                        "✅ Unregistration successful - session {} marked as unregistered",
+                        session_id.0
+                    );
+                } else {
+                    tracing::info!(
+                        "✅ Registration successful - session {} marked as registered",
+                        session_id.0
+                    );
+                }
+
+                if let Some(state_machine) = self.state_machine.get() {
+                    let event = if is_unregister {
+                        crate::state_table::types::EventType::Unregistration200OK
+                    } else {
+                        crate::state_table::types::EventType::Registration200OK
+                    };
+                    Box::pin(state_machine.process_event(session_id, event))
+                        .await
+                        .map_err(|e| {
+                            SessionError::InternalError(format!(
+                                "REGISTER success event dispatch failed: {}",
+                                e
+                            ))
+                        })?;
+                } else {
+                    tracing::debug!(
+                        "No state_machine wired into DialogAdapter; REGISTER success stored without state event"
+                    );
+                }
             }
             401 | 407 => {
                 // RFC 3261 §22.2 — auth challenge on REGISTER. Unified with the
