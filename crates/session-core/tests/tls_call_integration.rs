@@ -13,14 +13,21 @@
 //! `sips:` URIs through real session-core APIs, not just unit-level TLS
 //! transport plumbing.
 
+#[cfg(feature = "dev-insecure-tls")]
 use std::io::Write;
+#[cfg(feature = "dev-insecure-tls")]
 use std::path::PathBuf;
+#[cfg(feature = "dev-insecure-tls")]
 use std::time::Duration;
 
+#[cfg(feature = "dev-insecure-tls")]
 use rvoip_session_core::api::events::Event;
+#[cfg(feature = "dev-insecure-tls")]
 use rvoip_session_core::api::stream_peer::EventReceiver;
+#[cfg(feature = "dev-insecure-tls")]
 use rvoip_session_core::api::unified::{Config, UnifiedCoordinator};
 
+#[cfg(feature = "dev-insecure-tls")]
 fn write_self_signed_localhost_cert() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let cert_path = dir.path().join("server.crt");
@@ -42,6 +49,7 @@ fn write_self_signed_localhost_cert() -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 /// Wait for any event matching `pred` on `events`, up to `timeout`.
+#[cfg(feature = "dev-insecure-tls")]
 async fn wait_for<F>(events: &mut EventReceiver, timeout: Duration, mut pred: F) -> Option<Event>
 where
     F: FnMut(&Event) -> bool,

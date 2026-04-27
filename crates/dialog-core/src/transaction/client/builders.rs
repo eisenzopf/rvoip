@@ -1220,10 +1220,13 @@ impl InDialogRequestBuilder {
     /// # Returns
     /// Pre-configured InDialogRequestBuilder for NOTIFY
     pub fn for_notify(event: impl Into<String>, body: Option<String>) -> Self {
-        let mut builder = Self::new(Method::Notify).with_event(event);
+        let event = event.into();
+        let mut builder = Self::new(Method::Notify).with_event(event.clone());
 
         if let Some(notification_body) = body {
-            builder = builder.with_body(notification_body);
+            builder = builder
+                .with_body(notification_body)
+                .with_content_type(default_notify_content_type(&event));
         }
 
         builder
@@ -1241,6 +1244,15 @@ impl InDialogRequestBuilder {
         Self::new(Method::Message)
             .with_body(content.into())
             .with_content_type(content_type.unwrap_or_else(|| "text/plain".to_string()))
+    }
+}
+
+fn default_notify_content_type(event: &str) -> &'static str {
+    match event.trim().to_ascii_lowercase().as_str() {
+        "dialog" => "application/dialog-info+xml",
+        "presence" => "application/pidf+xml",
+        "refer" => "message/sipfrag",
+        _ => "text/plain",
     }
 }
 

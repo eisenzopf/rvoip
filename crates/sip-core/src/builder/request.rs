@@ -1273,7 +1273,7 @@ impl SimpleRequestBuilder {
                 // For appendable headers, no special action is needed before pushing.
             }
             TypedHeader::Other(name, _value) => {
-                if *name == HeaderName::ReferTo { 
+                if *name == HeaderName::ReferTo {
                     self.request.headers.retain(|h| h.name() != HeaderName::ReferTo);
                 }
                 // For other headers, default to single-value behavior (replace existing)
@@ -1351,7 +1351,15 @@ impl SimpleRequestBuilder {
     ///     .max_forwards(70)
     ///     .build();
     /// ```
-    pub fn build(self) -> Request {
+    pub fn build(mut self) -> Request {
+        self.request
+            .headers
+            .retain(|h| h.name() != HeaderName::ContentLength);
+        self.request
+            .headers
+            .push(TypedHeader::ContentLength(ContentLength::new(
+                self.request.body.len() as u32,
+            )));
         self.request
     }
 }

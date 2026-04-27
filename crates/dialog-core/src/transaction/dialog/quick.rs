@@ -865,6 +865,10 @@ mod tests {
         assert_eq!(notify_request.call_id().unwrap().value(), "call-345");
         assert_eq!(notify_request.cseq().unwrap().seq, 6);
         assert_eq!(notify_request.body(), notification_body.as_bytes());
+        assert!(notify_request
+            .header(&rvoip_sip_core::HeaderName::ContentType)
+            .is_some());
+        rvoip_sip_core::validation::validate_wire_request(&notify_request).unwrap();
     }
 
     #[tokio::test]

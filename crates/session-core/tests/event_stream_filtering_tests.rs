@@ -6,7 +6,6 @@
 //! the global event bus rather than driving a full SIP handshake, so the
 //! test is hermetic and runs in milliseconds.
 
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use rvoip_session_core::adapters::SessionApiCrossCrateEvent;

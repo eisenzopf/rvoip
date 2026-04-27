@@ -60,6 +60,10 @@ fn test_simple_request_builder() {
     // Check Max-Forwards header
     let max_forwards = request.typed_header::<MaxForwards>().unwrap();
     assert_eq!(max_forwards.0, 70);
+
+    // Empty-body requests still need an explicit Content-Length.
+    let content_length = request.typed_header::<ContentLength>().unwrap();
+    assert_eq!(content_length.0, 0);
 }
 
 #[test]
@@ -102,6 +106,10 @@ fn test_simple_response_builder() {
     assert_eq!(via.0[0].sent_by_host.to_string(), "pc33.atlanta.com");
     assert!(via.branch().is_some());
     assert_eq!(via.branch().unwrap(), "z9hG4bK776asdhds");
+
+    // Empty-body responses still need an explicit Content-Length.
+    let content_length = response.typed_header::<ContentLength>().unwrap();
+    assert_eq!(content_length.0, 0);
 }
 
 #[test]

@@ -1625,7 +1625,7 @@ impl SimpleResponseBuilder {
             TypedHeader::SipIfMatch(_) => {  // Single-value header for conditional requests
                 self.response.headers.retain(|h| h.name() != new_header_name);
             }
-            
+
             // Appendable headers: These headers can appear multiple times.
             TypedHeader::Via(_) |
             TypedHeader::Route(_) |         // Less common in responses but possible
@@ -1758,7 +1758,15 @@ impl SimpleResponseBuilder {
     ///     .via("example.com", "UDP", Some("z9hG4bK776asdhds"))
     ///     .build();
     /// ```
-    pub fn build(self) -> Response {
+    pub fn build(mut self) -> Response {
+        self.response
+            .headers
+            .retain(|h| h.name() != HeaderName::ContentLength);
+        self.response
+            .headers
+            .push(TypedHeader::ContentLength(ContentLength::new(
+                self.response.body.len() as u32,
+            )));
         self.response
     }
 }
